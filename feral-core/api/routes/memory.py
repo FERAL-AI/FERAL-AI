@@ -40,6 +40,117 @@ def _memory_backend_installed(module_path: str) -> bool:
         return False
 
 
+@router.get("/api/memory/stats")
+async def get_memory_stats():
+    """Snapshot of memory subsystem health for the dashboard.
+
+    v2026.5.34 surfaces the D11 decay state (active vs. forgotten
+    episode counts, sweep cadence config) so the operator can see
+    whether the background sweeper is actually running and how
+    aggressive it is. The endpoint is also the canary for HA's
+    health probe.
+    """
+    out: dict = {"ok": True}
+    decay = getattr(state, "memory_decay", None)
+    if decay is not None:
+        try:
+            out["decay"] = await decay.stats()
+        except Exception as exc:
+            logger.warning("memory_decay.stats() failed: %s", exc)
+            out["decay"] = {"ok": False, "error": str(exc)}
+    else:
+        out["decay"] = {"enabled": False, "reason": "service_not_constructed"}
+    # Lightweight episode totals straight off the store (do not gate
+    # the health probe on the decay service being up).
+    try:
+        s = await state.memory.stats()
+        out["totals"] = {
+            "episodes": s.get("episodes", 0),
+            "notes": s.get("notes", 0),
+            "knowledge": s.get("knowledge", 0),
+        }
+    except Exception as exc:
+        logger.debug("memory.stats() failed in /api/memory/stats: %s", exc)
+        out["totals"] = {}
+    return out
+
+
+@router.post("/api/memory/forget/{episode_id}")
+async def memory_forget(episode_id: str):
+    """Mark an episode as forgotten *now*. Operator escape hatch for
+    privacy / mistaken-input cases. Returns 404-shaped JSON when the
+    id is unknown.
+    """
+    decay = getattr(state, "memory_decay", None)
+    if decay is None:
+        raise HTTPException(status_code=503, detail="memory_decay service not running")
+    result = await decay.forget(episode_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("reason", "not_found"))
+    return result
+
+
+@router.post("/api/memory/recall/{episode_id}")
+async def memory_recall(episode_id: str):
+    """Reverse a forget. Hard-deleted episodes cannot be recalled —
+    they're gone from disk — and return 404."""
+    decay = getattr(state, "memory_decay", None)
+    if decay is None:
+        raise HTTPException(status_code=503, detail="memory_decay service not running")
+    result = await decay.recall(episode_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("reason", "not_found"))
+    return result
+
+
+@router.post("/api/memory/decay/now")
+async def memory_decay_now():
+    """Trigger a one-shot decay sweep immediately. Useful for manual
+    operator runs, tests, and the dashboard's "Run sweep now"
+    button."""
+    decay = getattr(state, "memory_decay", None)
+    if decay is None:
+        raise HTTPException(status_code=503, detail="memory_decay service not running")
+    return await decay.run_once()
+
+
+@router.post("/api/memory/compact")
+async def memory_compact(session_id: str | None = None):
+    """F2 — manually trigger session compaction.
+
+    Without ``session_id`` this compacts every active orchestrator
+    session. With a session_id it compacts that one session only.
+
+    Compaction promotes summarisable turns into a real episode row
+    (see ``memory.context_builder.compact_session``). Returns a list
+    of per-session results so the dashboard / CLI can show what
+    landed (``episode_id``, ``key_entities``, sizes).
+    """
+    if not state.memory or not state.orchestrator:
+        raise HTTPException(status_code=503, detail="memory or orchestrator not initialized")
+
+    sessions: list[str]
+    if session_id:
+        sessions = [session_id]
+    else:
+        sessions = list(state.orchestrator.conversation_history.keys())
+
+    out: list[dict] = []
+    for sid in sessions:
+        history = state.orchestrator.conversation_history.get(sid, [])
+        if not history:
+            out.append({"session_id": sid, "compacted": False, "reason": "empty"})
+            continue
+        result = await state.memory.compact_session(
+            sid, history, llm=state.orchestrator.llm,
+        )
+        if result.get("compacted") and result.get("history"):
+            state.orchestrator.conversation_history[sid] = result["history"]
+        result["session_id"] = sid
+        out.append(result)
+    return {"results": out, "count": len(out)}
+
+
 @router.get("/api/memory/context")
 async def get_memory_context(limit: int = 20):
     """Return the recent `## Memory` blocks the Brain assembled per LLM turn.

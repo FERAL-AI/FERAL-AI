@@ -28,11 +28,26 @@ async def save_note(
     note_id = str(uuid4())[:8]
     now = time.time()
     tags = tags or []
+    # Sync log first so the HLC string can land in the same INSERT —
+    # required by D12 LWW on the receiving side.
+    hlc = store._log_sync(
+        "notes",
+        "insert",
+        note_id,
+        {
+            "id": note_id,
+            "content": content,
+            "tags": json.dumps(tags),
+            "importance": importance,
+            "source": source,
+            "created_at": now,
+        },
+    )
     conn = await aiosqlite.connect(store.db_path)
     try:
         await conn.execute(
-            "INSERT INTO notes (id, content, tags, importance, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (note_id, content, json.dumps(tags), importance, source, now, now),
+            "INSERT INTO notes (id, content, tags, importance, source, created_at, updated_at, hlc_string) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (note_id, content, json.dumps(tags), importance, source, now, now, hlc),
         )
         await conn.commit()
     finally:
@@ -54,19 +69,6 @@ async def save_note(
         predicate="says",
         obj=content[:300],
         source=f"notes:{note_id}",
-    )
-    store._log_sync(
-        "notes",
-        "insert",
-        note_id,
-        {
-            "id": note_id,
-            "content": content,
-            "tags": json.dumps(tags),
-            "importance": importance,
-            "source": source,
-            "created_at": now,
-        },
     )
     return {
         "id": note_id,

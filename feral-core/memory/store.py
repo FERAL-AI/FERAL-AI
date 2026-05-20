@@ -100,7 +100,24 @@ from memory.wiki import (
 
 logger = logging.getLogger("feral.memory")
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6  # v2026.5.34: D11 decay + D12 sync HLC columns
+
+
+def _stable_knowledge_id(subject: str, predicate: str) -> str:
+    """Deterministic id for a (subject, predicate) knowledge tuple.
+
+    Used by :meth:`MemoryStore.knowledge_store` to keep two-brain CRDT
+    convergence working: if both brains write ``("user", "name")``
+    independently, they must produce the same row id so the receiving
+    side's ``(subject, predicate)`` dedup gate recognises the
+    incoming op as an update to the existing row rather than a brand
+    new fact. A 12-hex-char SHA-256 prefix matches the legacy
+    ``uuid4()[:12]`` width.
+    """
+    import hashlib
+
+    digest = hashlib.sha256(f"{subject}\0{predicate}".encode("utf-8")).hexdigest()
+    return digest[:12]
 
 TEXT_WEIGHT = 0.3
 VECTOR_WEIGHT = 0.7
@@ -232,9 +249,21 @@ class MemoryStore:
         """
         self._about_me_store = about_me_store
 
-    def _log_sync(self, table: str, op_type: str, row_id: str, data: dict):
-        if self._sync_engine:
-            self._sync_engine.log_operation(table, op_type, row_id, data)
+    def _log_sync(self, table: str, op_type: str, row_id: str, data: dict) -> str:
+        """Log a local write to the sync WAL. Returns the HLC string
+        so the caller can persist ``hlc_string`` into the row column
+        — without that the receiving side has no basis for the D12
+        LWW comparison. An empty string is returned when sync is
+        disabled or the WAL append failed (the row still lands
+        locally; replication just won't carry an HLC).
+        """
+        if not self._sync_engine:
+            return ""
+        try:
+            return self._sync_engine.log_operation(table, op_type, row_id, data) or ""
+        except Exception as exc:
+            logger.debug("_log_sync swallowed exception: %s", exc)
+            return ""
 
     async def _conn(self) -> aiosqlite.Connection:
         """Acquire a pooled aiosqlite connection.
@@ -326,9 +355,31 @@ class MemoryStore:
             pass
 
     async def aclose(self) -> None:
-        """Async-native shutdown: stop the embed queue and close every
+        """Async-native shutdown: drain in-flight fire-and-forget
+        access-tracking tasks, stop the embed queue, then close every
         pooled aiosqlite connection. Safe to call multiple times.
+
+        Access-tracking tasks are drained first so they don't try to
+        acquire a connection from a closed pool. Pending tasks get a
+        500 ms grace window; anything still in flight after that is
+        cancelled and joined to avoid leaving "Task was destroyed but
+        it is pending" warnings on interpreter shutdown.
         """
+        access_tasks = getattr(self, "_access_tasks", None)
+        if access_tasks:
+            pending = [t for t in access_tasks if not t.done()]
+            if pending:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*pending, return_exceptions=True),
+                        timeout=0.5,
+                    )
+                except asyncio.TimeoutError:
+                    for t in pending:
+                        if not t.done():
+                            t.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+            access_tasks.clear()
         try:
             self._embed_queue.stop()
         except Exception:
@@ -343,7 +394,7 @@ class MemoryStore:
             except asyncio.QueueEmpty:
                 break
             try:
-                await self._release(conn)
+                await conn.close()
             except Exception:
                 pass
 
@@ -602,9 +653,68 @@ class MemoryStore:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC)")
 
+            # ─────────────────────────────────────────────────────────────
+            # v2026.5.34 (PR 2 — feat/memory-v2-truth) schema additions.
+            # Idempotent ALTER TABLE statements: SQLite raises
+            # "duplicate column name" if the column already exists, which
+            # we treat as a no-op so reruns on already-migrated
+            # databases (existing installs + fresh CREATE TABLE paths
+            # for the same release) succeed. The full versioned
+            # migration framework lands in PR 4 (A6); this is the
+            # bridge until then.
+            # ─────────────────────────────────────────────────────────────
+            self._add_column_if_missing(conn, "episodes", "last_accessed_at", "REAL DEFAULT 0")
+            self._add_column_if_missing(conn, "episodes", "access_count", "INTEGER DEFAULT 0")
+            self._add_column_if_missing(conn, "episodes", "forgotten_at", "REAL DEFAULT NULL")
+            self._add_column_if_missing(conn, "episodes", "hlc_string", "TEXT DEFAULT ''")
+            self._add_column_if_missing(conn, "notes", "hlc_string", "TEXT DEFAULT ''")
+            self._add_column_if_missing(conn, "knowledge", "hlc_string", "TEXT DEFAULT ''")
+            # ``execution_log`` is created lazily in ``log_execution``,
+            # so ensure it exists before the ALTER. Done with the same
+            # DDL as the runtime path so the table shape stays in sync.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS execution_log (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    skill_id TEXT NOT NULL,
+                    endpoint_id TEXT NOT NULL,
+                    args TEXT NOT NULL DEFAULT '{}',
+                    result_status TEXT NOT NULL DEFAULT 'unknown',
+                    result_summary TEXT NOT NULL DEFAULT '',
+                    latency_ms INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL
+                )
+            """)
+            self._add_column_if_missing(conn, "execution_log", "hlc_string", "TEXT DEFAULT ''")
+
+            # D11 indexes:
+            # (forgotten_at, decay_factor) — sweep query "find episodes
+            # newly under the threshold" hits this composite directly.
+            # (last_accessed_at) — supports the future "least-recently-
+            # accessed first" recall heuristic and keeps decay sweep
+            # cheap on multi-million-row stores.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_forgotten ON episodes(forgotten_at, decay_factor)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_last_accessed ON episodes(last_accessed_at)")
+
             conn.commit()
         finally:
             conn.close()
+
+    @staticmethod
+    def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+        """Idempotent ``ALTER TABLE ADD COLUMN``.
+
+        SQLite refuses to add a column that already exists. The cheapest
+        cross-version check is to inspect ``PRAGMA table_info`` and only
+        emit the ALTER when the column is genuinely missing — this
+        avoids both the spurious error log and the cost of catching the
+        exception on the hot upgrade path.
+        """
+        cur = conn.execute(f"PRAGMA table_info({table})")
+        existing = {row[1] for row in cur.fetchall()}
+        if column in existing:
+            return
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     # ─────────────────────────────────────────────
     # Tier 1: Working Memory (in-RAM, sync)
@@ -910,14 +1020,22 @@ class MemoryStore:
         emotions = emotions or []
         participants = participants or []
 
+        # Sync log first so we know the HLC string and can persist it
+        # into ``episodes.hlc_string`` in the same INSERT — that gives
+        # the receiving side a stable comparator for D12 LWW.
+        hlc = self._log_sync("episodes", "insert", eid, {
+            "id": eid, "session_id": session_id, "event_type": event_type,
+            "summary": summary, "detail": detail, "importance": importance, "created_at": now,
+        })
+
         conn = await self._conn()
         try:
             await conn.execute(
                 """INSERT INTO episodes
-                   (id, session_id, event_type, summary, detail, emotions, location, participants, importance, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (id, session_id, event_type, summary, detail, emotions, location, participants, importance, created_at, hlc_string)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (eid, session_id, event_type, summary, detail,
-                 json.dumps(emotions), location, json.dumps(participants), importance, now),
+                 json.dumps(emotions), location, json.dumps(participants), importance, now, hlc),
             )
             await conn.commit()
         finally:
@@ -932,11 +1050,6 @@ class MemoryStore:
                 chunk_index=i, db_path=self.db_path,
             )
 
-        self._log_sync("episodes", "insert", eid, {
-            "id": eid, "session_id": session_id, "event_type": event_type,
-            "summary": summary, "detail": detail, "importance": importance, "created_at": now,
-        })
-
         if self._about_me_store is not None and text:
             try:
                 self._about_me_store.extract_from_text(text)
@@ -945,20 +1058,42 @@ class MemoryStore:
 
         return {"id": eid, "event_type": event_type, "summary": summary, "created_at": now}
 
-    async def episode_search_hybrid(self, query: str, limit: int = 10) -> list[dict]:
-        """
-        Hybrid search: FTS5 text (0.3) + vector similarity (0.7) with temporal decay.
+    async def episode_search_hybrid(
+        self,
+        query: str,
+        limit: int = 10,
+        *,
+        include_forgotten: bool = False,
+    ) -> list[dict]:
+        """Hybrid search: FTS5 text (0.3) + vector similarity (0.7) with temporal decay.
+
         Uses sqlite-vec indexed search when available, numpy fallback otherwise.
+
+        Excludes episodes whose ``forgotten_at`` is set by default. Set
+        ``include_forgotten=True`` for admin / recall-eligibility
+        queries that need to see the full set.
+
+        Every returned episode is access-tracked: a fire-and-forget
+        background task bumps ``last_accessed_at`` + ``access_count``
+        so the decay sweep gives recently-rehearsed items a boost.
         """
+        # The exclusion filter is applied in three places (FTS join, raw
+        # episode lookup, and the in-memory cache fallback) so a row
+        # cannot leak in through any code path even when one branch
+        # short-circuits.
+        forgotten_clause = "" if include_forgotten else " AND e.forgotten_at IS NULL"
         conn = await self._conn()
         try:
             fts_results = {}
             try:
                 async with conn.execute(
-                    """SELECT e.id, e.session_id, e.event_type, e.summary, e.detail,
-                              e.emotions, e.location, e.importance, e.created_at, e.decay_factor, rank
+                    f"""SELECT e.id, e.session_id, e.event_type, e.summary, e.detail,
+                              e.emotions, e.location, e.importance, e.created_at,
+                              e.decay_factor, e.forgotten_at, e.last_accessed_at,
+                              e.access_count, rank
                        FROM episodes_fts f JOIN episodes e ON f.rowid = e.rowid
-                       WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?""",
+                       WHERE episodes_fts MATCH ?{forgotten_clause}
+                       ORDER BY rank LIMIT ?""",
                     (query, limit * 3),
                 ) as cur:
                     rows = await cur.fetchall()
@@ -1003,7 +1138,9 @@ class MemoryStore:
                 missing = all_ids - set(fts_results.keys())
                 placeholders = ",".join("?" for _ in missing)
                 async with conn.execute(
-                    f"SELECT * FROM episodes WHERE id IN ({placeholders})", list(missing),
+                    f"SELECT * FROM episodes "
+                    f"WHERE id IN ({placeholders}){forgotten_clause.replace('e.', '')}",
+                    list(missing),
                 ) as cur:
                     rows = await cur.fetchall()
                 for r in rows:
@@ -1030,52 +1167,139 @@ class MemoryStore:
             merged.append(info)
 
         merged.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
-        return self._mmr_rerank_episodes(merged, limit)
+        results = self._mmr_rerank_episodes(merged, limit)
+        self._track_access([r["id"] for r in results])
+        return results
 
-    async def episode_search(self, query: str, limit: int = 10) -> list[dict]:
-        """FTS-only episode search (backward compat)."""
+    async def episode_search(
+        self,
+        query: str,
+        limit: int = 10,
+        *,
+        include_forgotten: bool = False,
+    ) -> list[dict]:
+        """FTS-only episode search (backward compat). Honours the
+        same ``forgotten_at`` filter + access tracking as
+        :meth:`episode_search_hybrid`."""
+        forgotten_clause = "" if include_forgotten else " AND e.forgotten_at IS NULL"
+        like_clause = "" if include_forgotten else " AND forgotten_at IS NULL"
         conn = await self._conn()
         try:
             try:
                 async with conn.execute(
-                    """SELECT e.* FROM episodes_fts f
+                    f"""SELECT e.* FROM episodes_fts f
                        JOIN episodes e ON f.rowid = e.rowid
-                       WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?""",
+                       WHERE episodes_fts MATCH ?{forgotten_clause}
+                       ORDER BY rank LIMIT ?""",
                     (query, limit),
                 ) as cur:
                     rows = await cur.fetchall()
             except Exception:
                 async with conn.execute(
-                    """SELECT * FROM episodes WHERE summary LIKE ? OR detail LIKE ?
+                    f"""SELECT * FROM episodes
+                       WHERE (summary LIKE ? OR detail LIKE ?){like_clause}
                        ORDER BY created_at DESC LIMIT ?""",
                     (f"%{query}%", f"%{query}%", limit),
                 ) as cur:
                     rows = await cur.fetchall()
         finally:
             await self._release(conn)
-        return [self._episode_row_to_dict(r) for r in rows]
+        out = [self._episode_row_to_dict(r) for r in rows]
+        self._track_access([r["id"] for r in out])
+        return out
 
-    async def episode_recent(self, limit: int = 10, session_id: str = None) -> list[dict]:
+    async def episode_recent(
+        self,
+        limit: int = 10,
+        session_id: str = None,
+        *,
+        include_forgotten: bool = False,
+    ) -> list[dict]:
+        """Recent episodes by ``created_at`` (newest first). Honours
+        the same ``forgotten_at`` filter + access tracking as the
+        other episode read paths."""
+        filter_clause = "" if include_forgotten else " AND forgotten_at IS NULL"
         conn = await self._conn()
         try:
             if session_id:
                 async with conn.execute(
-                    "SELECT * FROM episodes WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
+                    f"SELECT * FROM episodes WHERE session_id = ?{filter_clause} "
+                    "ORDER BY created_at DESC LIMIT ?",
                     (session_id, limit),
                 ) as cur:
                     rows = await cur.fetchall()
             else:
+                # Strip the leading " AND " when this is the only condition.
+                where = "WHERE forgotten_at IS NULL " if not include_forgotten else ""
                 async with conn.execute(
-                    "SELECT * FROM episodes ORDER BY created_at DESC LIMIT ?", (limit,),
+                    f"SELECT * FROM episodes {where}ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
                 ) as cur:
                     rows = await cur.fetchall()
         finally:
             await self._release(conn)
-        return [self._episode_row_to_dict(r) for r in rows]
+        out = [self._episode_row_to_dict(r) for r in rows]
+        self._track_access([r["id"] for r in out])
+        return out
+
+    # ── D11 access tracking ─────────────────────────────────────────────
+
+    def _track_access(self, episode_ids: list[str]) -> None:
+        """Fire-and-forget access bump for episodes just returned to a
+        caller.
+
+        Bumping ``last_accessed_at`` + ``access_count`` is the input to
+        the decay sweep's ``access_boost`` term — rehearsed items
+        decay slower. Doing the UPDATE inline would add a transaction
+        round-trip to every search; instead we kick a background
+        task per call. The task references are kept on
+        ``self._access_tasks`` so the GC doesn't tear them down
+        mid-write (asyncio's documented "fire-and-forget" hazard).
+
+        Empty input is a no-op. Exceptions inside the task are
+        swallowed with a debug log because access tracking is a
+        heuristic; losing one update to a database-lock race must
+        never surface as a chat-handler error.
+        """
+        if not episode_ids:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop (sync call from a test that bypassed
+            # async). Silently skip — the caller is not in a context
+            # where fire-and-forget makes sense.
+            return
+        task = loop.create_task(self._bump_access(list(episode_ids)))
+        if not hasattr(self, "_access_tasks"):
+            self._access_tasks: set[asyncio.Task] = set()
+        self._access_tasks.add(task)
+        task.add_done_callback(self._access_tasks.discard)
+
+    async def _bump_access(self, episode_ids: list[str]) -> None:
+        now = time.time()
+        conn = await self._conn()
+        try:
+            placeholders = ",".join("?" * len(episode_ids))
+            await conn.execute(
+                f"UPDATE episodes SET last_accessed_at = ?, "
+                f"access_count = COALESCE(access_count, 0) + 1 "
+                f"WHERE id IN ({placeholders})",
+                [now, *episode_ids],
+            )
+            await conn.commit()
+        except Exception as exc:
+            logger.debug("episode access tracking lost an update: %s", exc)
+        finally:
+            await self._release(conn)
 
     @staticmethod
     def _episode_row_to_dict(row) -> dict:
-        return {
+        # Use ``keys()`` to detect the v2026.5.34 columns so old-shape
+        # rows (test fixtures, fresh fts joins that didn't select them)
+        # still round-trip correctly.
+        keys = set(row.keys()) if hasattr(row, "keys") else set()
+        out = {
             "id": row["id"],
             "session_id": row["session_id"],
             "event_type": row["event_type"],
@@ -1083,10 +1307,24 @@ class MemoryStore:
             "detail": row["detail"],
             "emotions": json.loads(row["emotions"]) if isinstance(row["emotions"], str) else row["emotions"],
             "location": row["location"],
+            "participants": (
+                json.loads(row["participants"])
+                if "participants" in keys and isinstance(row["participants"], str)
+                else (row["participants"] if "participants" in keys else [])
+            ),
             "importance": row["importance"],
             "created_at": row["created_at"],
             "decay_factor": row["decay_factor"],
         }
+        if "last_accessed_at" in keys:
+            out["last_accessed_at"] = row["last_accessed_at"] or 0.0
+        if "access_count" in keys:
+            out["access_count"] = row["access_count"] or 0
+        if "forgotten_at" in keys:
+            out["forgotten_at"] = row["forgotten_at"]
+        if "hlc_string" in keys:
+            out["hlc_string"] = row["hlc_string"] or ""
+        return out
 
     @staticmethod
     def _mmr_rerank_episodes(results: list[dict], limit: int, diversity: float = 0.3) -> list[dict]:
@@ -1133,25 +1371,48 @@ class MemoryStore:
 
             if existing:
                 kid = existing[0]
+                # Sync log returns the HLC for this update — feed it
+                # into the row so the receiving side's LWW gate has a
+                # comparator that reflects this exact write.
+                hlc = self._log_sync("knowledge", "insert", kid, {
+                    "id": kid, "subject": subject, "predicate": predicate,
+                    "object": obj, "confidence": confidence, "source": source,
+                    "created_at": now,
+                })
                 await conn.execute(
-                    "UPDATE knowledge SET object = ?, confidence = ?, source = ?, updated_at = ? WHERE id = ?",
-                    (obj, confidence, source, now, kid),
+                    "UPDATE knowledge SET object = ?, confidence = ?, source = ?, updated_at = ?, hlc_string = ? WHERE id = ?",
+                    (obj, confidence, source, now, hlc, kid),
                 )
             else:
-                kid = str(uuid4())[:12]
+                # v2026.5.34 (PR 2 D12): derive the id from
+                # (subject, predicate) deterministically so two
+                # brains writing the same logical fact assign the
+                # same id and converge to one row after sync. The
+                # legacy random-UUID path could not converge —
+                # different ids on each side meant both rows
+                # replicated and the receiving brain ended up with
+                # two rows for the same (subject, predicate). The
+                # hash is truncated to 12 hex chars to match the
+                # pre-existing id length; collisions are
+                # vanishingly rare at that width for the small
+                # subject/predicate value space and would manifest
+                # as one extra UNIQUE-style merge, which the
+                # ``(subject, predicate)`` dedup gate catches.
+                kid = _stable_knowledge_id(subject, predicate)
+                hlc = self._log_sync("knowledge", "insert", kid, {
+                    "id": kid, "subject": subject, "predicate": predicate,
+                    "object": obj, "confidence": confidence, "source": source,
+                    "created_at": now,
+                })
                 await conn.execute(
-                    """INSERT INTO knowledge (id, subject, predicate, object, confidence, source, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (kid, subject, predicate, obj, confidence, source, now, now),
+                    """INSERT INTO knowledge (id, subject, predicate, object, confidence, source, created_at, updated_at, hlc_string)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (kid, subject, predicate, obj, confidence, source, now, now, hlc),
                 )
 
             await conn.commit()
         finally:
             await self._release(conn)
-        self._log_sync("knowledge", "insert", kid, {
-            "id": kid, "subject": subject, "predicate": predicate, "object": obj,
-            "confidence": confidence, "source": source, "created_at": now,
-        })
         return {"id": kid, "subject": subject, "predicate": predicate, "object": obj}
 
     async def knowledge_query(self, subject: str = "", predicate: str = "", limit: int = 20) -> list[dict]:

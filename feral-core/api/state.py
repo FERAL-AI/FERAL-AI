@@ -317,6 +317,13 @@ class BrainState:
         self.scene: Optional[SceneAnalyzer] = None
         self.change_detector = ChangeDetector()
         self.learner: Optional[Learner] = None
+        # v2026.5.34 (PR 2 D11/D12): the two new memory-v2 services are
+        # constructed in ``_boot_subsystems`` once ``self.memory`` +
+        # ``self.sync_engine`` are wired; declared here so the
+        # attributes always exist for HTTP-route guard checks
+        # (``getattr(state, "memory_decay", None)`` patterns).
+        self.memory_decay = None  # type: ignore[assignment]
+        self.sync_scheduler = None  # type: ignore[assignment]
         self.skill_gen: Optional[SkillGenerator] = None
         self.vault: Optional[BlindVault] = None
         self.sandbox: Optional[ExecutionSandbox] = None
@@ -696,6 +703,21 @@ class BrainState:
                 # Self-heal must NEVER block boot; degrade gracefully.
                 logger.warning("self_heal_llm_model: skipped (%s)", exc)
         self.learner = Learner(llm=_shared_llm, memory=self.memory)
+
+        # v2026.5.34 (PR 2 D11): the MemoryDecayService runs an
+        # Ebbinghaus + SM-2 sweep over ``episodes`` on a
+        # ``settings.memory.decay.cadence_seconds`` cadence. The
+        # service is constructed unconditionally so HTTP routes
+        # (``/api/memory/{forget,recall,stats,decay/now}``) always
+        # have a target; whether the background loop is *running*
+        # depends on the ``enabled`` flag and is decided by
+        # ``service.start()`` itself.
+        from memory.decay import DecayConfig, MemoryDecayService
+        from config.loader import load_settings as _load_settings
+        self.memory_decay = MemoryDecayService(
+            self.memory,
+            DecayConfig.from_settings(_load_settings()),
+        )
         self.scene = SceneAnalyzer(llm=_shared_llm)
         scene_cooldown = int(os.environ.get("FERAL_SCENE_COOLDOWN", "10"))
         self.scene.set_cooldown(scene_cooldown)
@@ -758,11 +780,45 @@ class BrainState:
         self.webhook_receiver = WebhookReceiver(event_bus=self.event_bus)
         self.marketplace = MarketplaceClient(skill_registry=self.skill_registry)
 
-        import socket
-        sync_node_id = f"{socket.gethostname()}-{os.getpid()}"
+        # v2026.5.34 (PR 2 D12): the HLC node_id is now a persistent
+        # per-brain identity. The previous ``hostname-pid`` value
+        # changed on every restart, so the WAL could not de-duplicate
+        # operations across reboots and a peer that came back from a
+        # crash got every op replayed. ``stable_node_id`` writes a
+        # one-shot UUID-v7-shaped value to
+        # ``~/.feral/sync_node_id`` and re-reads it on every boot.
+        from memory.sync import stable_node_id
+        sync_node_id = stable_node_id()
         self.sync_engine = SyncEngine(node_id=sync_node_id, memory_store=self.memory)
         self.memory.set_sync_engine(self.sync_engine)
         await self.sync_engine.start_discovery()
+
+        # v2026.5.34 (PR 2 D12): kick the SyncScheduler — it walks
+        # every known peer on a cadence, applies exponential
+        # backoff to flaky ones, and exposes per-peer health to
+        # /api/sync/status. start() is a no-op when
+        # settings.memory.sync.enabled is false.
+        from memory.sync_scheduler import SchedulerConfig, SyncScheduler
+        self.sync_scheduler = SyncScheduler(
+            self.sync_engine,
+            SchedulerConfig.from_settings(_load_settings()),
+        )
+        try:
+            await self.sync_scheduler.start()
+        except Exception as exc:
+            logger.warning("SyncScheduler.start() failed: %s", exc)
+
+        # v2026.5.34 (PR 2 D11): kick the decay sweeper. ``start()``
+        # is a no-op when ``settings.memory.decay.enabled`` is false,
+        # so the operator can disable it without changing this
+        # call site. Failures are logged but do not block boot —
+        # the brain runs fine with the sweeper off; the worst case
+        # is unbounded episode growth, which a follow-up cron can
+        # clean up.
+        try:
+            await self.memory_decay.start()
+        except Exception as exc:
+            logger.warning("MemoryDecayService.start() failed: %s", exc)
 
         self.wasm_sandbox = WASMSandbox()
 

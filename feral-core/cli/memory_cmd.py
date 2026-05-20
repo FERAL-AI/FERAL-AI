@@ -61,7 +61,104 @@ def _current_backend() -> str:
     return (settings.get("memory") or {}).get("backend", "sqlite_vec")
 
 
+def _http_request(method: str, path: str) -> dict:
+    """Call the running brain over HTTP. Imported lazily so the CLI
+    keeps booting when the brain is offline (status / list shouldn't
+    need a live brain to work)."""
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+    from config.runtime import brain_port
+
+    url = f"http://127.0.0.1:{brain_port()}{path}"
+    req = Request(url, method=method)
+    try:
+        with urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        return json.loads(body)
+    except HTTPError as exc:
+        try:
+            detail = json.loads(exc.read().decode("utf-8", errors="replace"))
+        except Exception:
+            detail = {"detail": str(exc)}
+        return {"ok": False, "status": exc.code, **detail}
+    except URLError as exc:
+        return {
+            "ok": False,
+            "error": (
+                f"Could not reach brain at {url}: {exc.reason}. "
+                "Is `feral start` running?"
+            ),
+        }
+
+
 def cmd_memory(action: str, backend_id: str | None) -> None:
+    if action == "decay":
+        if backend_id != "now":
+            print("  Usage: feral memory decay now")
+            sys.exit(2)
+        result = _http_request("POST", "/api/memory/decay/now")
+        if not result.get("ok"):
+            print(f"  Decay sweep failed: {result.get('error') or result.get('detail') or result}")
+            sys.exit(1)
+        print(
+            "  Decay sweep complete: "
+            f"scanned={result.get('scanned', 0)} "
+            f"updated={result.get('updated', 0)} "
+            f"newly_forgotten={result.get('newly_forgotten', 0)} "
+            f"hard_deleted={result.get('hard_deleted', 0)} "
+            f"duration={result.get('duration_seconds', 0):.3f}s"
+        )
+        return
+
+    if action == "forget":
+        if not backend_id:
+            print("  Usage: feral memory forget <episode_id>")
+            sys.exit(2)
+        result = _http_request("POST", f"/api/memory/forget/{backend_id}")
+        if not result.get("ok"):
+            print(f"  Could not forget {backend_id}: {result.get('detail') or result.get('error') or result}")
+            sys.exit(1)
+        print(f"  Episode {backend_id} forgotten at {result.get('forgotten_at')}.")
+        return
+
+    if action == "recall":
+        if not backend_id:
+            print("  Usage: feral memory recall <episode_id>")
+            sys.exit(2)
+        result = _http_request("POST", f"/api/memory/recall/{backend_id}")
+        if not result.get("ok"):
+            print(f"  Could not recall {backend_id}: {result.get('detail') or result.get('error') or result}")
+            sys.exit(1)
+        print(f"  Episode {backend_id} recalled (forgotten_at cleared).")
+        return
+
+    if action == "compact":
+        # F2 — promote conversation turns to episodes. Hits the
+        # /api/memory/compact endpoint (built in chunk F2 below).
+        # Optional positional ``backend_id`` doubles as the
+        # ``session_id`` filter.
+        path = "/api/memory/compact"
+        if backend_id:
+            from urllib.parse import quote
+            path += f"?session_id={quote(backend_id)}"
+        result = _http_request("POST", path)
+        if "error" in result and not result.get("results"):
+            print(f"  Compaction failed: {result.get('error') or result.get('detail') or result}")
+            sys.exit(1)
+        results = result.get("results", []) or []
+        compacted = [r for r in results if r.get("compacted")]
+        print(f"  Compaction complete: sessions_scanned={len(results)} sessions_compacted={len(compacted)}")
+        for r in compacted:
+            sid = r.get("session_id", "?")
+            episode_id = r.get("episode_id") or "(none)"
+            ents = r.get("key_entities", []) or []
+            print(
+                f"    - session={sid} episode={episode_id} "
+                f"turns={r.get('original_length', 0)}→{r.get('new_length', 0)} "
+                f"entities={','.join(ents[:5]) or '-'}"
+            )
+        return
+
     if action == "status":
         active = _current_backend()
         module_path, install_hint = _KNOWN_BACKENDS.get(

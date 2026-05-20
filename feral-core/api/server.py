@@ -969,6 +969,24 @@ async def shutdown_event():
         except Exception as exc:
             logger.warning("Shutdown: sync_engine.stop_discovery failed: %s", exc)
 
+    # (e.1) v2026.5.34 PR 2 D11/D12: stop the new memory-v2 services.
+    # Done before the memory store's connection pool dies so in-flight
+    # sweeps / per-peer sync attempts can release their connections
+    # cleanly. SyncScheduler stops first because its tasks own
+    # MemoryStore.refresh() awaits that need the pool to be alive.
+    scheduler = getattr(state, "sync_scheduler", None)
+    if scheduler is not None:
+        try:
+            await scheduler.stop()
+        except Exception as exc:
+            logger.warning("Shutdown: sync_scheduler.stop failed: %s", exc)
+    decay = getattr(state, "memory_decay", None)
+    if decay is not None:
+        try:
+            await decay.stop()
+        except Exception as exc:
+            logger.warning("Shutdown: memory_decay.stop failed: %s", exc)
+
     # (f) Persist consciousness before the SQLite connection pools die.
     try:
         store = getattr(state, "consciousness", None)
@@ -2570,6 +2588,24 @@ async def sync_peer_endpoint(ws: WebSocket):
                     await ws.send_json({"type": "sync_error", "message": "Invalid passphrase"})
                     break
 
+                # v2026.5.34 (PR 2 D12): refuse the handshake when a
+                # peer advertises our own node_id. The HLC protocol's
+                # tiebreaker assumes globally-unique ids; a duplicate
+                # means an operator cloned ~/.feral/sync_node_id
+                # between two brains and both copies must rotate
+                # before sync can land safely.
+                if state.sync_engine and peer_id == state.sync_engine.node_id:
+                    await ws.send_json({
+                        "type": "sync_error",
+                        "message": (
+                            "duplicate_node_id: peer advertised the same "
+                            "node_id as the local brain. Rotate ~/.feral/sync_node_id "
+                            "on one side and restart."
+                        ),
+                    })
+                    logger.warning("Sync handshake rejected: duplicate node_id %s", peer_id)
+                    break
+
                 await ws.send_json({
                     "type": "sync_response",
                     "node_id": state.sync_engine.node_id if state.sync_engine else "",
@@ -2579,7 +2615,35 @@ async def sync_peer_endpoint(ws: WebSocket):
                 incoming = await ws.receive_json()
                 applied = 0
                 if incoming.get("type") == "sync_data" and state.sync_engine:
-                    applied = state.sync_engine.apply_remote_changes(incoming.get("changes", []))
+                    # v2026.5.34 (PR 2 D12): refresh-gate the apply.
+                    # If the on-disk store has been corrupted /
+                    # restored / rotated since boot, the in-memory
+                    # cache is stale and apply_remote_changes would
+                    # mutate a wrong shape. Refresh fails loud to the
+                    # peer so they can retry once we've recovered.
+                    try:
+                        refresh = await state.memory.refresh()
+                        if not refresh.get("ok", True):
+                            await ws.send_json({
+                                "type": "sync_error",
+                                "message": (
+                                    f"memory_refresh_failed: {refresh.get('error', 'unknown')}"
+                                ),
+                            })
+                            logger.warning(
+                                "Sync apply aborted: memory.refresh() reported %s", refresh,
+                            )
+                            break
+                    except Exception as exc:
+                        await ws.send_json({
+                            "type": "sync_error",
+                            "message": f"memory_refresh_exception: {exc}",
+                        })
+                        logger.warning("Sync apply aborted: memory.refresh() raised %s", exc)
+                        break
+                    applied = await state.sync_engine.apply_remote_changes(
+                        incoming.get("changes", [])
+                    )
 
                 my_changes = []
                 if state.sync_engine and hasattr(state.sync_engine, '_wal'):

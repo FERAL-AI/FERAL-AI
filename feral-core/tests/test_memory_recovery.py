@@ -75,7 +75,7 @@ class TestKillBrainMidApply:
 
             # B applies the first 50% of the chunk, then "the process dies".
             half = len(ops_from_a) // 2
-            applied_first_half = engine_b.apply_remote_changes(ops_from_a[:half])
+            applied_first_half = await engine_b.apply_remote_changes(ops_from_a[:half])
             assert applied_first_half == half
 
             # Snapshot B's pre-crash state for monotonicity comparison.
@@ -83,6 +83,7 @@ class TestKillBrainMidApply:
             pre_crash_hlcs = [op["hlc"] for op in pre_crash_ops]
 
             # ── crash ── (drop the in-memory engine; on-disk WAL persists)
+            await engine_b._memory.aclose()
             del engine_b
 
             # ── restart ──
@@ -92,8 +93,15 @@ class TestKillBrainMidApply:
             # entire chunk, not just the missing tail — this is the
             # realistic recovery path because the killed B never ACKed
             # its half-applied position).
-            replay_count = engine_b.apply_remote_changes(ops_from_a)
-            assert replay_count == 100
+            # v2026.5.34 (PR 2 D12): the first half's ops now have a
+            # row already on disk with an hlc_string. The LWW gate
+            # short-circuits them as "not strictly greater" so apply
+            # returns ``half`` for the new ops; the existing rows are
+            # already at the right version.
+            replay_count = await engine_b.apply_remote_changes(ops_from_a)
+            assert replay_count == half, (
+                f"expected {half} newly-applied ops post-restart, got {replay_count}"
+            )
 
             # 1) No duplicates: WAL is keyed on op_id (INSERT OR REPLACE),
             #    so re-applying the first half overwrote rather than

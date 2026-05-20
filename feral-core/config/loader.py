@@ -84,6 +84,65 @@ DEFAULT_SETTINGS = {
         # chroma, qdrant, or any registered community backend.
         "backend": "sqlite_vec",
         "backend_config": {},
+        # v2026.5.34 (PR 2 — feat/memory-v2-truth). The four memory-v2
+        # subsystems each carry an ``enabled`` flag so an operator can
+        # disable any one of them in ``settings.json`` without
+        # reverting the release. Cluster-level flags default ON
+        # because the post-canary documented behaviour is "all four
+        # active"; the per-feature spec defaults are the safe
+        # production tunables. Disable knobs live under each subkey.
+        "decay": {
+            # D11 — Ebbinghaus-with-SM-2 decay + active forgetting.
+            # When ``enabled`` is true the brain runs a background
+            # sweep every ``cadence_seconds`` that recalculates each
+            # episode's ``decay_factor`` and marks the ones below
+            # ``forget_threshold`` as forgotten. ``retention_days``
+            # is the grace period before a forgotten episode (plus
+            # its chunks + FTS rows) is hard-deleted from disk.
+            "enabled": True,
+            "cadence_seconds": 3600,
+            "decay_rate": 0.001,
+            "forget_threshold": 0.05,
+            "access_boost_factor": 0.1,
+            "retention_days": 365,
+        },
+        "sync": {
+            # D12 — P2P federated sync scheduler. When ``enabled`` is
+            # true the SyncScheduler runs every ``cadence_seconds``,
+            # walks every known peer, and reconciles operations.
+            # Per-peer exponential backoff starts at
+            # ``backoff_initial_seconds`` and caps at
+            # ``backoff_max_seconds``. ``peer_timeout_seconds`` is
+            # the handshake / round-trip ceiling before a peer is
+            # declared unreachable.
+            "enabled": True,
+            "cadence_seconds": 30,
+            "peer_timeout_seconds": 10,
+            "backoff_initial_seconds": 5,
+            "backoff_max_seconds": 300,
+            "heartbeat_interval_seconds": 15,
+            "heartbeat_miss_threshold": 3,
+        },
+        "kg": {
+            # F1 — Unified knowledge graph. When ``unified`` is true
+            # writes go to the typed entity-relation graph
+            # exclusively; the flat ``knowledge`` table is renamed to
+            # ``knowledge__deprecated`` on first boot of this release
+            # and dropped in the next release. Old data is migrated
+            # into the unified graph automatically.
+            "unified": True,
+        },
+        "compaction": {
+            # F2 — Real session compaction. When ``enabled`` is true,
+            # ``compact_session`` promotes summarisable turns into
+            # episode rows (with participants, time_range, summary,
+            # key_entities, source_turn_ids metadata). The brain
+            # auto-fires compaction either at the end of a session or
+            # once a session has accumulated ``turns_threshold`` new
+            # turns since the last compaction.
+            "enabled": True,
+            "turns_threshold": 20,
+        },
     },
     "security": {
         "node_api_key": "",

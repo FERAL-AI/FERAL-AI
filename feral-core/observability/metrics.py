@@ -264,6 +264,75 @@ AUTOMATION_REPAIR_LOOP_TOTAL = Counter(
     registry=REGISTRY,
 )
 
+# v2026.5.34 (PR 2) D11 — memory decay sweeper.
+# Owned by memory/decay.py:MemoryDecayService.run_once().
+MEMORY_DECAY_SWEEPS_TOTAL = Counter(
+    "feral_memory_decay_sweeps_total",
+    "Number of background decay sweeps that have completed.",
+    registry=REGISTRY,
+)
+MEMORY_DECAY_SWEEP_DURATION_SECONDS = Histogram(
+    "feral_memory_decay_sweep_duration_seconds",
+    "Wall-clock duration of each decay sweep, in seconds.",
+    registry=REGISTRY,
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0),
+)
+MEMORY_EPISODES_ACTIVE = Gauge(
+    "feral_memory_episodes_active",
+    "Episodes currently not forgotten (forgotten_at IS NULL).",
+    registry=REGISTRY,
+)
+MEMORY_EPISODES_FORGOTTEN = Gauge(
+    "feral_memory_episodes_forgotten",
+    "Episodes whose decay_factor crossed forget_threshold and are awaiting hard-delete.",
+    registry=REGISTRY,
+)
+MEMORY_EPISODES_HARD_DELETED_TOTAL = Counter(
+    "feral_memory_episodes_hard_deleted_total",
+    "Episodes hard-deleted after retention_days past forgotten_at.",
+    registry=REGISTRY,
+)
+
+# v2026.5.34 (PR 2) D12 — federated sync scheduler / engine.
+# Owned by memory/sync.py:SyncEngine + memory/sync_scheduler.py.
+# feral_sync_active_peers + feral_sync_failures_total + feral_sync_was_active_recent
+# were defined above for W13.1; the labels below extend the surface.
+SYNC_ATTEMPTS_TOTAL = Counter(
+    "feral_sync_attempts_total",
+    "Sync attempts initiated by the scheduler, labelled by peer node id and final status.",
+    labelnames=("peer", "status"),
+    registry=REGISTRY,
+)
+SYNC_OPS_SENT_TOTAL = Counter(
+    "feral_sync_ops_sent_total",
+    "Sync operations transmitted to a peer, labelled by peer node id.",
+    labelnames=("peer",),
+    registry=REGISTRY,
+)
+SYNC_OPS_RECEIVED_TOTAL = Counter(
+    "feral_sync_ops_received_total",
+    "Sync operations received from a peer (post-WAL append), labelled by peer node id.",
+    labelnames=("peer",),
+    registry=REGISTRY,
+)
+SYNC_LAG_SECONDS = Gauge(
+    "feral_sync_lag_seconds",
+    "Seconds since the last successful sync with a peer, labelled by peer node id.",
+    labelnames=("peer",),
+    registry=REGISTRY,
+)
+SYNC_WAL_SIZE_BYTES = Gauge(
+    "feral_sync_wal_size_bytes",
+    "Current on-disk size of the sync WAL (sync_wal.db).",
+    registry=REGISTRY,
+)
+SYNC_HEARTBEAT_MISSES_TOTAL = Counter(
+    "feral_sync_heartbeat_misses_total",
+    "Heartbeat pings that did not get a reply within heartbeat_interval_seconds, labelled by peer.",
+    labelnames=("peer",),
+    registry=REGISTRY,
+)
+
 
 # Map of metric name → metric object so emit() can dispatch by string.
 # Tests/test_metrics_registry.py walks this map to enforce parity with
@@ -285,6 +354,17 @@ _METRICS: dict[str, Counter | Gauge | Histogram] = {
     "feral_automation_failure_total": AUTOMATION_FAILURE_TOTAL,
     "feral_automation_permission_denied_total": AUTOMATION_PERMISSION_DENIED_TOTAL,
     "feral_automation_repair_loop_total": AUTOMATION_REPAIR_LOOP_TOTAL,
+    "feral_memory_decay_sweeps_total": MEMORY_DECAY_SWEEPS_TOTAL,
+    "feral_memory_decay_sweep_duration_seconds": MEMORY_DECAY_SWEEP_DURATION_SECONDS,
+    "feral_memory_episodes_active": MEMORY_EPISODES_ACTIVE,
+    "feral_memory_episodes_forgotten": MEMORY_EPISODES_FORGOTTEN,
+    "feral_memory_episodes_hard_deleted_total": MEMORY_EPISODES_HARD_DELETED_TOTAL,
+    "feral_sync_attempts_total": SYNC_ATTEMPTS_TOTAL,
+    "feral_sync_ops_sent_total": SYNC_OPS_SENT_TOTAL,
+    "feral_sync_ops_received_total": SYNC_OPS_RECEIVED_TOTAL,
+    "feral_sync_lag_seconds": SYNC_LAG_SECONDS,
+    "feral_sync_wal_size_bytes": SYNC_WAL_SIZE_BYTES,
+    "feral_sync_heartbeat_misses_total": SYNC_HEARTBEAT_MISSES_TOTAL,
 }
 
 

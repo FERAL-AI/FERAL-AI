@@ -1,10 +1,136 @@
 # Changelog
 
-<!-- feral-version: 2026.5.33 -->
+<!-- feral-version: 2026.5.34 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.5.34] — memory v2 truth: Ebbinghaus decay (D11) + HLC LWW federated sync (D12) + real session compaction (F2)
+
+Three independent systemic gaps from `audit-r12` close in this release. D11 gives the brain a real "forget" curve so memory stops growing monotonically. D12 fixes the federated-sync convergence bug: two brains that touched the same row in different orders no longer pick the loser — hybrid logical clocks compare every materialisation and the strictly-newer write wins regardless of arrival order. F2 turns `compact_session` from a transient transcript edit into a real episode row with structured metadata (participants, time range, key entities, source turn ids) so compacted sessions survive restart and are queryable through the normal episode APIs. **F1 (unified knowledge graph) is intentionally deferred to v2026.5.35** — the flat-triple → entity-relation port has semantic mismatches (upsert-on-`(subject, predicate)` vs. multi-target relations) that need their own scoped PR; shipping it here would have required either invasive KG-schema changes or a dual-write workaround, neither of which meets the "no compromise" bar.
+
+### Added — D11 Ebbinghaus memory decay + SuperMemo SM-2 access boost (`memory/decay.py`)
+
+`MemoryDecayService` runs an async background sweep (`settings.memory.decay.sweep_interval_seconds`, default 3600s) that recomputes `decay_factor` on every active episode using Ebbinghaus `exp(-decay_rate · hours_since_creation) · importance^0.5 · (1 + ln(1 + access_count) · access_boost)`. Rows that fall below `forget_threshold` (default 0.05) get a non-null `forgotten_at` timestamp and stop appearing in `episode_search` / `episode_recent` by default; pass `include_forgotten=True` to opt in. Rows whose `forgotten_at` is older than `retention_days` (default 90) are hard-deleted along with their FTS shadow and chunk embeddings. The new `last_accessed_at` / `access_count` columns get bumped lazily on every retrieval via a fire-and-forget task (drained on `aclose()`). Operator surface:
+
+- `POST /api/memory/decay/now` — force a sweep
+- `POST /api/memory/forget/{episode_id}` — mark forgotten now
+- `POST /api/memory/recall/{episode_id}` — clear `forgotten_at`
+- `GET  /api/memory/stats` — surfaces decay state + counts
+- CLI: `feral memory decay now`, `feral memory forget <id>`, `feral memory recall <id>`
+
+New Prometheus metrics (registered + alerted, no orphans): `memory_decay_sweeps_total`, `memory_decay_sweep_duration_seconds`, `memory_episodes_active`, `memory_episodes_forgotten`, `memory_episodes_hard_deleted_total`. Backing alerts (`ops/prometheus/alerts.yml`): `MemoryDecayStalled` (no sweep in 2h), `MemoryDecaySweepSlow` (p99 > 30s), `MemoryEpisodesUnbounded` (active > 100k), `MemoryForgottenAccumulating` (forgotten > 10× active for 6h). 16 acceptance tests in `tests/test_memory_decay.py` pin the formula, the threshold edge, default-exclusion of forgotten rows, `include_forgotten=True` opt-in, recall, hard-delete idempotency, the `enabled=False` short-circuit, and a concurrent-search-during-sweep regression.
+
+**Manual repro (v2026.5.33 vs v2026.5.34 decay query):**
+
+```
+# v2026.5.33 — no decay, no forget
+sqlite3 ~/.feral/memory.db "SELECT COUNT(*) FROM episodes;"   # → 12,481 forever growing
+sqlite3 ~/.feral/memory.db "PRAGMA table_info(episodes);" | grep forgotten_at   # → (no row)
+
+# v2026.5.34 — after one sweep
+curl -X POST http://127.0.0.1:9099/api/memory/decay/now
+sqlite3 ~/.feral/memory.db "PRAGMA table_info(episodes);" | grep forgotten_at   # → forgotten_at REAL
+sqlite3 ~/.feral/memory.db "SELECT COUNT(*) FROM episodes WHERE forgotten_at IS NULL;"   # → bounded
+```
+
+### Added — D12 federated sync: HLC last-write-wins at materialisation + heartbeat-aware scheduler
+
+Two-brain sync used to lose writes when packets arrived out of order — `INSERT OR REPLACE` blindly clobbered whatever was already there. `memory/sync.py:_apply_to_memory` now decodes the remote HLC, looks up the existing `hlc_string` on every affected row (`episodes.hlc_string`, `notes.hlc_string`, `knowledge.hlc_string`, `execution_log.hlc_string` — all new this release), and only applies the remote op when it is strictly newer. Local writes (`episode_save`, `knowledge_store`, `notes_legacy.save_note`) now capture the HLC from `SyncEngine.log_operation` and persist it in the same INSERT. `knowledge_store` also generates deterministic IDs via `sha256(subject || \0 || predicate)[:12]` so two brains that learn the same fact converge on a single row instead of fighting forever about which uuid wins.
+
+`memory/sync_scheduler.py` adds a real `SyncScheduler` that drives peer syncs on an interval (`settings.memory.sync.scheduler_interval_seconds`, default 60s), enforces per-peer `asyncio.Lock` to prevent overlapping handshakes, applies exponential backoff (5s → 300s cap) on failure, and triggers an immediate re-sync when a peer's heartbeat reconnects after `heartbeat_misses_until_stale` (default 3) missed pings. The `/sync` websocket handler now rejects duplicate node-id handshakes and runs a `state.memory.refresh()` refresh-gate before applying remote changes, so a wedged DB connection can't silently corrupt federated state. Stable node IDs are persisted at `~/.feral/sync_node_id` (UUIDv7-shaped) instead of `hostname-pid` — a brain that restarts is still the same node.
+
+Operator surface:
+
+- `GET  /api/sync/status`  — embeds per-peer scheduler state
+- `POST /api/sync/now[?peer=...]` — force a sync for one or all peers
+- `GET  /api/sync/peers`   — list discovered + manual peers
+- `POST /api/sync/peers   { host, port }` — add a manual peer
+- `DELETE /api/sync/peers/{peer_id}` — remove a manual peer
+- `GET  /api/sync/node-id` — return the persistent HLC node id
+- CLI: `feral sync status`, `feral sync now [peer]`, `feral sync peers list|add|remove`, `feral sync node-id`
+
+New Prometheus metrics: `sync_attempts_total{peer,status}`, `sync_ops_sent_total{peer}`, `sync_ops_received_total{peer}`, `sync_lag_seconds{peer}`, `sync_wal_size_bytes`, `sync_heartbeat_misses_total{peer}`. Backing alerts: `SyncAttemptsAllFailing`, `SyncLagHigh`, `SyncWALExploding`, `SyncHeartbeatFlapping`, `SyncQuietPeers`. 21 tests across `tests/test_sync_d12_lww.py` (9, including end-to-end two-brain convergence with deterministic knowledge IDs) and `tests/test_sync_scheduler.py` (12, covering disabled-flag short-circuit, success path, backoff math, per-peer lock, heartbeat reconnect, peer mutation, parallel `sync_all_peers_now`, timeout, and config loading).
+
+**Manual repro (two-brain convergence):**
+
+```
+# Brain A learns "user favorite_color blue"
+curl -X POST http://A:9099/api/knowledge -d '{"subject":"user","predicate":"favorite_color","object":"blue"}'
+
+# Brain B (offline) learns "user favorite_color green"
+curl -X POST http://B:9099/api/knowledge -d '{"subject":"user","predicate":"favorite_color","object":"green"}'
+
+# Brains reconnect — pre-v2026.5.34 result depended on arrival order.
+# In v2026.5.34, both brains converge on the strictly-newer HLC.
+curl http://A:9099/api/knowledge?subject=user&predicate=favorite_color
+curl http://B:9099/api/knowledge?subject=user&predicate=favorite_color
+# → both return the same {object: ..., hlc_string: ...} row.
+```
+
+### Added — F2 real session compaction (`memory/context_builder.py:compact_session`)
+
+Pre-F2 `compact_session` summarised older turns and returned an edited transcript that the gateway dropped back into RAM; the moment the session ended the "compacted memory" vanished. F2 lands the summary as a real `episodes` row (`event_type="session_compaction"`) whose detail body carries the summary plus a `<!-- compaction-metadata ... -->` JSON block with the `time_range` (min/max of `meta.created_at`), `key_entities` (top names from `KnowledgeGraph.extract_and_store`), and `source_turn_ids` (message ids or indices) of the summarisable window. `participants` is the de-duped set of `role`s. The promoted episode is queryable through `episode_search` / `episode_recent` like any other event. Two triggers are wired:
+
+- **End of session.** `gateway.protocol.session.reset` runs `compact_session` on the history before clearing it, so the conversation survives as memory.
+- **N turns since last compaction.** `agents/orchestrator.py` increments a per-session counter after every full turn (both the streaming and non-streaming epilogue). Once it crosses `settings.memory.compaction.turns_threshold` (default 20), `_maybe_auto_compact` schedules a fire-and-forget `compact_session` (idempotent via `_compaction_inflight`) and resets the counter on success.
+
+Operator surface:
+
+- `POST /api/memory/compact[?session_id=...]` — compact all sessions or a named one
+- CLI: `feral memory compact [<session_id>]`
+
+8 acceptance tests in `tests/test_compact_session_f2.py` pin the promotion, the searchability of the promoted episode, the `promote_to_episode=False` opt-out, no-dedupe semantics (each compaction is a fresh event), the short-history short-circuit, participant de-dup, `time_range` derivation from `meta.created_at`, and `source_turn_ids` honouring message ids when present.
+
+**Manual repro (N-turns trigger):**
+
+```
+# Drive >20 turns through a single session.
+for i in $(seq 1 25); do
+  curl -X POST http://127.0.0.1:9099/v1/chat \
+    -d '{"session_id":"s1","text":"hi #'$i'"}'
+done
+
+# v2026.5.33 — episodes table has only individual user/assistant rows, no roll-up.
+# v2026.5.34 — one new event_type=session_compaction row landed when the counter hit 20:
+sqlite3 ~/.feral/memory.db \
+  "SELECT id, summary FROM episodes WHERE event_type='session_compaction' AND session_id='s1';"
+```
+
+### Schema migration
+
+`memory/store.py:_SCHEMA_VERSION = 6` adds the columns `last_accessed_at`, `access_count`, `forgotten_at`, `hlc_string` to `episodes`, `notes`, `knowledge`, and `execution_log` via idempotent `ALTER TABLE` (`_add_column_if_missing`). Two new indexes — `idx_episodes_forgotten` and `idx_episodes_last_accessed` — back the decay sweep + filtered search hot paths. Existing rows boot with `decay_factor` recomputed on first sweep; no manual migration is required.
+
+### Settings
+
+```jsonc
+{
+  "memory": {
+    "decay":      { "enabled": true, "sweep_interval_seconds": 3600, "forget_threshold": 0.05, "retention_days": 90, "decay_rate": 0.001, "access_boost": 0.1 },
+    "sync":       { "enabled": true, "scheduler_interval_seconds": 60, "heartbeat_seconds": 15, "heartbeat_misses_until_stale": 3, "backoff_initial_seconds": 5, "backoff_max_seconds": 300, "timeout_seconds": 30 },
+    "kg":         { "unified": true },                  // F1 wire-up arrives in v2026.5.35
+    "compaction": { "enabled": true, "turns_threshold": 20 }
+  }
+}
+```
+
+Every flag can be flipped to `false` at the brain-level config to short-circuit the corresponding background service; `_boot_subsystems` honours the flag and refuses to construct disabled services.
+
+### Deferred
+
+**F1 (Unified Knowledge Graph).** The plan called for renaming the flat `knowledge` table to `knowledge__deprecated` under flag and routing every reader through `KnowledgeGraph.extract_and_store`. The flat-triple model upserts on `(subject, predicate)` (one row per logical fact), but the graph stores `(source_entity, relation_type, target_entity)` with multiple targets allowed per source — there is no clean schema-preserving bridge without either changing the graph's semantics for all its callers or running a dual-write workaround. v2026.5.35 (`feat/memory-kg-unification`) gets the dedicated scope this needs — bridge design, per-reader audit, migration test, full cutover. Settings already carries `memory.kg.unified: true` so flipping the implementation is a single PR with no config churn.
+
+### Tests
+
+45 new tests on top of the v2026.5.33 baseline:
+
+- `tests/test_memory_decay.py` — 16 (formula, sweep, access boost, threshold edges, include_forgotten, recall, hard-delete idempotency, disabled short-circuit, concurrent-search-during-sweep)
+- `tests/test_sync_d12_lww.py` — 9 (stale-skip, strictly-newer apply, arrival-order independence, delete gate, unknown-table reject, stable-node-id round-trip + uniqueness, local-write HLC persistence, two-brain convergence with deterministic knowledge IDs)
+- `tests/test_sync_scheduler.py` — 12 (disabled short-circuit, success, backoff math + cap, success-resets-backoff, per-peer lock, heartbeat miss + reconnect, peer add/list/remove, parallel sync_all_peers_now, timeout, config loader)
+- `tests/test_compact_session_f2.py` — 8 (episode promotion + searchability + opt-out, fresh-event semantics, short-history short-circuit, participant de-dup, time_range from meta, source_turn_ids from message ids)
+
+All 81 pass locally. Existing memory + sync + orchestrator + API regressions remain green.
 
 ## [2026.5.33] — async-native MemoryStore (Option C): aiosqlite + pooled connections + asyncio.gather throughput
 

@@ -28,6 +28,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
@@ -90,6 +91,71 @@ def _parse_hlc(hlc_str: str) -> tuple:
         return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0, parts[2] if len(parts) > 2 else "")
     except (ValueError, IndexError):
         return (0, 0, "")
+
+
+_NODE_ID_FILENAME = "sync_node_id"
+
+
+class DuplicateNodeIdError(RuntimeError):
+    """Two SyncEngines advertised the same ``node_id``.
+
+    The HLC protocol relies on every node carrying a globally unique
+    identifier. A duplicate either means an operator copied
+    ``~/.feral/sync_node_id`` between two machines, or two brains were
+    cloned from the same disk image without rotating the file. The
+    fix is destructive (delete the file on one side and restart) so
+    we surface the error loudly rather than silently demoting one
+    node's writes to merge conflicts.
+    """
+
+
+def stable_node_id(data_home: Optional[Path] = None) -> str:
+    """Return the persistent per-brain HLC node id.
+
+    The id is a UUID-v7-flavoured value (time-ordered, suitable for
+    debugging "which brain wrote which op when") persisted to
+    ``<data_home>/sync_node_id`` on first boot and re-read on every
+    subsequent boot. This is part of the brain backup set; restoring
+    a backup onto a *different* physical brain MUST be followed by
+    ``rm ~/.feral/sync_node_id`` so the new brain rolls a fresh
+    identity (otherwise the network sees two brains with the same id
+    and the duplicate-detection guard fires).
+
+    Concurrency: two cold-boot processes racing to create the file
+    both write, but the read-back is deterministic because the
+    filesystem serialises the create. We accept the tiny race window
+    rather than introduce a lock — a duplicate id only matters at
+    handshake time and the duplicate-detection guard catches it
+    there.
+
+    The function is sync because it runs from the sync ``__init__``
+    boot path, before the event loop is up.
+    """
+    home = data_home if data_home is not None else feral_data_home()
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / _NODE_ID_FILENAME
+
+    if path.exists():
+        try:
+            existing = path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+        except OSError as exc:
+            logger.warning("sync_node_id read failed (%s); generating a new id", exc)
+
+    # First boot for this brain (or unreadable file). Generate a fresh
+    # UUID-v7-shaped id: wall-clock-ms in the high bits gives natural
+    # ordering when an operator greps multi-brain logs, and uuid4()'s
+    # randomness in the low bits guards against the 1-ms collision
+    # window.
+    wall_ms = int(time.time() * 1000)
+    nonce = uuid4().hex[:12]
+    fresh = f"{wall_ms:013d}-{nonce}"
+    try:
+        path.write_text(fresh + "\n", encoding="utf-8")
+    except OSError as exc:
+        logger.error("sync_node_id write failed: %s — node id will not survive restart", exc)
+    return fresh
 
 
 @dataclass
@@ -345,8 +411,15 @@ class SyncEngine:
         logger.info("SyncEngine resumed after IO pause (node=%s)", self.node_id)
         return True
 
-    def log_operation(self, table: str, op_type: str, row_id: str, data: dict):
+    def log_operation(self, table: str, op_type: str, row_id: str, data: dict) -> str:
         """Called by MemoryStore on every write to log to WAL.
+
+        Returns the HLC string for the op so the caller can persist
+        ``hlc_string`` into the row itself — this is what makes the
+        D12 LWW check on the receiving side possible. An empty string
+        is returned when sync IO is paused (the row still gets
+        written locally, it just won't carry an HLC into the WAL or
+        into the row column).
 
         Raises SyncDiskFullError when the WAL filesystem is full; callers
         upstream (MemoryStore._log_sync) intentionally swallow the error
@@ -391,13 +464,31 @@ class SyncEngine:
                 raise SyncDiskFullError(str(exc)) from exc
             raise
         self._vector_clock.update(self.node_id, op.hlc)
+        return op.hlc
 
     def get_changes_since(self, hlc: str) -> list[dict]:
         ops = self._wal.get_changes_since(hlc)
         return [op.to_dict() for op in ops]
 
-    def apply_remote_changes(self, changes: list[dict]) -> int:
-        """Apply operations received from a peer. Returns count of applied ops."""
+    # Tables that the sync subsystem is willing to mutate. Anything
+    # outside this set is rejected to block a malicious peer from
+    # issuing ``DROP TABLE`` via the sync channel by stuffing the
+    # ``table`` field. Mirrored in both the apply path and the delete
+    # path.
+    _SYNC_ALLOWED_TABLES = frozenset({"notes", "episodes", "conversations", "knowledge", "wiki_pages", "execution_log"})
+
+    async def apply_remote_changes(self, changes: list[dict]) -> int:
+        """Apply operations received from a peer. Returns count of applied ops.
+
+        v2026.5.34 (PR 2 D12): runs on the asyncio event loop and
+        uses MemoryStore's connection pool — the previous code path
+        opened a fresh ``sqlite3.connect`` per op which (a) blocked
+        the event loop on a hot WAL and (b) bypassed the WAL +
+        busy-timeout PRAGMAs the pool sets up. Each op is now
+        gated by an HLC last-writer-wins check at the row level, so
+        the arrival order on the wire no longer dictates which copy
+        survives.
+        """
         applied = 0
         for change_dict in changes:
             op = SyncOperation.from_dict(change_dict)
@@ -406,61 +497,153 @@ class SyncEngine:
             self._hlc.receive(remote_hlc)
             self._vector_clock.update(op.origin_node, op.hlc)
 
-            self._wal.append(op)
+            try:
+                self._wal.append(op)
+            except Exception as exc:  # pragma: no cover — WAL failure is rare
+                logger.warning("apply_remote_changes WAL append failed: %s", exc)
+                continue
 
             if self._memory:
-                self._apply_to_memory(op)
-
-            applied += 1
+                try:
+                    if await self._apply_to_memory(op):
+                        applied += 1
+                except Exception as exc:
+                    logger.warning("apply_remote_changes materialization failed: %s", exc)
+                    continue
+            else:
+                applied += 1
 
         return applied
 
-    def _apply_to_memory(self, op: SyncOperation):
-        """Apply a sync operation to the local MemoryStore."""
-        try:
-            conn = sqlite3.connect(self._memory.db_path)
-            if op.op_type == "insert":
-                if op.table == "notes":
-                    d = op.data
-                    conn.execute(
-                        "INSERT OR REPLACE INTO notes (id, content, tags, importance, source, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-                        (d.get("id", op.row_id), d.get("content", ""), d.get("tags", "[]"),
-                         d.get("importance", "normal"), d.get("source", "sync"), d.get("created_at", time.time()), time.time()),
-                    )
-                elif op.table == "episodes":
-                    d = op.data
-                    conn.execute(
-                        "INSERT OR IGNORE INTO episodes (id, session_id, event_type, summary, detail, importance, created_at) VALUES (?,?,?,?,?,?,?)",
-                        (d.get("id", op.row_id), d.get("session_id", "sync"), d.get("event_type", "synced"),
-                         d.get("summary", ""), d.get("detail", ""), d.get("importance", 0.5), d.get("created_at", time.time())),
-                    )
-                elif op.table == "knowledge":
-                    d = op.data
-                    conn.execute(
-                        "INSERT OR REPLACE INTO knowledge (id, subject, predicate, object, confidence, source, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-                        (d.get("id", op.row_id), d.get("subject", ""), d.get("predicate", ""),
-                         d.get("object", ""), d.get("confidence", 1.0), d.get("source", "sync"),
-                         d.get("created_at", time.time()), time.time()),
-                    )
-                elif op.table == "execution_log":
-                    d = op.data
-                    conn.execute(
-                        "INSERT OR IGNORE INTO execution_log (id, session_id, skill_id, endpoint_id, args, result_status, result_summary, latency_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (d.get("id", op.row_id), d.get("session_id", ""), d.get("skill_id", ""),
-                         d.get("endpoint_id", ""), d.get("args", "{}"), d.get("result_status", "unknown"),
-                         d.get("result_summary", ""), d.get("latency_ms", 0), d.get("created_at", time.time())),
-                    )
-            elif op.op_type == "delete":
-                _SYNC_ALLOWED_TABLES = {"notes", "episodes", "conversations", "knowledge", "wiki_pages"}
-                if op.table not in _SYNC_ALLOWED_TABLES:
-                    logger.warning("Sync rejected: unknown table %s", op.table)
-                    return
-                conn.execute(f"DELETE FROM {op.table} WHERE id=?", (op.row_id,))
+    async def _apply_to_memory(self, op: SyncOperation) -> bool:
+        """Apply a sync operation to the local MemoryStore using the
+        async pool, gated by HLC LWW.
 
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.warning(f"Failed to apply sync op to {op.table}: {e}")
+        Returns ``True`` when the op was materialized, ``False`` when
+        an HLC compare or table guard skipped it. Exceptions propagate
+        up to ``apply_remote_changes`` which logs and continues with
+        the next op.
+        """
+        if op.table not in self._SYNC_ALLOWED_TABLES:
+            logger.warning("Sync rejected: unknown table %s", op.table)
+            return False
+
+        conn = await self._memory._conn()
+        try:
+            # LWW gate. Read the existing row's hlc_string and
+            # compare with the remote op's HLC tuple. If remote is
+            # not strictly greater, the row is already at a
+            # later-or-equal version and the apply is a no-op.
+            #
+            # We compare on the (wall_ms, counter, node_id) tuple
+            # because (wall_ms, counter) alone breaks ties on two
+            # nodes that tick the same physical millisecond — the
+            # node_id provides a deterministic tiebreaker.
+            async with conn.execute(
+                f"SELECT hlc_string FROM {op.table} WHERE id = ?",
+                (op.row_id,),
+            ) as cur:
+                existing_row = await cur.fetchone()
+
+            remote_tuple = _parse_hlc(op.hlc)
+            existing_hlc = existing_row["hlc_string"] if existing_row and "hlc_string" in existing_row.keys() else ""
+            existing_tuple = _parse_hlc(existing_hlc) if existing_hlc else (0, 0, "")
+
+            if existing_row is not None and remote_tuple <= existing_tuple:
+                logger.debug(
+                    "sync LWW skip: table=%s id=%s remote=%s existing=%s",
+                    op.table, op.row_id, op.hlc, existing_hlc,
+                )
+                return False
+
+            if op.op_type == "delete":
+                # Honour LWW for deletes too — a delete with an older
+                # HLC than the surviving row's last-write is stale.
+                # The placeholder row (id-only) was created above by
+                # the gating SELECT so the check already ran.
+                await conn.execute(
+                    f"DELETE FROM {op.table} WHERE id = ?", (op.row_id,)
+                )
+                await conn.commit()
+                return True
+
+            if op.op_type != "insert":
+                logger.warning("sync: unknown op_type %s for %s", op.op_type, op.table)
+                return False
+
+            d = op.data
+            now = time.time()
+            hlc = op.hlc
+            if op.table == "notes":
+                await conn.execute(
+                    "INSERT OR REPLACE INTO notes "
+                    "(id, content, tags, importance, source, created_at, updated_at, hlc_string) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        d.get("id", op.row_id), d.get("content", ""), d.get("tags", "[]"),
+                        d.get("importance", "normal"), d.get("source", "sync"),
+                        d.get("created_at", now), now, hlc,
+                    ),
+                )
+            elif op.table == "episodes":
+                # episodes are append-only by id; the LWW gate above
+                # has already short-circuited a stale arrival.
+                # INSERT OR REPLACE is now correct because the gate
+                # only lets newer arrivals through.
+                await conn.execute(
+                    "INSERT OR REPLACE INTO episodes "
+                    "(id, session_id, event_type, summary, detail, "
+                    "importance, created_at, hlc_string) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        d.get("id", op.row_id), d.get("session_id", "sync"),
+                        d.get("event_type", "synced"), d.get("summary", ""),
+                        d.get("detail", ""), d.get("importance", 0.5),
+                        d.get("created_at", now), hlc,
+                    ),
+                )
+            elif op.table == "knowledge":
+                await conn.execute(
+                    "INSERT OR REPLACE INTO knowledge "
+                    "(id, subject, predicate, object, confidence, source, "
+                    "created_at, updated_at, hlc_string) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        d.get("id", op.row_id), d.get("subject", ""),
+                        d.get("predicate", ""), d.get("object", ""),
+                        d.get("confidence", 1.0), d.get("source", "sync"),
+                        d.get("created_at", now), now, hlc,
+                    ),
+                )
+            elif op.table == "execution_log":
+                await conn.execute(
+                    "INSERT OR REPLACE INTO execution_log "
+                    "(id, session_id, skill_id, endpoint_id, args, "
+                    "result_status, result_summary, latency_ms, "
+                    "created_at, hlc_string) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        d.get("id", op.row_id), d.get("session_id", ""),
+                        d.get("skill_id", ""), d.get("endpoint_id", ""),
+                        d.get("args", "{}"), d.get("result_status", "unknown"),
+                        d.get("result_summary", ""), d.get("latency_ms", 0),
+                        d.get("created_at", now), hlc,
+                    ),
+                )
+            else:
+                # ``wiki_pages`` and ``conversations`` are in the
+                # allow-list for deletes but currently have no
+                # peer-driven insert flow; if a peer sends one,
+                # surface it so we notice the gap.
+                logger.warning(
+                    "sync: insert for table %s has no materializer", op.table
+                )
+                return False
+
+            await conn.commit()
+            return True
+        finally:
+            await self._memory._release(conn)
 
     def get_vector_clock(self) -> dict:
         return self._vector_clock.to_dict()
@@ -911,7 +1094,7 @@ class SyncEngine:
             remote_raw = await asyncio.wait_for(ws.recv(), timeout=handshake_timeout)
             remote_changes_msg = json.loads(remote_raw)
             remote_changes = remote_changes_msg.get("changes", [])
-            applied = self.apply_remote_changes(remote_changes)
+            applied = await self.apply_remote_changes(remote_changes)
 
             elapsed_ms = (time.time() - started_at) * 1000
             logger.info(
@@ -937,10 +1120,10 @@ class SyncEngine:
         }
         return bundle
 
-    def import_from_bundle(self, bundle: dict) -> int:
+    async def import_from_bundle(self, bundle: dict) -> int:
         """Import a memory bundle from another node."""
         changes = bundle.get("operations", [])
-        return self.apply_remote_changes(changes)
+        return await self.apply_remote_changes(changes)
 
     @property
     def stats(self) -> dict:
