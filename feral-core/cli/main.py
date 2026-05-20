@@ -1800,10 +1800,12 @@ def cmd_sync(action: str, file_path: str):
                 print("  No peers known.")
             else:
                 for p in peers:
+                    lag_val = p.get("lag_seconds")
+                    lag_str = f"{lag_val:.1f}s" if lag_val is not None else "—"
                     print(
                         f"  {p['peer_id']:32s} addr={p.get('address', '—'):24s} "
                         f"source={p.get('source', '—'):6s} "
-                        f"lag={(f'{p.get('lag_seconds', 0):.1f}s' if p.get('lag_seconds') is not None else '—'):8s} "
+                        f"lag={lag_str:8s} "
                         f"fails={p.get('consecutive_failures', 0)}"
                     )
         elif file_path.startswith("add "):
