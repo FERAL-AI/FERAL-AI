@@ -317,6 +317,11 @@ class BrainState:
         self.scene: Optional[SceneAnalyzer] = None
         self.change_detector = ChangeDetector()
         self.learner: Optional[Learner] = None
+        # v2026.5.34 (PR 2 D11): MemoryDecayService is constructed in
+        # ``_boot_subsystems`` once ``self.memory`` is wired; declared
+        # here so the attribute always exists for HTTP-route guard
+        # checks (``getattr(state, "memory_decay", None)`` patterns).
+        self.memory_decay = None  # type: ignore[assignment]
         self.skill_gen: Optional[SkillGenerator] = None
         self.vault: Optional[BlindVault] = None
         self.sandbox: Optional[ExecutionSandbox] = None
@@ -696,6 +701,21 @@ class BrainState:
                 # Self-heal must NEVER block boot; degrade gracefully.
                 logger.warning("self_heal_llm_model: skipped (%s)", exc)
         self.learner = Learner(llm=_shared_llm, memory=self.memory)
+
+        # v2026.5.34 (PR 2 D11): the MemoryDecayService runs an
+        # Ebbinghaus + SM-2 sweep over ``episodes`` on a
+        # ``settings.memory.decay.cadence_seconds`` cadence. The
+        # service is constructed unconditionally so HTTP routes
+        # (``/api/memory/{forget,recall,stats,decay/now}``) always
+        # have a target; whether the background loop is *running*
+        # depends on the ``enabled`` flag and is decided by
+        # ``service.start()`` itself.
+        from memory.decay import DecayConfig, MemoryDecayService
+        from config.loader import load_settings as _load_settings
+        self.memory_decay = MemoryDecayService(
+            self.memory,
+            DecayConfig.from_settings(_load_settings()),
+        )
         self.scene = SceneAnalyzer(llm=_shared_llm)
         scene_cooldown = int(os.environ.get("FERAL_SCENE_COOLDOWN", "10"))
         self.scene.set_cooldown(scene_cooldown)
@@ -770,6 +790,18 @@ class BrainState:
         self.sync_engine = SyncEngine(node_id=sync_node_id, memory_store=self.memory)
         self.memory.set_sync_engine(self.sync_engine)
         await self.sync_engine.start_discovery()
+
+        # v2026.5.34 (PR 2 D11): kick the decay sweeper. ``start()``
+        # is a no-op when ``settings.memory.decay.enabled`` is false,
+        # so the operator can disable it without changing this
+        # call site. Failures are logged but do not block boot —
+        # the brain runs fine with the sweeper off; the worst case
+        # is unbounded episode growth, which a follow-up cron can
+        # clean up.
+        try:
+            await self.memory_decay.start()
+        except Exception as exc:
+            logger.warning("MemoryDecayService.start() failed: %s", exc)
 
         self.wasm_sandbox = WASMSandbox()
 

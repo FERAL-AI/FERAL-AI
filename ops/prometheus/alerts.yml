@@ -89,3 +89,170 @@ groups:
             in the keychain, tampered ciphertext, or schema drift.
             Inspect feral-core/security/vault.py logs.
           runbook_url: docs/mintlify/operations/metrics.mdx#VaultDecryptFailed
+
+      # v2026.5.34 (PR 2) D11 — Memory decay subsystem signals.
+      - alert: MemoryDecayStalled
+        expr: |
+          (
+            increase(feral_memory_decay_sweeps_total[2h]) == 0
+          ) and on() (
+            feral_memory_episodes_active + feral_memory_episodes_forgotten > 0
+          )
+        for: 2h
+        labels:
+          severity: warning
+          workstream: PR2-D11
+        annotations:
+          summary: >-
+            Memory decay sweeper has not run for 2h
+          description: >-
+            feral_memory_decay_sweeps_total has not incremented in 2 hours
+            despite episodes existing. Either the background loop crashed
+            silently or settings.memory.decay.enabled is false — check
+            api/state.py boot logs for "MemoryDecayService" warnings.
+          runbook_url: docs/mintlify/operations/metrics.mdx#MemoryDecayStalled
+
+      - alert: MemoryDecaySweepSlow
+        expr: |
+          histogram_quantile(
+            0.99,
+            rate(feral_memory_decay_sweep_duration_seconds_bucket[15m])
+          ) > 30
+        for: 15m
+        labels:
+          severity: warning
+          workstream: PR2-D11
+        annotations:
+          summary: >-
+            Decay sweep p99 exceeds 30s
+          description: >-
+            The Ebbinghaus sweep is taking more than 30s at p99 over the
+            last 15m. Episode table likely needs the
+            (forgotten_at, decay_factor) index rebuilt or
+            settings.memory.decay.cadence_seconds increased.
+          runbook_url: docs/mintlify/operations/metrics.mdx#MemoryDecaySweepSlow
+
+      - alert: MemoryEpisodesUnbounded
+        expr: feral_memory_episodes_active > 1000000
+        for: 1h
+        labels:
+          severity: warning
+          workstream: PR2-D11
+        annotations:
+          summary: >-
+            Active episode count exceeds 1M
+          description: >-
+            feral_memory_episodes_active has been above 1,000,000 for 1h.
+            Either decay is too lax (raise forget_threshold or
+            decay_rate) or retention_days needs lowering. Check
+            feral_memory_episodes_forgotten to confirm rows are being
+            culled.
+          runbook_url: docs/mintlify/operations/metrics.mdx#MemoryEpisodesUnbounded
+
+      - alert: MemoryForgottenAccumulating
+        expr: |
+          feral_memory_episodes_forgotten > 100000
+          and on()
+          (rate(feral_memory_episodes_hard_deleted_total[24h]) == 0)
+        for: 24h
+        labels:
+          severity: warning
+          workstream: PR2-D11
+        annotations:
+          summary: >-
+            Forgotten episodes piling up — hard delete inactive
+          description: >-
+            More than 100,000 episodes are marked forgotten but
+            feral_memory_episodes_hard_deleted_total has not advanced in
+            24h. The retention window may be too long, or the sweep is
+            not reaching the hard-delete pass — inspect decay sweep
+            logs for partial-transaction errors.
+          runbook_url: docs/mintlify/operations/metrics.mdx#MemoryForgottenAccumulating
+
+      # v2026.5.34 (PR 2) D12 — Federated sync engine signals.
+      - alert: SyncAttemptsAllFailing
+        expr: |
+          sum(rate(feral_sync_attempts_total{status!="success"}[10m]))
+          > sum(rate(feral_sync_attempts_total{status="success"}[10m]))
+        for: 10m
+        labels:
+          severity: critical
+          workstream: PR2-D12
+        annotations:
+          summary: >-
+            Sync attempts failing more often than they succeed
+          description: >-
+            Over the last 10m, feral_sync_attempts_total has logged more
+            non-success than success outcomes. Inspect SyncScheduler
+            logs for backoff loops, transport errors, or peer
+            authentication mismatches.
+          runbook_url: docs/mintlify/operations/metrics.mdx#SyncAttemptsAllFailing
+
+      - alert: SyncLagHigh
+        expr: max(feral_sync_lag_seconds) > 600
+        for: 10m
+        labels:
+          severity: warning
+          workstream: PR2-D12
+        annotations:
+          summary: >-
+            At least one peer is >10m behind
+          description: >-
+            feral_sync_lag_seconds exceeds 600 for some peer for 10m.
+            Either that peer is unreachable, or the sync scheduler is
+            wedged in backoff. Run `feral sync now <peer>` to force
+            reconciliation.
+          runbook_url: docs/mintlify/operations/metrics.mdx#SyncLagHigh
+
+      - alert: SyncWALExploding
+        expr: feral_sync_wal_size_bytes > 1073741824
+        for: 30m
+        labels:
+          severity: warning
+          workstream: PR2-D12
+        annotations:
+          summary: >-
+            sync_wal.db has exceeded 1GiB
+          description: >-
+            feral_sync_wal_size_bytes is above 1 GiB for 30m. The WAL
+            should compact via mark_synced as peers ack ops — if it
+            keeps growing, peers may be acking but never replaying, or
+            no peer is actually consuming the WAL.
+          runbook_url: docs/mintlify/operations/metrics.mdx#SyncWALExploding
+
+      - alert: SyncHeartbeatFlapping
+        expr: rate(feral_sync_heartbeat_misses_total[5m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          workstream: PR2-D12
+        annotations:
+          summary: >-
+            Sync heartbeats are missing frequently
+          description: >-
+            feral_sync_heartbeat_misses_total is incrementing faster than
+            0.1 misses/second over 5m. Peer network is flaky; the
+            scheduler will keep retrying via exponential backoff but
+            chat-time replication will lag.
+          runbook_url: docs/mintlify/operations/metrics.mdx#SyncHeartbeatFlapping
+
+      - alert: SyncQuietPeers
+        expr: |
+          (
+            sum(rate(feral_sync_ops_sent_total[1h])) == 0
+            and sum(rate(feral_sync_ops_received_total[1h])) == 0
+          )
+          and on() feral_sync_active_peers > 0
+        for: 1h
+        labels:
+          severity: info
+          workstream: PR2-D12
+        annotations:
+          summary: >-
+            Active peers but no sync traffic in 1h
+          description: >-
+            Peers are connected (feral_sync_active_peers > 0) but neither
+            feral_sync_ops_sent_total nor feral_sync_ops_received_total
+            has incremented in an hour. Either nothing has been written
+            on either side, or sync_wal append is failing silently.
+          runbook_url: docs/mintlify/operations/metrics.mdx#SyncQuietPeers

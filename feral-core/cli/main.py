@@ -1917,12 +1917,19 @@ def main():
     sp.add_argument("action", nargs="?", default="status", choices=["status", "peers", "export", "import"], help="Action")
     sp.add_argument("file", nargs="?", default="", help="File path for export/import")
 
-    # feral memory — backend selector
-    mem_p = sub.add_parser("memory", help="Memory backend management")
+    # feral memory — backend selector + v2026.5.34 decay/forget/recall/compact.
+    mem_p = sub.add_parser("memory", help="Memory backend + decay management")
     mem_p.add_argument(
         "action",
-        choices=["status", "switch", "list"],
-        help="status: show current backend | list: installed backends | switch <id>: select backend",
+        choices=["status", "switch", "list", "decay", "forget", "recall", "compact"],
+        help=(
+            "status: show current backend | list: installed backends | "
+            "switch <id>: select backend | "
+            "decay now: run a one-shot Ebbinghaus sweep | "
+            "forget <episode_id>: mark an episode forgotten | "
+            "recall <episode_id>: reverse a forget | "
+            "compact [<session_id>]: promote conversation turns to episodes"
+        ),
     )
     mem_p.add_argument(
         "backend_id",

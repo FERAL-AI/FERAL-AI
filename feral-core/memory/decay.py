@@ -53,54 +53,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger("feral.memory.decay")
 
 
-# Prometheus metrics — registered lazily so the module is importable
-# without ``prometheus_client``. Wired by ``observability.metrics``.
-_METRICS: dict = {}
+def _metrics() -> dict:
+    """Lazy accessor for the central Prometheus metric handles.
 
-
-def _metric(name: str):
-    return _METRICS.get(name)
-
-
-def register_metrics(registry=None) -> None:
-    """Idempotently register the decay metrics.
-
-    Called from ``observability.metrics`` at boot. Safe to call more
-    than once (the second call is a no-op).
+    The metrics live on ``observability.metrics.REGISTRY`` (defined
+    there so test_metrics_registry.py can audit dashboard parity).
+    Importing inline keeps decay.py importable when
+    ``prometheus_client`` is missing — the metric calls then
+    silently no-op.
     """
-    if _METRICS:
-        return
     try:
-        from prometheus_client import Counter, Gauge, Histogram
+        from observability import metrics as _m
 
-        _METRICS["sweeps_total"] = Counter(
-            "feral_memory_decay_sweeps_total",
-            "Number of decay sweeps that have completed.",
-            registry=registry,
-        )
-        _METRICS["sweep_duration_seconds"] = Histogram(
-            "feral_memory_decay_sweep_duration_seconds",
-            "Wall-clock duration of each decay sweep.",
-            registry=registry,
-            buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0),
-        )
-        _METRICS["episodes_active"] = Gauge(
-            "feral_memory_episodes_active",
-            "Episodes currently not forgotten.",
-            registry=registry,
-        )
-        _METRICS["episodes_forgotten"] = Gauge(
-            "feral_memory_episodes_forgotten",
-            "Episodes whose decay_factor crossed forget_threshold (not yet hard-deleted).",
-            registry=registry,
-        )
-        _METRICS["episodes_hard_deleted_total"] = Counter(
-            "feral_memory_episodes_hard_deleted_total",
-            "Episodes hard-deleted after retention_days past forgotten_at.",
-            registry=registry,
-        )
-    except Exception as exc:  # pragma: no cover - prometheus optional at boot
-        logger.debug("Memory decay metrics not registered (prometheus_client missing?): %s", exc)
+        return {
+            "sweeps_total": _m.MEMORY_DECAY_SWEEPS_TOTAL,
+            "sweep_duration_seconds": _m.MEMORY_DECAY_SWEEP_DURATION_SECONDS,
+            "episodes_active": _m.MEMORY_EPISODES_ACTIVE,
+            "episodes_forgotten": _m.MEMORY_EPISODES_FORGOTTEN,
+            "episodes_hard_deleted_total": _m.MEMORY_EPISODES_HARD_DELETED_TOTAL,
+        }
+    except Exception:  # pragma: no cover — observability optional
+        return {}
 
 
 @dataclass(frozen=True)
@@ -203,7 +176,6 @@ class MemoryDecayService:
         self.config = config or DecayConfig()
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
-        register_metrics()
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -365,16 +337,20 @@ class MemoryDecayService:
             await self.store._release(conn)
 
         duration = time.perf_counter() - t0
-        if (g := _metric("episodes_active")) is not None:
-            g.set(active)
-        if (g := _metric("episodes_forgotten")) is not None:
-            g.set(forgotten)
-        if (c := _metric("episodes_hard_deleted_total")) is not None and hard_deleted:
-            c.inc(hard_deleted)
-        if (c := _metric("sweeps_total")) is not None:
-            c.inc()
-        if (h := _metric("sweep_duration_seconds")) is not None:
-            h.observe(duration)
+        m = _metrics()
+        try:
+            if "episodes_active" in m:
+                m["episodes_active"].set(active)
+            if "episodes_forgotten" in m:
+                m["episodes_forgotten"].set(forgotten)
+            if hard_deleted and "episodes_hard_deleted_total" in m:
+                m["episodes_hard_deleted_total"].inc(hard_deleted)
+            if "sweeps_total" in m:
+                m["sweeps_total"].inc()
+            if "sweep_duration_seconds" in m:
+                m["sweep_duration_seconds"].observe(duration)
+        except Exception as exc:  # pragma: no cover — metrics never break the sweep
+            logger.debug("decay metrics emit failed: %s", exc)
 
         logger.debug(
             "decay sweep: scanned=%d updated=%d newly_forgotten=%d hard_deleted=%d duration=%.3fs",

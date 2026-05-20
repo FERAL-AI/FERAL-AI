@@ -969,6 +969,16 @@ async def shutdown_event():
         except Exception as exc:
             logger.warning("Shutdown: sync_engine.stop_discovery failed: %s", exc)
 
+    # (e.1) v2026.5.34 PR 2 D11: stop the decay sweeper. Done before
+    # the memory store's connection pool dies so the in-flight sweep
+    # (if any) can release its connection cleanly.
+    decay = getattr(state, "memory_decay", None)
+    if decay is not None:
+        try:
+            await decay.stop()
+        except Exception as exc:
+            logger.warning("Shutdown: memory_decay.stop failed: %s", exc)
+
     # (f) Persist consciousness before the SQLite connection pools die.
     try:
         store = getattr(state, "consciousness", None)
