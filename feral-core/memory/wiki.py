@@ -195,16 +195,49 @@ async def wiki_compile(
             (max(1, episodes_limit),),
         ) as cur:
             episodes = await cur.fetchall()
-        async with conn.execute(
-            """
-            SELECT id, subject, predicate, object, confidence, source, updated_at
-            FROM knowledge
-            ORDER BY updated_at DESC
-            LIMIT ?
-            """,
-            (max(1, knowledge_limit),),
-        ) as cur:
-            triples = await cur.fetchall()
+        # v2026.5.35 (F1) — the wiki compiler used to read flat
+        # ``knowledge`` rows. When ``settings.memory.kg.unified`` is
+        # on (default) the canonical knowledge surface is the KG's
+        # ``entities`` × ``relations`` JOIN, and the flat table is
+        # either empty post-migration or renamed to
+        # ``knowledge__deprecated``. Route through the same view
+        # ``MemoryStore._knowledge_query_unified`` uses so wiki
+        # compilation sees exactly what the rest of the brain sees.
+        unified = False
+        try:
+            from config.loader import load_settings
+            unified = bool(
+                ((load_settings().get("memory") or {}).get("kg") or {})
+                .get("unified", True)
+            )
+        except Exception:
+            pass
+        if unified:
+            async with conn.execute(
+                """
+                SELECT r.id, e_src.name AS subject, r.relation_type AS predicate,
+                       e_tgt.name AS object, r.confidence,
+                       r.evidence_text AS source, r.updated_at
+                FROM relations r
+                JOIN entities e_src ON r.source_id = e_src.id
+                JOIN entities e_tgt ON r.target_id = e_tgt.id
+                ORDER BY r.updated_at DESC
+                LIMIT ?
+                """,
+                (max(1, knowledge_limit),),
+            ) as cur:
+                triples = await cur.fetchall()
+        else:
+            async with conn.execute(
+                """
+                SELECT id, subject, predicate, object, confidence, source, updated_at
+                FROM knowledge
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (max(1, knowledge_limit),),
+            ) as cur:
+                triples = await cur.fetchall()
     finally:
         await conn.close()
 

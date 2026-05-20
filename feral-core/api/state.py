@@ -820,6 +820,33 @@ class BrainState:
         except Exception as exc:
             logger.warning("MemoryDecayService.start() failed: %s", exc)
 
+        # v2026.5.35 (PR 2.5 F1): one-shot migration of legacy flat-
+        # knowledge rows into the unified KG. The function is
+        # idempotent — once a row carries ``kg_migrated_at`` the
+        # next boot skips it — and the rename of ``knowledge`` to
+        # ``knowledge__deprecated`` only fires when every row has
+        # been ported. When ``settings.memory.kg.unified`` is false
+        # (chaos/rollback path) the migration is a no-op because
+        # the read/write code paths stay on the flat table.
+        try:
+            from config.loader import load_settings as _load_settings
+            f1_settings = _load_settings() or {}
+        except Exception:
+            f1_settings = {}
+        unified = bool(((f1_settings.get("memory") or {}).get("kg") or {}).get("unified", True))
+        if unified and self.memory:
+            try:
+                result = await self.memory.migrate_knowledge_to_kg()
+                if result.get("ported") or result.get("deprecated"):
+                    logger.info(
+                        "F1 KG migration: ported=%d skipped=%d deprecated=%s",
+                        result.get("ported", 0),
+                        result.get("skipped", 0),
+                        result.get("deprecated", False),
+                    )
+            except Exception as exc:
+                logger.warning("F1 KG migration failed: %s", exc)
+
         self.wasm_sandbox = WASMSandbox()
 
         # Default OFF so a fresh install does not start listening to
