@@ -87,6 +87,8 @@ feral status           # runtime status
 feral doctor           # diagnostics — what's reachable, what needs setup
 feral access status    # current pairing / network mode
 feral key paste        # add or rotate a credential without re-running setup
+feral memory status    # backend, KG entity/relation counts, decay schedule
+feral sync status      # federated peers + per-peer lag + last-sync HLC
 ```
 
 If you prefer the installer script:
@@ -168,7 +170,7 @@ What it is not yet:
 ## Stable Today
 
 <!-- sync-versions:test-counts pytest=3722 vitest=312 -->
-Current CI snapshot: **2842 backend + 259 frontend tests**.
+Current CI snapshot: **3722 backend + 312 frontend tests**.
 <!-- /sync-versions:test-counts -->
 
 | Area | Current state |
@@ -186,9 +188,11 @@ Current CI snapshot: **2842 backend + 259 frontend tests**.
 
 For the full per-release breakdown see [`CHANGELOG.md`](CHANGELOG.md). Highlights from the last few releases:
 
+- **`v2026.5.35`** — F1 unified knowledge graph. `MemoryStore.knowledge_store/query/search/about` route through the entity-relation `KnowledgeGraph` when `settings.memory.kg.unified` is true (default). The flat `knowledge` table is migrated on boot and renamed to `knowledge__deprecated`; HLC LWW sync is extended to the `entities` and `relations` tables so KG-native writes replicate across federated brains. `Learner.extract_knowledge` delegates to `KnowledgeGraph.extract_and_store` — one extraction surface, one prompt, entity types preserved.
+- **`v2026.5.34`** — Memory v2 truth. Ebbinghaus decay (D11) runs an hourly background sweep that recomputes `decay_factor` per episode with an SM-2 access boost and marks rows below the forget threshold as forgotten; HLC last-write-wins federated sync (D12) lets multiple brains reconcile via a deterministic per-row id without coordination; real session compaction (F2) promotes summarisable turns into episode rows with structured `participants` / `time_range` / `key_entities` / `source_turn_ids` metadata, triggered end-of-session or every `turns_threshold` turns. `feral memory` and `feral sync` subcommands surface all of it.
+- **`v2026.5.33`** — Async-native `MemoryStore` (Option C) on `aiosqlite` with a pre-warmed connection pool in WAL mode. Pure refactor, zero behaviour change. Per-call p50 search latency drops 42% and aggregate wall-clock under K=32 concurrent searches drops 53% versus the legacy `sqlite3.connect`-per-call path. Reference numbers and acceptance benchmark in `feral-core/tests/perf/test_memory_latency.py`.
+- **`v2026.5.32`** — Audit-r12 systemic remediation: phone-bearer allowlist coherence (D1), HUP wire-version coherence with a static-AST guard (D3), real `settings.memory.backend` selector with sqlite-vec / Chroma / Qdrant adapters (D4), MCP HTTP transport implementation against spec rev `2025-06-18` (D6), canonical `MCPServerConfig` + `MCPClientManager.connect_server` API (D7), Bedrock Converse `chat()` and streaming path (D8), and Whoop / Oura OAuth registration with a static-AST coherence guard (D9).
 - **`v2026.5.23`** — fixes a P0 in `feral setup` where the InquirerPy arrow-key picker silently fell back to a typed numeric prompt because the wizard ran inside `asyncio.run()`. Adds the raccoon ASCII logo banner, "── Step N of M ──" indicators, and the space-to-mark + enter-to-confirm picker pattern.
-- **`v2026.5.22`** — first interactive CLI overhaul: arrow-key provider/model picker, masked API key paste, raccoon brand chrome across `feral setup` / `install` / `key` / `access`, and a new "Network access" wizard step (localhost / LAN / Tailscale Funnel). Bundles the audit-r10 brain overhaul (PRs #105–#119).
-- **`v2026.5.20`** — agent runtime recovery: canonical execution + Desktop grants, Playwright/CDP browser runtime + tracing/HAR/downloads, provider-neutral ComputerUseDriver, CodingRun loop, sub-sessions REST + GoalChecker, MemoryRetriever + IntentGate, in-composer voice, uploads end-to-end, Google/Microsoft OAuth + manifests + MCP projection.
 
 ## Architecture in 60 Seconds
 
