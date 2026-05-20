@@ -216,10 +216,23 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("session.reset")
     async def session_reset(session_id: str, params: dict, session: GatewaySession):
+        # F2 — end-of-session trigger. Compact whatever history we
+        # have before throwing it away; that preserves the session as
+        # a real episode row instead of letting it vanish.
+        if state.orchestrator and state.memory:
+            history = state.orchestrator.conversation_history.get(session_id, [])
+            if history:
+                try:
+                    await state.memory.compact_session(
+                        session_id, history, llm=state.orchestrator.llm,
+                    )
+                except Exception:
+                    logger.exception("session.reset: end-of-session compaction failed")
         if state.memory:
             state.memory.working_clear(session_id)
         if state.orchestrator:
             state.orchestrator.conversation_history.pop(session_id, None)
+            state.orchestrator._turns_since_compaction.pop(session_id, None)
         return {"status": "reset"}
 
     @registry.method("session.compact")

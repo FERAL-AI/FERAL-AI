@@ -1307,6 +1307,11 @@ class MemoryStore:
             "detail": row["detail"],
             "emotions": json.loads(row["emotions"]) if isinstance(row["emotions"], str) else row["emotions"],
             "location": row["location"],
+            "participants": (
+                json.loads(row["participants"])
+                if "participants" in keys and isinstance(row["participants"], str)
+                else (row["participants"] if "participants" in keys else [])
+            ),
             "importance": row["importance"],
             "created_at": row["created_at"],
             "decay_factor": row["decay_factor"],

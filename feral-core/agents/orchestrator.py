@@ -161,6 +161,14 @@ class Orchestrator:
         # surface deny-lists fire on the actual invocation surface
         # instead of the historical "websocket" default.
         self._session_surfaces: dict[str, str] = {}
+        # F2 — turns-since-last-compaction counter per session.
+        # ``_maybe_auto_compact`` increments after every full turn and
+        # fires ``memory.compact_session`` once it crosses
+        # ``settings.memory.compaction.turns_threshold`` (default 20),
+        # at which point the counter resets. ``_compaction_inflight``
+        # gates against overlapping compactions on the same session.
+        self._turns_since_compaction: dict[str, int] = {}
+        self._compaction_inflight: dict[str, bool] = {}
         # Audit-r11 — Bug 1 (double bubble on iOS): when the phone
         # ``/v1/node chat_request`` handler is about to send its own
         # synchronous ``chat_response`` we set
@@ -441,6 +449,69 @@ class Orchestrator:
 
     def _compact_context(self, history: list[dict]) -> list[dict]:
         return self.context_manager.compact(history)
+
+    def _maybe_auto_compact(self, session_id: str) -> None:
+        """F2 — increment the per-session turn counter and schedule a
+        real ``compact_session`` once it crosses the configured
+        ``turns_threshold``.
+
+        Called from the post-turn save sites in ``handle_command``
+        and ``_handle_command_stream_impl``. Runs in fire-and-forget
+        mode so the user-visible turn isn't blocked on compaction.
+        Idempotent against overlapping invocations via
+        ``_compaction_inflight``.
+        """
+        try:
+            from config.loader import load_settings
+            settings = load_settings()
+            compaction_cfg = (
+                (settings.get("memory") or {}).get("compaction") or {}
+            )
+        except Exception:
+            return
+        if not compaction_cfg.get("enabled", True):
+            return
+        threshold = int(compaction_cfg.get("turns_threshold", 20))
+        if threshold <= 0:
+            return
+
+        self._turns_since_compaction[session_id] = (
+            self._turns_since_compaction.get(session_id, 0) + 1
+        )
+        if self._turns_since_compaction[session_id] < threshold:
+            return
+        if self._compaction_inflight.get(session_id):
+            return
+        if not self.memory:
+            return
+
+        async def _run() -> None:
+            self._compaction_inflight[session_id] = True
+            try:
+                history = list(self.conversation_history.get(session_id, []))
+                if not history:
+                    return
+                result = await self.memory.compact_session(
+                    session_id, history, llm=self.llm,
+                )
+                if result.get("compacted") and result.get("history"):
+                    self.conversation_history[session_id] = result["history"]
+                self._turns_since_compaction[session_id] = 0
+                logger.info(
+                    "F2 auto-compact: session=%s episode_id=%s entities=%s",
+                    session_id,
+                    result.get("episode_id"),
+                    result.get("key_entities", []),
+                )
+            except Exception as exc:
+                logger.warning("F2 auto-compact failed: %s", exc)
+            finally:
+                self._compaction_inflight[session_id] = False
+
+        try:
+            asyncio.ensure_future(_run())
+        except RuntimeError:
+            pass
 
     def _is_refusal_text(self, text: str) -> bool:
         return self.refusal_handler.is_refusal(text)
@@ -1278,6 +1349,10 @@ class Orchestrator:
         # Phase 3 (audit-r10) — persist primary thread snapshot so the
         # operator's last 50 turns survive brain restart.
         self._maybe_snapshot_primary(session_id)
+        # F2 — fire compaction when this session crosses
+        # ``turns_threshold`` since its last compaction (async, no
+        # block).
+        self._maybe_auto_compact(session_id)
 
     async def handle_command_stream(self, session_id: str, text: str, context: Optional[dict] = None):
         """Streaming variant of handle_command with a per-session lock."""
@@ -1570,6 +1645,7 @@ class Orchestrator:
         # Phase 3 (audit-r10) — stream path snapshot, symmetric with
         # the non-stream `_handle_command_impl` epilogue.
         self._maybe_snapshot_primary(session_id)
+        self._maybe_auto_compact(session_id)
 
     # ─────────────────────────────────────────────
     # Proactive Agent Loop

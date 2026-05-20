@@ -8,6 +8,7 @@ the only entry point is :func:`build_context_for_llm_async`. The
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 
@@ -140,9 +141,35 @@ async def compact_session(
     llm=None,
     preserve_last_n: int = 3,
     max_summary_chars: int = 16000,
+    *,
+    promote_to_episode: bool = True,
 ) -> dict:
-    """Multi-stage session compaction. Summarizes older messages while
-    preserving the last N turns and identity context."""
+    """Multi-stage session compaction.
+
+    v2026.5.34 (PR 2 F2): when ``promote_to_episode`` is true (the
+    default), the compacted summary lands as a *real* episode row
+    with structured metadata — participants, time_range,
+    summary_chars, key_entities, source_turn_ids — alongside the
+    in-memory transcript edit. Pre-F2 compaction returned an edited
+    history but never persisted anything to the episodes table, so
+    the "compacted" memory was lost the moment the session ended.
+
+    The metadata derivation is heuristic on the message list:
+
+    * participants  — unique non-empty ``role`` values from the
+      summarizable turns.
+    * time_range    — (first_ts, last_ts) when ``meta.created_at`` is
+      present on the messages; else (0, 0) and the caller can
+      backfill.
+    * key_entities  — top entity names yielded by
+      :meth:`KnowledgeGraph.extract_and_store` (when the KG is
+      attached and the LLM is available); empty list otherwise.
+    * source_turn_ids — message ids if the history carries them,
+      else integer indices.
+
+    Returns the same shape as before plus a new ``episode_id`` field
+    when an episode was written.
+    """
     if len(history) <= preserve_last_n + 2:
         return {"compacted": False, "reason": "too_short"}
 
@@ -159,15 +186,78 @@ async def compact_session(
         *preserved,
     ]
 
+    key_entities: list[str] = []
     if store.kg:
         try:
             conversation_text = " ".join(
                 m.get("content", "") for m in summarizable if isinstance(m.get("content"), str)
             )
             if conversation_text:
-                await store.kg.extract_and_store(conversation_text[:3000], llm)
+                extracted = await store.kg.extract_and_store(conversation_text[:3000], llm)
+                # extract_and_store returns a list of {entity, ...} dicts;
+                # surface the names so callers can inspect what landed.
+                for item in extracted or []:
+                    if isinstance(item, dict):
+                        name = item.get("name") or item.get("entity") or item.get("subject")
+                        if name and name not in key_entities:
+                            key_entities.append(str(name))
         except Exception as e:
             logger.debug("KG extraction during compaction failed: %s", e)
+
+    episode_id: str | None = None
+    if promote_to_episode and summarizable:
+        participants = sorted({
+            str(m.get("role")) for m in summarizable
+            if m.get("role")
+        })
+        timestamps = [
+            float(m["meta"]["created_at"]) for m in summarizable
+            if isinstance(m.get("meta"), dict) and isinstance(m["meta"].get("created_at"), (int, float))
+        ]
+        time_range = (min(timestamps), max(timestamps)) if timestamps else (0.0, 0.0)
+        source_turn_ids = [
+            str(m.get("id") or i) for i, m in enumerate(summarizable)
+        ]
+
+        try:
+            episode = await store.episode_save(
+                session_id=session_id,
+                event_type="session_compaction",
+                summary=summary[:500],
+                detail=summary,
+                emotions=[],
+                location="",
+                participants=participants,
+                importance=0.6,
+            )
+            episode_id = episode.get("id")
+
+            # Backfill the structured metadata into the episode row.
+            # episode_save doesn't accept these fields natively (they
+            # live on the row as JSON-on-detail or columns we don't
+            # have), so we stash them on the detail body alongside the
+            # summary in a delimited block.
+            extra = {
+                "time_range": list(time_range),
+                "key_entities": key_entities,
+                "source_turn_ids": source_turn_ids,
+            }
+            new_detail = (
+                f"{summary}\n\n"
+                f"<!-- compaction-metadata\n{json.dumps(extra, ensure_ascii=False)}\n-->"
+            )
+            conn = await store._conn()
+            try:
+                await conn.execute(
+                    "UPDATE episodes SET detail = ? WHERE id = ?",
+                    (new_detail, episode_id),
+                )
+                await conn.commit()
+            finally:
+                await store._release(conn)
+        except Exception as exc:
+            logger.warning("compact_session: episode promotion failed: %s", exc)
+            episode_id = None
 
     return {
         "compacted": True,
@@ -175,6 +265,8 @@ async def compact_session(
         "new_length": len(compacted_history),
         "summary_chars": len(summary),
         "history": compacted_history,
+        "episode_id": episode_id,
+        "key_entities": key_entities,
     }
 
 

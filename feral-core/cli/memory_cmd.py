@@ -142,14 +142,21 @@ def cmd_memory(action: str, backend_id: str | None) -> None:
             from urllib.parse import quote
             path += f"?session_id={quote(backend_id)}"
         result = _http_request("POST", path)
-        if not result.get("ok"):
+        if "error" in result and not result.get("results"):
             print(f"  Compaction failed: {result.get('error') or result.get('detail') or result}")
             sys.exit(1)
-        print(
-            f"  Compaction complete: sessions={result.get('sessions_compacted', 0)} "
-            f"episodes_added={result.get('episodes_added', 0)} "
-            f"turns_promoted={result.get('turns_promoted', 0)}"
-        )
+        results = result.get("results", []) or []
+        compacted = [r for r in results if r.get("compacted")]
+        print(f"  Compaction complete: sessions_scanned={len(results)} sessions_compacted={len(compacted)}")
+        for r in compacted:
+            sid = r.get("session_id", "?")
+            episode_id = r.get("episode_id") or "(none)"
+            ents = r.get("key_entities", []) or []
+            print(
+                f"    - session={sid} episode={episode_id} "
+                f"turns={r.get('original_length', 0)}→{r.get('new_length', 0)} "
+                f"entities={','.join(ents[:5]) or '-'}"
+            )
         return
 
     if action == "status":

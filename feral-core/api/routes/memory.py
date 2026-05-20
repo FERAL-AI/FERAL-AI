@@ -114,6 +114,43 @@ async def memory_decay_now():
     return await decay.run_once()
 
 
+@router.post("/api/memory/compact")
+async def memory_compact(session_id: str | None = None):
+    """F2 — manually trigger session compaction.
+
+    Without ``session_id`` this compacts every active orchestrator
+    session. With a session_id it compacts that one session only.
+
+    Compaction promotes summarisable turns into a real episode row
+    (see ``memory.context_builder.compact_session``). Returns a list
+    of per-session results so the dashboard / CLI can show what
+    landed (``episode_id``, ``key_entities``, sizes).
+    """
+    if not state.memory or not state.orchestrator:
+        raise HTTPException(status_code=503, detail="memory or orchestrator not initialized")
+
+    sessions: list[str]
+    if session_id:
+        sessions = [session_id]
+    else:
+        sessions = list(state.orchestrator.conversation_history.keys())
+
+    out: list[dict] = []
+    for sid in sessions:
+        history = state.orchestrator.conversation_history.get(sid, [])
+        if not history:
+            out.append({"session_id": sid, "compacted": False, "reason": "empty"})
+            continue
+        result = await state.memory.compact_session(
+            sid, history, llm=state.orchestrator.llm,
+        )
+        if result.get("compacted") and result.get("history"):
+            state.orchestrator.conversation_history[sid] = result["history"]
+        result["session_id"] = sid
+        out.append(result)
+    return {"results": out, "count": len(out)}
+
+
 @router.get("/api/memory/context")
 async def get_memory_context(limit: int = 20):
     """Return the recent `## Memory` blocks the Brain assembled per LLM turn.
