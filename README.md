@@ -21,7 +21,7 @@
 
 <p align="center">
   <!-- sync-versions:badge -->
-  <img src="https://img.shields.io/badge/version-2026.5.35-06b6d4?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2026.5.36-06b6d4?style=flat-square" alt="Version" />
   <!-- /sync-versions:badge -->
   <a href="https://github.com/FERAL-AI/FERAL-AI/stargazers"><img src="https://img.shields.io/github/stars/FERAL-AI/FERAL-AI?style=flat-square&color=06b6d4" alt="Stars" /></a>
   <a href="https://github.com/FERAL-AI/FERAL-AI/commits/main"><img src="https://img.shields.io/github/last-commit/FERAL-AI/FERAL-AI?style=flat-square&color=06b6d4" alt="Last Commit" /></a>
@@ -188,6 +188,7 @@ Current CI snapshot: **3722 backend + 312 frontend tests**.
 
 For the full per-release breakdown see [`CHANGELOG.md`](CHANGELOG.md). Highlights from the last few releases:
 
+- **`v2026.5.36`** — `feral doctor` honesty + first-run pairing dependency closure. A clean install used to produce ~5 yellow warnings and 1 red failure from `feral doctor` for things that are *expected* to be absent on a fresh machine (Chrome CDP not running, Local STT/TTS not installed, no voice key, no workspace grants, PyObjC ApplicationServices missing). v2026.5.36 introduces a fourth `_info` severity tier for "not configured yet" / "opt-in" probes, demotes the six false-positive warnings into it, and closes two real packaging gaps: PyObjC ApplicationServices + Quartz are now base dependencies on Darwin (so TCC probes return real `granted`/`denied`), and `qrcode[pil]` moves from the `[discovery]`/`[all]` extras into base deps so the first-run "pair a device" path doesn't 500 on bare installs.
 - **`v2026.5.35`** — F1 unified knowledge graph. `MemoryStore.knowledge_store/query/search/about` route through the entity-relation `KnowledgeGraph` when `settings.memory.kg.unified` is true (default). The flat `knowledge` table is migrated on boot and renamed to `knowledge__deprecated`; HLC LWW sync is extended to the `entities` and `relations` tables so KG-native writes replicate across federated brains. `Learner.extract_knowledge` delegates to `KnowledgeGraph.extract_and_store` — one extraction surface, one prompt, entity types preserved.
 - **`v2026.5.34`** — Memory v2 truth. Ebbinghaus decay (D11) runs an hourly background sweep that recomputes `decay_factor` per episode with an SM-2 access boost and marks rows below the forget threshold as forgotten; HLC last-write-wins federated sync (D12) lets multiple brains reconcile via a deterministic per-row id without coordination; real session compaction (F2) promotes summarisable turns into episode rows with structured `participants` / `time_range` / `key_entities` / `source_turn_ids` metadata, triggered end-of-session or every `turns_threshold` turns. `feral memory` and `feral sync` subcommands surface all of it.
 - **`v2026.5.33`** — Async-native `MemoryStore` (Option C) on `aiosqlite` with a pre-warmed connection pool in WAL mode. Pure refactor, zero behaviour change. Per-call p50 search latency drops 42% and aggregate wall-clock under K=32 concurrent searches drops 53% versus the legacy `sqlite3.connect`-per-call path. Reference numbers and acceptance benchmark in `feral-core/tests/perf/test_memory_latency.py`.

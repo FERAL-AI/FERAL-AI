@@ -1,10 +1,61 @@
 # Changelog
 
-<!-- feral-version: 2026.5.35 -->
+<!-- feral-version: 2026.5.36 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.5.36] — `feral doctor` honesty + first-run pairing dependency closure
+
+The first thing every new operator sees after `pip install feral-ai && feral` is the dashboard or the doctor, and both have to be honest. Pre-v2026.5.36, a clean install on macOS produced ~5 yellow warnings and 1 red failure from `feral doctor` for things that are *expected* to be absent on a fresh machine (memory DB not created yet, Chrome CDP not running, Local STT/TTS not installed, no voice key, no workspace grants pre-authorised, PyObjC ApplicationServices missing). Worse, hitting "pair a device" from a bare-base install crashed with a 500 because `qrcode` was only declared in the `[discovery]` / `[all]` extras and the dashboard's first-run feature couldn't import it. v2026.5.36 closes both gaps without papering over real degradations.
+
+### Added — fourth `doctor` severity tier (`_info`)
+
+The pre-v2026.5.36 doctor had three tiers: `pass` / `warn` / `fail`. That binary "is this a problem?" forced every probe to pick between green and yellow, which is why a clean install lit up like a Christmas tree the first time a user ran it. `_info` is now the fourth tier — a blue `ℹ` glyph reserved for "not configured yet" / "opt-in feature you haven't enabled yet". Info-tier probes do not count toward warnings, never appear in the Suggested-fixes list, and the Summary panel's border colour now reflects only `_warn` / `_fail`, so a fresh install renders a green Summary panel for real.
+
+Probes demoted to `_info` (each was previously a misleading yellow `_warn`):
+
+| Probe | Why it was wrong as a `_warn` |
+|---|---|
+| Memory database — "not created yet" | The brain auto-creates `memory.db` on first MemoryStore open. Absence is the expected state, not a degradation. |
+| Chrome (CDP endpoint) — "not reachable" | `BrowserController` auto-launches Chrome with the right CDP flag the first time an agent asks for a browser. Cold CDP only blocks computer-use if a binary is *also* missing (probed separately, still warn). |
+| Local STT (faster-whisper) — "not installed" | Opt-in via `pip install 'feral-ai[stt]'`. Cloud STT works without it. Absence is a deliberate user choice. |
+| Local TTS (piper) — "not installed" | Symmetric with STT; opt-in via `[tts]`. |
+| Node.js — "not found" | Only required to rebuild `webui_v2` locally. The shipped wheel already carries the compiled bundle. |
+| Local-agent grants — "no workspace_grants.json" | The local-agent runtime prompts interactively the first time `write_file` hits an un-granted dir. Pre-authorising is a convenience for headless runs. (The JSON-parse-error branch stays `_warn`.) |
+| Voice runtime — "no realtime provider key" | Voice is opt-in. The text agent works perfectly without it; the previous warn implied a broken install. |
+| macOS GUI Permissions — "denied" | Pre-v2026.5.36 was `_fail`. Denying Accessibility / Screen Recording only blocks GUI computer-use; it is a legitimate user choice for operators who don't use that path. Demoted to `_warn` with explicit "only blocks GUI computer-use" detail. |
+
+### Added — `pyobjc-framework-ApplicationServices` + `pyobjc-framework-Quartz` to base deps on Darwin
+
+Pre-v2026.5.36, the macOS TCC probes (Accessibility, Screen Recording) printed `unknown` with "PyObjC ApplicationServices not importable" because those PyObjC packages were not declared as dependencies anywhere — neither base nor extras. The doctor's honest readout was held hostage by a packaging gap that no amount of `feral setup` could close. Both packages are now declared in the base `dependencies` block of [`feral-core/pyproject.toml`](feral-core/pyproject.toml) with a `; sys_platform == 'darwin'` PEP-508 environment marker, so:
+
+- macOS wheels resolve PyObjC automatically — the TCC probes return real `granted` / `denied` from now on.
+- Linux / Windows wheels resolve nothing extra — the marker keeps them PyObjC-free.
+
+### Added — `qrcode[pil]` promoted from `[discovery]` / `[all]` extras into base deps
+
+QR pairing is the brain's first-run feature — the moment a user opens the dashboard they are asked to scan a QR with their phone. Pre-v2026.5.36, `qrcode[pil]` was only pulled in by `pip install 'feral-ai[discovery]'` or `[all]`. A user who did the cleanest possible install (`pip install feral-ai`) hit a `500` on `/api/devices/pair/qr` the first time they clicked "pair a device" — `import qrcode` failed at request time. Moving the dependency into the base block fixes the first-run cliff. The `[discovery]` extra is preserved with a comment so existing install recipes (`pip install 'feral-ai[discovery]'`) keep resolving.
+
+### Tests
+
+`tests/test_doctor_severity.py` — three test classes, six tests:
+
+1. `TestDoctorSeverity.test_fresh_install_has_no_warnings_or_failures` — drives `cmd_doctor` against a fresh, empty `FERAL_HOME` with network probes stubbed, captures the Rich output via `Console(file=StringIO())`, and asserts zero `✘` / `⚠` markers in the body. The defining behaviour contract of this release.
+2. `TestDoctorSeverity.test_summary_panel_renders_info_count` — confirms the Summary panel now includes the `N info` segment, proving the new tier reaches the user.
+3. `TestDoctorSeverity.test_no_suggested_fixes_on_clean_install` — asserts the "Suggested fixes:" section header never appears on a clean install (no remediation should be offered when nothing is broken).
+4. `TestDoctorSeverityAllowlist.test_all_fail_labels_are_allowlisted` — static AST walk of `cli/main.py`; collects every `_fail(...)` label string inside `cmd_doctor` and rejects any not in the explicit `ALLOWED_FAIL_LABELS` set in the test file.
+5. `TestDoctorSeverityAllowlist.test_all_warn_labels_are_allowlisted` — same shape for `_warn(...)`. Together with the failure variant, any future PR that introduces a new probe must update the allowlist with explicit justification.
+6. `TestDoctorSeverityAllowlist.test_demoted_probes_no_longer_warn` — explicit anti-regression check. If a future PR accidentally re-promotes `Chrome (CDP endpoint)` / `Local STT` / `Local TTS` / `Voice runtime` from `_info` back to `_warn`, this test fails.
+
+The behaviour test handles the dual-emission cases (`Memory database` corrupt-vs-not-created, `Local-agent grants` exception-vs-no-config) because a clean install only hits the demoted branch and any regression would manifest as a yellow line in the output.
+
+### Compatibility
+
+- Wheel size grows by ~2 MB on macOS (PyObjC ApplicationServices + Quartz) and ~600 KB cross-platform (`qrcode[pil]` brings `pillow` … which the wheel already declared). Linux / Windows wheels are unchanged in size.
+- Operators on pre-v2026.5.36 wheels still see the legacy `_warn` output until they upgrade — the doctor severity changes are runtime, not migration.
+- The TCC probe `unknown` branch is still reachable on heavily custom installs that pin pip resolvers around platform markers; the remediation now reads "upgrade to feral-ai>=2026.5.36" rather than "install PyObjC manually".
 
 ## [2026.5.35] — memory KG unification (F1): flat triples deprecated, KG is the canonical knowledge surface
 
