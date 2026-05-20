@@ -221,6 +221,12 @@ class MemoryStore:
         try:
             from memory.knowledge_graph import KnowledgeGraph
             self._kg = KnowledgeGraph(self.db_path, self._embedder)
+            # v2026.5.35 (F1) — back-reference so the KG can log every
+            # write to the sync WAL with HLC. Without this, KG-native
+            # writes (``add_entity``/``add_relation``) wouldn't
+            # replicate across federated brains; with it, the unified
+            # KG inherits the D12 LWW semantics from PR 2.
+            self._kg._store = self
             kg_stats = self._kg.stats()
             logger.info(
                 "Knowledge graph: %d entities, %d relations",
@@ -686,6 +692,11 @@ class MemoryStore:
                 )
             """)
             self._add_column_if_missing(conn, "execution_log", "hlc_string", "TEXT DEFAULT ''")
+
+            # F1 (v2026.5.35) — track whether each flat knowledge row
+            # has been mirrored into the KG, so the bulk migration on
+            # next boot is idempotent and incremental.
+            self._add_column_if_missing(conn, "knowledge", "kg_migrated_at", "REAL DEFAULT 0")
 
             # D11 indexes:
             # (forgotten_at, decay_factor) — sweep query "find episodes
@@ -1349,8 +1360,45 @@ class MemoryStore:
         return selected
 
     # ─────────────────────────────────────────────
-    # Tier 3: Semantic Memory (Knowledge Graph + Legacy Triples)
+    # Tier 3: Semantic Memory — Unified Knowledge Graph (F1, v2026.5.35)
+    #
+    # The flat triple API (``knowledge_store/query/search/about``) is
+    # preserved as-is at the caller level. When ``settings.memory.kg
+    # .unified`` is true (default) the implementations route through
+    # the entity-relation KG instead of the flat ``knowledge`` table:
+    #
+    #   * ``knowledge_store(s, p, o)`` becomes
+    #     ``kg.add_relation(s, p, o)`` plus a "scalar-predicate" cleanup
+    #     that deletes any pre-existing ``(s, p, *)`` relation so the
+    #     flat-table "one row per (subject, predicate)" semantic is
+    #     preserved. (The KG natively allows multi-target relations;
+    #     the bridge layer enforces upsert.)
+    #   * ``knowledge_query/search/about`` JOIN ``entities`` ×
+    #     ``relations`` and return triple-shaped dicts so existing
+    #     callers don't change.
+    #
+    # When ``unified`` is false the implementations stay on the flat
+    # table (legacy path, kept for chaos/recovery and the deprecation
+    # ramp).
     # ─────────────────────────────────────────────
+
+    def _kg_unified_enabled(self) -> bool:
+        """Cheap, cached lookup of the F1 feature flag.
+
+        Reads ``settings.memory.kg.unified`` once per call; the loader
+        is itself cached so this stays sub-microsecond. Honours an
+        explicit ``False`` to disable, defaults to ``True`` for new
+        installs.
+        """
+        if not self._kg:
+            return False
+        try:
+            from config.loader import load_settings
+            settings = load_settings()
+            kg_cfg = (settings.get("memory") or {}).get("kg") or {}
+            return bool(kg_cfg.get("unified", True))
+        except Exception:
+            return False
 
     async def knowledge_store(
         self,
@@ -1360,6 +1408,87 @@ class MemoryStore:
         confidence: float = 1.0,
         source: str = "user",
     ) -> dict:
+        if self._kg_unified_enabled():
+            return await self._knowledge_store_unified(
+                subject, predicate, obj, confidence, source,
+            )
+        return await self._knowledge_store_flat(
+            subject, predicate, obj, confidence, source,
+        )
+
+    async def _knowledge_store_unified(
+        self, subject: str, predicate: str, obj: str,
+        confidence: float, source: str,
+    ) -> dict:
+        """F1 KG-routed write with *scalar-predicate* semantics.
+
+        Flat triples upsert on ``(subject, predicate)``: one object
+        per (s, p) pair, latest write wins. The native KG stores
+        ``(source, relation_type, target)`` and allows multiple
+        targets per source (e.g. ``user works_at FERAL`` AND
+        ``user works_at Stripe`` both true). The bridge needs the
+        former semantic but the underlying table is the latter.
+
+        We solve this by computing a *scalar* relation id from
+        ``(source_id, relation_type)`` only — independent of the
+        target. Two writes of ``(user, color, *)`` get the same row
+        id; ``INSERT OR REPLACE`` makes the second write replace
+        the first locally, and two brains writing the same scalar
+        predicate at different HLC values converge under D12 LWW
+        because they agree on the row id without coordinating.
+
+        KG-native writes via ``kg.add_relation`` keep their full
+        ``(source, relation, target)`` id and multi-target
+        semantic — only the ``knowledge_store`` bridge surface is
+        scalar.
+        """
+        from memory.knowledge_graph import _stable_kg_id
+        # Use add_entity to create/merge entities (it handles
+        # embedding-based dedup + KG-native HLC logging).
+        src = await self._kg.add_entity(subject, "thing")
+        tgt = await self._kg.add_entity(obj, "thing")
+
+        rid = _stable_kg_id("scalar", src["id"], predicate)
+        now = time.time()
+
+        hlc = self._log_sync("relations", "insert", rid, {
+            "id": rid,
+            "source_id": src["id"], "relation_type": predicate,
+            "target_id": tgt["id"], "confidence": confidence,
+            "evidence_text": source[:1000], "created_at": now,
+        })
+
+        conn = await self._conn()
+        try:
+            # INSERT OR REPLACE collapses the two-write upsert into
+            # one row; LWW arrival ordering on the wire is handled
+            # by ``_apply_to_memory`` (it compares on hlc_string and
+            # short-circuits stale arrivals).
+            await conn.execute(
+                """INSERT OR REPLACE INTO relations
+                   (id, source_id, relation_type, target_id, confidence,
+                    evidence_text, source_origin, hlc_string,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 'bridge', ?, ?, ?)""",
+                (rid, src["id"], predicate, tgt["id"], confidence,
+                 source[:1000], hlc, now, now),
+            )
+            await conn.commit()
+        finally:
+            await self._release(conn)
+
+        return {
+            "id": rid,
+            "subject": subject, "predicate": predicate, "object": obj,
+        }
+
+    async def _knowledge_store_flat(
+        self, subject: str, predicate: str, obj: str,
+        confidence: float, source: str,
+    ) -> dict:
+        """Legacy flat-triple write path. Kept for the
+        ``memory.kg.unified=false`` chaos/recovery setting and for
+        brains that haven't run the F1 migration yet."""
         conn = await self._conn()
         now = time.time()
         try:
@@ -1371,9 +1500,6 @@ class MemoryStore:
 
             if existing:
                 kid = existing[0]
-                # Sync log returns the HLC for this update — feed it
-                # into the row so the receiving side's LWW gate has a
-                # comparator that reflects this exact write.
                 hlc = self._log_sync("knowledge", "insert", kid, {
                     "id": kid, "subject": subject, "predicate": predicate,
                     "object": obj, "confidence": confidence, "source": source,
@@ -1384,20 +1510,6 @@ class MemoryStore:
                     (obj, confidence, source, now, hlc, kid),
                 )
             else:
-                # v2026.5.34 (PR 2 D12): derive the id from
-                # (subject, predicate) deterministically so two
-                # brains writing the same logical fact assign the
-                # same id and converge to one row after sync. The
-                # legacy random-UUID path could not converge —
-                # different ids on each side meant both rows
-                # replicated and the receiving brain ended up with
-                # two rows for the same (subject, predicate). The
-                # hash is truncated to 12 hex chars to match the
-                # pre-existing id length; collisions are
-                # vanishingly rare at that width for the small
-                # subject/predicate value space and would manifest
-                # as one extra UNIQUE-style merge, which the
-                # ``(subject, predicate)`` dedup gate catches.
                 kid = _stable_knowledge_id(subject, predicate)
                 hlc = self._log_sync("knowledge", "insert", kid, {
                     "id": kid, "subject": subject, "predicate": predicate,
@@ -1416,6 +1528,47 @@ class MemoryStore:
         return {"id": kid, "subject": subject, "predicate": predicate, "object": obj}
 
     async def knowledge_query(self, subject: str = "", predicate: str = "", limit: int = 20) -> list[dict]:
+        if self._kg_unified_enabled():
+            return await self._knowledge_query_unified(subject, predicate, limit)
+        return await self._knowledge_query_flat(subject, predicate, limit)
+
+    async def _knowledge_query_unified(
+        self, subject: str, predicate: str, limit: int,
+    ) -> list[dict]:
+        conn = await self._conn()
+        try:
+            conditions, params = [], []
+            if subject:
+                conditions.append("e_src.name = ?")
+                params.append(subject)
+            if predicate:
+                conditions.append("r.relation_type = ?")
+                params.append(predicate)
+            where = "WHERE " + " AND ".join(conditions) if conditions else ""
+            async with conn.execute(
+                f"""SELECT r.id, e_src.name AS subject, r.relation_type AS predicate,
+                           e_tgt.name AS object, r.confidence, r.evidence_text AS source,
+                           r.updated_at
+                    FROM relations r
+                    JOIN entities e_src ON r.source_id = e_src.id
+                    JOIN entities e_tgt ON r.target_id = e_tgt.id
+                    {where}
+                    ORDER BY r.updated_at DESC LIMIT ?""",
+                (*params, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        finally:
+            await self._release(conn)
+        return [
+            {"id": r["id"], "subject": r["subject"], "predicate": r["predicate"],
+             "object": r["object"], "confidence": r["confidence"], "source": r["source"],
+             "updated_at": r["updated_at"]}
+            for r in rows
+        ]
+
+    async def _knowledge_query_flat(
+        self, subject: str, predicate: str, limit: int,
+    ) -> list[dict]:
         conn = await self._conn()
         try:
             conditions, params = [], []
@@ -1441,6 +1594,59 @@ class MemoryStore:
         ]
 
     async def knowledge_search(self, query: str, limit: int = 10) -> list[dict]:
+        if self._kg_unified_enabled():
+            return await self._knowledge_search_unified(query, limit)
+        return await self._knowledge_search_flat(query, limit)
+
+    async def _knowledge_search_unified(
+        self, query: str, limit: int,
+    ) -> list[dict]:
+        """KG-routed search: hit ``entities_fts`` for matching entity
+        names (subject OR object), then expand each match into the
+        relations it participates in."""
+        conn = await self._conn()
+        try:
+            try:
+                async with conn.execute(
+                    """SELECT e.id FROM entities_fts f
+                       JOIN entities e ON f.rowid = e.rowid
+                       WHERE entities_fts MATCH ? LIMIT ?""",
+                    (query, max(limit * 4, 20)),
+                ) as cur:
+                    entity_ids = [r["id"] for r in await cur.fetchall()]
+            except Exception:
+                # FTS unavailable: fall back to LIKE on names.
+                async with conn.execute(
+                    "SELECT id FROM entities WHERE name LIKE ? LIMIT ?",
+                    (f"%{query}%", max(limit * 4, 20)),
+                ) as cur:
+                    entity_ids = [r["id"] for r in await cur.fetchall()]
+            if not entity_ids:
+                return []
+            placeholders = ",".join("?" * len(entity_ids))
+            async with conn.execute(
+                f"""SELECT r.id, e_src.name AS subject, r.relation_type AS predicate,
+                           e_tgt.name AS object, r.confidence
+                    FROM relations r
+                    JOIN entities e_src ON r.source_id = e_src.id
+                    JOIN entities e_tgt ON r.target_id = e_tgt.id
+                    WHERE r.source_id IN ({placeholders})
+                       OR r.target_id IN ({placeholders})
+                    ORDER BY r.updated_at DESC LIMIT ?""",
+                (*entity_ids, *entity_ids, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        finally:
+            await self._release(conn)
+        return [
+            {"id": r["id"], "subject": r["subject"], "predicate": r["predicate"],
+             "object": r["object"], "confidence": r["confidence"]}
+            for r in rows
+        ]
+
+    async def _knowledge_search_flat(
+        self, query: str, limit: int,
+    ) -> list[dict]:
         conn = await self._conn()
         try:
             try:
@@ -1467,6 +1673,37 @@ class MemoryStore:
         ]
 
     async def knowledge_about(self, entity: str, limit: int = 20) -> list[dict]:
+        if self._kg_unified_enabled():
+            return await self._knowledge_about_unified(entity, limit)
+        return await self._knowledge_about_flat(entity, limit)
+
+    async def _knowledge_about_unified(
+        self, entity: str, limit: int,
+    ) -> list[dict]:
+        conn = await self._conn()
+        try:
+            async with conn.execute(
+                """SELECT r.id, e_src.name AS subject, r.relation_type AS predicate,
+                          e_tgt.name AS object, r.confidence
+                   FROM relations r
+                   JOIN entities e_src ON r.source_id = e_src.id
+                   JOIN entities e_tgt ON r.target_id = e_tgt.id
+                   WHERE e_src.name = ? OR e_tgt.name = ?
+                   ORDER BY r.confidence DESC, r.updated_at DESC LIMIT ?""",
+                (entity, entity, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        finally:
+            await self._release(conn)
+        return [
+            {"subject": r["subject"], "predicate": r["predicate"], "object": r["object"],
+             "confidence": r["confidence"]}
+            for r in rows
+        ]
+
+    async def _knowledge_about_flat(
+        self, entity: str, limit: int,
+    ) -> list[dict]:
         conn = await self._conn()
         try:
             async with conn.execute(
@@ -1482,6 +1719,123 @@ class MemoryStore:
              "confidence": r["confidence"]}
             for r in rows
         ]
+
+    async def migrate_knowledge_to_kg(
+        self, *, batch_size: int = 200, mark_as_deprecated: bool = True,
+    ) -> dict:
+        """F1 bulk migration: port unmigrated rows from the flat
+        ``knowledge`` table into the unified KG, then optionally
+        rename the flat table to ``knowledge__deprecated`` so the
+        legacy reader paths see no rows.
+
+        Idempotent. Re-runs only port rows whose ``kg_migrated_at``
+        is null/zero; rows already ported (from a prior boot) are
+        skipped. Returns ``{"ported": N, "skipped": M, "deprecated":
+        true/false}``.
+        """
+        if not self._kg:
+            return {"ported": 0, "skipped": 0, "deprecated": False, "reason": "no_kg"}
+
+        ported = 0
+        skipped = 0
+
+        # Check whether the flat table still exists. After
+        # ``mark_as_deprecated`` fires once the table is renamed to
+        # ``knowledge__deprecated`` and ``_init_db`` recreates an
+        # empty ``knowledge`` on next boot; a second migration call
+        # then finds the empty table, has zero unmigrated rows, and
+        # skips the rename (because ``knowledge__deprecated``
+        # already exists). Surface that state cleanly.
+        conn = await self._conn()
+        try:
+            async with conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge'"
+            ) as cur:
+                has_flat = (await cur.fetchone()) is not None
+        finally:
+            await self._release(conn)
+        if not has_flat:
+            return {"ported": 0, "skipped": 0, "deprecated": False, "reason": "no_flat_table"}
+
+        # Pull batches via the pooled connection, RELEASE it before
+        # calling ``kg.add_relation`` (KG opens its own connection;
+        # holding a pooled write transaction here would deadlock on
+        # SQLite's reserved lock under WAL contention), then reopen
+        # to mark the rows ported.
+        while True:
+            conn = await self._conn()
+            try:
+                async with conn.execute(
+                    """SELECT id, subject, predicate, object, confidence, source
+                       FROM knowledge
+                       WHERE COALESCE(kg_migrated_at, 0) = 0
+                       LIMIT ?""",
+                    (batch_size,),
+                ) as cur:
+                    batch = [dict(row) for row in await cur.fetchall()]
+            finally:
+                await self._release(conn)
+            if not batch:
+                break
+
+            now = time.time()
+            for row in batch:
+                try:
+                    await self._kg.add_relation(
+                        source_name=row["subject"],
+                        relation_type=row["predicate"],
+                        target_name=row["object"],
+                        confidence=row["confidence"] or 1.0,
+                        evidence=row["source"] or "migration",
+                    )
+                    ported += 1
+                except Exception as exc:
+                    logger.warning(
+                        "F1 migration: skipping row id=%s subject=%s: %s",
+                        row["id"], row["subject"], exc,
+                    )
+                    skipped += 1
+                    continue
+
+                # Mark the row as ported in its own short
+                # transaction so KG's connection isn't fighting our
+                # write lock.
+                mark_conn = await self._conn()
+                try:
+                    await mark_conn.execute(
+                        "UPDATE knowledge SET kg_migrated_at = ? WHERE id = ?",
+                        (now, row["id"]),
+                    )
+                    await mark_conn.commit()
+                finally:
+                    await self._release(mark_conn)
+
+        deprecated = False
+        if mark_as_deprecated:
+            conn = await self._conn()
+            try:
+                async with conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge__deprecated'"
+                ) as cur:
+                    already_deprecated = await cur.fetchone()
+                if not already_deprecated:
+                    async with conn.execute(
+                        "SELECT COUNT(*) FROM knowledge WHERE COALESCE(kg_migrated_at, 0) = 0"
+                    ) as cur:
+                        unmigrated = (await cur.fetchone())[0]
+                    if unmigrated == 0:
+                        await conn.execute(
+                            "ALTER TABLE knowledge RENAME TO knowledge__deprecated"
+                        )
+                        await conn.commit()
+                        deprecated = True
+                        logger.info(
+                            "F1: knowledge table renamed to knowledge__deprecated "
+                            "(ported=%d)", ported,
+                        )
+            finally:
+                await self._release(conn)
+        return {"ported": ported, "skipped": skipped, "deprecated": deprecated}
 
     # ─────────────────────────────────────────────
     # Tier 4: Execution Log
@@ -1690,7 +2044,14 @@ class MemoryStore:
                 notes_count = (await cur.fetchone())[0]
             async with conn.execute("SELECT COUNT(*) FROM episodes") as cur:
                 episodes_count = (await cur.fetchone())[0]
-            async with conn.execute("SELECT COUNT(*) FROM knowledge") as cur:
+            # F1 (v2026.5.35) — when the unified KG is on, the canonical
+            # knowledge surface is ``relations``. Count from there so
+            # ``stats["knowledge_triples"]`` keeps meaning "how many
+            # facts does the brain know" across the flat→KG cutover.
+            knowledge_table = "knowledge"
+            if self._kg_unified_enabled():
+                knowledge_table = "relations"
+            async with conn.execute(f"SELECT COUNT(*) FROM {knowledge_table}") as cur:
                 knowledge_count = (await cur.fetchone())[0]
             async with conn.execute("SELECT COUNT(*) FROM execution_log") as cur:
                 exec_count = (await cur.fetchone())[0]

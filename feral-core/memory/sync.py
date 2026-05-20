@@ -475,7 +475,15 @@ class SyncEngine:
     # issuing ``DROP TABLE`` via the sync channel by stuffing the
     # ``table`` field. Mirrored in both the apply path and the delete
     # path.
-    _SYNC_ALLOWED_TABLES = frozenset({"notes", "episodes", "conversations", "knowledge", "wiki_pages", "execution_log"})
+    _SYNC_ALLOWED_TABLES = frozenset({
+        "notes", "episodes", "conversations", "knowledge",
+        "wiki_pages", "execution_log",
+        # v2026.5.35 (F1) — the unified KG. ``add_entity`` and
+        # ``add_relation`` log here so KG-native writes replicate
+        # under the same HLC LWW gate that PR 2 D12 ships for the
+        # flat tables.
+        "entities", "relations",
+    })
 
     async def apply_remote_changes(self, changes: list[dict]) -> int:
         """Apply operations received from a peer. Returns count of applied ops.
@@ -628,6 +636,63 @@ class SyncEngine:
                         d.get("args", "{}"), d.get("result_status", "unknown"),
                         d.get("result_summary", ""), d.get("latency_ms", 0),
                         d.get("created_at", now), hlc,
+                    ),
+                )
+            elif op.table == "entities":
+                # v2026.5.35 (F1) — entities are content-addressed by
+                # ``_stable_kg_id(name, type)`` so two brains computing
+                # the same name+type get the same id; the LWW gate
+                # above already enforces strictly-newer arrivals.
+                # ``embedding`` is recomputed locally on first read,
+                # not shipped over the wire (saves ~3KB per entity).
+                await conn.execute(
+                    "INSERT OR REPLACE INTO entities "
+                    "(id, name, entity_type, embedding, metadata, "
+                    "mention_count, hlc_string, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        d.get("id", op.row_id), d.get("name", ""),
+                        d.get("entity_type", "thing"), None,
+                        d.get("metadata", "{}"), d.get("mention_count", 1),
+                        hlc, d.get("created_at", now), now,
+                    ),
+                )
+            elif op.table == "relations":
+                # Relations are content-addressed by
+                # ``_stable_kg_id(source_id, relation_type, target_id)``.
+                # A peer that ships a relation whose source/target
+                # entities haven't synced yet would FK-fail on
+                # INSERT — guard by upserting placeholder entities
+                # so the relation lands and the real entity rows
+                # converge on their own HLC pass.
+                src_id = d.get("source_id", "")
+                tgt_id = d.get("target_id", "")
+                for ent_id in (src_id, tgt_id):
+                    if not ent_id:
+                        continue
+                    # The placeholder ``name`` is the id itself — the
+                    # real entity row will arrive on its own sync op
+                    # and overwrite this stub under LWW (the stub's
+                    # hlc_string is empty, so anything newer wins).
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO entities "
+                        "(id, name, entity_type, metadata, mention_count, "
+                        "hlc_string, created_at, updated_at) "
+                        "VALUES (?, ?, 'thing', '{}', 0, '', ?, ?)",
+                        (ent_id, ent_id, now, now),
+                    )
+                await conn.execute(
+                    "INSERT OR REPLACE INTO relations "
+                    "(id, source_id, relation_type, target_id, confidence, "
+                    "evidence_text, source_origin, hlc_string, "
+                    "created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        d.get("id", op.row_id), src_id,
+                        d.get("relation_type", ""), tgt_id,
+                        d.get("confidence", 1.0),
+                        d.get("evidence_text", ""), "sync", hlc,
+                        d.get("created_at", now), now,
                     ),
                 )
             else:

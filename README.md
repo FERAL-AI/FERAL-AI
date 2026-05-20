@@ -21,7 +21,7 @@
 
 <p align="center">
   <!-- sync-versions:badge -->
-  <img src="https://img.shields.io/badge/version-2026.5.34-06b6d4?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2026.5.35-06b6d4?style=flat-square" alt="Version" />
   <!-- /sync-versions:badge -->
   <a href="https://github.com/FERAL-AI/FERAL-AI/stargazers"><img src="https://img.shields.io/github/stars/FERAL-AI/FERAL-AI?style=flat-square&color=06b6d4" alt="Stars" /></a>
   <a href="https://github.com/FERAL-AI/FERAL-AI/commits/main"><img src="https://img.shields.io/github/last-commit/FERAL-AI/FERAL-AI?style=flat-square&color=06b6d4" alt="Last Commit" /></a>

@@ -1,10 +1,86 @@
 # Changelog
 
-<!-- feral-version: 2026.5.34 -->
+<!-- feral-version: 2026.5.35 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.5.35] — memory KG unification (F1): flat triples deprecated, KG is the canonical knowledge surface
+
+PR 2's deferred slice lands. The flat ``knowledge`` table stops being the canonical knowledge store; the entity-relation ``KnowledgeGraph`` is now the unified read + write surface, with full D12 HLC LWW sync semantics extended to the ``entities`` and ``relations`` tables. The ``knowledge_store`` API surface is preserved at the caller layer — every existing consumer (orchestrator, Learner, wiki compiler, dashboard, REST routes) keeps the same signatures — but the implementation routes through the KG when ``settings.memory.kg.unified`` is true (default). The flat ``knowledge`` table is renamed to ``knowledge__deprecated`` after a successful bulk port, and the ``Learner.extract_knowledge`` LLM path now delegates exclusively to ``KnowledgeGraph.extract_and_store`` — one extraction surface, one prompt, entity-typing preserved.
+
+### The flat→KG bridge in three pieces
+
+**Scalar-predicate relation ids.** Flat triples upsert on ``(subject, predicate)`` — one object per pair, latest write wins. The KG natively stores ``(source, relation_type, target)`` and allows multiple targets per source (``user works_at FERAL`` AND ``user works_at Stripe`` both true). The bridge solves the mismatch by computing a *scalar* relation id from ``(source_id, predicate)`` only, independent of the target. Two writes of ``(user, color, *)`` get the same row id; ``INSERT OR REPLACE`` makes the second write replace the first locally, and two brains writing the same scalar predicate at different HLC values converge under D12 LWW because they agree on the row id without coordinating. KG-native writes via ``kg.add_relation`` keep their full ``(source, relation, target)`` id and multi-target semantic — only the ``knowledge_store`` bridge is scalar. Stable ids for both come from ``_stable_kg_id`` (sha256-truncated).
+
+**HLC + sync logging on the KG tables.** ``KnowledgeGraph.add_entity`` and ``add_relation`` now persist ``hlc_string`` in the same row insert. ``KnowledgeGraph._store`` is back-referenced from ``MemoryStore.__init__`` so the KG can log to the sync WAL without a circular import. ``SyncEngine._SYNC_ALLOWED_TABLES`` is extended with ``entities`` and ``relations``; ``_apply_to_memory`` learns to materialise both with the same LWW gate that gates ``episodes``/``notes``/``knowledge``/``execution_log``. Embeddings are NOT shipped over the wire — the receiving brain recomputes locally on first read (saves ~3KB per entity). Relations whose source/target entities haven't synced yet would FK-fail on insert; the materialiser inserts placeholder ``entities`` rows with empty ``hlc_string`` so the relation lands, and the real entity row's later arrival (with a non-empty HLC) wins LWW.
+
+**Idempotent bulk migration on boot.** ``MemoryStore.migrate_knowledge_to_kg`` (called from ``api/state.py:init``) reads pending flat rows in batches, calls ``kg.add_relation`` per row, marks the source row with ``kg_migrated_at`` so re-runs skip it, and renames the flat table to ``knowledge__deprecated`` once every row has been ported. The marker is checked separately from the rename so a partial migration on first boot finishes on a later boot without losing rows. The migration is a no-op when ``settings.memory.kg.unified`` is false (chaos/rollback path keeps the flat path live).
+
+### Changed — readers ported to the unified KG
+
+* ``MemoryStore.knowledge_store/query/search/about`` route through the KG when ``unified=true``. Each method dispatches on ``_kg_unified_enabled()``; the flat implementations stay reachable under ``_knowledge_*_flat`` for rollback. ``knowledge_search`` hits ``entities_fts`` for matching entity names and expands each match into the relations it participates in. ``knowledge_about`` returns every relation where the queried entity appears as source OR target.
+* ``MemoryStore.stats()`` counts ``knowledge_triples`` from ``relations`` when unified is on, so "how many facts does the brain know" keeps its meaning across the flat→KG cutover.
+* ``memory/wiki.py:wiki_compile`` reads from the KG JOIN view when ``unified=true`` — the wiki sees the same knowledge surface the rest of the brain does.
+* ``agents/learner.py:Learner.extract_knowledge`` no longer LLM-extracts JSON triples and calls ``knowledge_store`` per row. It delegates to ``KnowledgeGraph.extract_and_store(text, llm)``. One extraction surface, one prompt, entity types preserved.
+
+### Settings
+
+```jsonc
+{
+  "memory": {
+    "kg": { "unified": true }    // default true — flips the implementation
+  }
+}
+```
+
+When ``false`` every reader/writer short-circuits to the flat-table legacy path. Useful for chaos tests, rollback, and brains that haven't run the boot migration yet. The migration is a no-op when ``unified=false``.
+
+### Two-brain convergence
+
+The PR 2 D12 two-brain convergence guarantee now extends to KG-native data. Without F1, brain A writing ``(user, color, blue)`` and brain B writing ``(user, color, green)`` would converge under HLC LWW because the flat ``knowledge`` table used a deterministic id from ``(subject, predicate)``. With F1, the scalar-bridge ``knowledge_store`` writes preserve that convergence because the relation id is now derived from ``(source_id, predicate)`` — same input → same id on both brains → LWW resolves cleanly. KG-native multi-target writes via ``kg.add_relation`` continue to converge per-tuple. See ``tests/test_unified_kg_f1.py::test_two_brain_convergence_scalar_predicate`` for the end-to-end repro.
+
+### Tests
+
+12 new acceptance tests in ``tests/test_unified_kg_f1.py``:
+
+1. ``knowledge_store`` routes through the KG and lands entities + relations.
+2. Two writes to the same ``(subject, predicate)`` collapse to a single row (scalar upsert).
+3. ``knowledge_query`` returns triple-shaped dicts identical to the legacy API.
+4. ``knowledge_search`` uses ``entities_fts`` and returns connected relations.
+5. ``knowledge_about`` surfaces relations where the entity is source OR target.
+6. Bulk migration is idempotent across re-runs.
+7. Flat table renamed to ``knowledge__deprecated`` after full port.
+8. Idempotent skip on ``kg_migrated_at != 0`` rows.
+9. ``settings.memory.kg.unified=false`` short-circuits to the flat path.
+10. KG-native ``kg.add_relation`` preserves multi-target semantics.
+11. ``_stable_kg_id`` is deterministic across processes.
+12. Two-brain convergence on a scalar predicate (end-to-end with ``SyncEngine``).
+13. ``wiki_compile`` reads from the KG view and emits an entity page for the subject of the unified-path triple.
+
+Full local suite: 154 passes across memory + decay + sync + scheduler + compaction + learner + KG-unification + orchestrator + API regressions. Zero existing tests modified — the bridge preserves all flat-API contracts.
+
+### Manual repro
+
+```
+# v2026.5.34 — knowledge_store still wrote to flat ``knowledge``.
+sqlite3 ~/.feral/memory.db "SELECT COUNT(*) FROM knowledge;"      # → 47
+sqlite3 ~/.feral/memory.db "SELECT COUNT(*) FROM relations;"      # → 0 (KG was a side-channel)
+
+# v2026.5.35 — boot migration ports the flat rows; new writes go to KG.
+sqlite3 ~/.feral/memory.db ".tables" | grep knowledge             # → knowledge__deprecated
+sqlite3 ~/.feral/memory.db "SELECT COUNT(*) FROM relations;"      # → 47 (ported)
+
+curl -X POST http://127.0.0.1:9099/api/knowledge -d \
+    '{"subject":"user","predicate":"favorite_color","object":"blue"}'
+sqlite3 ~/.feral/memory.db \
+    "SELECT e.name, r.relation_type, e2.name FROM relations r
+     JOIN entities e  ON r.source_id = e.id
+     JOIN entities e2 ON r.target_id = e2.id
+     WHERE e.name='user' AND r.relation_type='favorite_color';"
+# → user|favorite_color|blue
+```
 
 ## [2026.5.34] — memory v2 truth: Ebbinghaus decay (D11) + HLC LWW federated sync (D12) + real session compaction (F2)
 

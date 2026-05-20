@@ -78,9 +78,17 @@ class Learner:
             await self.extract_knowledge(session_id)
 
     async def extract_knowledge(self, session_id: str):
-        """
-        Run an LLM call to extract user facts from recent working memory
-        and store them as semantic knowledge triples.
+        """Extract knowledge from recent working memory.
+
+        v2026.5.35 (PR 2.5, F1) — the Learner used to LLM-extract a
+        JSON triple list and call ``memory.knowledge_store`` per
+        row. That path duplicated the extraction prompt that
+        ``KnowledgeGraph.extract_and_store`` already maintains and
+        bypassed the KG's entity-typing + embedding-based entity
+        linking. Per the audit-r12 plan ("Learner.extract_knowledge
+        writes to KnowledgeGraph.extract_and_store only") we now
+        delegate to the KG. One extraction surface, one prompt,
+        entity types preserved, F1-LWW sync on every relation.
         """
         recent = self.memory.working_get(session_id, limit=10)
         if not recent:
@@ -96,51 +104,22 @@ class Learner:
         if len(conversation_text) < 20:
             return
 
-        prompt = EXTRACT_PROMPT + conversation_text.strip()
+        kg = getattr(self.memory, "kg", None)
+        if kg is None:
+            logger.debug(
+                "[%s] Learner skipped extraction: no KG attached", session_id[:8],
+            )
+            return
 
         try:
-            response = await self.llm.chat(
-                messages=[{"role": "user", "content": prompt}],
-                tools=None,
-                temperature=0.1,
-                max_tokens=512,
-            )
-            text_content, _ = self.llm.extract_response(response)
-            if not text_content:
-                return
-
-            cleaned = text_content.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned[7:-3].strip()
-            elif cleaned.startswith("```"):
-                cleaned = cleaned[3:-3].strip()
-
-            triples = json.loads(cleaned)
-            if not isinstance(triples, list):
-                return
-
-            extracted = 0
-            for triple in triples:
-                subject = triple.get("subject", "").strip()
-                predicate = triple.get("predicate", "").strip()
-                obj = triple.get("object", "").strip()
-                if subject and predicate and obj:
-                    await self.memory.knowledge_store(
-                        subject=subject,
-                        predicate=predicate,
-                        obj=obj,
-                        confidence=0.8,
-                        source=f"conversation_extraction:{session_id}",
-                    )
-                    extracted += 1
-
-            if extracted:
-                logger.info(f"[{session_id[:8]}] Learner extracted {extracted} knowledge triples")
-
-        except json.JSONDecodeError:
-            logger.debug("Knowledge extraction returned non-JSON, skipping")
+            stored = await kg.extract_and_store(conversation_text.strip(), self.llm)
+            if stored:
+                logger.info(
+                    "[%s] Learner extracted %d KG triples via extract_and_store",
+                    session_id[:8], len(stored),
+                )
         except Exception as e:
-            logger.warning(f"Knowledge extraction failed: {e}")
+            logger.warning("Knowledge extraction failed: %s", e)
 
     async def summarize_session(self, session_id: str):
         """

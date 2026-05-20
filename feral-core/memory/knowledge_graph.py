@@ -39,6 +39,24 @@ ENTITY_MERGE_THRESHOLD = 0.85
 ENTITY_CANDIDATE_THRESHOLD = 0.70
 
 
+def _stable_kg_id(*parts: str) -> str:
+    """Deterministic 12-char id from any tuple of strings.
+
+    Two brains that compute ``_stable_kg_id("Alice", "person")`` get
+    the same id without coordinating. Same convergence trick the
+    flat-knowledge ``_stable_knowledge_id`` uses, lifted here so the
+    KG can give entities + relations stable cross-brain identity.
+
+    The hash is sha256-truncated; collisions are negligible at the
+    sizes the KG operates on (~1e6 entities at most) and would
+    manifest as one extra LWW merge — the upstream caller's
+    ``WHERE id = ?`` gate catches it.
+    """
+    import hashlib
+    blob = "\0".join(parts).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:12]
+
+
 class KnowledgeGraph:
     """Production knowledge graph backed by SQLite with embedding-based
     entity linking and multi-hop traversal."""
@@ -46,6 +64,13 @@ class KnowledgeGraph:
     def __init__(self, db_path: str, embedder: EmbeddingProvider):
         self.db_path = db_path
         self._embedder = embedder
+        # v2026.5.35 (PR 2.5, F1) — late-bound MemoryStore reference so
+        # KG writes can log themselves to the sync WAL with HLC. Set by
+        # ``MemoryStore.__init__`` after both objects exist (avoids a
+        # circular import). When ``None`` (e.g. unit tests instantiate
+        # KG directly), writes skip sync logging — the relations and
+        # entities still land, they just don't replicate.
+        self._store = None
         self._init_schema()
 
     async def _conn(self) -> aiosqlite.Connection:
@@ -66,6 +91,7 @@ class KnowledgeGraph:
                     embedding BLOB,
                     metadata TEXT DEFAULT '{}',
                     mention_count INTEGER DEFAULT 1,
+                    hlc_string TEXT DEFAULT '',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
@@ -89,6 +115,7 @@ class KnowledgeGraph:
                     confidence REAL DEFAULT 1.0,
                     evidence_text TEXT DEFAULT '',
                     source_origin TEXT DEFAULT 'conversation',
+                    hlc_string TEXT DEFAULT '',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
@@ -112,6 +139,18 @@ class KnowledgeGraph:
                     VALUES (new.rowid, new.name, new.entity_type, new.metadata);
                 END;
             """)
+            # v2026.5.35 (F1) — idempotent migration to add the hlc_string
+            # column on pre-existing brains. Same pattern as
+            # ``MemoryStore._add_column_if_missing`` but inlined here
+            # because KG owns its own schema.
+            cur = conn.execute("PRAGMA table_info(relations)")
+            existing = {row[1] for row in cur.fetchall()}
+            if "hlc_string" not in existing:
+                conn.execute("ALTER TABLE relations ADD COLUMN hlc_string TEXT DEFAULT ''")
+            cur = conn.execute("PRAGMA table_info(entities)")
+            existing = {row[1] for row in cur.fetchall()}
+            if "hlc_string" not in existing:
+                conn.execute("ALTER TABLE entities ADD COLUMN hlc_string TEXT DEFAULT ''")
             conn.commit()
         finally:
             conn.close()
@@ -134,17 +173,33 @@ class KnowledgeGraph:
             await self._add_alias(linked["id"], name)
             return linked
 
-        eid = str(uuid4())[:12]
+        # v2026.5.35 (F1) — derive a stable id from the entity name so
+        # two brains that learn the same person/thing converge on a
+        # single row after HLC LWW. Without this the entities table
+        # would replicate twice (once per node id) and ``add_relation``
+        # would link to whichever copy the local brain wrote first.
+        eid = _stable_kg_id(name, entity_type)
         now = time.time()
         embedding = await self._embedder.embed(name)
         meta_json = json.dumps(metadata or {})
 
+        # Sync log first so the row carries the HLC for D12 LWW.
+        hlc = ""
+        if self._store is not None:
+            try:
+                hlc = self._store._log_sync("entities", "insert", eid, {
+                    "id": eid, "name": name, "entity_type": entity_type,
+                    "metadata": meta_json, "created_at": now,
+                })
+            except Exception as exc:
+                logger.debug("entities sync log failed: %s", exc)
+
         conn = await self._conn()
         try:
             await conn.execute(
-                """INSERT INTO entities (id, name, entity_type, embedding, metadata, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (eid, name, entity_type, vec_to_blob(embedding), meta_json, now, now),
+                """INSERT INTO entities (id, name, entity_type, embedding, metadata, hlc_string, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (eid, name, entity_type, vec_to_blob(embedding), meta_json, hlc, now, now),
             )
             await conn.commit()
         finally:
@@ -176,20 +231,43 @@ class KnowledgeGraph:
                 existing = await cur.fetchone()
 
             now = time.time()
+            # v2026.5.35 (F1) — derive a stable id from the triple so
+            # two brains converge on a single relation row under HLC
+            # LWW (mirrors ``_stable_knowledge_id``).
+            rid = _stable_kg_id(source["id"], relation_type, target["id"])
             if existing:
                 new_conf = min(1.0, (existing["confidence"] + confidence) / 2.0 + 0.1)
+                hlc = ""
+                if self._store is not None:
+                    try:
+                        hlc = self._store._log_sync("relations", "insert", rid, {
+                            "id": rid, "source_id": source["id"], "relation_type": relation_type,
+                            "target_id": target["id"], "confidence": new_conf,
+                            "evidence_text": evidence[:1000], "created_at": now,
+                        })
+                    except Exception as exc:
+                        logger.debug("relations sync log failed: %s", exc)
                 await conn.execute(
-                    "UPDATE relations SET confidence = ?, evidence_text = ?, updated_at = ? WHERE id = ?",
-                    (new_conf, evidence[:1000], now, existing["id"]),
+                    "UPDATE relations SET confidence = ?, evidence_text = ?, updated_at = ?, hlc_string = ? WHERE id = ?",
+                    (new_conf, evidence[:1000], now, hlc, existing["id"]),
                 )
                 rid = existing["id"]
             else:
-                rid = str(uuid4())[:12]
+                hlc = ""
+                if self._store is not None:
+                    try:
+                        hlc = self._store._log_sync("relations", "insert", rid, {
+                            "id": rid, "source_id": source["id"], "relation_type": relation_type,
+                            "target_id": target["id"], "confidence": confidence,
+                            "evidence_text": evidence[:1000], "created_at": now,
+                        })
+                    except Exception as exc:
+                        logger.debug("relations sync log failed: %s", exc)
                 await conn.execute(
                     """INSERT INTO relations
-                       (id, source_id, relation_type, target_id, confidence, evidence_text, source_origin, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (rid, source["id"], relation_type, target["id"], confidence, evidence[:1000], "conversation", now, now),
+                       (id, source_id, relation_type, target_id, confidence, evidence_text, source_origin, hlc_string, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (rid, source["id"], relation_type, target["id"], confidence, evidence[:1000], "conversation", hlc, now, now),
                 )
 
             await conn.commit()
