@@ -317,11 +317,13 @@ class BrainState:
         self.scene: Optional[SceneAnalyzer] = None
         self.change_detector = ChangeDetector()
         self.learner: Optional[Learner] = None
-        # v2026.5.34 (PR 2 D11): MemoryDecayService is constructed in
-        # ``_boot_subsystems`` once ``self.memory`` is wired; declared
-        # here so the attribute always exists for HTTP-route guard
-        # checks (``getattr(state, "memory_decay", None)`` patterns).
+        # v2026.5.34 (PR 2 D11/D12): the two new memory-v2 services are
+        # constructed in ``_boot_subsystems`` once ``self.memory`` +
+        # ``self.sync_engine`` are wired; declared here so the
+        # attributes always exist for HTTP-route guard checks
+        # (``getattr(state, "memory_decay", None)`` patterns).
         self.memory_decay = None  # type: ignore[assignment]
+        self.sync_scheduler = None  # type: ignore[assignment]
         self.skill_gen: Optional[SkillGenerator] = None
         self.vault: Optional[BlindVault] = None
         self.sandbox: Optional[ExecutionSandbox] = None
@@ -790,6 +792,21 @@ class BrainState:
         self.sync_engine = SyncEngine(node_id=sync_node_id, memory_store=self.memory)
         self.memory.set_sync_engine(self.sync_engine)
         await self.sync_engine.start_discovery()
+
+        # v2026.5.34 (PR 2 D12): kick the SyncScheduler — it walks
+        # every known peer on a cadence, applies exponential
+        # backoff to flaky ones, and exposes per-peer health to
+        # /api/sync/status. start() is a no-op when
+        # settings.memory.sync.enabled is false.
+        from memory.sync_scheduler import SchedulerConfig, SyncScheduler
+        self.sync_scheduler = SyncScheduler(
+            self.sync_engine,
+            SchedulerConfig.from_settings(_load_settings()),
+        )
+        try:
+            await self.sync_scheduler.start()
+        except Exception as exc:
+            logger.warning("SyncScheduler.start() failed: %s", exc)
 
         # v2026.5.34 (PR 2 D11): kick the decay sweeper. ``start()``
         # is a no-op when ``settings.memory.decay.enabled`` is false,

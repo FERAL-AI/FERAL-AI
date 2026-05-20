@@ -83,9 +83,82 @@ async def list_devices():
 
 @router.get("/api/sync/status")
 async def sync_status():
+    """Engine + per-peer health snapshot. v2026.5.34 (PR 2 D12)
+    embeds the SyncScheduler's per-peer status alongside the legacy
+    engine stats so the dashboard / CLI can render lag, backoff,
+    and op counters without two round-trips.
+    """
     if not state.sync_engine:
         return {"enabled": False}
-    return {"enabled": True, **state.sync_engine.stats}
+    body = {
+        "enabled": True,
+        "node_id": state.sync_engine.node_id,
+        **state.sync_engine.stats,
+    }
+    scheduler = getattr(state, "sync_scheduler", None)
+    if scheduler is not None:
+        body["scheduler"] = {
+            "enabled": scheduler.config.enabled,
+            "cadence_seconds": scheduler.config.cadence_seconds,
+            "peers": scheduler.peer_status(),
+        }
+    return body
+
+
+@router.post("/api/sync/now")
+async def sync_now(body: dict | None = None):
+    """Trigger an immediate sync. With ``{"peer": "<peer_id>"}`` syncs
+    one peer; without a body syncs every known peer.
+    """
+    scheduler = getattr(state, "sync_scheduler", None)
+    if scheduler is None:
+        return {"ok": False, "error": "sync_scheduler not running"}
+    peer = (body or {}).get("peer")
+    if peer:
+        return await scheduler.sync_one_peer_now(peer)
+    return {"ok": True, "results": await scheduler.sync_all_peers_now()}
+
+
+@router.get("/api/sync/peers")
+async def sync_peers_list():
+    """Enumerate every known peer (mDNS-discovered + manually added)."""
+    scheduler = getattr(state, "sync_scheduler", None)
+    if scheduler is None:
+        return {"ok": False, "error": "sync_scheduler not running", "peers": []}
+    return {"ok": True, "peers": scheduler.list_peers()}
+
+
+@router.post("/api/sync/peers")
+async def sync_peers_add(body: dict):
+    """Add a peer by ``host:port``. Persists for the lifetime of the
+    process; restart reinjects manual peers via FERAL_SYNC_PEERS."""
+    scheduler = getattr(state, "sync_scheduler", None)
+    if scheduler is None:
+        return {"ok": False, "error": "sync_scheduler not running"}
+    addr = (body or {}).get("address", "").strip()
+    if not addr:
+        return {"ok": False, "error": "address required"}
+    return scheduler.add_peer(addr)
+
+
+@router.delete("/api/sync/peers/{peer_id}")
+async def sync_peers_remove(peer_id: str):
+    scheduler = getattr(state, "sync_scheduler", None)
+    if scheduler is None:
+        return {"ok": False, "error": "sync_scheduler not running"}
+    return scheduler.remove_peer(peer_id)
+
+
+@router.get("/api/sync/node-id")
+async def sync_node_id():
+    """Return the persistent HLC node id. Surfaced for backups +
+    duplicate-id triage (operator runs this on every brain and
+    confirms the values differ before troubleshooting sync drift)."""
+    engine = state.sync_engine
+    return {
+        "node_id": engine.node_id if engine else "",
+        "note": "Persisted at ~/.feral/sync_node_id. Rotate by deleting the file and restarting.",
+    }
 
 
 @router.get("/api/sync/export")
@@ -101,5 +174,5 @@ async def sync_import(body: dict):
     """Import a memory bundle from another node."""
     if not state.sync_engine:
         return {"error": "Sync engine not running"}
-    applied = state.sync_engine.import_from_bundle(body)
+    applied = await state.sync_engine.import_from_bundle(body)
     return {"applied": applied}

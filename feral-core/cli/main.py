@@ -1743,17 +1743,98 @@ def cmd_sync(action: str, file_path: str):
         print(f"  Running:     {data.get('running', False)}")
         print(f"  Node ID:     {data.get('node_id', '?')}")
         print(f"  Peers:       {data.get('peer_count', 0)}")
+        sched = data.get("scheduler") or {}
+        if sched:
+            print(f"  Scheduler:   enabled={sched.get('enabled', False)} cadence={sched.get('cadence_seconds', 0)}s")
+            for pid, ps in (sched.get("peers") or {}).items():
+                lag = ps.get("lag_seconds")
+                lag_str = f"{lag:.1f}s" if isinstance(lag, (int, float)) else "—"
+                print(
+                    f"    · {pid:32s} lag={lag_str:8s} fails={ps.get('consecutive_failures', 0)} "
+                    f"sent={ps.get('ops_sent', 0)} recv={ps.get('ops_received', 0)}"
+                )
         vc = data.get("vector_clock", {})
         if vc:
             print(f"  Clock:       {json.dumps(vc, indent=2)}")
-    elif action == "peers":
-        data = _http_get("/api/sync/status")
-        peers = data.get("peers", [])
-        if not peers:
-            print("  No peers discovered.")
+    elif action == "node-id":
+        data = _http_get("/api/sync/node-id")
+        print(f"  Node ID: {data.get('node_id', '?')}")
+        if data.get("note"):
+            print(f"  {data['note']}")
+    elif action == "now":
+        # `feral sync now`            → sync all peers
+        # `feral sync now <peer_id>`  → sync one peer
+        import urllib.request
+        body = {"peer": file_path} if file_path else {}
+        req = urllib.request.Request(
+            f"{HTTP_BASE}/api/sync/now",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read())
+        except Exception as e:
+            print(f"  Sync trigger failed: {e}")
+            return
+        if file_path:
+            if result.get("ok"):
+                print(f"  Synced {file_path}: sent={result.get('sent', 0)} received={result.get('received', 0)}")
+            else:
+                print(f"  Sync failed for {file_path}: {result.get('reason')} {result.get('detail', '')}")
         else:
-            for p in peers:
-                print(f"  - {p}")
+            for r in result.get("results", []):
+                if r.get("ok"):
+                    print(f"  · {r['peer_id']}: sent={r['sent']} received={r['received']}")
+                else:
+                    print(f"  · {r.get('peer_id', '?')}: failed ({r.get('reason')})")
+    elif action == "peers":
+        # `feral sync peers`               → list peers (mDNS + manual)
+        # `feral sync peers add host:port` → add manual peer
+        # `feral sync peers remove <id>`   → remove peer
+        if not file_path or file_path == "list":
+            data = _http_get("/api/sync/peers")
+            peers = data.get("peers", [])
+            if not peers:
+                print("  No peers known.")
+            else:
+                for p in peers:
+                    print(
+                        f"  {p['peer_id']:32s} addr={p.get('address', '—'):24s} "
+                        f"source={p.get('source', '—'):6s} "
+                        f"lag={(f'{p.get('lag_seconds', 0):.1f}s' if p.get('lag_seconds') is not None else '—'):8s} "
+                        f"fails={p.get('consecutive_failures', 0)}"
+                    )
+        elif file_path.startswith("add "):
+            addr = file_path[4:].strip()
+            import urllib.request
+            req = urllib.request.Request(
+                f"{HTTP_BASE}/api/sync/peers",
+                data=json.dumps({"address": addr}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    r = json.loads(resp.read())
+                print(f"  Added peer: {r.get('peer_id', addr)}" if r.get("ok") else f"  Add failed: {r.get('error', '?')}")
+            except Exception as e:
+                print(f"  Add failed: {e}")
+        elif file_path.startswith("remove "):
+            pid = file_path[7:].strip()
+            import urllib.request
+            req = urllib.request.Request(
+                f"{HTTP_BASE}/api/sync/peers/{pid}", method="DELETE",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    r = json.loads(resp.read())
+                print(f"  Removed peer: {pid}" if r.get("ok") else f"  Remove failed: {r.get('error', '?')}")
+            except Exception as e:
+                print(f"  Remove failed: {e}")
+        else:
+            print("  Usage: feral sync peers [list | add <host:port> | remove <peer_id>]")
     elif action == "export":
         out = file_path or "feral_memory_export.json"
         data = _http_get("/api/sync/status")
@@ -1914,8 +1995,25 @@ def main():
 
     # feral sync
     sp = sub.add_parser("sync", help="Federated memory sync commands")
-    sp.add_argument("action", nargs="?", default="status", choices=["status", "peers", "export", "import"], help="Action")
-    sp.add_argument("file", nargs="?", default="", help="File path for export/import")
+    sp.add_argument(
+        "action",
+        nargs="?",
+        default="status",
+        choices=["status", "peers", "export", "import", "now", "node-id"],
+        help=(
+            "status: show engine + per-peer health | "
+            "peers [list|add <host:port>|remove <peer_id>] | "
+            "now [<peer_id>]: trigger immediate sync | "
+            "node-id: print persistent HLC id | "
+            "export/import <file>: bundle round-trip"
+        ),
+    )
+    sp.add_argument(
+        "file",
+        nargs="?",
+        default="",
+        help="File path for export/import, peer_id for `now`, or subcommand for `peers`",
+    )
 
     # feral memory — backend selector + v2026.5.34 decay/forget/recall/compact.
     mem_p = sub.add_parser("memory", help="Memory backend + decay management")

@@ -969,9 +969,17 @@ async def shutdown_event():
         except Exception as exc:
             logger.warning("Shutdown: sync_engine.stop_discovery failed: %s", exc)
 
-    # (e.1) v2026.5.34 PR 2 D11: stop the decay sweeper. Done before
-    # the memory store's connection pool dies so the in-flight sweep
-    # (if any) can release its connection cleanly.
+    # (e.1) v2026.5.34 PR 2 D11/D12: stop the new memory-v2 services.
+    # Done before the memory store's connection pool dies so in-flight
+    # sweeps / per-peer sync attempts can release their connections
+    # cleanly. SyncScheduler stops first because its tasks own
+    # MemoryStore.refresh() awaits that need the pool to be alive.
+    scheduler = getattr(state, "sync_scheduler", None)
+    if scheduler is not None:
+        try:
+            await scheduler.stop()
+        except Exception as exc:
+            logger.warning("Shutdown: sync_scheduler.stop failed: %s", exc)
     decay = getattr(state, "memory_decay", None)
     if decay is not None:
         try:
