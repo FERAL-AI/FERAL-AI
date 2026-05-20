@@ -758,8 +758,15 @@ class BrainState:
         self.webhook_receiver = WebhookReceiver(event_bus=self.event_bus)
         self.marketplace = MarketplaceClient(skill_registry=self.skill_registry)
 
-        import socket
-        sync_node_id = f"{socket.gethostname()}-{os.getpid()}"
+        # v2026.5.34 (PR 2 D12): the HLC node_id is now a persistent
+        # per-brain identity. The previous ``hostname-pid`` value
+        # changed on every restart, so the WAL could not de-duplicate
+        # operations across reboots and a peer that came back from a
+        # crash got every op replayed. ``stable_node_id`` writes a
+        # one-shot UUID-v7-shaped value to
+        # ``~/.feral/sync_node_id`` and re-reads it on every boot.
+        from memory.sync import stable_node_id
+        sync_node_id = stable_node_id()
         self.sync_engine = SyncEngine(node_id=sync_node_id, memory_store=self.memory)
         self.memory.set_sync_engine(self.sync_engine)
         await self.sync_engine.start_discovery()

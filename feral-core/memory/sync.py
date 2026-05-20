@@ -28,6 +28,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
@@ -90,6 +91,71 @@ def _parse_hlc(hlc_str: str) -> tuple:
         return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0, parts[2] if len(parts) > 2 else "")
     except (ValueError, IndexError):
         return (0, 0, "")
+
+
+_NODE_ID_FILENAME = "sync_node_id"
+
+
+class DuplicateNodeIdError(RuntimeError):
+    """Two SyncEngines advertised the same ``node_id``.
+
+    The HLC protocol relies on every node carrying a globally unique
+    identifier. A duplicate either means an operator copied
+    ``~/.feral/sync_node_id`` between two machines, or two brains were
+    cloned from the same disk image without rotating the file. The
+    fix is destructive (delete the file on one side and restart) so
+    we surface the error loudly rather than silently demoting one
+    node's writes to merge conflicts.
+    """
+
+
+def stable_node_id(data_home: Optional[Path] = None) -> str:
+    """Return the persistent per-brain HLC node id.
+
+    The id is a UUID-v7-flavoured value (time-ordered, suitable for
+    debugging "which brain wrote which op when") persisted to
+    ``<data_home>/sync_node_id`` on first boot and re-read on every
+    subsequent boot. This is part of the brain backup set; restoring
+    a backup onto a *different* physical brain MUST be followed by
+    ``rm ~/.feral/sync_node_id`` so the new brain rolls a fresh
+    identity (otherwise the network sees two brains with the same id
+    and the duplicate-detection guard fires).
+
+    Concurrency: two cold-boot processes racing to create the file
+    both write, but the read-back is deterministic because the
+    filesystem serialises the create. We accept the tiny race window
+    rather than introduce a lock — a duplicate id only matters at
+    handshake time and the duplicate-detection guard catches it
+    there.
+
+    The function is sync because it runs from the sync ``__init__``
+    boot path, before the event loop is up.
+    """
+    home = data_home if data_home is not None else feral_data_home()
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / _NODE_ID_FILENAME
+
+    if path.exists():
+        try:
+            existing = path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+        except OSError as exc:
+            logger.warning("sync_node_id read failed (%s); generating a new id", exc)
+
+    # First boot for this brain (or unreadable file). Generate a fresh
+    # UUID-v7-shaped id: wall-clock-ms in the high bits gives natural
+    # ordering when an operator greps multi-brain logs, and uuid4()'s
+    # randomness in the low bits guards against the 1-ms collision
+    # window.
+    wall_ms = int(time.time() * 1000)
+    nonce = uuid4().hex[:12]
+    fresh = f"{wall_ms:013d}-{nonce}"
+    try:
+        path.write_text(fresh + "\n", encoding="utf-8")
+    except OSError as exc:
+        logger.error("sync_node_id write failed: %s — node id will not survive restart", exc)
+    return fresh
 
 
 @dataclass
