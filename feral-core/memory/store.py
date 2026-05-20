@@ -102,6 +102,23 @@ logger = logging.getLogger("feral.memory")
 
 _SCHEMA_VERSION = 6  # v2026.5.34: D11 decay + D12 sync HLC columns
 
+
+def _stable_knowledge_id(subject: str, predicate: str) -> str:
+    """Deterministic id for a (subject, predicate) knowledge tuple.
+
+    Used by :meth:`MemoryStore.knowledge_store` to keep two-brain CRDT
+    convergence working: if both brains write ``("user", "name")``
+    independently, they must produce the same row id so the receiving
+    side's ``(subject, predicate)`` dedup gate recognises the
+    incoming op as an update to the existing row rather than a brand
+    new fact. A 12-hex-char SHA-256 prefix matches the legacy
+    ``uuid4()[:12]`` width.
+    """
+    import hashlib
+
+    digest = hashlib.sha256(f"{subject}\0{predicate}".encode("utf-8")).hexdigest()
+    return digest[:12]
+
 TEXT_WEIGHT = 0.3
 VECTOR_WEIGHT = 0.7
 DEFAULT_DECAY_RATE = 0.01
@@ -232,9 +249,21 @@ class MemoryStore:
         """
         self._about_me_store = about_me_store
 
-    def _log_sync(self, table: str, op_type: str, row_id: str, data: dict):
-        if self._sync_engine:
-            self._sync_engine.log_operation(table, op_type, row_id, data)
+    def _log_sync(self, table: str, op_type: str, row_id: str, data: dict) -> str:
+        """Log a local write to the sync WAL. Returns the HLC string
+        so the caller can persist ``hlc_string`` into the row column
+        — without that the receiving side has no basis for the D12
+        LWW comparison. An empty string is returned when sync is
+        disabled or the WAL append failed (the row still lands
+        locally; replication just won't carry an HLC).
+        """
+        if not self._sync_engine:
+            return ""
+        try:
+            return self._sync_engine.log_operation(table, op_type, row_id, data) or ""
+        except Exception as exc:
+            logger.debug("_log_sync swallowed exception: %s", exc)
+            return ""
 
     async def _conn(self) -> aiosqlite.Connection:
         """Acquire a pooled aiosqlite connection.
@@ -991,14 +1020,22 @@ class MemoryStore:
         emotions = emotions or []
         participants = participants or []
 
+        # Sync log first so we know the HLC string and can persist it
+        # into ``episodes.hlc_string`` in the same INSERT — that gives
+        # the receiving side a stable comparator for D12 LWW.
+        hlc = self._log_sync("episodes", "insert", eid, {
+            "id": eid, "session_id": session_id, "event_type": event_type,
+            "summary": summary, "detail": detail, "importance": importance, "created_at": now,
+        })
+
         conn = await self._conn()
         try:
             await conn.execute(
                 """INSERT INTO episodes
-                   (id, session_id, event_type, summary, detail, emotions, location, participants, importance, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (id, session_id, event_type, summary, detail, emotions, location, participants, importance, created_at, hlc_string)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (eid, session_id, event_type, summary, detail,
-                 json.dumps(emotions), location, json.dumps(participants), importance, now),
+                 json.dumps(emotions), location, json.dumps(participants), importance, now, hlc),
             )
             await conn.commit()
         finally:
@@ -1012,11 +1049,6 @@ class MemoryStore:
                 source_table="episodes", source_id=eid,
                 chunk_index=i, db_path=self.db_path,
             )
-
-        self._log_sync("episodes", "insert", eid, {
-            "id": eid, "session_id": session_id, "event_type": event_type,
-            "summary": summary, "detail": detail, "importance": importance, "created_at": now,
-        })
 
         if self._about_me_store is not None and text:
             try:
@@ -1334,25 +1366,48 @@ class MemoryStore:
 
             if existing:
                 kid = existing[0]
+                # Sync log returns the HLC for this update — feed it
+                # into the row so the receiving side's LWW gate has a
+                # comparator that reflects this exact write.
+                hlc = self._log_sync("knowledge", "insert", kid, {
+                    "id": kid, "subject": subject, "predicate": predicate,
+                    "object": obj, "confidence": confidence, "source": source,
+                    "created_at": now,
+                })
                 await conn.execute(
-                    "UPDATE knowledge SET object = ?, confidence = ?, source = ?, updated_at = ? WHERE id = ?",
-                    (obj, confidence, source, now, kid),
+                    "UPDATE knowledge SET object = ?, confidence = ?, source = ?, updated_at = ?, hlc_string = ? WHERE id = ?",
+                    (obj, confidence, source, now, hlc, kid),
                 )
             else:
-                kid = str(uuid4())[:12]
+                # v2026.5.34 (PR 2 D12): derive the id from
+                # (subject, predicate) deterministically so two
+                # brains writing the same logical fact assign the
+                # same id and converge to one row after sync. The
+                # legacy random-UUID path could not converge —
+                # different ids on each side meant both rows
+                # replicated and the receiving brain ended up with
+                # two rows for the same (subject, predicate). The
+                # hash is truncated to 12 hex chars to match the
+                # pre-existing id length; collisions are
+                # vanishingly rare at that width for the small
+                # subject/predicate value space and would manifest
+                # as one extra UNIQUE-style merge, which the
+                # ``(subject, predicate)`` dedup gate catches.
+                kid = _stable_knowledge_id(subject, predicate)
+                hlc = self._log_sync("knowledge", "insert", kid, {
+                    "id": kid, "subject": subject, "predicate": predicate,
+                    "object": obj, "confidence": confidence, "source": source,
+                    "created_at": now,
+                })
                 await conn.execute(
-                    """INSERT INTO knowledge (id, subject, predicate, object, confidence, source, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (kid, subject, predicate, obj, confidence, source, now, now),
+                    """INSERT INTO knowledge (id, subject, predicate, object, confidence, source, created_at, updated_at, hlc_string)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (kid, subject, predicate, obj, confidence, source, now, now, hlc),
                 )
 
             await conn.commit()
         finally:
             await self._release(conn)
-        self._log_sync("knowledge", "insert", kid, {
-            "id": kid, "subject": subject, "predicate": predicate, "object": obj,
-            "confidence": confidence, "source": source, "created_at": now,
-        })
         return {"id": kid, "subject": subject, "predicate": predicate, "object": obj}
 
     async def knowledge_query(self, subject: str = "", predicate: str = "", limit: int = 20) -> list[dict]:

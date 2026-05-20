@@ -107,8 +107,15 @@ class TestSyncEngine:
             ops = engine.get_changes_since("")
             assert len(ops) >= 1
 
-    def test_two_engines_exchange(self):
-        """Simulate 2-node sync — verify WAL exchange works."""
+    async def test_two_engines_exchange(self):
+        """Simulate 2-node sync — verify WAL exchange + materialization work.
+
+        v2026.5.34 (PR 2 D12): apply_remote_changes is async, and the
+        op_type contract is "insert" (the legacy "upsert" was never a
+        real production value — log_operation only emits "insert" /
+        "delete"). Exchanged ops now flow through HLC LWW and the
+        async pool.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             from memory.store import MemoryStore
             db_a = os.path.join(tmpdir, "a.db")
@@ -117,33 +124,32 @@ class TestSyncEngine:
             wal_b = os.path.join(tmpdir, "wal_b.db")
             store_a = MemoryStore(db_path=db_a)
             store_b = MemoryStore(db_path=db_b)
+            try:
+                engine_a = SyncEngine(node_id="node-a", memory_store=store_a, db_path=wal_a)
+                engine_b = SyncEngine(node_id="node-b", memory_store=store_b, db_path=wal_b)
 
-            engine_a = SyncEngine(node_id="node-a", memory_store=store_a, db_path=wal_a)
-            engine_b = SyncEngine(node_id="node-b", memory_store=store_b, db_path=wal_b)
+                engine_a.log_operation("notes", "insert", "a1", {"id": "a1", "content": "hello from A"})
+                engine_a.log_operation("notes", "insert", "a2", {"id": "a2", "content": "second from A"})
+                engine_b.log_operation("notes", "insert", "b1", {"id": "b1", "content": "hello from B"})
 
-            # Each side logs operations
-            engine_a.log_operation("notes", "upsert", "note-a1", {"id": "a1", "content": "hello from A"})
-            engine_a.log_operation("notes", "upsert", "note-a2", {"id": "a2", "content": "second from A"})
-            engine_b.log_operation("notes", "upsert", "note-b1", {"id": "b1", "content": "hello from B"})
+                ops_from_a = engine_a.get_changes_since("")
+                ops_from_b = engine_b.get_changes_since("")
 
-            # Get ops each side has
-            ops_from_a = engine_a.get_changes_since("")
-            ops_from_b = engine_b.get_changes_since("")
+                assert len(ops_from_a) == 2
+                assert len(ops_from_b) == 1
 
-            assert len(ops_from_a) == 2
-            assert len(ops_from_b) == 1
+                applied_b = await engine_b.apply_remote_changes(ops_from_a)
+                applied_a = await engine_a.apply_remote_changes(ops_from_b)
 
-            # Exchange
-            applied_b = engine_b.apply_remote_changes(ops_from_a)
-            applied_a = engine_a.apply_remote_changes(ops_from_b)
+                assert applied_b == 2
+                assert applied_a == 1
 
-            assert applied_b >= 1
-            assert applied_a >= 1
-
-            # After exchange, B should have A's ops in its WAL too
-            all_b_ops = engine_b.get_changes_since("")
-            origins = {op["origin_node"] for op in all_b_ops}
-            assert "node-a" in origins
+                all_b_ops = engine_b.get_changes_since("")
+                origins = {op["origin_node"] for op in all_b_ops}
+                assert "node-a" in origins
+            finally:
+                await store_a.aclose()
+                await store_b.aclose()
 
     def test_export_import_bundle(self):
         with tempfile.TemporaryDirectory() as tmpdir:

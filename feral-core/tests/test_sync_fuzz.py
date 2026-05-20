@@ -66,12 +66,12 @@ def _final_state(engine: SyncEngine) -> dict:
     return state
 
 
-def _sync_bidirectional(a: SyncEngine, b: SyncEngine):
+async def _sync_bidirectional(a: SyncEngine, b: SyncEngine):
     """Perform a full bidirectional sync between two engines."""
     ops_a = a.get_changes_since("0:0:")
     ops_b = b.get_changes_since("0:0:")
-    b.apply_remote_changes(ops_a)
-    a.apply_remote_changes(ops_b)
+    await b.apply_remote_changes(ops_a)
+    await a.apply_remote_changes(ops_b)
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +81,7 @@ def _sync_bidirectional(a: SyncEngine, b: SyncEngine):
 class TestCRDTFuzzConvergence:
     """100 random CRDT ops, different ordering on each node, verify convergence."""
 
-    def test_random_ops_converge(self):
+    async def test_random_ops_converge(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine_a = _make_engine(tmpdir, "node-a")
             engine_b = _make_engine(tmpdir, "node-b")
@@ -91,14 +91,13 @@ class TestCRDTFuzzConvergence:
                 table, op_type, row_id, data = _random_op(random.choice(["node-a", "node-b"]))
                 all_ops.append((table, op_type, row_id, data))
 
-            # Partition: first 50 to A in order, last 50 to B in order
             random.shuffle(all_ops)
             for table, op_type, row_id, data in all_ops[:50]:
                 engine_a.log_operation(table, op_type, row_id, data)
             for table, op_type, row_id, data in all_ops[50:]:
                 engine_b.log_operation(table, op_type, row_id, data)
 
-            _sync_bidirectional(engine_a, engine_b)
+            await _sync_bidirectional(engine_a, engine_b)
 
             state_a = _final_state(engine_a)
             state_b = _final_state(engine_b)
@@ -108,7 +107,7 @@ class TestCRDTFuzzConvergence:
 class TestConflictingWritersLWW:
     """Both nodes write to same key with different HLC timestamps — LWW wins."""
 
-    def test_lww_same_key(self):
+    async def test_lww_same_key(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine_a = _make_engine(tmpdir, "node-a")
             engine_b = _make_engine(tmpdir, "node-b")
@@ -119,7 +118,7 @@ class TestConflictingWritersLWW:
                 engine_b.log_operation("notes", "insert", "shared-key",
                                        {"id": "shared-key", "content": f"B-version-{i}", "tags": "[]", "importance": "normal", "source": "node-b"})
 
-            _sync_bidirectional(engine_a, engine_b)
+            await _sync_bidirectional(engine_a, engine_b)
 
             state_a = _final_state(engine_a)
             state_b = _final_state(engine_b)
@@ -132,7 +131,7 @@ class TestConflictingWritersLWW:
 class TestPartialDelivery:
     """Drop random 10% of ops during sync — after re-sync, state converges."""
 
-    def test_partial_sync_then_full_converges(self):
+    async def test_partial_sync_then_full_converges(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine_a = _make_engine(tmpdir, "node-a")
             engine_b = _make_engine(tmpdir, "node-b")
@@ -144,18 +143,15 @@ class TestPartialDelivery:
                 table, op_type, row_id, data = _random_op("node-b")
                 engine_b.log_operation(table, op_type, row_id, data)
 
-            # Partial delivery: drop ~10% of ops from A→B
             ops_a = engine_a.get_changes_since("0:0:")
             dropped = [op for op in ops_a if random.random() > 0.1]
-            engine_b.apply_remote_changes(dropped)
+            await engine_b.apply_remote_changes(dropped)
 
-            # Partial delivery: drop ~10% of ops from B→A
             ops_b = engine_b.get_changes_since("0:0:")
             dropped_b = [op for op in ops_b if random.random() > 0.1]
-            engine_a.apply_remote_changes(dropped_b)
+            await engine_a.apply_remote_changes(dropped_b)
 
-            # States may differ here. Now do a full re-sync.
-            _sync_bidirectional(engine_a, engine_b)
+            await _sync_bidirectional(engine_a, engine_b)
 
             state_a = _final_state(engine_a)
             state_b = _final_state(engine_b)
@@ -165,21 +161,19 @@ class TestPartialDelivery:
 class TestNetworkFlap:
     """Sync, disconnect, more local ops, reconnect, re-sync — must converge."""
 
-    def test_flap_converges(self):
+    async def test_flap_converges(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine_a = _make_engine(tmpdir, "node-a")
             engine_b = _make_engine(tmpdir, "node-b")
 
-            # Phase 1: both write, then sync
             for _ in range(20):
                 t, o, r, d = _random_op("node-a")
                 engine_a.log_operation(t, o, r, d)
             for _ in range(20):
                 t, o, r, d = _random_op("node-b")
                 engine_b.log_operation(t, o, r, d)
-            _sync_bidirectional(engine_a, engine_b)
+            await _sync_bidirectional(engine_a, engine_b)
 
-            # Phase 2: "disconnect" — each writes locally without syncing
             for _ in range(30):
                 t, o, r, d = _random_op("node-a")
                 engine_a.log_operation(t, o, r, d)
@@ -187,8 +181,7 @@ class TestNetworkFlap:
                 t, o, r, d = _random_op("node-b")
                 engine_b.log_operation(t, o, r, d)
 
-            # Phase 3: reconnect and re-sync
-            _sync_bidirectional(engine_a, engine_b)
+            await _sync_bidirectional(engine_a, engine_b)
 
             state_a = _final_state(engine_a)
             state_b = _final_state(engine_b)
@@ -198,13 +191,12 @@ class TestNetworkFlap:
 class TestThreeNodeTopology:
     """A<->B<->C: writes on A and C, sync all, verify all 3 converge."""
 
-    def test_three_nodes_converge(self):
+    async def test_three_nodes_converge(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine_a = _make_engine(tmpdir, "node-a")
             engine_b = _make_engine(tmpdir, "node-b")
             engine_c = _make_engine(tmpdir, "node-c")
 
-            # A and C write independently
             for _ in range(40):
                 t, o, r, d = _random_op("node-a")
                 engine_a.log_operation(t, o, r, d)
@@ -212,15 +204,13 @@ class TestThreeNodeTopology:
                 t, o, r, d = _random_op("node-c")
                 engine_c.log_operation(t, o, r, d)
 
-            # B has a few of its own
             for _ in range(20):
                 t, o, r, d = _random_op("node-b")
                 engine_b.log_operation(t, o, r, d)
 
-            # Sync A<->B, then B<->C, then A<->B again (propagate C's ops to A)
-            _sync_bidirectional(engine_a, engine_b)
-            _sync_bidirectional(engine_b, engine_c)
-            _sync_bidirectional(engine_a, engine_b)
+            await _sync_bidirectional(engine_a, engine_b)
+            await _sync_bidirectional(engine_b, engine_c)
+            await _sync_bidirectional(engine_a, engine_b)
 
             state_a = _final_state(engine_a)
             state_b = _final_state(engine_b)
