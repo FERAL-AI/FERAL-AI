@@ -175,6 +175,12 @@ jobs:
         # local wheel while resolving dependencies from real PyPI.
         # This avoids dependency shadowing when TestPyPI has stale or
         # malformed third-party packages with the same names.
+        #
+        # TestPyPI's simple index lags behind the JSON API by minutes
+        # in our experience — the JSON probe above can succeed while
+        # ``pip download --index-url https://test.pypi.org/simple/``
+        # still 404s on the brand-new version. Retry the download up
+        # to 12 times (2min) instead of failing immediately.
         shell: bash
         env:
           EXPECTED_VERSION: ${{ needs.build.outputs.version }}
@@ -185,15 +191,27 @@ jobs:
           python -m pip install --upgrade pip
           rm -rf .stage-dist
           mkdir -p .stage-dist
-          python -m pip download \
-            --no-deps \
-            --index-url https://test.pypi.org/simple/ \
-            --dest .stage-dist \
-            "feral-ai==${EXPECTED_VERSION}"
           shopt -s nullglob
+          for attempt in $(seq 1 12); do
+            if python -m pip download \
+                 --no-deps \
+                 --index-url https://test.pypi.org/simple/ \
+                 --dest .stage-dist \
+                 "feral-ai==${EXPECTED_VERSION}" 2>&1; then
+              wheels=(.stage-dist/feral_ai-"${EXPECTED_VERSION}"-*.whl)
+              if [ "${#wheels[@]}" -gt 0 ]; then
+                echo "  · TestPyPI simple index served the wheel (attempt ${attempt})"
+                break
+              fi
+            fi
+            echo "  · TestPyPI simple-index still propagating (attempt ${attempt}); sleeping"
+            sleep 10
+            rm -rf .stage-dist
+            mkdir -p .stage-dist
+          done
           wheels=(.stage-dist/feral_ai-"${EXPECTED_VERSION}"-*.whl)
           if [ "${#wheels[@]}" -eq 0 ]; then
-            echo "No wheel for feral-ai==${EXPECTED_VERSION} was downloaded from TestPyPI." >&2
+            echo "No wheel for feral-ai==${EXPECTED_VERSION} was downloaded from TestPyPI after 12 attempts." >&2
             ls -la .stage-dist >&2
             exit 1
           fi
