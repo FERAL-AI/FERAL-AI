@@ -1076,14 +1076,46 @@ def cmd_doctor():
 
     console = Console()
     passed = 0
+    infos = 0
     warnings = 0
     failures = 0
     fixes: list[str] = []
 
+    # v2026.5.36 — four severity tiers, not three. The pre-v2026.5.36
+    # doctor only had pass / warn / fail, which forced every probe to
+    # pick between "everything is great" and "there is a problem".
+    # That made a fresh install look broken: a clean Mac with FERAL
+    # newly installed produced ~5 yellow warnings (memory DB not
+    # created yet, Chrome CDP not running, Local STT not installed,
+    # Voice key not set, …) for things that are *expected* to be
+    # absent on first boot. The new ``_info`` tier is reserved for
+    # "not configured yet" / "opt-in feature you haven't enabled" —
+    # zero remediation expected, never counts toward warnings, and
+    # never adds noise to the Suggested-fixes list.
+    #
+    # The summary panel renders all four counts (passes, infos,
+    # warnings, failures) so the operator can still tell at a glance
+    # whether anything in the install is actually broken.
     def _pass(label: str, detail: str = ""):
         nonlocal passed
         passed += 1
         msg = f"[green]✔[/green]  {label}"
+        if detail:
+            msg += f"  [dim]{detail}[/dim]"
+        console.print(msg)
+
+    def _info(label: str, detail: str = ""):
+        """Optional / not-yet-configured probe.
+
+        Used for features that are explicitly opt-in (local STT/TTS,
+        voice realtime key, workspace grants) or that auto-initialise
+        on first use (memory DB, Chrome CDP auto-launch). No fix is
+        offered because nothing is broken — the operator simply has
+        not turned this thing on yet.
+        """
+        nonlocal infos
+        infos += 1
+        msg = f"[cyan]ℹ[/cyan]  {label}"
         if detail:
             msg += f"  [dim]{detail}[/dim]"
         console.print(msg)
@@ -1226,7 +1258,11 @@ def cmd_doctor():
             _fail("Memory database", f"exists but not accessible: {exc}",
                   "Check permissions on ~/.feral/memory.db")
     else:
-        _warn("Memory database", "not created yet — will be created on first run")
+        # v2026.5.36 — was `_warn`. The brain auto-creates `memory.db`
+        # the first time MemoryStore opens, so "not created yet" is
+        # the *expected* state immediately after `pip install`. No
+        # operator action required.
+        _info("Memory database", "not created yet — will be created on first run")
 
     # ── 7. Port availability ──
     import socket
@@ -1287,14 +1323,17 @@ def cmd_doctor():
             f"reachable on http://{cdp_host}:{cdp_port}",
         )
     else:
-        _warn(
+        # v2026.5.36 — was `_warn`. The CDP endpoint being cold on a
+        # fresh install is the default state: FERAL's BrowserController
+        # auto-launches Chrome with the right `--remote-debugging-port`
+        # flag the first time an agent asks for a browser, provided a
+        # binary exists (probed separately below). The probe is
+        # informational; an absent CDP only blocks computer-use the
+        # instant a binary is *also* missing.
+        _info(
             "Chrome (CDP endpoint)",
-            f"not reachable on http://{cdp_host}:{cdp_port}",
-            (
-                f"Start Chrome with: --remote-debugging-port={cdp_port} "
-                "--user-data-dir=~/.feral/chrome-profile  (FERAL also "
-                "auto-launches if Chrome/Chromium/Brave is installed)"
-            ),
+            f"not running on http://{cdp_host}:{cdp_port} (FERAL will "
+            "auto-launch on first computer-use action)",
         )
 
     try:
@@ -1356,8 +1395,11 @@ def cmd_doctor():
         except Exception:
             _warn("Node.js", "found but could not determine version")
     else:
-        _warn("Node.js", "not found — needed for client/webui development",
-              "Install Node 20+: https://nodejs.org")
+        # v2026.5.36 — was `_warn`. Node.js is only required if the
+        # operator wants to rebuild the webui_v2 bundle locally. The
+        # shipped wheel already carries the compiled bundle, so the
+        # runtime path is fully Node-free. Demoted to info.
+        _info("Node.js", "not found — only needed if you plan to rebuild webui_v2 locally")
 
     # ── 10. Local audio backends ──
     console.print()
@@ -1368,13 +1410,19 @@ def cmd_doctor():
         if caps["local_stt"]:
             _pass("Local STT (faster-whisper)", f"models: {', '.join(caps['stt_models'])}")
         else:
-            _warn("Local STT (faster-whisper)", "not installed — cloud-only STT",
-                  "pip install 'feral-ai[stt]'")
+            # v2026.5.36 — was `_warn`. Local STT is explicitly an
+            # opt-in extra (`pip install 'feral-ai[stt]'`). Cloud STT
+            # via OpenAI / Google works without it. Not installing it
+            # is a deliberate choice, not a problem.
+            _info("Local STT (faster-whisper)",
+                  "not installed — cloud STT only (install via `pip install 'feral-ai[stt]'`)")
         if caps["local_tts"]:
             _pass("Local TTS (piper)", f"voices: {', '.join(caps['tts_voices'])}")
         else:
-            _warn("Local TTS (piper)", "not installed — cloud-only TTS",
-                  "pip install 'feral-ai[tts]'")
+            # v2026.5.36 — was `_warn`. Symmetric demote with the STT
+            # case above: Piper is opt-in via `[tts]`.
+            _info("Local TTS (piper)",
+                  "not installed — cloud TTS only (install via `pip install 'feral-ai[tts]'`)")
     except Exception as exc:
         _warn("Local Audio", f"detection failed: {exc}")
 
@@ -1394,12 +1442,36 @@ def cmd_doctor():
                 if probe.status == "granted":
                     _pass(label, f"{probe.api}: granted")
                 elif probe.status == "denied":
-                    _fail(label, f"{probe.api}: denied", probe.setup_step)
+                    # v2026.5.36 — was `_fail`. A denied TCC grant
+                    # only blocks the GUI computer-use code path
+                    # (synthetic clicks via Accessibility, screen
+                    # capture via Screen Recording). Users who never
+                    # touch GUI computer-use shouldn't see a red ✘
+                    # for an entitlement they intentionally withheld.
+                    # We keep the remediation in `fixes` so anyone
+                    # who *does* want GUI computer-use has a path,
+                    # but the probe no longer claims the install is
+                    # broken.
+                    _warn(
+                        label,
+                        f"{probe.api}: denied (only blocks GUI computer-use)",
+                        probe.setup_step,
+                    )
                 elif probe.status == "unknown":
+                    # v2026.5.36 — PyObjC ApplicationServices + Quartz
+                    # are now base dependencies on Darwin (see
+                    # pyproject.toml). Reaching this branch means the
+                    # user installed FERAL from a pre-v2026.5.36 wheel
+                    # or a custom resolver skipped the deps. Keep as
+                    # warn with explicit upgrade remediation.
                     detail = probe.error or "PyObjC not available"
-                    _warn(label, detail, probe.setup_step)
+                    _warn(
+                        label,
+                        f"{detail} (upgrade to feral-ai>=2026.5.36 to fix)",
+                        probe.setup_step,
+                    )
                 else:
-                    _warn(label, "not_applicable")
+                    _info(label, "not_applicable")
         except Exception as exc:
             _warn("macOS GUI Permissions", f"probe failed: {exc}")
 
@@ -1439,10 +1511,15 @@ def cmd_doctor():
                 f"{grant_count} workspace grant(s) registered" if grant_count else "no grants yet",
             )
         else:
-            _warn(
+            # v2026.5.36 — was `_warn`. The local-agent runtime
+            # prompts interactively the first time `write_file` is
+            # called against an un-granted directory; pre-authorizing
+            # via `feral grant` is purely a convenience for headless
+            # / scripted runs. No fix is *required* on a fresh
+            # install.
+            _info(
                 "Local-agent grants",
-                "no workspace_grants.json — write_file will prompt on first use",
-                "Run: feral grant <name> <path> to pre-authorize a directory",
+                "no workspace_grants.json yet — write_file will prompt on first use",
             )
     except Exception as exc:
         _warn("Local-agent grants", f"could not read grants: {exc}")
@@ -1488,10 +1565,15 @@ def cmd_doctor():
             providers.append("Google Gemini Realtime")
         _pass("Voice runtime", "key set: " + ", ".join(providers))
     else:
-        _warn(
+        # v2026.5.36 — was `_warn`. Voice (in-composer realtime
+        # speech) is opt-in. The text agent works perfectly without
+        # an OpenAI/Google realtime key — many operators run FERAL
+        # voice-free. Demoted to info so a clean install no longer
+        # raises a yellow flag for a feature the user may never want.
+        _info(
             "Voice runtime",
-            "no realtime provider key configured",
-            "Set OPENAI_API_KEY or GOOGLE_API_KEY to enable in-composer voice.",
+            "no realtime provider key set — voice is off (set OPENAI_API_KEY or "
+            "GOOGLE_API_KEY to enable in-composer voice)",
         )
 
     # computer-use: provider-neutral driver importable
@@ -1523,11 +1605,23 @@ def cmd_doctor():
     parts = []
     if passed:
         parts.append(f"[green]{passed} passed[/green]")
+    if infos:
+        parts.append(f"[cyan]{infos} info[/cyan]")
     if warnings:
         parts.append(f"[yellow]{warnings} warnings[/yellow]")
     if failures:
         parts.append(f"[red]{failures} failures[/red]")
-    console.print(Panel(", ".join(parts), title="Summary", border_style="cyan"))
+    # v2026.5.36 — panel border colour reflects the *actual* severity
+    # so a fresh install (no warnings, no failures) shows a green
+    # border even if there are info items, and a broken install shows
+    # red. This makes the first impression honest at a glance.
+    if failures:
+        border = "red"
+    elif warnings:
+        border = "yellow"
+    else:
+        border = "green"
+    console.print(Panel(", ".join(parts), title="Summary", border_style=border))
 
     if fixes:
         console.print()

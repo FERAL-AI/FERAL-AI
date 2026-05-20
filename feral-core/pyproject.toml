@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "feral-ai"
-version = "2026.5.35"
+version = "2026.5.36"
 description = "FERAL — Open-source AI agent with computer use, GenUI, voice, hardware control, and persistent memory."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -69,6 +69,25 @@ dependencies = [
     # the documented fallback when argon2-cffi is genuinely unavailable
     # on a given platform (see security/device_pairing.py).
     "argon2-cffi>=23.1",
+    # v2026.5.36 — QR pairing is a first-run feature, NOT an opt-in
+    # extra. Pre-v2026.5.36 the `qrcode[pil]` package only landed via
+    # the `[discovery]` or `[all]` extras, which meant a bare
+    # `pip install feral-ai` produced an installation where the very
+    # first thing a user is asked to do (pair a device by QR) crashed
+    # with a 500 because `/api/devices/pair/qr` couldn't import
+    # `qrcode`. Promoting the dep into the base block is the only
+    # honest fix: anyone who installs FERAL can immediately pair.
+    "qrcode[pil]>=7.4",
+    # v2026.5.36 — Honest macOS TCC probes (Accessibility / Screen
+    # Recording) require Apple's ApplicationServices + Quartz APIs,
+    # which are exposed to Python only via PyObjC. Pre-v2026.5.36 the
+    # `feral doctor` command on a clean macOS install printed two
+    # yellow warnings ("PyObjC ApplicationServices not importable",
+    # "PyObjC Quartz not importable") that no amount of FERAL setup
+    # could clear — the deps simply weren't in the wheel. The PEP-508
+    # environment marker keeps Linux/Windows wheels untouched.
+    "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
@@ -102,7 +121,10 @@ sync = [
 ]
 discovery = [
     "zeroconf>=0.131.0",
-    "qrcode[pil]>=7.4",
+    # NOTE: `qrcode[pil]` moved to base `dependencies` in v2026.5.36 —
+    # QR pairing is first-run, not opt-in. Kept this extra alive (it's
+    # widely referenced in docs / install guides) so `pip install
+    # feral-ai[discovery]` still resolves; pip handles the duplicate.
 ]
 stt = [
     "faster-whisper>=1.0.0",
@@ -176,7 +198,9 @@ all = [
     "playwright>=1.40.0",
     "wasmtime>=22.0.0",
     "zeroconf>=0.131.0",
-    "qrcode[pil]>=7.4",
+    # v2026.5.36 — `qrcode[pil]` moved to base `dependencies` (first-run
+    # feature). Left out of `[all]` to avoid pip resolver duplicate
+    # work; the base wheel always carries it.
     "onnxruntime>=1.16.0",
     "rich>=13.0.0",
     "faster-whisper>=1.0.0",
