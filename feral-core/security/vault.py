@@ -673,6 +673,18 @@ class BlindVault:
     def get_credential(self, key_name: str) -> Optional[str]:
         return self.retrieve(key_name, requester="get_credential")
 
+    def list_credential_keys(self) -> list[str]:
+        """Return key names in the default credentials namespace (no values).
+
+        Used by probe/doctor surfaces to discover configured providers
+        without leaking secrets to logs.
+        """
+        return self.list_keys()
+
+    def iter_credential_keys(self):
+        """Iterate credential key names in the default namespace."""
+        yield from self.list_keys()
+
     # ── Rotation ────────────────────────────────────────────────────
 
     def rotate_master_key(self) -> str:

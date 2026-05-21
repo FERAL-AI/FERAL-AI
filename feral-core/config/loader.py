@@ -10,8 +10,8 @@ Hierarchy (highest priority wins):
   3. Project config (.feral/settings.json) — shared with team
   4. User config    (~/.feral/settings.json) — user-global defaults
 
-Credentials are stored separately in ~/.feral/credentials.json
-and NEVER merged into settings (blind vault pattern).
+Credentials are stored separately in the encrypted BlindVault
+(``~/.feral/credentials.enc``) and NEVER merged into settings.
 
 Skills are discovered from:
   - ~/.feral/skills/           (user-installed)
@@ -372,34 +372,54 @@ class ConfigLoader:
         vision["enabled"] = unified
 
     def _load_credentials(self):
-        """Load credentials from a separate file (never merged into settings)."""
+        """Load credentials from BlindVault (authoritative store).
+
+        Environment variables override vault values only when explicitly
+        set in the process environment (ops / CI convenience). Legacy
+        plaintext ``credentials.json`` is never read here — opening the
+        vault triggers W9 migration into ``credentials.enc`` when needed.
+        """
+        self._credentials = {}
         cred_path = self.user_home / "credentials.json"
         if cred_path.exists():
-            try:
-                with open(cred_path) as f:
-                    self._credentials = json.load(f)
-            except Exception as e:
-                logger.warning(f"Failed to load credentials: {e}")
+            logger.warning(
+                "Deprecated plaintext credentials.json at %s — ConfigLoader "
+                "no longer reads this file directly; credentials are loaded "
+                "from the encrypted vault (migration runs on vault init).",
+                cred_path,
+            )
 
-        # Also check env for API keys
+        try:
+            from security.vault import BlindVault
+
+            vault = BlindVault(vault_path=str(cred_path))
+            for key in vault.list_keys():
+                value = vault.get_credential(key)
+                if isinstance(value, str) and value.strip():
+                    self._credentials[key] = value.strip()
+        except Exception as exc:
+            logger.warning("Failed to load credentials from vault: %s", exc)
+
+        # Env overrides — only when the variable is explicitly set.
         _api_key_envs = (
             "OPENAI_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
-            "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "MOONSHOT_API_KEY", "DASHSCOPE_API_KEY",
-            "EXA_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY", "BRAVE_API_KEY",
-            "GITHUB_TOKEN", "SPOTIFY_CLIENT_ID",
+            "GEMINI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "MOONSHOT_API_KEY",
+            "DASHSCOPE_API_KEY", "EXA_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY",
+            "BRAVE_API_KEY", "GITHUB_TOKEN", "SPOTIFY_CLIENT_ID", "NOTION_TOKEN",
+            "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+            "FERAL_WHOOP_TOKEN", "FERAL_OURA_TOKEN",
         )
         for env_key in _api_key_envs:
             value = os.environ.get(env_key)
-            if value:
-                self._credentials[env_key] = value
+            if value is not None and str(value).strip():
+                self._credentials[env_key] = str(value).strip()
 
         # Skill-specific keys from FERAL_KEY_* pattern
         for key, value in os.environ.items():
-            if key.startswith("FERAL_KEY_"):
+            if key.startswith("FERAL_KEY_") and str(value).strip():
                 skill_id = key[10:].lower()  # FERAL_KEY_web_search -> web_search
-                if "skill_keys" not in self._credentials:
-                    self._credentials["skill_keys"] = {}
-                self._credentials["skill_keys"][skill_id] = value
+                self._credentials.setdefault("skill_keys", {})
+                self._credentials["skill_keys"][skill_id] = str(value).strip()
 
     def _derive_fallback_providers(self) -> list[str]:
         """Auto-populate fallback_providers from providers that have stored keys."""

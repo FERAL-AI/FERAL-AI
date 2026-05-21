@@ -329,3 +329,74 @@ class TestRestoreFromRecoveryCode:
 
         with pytest.raises(VaultTamperedError):
             vault.restore_from_recovery_code(wrong_code)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# ConfigLoader integration — vault as credential authority
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestConfigLoaderVaultIntegration:
+    def test_loader_reads_credentials_from_vault(
+        self, tmp_path: Path, fake_keychain, monkeypatch
+    ):
+        monkeypatch.setenv("FERAL_HOME", str(tmp_path))
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        vault = BlindVault(vault_path=str(tmp_path / "credentials.json"))
+        vault.set_credential("OPENAI_API_KEY", "sk-from-vault")
+        vault.set_credential("ANTHROPIC_API_KEY", "sk-ant-from-vault")
+
+        from config.loader import ConfigLoader
+
+        loader = ConfigLoader(project_dir=str(tmp_path))
+        loader.user_home = tmp_path
+        loader.discover()
+
+        assert loader.get_credential("OPENAI_API_KEY") == "sk-from-vault"
+        assert loader.get_credential("ANTHROPIC_API_KEY") == "sk-ant-from-vault"
+
+    def test_loader_env_overrides_vault(
+        self, tmp_path: Path, fake_keychain, monkeypatch
+    ):
+        monkeypatch.setenv("FERAL_HOME", str(tmp_path))
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+
+        vault = BlindVault(vault_path=str(tmp_path / "credentials.json"))
+        vault.set_credential("OPENAI_API_KEY", "sk-from-vault")
+
+        from config.loader import ConfigLoader
+
+        loader = ConfigLoader(project_dir=str(tmp_path))
+        loader.user_home = tmp_path
+        loader.discover()
+
+        assert loader.get_credential("OPENAI_API_KEY") == "sk-from-env"
+
+    def test_loader_warns_on_legacy_plaintext_without_reading(
+        self, tmp_path: Path, fake_keychain, monkeypatch, caplog
+    ):
+        import json
+        import logging
+
+        monkeypatch.setenv("FERAL_HOME", str(tmp_path))
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        legacy = tmp_path / "credentials.json"
+        legacy.write_text(json.dumps({"OPENAI_API_KEY": "sk-legacy-plain"}))
+
+        from config.loader import ConfigLoader
+
+        with caplog.at_level(logging.WARNING, logger="feral.config"):
+            loader = ConfigLoader(project_dir=str(tmp_path))
+            loader.user_home = tmp_path
+            loader.discover()
+
+        assert any(
+            "Deprecated plaintext credentials.json" in rec.message
+            for rec in caplog.records
+        )
+        # Vault migration should have moved legacy into encrypted store.
+        assert (tmp_path / "credentials.enc").exists()
+        assert loader.get_credential("OPENAI_API_KEY") == "sk-legacy-plain"
