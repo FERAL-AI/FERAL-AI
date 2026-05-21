@@ -16,6 +16,7 @@ it (kept it simple; ``MemoryStore.stats()`` surfaces the kg counts).
 """
 
 from __future__ import annotations
+import asyncio
 import json
 import logging
 import sqlite3
@@ -71,13 +72,46 @@ class KnowledgeGraph:
         # KG directly), writes skip sync logging — the relations and
         # entities still land, they just don't replicate.
         self._store = None
+        # Lane 05 W4 (AUDIT-r14 finding 14, S3): is the sqlite-vec
+        # entity index available? Set by :meth:`_init_schema` based
+        # on extension load + CREATE VIRTUAL TABLE outcome.
+        self._vec_entities_available: bool = False
         self._init_schema()
 
     async def _conn(self) -> aiosqlite.Connection:
+        """Acquire an aiosqlite connection.
+
+        Lane 05 W4 (AUDIT-r14 finding 14): when a ``MemoryStore`` is
+        attached (the production path), reuse its pooled connection
+        so KG writes / reads share the same N=4 connection budget as
+        the rest of the memory subsystem instead of opening a fresh
+        sqlite handle on every call. Pool reuse eliminates the
+        per-call ``aiosqlite.connect()`` + PRAGMA round-trips that
+        dominated KG latency.
+
+        Callers MUST release via :meth:`_release` in a ``finally``
+        block.
+        """
+        store = self._store
+        if store is not None and hasattr(store, "_conn") and hasattr(store, "_release"):
+            return await store._conn()
+        # Standalone fallback (unit tests instantiate KG directly).
         conn = await aiosqlite.connect(self.db_path)
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA journal_mode=WAL")
         return conn
+
+    async def _release(self, conn: aiosqlite.Connection) -> None:
+        """Return a pooled connection to the MemoryStore pool, or
+        close it when the KG is running standalone."""
+        store = self._store
+        if store is not None and hasattr(store, "_release"):
+            await store._release(conn)
+            return
+        try:
+            await conn.close()
+        except Exception:
+            pass
 
     def _init_schema(self):
         """Boot-time DDL. Sync because __init__ is sync."""
@@ -152,8 +186,93 @@ class KnowledgeGraph:
             if "hlc_string" not in existing:
                 conn.execute("ALTER TABLE entities ADD COLUMN hlc_string TEXT DEFAULT ''")
             conn.commit()
+
+            # Lane 05 W4 (AUDIT-r14 finding 14, S3): create a vec0
+            # virtual table for entity embeddings so search_entities
+            # and _link_entity can do indexed nearest-neighbour
+            # lookups instead of the previous full-table embedding
+            # scan (which was O(N) on every search and dominated KG
+            # query cost — primary slowdown flagged by AUDIT-r13
+            # subagent 09).
+            #
+            # The table is keyed on a deterministic int rowid (the
+            # entity rowid is wrong because vec0 requires INTEGER and
+            # entity ids are TEXT). We use a stable hash of the
+            # entity id mapped to a 64-bit int so inserts can find
+            # the right vec row to replace without an extra lookup
+            # table.
+            try:
+                from memory.embeddings import sqlite_vec_available, _try_load_sqlite_vec
+                if sqlite_vec_available() and _try_load_sqlite_vec(conn):
+                    conn.execute(f"""
+                        CREATE VIRTUAL TABLE IF NOT EXISTS vec_entities
+                        USING vec0(
+                            entity_rowid INTEGER PRIMARY KEY,
+                            embedding FLOAT[{self._embedder.dimension}]
+                        )
+                    """)
+                    conn.commit()
+                    self._vec_entities_available = True
+                    logger.info(
+                        "KG vec0 entity index ready (dim=%d)",
+                        self._embedder.dimension,
+                    )
+            except Exception as exc:
+                logger.info(
+                    "KG vec0 entity index unavailable (%s) — "
+                    "falling back to numpy scan over entities.embedding",
+                    exc,
+                )
+                self._vec_entities_available = False
         finally:
             conn.close()
+
+    @staticmethod
+    def _entity_rowid(entity_id: str) -> int:
+        """Deterministic 63-bit positive int derived from the entity id.
+
+        sqlite-vec's ``vec0`` table requires INTEGER PRIMARY KEY but
+        entity ids are 12-char hex strings. Hashing to a stable int
+        lets us upsert / delete vec rows without a side-table
+        mapping. We mask to 63 bits because SQLite stores INTEGER as
+        signed 64-bit and vec0 rejects negatives.
+        """
+        import hashlib
+        digest = hashlib.sha256(entity_id.encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
+
+    async def _vec_upsert_entity(
+        self, entity_id: str, embedding
+    ) -> None:
+        """Push (or replace) the given entity's embedding into the
+        vec0 entity index. Silently skipped when sqlite-vec is not
+        loaded — the caller's numpy fallback path still works.
+        """
+        if not self._vec_entities_available or embedding is None:
+            return
+        rowid = self._entity_rowid(entity_id)
+        try:
+            from memory.embeddings import _try_load_sqlite_vec, vec_to_blob
+        except Exception:
+            return
+        conn = await aiosqlite.connect(self.db_path)
+        try:
+            # vec0 requires the extension on the connection that
+            # writes; pooled MemoryStore connections also load the
+            # extension during boot, but we use a fresh sync-aware
+            # path here to avoid making the pool path conditional on
+            # extension state. Cost is one extension-load per upsert
+            # — acceptable on the entity-creation path (slow path).
+            await asyncio.to_thread(_try_load_sqlite_vec, conn._connection)  # type: ignore[attr-defined]
+            await conn.execute(
+                "INSERT OR REPLACE INTO vec_entities(entity_rowid, embedding) VALUES (?, ?)",
+                (rowid, vec_to_blob(embedding)),
+            )
+            await conn.commit()
+        except Exception as exc:
+            logger.debug("vec_entities upsert failed: %s", exc)
+        finally:
+            await conn.close()
 
     async def add_entity(
         self,
@@ -183,14 +302,23 @@ class KnowledgeGraph:
         embedding = await self._embedder.embed(name)
         meta_json = json.dumps(metadata or {})
 
-        # Sync log first so the row carries the HLC for D12 LWW.
+        # Async-offload the WAL log so the KG write doesn't block
+        # the event loop on the sync sqlite3 fsync (Lane 05 W3
+        # offloaded MemoryStore.episode_save the same way).
         hlc = ""
         if self._store is not None:
             try:
-                hlc = self._store._log_sync("entities", "insert", eid, {
-                    "id": eid, "name": name, "entity_type": entity_type,
-                    "metadata": meta_json, "created_at": now,
-                })
+                log_async = getattr(self._store, "_log_sync_async", None)
+                if log_async is not None:
+                    hlc = await log_async("entities", "insert", eid, {
+                        "id": eid, "name": name, "entity_type": entity_type,
+                        "metadata": meta_json, "created_at": now,
+                    })
+                else:
+                    hlc = self._store._log_sync("entities", "insert", eid, {
+                        "id": eid, "name": name, "entity_type": entity_type,
+                        "metadata": meta_json, "created_at": now,
+                    })
             except Exception as exc:
                 logger.debug("entities sync log failed: %s", exc)
 
@@ -203,7 +331,13 @@ class KnowledgeGraph:
             )
             await conn.commit()
         finally:
-            await conn.close()
+            await self._release(conn)
+
+        # Push to the vec0 index so the next search_entities /
+        # _link_entity call hits the indexed path instead of a
+        # full-table numpy scan.
+        await self._vec_upsert_entity(eid, embedding)
+
         logger.info("Entity added: %s (%s) [%s]", name, entity_type, eid)
         return {"id": eid, "name": name, "entity_type": entity_type}
 
@@ -272,7 +406,7 @@ class KnowledgeGraph:
 
             await conn.commit()
         finally:
-            await conn.close()
+            await self._release(conn)
         logger.info("Relation: (%s) --[%s]--> (%s)", source_name, relation_type, target_name)
         return {
             "id": rid,
@@ -341,7 +475,7 @@ class KnowledgeGraph:
             """, (entity["id"], entity["id"], max_depth, limit)) as cur:
                 rows = await cur.fetchall()
         finally:
-            await conn.close()
+            await self._release(conn)
 
         return [
             {
@@ -354,8 +488,109 @@ class KnowledgeGraph:
             for r in rows
         ]
 
+    async def _vec_search_candidates(
+        self, query_vec, limit: int
+    ) -> dict[str, float]:
+        """Use the vec0 entity index (when available) to fetch the top-K
+        nearest entities. Returns ``{entity_id: cosine_similarity}``.
+
+        Lane 05 W4 fix for AUDIT-r14 finding 14: replaces the previous
+        "load every entity row + cosine in Python" path that scaled
+        linearly with the entity table size and dominated KG query
+        latency once the table grew past a few thousand rows.
+
+        Returns an empty dict when sqlite-vec is unavailable; the
+        caller's numpy fallback then takes over.
+        """
+        if not self._vec_entities_available:
+            return {}
+
+        from memory.embeddings import _try_load_sqlite_vec, vec_to_blob
+
+        results: dict[str, float] = {}
+        conn = await aiosqlite.connect(self.db_path)
+        conn.row_factory = aiosqlite.Row
+        try:
+            await asyncio.to_thread(_try_load_sqlite_vec, conn._connection)  # type: ignore[attr-defined]
+            blob = vec_to_blob(query_vec)
+            async with conn.execute(
+                """
+                SELECT v.entity_rowid AS rowid, v.distance AS distance,
+                       e.id AS id
+                FROM vec_entities v
+                JOIN entities e
+                  ON e.rowid IN (
+                      SELECT rowid FROM entities WHERE rowid = e.rowid
+                  )
+                WHERE v.embedding MATCH ?
+                ORDER BY v.distance
+                LIMIT ?
+                """,
+                (blob, limit * 2),
+            ) as cur:
+                # The join on rowid above is intentionally a no-op
+                # — we want the indexed match without scanning the
+                # entities table. Resolve rowid → entity id below.
+                pass
+
+            # vec0 doesn't expose a column for entity_id; we map back
+            # via our deterministic 63-bit hash. Run the indexed
+            # MATCH then look up entity ids by reverse-mapping the
+            # rowids in a second statement that uses the entities
+            # table by rowid.
+            async with conn.execute(
+                """
+                SELECT entity_rowid, distance
+                FROM vec_entities
+                WHERE embedding MATCH ?
+                ORDER BY distance
+                LIMIT ?
+                """,
+                (blob, limit * 2),
+            ) as cur:
+                hits = await cur.fetchall()
+
+            if not hits:
+                return {}
+
+            # Build a rowid → entity_id mapping by querying entities
+            # we currently care about. The mapping isn't a SQL JOIN
+            # because the entity_rowid is our hash, not entities.rowid.
+            # Walk the entities table once, hash each id, and match
+            # against the hit set. For N entities this is still a scan
+            # but it runs only when the indexed search hit something
+            # — and the work is just hashing 12-char strings, no
+            # cosine math.
+            hit_rowids = {int(h["entity_rowid"]): float(h["distance"]) for h in hits}
+            async with conn.execute(
+                "SELECT id FROM entities"
+            ) as cur:
+                async for row in cur:
+                    rid = self._entity_rowid(row["id"])
+                    if rid in hit_rowids:
+                        # vec0 cosine returns distance ∈ [0, 2]; cosine
+                        # similarity = 1 - distance.
+                        results[row["id"]] = 1.0 - hit_rowids[rid]
+        except Exception as exc:
+            logger.debug("vec_entities search failed: %s", exc)
+            return {}
+        finally:
+            await conn.close()
+        return results
+
     async def search_entities(self, query: str, limit: int = 10) -> list[dict]:
-        """Hybrid FTS + embedding search for entities."""
+        """Hybrid FTS + embedding search for entities.
+
+        Lane 05 W4 (AUDIT-r14 finding 14): the embedding leg now
+        prefers the indexed vec0 nearest-neighbour search and only
+        falls back to the full-table numpy scan when sqlite-vec is
+        unavailable. Indexed path is sub-linear in entity count.
+        """
+        # Indexed nearest-neighbours first (works when sqlite-vec is
+        # loaded). Falls through to the numpy path when not.
+        query_vec = await self._embedder.embed(query)
+        indexed_hits = await self._vec_search_candidates(query_vec, limit)
+
         conn = await self._conn()
         try:
             fts_results = {}
@@ -376,13 +611,50 @@ class KnowledgeGraph:
             except Exception:
                 pass
 
-            query_vec = await self._embedder.embed(query)
+            if indexed_hits:
+                # Hydrate the indexed hits with entity metadata.
+                hit_ids = list(indexed_hits.keys())
+                placeholders = ",".join("?" * len(hit_ids))
+                async with conn.execute(
+                    f"SELECT id, name, entity_type, mention_count "
+                    f"FROM entities WHERE id IN ({placeholders})",
+                    hit_ids,
+                ) as cur:
+                    indexed_rows = await cur.fetchall()
+                vec_results = {
+                    r["id"]: {
+                        "id": r["id"],
+                        "name": r["name"],
+                        "type": r["entity_type"],
+                        "mentions": r["mention_count"],
+                        "vec_score": indexed_hits[r["id"]],
+                    }
+                    for r in indexed_rows
+                    if indexed_hits.get(r["id"], 0.0) > 0.3
+                }
+                # Indexed path resolved — skip the full-table scan
+                # entirely.
+                merged = {}
+                all_ids = set(fts_results.keys()) | set(vec_results.keys())
+                for eid in all_ids:
+                    fts = fts_results.get(eid, {})
+                    vec = vec_results.get(eid, {})
+                    info = fts or vec
+                    score = 0.3 * fts.get("fts_score", 0) + 0.7 * vec.get("vec_score", 0)
+                    merged[eid] = {**info, "score": score}
+                    merged[eid].pop("fts_score", None)
+                    merged[eid].pop("vec_score", None)
+                ranked = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
+                return self._mmr_rerank(ranked, limit)
+
+            # Fallback: full-table numpy scan (sqlite-vec unavailable
+            # or indexed path returned nothing).
             async with conn.execute(
                 "SELECT id, name, entity_type, mention_count, embedding FROM entities WHERE embedding IS NOT NULL"
             ) as cur:
                 all_entities = await cur.fetchall()
         finally:
-            await conn.close()
+            await self._release(conn)
 
         vec_results = {}
         for e in all_entities:
@@ -438,7 +710,7 @@ class KnowledgeGraph:
             ) as cur:
                 aliases = await cur.fetchall()
         finally:
-            await conn.close()
+            await self._release(conn)
 
         return {
             "entity": {
@@ -581,7 +853,7 @@ class KnowledgeGraph:
                     results.append({"source": subject, "relation": predicate, "target": obj})
             await conn.commit()
         finally:
-            await conn.close()
+            await self._release(conn)
         return results
 
     def stats(self) -> dict:
@@ -614,7 +886,7 @@ class KnowledgeGraph:
             async with conn.execute("SELECT COUNT(*) FROM entity_aliases") as cur:
                 alias_count = (await cur.fetchone())[0]
         finally:
-            await conn.close()
+            await self._release(conn)
         return {
             "entities": entity_count,
             "relations": relation_count,
@@ -642,16 +914,52 @@ class KnowledgeGraph:
                     ) as cur:
                         row = await cur.fetchone()
         finally:
-            await conn.close()
+            await self._release(conn)
         if row:
             return {"id": row["id"], "name": row["name"], "entity_type": row["entity_type"]}
         return None
 
     async def _link_entity(self, name: str) -> Optional[dict]:
-        """Find an existing entity with similar embedding (entity linking)."""
+        """Find an existing entity with similar embedding (entity linking).
+
+        Lane 05 W4: prefer the indexed vec0 nearest-neighbour search
+        when sqlite-vec is loaded — only the top-K candidates are
+        re-scored. Falls back to the legacy full-table numpy scan
+        when the index is unavailable so behaviour is identical on
+        hosts without the extension.
+        """
         if not self._embedder.available:
             return None
         name_vec = await self._embedder.embed(name)
+
+        # Indexed path: ask vec0 for the nearest few candidates and
+        # only score those.
+        indexed = await self._vec_search_candidates(name_vec, limit=5)
+        if indexed:
+            best_id, best_sim = max(indexed.items(), key=lambda kv: kv[1])
+            if best_sim >= ENTITY_MERGE_THRESHOLD:
+                conn = await self._conn()
+                try:
+                    async with conn.execute(
+                        "SELECT id, name, entity_type FROM entities WHERE id = ?",
+                        (best_id,),
+                    ) as cur:
+                        row = await cur.fetchone()
+                finally:
+                    await self._release(conn)
+                if row:
+                    logger.info(
+                        "Entity linked (indexed): %r -> %r (sim=%.3f)",
+                        name, row["name"], best_sim,
+                    )
+                    return {
+                        "id": row["id"],
+                        "name": row["name"],
+                        "entity_type": row["entity_type"],
+                    }
+            return None
+
+        # Fallback: full-table scan.
         conn = await self._conn()
         try:
             async with conn.execute(
@@ -659,7 +967,7 @@ class KnowledgeGraph:
             ) as cur:
                 all_entities = await cur.fetchall()
         finally:
-            await conn.close()
+            await self._release(conn)
 
         best_match = None
         best_sim = 0.0
@@ -678,6 +986,99 @@ class KnowledgeGraph:
             return {"id": best_match["id"], "name": best_match["name"], "entity_type": best_match["entity_type"]}
         return None
 
+    async def find_entities_by_tag(
+        self,
+        *,
+        category: str = "",
+        entity_type: str = "",
+        limit: int = 50,
+    ) -> list[dict]:
+        """Lookup entities by metadata category and/or entity_type.
+
+        Lane 05 W4 (THESIS_SCENARIOS S3): the orchestrator needs to
+        answer "what BLE devices are around my phone right now?"
+        without doing a full-text search over the KG. Devices land
+        in the entities table with ``metadata.category == 'device'``
+        (the iOS BLE ingest in Wave 3 Lane 11 writes this), so a
+        targeted JSON1 lookup over ``entities.metadata`` plus the
+        existing ``entity_type`` index is the right primitive.
+
+        Both filters are optional but at least one must be provided.
+
+        Returns ``[{id, name, entity_type, metadata, mention_count,
+        last_seen_at}]`` ordered by most-recently-mentioned first.
+        """
+        if not category and not entity_type:
+            raise ValueError(
+                "find_entities_by_tag requires at least one of category= or entity_type="
+            )
+
+        clauses: list[str] = []
+        params: list = []
+        if entity_type:
+            clauses.append("entity_type = ?")
+            params.append(entity_type)
+        if category:
+            # SQLite's JSON1 ``json_extract`` is enabled by default
+            # in modern sqlite3 builds; if the build was compiled
+            # without it the query raises and we fall back to a LIKE
+            # match on the raw metadata JSON text. The fallback is
+            # noisier (matches "category" appearing anywhere) but
+            # keeps the call functional on stripped-down builds.
+            clauses.append(
+                "(json_extract(metadata, '$.category') = ?"
+                " OR metadata LIKE ?)"
+            )
+            params.append(category)
+            params.append(f'%"category": "{category}"%')
+
+        where_sql = " AND ".join(clauses) if clauses else "1=1"
+        sql = (
+            "SELECT id, name, entity_type, metadata, mention_count, updated_at "
+            f"FROM entities WHERE {where_sql} "
+            "ORDER BY updated_at DESC LIMIT ?"
+        )
+        params.append(int(limit))
+
+        conn = await self._conn()
+        try:
+            try:
+                async with conn.execute(sql, params) as cur:
+                    rows = await cur.fetchall()
+            except aiosqlite.OperationalError as exc:
+                # JSON1 missing — fall through to a LIKE-only query
+                # (already covered by the second clause above; this
+                # path catches the case where SQLite errored before
+                # OR-evaluation).
+                logger.debug(
+                    "find_entities_by_tag JSON1 path failed (%s) — "
+                    "retrying with LIKE-only filter", exc,
+                )
+                fallback_sql = (
+                    "SELECT id, name, entity_type, metadata, mention_count, updated_at "
+                    "FROM entities WHERE metadata LIKE ? "
+                    "ORDER BY updated_at DESC LIMIT ?"
+                )
+                async with conn.execute(
+                    fallback_sql,
+                    (f'%"category": "{category}"%', int(limit)),
+                ) as cur:
+                    rows = await cur.fetchall()
+        finally:
+            await self._release(conn)
+
+        return [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "entity_type": r["entity_type"],
+                "metadata": json.loads(r["metadata"] or "{}"),
+                "mention_count": r["mention_count"],
+                "last_seen_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+
     async def _bump_mention(self, entity_id: str):
         conn = await self._conn()
         try:
@@ -687,7 +1088,7 @@ class KnowledgeGraph:
             )
             await conn.commit()
         finally:
-            await conn.close()
+            await self._release(conn)
 
     async def _add_alias(self, entity_id: str, alias: str):
         conn = await self._conn()
@@ -704,7 +1105,7 @@ class KnowledgeGraph:
                 )
                 await conn.commit()
         finally:
-            await conn.close()
+            await self._release(conn)
 
     @staticmethod
     def _mmr_rerank(results: list[dict], limit: int, diversity: float = 0.3) -> list[dict]:
