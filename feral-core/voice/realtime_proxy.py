@@ -604,6 +604,31 @@ class RealtimeProxy:
         await rs.connect()
         if not getattr(rs, 'connected', False) and not getattr(rs, '_ws', None):
             logger.warning("Voice session failed to connect for %s", session_id)
+            # Lane 05 W9 (AUDIT-r14 finding 15 fix #2): pre-fix the
+            # connect-time failure path returned None silently and the
+            # phone never saw a ``voice_status`` frame — the user got
+            # dead air with no banner. Now we route the failure through
+            # the same fallback router that runtime errors use, with a
+            # synthetic ``openai_realtime_connect`` reason so the UI
+            # can distinguish "couldn't even open the WS" from "WS
+            # opened but quota tripped mid-call".
+            if not self._api_key:
+                reason = "openai_realtime_no_key"
+                detail = "OPENAI_API_KEY not configured"
+            else:
+                reason = "openai_realtime_connect"
+                detail = "OpenAI Realtime WS handshake failed"
+            if self._fallback_router:
+                try:
+                    await self._fallback_router.handle_realtime_failure(
+                        session_id=session_id,
+                        reason=reason,
+                        detail=detail,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Fallback router refused realtime connect failure"
+                    )
             return None
         self._sessions[session_id] = rs
         self._node_to_session[node_id] = session_id

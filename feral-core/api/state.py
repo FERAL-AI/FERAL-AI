@@ -1099,6 +1099,13 @@ class BrainState:
             )
             if self.voice_router:
                 self.voice_router.set_gemini_proxy(self.gemini_proxy)
+            # Lane 05 W9 (AUDIT-r14 finding 15 fix #3): mirror the
+            # OpenAI Realtime fallback wiring so Gemini Live errors
+            # also emit ``voice_status: degraded`` + flip to whisper
+            # TTS (or chained pipeline). Without this, an invalid
+            # Gemini key drops the call silently.
+            if self.gemini_proxy and self.voice_router:
+                self.gemini_proxy.attach_fallback_router(self.voice_router)
 
         with boot_subsystem(self._boot_report, "ChainedVoicePipeline"):
             # Lane 05 W8 (AUDIT-r14 finding 15 fix #1, THESIS_SCENARIOS
