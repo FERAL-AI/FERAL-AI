@@ -25,6 +25,12 @@ from security.safety_resolver import (
     is_read_only,
     resolve_policy,
 )
+from agents.tool_dispatch_validator import (
+    ToolDispatchValidator,
+    make_tool_error_envelope,
+)
+
+MAX_LLM_TOOLS = 64
 
 if TYPE_CHECKING:
     from agents.orchestrator import Orchestrator
@@ -89,10 +95,57 @@ class ToolRunner:
         # ToolRunner. If no manager is injected (legacy/tests), fall back
         # to local construction.
         self._approval_mgr = approval_manager or ApprovalManager()
+        self._dispatch_validator: Optional[ToolDispatchValidator] = None
 
         raw_mode = os.environ.get("FERAL_AUTONOMY", "").strip().lower() or autonomy_mode
         self._autonomy_mode = raw_mode if raw_mode in VALID_AUTONOMY_MODES else "hybrid"
         logger.info(f"ToolRunner autonomy_mode={self._autonomy_mode}")
+
+    def _get_dispatch_validator(self) -> ToolDispatchValidator:
+        if self._dispatch_validator is None:
+            self._dispatch_validator = ToolDispatchValidator(registry=self._skill_registry())
+        return self._dispatch_validator
+
+    @staticmethod
+    def assemble_llm_tool_list(
+        skills_registry,
+        relevant_skills,
+        *,
+        mcp_client=None,
+        max_tools: int = MAX_LLM_TOOLS,
+    ) -> list[dict]:
+        """Build the LLM-facing tool list with routing-priority cap.
+
+        ``relevant_skills`` is already ranked by the orchestrator router;
+        skill tools from higher-priority skills are kept first. MCP tools
+        are appended after skill tools (same order as orchestrator today).
+        When the combined list exceeds ``max_tools``, tail entries drop and
+        ``feral_tool_list_truncated_total`` increments.
+        """
+        from observability.metrics import increment
+
+        tools: list[dict] = []
+        if skills_registry is not None and relevant_skills:
+            for skill in relevant_skills:
+                tools.extend(skills_registry.get_tools_for_skills([skill]))
+
+        if mcp_client is not None:
+            mcp_tools = mcp_client.to_llm_tool_definitions()
+            if mcp_tools:
+                tools = (tools or []) + mcp_tools
+
+        if len(tools) > max_tools:
+            dropped = len(tools) - max_tools
+            increment(
+                "feral_tool_list_truncated_total",
+                attributes={"dropped": str(dropped), "cap": str(max_tools)},
+            )
+            logger.warning(
+                "LLM tool list truncated: %d -> %d (dropped %d tail tools)",
+                len(tools), max_tools, dropped,
+            )
+            tools = tools[:max_tools]
+        return tools or []
 
     # ─────────────────────────────────────────────
     # Safety: Graduated Permission System
@@ -787,7 +840,26 @@ class ToolRunner:
 
         endpoint = next((ep for ep in skill.endpoints if ep.id == endpoint_id), None)
         if not endpoint:
-            return {"error": f"Endpoint not found: {endpoint_id}"}
+            return make_tool_error_envelope(
+                tool_call_id=tool_call.get("id", ""),
+                error_code="unknown_endpoint",
+                reason=f"Endpoint not found: {endpoint_id}",
+            )
+
+        validation = self._get_dispatch_validator().validate(skill_id, endpoint_id, args)
+        if not validation.ok:
+            logger.warning(
+                "Tool dispatch validation failed for %s: %s",
+                tool_name, validation.reason,
+            )
+            return make_tool_error_envelope(
+                tool_call_id=tool_call.get("id", ""),
+                error_code=validation.error_code or "invalid_args",
+                reason=validation.reason or "Invalid tool arguments",
+                schema_hint=validation.schema_hint,
+            )
+        if validation.fixed_args is not None:
+            args = validation.fixed_args
 
         result = await self._orch.executor.execute(
             tool_name=tool_name, args=args, skill=skill, endpoint=endpoint,
@@ -1027,11 +1099,9 @@ class ToolRunner:
         """Execute one subagent task with isolated history and full tool access."""
         orch = self._orch
         relevant_skills = await orch._route_prompt(task_text)
-        tools = orch.skills.get_tools_for_skills(relevant_skills)
-        if orch._mcp_client:
-            mcp_tools = orch._mcp_client.to_llm_tool_definitions()
-            if mcp_tools:
-                tools = (tools or []) + mcp_tools
+        tools = self.assemble_llm_tool_list(
+            orch.skills, relevant_skills, mcp_client=orch._mcp_client,
+        )
 
         frame = orch.perception.get_frame(parent_session_id)
         system_prompt = await orch._build_system_prompt(frame, relevant_skills, parent_session_id)
