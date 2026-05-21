@@ -69,7 +69,19 @@ class TelegramBridge:
 
     @property
     def connected(self) -> bool:
-        return self._token is not None
+        from integrations._probe_status import is_connected_cached
+
+        return is_connected_cached(
+            "telegram", fallback=self._token is not None,
+        )
+
+    async def probe_connected(self) -> bool:
+        from integrations._probe_status import refresh
+
+        result = await refresh("telegram")
+        if result is None:
+            return self.connected
+        return result
 
     async def send(self, chat_id: str = "", text: str = "", **kwargs) -> dict:
         if not self._channel:
@@ -125,7 +137,19 @@ class SlackBridge:
 
     @property
     def connected(self) -> bool:
-        return self._token is not None
+        from integrations._probe_status import is_connected_cached
+
+        return is_connected_cached(
+            "slack", fallback=self._token is not None,
+        )
+
+    async def probe_connected(self) -> bool:
+        from integrations._probe_status import refresh
+
+        result = await refresh("slack")
+        if result is None:
+            return self.connected
+        return result
 
     async def send(self, channel: str = "", text: str = "", **kwargs) -> dict:
         if not self._channel:
@@ -238,7 +262,19 @@ class DiscordBridge:
 
     @property
     def connected(self) -> bool:
-        return self._token is not None
+        from integrations._probe_status import is_connected_cached
+
+        return is_connected_cached(
+            "discord", fallback=self._token is not None,
+        )
+
+    async def probe_connected(self) -> bool:
+        from integrations._probe_status import refresh
+
+        result = await refresh("discord")
+        if result is None:
+            return self.connected
+        return result
 
     async def send(self, channel_id: str = "", text: str = "", **kwargs) -> dict:
         if not self._channel:

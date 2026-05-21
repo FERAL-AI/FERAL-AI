@@ -42,9 +42,39 @@ class CalendarIntegration:
 
     @property
     def connected(self) -> bool:
-        if self._ics_url:
-            return True
-        return self._oauth is not None and self._oauth.is_connected("google")
+        """Live-verified Google Calendar connection.
+
+        Pre-Lane-10 we returned ``True`` whenever an ICS URL was set,
+        which lied about Google Calendar specifically — the ICS feed
+        is a read-only side-channel for users without OAuth, not a
+        valid Google Calendar credential. The truthful surface now:
+
+        * If a Google probe has run recently → reflect that result.
+        * Otherwise fall back to the OAuth ``is_connected`` check.
+
+        ICS readiness is exposed separately via :attr:`ics_configured`
+        so the WebUI can render "Read-only ICS feed" alongside (not
+        as a substitute for) the Google connection.
+        """
+        from integrations._probe_status import is_connected_cached
+
+        token_present = (
+            self._oauth is not None and self._oauth.is_connected("google")
+        )
+        return is_connected_cached("google", fallback=token_present)
+
+    @property
+    def ics_configured(self) -> bool:
+        return self._ics_url is not None
+
+    async def probe_connected(self) -> bool:
+        from integrations._probe_status import refresh
+
+        result = await refresh("google",
+                               vault=getattr(self._oauth, "_vault", None))
+        if result is None:
+            return self.connected
+        return result
 
     @property
     def _use_ics(self) -> bool:

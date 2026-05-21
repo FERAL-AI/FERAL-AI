@@ -491,6 +491,108 @@ async def _probe_oura(*, vault=None, **_kwargs: Any) -> ProbeResult:
     )
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Lane 10 — additive probe registrations for integrations whose
+# ``connected`` property previously relied on token-presence only.
+# Microsoft, Home Assistant and the messaging bridges (Telegram, Slack,
+# Discord) all expose cheap "is this token still good?" endpoints we
+# can hit. Probes are read-only and rate-limited by
+# ``PROBE_CACHE_TTL_SECONDS``.
+# ─────────────────────────────────────────────────────────────────────
+
+
+@register_probe("microsoft")
+async def _probe_microsoft(*, vault=None, **_kwargs: Any) -> ProbeResult:
+    token = _resolve_oauth_access_token(vault, "microsoft")
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    return await _http_probe(
+        "microsoft",
+        method="GET",
+        url="https://graph.microsoft.com/v1.0/me",
+        headers=headers,
+        had_key=bool(token),
+    )
+
+
+@register_probe("home_assistant")
+async def _probe_home_assistant(*, vault=None, **_kwargs: Any) -> ProbeResult:
+    """Probe Home Assistant via ``GET {base_url}/api/states``.
+
+    Looks up the long-lived access token in env (``HA_TOKEN`` or the
+    add-on ``SUPERVISOR_TOKEN``) or via the OAuth manager's stored
+    bearer token. Base URL is configurable per Lane 03's environment
+    discovery; we mirror the resolution logic the integration already
+    uses.
+    """
+    token = (
+        os.environ.get("HA_TOKEN")
+        or os.environ.get("SUPERVISOR_TOKEN")
+        or ""
+    ).strip()
+    if not token:
+        token = _resolve_oauth_access_token(vault, "home_assistant") or ""
+    if os.environ.get("SUPERVISOR_TOKEN"):
+        base = os.environ.get("FERAL_HA_URL", "http://supervisor/core")
+    else:
+        base = os.environ.get("HA_URL", "http://homeassistant.local:8123")
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    return await _http_probe(
+        "home_assistant",
+        method="GET",
+        url=f"{base.rstrip('/')}/api/states",
+        headers=headers,
+        had_key=bool(token),
+    )
+
+
+@register_probe("telegram")
+async def _probe_telegram(*, vault=None, **_kwargs: Any) -> ProbeResult:
+    token = _resolve_env_or_vault(vault, ("FERAL_TELEGRAM_BOT_TOKEN",))
+    if not token:
+        probed_at = time.time()
+        return ProbeResult(
+            provider="telegram",
+            ok=False,
+            status_code=None,
+            reason="no_key",
+            detail="FERAL_TELEGRAM_BOT_TOKEN not configured",
+            probed_at=probed_at,
+            latency_ms=0.0,
+        )
+    return await _http_probe(
+        "telegram",
+        method="GET",
+        url=f"https://api.telegram.org/bot{token}/getMe",
+        had_key=True,
+    )
+
+
+@register_probe("slack")
+async def _probe_slack(*, vault=None, **_kwargs: Any) -> ProbeResult:
+    token = _resolve_env_or_vault(vault, ("FERAL_SLACK_BOT_TOKEN",))
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    return await _http_probe(
+        "slack",
+        method="GET",
+        url="https://slack.com/api/auth.test",
+        headers=headers,
+        had_key=bool(token),
+    )
+
+
+@register_probe("discord")
+async def _probe_discord(*, vault=None, **_kwargs: Any) -> ProbeResult:
+    token = _resolve_env_or_vault(vault, ("FERAL_DISCORD_BOT_TOKEN",))
+    headers = {"Authorization": f"Bot {token}"} if token else None
+    return await _http_probe(
+        "discord",
+        method="GET",
+        url="https://discord.com/api/v10/users/@me",
+        headers=headers,
+        had_key=bool(token),
+    )
+
+
 async def probe(
     provider_id: str,
     *,

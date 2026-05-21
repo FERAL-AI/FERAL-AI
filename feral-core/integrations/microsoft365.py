@@ -34,7 +34,22 @@ class Microsoft365Integration:
 
     @property
     def connected(self) -> bool:
-        return self._oauth is not None and self._oauth.is_connected("microsoft")
+        from integrations._probe_status import is_connected_cached
+
+        token_present = (
+            self._oauth is not None and self._oauth.is_connected("microsoft")
+        )
+        return is_connected_cached("microsoft", fallback=token_present)
+
+    async def probe_connected(self) -> bool:
+        """Force a live Microsoft Graph ``/me`` probe."""
+        from integrations._probe_status import refresh
+
+        result = await refresh("microsoft",
+                               vault=getattr(self._oauth, "_vault", None))
+        if result is None:
+            return self.connected
+        return result
 
     async def execute(self, endpoint_id: str, args: dict[str, Any], vault: dict[str, str] | None = None) -> dict[str, Any]:
         dispatch = {

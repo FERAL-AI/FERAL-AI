@@ -56,9 +56,46 @@ class HomeAssistantIntegration:
 
     @property
     def connected(self) -> bool:
-        return bool(self._token) or (
+        from integrations._probe_status import is_connected_cached
+
+        token_present = bool(self._token) or (
             self._oauth is not None and self._oauth.is_connected("home_assistant")
         )
+        return is_connected_cached("home_assistant", fallback=token_present)
+
+    async def probe_connected(self) -> bool:
+        """Force a live ``GET {base_url}/api/states`` probe with the
+        configured long-lived token."""
+        from integrations._probe_status import refresh, mark_probe_result
+
+        result = await refresh(
+            "home_assistant",
+            vault=getattr(self._oauth, "_vault", None),
+        )
+        if result is not None:
+            return result
+        # No registered probe — do a one-off direct check so the cache
+        # gets populated. Without this the integration would never
+        # transition out of token-presence fallback.
+        await self._ensure_client()
+        try:
+            resp = await self._http.get("/api/states")
+            ok = resp.status_code == 200
+            mark_probe_result(
+                "home_assistant",
+                ok=ok,
+                reason="ok" if ok else f"http_{resp.status_code}",
+                detail=("" if ok else (resp.text or "")[:200]),
+            )
+            return ok
+        except Exception as exc:
+            mark_probe_result(
+                "home_assistant",
+                ok=False,
+                reason="network_error",
+                detail=str(exc),
+            )
+            return False
 
     async def execute(self, endpoint_id: str, args: dict, vault: dict = None) -> dict:
         """Skill executor interface."""

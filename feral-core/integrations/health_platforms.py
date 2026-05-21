@@ -39,9 +39,21 @@ class WhoopClient:
 
     @property
     def connected(self) -> bool:
-        if self._token:
-            return True
-        return self._oauth is not None and self._oauth.is_connected("whoop")
+        from integrations._probe_status import is_connected_cached
+
+        token_present = bool(self._token) or (
+            self._oauth is not None and self._oauth.is_connected("whoop")
+        )
+        return is_connected_cached("whoop", fallback=token_present)
+
+    async def probe_connected(self) -> bool:
+        from integrations._probe_status import refresh
+
+        result = await refresh("whoop",
+                               vault=getattr(self._oauth, "_vault", None))
+        if result is None:
+            return self.connected
+        return result
 
     async def get_recovery(self) -> dict[str, Any]:
         headers = await self._headers()
@@ -215,9 +227,21 @@ class OuraClient:
 
     @property
     def connected(self) -> bool:
-        if self._token:
-            return True
-        return self._oauth is not None and self._oauth.is_connected("oura")
+        from integrations._probe_status import is_connected_cached
+
+        token_present = bool(self._token) or (
+            self._oauth is not None and self._oauth.is_connected("oura")
+        )
+        return is_connected_cached("oura", fallback=token_present)
+
+    async def probe_connected(self) -> bool:
+        from integrations._probe_status import refresh
+
+        result = await refresh("oura",
+                               vault=getattr(self._oauth, "_vault", None))
+        if result is None:
+            return self.connected
+        return result
 
     async def get_sleep(self, days: int = 7) -> dict[str, Any]:
         headers = await self._headers()

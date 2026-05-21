@@ -48,9 +48,22 @@ class NotionIntegration:
 
     @property
     def connected(self) -> bool:
-        return bool(self._token) or (
+        from integrations._probe_status import is_connected_cached
+
+        token_present = bool(self._token) or (
             self._oauth is not None and self._oauth.is_connected("notion")
         )
+        return is_connected_cached("notion", fallback=token_present)
+
+    async def probe_connected(self) -> bool:
+        """Force a live Notion ``/v1/users/me`` probe."""
+        from integrations._probe_status import refresh
+
+        result = await refresh("notion",
+                               vault=getattr(self._oauth, "_vault", None))
+        if result is None:
+            return self.connected
+        return result
 
     async def execute(self, endpoint_id: str, args: dict, vault: dict = None) -> dict:
         """Skill executor interface."""

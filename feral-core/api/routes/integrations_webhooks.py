@@ -28,13 +28,20 @@ async def list_integrations():
 
 @router.get("/api/oauth/authorize/{provider_id}")
 async def oauth_authorize(provider_id: str):
-    """Start an OAuth2 flow — returns the authorization URL."""
+    """Start an OAuth2 flow — returns the authorization URL.
+
+    When the provider hasn't been set up yet (no client_id baked in
+    and operator hasn't supplied one) we surface
+    ``setup_status=provider_setup_required`` plus the doc URL so the
+    UI can render a "Configure your own Google/Notion/Spotify app"
+    panel instead of a misleading error toast.
+    """
     if not state.oauth:
-        return {"error": "OAuth manager not initialized"}
-    url = state.oauth.build_authorize_url(provider_id)
-    if not url:
-        return {"error": f"Cannot build authorize URL for {provider_id}"}
-    return {"url": url, "provider": provider_id}
+        return {
+            "error": "OAuth manager not initialized",
+            "reason": "oauth_unavailable",
+        }
+    return state.oauth.build_authorize_response(provider_id)
 
 
 @router.get("/api/oauth/callback")
