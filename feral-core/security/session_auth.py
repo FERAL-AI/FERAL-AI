@@ -5,6 +5,15 @@ Token-based authentication for WebSocket sessions (/v1/session).
 
 Tokens are 32-char hex strings persisted in ~/.feral/session_token.
 Localhost connections can optionally bypass auth (FERAL_LOCAL_BYPASS).
+
+**audit-r12 A1 (shipped in v2026.5.38):** ``FERAL_LOCAL_BYPASS`` now
+defaults to ``False``. Loopback (127.0.0.1 / ::1) continues to bypass
+auth via the explicit loopback exception in the middleware so a fresh
+``feral serve`` against the default ``127.0.0.1`` bind keeps working
+without configuration. LAN / Tailscale / 0.0.0.0 binds now reject
+unauthenticated requests by default. Opt back in for dev with
+``FERAL_LOCAL_BYPASS=1``; boot will then emit a loud warning whenever
+the brain is bound to a non-loopback address.
 """
 
 from __future__ import annotations
@@ -76,5 +85,35 @@ def is_localhost(host: str | None) -> bool:
 
 
 def local_bypass_enabled() -> bool:
-    """Whether localhost connections skip session auth (default ``True``)."""
-    return os.environ.get("FERAL_LOCAL_BYPASS", "true").lower() in ("true", "1", "yes")
+    """Whether localhost connections skip session auth (default ``False``).
+
+    audit-r12 A1 — flipped to secure-by-default in v2026.5.38. The
+    middleware separately permits loopback requests so the default
+    127.0.0.1 bind still works without auth. Set
+    ``FERAL_LOCAL_BYPASS=1`` (alongside ``FERAL_LOCAL_BYPASS=true`` /
+    ``yes``) only in dev when running off-loopback (LAN/Tailscale)
+    and you accept the trust posture.
+    """
+    return os.environ.get("FERAL_LOCAL_BYPASS", "false").lower() in ("true", "1", "yes")
+
+
+def warn_if_unsafe_bypass(bind_host: str) -> Optional[str]:
+    """Emit a loud warning when ``FERAL_LOCAL_BYPASS`` is on for a
+    non-loopback bind.
+
+    Returns the warning message that was logged (or ``None`` if the
+    configuration is safe). Callers (boot path, ``feral doctor``)
+    surface this so operators see the trust degradation immediately.
+    """
+    if not local_bypass_enabled():
+        return None
+    if is_localhost(bind_host) or bind_host in ("", None):
+        return None
+    msg = (
+        "FERAL_LOCAL_BYPASS=1 with bind_host=%s — UNAUTHENTICATED ACCESS "
+        "from every host that can reach this address. Set "
+        "FERAL_LOCAL_BYPASS=0 (default) for production; this opt-in only "
+        "makes sense on a trusted single-user dev box."
+    ) % bind_host
+    logger.warning(msg)
+    return msg

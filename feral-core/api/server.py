@@ -47,7 +47,9 @@ from security.session_auth import (
     verify_session,
     is_localhost,
     local_bypass_enabled,
+    warn_if_unsafe_bypass,
 )
+from config.runtime import brain_bind_host
 from security.device_pairing import DevicePairingStore  # used in type hint
 
 from api.routes.dashboard import router as dashboard_router
@@ -526,8 +528,16 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         if scope_type == "websocket":
             return await call_next(request)
 
+        # audit-r12 A1 (v2026.5.38) — secure-by-default.
+        # Loopback (127.0.0.1 / ::1 / localhost) ALWAYS bypasses HTTP auth so
+        # the local dashboard works out of the box. Off-loopback (LAN /
+        # Tailscale / 0.0.0.0) requires the API key or phone bearer; the
+        # dev escape hatch is ``FERAL_LOCAL_BYPASS=1``, which emits a loud
+        # boot warning via ``warn_if_unsafe_bypass``.
         client_host = request.client.host if request.client else None
-        if _session_auth_module.is_localhost(client_host) and _session_auth_module.local_bypass_enabled():
+        if _session_auth_module.is_localhost(client_host):
+            return await call_next(request)
+        if _session_auth_module.local_bypass_enabled():
             return await call_next(request)
 
         auth = request.headers.get("authorization", "")
@@ -763,6 +773,16 @@ async def metrics_endpoint(request: Request):
 
 @app.on_event("startup")
 async def startup():
+    # audit-r12 A1 — surface FERAL_LOCAL_BYPASS=1 on non-loopback bind
+    # as a loud boot warning. The middleware enforces the actual policy
+    # (loopback still bypasses by default); the warning makes the trust
+    # degradation visible the moment the brain comes up.
+    try:
+        _bind = brain_bind_host()
+    except Exception:
+        _bind = ""
+    warn_if_unsafe_bypass(_bind)
+
     await state.init()
     if state.memory:
         state.memory.start_background_tasks()
@@ -1024,7 +1044,11 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
     client_host = ws.client.host if ws.client else None
     _ws_authed = False
 
-    if is_localhost(client_host) and local_bypass_enabled():
+    # audit-r12 A1 (v2026.5.38) — loopback always bypasses; off-loopback
+    # requires a token, with ``FERAL_LOCAL_BYPASS=1`` as the dev opt-in.
+    if is_localhost(client_host):
+        _ws_authed = True
+    elif local_bypass_enabled():
         _ws_authed = True
     elif token and (verify_session(token) or token == FERAL_API_KEY):
         _ws_authed = True
