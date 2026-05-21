@@ -70,14 +70,24 @@ class TestCredentialFileLoading:
 
         loader = ConfigLoader(project_dir=str(tmp_path))
         loader.user_home = user_home
-        with caplog.at_level("WARNING", logger="feral.config"):
+        # v2026.5.37 (Lane 03): ConfigLoader is now vault-first; legacy plaintext
+        # credentials.json is no longer read directly. The corrupt file is detected
+        # by vault auto-migration (logged under feral.vault) AND ConfigLoader emits
+        # a deprecation warning under feral.config. Either signal is acceptable —
+        # what matters is that the loader does not raise and credentials remain
+        # empty.
+        with caplog.at_level("WARNING"):
             loader.discover()
 
         assert loader.get_credential("OPENAI_API_KEY") == ""
         assert any(
-            "Failed to load credentials" in rec.getMessage()
+            (
+                "Deprecated plaintext credentials.json" in rec.getMessage()
+                or "vault.legacy_corrupt" in rec.getMessage()
+                or "Failed to load credentials" in rec.getMessage()
+            )
             for rec in caplog.records
-        )
+        ), "expected a corrupt-credentials warning (deprecation or vault quarantine or load failure)"
 
     def test_env_api_key_is_captured_in_credentials(self, tmp_path, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
