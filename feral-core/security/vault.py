@@ -824,22 +824,33 @@ class BlindVault:
     # ── Audit ───────────────────────────────────────────────────────
 
     def _audit(self, action: str, key_name: str, actor: str, **extra) -> None:
-        entry = {
-            "ts": time.time(),
-            "action": action,
-            "key": key_name,
-            "actor": actor,
-            **extra,
-        }
-        try:
-            self._audit_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._audit_path, "a") as f:
-                f.write(json.dumps(entry) + "\n")
-        except OSError as exc:
-            # Audit failures must NOT block credential ops, but they
-            # MUST be visible in logs so operators notice when their
-            # disk is full / read-only.
-            logger.warning("vault.audit_write_failed: %s", exc)
+        """Append a fail-loud audit entry.
+
+        audit-r12 A5 (v2026.5.38) — the pre-fix path logged the OSError
+        as a warning and let the credential op succeed silently. That
+        violated the security-perimeter promise: a write that left no
+        audit record might as well have been a stealth credential read
+        for the operator who later combs the log looking for the breach.
+
+        The new behaviour delegates to
+        :func:`security.audit_log.audit_event` which raises
+        :class:`security.audit_log.AuditFailure` on any I/O error. The
+        public credential ops (:meth:`store`, :meth:`retrieve`,
+        :meth:`remove`, :meth:`put`, :meth:`get`, :meth:`remove_from`,
+        :meth:`put_namespace`, :meth:`get_namespace`,
+        :meth:`remove_namespace`, :meth:`rotate_master_key`,
+        :meth:`restore_from_recovery_code`) propagate the exception so
+        the caller decides — they no longer swallow it.
+
+        The legacy ``self._audit_path`` attribute is still set in
+        ``__init__`` for the historical inline path, but writes now
+        flow through :func:`audit_log.audit_event` which resolves the
+        path via ``FERAL_AUDIT_LOG_PATH`` / ``$FERAL_HOME/audit.log``
+        (same default as before, plus a test-friendly env override).
+        """
+        from security import audit_log
+
+        audit_log.audit_event(action, key_name, actor, **extra)
 
 
 # ─────────────────────────────────────────────────────────────────────
