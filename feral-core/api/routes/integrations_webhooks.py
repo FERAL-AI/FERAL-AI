@@ -1,11 +1,12 @@
 """OAuth, integrations, and webhook HTTP endpoints."""
 
-import json
+import logging
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request, Response
 
 from api.state import state
 
+logger = logging.getLogger("feral.api.integrations_webhooks")
 router = APIRouter()
 
 
@@ -79,17 +80,45 @@ async def disconnect_integration(provider_id: str):
 
 
 @router.post("/api/webhooks/{app_id}")
-async def receive_webhook(app_id: str, request_body: dict = None):
-    """Receive an incoming webhook from an external app."""
+async def receive_webhook(app_id: str, request: Request):
+    """Receive an incoming webhook from an external app.
+
+    Reads the **raw** request body (not a parsed JSON dict) so HMAC
+    signatures stay byte-exact, and forwards the **real** request
+    headers — pre-Lane-10 the route always passed ``headers={}`` which
+    made GitHub/Stripe/HA HMAC verification unreachable through this
+    HTTP path even when the operator had configured a secret. The
+    receiver is fail-closed: when a secret is configured and the
+    signature is missing or wrong the request is rejected with a 401
+    or 403 rather than accepted with a misleading
+    ``verified=false`` flag.
+    """
     if not state.webhook_receiver:
-        return {"error": "Webhook receiver not initialized"}
-    body_bytes = json.dumps(request_body or {}).encode() if request_body else b"{}"
+        return Response(
+            status_code=503,
+            content='{"error":"Webhook receiver not initialized"}',
+            media_type="application/json",
+        )
+    body_bytes = await request.body()
+    headers = {k: v for k, v in request.headers.items()}
+    content_type = request.headers.get("content-type", "application/json")
     result = await state.webhook_receiver.handle_request(
         app_id=app_id,
         body=body_bytes,
-        headers={},
-        content_type="application/json",
+        headers=headers,
+        content_type=content_type,
     )
+    if not result.get("accepted"):
+        reason = result.get("reason") or "rejected"
+        status_code = 401 if reason == "missing_signature" else (
+            403 if reason == "invalid_signature" else 400
+        )
+        return Response(
+            status_code=status_code,
+            content=f'{{"error":"{result.get("error", "rejected")}",'
+                    f'"reason":"{reason}"}}',
+            media_type="application/json",
+        )
     return result
 
 
