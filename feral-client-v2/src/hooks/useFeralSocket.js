@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from 'react';
-import { FeralSocket } from '../lib/ws';
+import { FeralSocket, wireSocketGlobalErrors } from '../lib/feralSocket';
 
 /**
  * Single shared FeralSocket instance for the whole v2 app. Components call
@@ -17,6 +17,7 @@ let sharedSocket = null;
 function getShared() {
   if (!sharedSocket) {
     sharedSocket = new FeralSocket();
+    wireSocketGlobalErrors(sharedSocket);
     sharedSocket.connect();
   }
   return sharedSocket;
@@ -69,6 +70,7 @@ export function sendUiEvent(socket, { screen_id, action_id, event = 'tap', value
 export function useFeralSocket() {
   const socket = useMemo(() => getShared(), []);
   useEffect(() => {
+    wireSocketGlobalErrors(socket);
     socket.connect();
   }, [socket]);
   return socket;

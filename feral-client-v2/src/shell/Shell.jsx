@@ -7,6 +7,7 @@ import { VoiceProvider, useVoice } from './VoiceContext';
 import VoiceOverlay from './VoiceOverlay';
 import PerceptionShare from '../components/PerceptionShare';
 import ProactiveToast from '../components/ProactiveToast';
+import ErrorToast from '../components/ErrorToast';
 import { apiFetch, apiJson } from '../lib/api';
 
 const ACTIVE_CONVERSATION_KEY = 'feral_v2_active_conversation';
@@ -308,6 +309,7 @@ function ShellFrame() {
         <Dock />
         <VoiceOverlay />
         <ProactiveToast />
+        <ErrorToast />
         <PerceptionShare.FloatingChip />
       </div>
     </ChatThreadContext.Provider>
