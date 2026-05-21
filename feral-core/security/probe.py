@@ -593,6 +593,166 @@ async def _probe_discord(*, vault=None, **_kwargs: Any) -> ProbeResult:
     )
 
 
+
+# ─────────────────────────────────────────────────────────────────
+# Voice provider probes (Lane 05 W7 — THESIS_SCENARIOS S4)
+# ─────────────────────────────────────────────────────────────────
+#
+# Each STT / TTS provider gets a dedicated probe so the
+# /api/voice/providers REST surface (Lane 05 W8) and the Settings
+# voice picker (Lane 12) can show real probe_status rather than
+# relying on env-var presence alone. Probe URLs are cheap "list
+# models" or "list voices" calls — they hit the provider's auth
+# layer without consuming generation credits.
+
+
+@register_probe("deepgram")
+async def _probe_deepgram(*, vault=None, **_kwargs: Any) -> ProbeResult:
+    api_key = _resolve_env_or_vault(vault, ("DEEPGRAM_API_KEY",))
+    headers = {"Authorization": f"Token {api_key}"} if api_key else None
+    return await _http_probe(
+        "deepgram",
+        method="GET",
+        url="https://api.deepgram.com/v1/projects",
+        headers=headers,
+        had_key=bool(api_key),
+    )
+
+
+@register_probe("elevenlabs")
+async def _probe_elevenlabs(*, vault=None, **_kwargs: Any) -> ProbeResult:
+    api_key = _resolve_env_or_vault(vault, ("ELEVENLABS_API_KEY",))
+    headers = {"xi-api-key": api_key} if api_key else None
+    return await _http_probe(
+        "elevenlabs",
+        method="GET",
+        url="https://api.elevenlabs.io/v1/user",
+        headers=headers,
+        had_key=bool(api_key),
+    )
+
+
+@register_probe("cartesia")
+async def _probe_cartesia(*, vault=None, **_kwargs: Any) -> ProbeResult:
+    api_key = _resolve_env_or_vault(vault, ("CARTESIA_API_KEY",))
+    headers = (
+        {
+            "X-API-Key": api_key,
+            # Cartesia requires a date-pinned API version header on
+            # every request (the latest stable as of 2026-05).
+            "Cartesia-Version": "2024-11-13",
+        }
+        if api_key
+        else None
+    )
+    return await _http_probe(
+        "cartesia",
+        method="GET",
+        url="https://api.cartesia.ai/voices",
+        headers=headers,
+        had_key=bool(api_key),
+    )
+
+
+@register_probe("openai_whisper")
+async def _probe_openai_whisper(*, vault=None, **_kwargs: Any) -> ProbeResult:
+    """Whisper STT shares the OpenAI key with chat / TTS but probes
+    against ``/v1/models`` because there's no dedicated 'list whisper
+    models' endpoint."""
+    api_key = _resolve_env_or_vault(vault, ("OPENAI_API_KEY",))
+    return await _http_probe(
+        "openai_whisper",
+        method="GET",
+        url="https://api.openai.com/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"} if api_key else None,
+        had_key=bool(api_key),
+    )
+
+
+@register_probe("groq_whisper")
+async def _probe_groq_whisper(*, vault=None, **_kwargs: Any) -> ProbeResult:
+    api_key = _resolve_env_or_vault(vault, ("GROQ_API_KEY",))
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    return await _http_probe(
+        "groq_whisper",
+        method="GET",
+        url="https://api.groq.com/openai/v1/models",
+        headers=headers,
+        had_key=bool(api_key),
+    )
+
+
+@register_probe("openai_tts")
+async def _probe_openai_tts(*, vault=None, **_kwargs: Any) -> ProbeResult:
+    """OpenAI TTS shares the OpenAI key with chat. Same probe URL —
+    the distinction matters for the /api/voice/providers surface
+    where each TTS slot is its own selectable provider."""
+    api_key = _resolve_env_or_vault(vault, ("OPENAI_API_KEY",))
+    return await _http_probe(
+        "openai_tts",
+        method="GET",
+        url="https://api.openai.com/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"} if api_key else None,
+        had_key=bool(api_key),
+    )
+
+
+@register_probe("openai_realtime")
+async def _probe_openai_realtime(*, vault=None, **_kwargs: Any) -> ProbeResult:
+    """Realtime API uses the same OPENAI_API_KEY but is a separately
+    selectable voice provider in Settings."""
+    api_key = _resolve_env_or_vault(vault, ("OPENAI_API_KEY",))
+    return await _http_probe(
+        "openai_realtime",
+        method="GET",
+        url="https://api.openai.com/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"} if api_key else None,
+        had_key=bool(api_key),
+    )
+
+
+@register_probe("gemini_live")
+async def _probe_gemini_live(*, vault=None, **_kwargs: Any) -> ProbeResult:
+    """Gemini Live shares the Gemini key but is its own selectable
+    realtime voice provider."""
+    api_key = _resolve_env_or_vault(vault, ("GEMINI_API_KEY", "GOOGLE_API_KEY"))
+    return await _http_probe(
+        "gemini_live",
+        method="GET",
+        url="https://generativelanguage.googleapis.com/v1/models",
+        params={"key": api_key} if api_key else None,
+        had_key=bool(api_key),
+    )
+
+
+# Voice provider catalogue used by the /api/voice/providers REST
+# surface (Lane 05 W8). Each entry maps a provider id to its kind
+# (realtime|stt|tts) and human-readable name. Keys MUST match the
+# probe ids registered above so the catalogue handler can look up
+# probe_status without a separate mapping table.
+VOICE_PROVIDER_CATALOGUE: tuple[tuple[str, str, str], ...] = (
+    # (id, kind, display_name)
+    ("openai_realtime", "realtime", "OpenAI Realtime"),
+    ("gemini_live", "realtime", "Gemini Live"),
+    ("deepgram", "stt", "Deepgram (streaming)"),
+    ("groq_whisper", "stt", "Groq Whisper"),
+    ("openai_whisper", "stt", "OpenAI Whisper"),
+    ("elevenlabs", "tts", "ElevenLabs"),
+    ("cartesia", "tts", "Cartesia"),
+    ("openai_tts", "tts", "OpenAI TTS"),
+)
+
+
+def voice_provider_catalogue() -> list[dict[str, str]]:
+    """Return the structured catalogue of voice providers the brain
+    knows about (regardless of whether they're configured / probed
+    OK). Used by the boot wiring + the REST surface."""
+    return [
+        {"id": pid, "kind": kind, "name": name}
+        for pid, kind, name in VOICE_PROVIDER_CATALOGUE
+    ]
+
+
 async def probe(
     provider_id: str,
     *,
