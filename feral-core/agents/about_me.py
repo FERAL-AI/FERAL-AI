@@ -43,6 +43,7 @@ SF this week" — the sweep() helper drops expired rows on schedule.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -450,6 +451,29 @@ class AboutMeStore:
                 except ValueError as e:
                     logger.debug("About-me extractor skipped match: %s", e)
         return saved
+
+    async def extract_from_text_async(
+        self,
+        text: str,
+        *,
+        confidence: float = CONFIDENCE_UNCONFIRMED,
+        source: FactSource = "inferred_from_chat",
+    ) -> list[AboutMeFact]:
+        """Async-offloaded variant of :meth:`extract_from_text`.
+
+        Regex matching plus N sqlite3 ``INSERT`` round-trips per
+        match are run on a worker thread so the chat / voice hot
+        paths can ``await`` extraction without blocking the event
+        loop. AUDIT-r14 finding 14 traced sync ``extract_from_text``
+        calls in ``MemoryStore.episode_save`` as a measurable
+        slow-callback on every chat turn.
+        """
+        return await asyncio.to_thread(
+            self.extract_from_text,
+            text,
+            confidence=confidence,
+            source=source,
+        )
 
     # ------------------------------------------------------------------
     # Internals
