@@ -777,6 +777,17 @@ class BrainState:
             max_tier=os.environ.get("FERAL_MAX_TIER", "active")
         )
 
+        # audit-r12 A2 (v2026.5.38) — auto-generate the federated-sync
+        # passphrase on first boot when neither the env var nor a
+        # previously-persisted vault entry exists. The function prints
+        # the value once to stderr (and to
+        # ``$FERAL_HOME/sync_passphrase.first_boot`` chmod 0600) so
+        # the operator can pair another brain. Pre-fix, an unset env
+        # var made /sync a zero-auth endpoint.
+        with boot_subsystem(self._boot_report, "SyncPassphrase"):
+            from memory.sync import ensure_sync_passphrase
+            ensure_sync_passphrase()
+
         self.policy = SandboxPolicy.load_default()
         self.device_registry = DeviceRegistry()
         self.mcp_server = FeralMCPServer(

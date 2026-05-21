@@ -25,6 +25,7 @@ import logging
 import os
 import ssl
 import sqlite3
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -42,6 +43,16 @@ SYNC_PORT = int(os.getenv("FERAL_SYNC_PORT", str(brain_port())))
 SYNC_PASSPHRASE = os.getenv("FERAL_SYNC_PASSPHRASE", "")
 SERVICE_TYPE = "_feral._tcp.local."
 
+# audit-r12 A2 (v2026.5.38) — vault namespace + key for the persisted
+# sync passphrase. ``ensure_sync_passphrase`` first reads the env var,
+# then falls back to the vault, then auto-generates + persists +
+# returns. The handshake at ``/sync`` rejects a connection with an
+# empty passphrase (pre-fix it accepted, which made federated sync a
+# zero-auth endpoint when ``FERAL_SYNC_PASSPHRASE`` was unset — the
+# default).
+_SYNC_VAULT_NAMESPACE = "sync"
+_SYNC_VAULT_KEY = "passphrase"
+
 # TLS mutual auth configuration
 SYNC_TLS_CERT = os.getenv("FERAL_SYNC_TLS_CERT", "")
 SYNC_TLS_KEY = os.getenv("FERAL_SYNC_TLS_KEY", "")
@@ -52,6 +63,127 @@ SYNC_REQUIRE_CLIENT_CERT = os.getenv("FERAL_SYNC_REQUIRE_CLIENT_CERT", "").lower
 SYNC_PEERS = [p.strip() for p in os.getenv("FERAL_SYNC_PEERS", "").split(",") if p.strip()]
 
 _MDNS_DISCOVERY_TIMEOUT = 30  # seconds before falling back to static peers
+
+
+def ensure_sync_passphrase() -> str:
+    """Resolve the federated-sync shared secret, generating + persisting
+    it on first boot when none exists yet.
+
+    Resolution order (each step short-circuits the rest):
+
+    1. ``FERAL_SYNC_PASSPHRASE`` env var, when non-empty.
+    2. ``BlindVault`` ``sync.passphrase`` namespace key (set by a
+       previous boot of this brain).
+    3. ``secrets.token_urlsafe(32)`` — a fresh 43-character random
+       string. Persisted to the vault, exported as
+       ``FERAL_SYNC_PASSPHRASE`` for any subprocess that re-reads
+       env, and *printed once* via :func:`_print_passphrase_banner`
+       so the operator can write it down to pair another brain.
+
+    The vault read/write swallows ``VaultError`` (no vault yet,
+    keychain missing) and falls back to a process-lifetime secret
+    so that brain boot never blocks on the federation key. A loud
+    warning is emitted in that path because the next boot will mint
+    a fresh secret and existing peers will need to be re-paired.
+    """
+    global SYNC_PASSPHRASE
+
+    env = os.getenv("FERAL_SYNC_PASSPHRASE", "").strip()
+    if env:
+        SYNC_PASSPHRASE = env
+        return env
+
+    try:
+        from security.vault import get_vault, VaultError
+    except Exception:  # pragma: no cover — vault module unavailable
+        get_vault = None  # type: ignore
+        VaultError = Exception  # type: ignore
+
+    stored: Optional[str] = None
+    if get_vault is not None:
+        try:
+            v = get_vault()
+            stored = v.get(_SYNC_VAULT_NAMESPACE, _SYNC_VAULT_KEY)
+        except VaultError as exc:
+            logger.warning(
+                "sync.passphrase_vault_read_failed: %s — using "
+                "process-lifetime secret; rotate after fix.",
+                exc,
+            )
+
+    if stored:
+        SYNC_PASSPHRASE = stored
+        os.environ["FERAL_SYNC_PASSPHRASE"] = stored
+        return stored
+
+    import secrets
+
+    fresh = secrets.token_urlsafe(32)
+
+    persisted = False
+    if get_vault is not None:
+        try:
+            v = get_vault()
+            v.put(
+                _SYNC_VAULT_NAMESPACE,
+                _SYNC_VAULT_KEY,
+                fresh,
+                stored_by="boot.auto-generate",
+            )
+            persisted = True
+        except VaultError as exc:
+            logger.warning(
+                "sync.passphrase_vault_write_failed: %s — using "
+                "process-lifetime secret. Set FERAL_SYNC_PASSPHRASE to "
+                "pin a value across restarts.",
+                exc,
+            )
+        except Exception as exc:  # noqa: BLE001 — vault audit may raise
+            logger.warning(
+                "sync.passphrase_vault_write_failed: %s", exc,
+            )
+
+    SYNC_PASSPHRASE = fresh
+    os.environ["FERAL_SYNC_PASSPHRASE"] = fresh
+    _print_passphrase_banner(fresh, persisted=persisted)
+    return fresh
+
+
+def _print_passphrase_banner(passphrase: str, *, persisted: bool) -> None:
+    """Render the auto-generated sync passphrase to stderr with framing
+    so the operator notices it on first boot.
+
+    Never logged at INFO/DEBUG so a routine log scrape doesn't pick
+    the secret up. The banner is also written to
+    ``$FERAL_HOME/sync_passphrase.first_boot`` (chmod 0600) so a
+    headless install can still recover the value if the operator
+    missed the boot output.
+    """
+    bar = "─" * 64
+    location = "persisted to vault" if persisted else "PROCESS-LIFETIME ONLY"
+    print(bar, file=sys.stderr, flush=True)
+    print(
+        f"  FERAL — federated sync passphrase ({location})", file=sys.stderr, flush=True,
+    )
+    print(bar, file=sys.stderr, flush=True)
+    print(f"    {passphrase}", file=sys.stderr, flush=True)
+    print(
+        "  Set FERAL_SYNC_PASSPHRASE on every peer to pair with this brain.",
+        file=sys.stderr, flush=True,
+    )
+    print(bar, file=sys.stderr, flush=True)
+
+    try:
+        home = Path(os.environ.get("FERAL_HOME", str(Path.home() / ".feral")))
+        home.mkdir(parents=True, exist_ok=True)
+        marker = home / "sync_passphrase.first_boot"
+        marker.write_text(passphrase + "\n", encoding="utf-8")
+        try:
+            marker.chmod(0o600)
+        except OSError:
+            pass
+    except OSError as exc:
+        logger.debug("sync.passphrase_marker_write_failed: %s", exc)
 
 
 def build_server_ssl_context() -> Optional[ssl.SSLContext]:

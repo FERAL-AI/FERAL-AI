@@ -2643,9 +2643,26 @@ async def sync_peer_endpoint(ws: WebSocket):
                 peer_id = raw.get("node_id", "unknown")
                 remote_vc = raw.get("vector_clock", {})
 
-                expected_pass = os.getenv("FERAL_SYNC_PASSPHRASE", "")
+                # audit-r12 A2 (v2026.5.38) — handshake REJECTS when
+                # the local passphrase is unset (was: accepted, which
+                # made /sync a zero-auth endpoint on fresh installs).
+                # ``ensure_sync_passphrase`` runs at boot so a fresh
+                # install always has a value (auto-generated + printed
+                # to the operator banner). The remote-side mismatch
+                # check below stays identical.
+                from memory.sync import SYNC_PASSPHRASE as _local_pass
+                expected_pass = os.getenv("FERAL_SYNC_PASSPHRASE", "") or _local_pass
                 remote_pass = raw.get("passphrase", "")
-                if expected_pass and remote_pass != expected_pass:
+                if not expected_pass:
+                    await ws.send_json({
+                        "type": "sync_error",
+                        "message": (
+                            "Local sync passphrase unset — set "
+                            "FERAL_SYNC_PASSPHRASE on this brain and retry."
+                        ),
+                    })
+                    break
+                if remote_pass != expected_pass:
                     await ws.send_json({"type": "sync_error", "message": "Invalid passphrase"})
                     break
 
