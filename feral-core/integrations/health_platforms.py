@@ -524,8 +524,23 @@ class HealthAggregator:
         entries.sort(key=lambda e: e.get("date", ""))
         return entries
 
-    async def execute(self, endpoint_id: str, args: dict) -> dict[str, Any]:
-        """Skill executor interface — called by SkillExecutor."""
+    async def execute(
+        self,
+        endpoint_id: str,
+        args: dict,
+        vault: dict | None = None,
+    ) -> dict[str, Any]:
+        """Skill executor interface — called by SkillExecutor.
+
+        Lane 05 W5: signature gained the third ``vault`` arg so the
+        skill executor's standard ``await impl.execute(endpoint_id,
+        args, self._vault)`` call site works against this aggregator.
+        Pre-fix the signature only accepted two positional args and
+        every dispatch raised TypeError — health_data was effectively
+        dead in chat regardless of manifest.
+        """
+        del vault  # No vault credential needed; per-platform clients
+        # carry their own OAuth tokens via OAuthManager.
         dispatch = {
             "health_summary": self.get_health_summary,
             "sleep_trend": self.get_sleep_trend,
@@ -533,11 +548,24 @@ class HealthAggregator:
         }
         fn = dispatch.get(endpoint_id)
         if not fn:
-            return {"success": False, "error": f"Unknown endpoint: {endpoint_id}"}
-        result = await fn(**args)
+            return {
+                "success": False,
+                "status_code": 404,
+                "data": None,
+                "error": f"Unknown endpoint: {endpoint_id}",
+            }
+        # The aggregator's helper kwargs are limited to ``days`` (int).
+        # Drop the executor's hidden ``_feral_require_sandbox`` flag and
+        # any other unknown kwargs so the helper signature is clean.
+        clean_args = {k: v for k, v in (args or {}).items() if not k.startswith("_")}
+        result = await fn(**clean_args)
         if isinstance(result, dict):
-            return result
-        return {"success": True, "data": result}
+            # health_summary returns a flat dict (not the {success,
+            # data} envelope); wrap it.
+            if "success" in result:
+                return result
+            return {"success": True, "status_code": 200, "data": result, "error": None}
+        return {"success": True, "status_code": 200, "data": result, "error": None}
 
     async def close(self):
         if self._whoop:

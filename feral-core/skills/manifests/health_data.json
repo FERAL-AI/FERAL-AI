@@ -1,0 +1,95 @@
+{
+    "skill_id": "health_data",
+    "version": "1.0.0",
+    "author": "feral-core",
+    "brand": {
+        "name": "Health",
+        "primary_color": "#FF3B30",
+        "secondary_color": "#FF9500",
+        "logo_url": "",
+        "icon_set": "sf_symbols"
+    },
+    "description": "Unified personal-health view across the platforms the user has connected: Whoop (recovery, strain, sleep, HRV, resting heart rate), Oura (readiness, sleep, activity), and Apple HealthKit (heart rate, sleep, workouts — paired iPhone, ingested via the FERAL companion app). Use this skill any time the user asks about sleep, recovery, readiness, heart rate, HRV, strain, or activity — it merges whatever sources are connected and tags each data point with its source.",
+    "trigger_phrases": [
+        "how did i sleep",
+        "how was my sleep last night",
+        "what's my heart rate",
+        "what was my heart rate this morning",
+        "my hrv",
+        "my recovery",
+        "my readiness",
+        "how recovered am i",
+        "how ready am i",
+        "my strain",
+        "my activity",
+        "show me my vitals",
+        "summarize today's vitals",
+        "my health summary",
+        "my whoop",
+        "my oura",
+        "healthkit"
+    ],
+    "categories": ["health", "biometric", "wellness"],
+    "auth": {
+        "type": "oauth2",
+        "scopes": []
+    },
+    "endpoints": [
+        {
+            "id": "health_summary",
+            "method": "PYTHON",
+            "url": "python://health_data/health_summary",
+            "description": "Single-call snapshot of the user's current biometrics: sleep_hours, sleep_quality, recovery_score, resting_hr, hrv (ms), readiness, activity_score, strain. Each field is null when no connected source provided it; the response also lists which platforms contributed via the 'sources' array. Read-only.",
+            "params": [],
+            "returns_description": "{sleep_hours, sleep_quality, recovery_score, resting_hr, hrv, readiness, activity_score, strain, sources}",
+            "ui_hint": "metric",
+            "read_only_hint": true
+        },
+        {
+            "id": "sleep_trend",
+            "method": "PYTHON",
+            "url": "python://health_data/sleep_trend",
+            "description": "Per-day sleep entries from every connected platform over the past N days. Each entry is tagged with its 'source' (whoop, oura, healthkit) so the LLM can describe convergence or divergence between platforms. Read-only.",
+            "params": [
+                {"name": "days", "type": "integer", "required": false, "description": "How many days back from today to include (default 7).", "default": "7"}
+            ],
+            "returns_description": "Array of {date, total_sleep_hours, sleep_score, source} entries, sorted ascending by date.",
+            "ui_hint": "list",
+            "read_only_hint": true
+        },
+        {
+            "id": "recovery_trend",
+            "method": "PYTHON",
+            "url": "python://health_data/recovery_trend",
+            "description": "Per-day recovery / readiness scores from every connected platform over the past N days. Whoop contributes a 'strain' value, Oura contributes 'readiness'; both are returned in the same shape with a 'type' field so the LLM can describe each correctly. Read-only.",
+            "params": [
+                {"name": "days", "type": "integer", "required": false, "description": "How many days back from today to include (default 7).", "default": "7"}
+            ],
+            "returns_description": "Array of {date, score, type: 'strain'|'readiness', source} entries, sorted ascending by date.",
+            "ui_hint": "list",
+            "read_only_hint": true
+        }
+    ],
+    "flows": [
+        {
+            "id": "morning_check_in",
+            "description": "Morning briefing: pull current snapshot then last 7 days of sleep + recovery for context",
+            "steps": [
+                {"endpoint_id": "health_summary"},
+                {"endpoint_id": "sleep_trend"},
+                {"endpoint_id": "recovery_trend"}
+            ]
+        }
+    ],
+    "crons": [
+        {
+            "id": "morning_briefing",
+            "schedule": "0 7 * * *",
+            "flow_id": "morning_check_in"
+        }
+    ],
+    "triggers": [],
+    "permissions": ["health_data"],
+    "requires_daemon": false,
+    "max_calls_per_hour": 200
+}
