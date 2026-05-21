@@ -617,7 +617,7 @@ class TestChatReadinessSignal:
         # adapter, we validate the contract using a synthetic
         # descriptor — the same precedence rule still applies and
         # any future stubbed-by-default provider will rely on it.
-        from providers.catalog import ProviderDescriptor
+        # ProviderDescriptor is already imported at the top of this module.
 
         STUB_ID = "synthetic-stub"
         catalog._descriptors[STUB_ID] = ProviderDescriptor(
