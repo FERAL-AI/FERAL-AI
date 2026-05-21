@@ -1,6 +1,6 @@
 {
     "skill_id": "messaging_sms",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "author": "feral-core",
     "brand": {
         "name": "Messaging",
@@ -9,58 +9,141 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Send SMS and WhatsApp messages using Twilio. Read recent messages and manage conversations.",
+    "description": "Send chat messages via Telegram, Slack, or Discord and read recent activity. Backend: MessagingHub (channels.base bridges; bot tokens loaded from FERAL_TELEGRAM_BOT_TOKEN / FERAL_SLACK_BOT_TOKEN / FERAL_DISCORD_BOT_TOKEN).",
     "trigger_phrases": [
-        "send a text",
-        "text someone",
         "send a message",
-        "message",
-        "sms",
-        "send sms to",
-        "whatsapp message",
-        "notify",
+        "message them",
         "tell them",
-        "let them know"
+        "let them know",
+        "notify",
+        "telegram",
+        "slack",
+        "discord",
+        "post in slack",
+        "post in discord",
+        "dm",
+        "direct message"
     ],
     "categories": ["messaging", "communication"],
     "auth": {
-        "type": "api_key",
-        "api_key_header": "Authorization"
+        "type": "bearer"
     },
     "endpoints": [
         {
-            "id": "send_sms",
-            "method": "POST",
-            "url": "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
-            "description": "Send an SMS text message to a phone number.",
+            "id": "telegram_send",
+            "method": "PYTHON",
+            "url": "python://messaging_sms/telegram_send",
+            "description": "Send a Telegram message to a chat using the configured FERAL bot. Provide the numeric chat id or @channelname.",
             "params": [
-                {"name": "account_sid", "type": "string", "required": true, "description": "Twilio Account SID"},
-                {"name": "To", "type": "string", "required": true, "description": "Recipient phone number in E.164 format (e.g. +1234567890)"},
-                {"name": "From", "type": "string", "required": true, "description": "Your Twilio phone number"},
-                {"name": "Body", "type": "string", "required": true, "description": "The message content"}
+                {"name": "chat_id", "type": "string", "required": true, "description": "Telegram chat id (numeric for users/groups, '@channelname' for public channels)."},
+                {"name": "text", "type": "string", "required": true, "description": "Message body. Supports plain text up to 4096 characters."}
             ],
-            "returns_description": "{sid, status, to, from, body, date_created}",
+            "returns_description": "{chat_id}",
             "ui_hint": "detail_card"
         },
         {
-            "id": "list_messages",
-            "method": "GET",
-            "url": "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
-            "description": "List recent SMS messages.",
+            "id": "telegram_get_updates",
+            "method": "PYTHON",
+            "url": "python://messaging_sms/telegram_get_updates",
+            "description": "Read recent Telegram updates (incoming messages) for the configured bot. Read-only; uses long-poll offset to advance through unread updates.",
             "params": [
-                {"name": "account_sid", "type": "string", "required": true, "description": "Twilio Account SID"},
-                {"name": "PageSize", "type": "number", "required": false, "default": "20", "description": "Number of messages to return"}
+                {"name": "offset", "type": "integer", "required": false, "description": "Update id to start from. Pass the (last_seen_update_id + 1) to advance. Default 0 returns the most recent batch.", "default": "0"}
             ],
-            "returns_description": "{messages: [{sid, to, from, body, status, date_sent}]}",
-            "ui_hint": "list"
+            "returns_description": "{updates: [{update_id, chat_id, from, text, date}]}",
+            "ui_hint": "list",
+            "read_only_hint": true
+        },
+        {
+            "id": "slack_send",
+            "method": "PYTHON",
+            "url": "python://messaging_sms/slack_send",
+            "description": "Post a message to a Slack channel or DM as the FERAL bot user. Provide the channel id (e.g. C123ABC) or '#channel-name'.",
+            "params": [
+                {"name": "channel", "type": "string", "required": true, "description": "Slack channel id ('C…') or '#channel-name'."},
+                {"name": "text", "type": "string", "required": true, "description": "Message body (Slack mrkdwn supported)."}
+            ],
+            "returns_description": "{channel}",
+            "ui_hint": "detail_card"
+        },
+        {
+            "id": "slack_list_channels",
+            "method": "PYTHON",
+            "url": "python://messaging_sms/slack_list_channels",
+            "description": "List public and private Slack channels visible to the FERAL bot. Read-only; returns up to 100 channels.",
+            "params": [],
+            "returns_description": "{channels: [{id, name, is_member}]}",
+            "ui_hint": "list",
+            "read_only_hint": true
+        },
+        {
+            "id": "slack_read_channel_history",
+            "method": "PYTHON",
+            "url": "python://messaging_sms/slack_read_channel_history",
+            "description": "Read recent messages from a Slack channel the bot is a member of. Read-only.",
+            "params": [
+                {"name": "channel", "type": "string", "required": true, "description": "Slack channel id."},
+                {"name": "limit", "type": "integer", "required": false, "description": "Max messages to return (1-100).", "default": "25"}
+            ],
+            "returns_description": "{channel, messages: [{ts, user, text, thread_ts}]}",
+            "ui_hint": "list",
+            "read_only_hint": true
+        },
+        {
+            "id": "slack_reply_to_thread",
+            "method": "PYTHON",
+            "url": "python://messaging_sms/slack_reply_to_thread",
+            "description": "Reply to an existing Slack thread by parent message timestamp.",
+            "params": [
+                {"name": "channel", "type": "string", "required": true, "description": "Slack channel id."},
+                {"name": "thread_ts", "type": "string", "required": true, "description": "Parent message timestamp (the 'ts' value of the message you are replying to)."},
+                {"name": "text", "type": "string", "required": true, "description": "Reply body."}
+            ],
+            "returns_description": "{channel, ts}",
+            "ui_hint": "detail_card"
+        },
+        {
+            "id": "slack_set_status",
+            "method": "PYTHON",
+            "url": "python://messaging_sms/slack_set_status",
+            "description": "Set the FERAL bot user's Slack status text and emoji.",
+            "params": [
+                {"name": "status_text", "type": "string", "required": true, "description": "Status text (max 100 chars)."},
+                {"name": "status_emoji", "type": "string", "required": false, "description": "Emoji shortcode like ':palm_tree:'. Empty clears the emoji.", "default": ""}
+            ],
+            "returns_description": "{status_text, status_emoji}",
+            "ui_hint": "detail_card"
+        },
+        {
+            "id": "discord_send",
+            "method": "PYTHON",
+            "url": "python://messaging_sms/discord_send",
+            "description": "Send a Discord message to a channel as the FERAL bot.",
+            "params": [
+                {"name": "channel_id", "type": "string", "required": true, "description": "Discord channel id (snowflake)."},
+                {"name": "text", "type": "string", "required": true, "description": "Message body (max 2000 chars)."}
+            ],
+            "returns_description": "{channel_id}",
+            "ui_hint": "detail_card"
+        },
+        {
+            "id": "discord_list_channels",
+            "method": "PYTHON",
+            "url": "python://messaging_sms/discord_list_channels",
+            "description": "List text/voice/announcement channels in a Discord guild. Read-only.",
+            "params": [
+                {"name": "guild_id", "type": "string", "required": true, "description": "Discord guild (server) id."}
+            ],
+            "returns_description": "{channels: [{id, name, type}], guild_id}",
+            "ui_hint": "list",
+            "read_only_hint": true
         }
     ],
     "flows": [
         {
             "id": "send_and_confirm",
-            "description": "Send a message and show confirmation",
+            "description": "Send a Slack message and surface confirmation",
             "steps": [
-                {"endpoint_id": "send_sms"}
+                {"endpoint_id": "slack_send"}
             ]
         }
     ],
