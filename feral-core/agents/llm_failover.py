@@ -160,6 +160,16 @@ class FailoverReason(str, Enum):
     TIMEOUT = "timeout"
     OVERLOADED = "overloaded"
     UNKNOWN = "unknown"
+    # Catalog descriptor exists but the runtime has no adapter
+    # wired — used for failover chip text so the UI can say
+    # "skipped <provider>: not supported by this build" instead
+    # of leaving the chip blank.
+    NOT_SUPPORTED = "not_supported"
+    # The candidate is in active circuit-breaker cooldown after
+    # consecutive failures; surfaced in the failover chip so the
+    # user can tell the difference between "we never tried it" and
+    # "it failed and is parked".
+    COOLDOWN = "cooldown"
 
 
 def classify_error(error: Exception) -> FailoverReason:

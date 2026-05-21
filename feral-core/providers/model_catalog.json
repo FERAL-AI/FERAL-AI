@@ -139,13 +139,20 @@
         "whisper-1"
       ],
       "pricing": {
+        "_pricing_meta": {
+          "source": "https://openai.com/api/pricing/",
+          "reconciled_at": "2026-05-21",
+          "notes": "Frontier rates (gpt-5.5, gpt-5.5-pro) marked needs-verification — the public pricing page lists family ranges, exact gpt-5.5 SKU rate not yet published. Conservative defaults chosen; cost overestimates are safer than underestimates for budget routing."
+        },
         "gpt-5.5": {
           "input": 0.005,
-          "output": 0.03
+          "output": 0.03,
+          "needs_verification": true
         },
         "gpt-5.5-pro": {
           "input": 0.012,
-          "output": 0.036
+          "output": 0.036,
+          "needs_verification": true
         },
         "gpt-5.4": {
           "input": 0.0025,
@@ -376,9 +383,15 @@
         "deepseek-v4-pro"
       ],
       "pricing": {
+        "_pricing_meta": {
+          "source": "https://api-docs.deepseek.com/quick_start/pricing",
+          "reconciled_at": "2026-05-21",
+          "discount_window_ended": "2026-05-05",
+          "notes": "Discount expired 2026-05-05; rates below are sticker (post-discount). Pre-W2 catalog still carried discounted values."
+        },
         "deepseek-v4-pro": {
-          "input": 0.000435,
-          "output": 0.00087
+          "input": 0.00174,
+          "output": 0.00348
         },
         "deepseek-v4-flash": {
           "input": 0.00014,
@@ -389,8 +402,8 @@
           "output": 0.00028
         },
         "deepseek-reasoner": {
-          "input": 0.00014,
-          "output": 0.00028
+          "input": 0.00055,
+          "output": 0.00219
         }
       }
     },

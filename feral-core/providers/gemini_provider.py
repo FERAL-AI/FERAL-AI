@@ -36,12 +36,9 @@ class GeminiProvider(BaseProvider):
         "gemini-3.1-flash-image-preview",
         "gemini-3-pro-image-preview",
     ]
-    _pricing = {
-        "gemini-3.1-pro-preview": {"input": 0.00175, "output": 0.014},
-        "gemini-3-flash-preview": {"input": 0.0004, "output": 0.003},
-        "gemini-3.1-flash-lite-preview": {"input": 0.00012, "output": 0.0005},
-        "gemini-3.1-pro-thinking": {"input": 0.00175, "output": 0.014},
-    }
+    # Pricing lives in providers/model_catalog.json — see
+    # findings/13-llm-core.md fix #4.
+    _pricing: dict[str, dict[str, float]] = {}
     _capabilities = {"tool_calling", "vision", "streaming", "audio_in"}
 
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None) -> None:

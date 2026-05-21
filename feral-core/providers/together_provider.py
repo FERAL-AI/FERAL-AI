@@ -31,11 +31,10 @@ class TogetherProvider(BaseProvider):
         "Qwen/Qwen2.5-72B-Instruct-Turbo",
         "mistralai/Mixtral-8x22B-Instruct-v0.1",
     ]
-    _pricing = {
-        # Indicative per-1K token prices; update from together.ai/pricing.
-        "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo": {"input": 0.00088, "output": 0.00088},
-        "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": {"input": 0.00018, "output": 0.00018},
-    }
+    # Together is catalog-only at runtime; pricing lives in
+    # model_catalog.json. Pre-W2 these adapter literals were marked
+    # "indicative" and never reconciled with together.ai/pricing.
+    _pricing: dict[str, dict[str, float]] = {}
     _capabilities = {"tool_calling", "streaming"}
 
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None) -> None:

@@ -245,18 +245,26 @@ BUILT_IN_DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         default_model="",
         credential_env_var="AWS_ACCESS_KEY_ID",
         aliases=("aws bedrock", "amazon"),
-        notes="Auth via AWS IAM (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY).",
-        # Bedrock's ``chat()`` path currently raises at stub level —
-        # model discovery works (so users can still see the inventory
-        # and pick a region-enabled id) but a real chat turn won't go
-        # through until the ``bedrock-runtime.converse`` wiring lands.
-        # Signal that to the UI instead of presenting bedrock as
-        # equivalently chat-ready to OpenAI / Anthropic.
-        chat_ready=False,
-        stub_reason=(
-            "Chat path is at stub level — model discovery is live but "
-            "bedrock-runtime.converse is not wired yet."
+        notes=(
+            "Auth via AWS IAM (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY). "
+            "Reached through the Bedrock Converse API; the FERAL "
+            "LLMProvider runtime currently routes Bedrock through the "
+            "catalog adapter rather than the httpx OpenAI-compat path, "
+            "so it ships as catalog-ready (chat available via the "
+            "catalog adapter / route_call) but does not appear in "
+            "SUPPORTED_RUNTIME_PROVIDERS — see findings/13-llm-core.md."
         ),
+        # The Bedrock adapter (BedrockProvider.chat /
+        # BedrockProvider.stream_chat) is live as of audit-r12 D8 — it
+        # speaks bedrock-runtime.converse via boto3 and returns the
+        # canonical ChatResponse shape. Pre-W2 this descriptor still
+        # advertised ``chat_ready=False``, which made the UI render a
+        # "Bedrock not chat-ready" chip even though the adapter ran a
+        # real chat turn. ``_resolve_chat_readiness`` lets the adapter
+        # downgrade but never upgrade; aligning the descriptor here is
+        # the only honest fix. See findings/13-llm-core.md fix #2.
+        chat_ready=True,
+        stub_reason="",
     ),
     ProviderDescriptor(
         provider_id="ollama",
@@ -880,9 +888,37 @@ class ProviderCatalog:
         return os.environ.get(descriptor.credential_env_var) or None
 
     def _is_configured(self, descriptor: ProviderDescriptor) -> bool:
+        """Decide whether *descriptor* is "configured" for the picker.
+
+        Pre-W2 this returned ``True`` whenever the descriptor's
+        credential env var was set, regardless of whether the value
+        actually authenticated upstream. Wave 1's
+        :mod:`security.probe` helper runs cheap HTTP probes on a 60s
+        cache; we consult that cache here so the picker can show a
+        configured-but-not-authorising provider as "configured=False"
+        instead of greenlighting a 401.
+
+        Three-state semantics: when the probe cache is cold (no probe
+        has run yet, e.g. a fresh boot before ``probe_all``) we keep
+        the legacy env-var verdict so the picker doesn't flicker
+        empty between boot and first probe. Once probes start landing
+        the verdict upgrades automatically.
+        """
         if not descriptor.requires_api_key:
             return True
-        return bool(self._env_api_key(descriptor))
+        if not self._env_api_key(descriptor):
+            return False
+        try:
+            from security.probe import probe_ok_or_unknown
+
+            verdict = probe_ok_or_unknown(descriptor.provider_id)
+        except Exception as exc:
+            logger.debug("probe lookup failed for %s: %s", descriptor.provider_id, exc)
+            verdict = None
+        if verdict is None:
+            # Cold cache — defer to env-var presence (legacy behaviour).
+            return True
+        return bool(verdict)
 
     def _load_cache(self) -> None:
         if self._cache_path is None:

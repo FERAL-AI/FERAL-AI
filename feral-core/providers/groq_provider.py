@@ -48,11 +48,9 @@ class GroqProvider(BaseProvider):
         "mixtral-8x7b-32768",
         "gemma2-9b-it",
     ]
-    _pricing = {
-        "llama-3.3-70b-versatile": {"input": 0.00059, "output": 0.00079},
-        "llama-3.1-8b-instant": {"input": 0.00005, "output": 0.00008},
-        "mixtral-8x7b-32768": {"input": 0.00024, "output": 0.00024},
-    }
+    # Pricing lives in providers/model_catalog.json — see
+    # findings/13-llm-core.md fix #4.
+    _pricing: dict[str, dict[str, float]] = {}
     _capabilities = {"tool_calling", "streaming"}
 
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None) -> None:

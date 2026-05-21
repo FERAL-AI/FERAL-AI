@@ -78,17 +78,12 @@ class OpenAIProvider(BaseProvider):
         "text-embedding-3-small",
         "text-embedding-3-large",
     ]
-    _pricing = {
-        # USD per 1k tokens — source of truth is model_catalog.json; these
-        # are backstops.
-        "gpt-5.5": {"input": 0.006, "output": 0.018},
-        "gpt-5.5-pro": {"input": 0.012, "output": 0.036},
-        "gpt-5.4": {"input": 0.005, "output": 0.015},
-        "gpt-5.4-mini": {"input": 0.0008, "output": 0.0024},
-        "gpt-5.4-nano": {"input": 0.0002, "output": 0.0008},
-        "gpt-5": {"input": 0.005, "output": 0.015},
-        "gpt-5-mini": {"input": 0.0003, "output": 0.0012},
-    }
+    # Pricing lives in providers/model_catalog.json (single source of
+    # truth). Pre-W2 this adapter shipped its own divergent literals
+    # — gpt-5.5 was 0.006/0.018 here vs 0.005/0.030 in the catalog,
+    # which broke budget routing whenever the catalog won. See
+    # findings/13-llm-core.md fix #4.
+    _pricing: dict[str, dict[str, float]] = {}
     _capabilities = {"tool_calling", "json_mode", "vision", "streaming", "audio_in", "audio_out"}
 
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None) -> None:

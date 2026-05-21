@@ -141,14 +141,11 @@ class DeepSeekProvider(BaseProvider):
     # discount (valid until 2026-05-05) is reflected here; the
     # post-discount sticker price is in the comment on each row so a
     # reviewer can confirm the refresh script captured the right number.
-    _pricing = {
-        # discounted (pre-2026-05-05): $0.000435/1k input, $0.00087/1k output
-        # sticker: $0.00174/1k input, $0.00348/1k output
-        "deepseek-v4-pro": {"input": 0.000435, "output": 0.00087},
-        "deepseek-v4-flash": {"input": 0.00014, "output": 0.00028},
-        "deepseek-chat": {"input": 0.00014, "output": 0.00028},
-        "deepseek-reasoner": {"input": 0.00014, "output": 0.00028},
-    }
+    # Pricing lives in providers/model_catalog.json — see
+    # findings/13-llm-core.md fix #4. Note: DeepSeek's discount window
+    # ended 2026-05-05; the catalog entry is updated to sticker rate
+    # in this lane (see PR pricing-reconciliation table).
+    _pricing: dict[str, dict[str, float]] = {}
     _capabilities = {"tool_calling", "streaming", "thinking", "json_mode"}
 
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None) -> None:
