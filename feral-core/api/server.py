@@ -814,6 +814,27 @@ async def startup():
                         return
 
                 if prompt and state.orchestrator:
+                    # audit-r14 / S6 — pre-flight against the cron
+                    # cost cap before invoking the orchestrator. A
+                    # scheduled routine is the same cost class as a
+                    # user chat turn, so a paused cap must skip the
+                    # turn and let the operator see why via the UI
+                    # banner. CronService runs on a daemon thread so
+                    # the guard's broadcast is a no-op (no running
+                    # asyncio loop) — the structured log line is
+                    # still emitted.
+                    guard = getattr(state, "cron_cost_guard", None)
+                    if guard is not None and not guard.allow(
+                        model="gpt-4o-mini",
+                        estimated_max_tokens=512,
+                    ):
+                        state.cron_service.record_run_finish(
+                            run_id,
+                            "skipped",
+                            {},
+                            "cost cap reached; routine deferred",
+                        )
+                        return
                     session_id = job.session_id or f"routine-{job.id}"
                     # Pass an explicit context so the Supervisor audit log
                     # can distinguish cron-driven turns from user / web.
@@ -934,6 +955,20 @@ async def shutdown_event():
                 await result
         except Exception as exc:
             logger.debug("Shutdown: %s.stop() raised: %s", owner_name, exc)
+
+    # audit-r14 finding 18 #1 — CronService runs on a daemon thread that
+    # the BrainState registry never owned, so the pre-fix shutdown left
+    # the cron loop polling the SQLite job DB until process death. Call
+    # stop() here so the join (35s timeout) drains the thread before
+    # the LLM client closes; without this, a routine that fires during
+    # shutdown raced ``llm.close()`` and produced
+    # "Cannot send a request, as the client has been closed"
+    # tracebacks in the operator log.
+    if getattr(state, "cron_service", None) is not None:
+        try:
+            state.cron_service.stop()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Shutdown: cron_service.stop() raised: %s", exc)
 
     # (a.2) Messaging + channel integrations that spawn their own
     # polling loops.

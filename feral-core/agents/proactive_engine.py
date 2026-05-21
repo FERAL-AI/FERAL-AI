@@ -94,6 +94,8 @@ class ProactiveEngine:
         baseline_engine=None,
         check_interval_s: float = 15.0,
         config: dict | None = None,
+        cost_guard=None,
+        cost_model: str = "gpt-4o-mini",
     ):
         self._perception = perception
         self._memory = memory
@@ -104,6 +106,12 @@ class ProactiveEngine:
         self._baseline = baseline_engine
         self._interval = check_interval_s
         self._running = False
+        # audit-r14 / S6 — gate the LLM eval call on the shared cost
+        # budget. ``cost_guard`` is wired from ``BrainState.init`` with
+        # the brain's CostBudget + the WS broadcaster so a cap hit
+        # both pauses this engine AND lights up the UI banner.
+        self._cost_guard = cost_guard
+        self._cost_model = cost_model
         # A7 — Hold the evaluation loop task so stop() can cancel it
         # rather than only flipping ``_running`` (which could still let
         # one more LLM evaluation fire while waiting on the interval
@@ -452,6 +460,15 @@ class ProactiveEngine:
             "If nothing useful to add, return exactly: null"
         )
 
+        # audit-r14 / S6 — pre-flight cost gate. When the projected
+        # spend would overshoot the proactive cap, skip the eval and
+        # let the loop tick again at the next interval; the guard
+        # already pauses + emits the WS frame.
+        if self._cost_guard is not None and not self._cost_guard.allow(
+            model=self._cost_model, estimated_max_tokens=300,
+        ):
+            return
+
         try:
             response = await self._llm.chat(
                 messages=[{"role": "user", "content": prompt}],
@@ -465,6 +482,18 @@ class ProactiveEngine:
                 text = response
             else:
                 text = str(response)
+
+            # audit-r14 / S6 — record post-call usage. We pass
+            # conservative estimates (prompt ~200 + completion bounded
+            # at the ``max_tokens=300`` we sent) since the LLM provider
+            # surface here doesn't return per-call usage; pricing.py
+            # treats this as a worst-case lower bound on the rollup.
+            if self._cost_guard is not None:
+                await self._cost_guard.record(
+                    model=self._cost_model,
+                    prompt_tokens=200,
+                    completion_tokens=min(300, len(text) // 4 + 1),
+                )
 
             text = text.strip()
             if not text or text == "null":
