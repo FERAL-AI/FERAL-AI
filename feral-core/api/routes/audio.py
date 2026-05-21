@@ -188,3 +188,107 @@ async def set_audio_config(req: AudioConfigRequest):
         state.config.update_settings("audio", key, value)
 
     return await get_audio_config()
+
+
+# ----------------------------------------------------------------------
+# Lane 05 W8: voice provider sovereignty (THESIS_SCENARIOS S4)
+# ----------------------------------------------------------------------
+#
+# /api/voice/providers — flat list of every realtime / STT / TTS
+# provider the brain knows about, with `configured` (probe-derived)
+# and `probe_status` so the iPhone Settings → Voice picker (Wave 3
+# Lane 11) and the WebUI Settings → Voice panel (Wave 3 Lane 12) can
+# render an honest "key valid?" badge per row.
+#
+# /api/voice/providers/probe — explicit POST that re-runs probes
+# bypassing the 60s probe cache. Used by the "Test connection"
+# button in Settings.
+
+
+@router.get("/api/voice/providers")
+async def list_voice_providers():
+    """Return the structured voice provider catalogue.
+
+    Each entry: ``{id, name, kind: 'realtime'|'stt'|'tts',
+    configured: bool, probe_status: 'ok'|'unauthorized'|'no_key'|...,
+    latency_ms?: float}``.
+
+    The list is populated from
+    ``security.probe.voice_provider_catalogue()`` (Lane 05 W7); the
+    probe status is read from the cached probe registry — call
+    ``POST /api/voice/providers/probe`` to force a refresh.
+    """
+    from security.probe import probe, voice_provider_catalogue
+
+    rows: list[dict] = []
+    for entry in voice_provider_catalogue():
+        try:
+            result = await probe(entry["id"])
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("voice provider probe %s raised: %s", entry["id"], exc)
+            rows.append({
+                **entry,
+                "configured": False,
+                "probe_status": "probe_error",
+                "probe_detail": str(exc),
+            })
+            continue
+        rows.append({
+            **entry,
+            "configured": result.ok,
+            "probe_status": result.reason,
+            "probe_detail": result.detail,
+            "latency_ms": result.latency_ms,
+        })
+    return {"providers": rows}
+
+
+class VoiceProbeRequest(BaseModel):
+    provider_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Specific provider to probe. Omit to refresh every voice "
+            "provider in the catalogue."
+        ),
+    )
+
+
+@router.post("/api/voice/providers/probe")
+async def probe_voice_providers(req: VoiceProbeRequest):
+    """Force-refresh one (or all) voice provider probes."""
+    from security.probe import (
+        probe,
+        voice_provider_catalogue,
+        VOICE_PROVIDER_CATALOGUE,
+    )
+
+    catalogue_ids = {pid for pid, _, _ in VOICE_PROVIDER_CATALOGUE}
+
+    if req.provider_id:
+        if req.provider_id not in catalogue_ids:
+            raise HTTPException(
+                status_code=404,
+                detail=f"unknown voice provider {req.provider_id!r}; "
+                f"valid: {sorted(catalogue_ids)}",
+            )
+        result = await probe(req.provider_id, force=True)
+        return {
+            "provider_id": req.provider_id,
+            "ok": result.ok,
+            "reason": result.reason,
+            "status_code": result.status_code,
+            "latency_ms": result.latency_ms,
+            "detail": result.detail,
+        }
+
+    rows: list[dict] = []
+    for entry in voice_provider_catalogue():
+        result = await probe(entry["id"], force=True)
+        rows.append({
+            **entry,
+            "ok": result.ok,
+            "reason": result.reason,
+            "status_code": result.status_code,
+            "latency_ms": result.latency_ms,
+        })
+    return {"providers": rows}

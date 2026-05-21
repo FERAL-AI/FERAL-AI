@@ -790,6 +790,8 @@ class VoiceRouter:
         tts_keys = {
             "openai": os.getenv("OPENAI_API_KEY", ""),
             "elevenlabs": os.getenv("ELEVENLABS_API_KEY", ""),
+            # Lane 05 W7: Cartesia is now a first-class TTS provider.
+            "cartesia": os.getenv("CARTESIA_API_KEY", ""),
         }
 
         stt_provider = get_stt_provider(
@@ -804,6 +806,18 @@ class VoiceRouter:
         elif tts_name == "elevenlabs":
             if opts.get("tts_voice_id"):
                 tts_kwargs["voice_id"] = opts["tts_voice_id"]
+        elif tts_name == "cartesia":
+            # Cartesia uses its own voice catalogue (Sonic-2 voice
+            # ids are stable UUIDs); operators pin one via settings
+            # `voice.chained.tts_voice_id` or per-session opts.
+            if opts.get("tts_voice_id"):
+                tts_kwargs["voice_id"] = opts["tts_voice_id"]
+            if opts.get("tts_websocket"):
+                tts_kwargs["websocket"] = bool(opts["tts_websocket"])
+            # Use the operator-configured Sonic model id when set;
+            # default sonic-2 is fine for everyone else.
+            if opts.get("tts_model"):
+                tts_kwargs["model_id"] = opts["tts_model"]
 
         tts_provider_inst = get_tts_provider(tts_name, **tts_kwargs)
 
