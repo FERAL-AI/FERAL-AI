@@ -243,7 +243,7 @@ py-modules = ["version"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
-    "agents*", "api*", "channels*", "cli*", "config*", "gateway*",
+    "agents*", "api*", "channels*", "cli*", "config*", "cost*", "gateway*",
     "genui*", "hardware*", "identity*", "infra*", "integrations*",
     "mcp*", "memory*", "models*", "observability*", "perception*",
     "providers*", "security*", "services*", "skills*", "voice*",
