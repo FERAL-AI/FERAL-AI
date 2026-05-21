@@ -130,22 +130,81 @@ class MCPServerRegistry:
         self._load_user_configs()
 
     def _load_user_configs(self):
-        if CONFIG_PATH.exists():
-            try:
-                self._user_configs = json.loads(CONFIG_PATH.read_text())
-            except Exception as e:
-                logger.warning(f"Failed to load MCP server configs: {e}")
+        """Load ``~/.feral/mcp_servers.json`` into a flat
+        ``{server_id: config}`` dict regardless of which on-disk
+        shape the operator used.
+
+        AUDIT-r14 finding 16 fix #5: pre-fix ``_user_configs`` ate the
+        whole file as one nested dict. Since the canonical shape
+        (matching ``MCPClientManager.load_and_connect``) is
+        ``{"servers": [{"name": ..., ...}, ...]}``, the only key
+        that ended up at the top level was ``"servers"`` — which made
+        ``configured = sid in self._user_configs`` always False (and
+        the Settings UI render every row as "not configured" even
+        for servers the operator had explicitly enabled).
+
+        We now accept three shapes, in order of preference:
+          1. ``{"servers": [{name, command, ...}, ...]}`` — canonical
+             (re-exports straight to the manager).
+          2. ``{"<sid>": {command, args, env, ...}, ...}`` — flat
+             dict of configs (legacy, but still supported).
+          3. anything else — logged + ignored.
+        """
+        if not CONFIG_PATH.exists():
+            return
+        try:
+            raw = json.loads(CONFIG_PATH.read_text())
+        except Exception as e:
+            logger.warning(f"Failed to load MCP server configs: {e}")
+            return
+        flat: dict[str, dict] = {}
+        if isinstance(raw, dict) and isinstance(raw.get("servers"), list):
+            for entry in raw["servers"]:
+                if not isinstance(entry, dict):
+                    continue
+                sid = entry.get("name") or entry.get("id")
+                if not sid:
+                    continue
+                flat[str(sid)] = dict(entry)
+        elif isinstance(raw, dict):
+            for sid, cfg in raw.items():
+                if isinstance(cfg, dict):
+                    flat[str(sid)] = dict(cfg)
+        else:
+            logger.warning(
+                "MCP server config has unrecognised shape (%s) — ignoring",
+                type(raw).__name__,
+            )
+        self._user_configs = flat
 
     def _save_user_configs(self):
+        """Persist user configs in the canonical
+        ``{"servers": [...]}`` shape so ``MCPClientManager.load_and_connect``
+        can read the file without translation."""
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(json.dumps(self._user_configs, indent=2))
+        servers_array = []
+        for sid, cfg in self._user_configs.items():
+            entry = dict(cfg)
+            entry.setdefault("name", sid)
+            servers_array.append(entry)
+        CONFIG_PATH.write_text(
+            json.dumps({"servers": servers_array}, indent=2)
+        )
 
     def list_known(self) -> list[dict]:
         """List all known MCP servers with installation and connection status."""
         result = []
         for sid, server in self._known.items():
             installed = self._check_installed(server)
-            connected = self._mcp_client and sid in getattr(self._mcp_client, '_connections', {})
+            # AUDIT-r14 finding 16 fix #5: ``MCPClientManager`` exposes
+            # ``_servers`` (the canonical name); the pre-fix code looked
+            # up ``_connections`` which doesn't exist, so every row in
+            # the Settings UI rendered as "not connected" even when the
+            # server was actually live.
+            connected = bool(
+                self._mcp_client
+                and sid in getattr(self._mcp_client, "_servers", {})
+            )
             configured = sid in self._user_configs
             has_required_env = self._check_env(server)
 

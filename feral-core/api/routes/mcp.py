@@ -71,7 +71,28 @@ async def mcp_external_tools():
 
 @router.get("/api/mcp/registry")
 async def mcp_registry():
-    """List all known MCP servers with status."""
+    """List all known MCP servers with status (legacy path).
+
+    Lane 12 (Wave 3 WebUI rebuild) prefers ``GET /api/mcp/servers`` —
+    the two endpoints return the same payload; both are kept so older
+    clients keep working through the deprecation window.
+    """
+    from mcp.registry import MCPServerRegistry
+    registry = MCPServerRegistry(mcp_client=state.mcp_client)
+    return {"servers": registry.list_known()}
+
+
+@router.get("/api/mcp/servers")
+async def mcp_servers():
+    """Lane 05 W10 — canonical MCP server catalogue for Settings UIs.
+
+    Returns the same shape as ``/api/mcp/registry``: a flat list of
+    ``{id, name, description, category, command, args, env,
+    install_hint, installed, connected, configured, ready}``. The
+    ``connected`` flag now reads from ``MCPClientManager._servers``
+    (post-Lane-05 fix); pre-fix it always returned False because it
+    was checking a nonexistent ``_connections`` attribute.
+    """
     from mcp.registry import MCPServerRegistry
     registry = MCPServerRegistry(mcp_client=state.mcp_client)
     return {"servers": registry.list_known()}
