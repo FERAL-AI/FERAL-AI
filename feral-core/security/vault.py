@@ -63,14 +63,48 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, TYPE_CHECKING
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-
-from config.loader import feral_home
+# R2-001 (round-2 of Wave 1) — vault module import must be side-effect-
+# free and < 200ms on a cold venv. The heavy ``cryptography`` import
+# (~150ms on macOS) and ``config.loader`` cascade are deferred to first
+# use so that ``python -c "import security.vault"`` returns fast and a
+# ``from security import vault`` from a route module doesn't drag the
+# AEAD primitive + every config dependency into the boot path.
+# ``BlindVault.__init__`` and the AEAD helpers do the imports on demand
+# via :func:`_cryptography` and :func:`_feral_home` below.
+if TYPE_CHECKING:  # pragma: no cover — import-time hint only
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305  # noqa: F401
 
 logger = logging.getLogger("feral.vault")
+
+
+def _cryptography():
+    """Lazy import of the AEAD primitive + ``InvalidTag``.
+
+    Returns ``(ChaCha20Poly1305, InvalidTag)``. Calling this triggers
+    the ~150ms ``cryptography`` import only when the vault is actually
+    used; ``import security.vault`` on its own no longer pays that
+    cost. The result is cached on the function via attribute lookup so
+    a hot vault (``store`` / ``retrieve`` in a loop) sees the same
+    one-time cost as the original eager import.
+    """
+    cached = getattr(_cryptography, "_cached", None)
+    if cached is not None:
+        return cached
+    from cryptography.exceptions import InvalidTag as _IT
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305 as _CC
+    _cryptography._cached = (_CC, _IT)  # type: ignore[attr-defined]
+    return _cryptography._cached  # type: ignore[attr-defined]
+
+
+def _feral_home() -> Path:
+    """Lazy wrapper around :func:`config.loader.feral_home` so the
+    ``config`` package's transitive imports (provider catalogs, model
+    pricing, settings shape validation) don't load on
+    ``import security.vault``."""
+    from config.loader import feral_home as _fh
+    return _fh()
 
 # OS keychain coordinates — keep these stable so legacy installs roll
 # forward cleanly. Changing them silently orphans every existing master
@@ -90,6 +124,34 @@ _VAULT_VERSION = 1
 # is parsed once at vault construction and cached for the process
 # lifetime; it is never echoed to logs.
 RECOVERY_ENV = "FERAL_VAULT_RECOVERY_CODE"
+
+# R2-001 — first vault construction blocks on the OS keychain. Without
+# a bound, an unresponsive ``securityd`` (macOS) or a broken Secret
+# Service bus (Linux) would hang the entire boot indefinitely. Cap the
+# unlock at 5 seconds by default; ``FERAL_VAULT_UNLOCK_TIMEOUT_S``
+# overrides for slow disaster-recovery environments. The timeout raises
+# :class:`VaultKeyUnavailableError` with the same recovery guidance as
+# a missing-key path so the operator sees the actionable next step.
+_DEFAULT_UNLOCK_TIMEOUT_S = 5.0
+_UNLOCK_TIMEOUT_ENV = "FERAL_VAULT_UNLOCK_TIMEOUT_S"
+
+
+def _unlock_timeout_seconds() -> float:
+    raw = os.environ.get(_UNLOCK_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_UNLOCK_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "vault.unlock_timeout_invalid: %s=%r is not a number; "
+            "falling back to %.1fs",
+            _UNLOCK_TIMEOUT_ENV, raw, _DEFAULT_UNLOCK_TIMEOUT_S,
+        )
+        return _DEFAULT_UNLOCK_TIMEOUT_S
+    if value <= 0:
+        return _DEFAULT_UNLOCK_TIMEOUT_S
+    return value
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -172,6 +234,12 @@ def _keyring_get_password(service: str, username: str) -> Optional[str]:
     instead of polluting the real macOS Keychain / Linux Secret Service.
     Returns ``None`` if the entry is missing OR the keychain is
     unavailable; the caller decides whether absence is fatal.
+
+    R2-001 — the call is run on a worker thread bounded by
+    :func:`_unlock_timeout_seconds` (default 5s). A frozen
+    ``securityd`` no longer hangs the brain boot indefinitely; instead
+    we raise :class:`VaultKeyUnavailableError` with the recovery
+    guidance the operator needs.
     """
     try:
         import keyring
@@ -181,13 +249,60 @@ def _keyring_get_password(service: str, username: str) -> Optional[str]:
             "`pip install keyring` or set "
             f"{RECOVERY_ENV}=<recovery-code> to decrypt the vault."
         ) from exc
-    try:
-        return keyring.get_password(service, username)
-    except Exception:
+
+    timeout = _unlock_timeout_seconds()
+    logger.info("vault.unlock.start service=%s timeout=%.1fs", service, timeout)
+
+    import threading
+
+    started = time.perf_counter()
+    result_box: dict[str, Any] = {}
+
+    def _worker() -> None:
+        try:
+            result_box["value"] = keyring.get_password(service, username)
+        except Exception as exc:  # noqa: BLE001 — caller decides
+            result_box["error"] = exc
+
+    # ``daemon=True`` so a frozen ``securityd`` cannot wedge process
+    # shutdown — the worker dies with the interpreter even when the
+    # blocking syscall never returns. We deliberately do NOT join with
+    # an unbounded wait; the timeout below is the only blocking point.
+    worker = threading.Thread(
+        target=_worker, name="vault-unlock", daemon=True,
+    )
+    worker.start()
+    worker.join(timeout)
+
+    if worker.is_alive():
+        raise VaultKeyUnavailableError(
+            f"OS keychain unlock for service={service!r}, "
+            f"user={username!r} did not complete in {timeout:.1f}s. "
+            f"On macOS, the login keychain may be locked — open "
+            f"Keychain Access and unlock it, then retry. On Linux, "
+            f"the Secret Service (gnome-keyring/KWallet) may not be "
+            f"running. Alternatively, set {RECOVERY_ENV}=<recovery-"
+            f"code> to skip the keychain on this boot."
+        )
+
+    if "error" in result_box:
         # Keychain backend errors are user-actionable but vary wildly
         # by platform; surface them at the call site with context
         # rather than guessing here.
+        logger.info(
+            "vault.unlock.error service=%s elapsed=%.0fms err=%s",
+            service,
+            (time.perf_counter() - started) * 1000,
+            type(result_box["error"]).__name__,
+        )
         return None
+
+    result = result_box.get("value")
+    logger.info(
+        "vault.unlock.done service=%s elapsed=%.0fms found=%s",
+        service, (time.perf_counter() - started) * 1000, result is not None,
+    )
+    return result
 
 
 def _keyring_set_password(service: str, username: str, password: str) -> None:
@@ -244,7 +359,7 @@ class BlindVault:
     DEFAULT_NAMESPACE = "credentials"
 
     def __init__(self, vault_path: Optional[str] = None):
-        home = feral_home()
+        home = _feral_home()
 
         # The vault has TWO disk artefacts:
         #   - legacy plaintext file (only present pre-migration)
@@ -353,6 +468,7 @@ class BlindVault:
         # Fresh install: generate a new master key, persist to keychain,
         # capture the recovery code so the CLI / boot path can show it
         # exactly once.
+        ChaCha20Poly1305, _ = _cryptography()
         key = ChaCha20Poly1305.generate_key()
         try:
             _keyring_set_password(
@@ -379,6 +495,7 @@ class BlindVault:
     # ── On-disk format: AEAD encrypt / decrypt ──────────────────────
 
     def _encrypt_blob(self, payload: dict) -> bytes:
+        ChaCha20Poly1305, _ = _cryptography()
         key = self._master_key()
         plaintext = json.dumps(
             {"version": _VAULT_VERSION, "data": payload},
@@ -395,6 +512,7 @@ class BlindVault:
                 f"Vault file {self._enc_path} is too short to contain a "
                 f"ChaCha20-Poly1305 ciphertext ({len(raw)} bytes)."
             )
+        ChaCha20Poly1305, InvalidTag = _cryptography()
         if key is None:
             key = self._master_key()
         nonce, ct = raw[:12], raw[12:]
@@ -708,6 +826,7 @@ class BlindVault:
             raw = self._enc_path.read_bytes()
             self._data = self._normalise_namespaces(self._decrypt_blob(raw))
 
+        ChaCha20Poly1305, _ = _cryptography()
         new_key = ChaCha20Poly1305.generate_key()
         plaintext = json.dumps(
             {"version": _VAULT_VERSION, "data": self._data},
