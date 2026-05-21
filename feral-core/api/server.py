@@ -72,6 +72,7 @@ from api.routes.tool_genesis import router as tool_genesis_router
 from api.routes.agent_mitosis import router as agent_mitosis_router
 from api.routes.intents import router as intents_router
 from api.routes.webhooks import router as webhooks_router
+from api.routes.outgoing_webhooks import router as outgoing_webhooks_router
 from api.routes.ambient import router as ambient_router
 from api.routes.auth import router as auth_router
 from api.routes.personas import router as personas_router
@@ -638,6 +639,7 @@ app.include_router(tool_genesis_router)
 app.include_router(agent_mitosis_router)
 app.include_router(intents_router)
 app.include_router(webhooks_router)
+app.include_router(outgoing_webhooks_router)
 app.include_router(ambient_router)
 app.include_router(auth_router)
 app.include_router(personas_router)
