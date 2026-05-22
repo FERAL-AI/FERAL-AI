@@ -323,11 +323,11 @@ async def test_handle_event_skips_non_matching_subscriptions(store_db):
     )
 
     store = OutgoingWebhookStore(db_path=store_db)
-    matching = await store.create(
+    await store.create(
         name="m", target_url="https://example.invalid/m",
         event_types=["chat.completed"],
     )
-    skipped = await store.create(
+    await store.create(
         name="s", target_url="https://example.invalid/s",
         event_types=["memory.saved"],
     )
