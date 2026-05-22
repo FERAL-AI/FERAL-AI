@@ -73,12 +73,18 @@ def client(tmp_path, monkeypatch, store):
 
 
 @pytest.fixture
-def non_loopback_client(monkeypatch):
+def non_loopback_client(tmp_path, monkeypatch, store):
     """Override ``is_localhost`` back to the strict definition so the
     API-key middleware exercises the *non*-loopback branch. Mirrors
     the helper in ``test_a4_pair_middleware.py``.
+
+    Also wires a config with ``pairing_mode=local`` so the pairing
+    routes are *exposed* (otherwise they short-circuit with the Mode-B
+    "pairing not available" payload and the auth middleware never
+    runs).
     """
     from security import session_auth as _sa
+    from config.loader import ConfigLoader
 
     def _strict(host):
         return host in ("127.0.0.1", "::1", "localhost")
@@ -90,8 +96,19 @@ def non_loopback_client(monkeypatch):
     except Exception:
         pass
 
-    from api.server import app
-    return TestClient(app, raise_server_exceptions=False)
+    config = ConfigLoader(project_dir=str(tmp_path))
+    config.discover()
+    config.update_settings("access", "pairing_mode", "local")
+    monkeypatch.setattr(
+        "api.routes.devices._detect_lan_ip", lambda: "192.168.50.9"
+    )
+
+    state_mock = MagicMock()
+    state_mock.config = config
+    state_mock.device_pairing_store = store
+    with patch("api.state.state", state_mock), patch("api.routes.devices.state", state_mock):
+        from api.server import app
+        yield TestClient(app, raise_server_exceptions=False)
 
 
 # ──────────────────────────────────────────────────────────────────
