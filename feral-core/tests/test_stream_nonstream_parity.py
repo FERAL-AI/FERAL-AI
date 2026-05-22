@@ -422,7 +422,7 @@ class TestParityMultiAgentPrePath:
             orch.memory.working_push = MagicMock()
             orch.memory.episode_save = AsyncMock(return_value={})
 
-            sends = _capture_sends(orch)
+            _capture_sends(orch)  # records to orch._captured_sends; we don't read it here
             handler = getattr(orch, handler_name)
             await handler(session_id=f"s-{handler_name}", text="anything")
 

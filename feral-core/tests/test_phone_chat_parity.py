@@ -79,7 +79,7 @@ def fake_prompt_refiner():
 
 
 def test_phone_and_webui_invoke_orchestrator_with_identical_shape(
-    ws_mock_state, ws_client, pairing_store_mock
+    ws_mock_state, ws_client, pairing_store_mock  # noqa: F811 — pytest fixtures imported from shared module
 ):
     PROMPT = "what did I do yesterday"
     web_calls: list[dict] = []
@@ -180,7 +180,7 @@ def test_phone_and_webui_invoke_orchestrator_with_identical_shape(
 
 
 def test_phone_and_webui_both_use_background_task_dispatch(
-    ws_mock_state, ws_client, pairing_store_mock
+    ws_mock_state, ws_client, pairing_store_mock  # noqa: F811 — pytest fixtures imported from shared module
 ):
     """Both code paths must spawn the orchestrator turn as a
     background task (Lane 08 WS9 contract). If either still awaited

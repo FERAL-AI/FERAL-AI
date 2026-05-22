@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Awaitable  # noqa: F401 — used by quoted return annotations in WS9 task spawners
 from pathlib import Path
 from uuid import uuid4
 

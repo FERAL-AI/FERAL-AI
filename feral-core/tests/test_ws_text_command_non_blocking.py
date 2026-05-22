@@ -34,7 +34,7 @@ import pytest
 from tests.test_server_websocket import ws_client, ws_mock_state  # noqa: F401
 
 
-def test_loop_keeps_receiving_while_orchestrator_turn_in_flight(ws_mock_state, ws_client):
+def test_loop_keeps_receiving_while_orchestrator_turn_in_flight(ws_mock_state, ws_client):  # noqa: F811
     """Send two text_commands back-to-back. The first
     ``handle_command_stream`` blocks for 500ms; the WS server must
     still pick up the second message and dispatch a SECOND
@@ -81,7 +81,7 @@ def test_loop_keeps_receiving_while_orchestrator_turn_in_flight(ws_mock_state, w
     assert slow_call_count == 2
 
 
-def test_background_turn_failure_surfaces_text_response(ws_mock_state, ws_client):
+def test_background_turn_failure_surfaces_text_response(ws_mock_state, ws_client):  # noqa: F811
     """When the orchestrator raises inside the background task we
     still send the operator a 'Sorry, something went wrong' chat
     message instead of dropping the failure silently.
