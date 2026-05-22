@@ -20,6 +20,7 @@ the script and SDK stay in lockstep.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,14 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "install-phone-bridge.sh"
+
+# Add the python-node-sdk src dir to the import path so the
+# argparse-contract tests can import ``feral_node_sdk.cli`` without
+# requiring the SDK to be pip-installed. Mirrors the bootstrap
+# convention used by ``feral-nodes/python-node-sdk/tests/conftest.py``.
+_NODE_SDK_SRC = REPO_ROOT / "feral-nodes" / "python-node-sdk" / "src"
+if _NODE_SDK_SRC.is_dir():
+    sys.path.insert(0, str(_NODE_SDK_SRC))
 
 
 def _script_text() -> str:
