@@ -1368,31 +1368,56 @@ class Orchestrator:
                 return
 
             if tool_calls:
-                # Parallel dispatch of every tool the LLM asked for in one
-                # turn. Results ARE interleaved in wall-clock but we rebuild
-                # ``history`` in the original ``tool_calls`` order so the
-                # next LLM turn sees tool_call_id → result in sequence (the
-                # OpenAI API requires that order for tool messages).
+                # WS5 — multi-actuator ordered WS frames. Tools still
+                # execute in parallel (cap = ``FERAL_MAX_PARALLEL_TOOLS``)
+                # for speed, but the ``tool_start`` AND ``tool_result``
+                # frames are emitted in the LLM's original tool_call
+                # index order so the consumer renders the chain
+                # consistently — e.g. ``vision__describe_scene`` →
+                # ``home_assistant__vacuum_start`` even when vacuum_start
+                # happens to finish first.
                 #
-                # Cap concurrency with ``FERAL_MAX_PARALLEL_TOOLS`` (default 6).
-                # Set to 1 to fall back to strict sequential execution.
+                # Step 1: emit tool_start frames synchronously in order.
+                # Step 2: execute everything in parallel.
+                # Step 3: emit tool_result frames in tool_call order.
+                #
+                # The OpenAI tool-message contract still requires
+                # ``history`` to be appended in tool_call order; that
+                # property is preserved below.
                 parallel_cap = max(1, int(os.environ.get("FERAL_MAX_PARALLEL_TOOLS", "6")))
                 sem = asyncio.Semaphore(parallel_cap)
 
+                # Step 1 — ordered tool_start emission.
+                for _tc in tool_calls:
+                    await self._emit_tool_start(session_id, _tc)
+
                 async def _run_tool(tc: dict) -> dict:
                     async with sem:
-                        await self._emit_tool_start(session_id, tc)
                         t_start = time.time()
-                        result_data = await self._execute_tool_call_for_llm(session_id, tc, relevant_skills)
+                        result_data = await self._execute_tool_call_for_llm(
+                            session_id, tc, relevant_skills,
+                        )
                         latency_ms = (time.time() - t_start) * 1000
-                        await self._emit_tool_result(session_id, tc, result_data, latency_ms)
                         return {
                             "tc": tc,
                             "result": result_data,
                             "latency_ms": latency_ms,
                         }
 
-                tool_outputs = await asyncio.gather(*[_run_tool(tc) for tc in tool_calls])
+                tool_outputs = await asyncio.gather(
+                    *[_run_tool(tc) for tc in tool_calls]
+                )
+
+                # Step 3 — ordered tool_result emission. ``tool_outputs``
+                # is already ordered because asyncio.gather preserves
+                # input order regardless of completion order.
+                for output in tool_outputs:
+                    await self._emit_tool_result(
+                        session_id,
+                        output["tc"],
+                        output["result"],
+                        output["latency_ms"],
+                    )
 
                 for tool_output in tool_outputs:
                     tc = tool_output["tc"]
@@ -1744,18 +1769,56 @@ class Orchestrator:
 
             if normalized_tool_calls:
                 any_tool_ran = True
+
+                # WS5 — multi-actuator ordered WS frames on the
+                # stream path. Symmetric with the non-stream branch:
+                # emit ``tool_start`` for every tool in tool_call
+                # order BEFORE any execution starts, then execute
+                # (in parallel under ``FERAL_MAX_PARALLEL_TOOLS``),
+                # then emit ``tool_result`` in the same order.
+                parallel_cap = max(
+                    1, int(os.environ.get("FERAL_MAX_PARALLEL_TOOLS", "6"))
+                )
+                sem = asyncio.Semaphore(parallel_cap)
+
                 for tc in normalized_tool_calls:
                     await self._emit_tool_start(session_id, tc)
-                    t_start = time.time()
-                    result_data = await self._execute_tool_call_for_llm(session_id, tc, relevant_skills)
-                    latency_ms = (time.time() - t_start) * 1000
 
-                    stream_tool_success = bool(result_data.get("success") or result_data.get("status") == "command_sent_to_hardware_daemon")
+                async def _stream_run(tc: dict) -> dict:
+                    async with sem:
+                        t_start = time.time()
+                        result_data = await self._execute_tool_call_for_llm(
+                            session_id, tc, relevant_skills,
+                        )
+                        latency_ms = (time.time() - t_start) * 1000
+                        return {
+                            "tc": tc,
+                            "result": result_data,
+                            "latency_ms": latency_ms,
+                        }
+
+                outputs = await asyncio.gather(
+                    *[_stream_run(tc) for tc in normalized_tool_calls]
+                )
+
+                for output in outputs:
+                    tc = output["tc"]
+                    result_data = output["result"]
+                    latency_ms = output["latency_ms"]
+                    stream_tool_success = bool(
+                        result_data.get("success")
+                        or result_data.get("status") == "command_sent_to_hardware_daemon"
+                    )
                     await self._emit_tool_result(session_id, tc, result_data, latency_ms)
-                    await self._emit_brain_event(session_id, "tool_exec", {"tool": tc["name"], "success": stream_tool_success})
+                    await self._emit_brain_event(
+                        session_id, "tool_exec",
+                        {"tool": tc["name"], "success": stream_tool_success},
+                    )
 
                     if self._tool_genesis:
-                        self._tool_genesis.record_tool_call(session_id, tc["name"], tc.get("args", {}))
+                        self._tool_genesis.record_tool_call(
+                            session_id, tc["name"], tc.get("args", {}),
+                        )
 
                     if self.memory:
                         parts = tc["name"].split("__", 1)
