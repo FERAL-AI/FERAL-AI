@@ -328,7 +328,7 @@ def _run_realtime_probe(provider: str) -> int:
     fall back to a hard probe and report green/red."""
     from security.probe import probe
 
-    print(f"  Realtime providers can't round-trip from the CLI — running a probe instead.")
+    print("  Realtime providers can't round-trip from the CLI — running a probe instead.")
     try:
         result = asyncio.run(probe(provider, force=True))
     except Exception as exc:

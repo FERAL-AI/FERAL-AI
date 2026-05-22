@@ -254,7 +254,7 @@ def cmd_integrations_connect(
         return _connect_oauth(integration_id, self_hosted=True, no_browser=no_browser)
 
     print(f"  Unknown integration: {integration_id!r}")
-    print(f"  Supported: gmail, home-assistant, " + ", ".join(SELF_HOSTED_OAUTH_PROVIDERS))
+    print("  Supported: gmail, home-assistant, " + ", ".join(SELF_HOSTED_OAUTH_PROVIDERS))
     return 2
 
 
@@ -629,7 +629,7 @@ def _connect_oauth(
 
     print()
     if no_browser:
-        print(f"  Open this URL in a browser to grant access:")
+        print("  Open this URL in a browser to grant access:")
         print(f"    {url}")
     else:
         print(f"  Opening browser for {provider_id} OAuth consent…")

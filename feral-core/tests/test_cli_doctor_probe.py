@@ -112,11 +112,10 @@ def test_doctor_renders_info_for_no_key(monkeypatch, capsys):
     from cli.main import cmd_doctor
 
     # Should NOT raise SystemExit(1) — no red rows.
-    rc = None
     try:
-        rc = cmd_doctor()
-    except SystemExit as e:
-        rc = e.code
+        cmd_doctor()
+    except SystemExit:
+        pass  # exit code asserted elsewhere; this test only inspects output
 
     out = capsys.readouterr()
     text = out.out + out.err
