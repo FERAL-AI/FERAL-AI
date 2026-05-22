@@ -1099,6 +1099,41 @@ class BrainState:
             )
             if self.voice_router:
                 self.voice_router.set_gemini_proxy(self.gemini_proxy)
+            # Lane 05 W9 (AUDIT-r14 finding 15 fix #3): mirror the
+            # OpenAI Realtime fallback wiring so Gemini Live errors
+            # also emit ``voice_status: degraded`` + flip to whisper
+            # TTS (or chained pipeline). Without this, an invalid
+            # Gemini key drops the call silently.
+            if self.gemini_proxy and self.voice_router:
+                self.gemini_proxy.attach_fallback_router(self.voice_router)
+
+        with boot_subsystem(self._boot_report, "ChainedVoicePipeline"):
+            # Lane 05 W8 (AUDIT-r14 finding 15 fix #1, THESIS_SCENARIOS
+            # S4): chained STT→LLM→TTS pipeline boot wiring. Pre-fix
+            # the pipeline class existed but ``api/state.py`` never
+            # called ``set_chained_pipeline``, so phone clients that
+            # selected ``mode: chained`` got ``None`` back and the
+            # call silently failed.
+            #
+            # Importing the provider modules below registers each
+            # provider with the chained-pipeline registries so
+            # ``get_stt_provider("deepgram")`` /
+            # ``get_tts_provider("cartesia")`` resolve at session-open
+            # time without further wiring.
+            from voice.chained_pipeline import ChainedVoicePipeline
+            import voice.stt_providers.deepgram  # noqa: F401  registers stt
+            import voice.stt_providers.openai_whisper  # noqa: F401
+            import voice.stt_providers.groq_whisper  # noqa: F401
+            import voice.tts_providers.openai_tts  # noqa: F401
+            import voice.tts_providers.elevenlabs  # noqa: F401
+            import voice.tts_providers.cartesia  # noqa: F401  Lane 05 W7
+            self.chained_voice_pipeline = ChainedVoicePipeline()
+            if self.voice_router:
+                self.voice_router.set_chained_pipeline(self.chained_voice_pipeline)
+            logger.info(
+                "Chained voice pipeline wired (STT: deepgram/openai_whisper/"
+                "groq_whisper, TTS: openai/elevenlabs/cartesia)"
+            )
 
         with boot_subsystem(self._boot_report, "MethodRegistry"):
             self.gateway_registry = MethodRegistry()

@@ -1,7 +1,32 @@
 """
 FERAL Code Interpreter Skill
 =============================
-Run Python/Node snippets in a Docker sandbox and capture generated artifacts.
+Run Python/Node snippets in a layered sandbox and capture generated artifacts.
+
+Sandbox cascade (best-to-worst isolation):
+
+  1. **Docker** — full container isolation (network=none, read-only fs,
+     memory + cpu caps, --user nobody). Used when ``docker`` is on PATH
+     and the daemon is reachable.
+
+  2. **WASM CPython** (Python only) — in-process WebAssembly CPython via
+     ``wasmtime`` + an operator-supplied CPython WASI binary referenced
+     by ``FERAL_CPYTHON_WASM``. Strong syscall isolation, no host fs by
+     default. The binary is not bundled — it's typically the official
+     VMware Wasm Labs ``python-3.12.0.wasm`` (~80MB) and operators who
+     can't run Docker install it once and point the env var at it.
+     Closes AUDIT-r14 finding 16 fix #4 (code_interpreter honest
+     fallback) and Lane 05 acceptance "code_interpreter works without
+     Docker (WASM/pyodide fallback)".
+
+  3. **Host with rlimit** — best-effort: tempfs CWD, ``PYTHONNOUSERSITE``,
+     CPU + filesystem-write rlimits (Linux: also address-space rlimit).
+     Last-resort path; flagged in the response payload so the caller
+     can warn the user.
+
+Each tier reports its label on the result so the UI / LLM can render
+a "sandbox: docker | wasm | host-rlimit" badge instead of a binary
+sandboxed-yes-or-no flag.
 """
 
 from __future__ import annotations
@@ -16,7 +41,7 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from config.loader import feral_data_home
 from skills.base import BaseSkill
@@ -34,6 +59,160 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 DOCKER_AVAILABLE = bool(shutil.which("docker"))
 
 
+# ─────────────────────────────────────────────────────────────────
+# WASM CPython runner (Python only)
+# ─────────────────────────────────────────────────────────────────
+
+
+def _wasm_cpython_path() -> Optional[Path]:
+    """Resolve the configured CPython WASI binary, if any.
+
+    Operators install (e.g. ``brew install wasmtime`` plus downloading
+    the CPython WASI binary from https://github.com/vmware-labs/webassembly-language-runtimes/releases)
+    and point ``FERAL_CPYTHON_WASM`` at the resulting ``python-X.Y.Z.wasm``.
+    The cost of installing this is a one-time ~80MB download — too heavy
+    to bundle, light enough to opt into.
+    """
+    raw = os.getenv("FERAL_CPYTHON_WASM", "").strip()
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    if p.is_file():
+        return p
+    logger.warning(
+        "FERAL_CPYTHON_WASM=%r does not point at a readable .wasm file — "
+        "falling back to host-rlimit Python.",
+        raw,
+    )
+    return None
+
+
+def _wasmtime_available() -> bool:
+    """``wasmtime-py`` is an optional install (extras=[wasm])."""
+    try:
+        import wasmtime  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+WASM_PYTHON_AVAILABLE = bool(_wasm_cpython_path()) and _wasmtime_available()
+
+
+async def _run_wasm_python(
+    code: str,
+    work_dir: str,
+    timeout: int = 45,
+) -> dict:
+    """Run *code* through the operator-installed WASM CPython.
+
+    The wasmtime invocation runs as a subprocess so we can pipe stdout
+    cleanly and enforce the timeout via ``asyncio.wait_for`` instead of
+    threading wasmtime's fuel mechanism through the whole call (fuel
+    measures execution time in wasm-instructions, not wall-clock — the
+    subprocess gives us a wall-clock budget that matches the Docker
+    path). The ``--`` separator passes the script path as argv[1] to the
+    embedded Python.
+    """
+    wasm_bin = _wasm_cpython_path()
+    if wasm_bin is None or not _wasmtime_available():
+        return {
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "WASM Python sandbox not configured (FERAL_CPYTHON_WASM unset or wasmtime missing).",
+            "sandbox": "unavailable",
+        }
+
+    script_path = Path(work_dir) / "script.py"
+    script_path.write_text(code)
+
+    # Mount the work_dir into the wasm fs so the script can write
+    # artifacts that the host then collects (mirrors the Docker path's
+    # `-v $work_dir:/workspace`).
+    cmd = [
+        "wasmtime",
+        "run",
+        "--dir", f"{work_dir}::/workspace",
+        "--env", "PYTHONHOME=/usr/local",
+        "--env", "PYTHONPATH=/usr/local/lib/python3.12",
+        str(wasm_bin),
+        "--",
+        "/workspace/script.py",
+    ]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=work_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return {
+            "exit_code": proc.returncode if proc.returncode is not None else -1,
+            "stdout": stdout.decode(errors="replace")[:50_000],
+            "stderr": stderr.decode(errors="replace")[:10_000],
+            "sandbox": "wasm",
+        }
+    except asyncio.TimeoutError:
+        proc.kill()
+        return {
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": "WASM execution timed out",
+            "sandbox": "wasm",
+        }
+    except FileNotFoundError as exc:
+        return {
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": f"wasmtime CLI not on PATH: {exc}",
+            "sandbox": "unavailable",
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        return {
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": f"WASM Python execution failed: {exc}",
+            "sandbox": "unavailable",
+        }
+
+
+async def _try_wasm_then_host(
+    code: str,
+    language: str,
+    work_dir: str,
+    timeout: int,
+    *,
+    allow_unsandboxed_fallback: bool,
+) -> dict:
+    """Helper that picks the best non-Docker tier based on language and
+    operator config. Returns a result dict with ``sandbox`` ∈
+    {``wasm``, ``host-rlimit``, ``unavailable``}."""
+    if language == "python" and WASM_PYTHON_AVAILABLE:
+        result = await _run_wasm_python(code, work_dir, timeout)
+        # If wasmtime invocation itself failed (CLI missing /
+        # bad binary), fall through to host with the same
+        # allow_unsandboxed_fallback gate.
+        if result["sandbox"] == "wasm":
+            return result
+        logger.warning(
+            "WASM Python sandbox unavailable at runtime: %s",
+            result.get("stderr"),
+        )
+    if allow_unsandboxed_fallback:
+        return await _run_unsandboxed(code, language, work_dir, timeout)
+    return {
+        "exit_code": 1,
+        "stdout": "",
+        "stderr": (
+            "Sandbox required but Docker is unavailable and no WASM "
+            "Python sandbox is configured (set FERAL_CPYTHON_WASM)."
+        ),
+        "sandbox": "unavailable",
+    }
+
+
 async def _run_sandboxed(
     code: str,
     language: str,
@@ -42,16 +221,18 @@ async def _run_sandboxed(
     *,
     allow_unsandboxed_fallback: bool = True,
 ) -> dict:
-    """Run code in Docker container with strict isolation."""
+    """Run code in the strongest available sandbox tier.
+
+    Cascade: Docker → WASM CPython (Python only, when configured) →
+    host with rlimit. Each result carries a ``sandbox`` field labelling
+    the tier that actually ran the code so callers can render an
+    accurate badge.
+    """
     if not DOCKER_AVAILABLE:
-        if allow_unsandboxed_fallback:
-            return await _run_unsandboxed(code, language, work_dir, timeout)
-        return {
-            "exit_code": 1,
-            "stdout": "",
-            "stderr": "Sandbox required but Docker is unavailable.",
-            "sandboxed": False,
-        }
+        return await _try_wasm_then_host(
+            code, language, work_dir, timeout,
+            allow_unsandboxed_fallback=allow_unsandboxed_fallback,
+        )
 
     image = "python:3.12-slim" if language == "python" else "node:22-slim"
     script_name = "script.py" if language == "python" else "script.js"
@@ -80,38 +261,47 @@ async def _run_sandboxed(
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         stderr_str = stderr.decode(errors="replace")[:10000]
         if proc.returncode != 0 and ("docker" in stderr_str.lower() and ("daemon" in stderr_str.lower() or "connect" in stderr_str.lower())):
-            if allow_unsandboxed_fallback:
-                logger.warning("Docker daemon not reachable — falling back to unsandboxed execution")
-                return await _run_unsandboxed(code, language, work_dir, timeout)
-            return {
-                "exit_code": 1,
-                "stdout": "",
-                "stderr": "Sandbox required but Docker daemon is not reachable.",
-                "sandboxed": False,
-            }
+            logger.warning("Docker daemon not reachable — escalating to WASM/host tier")
+            return await _try_wasm_then_host(
+                code, language, work_dir, timeout,
+                allow_unsandboxed_fallback=allow_unsandboxed_fallback,
+            )
         return {
             "exit_code": proc.returncode,
             "stdout": stdout.decode(errors="replace")[:50000],
             "stderr": stderr_str,
-            "sandboxed": True,
+            "sandbox": "docker",
         }
     except (asyncio.TimeoutError, OSError) as e:
         if isinstance(e, asyncio.TimeoutError):
             proc.kill()
-            return {"exit_code": -1, "stdout": "", "stderr": "Execution timed out", "sandboxed": True}
-        if allow_unsandboxed_fallback:
-            logger.warning(f"Docker execution failed: {e} — falling back to unsandboxed")
-            return await _run_unsandboxed(code, language, work_dir, timeout)
-        return {
-            "exit_code": 1,
-            "stdout": "",
-            "stderr": f"Sandbox required but Docker execution failed: {e}",
-            "sandboxed": False,
-        }
+            return {
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": "Execution timed out",
+                "sandbox": "docker",
+            }
+        logger.warning(f"Docker execution failed: {e} — escalating to WASM/host tier")
+        return await _try_wasm_then_host(
+            code, language, work_dir, timeout,
+            allow_unsandboxed_fallback=allow_unsandboxed_fallback,
+        )
 
 
 async def _run_unsandboxed(code: str, language: str, work_dir: str, timeout: int = 300) -> dict:
-    """Fallback: run with resource limits on Linux, bare subprocess otherwise."""
+    """Last-resort tier: run on the host with rlimit + a scrubbed env.
+
+    This is what ships on hosts without Docker AND without the WASM
+    CPython opt-in. We do everything we can short of an OS-level
+    sandbox:
+      * cwd is the per-invocation tempfs directory
+      * ``PYTHONNOUSERSITE`` blocks ``~/.local`` package leakage
+      * env scrubbed to a minimal allowlist (PATH, HOME, LANG, TZ)
+      * RLIMIT_CPU / RLIMIT_FSIZE always set; RLIMIT_AS on Linux
+
+    The result is labelled ``sandbox: 'host-rlimit'`` so the LLM /
+    UI can warn the user they're running on a soft sandbox.
+    """
     script_name = "script.py" if language == "python" else "script.js"
     script_path = Path(work_dir) / script_name
     if not script_path.exists():
@@ -131,7 +321,23 @@ async def _run_unsandboxed(code: str, language: str, work_dir: str, timeout: int
 
         preexec = _set_limits
 
-    logger.warning("Docker unavailable — executing code on host with best-effort limits")
+    # Minimal env — the executing code shouldn't see the brain's
+    # secrets, OAuth tokens, or arbitrary $PATH directories. PATH is
+    # narrowed to the system locations where python3 / node live.
+    safe_env = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
+        "HOME": work_dir,
+        "LANG": os.environ.get("LANG", "en_US.UTF-8"),
+        "TZ": os.environ.get("TZ", "UTC"),
+        "PYTHONNOUSERSITE": "1",
+        # NOTE: we intentionally do NOT pass PYTHONPATH or any FERAL_*
+        # env. Code that needs more should run via Docker or WASM tiers.
+    }
+
+    logger.warning(
+        "Docker + WASM unavailable — executing %s on host with best-effort rlimits",
+        language,
+    )
 
     proc = await asyncio.create_subprocess_exec(
         *argv,
@@ -139,6 +345,7 @@ async def _run_unsandboxed(code: str, language: str, work_dir: str, timeout: int
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         preexec_fn=preexec,
+        env=safe_env,
     )
     try:
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -146,11 +353,16 @@ async def _run_unsandboxed(code: str, language: str, work_dir: str, timeout: int
             "exit_code": proc.returncode if proc.returncode is not None else -1,
             "stdout": (stdout_b or b"").decode(errors="replace")[:50000],
             "stderr": (stderr_b or b"").decode(errors="replace")[:10000],
-            "sandboxed": False,
+            "sandbox": "host-rlimit",
         }
     except asyncio.TimeoutError:
         proc.kill()
-        return {"exit_code": -1, "stdout": "", "stderr": "Execution timed out", "sandboxed": False}
+        return {
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": "Execution timed out",
+            "sandbox": "host-rlimit",
+        }
 
 
 @register_skill
@@ -198,7 +410,11 @@ class CodeInterpreterSkill(BaseSkill):
             stdout = result.get("stdout", "")[:MAX_OUTPUT]
             stderr = result.get("stderr", "")[:MAX_OUTPUT]
             exit_code = int(result.get("exit_code", -1))
-            sandboxed = result.get("sandboxed", False)
+            sandbox_tier = result.get("sandbox", "unavailable")
+            # ``sandboxed`` (boolean) preserved for back-compat with
+            # callers that still grep for the old field; the new
+            # ``sandbox`` field is the authoritative tier label.
+            sandboxed = sandbox_tier in ("docker", "wasm")
 
             artifacts = self._collect_artifacts(temp_dir, script_name=script_name, run_id=run_id)
             status_code = 200
@@ -213,6 +429,7 @@ class CodeInterpreterSkill(BaseSkill):
                     "stdout": stdout,
                     "stderr": stderr,
                     "exit_code": exit_code,
+                    "sandbox": sandbox_tier,
                     "sandboxed": sandboxed,
                     "artifact_count": len(artifacts),
                     "artifacts": artifacts,

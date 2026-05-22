@@ -316,6 +316,21 @@ class GeminiRealtimeProxy:
         # emits, otherwise the v2 chat trace cannot render them.
         self._orchestrator = orchestrator
         self._api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY", "")
+        # Lane 05 W9 (AUDIT-r14 finding 15 fix #3): fallback parity with
+        # OpenAI Realtime. Without an attached VoiceRouter the
+        # ``_handle_error`` path just logs and dies silent — the phone
+        # never sees a ``voice_status`` frame, the user gets dead air.
+        # ``api/state.py`` calls ``attach_fallback_router(voice_router)``
+        # right after both are constructed, mirroring the realtime_proxy
+        # wiring (state.py:1080 OpenAI / state.py:~1101 Gemini).
+        self._fallback_router = None
+
+    def attach_fallback_router(self, router) -> None:
+        """Attach the VoiceRouter so connect/auth/runtime failures
+        trigger a structured ``voice_status: degraded`` fan-out + the
+        chained-pipeline fallback path. Mirror of
+        ``RealtimeProxy.attach_fallback_router``."""
+        self._fallback_router = router
 
     @property
     def available(self) -> bool:
@@ -360,6 +375,27 @@ class GeminiRealtimeProxy:
         await gs.connect()
         if not getattr(gs, 'connected', False) and not getattr(gs, '_ws', None):
             logger.warning("Gemini voice session failed to connect for %s", session_id)
+            # Lane 05 W9: same connect-failure fan-out OpenAI got in
+            # workstream 9 — emit a structured ``voice_status:
+            # degraded`` so the phone can render a fallback banner
+            # instead of dead air.
+            if not self._api_key:
+                reason = "gemini_live_no_key"
+                detail = "GEMINI_API_KEY / GOOGLE_API_KEY not configured"
+            else:
+                reason = "gemini_live_connect"
+                detail = "Gemini Live WS handshake failed"
+            if self._fallback_router:
+                try:
+                    await self._fallback_router.handle_realtime_failure(
+                        session_id=session_id,
+                        reason=reason,
+                        detail=detail,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Fallback router refused gemini connect failure"
+                    )
             return None
         self._sessions[session_id] = gs
         self._node_to_session[node_id] = session_id
@@ -587,4 +623,56 @@ class GeminiRealtimeProxy:
             })
 
     async def _handle_error(self, session_id: str, error: str):
-        logger.error(f"Gemini error [{session_id}]: {error}")
+        """Classify a Gemini Live error and trigger fallback parity
+        with OpenAI Realtime.
+
+        Lane 05 W9 (AUDIT-r14 finding 15 fix #3): pre-fix this method
+        only ``logger.error``-ed and the session died silent. With
+        ``_fallback_router`` attached at boot we now emit a structured
+        ``voice_status: degraded`` frame + delegate to the chained
+        pipeline so the call keeps going on Deepgram + ElevenLabs (or
+        whatever STT/TTS pair the user has selected).
+
+        Classification table mirrors the OpenAI counterpart:
+          * 401 / API_KEY_INVALID / authentication → ``gemini_live_auth``
+          * 429 / quota exceeded / billing → ``gemini_live_quota``
+          * 503 / model overloaded → ``gemini_live_overload``
+          * any other → ``gemini_live_error``
+        """
+        err_lc = (error or "").lower()
+        if (
+            "api_key_invalid" in err_lc
+            or "401" in err_lc
+            or "unauthorized" in err_lc
+            or "permission_denied" in err_lc
+            or "403" in err_lc
+        ):
+            reason = "gemini_live_auth"
+        elif (
+            "quota" in err_lc
+            or "billing" in err_lc
+            or "exceeded" in err_lc
+            or "429" in err_lc
+        ):
+            reason = "gemini_live_quota"
+        elif "overloaded" in err_lc or "503" in err_lc or "unavailable" in err_lc:
+            reason = "gemini_live_overload"
+        else:
+            reason = "gemini_live_error"
+
+        logger.error(
+            "Gemini error [%s]: %s -> classified=%s",
+            session_id, error, reason,
+        )
+
+        if self._fallback_router:
+            try:
+                await self._fallback_router.handle_realtime_failure(
+                    session_id=session_id,
+                    reason=reason,
+                    detail=str(error)[:200],
+                )
+            except Exception:
+                logger.exception(
+                    "Fallback router refused gemini failure handoff"
+                )

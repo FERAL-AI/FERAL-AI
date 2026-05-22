@@ -1,6 +1,6 @@
 {
     "skill_id": "smart_home_hue",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "author": "feral-core",
     "brand": {
         "name": "Smart Home",
@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Control Philips Hue smart lights: turn on/off, change colors, adjust brightness, set scenes.",
+    "description": "Control your Home Assistant smart home: list entities, read state, toggle switches, change light brightness/color, and trigger automations. Backend: HomeAssistantIntegration (REST API + long-lived access token).",
     "trigger_phrases": [
         "turn on the lights",
         "turn off the lights",
@@ -20,7 +20,10 @@
         "make it brighter",
         "night mode",
         "set the mood",
-        "living room lights"
+        "living room lights",
+        "is the door locked",
+        "thermostat",
+        "run the automation"
     ],
     "categories": ["smart_home", "iot", "hardware"],
     "auth": {
@@ -28,66 +31,108 @@
     },
     "endpoints": [
         {
-            "id": "list_lights",
-            "method": "GET",
-            "url": "http://localhost:8743/api/{username}/lights",
-            "description": "List all connected Hue lights. Returns light name, state (on/off), brightness, color.",
-            "params": [
-                {"name": "username", "type": "string", "required": true, "description": "Hue Bridge API username"}
-            ],
-            "returns_description": "Object with light IDs as keys: {name, state: {on, bri, hue, sat}, type, modelid}",
-            "ui_hint": "grid_cards"
+            "id": "get_states",
+            "method": "PYTHON",
+            "url": "python://smart_home_hue/get_states",
+            "description": "List Home Assistant entity states. Returns up to 50 entities with entity_id, current state, and friendly_name. Read-only.",
+            "params": [],
+            "returns_description": "{entities: [{entity_id, state, friendly_name}], total}",
+            "ui_hint": "list",
+            "read_only_hint": true
         },
         {
-            "id": "set_light_state",
-            "method": "PUT",
-            "url": "http://localhost:8743/api/{username}/lights/{light_id}/state",
-            "description": "Set the state of a specific light. Control on/off, brightness, color, and effects.",
+            "id": "get_entities",
+            "method": "PYTHON",
+            "url": "python://smart_home_hue/get_entities",
+            "description": "List entities filtered by Home Assistant domain (light, switch, sensor, climate, lock, media_player, etc.). Returns entity_id, state, friendly_name, device_class.",
             "params": [
-                {"name": "username", "type": "string", "required": true, "description": "Hue Bridge API username"},
-                {"name": "light_id", "type": "string", "required": true, "description": "Light ID number"},
-                {"name": "on", "type": "boolean", "required": false, "description": "Turn light on or off"},
-                {"name": "bri", "type": "number", "required": false, "description": "Brightness (1-254)"},
-                {"name": "hue", "type": "number", "required": false, "description": "Hue color value (0-65535)"},
-                {"name": "sat", "type": "number", "required": false, "description": "Saturation (0-254)"},
-                {"name": "effect", "type": "string", "required": false, "description": "Effect: none or colorloop", "enum": ["none", "colorloop"]}
+                {"name": "domain", "type": "string", "required": false, "description": "HA domain prefix to filter, e.g. 'light', 'switch', 'climate', 'sensor', 'lock', 'media_player'. Empty string returns all domains.", "default": ""}
             ],
-            "returns_description": "Array of success/error responses",
-            "ui_hint": null
+            "returns_description": "{entities: [{entity_id, state, friendly_name, device_class}], total}",
+            "ui_hint": "grid_cards",
+            "read_only_hint": true
         },
         {
-            "id": "list_scenes",
-            "method": "GET",
-            "url": "http://localhost:8743/api/{username}/scenes",
-            "description": "List all available Hue scenes.",
+            "id": "get_entity_state",
+            "method": "PYTHON",
+            "url": "python://smart_home_hue/get_entity_state",
+            "description": "Read the full state and curated attributes of a single Home Assistant entity (brightness, color_temp, temperature, humidity, battery, device_class, unit_of_measurement).",
             "params": [
-                {"name": "username", "type": "string", "required": true, "description": "Hue Bridge API username"}
+                {"name": "entity_id", "type": "string", "required": true, "description": "Fully-qualified HA entity id, e.g. 'light.living_room' or 'sensor.outside_temperature'."}
             ],
-            "returns_description": "Object with scene IDs: {name, type, lights, group}",
-            "ui_hint": "list"
+            "returns_description": "{entity_id, state, friendly_name, attributes, last_changed}",
+            "ui_hint": "detail_card",
+            "read_only_hint": true
         },
         {
-            "id": "set_group_state",
-            "method": "PUT",
-            "url": "http://localhost:8743/api/{username}/groups/{group_id}/action",
-            "description": "Set state for a group of lights (e.g., all living room lights).",
+            "id": "set_light",
+            "method": "PYTHON",
+            "url": "python://smart_home_hue/set_light",
+            "description": "Turn on a light and optionally set brightness, color temperature, or RGB color. Calls the HA service light.turn_on. To turn a light off, use toggle_entity instead.",
             "params": [
-                {"name": "username", "type": "string", "required": true, "description": "Hue Bridge API username"},
-                {"name": "group_id", "type": "string", "required": true, "description": "Group ID (0 = all lights)"},
-                {"name": "on", "type": "boolean", "required": false, "description": "Turn group on or off"},
-                {"name": "bri", "type": "number", "required": false, "description": "Brightness (1-254)"},
-                {"name": "scene", "type": "string", "required": false, "description": "Scene ID to activate"}
+                {"name": "entity_id", "type": "string", "required": true, "description": "Light entity id, e.g. 'light.living_room'."},
+                {"name": "brightness", "type": "integer", "required": false, "description": "Brightness 0-255 (0 = off, 255 = full). Clamped server-side."},
+                {"name": "color_temp", "type": "integer", "required": false, "description": "Color temperature in mireds (153 = cool ~6500K, 500 = warm ~2000K)."},
+                {"name": "rgb_color", "type": "array", "items": {"type": "integer"}, "required": false, "description": "RGB triplet [r,g,b] each 0-255."}
             ],
-            "returns_description": "Array of success/error responses",
-            "ui_hint": null
+            "returns_description": "{called, entity}",
+            "ui_hint": "detail_card"
+        },
+        {
+            "id": "toggle_entity",
+            "method": "PYTHON",
+            "url": "python://smart_home_hue/toggle_entity",
+            "description": "Toggle a Home Assistant entity (light, switch, fan, etc.) using the HA service '<domain>.toggle'. Use this to flip a device's on/off state without specifying a target value.",
+            "params": [
+                {"name": "entity_id", "type": "string", "required": true, "description": "Entity id like 'switch.kitchen' or 'light.bedroom'."}
+            ],
+            "returns_description": "{called, entity}",
+            "ui_hint": "detail_card"
+        },
+        {
+            "id": "call_service",
+            "method": "PYTHON",
+            "url": "python://smart_home_hue/call_service",
+            "description": "Generic Home Assistant service call. Use this when no specialised endpoint exists (e.g. media_player.play_media, climate.set_temperature, lock.lock).",
+            "params": [
+                {"name": "domain", "type": "string", "required": true, "description": "HA service domain, e.g. 'climate', 'media_player', 'lock'."},
+                {"name": "service", "type": "string", "required": true, "description": "Service name within the domain, e.g. 'set_temperature', 'play_media', 'lock'."},
+                {"name": "entity_id", "type": "string", "required": false, "description": "Target entity id. May be empty for services that accept other targeting (e.g. zone, area)."},
+                {"name": "data", "type": "object", "required": false, "description": "Extra service data merged into the call body."}
+            ],
+            "returns_description": "{called, entity}",
+            "ui_hint": "detail_card",
+            "requires_user_approval": true
+        },
+        {
+            "id": "get_automations",
+            "method": "PYTHON",
+            "url": "python://smart_home_hue/get_automations",
+            "description": "List configured Home Assistant automations (entities in the 'automation' domain) with their on/off state. Read-only.",
+            "params": [],
+            "returns_description": "{entities: [{entity_id, state, friendly_name, device_class}], total}",
+            "ui_hint": "list",
+            "read_only_hint": true
+        },
+        {
+            "id": "trigger_automation",
+            "method": "PYTHON",
+            "url": "python://smart_home_hue/trigger_automation",
+            "description": "Manually trigger a Home Assistant automation by entity id. Calls the HA service automation.trigger.",
+            "params": [
+                {"name": "entity_id", "type": "string", "required": true, "description": "Automation entity id, e.g. 'automation.evening_lights'."}
+            ],
+            "returns_description": "{called, entity}",
+            "ui_hint": "detail_card"
         }
     ],
     "flows": [
         {
             "id": "goodnight",
-            "description": "Turn off all lights gradually over 30 seconds",
+            "description": "Turn off all lights when going to bed",
             "steps": [
-                {"endpoint_id": "set_group_state", "condition": null}
+                {"endpoint_id": "get_entities"},
+                {"endpoint_id": "toggle_entity"}
             ]
         }
     ],

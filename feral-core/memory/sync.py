@@ -250,6 +250,13 @@ class SyncWAL:
         conn.close()
 
     def append(self, op: SyncOperation):
+        """Synchronous WAL append. Used by the boot path and the few
+        background callers that don't run inside an event loop. Async
+        callers (every `MemoryStore` write hot path) MUST use
+        :meth:`append_async` instead — calling this from `await`-land
+        blocks the event loop on `sqlite3.connect` + `commit` for the
+        full duration of the disk fsync.
+        """
         with self._write_lock:
             conn = sqlite3.connect(self._db_path)
             try:
@@ -273,6 +280,21 @@ class SyncWAL:
                     raise
             finally:
                 conn.close()
+
+    async def append_async(self, op: SyncOperation) -> None:
+        """Async wrapper around :meth:`append` that off-loads the
+        sqlite3 fsync onto a worker thread.
+
+        We deliberately do not rewrite the underlying append in
+        ``aiosqlite`` because the sync version is still called from
+        the boot path and from peer-applied changes (where there is
+        no running event loop). Off-loading via ``asyncio.to_thread``
+        keeps the event loop free for the chat / voice paths while
+        the WAL append commits — which on a slow disk can be tens
+        to hundreds of milliseconds and was the dominant slow-callback
+        offender flagged by AUDIT-r14 finding 14.
+        """
+        await asyncio.to_thread(self.append, op)
 
     def integrity_check(self) -> dict:
         """Run SQLite integrity_check on the WAL file.
@@ -411,26 +433,21 @@ class SyncEngine:
         logger.info("SyncEngine resumed after IO pause (node=%s)", self.node_id)
         return True
 
-    def log_operation(self, table: str, op_type: str, row_id: str, data: dict) -> str:
-        """Called by MemoryStore on every write to log to WAL.
+    def _build_operation(
+        self, table: str, op_type: str, row_id: str, data: dict
+    ) -> SyncOperation:
+        """Mint a SyncOperation with a fresh HLC for *table.row_id*.
 
-        Returns the HLC string for the op so the caller can persist
-        ``hlc_string`` into the row itself — this is what makes the
-        D12 LWW check on the receiving side possible. An empty string
-        is returned when sync IO is paused (the row still gets
-        written locally, it just won't carry an HLC into the WAL or
-        into the row column).
-
-        Raises SyncDiskFullError when the WAL filesystem is full; callers
-        upstream (MemoryStore._log_sync) intentionally swallow the error
-        so a full sync_wal.db never breaks a local note save.
+        Lifted out of ``log_operation`` so the sync and async paths
+        can share the same HLC bump + envelope construction without
+        duplicating logic.
         """
         if self._io_paused:
             raise SyncDiskFullError(
                 f"sync paused (reason={self._io_pause_reason or 'unknown'})"
             )
         hlc_ts = self._hlc.now()
-        op = SyncOperation(
+        return SyncOperation(
             op_id=str(uuid4()),
             table=table,
             op_type=op_type,
@@ -439,30 +456,71 @@ class SyncEngine:
             hlc=hlc_ts.to_string(),
             origin_node=self.node_id,
         )
-        try:
-            self._wal.append(op)
-        except SyncDiskFullError as exc:
+
+    def _on_wal_append_failure(
+        self, table: str, op_type: str, exc: BaseException
+    ) -> None:
+        """Centralise the disk-full → pause + re-raise dance shared by
+        both the sync and async log paths."""
+        if isinstance(exc, SyncDiskFullError):
             self._io_paused = True
             self._io_pause_reason = "disk_full"
             logger.warning(
                 "WAL disk full, sync paused (node=%s op=%s/%s): %s",
                 self.node_id, table, op_type, exc,
             )
-            raise
-        except OSError as exc:
-            # Catch raw ENOSPC that didn't go through SyncWAL's translator
-            # (e.g. a deeper-layer monkeypatch in tests, or a future
-            # backend that bypasses append()). Same pause + re-raise as
-            # the wrapped path so behavior is identical end-to-end.
-            if exc.errno == errno.ENOSPC:
-                self._io_paused = True
-                self._io_pause_reason = "disk_full"
-                logger.warning(
-                    "WAL disk full (raw OSError), sync paused (node=%s op=%s/%s): %s",
-                    self.node_id, table, op_type, exc,
-                )
-                raise SyncDiskFullError(str(exc)) from exc
-            raise
+            raise exc
+        if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+            self._io_paused = True
+            self._io_pause_reason = "disk_full"
+            logger.warning(
+                "WAL disk full (raw OSError), sync paused (node=%s op=%s/%s): %s",
+                self.node_id, table, op_type, exc,
+            )
+            raise SyncDiskFullError(str(exc)) from exc
+        raise exc
+
+    def log_operation(self, table: str, op_type: str, row_id: str, data: dict) -> str:
+        """Synchronous variant — kept for the boot path and any
+        non-async caller. Async callers MUST use
+        :meth:`log_operation_async` so the WAL fsync runs on a worker
+        thread instead of blocking the event loop. See AUDIT-r14
+        finding 14 (sync SyncWAL on episode_save hot path).
+
+        Returns the HLC string for the op so the caller can persist
+        ``hlc_string`` into the row itself — this is what makes the
+        D12 LWW check on the receiving side possible.
+
+        Raises SyncDiskFullError when the WAL filesystem is full; callers
+        upstream (MemoryStore._log_sync) intentionally swallow the error
+        so a full sync_wal.db never breaks a local note save.
+        """
+        op = self._build_operation(table, op_type, row_id, data)
+        try:
+            self._wal.append(op)
+        except (SyncDiskFullError, OSError) as exc:
+            self._on_wal_append_failure(table, op_type, exc)
+            raise  # _on_wal_append_failure already re-raised; defensive
+        self._vector_clock.update(self.node_id, op.hlc)
+        return op.hlc
+
+    async def log_operation_async(
+        self, table: str, op_type: str, row_id: str, data: dict
+    ) -> str:
+        """Async-safe variant of :meth:`log_operation`.
+
+        Identical semantics (HLC mint + WAL append + vector clock
+        update + disk-full pause) but the sqlite3 commit runs on a
+        worker thread so the calling coroutine yields control while
+        the disk fsync resolves. This is the codepath the chat /
+        voice / memory hot paths use.
+        """
+        op = self._build_operation(table, op_type, row_id, data)
+        try:
+            await self._wal.append_async(op)
+        except (SyncDiskFullError, OSError) as exc:
+            self._on_wal_append_failure(table, op_type, exc)
+            raise  # defensive
         self._vector_clock.update(self.node_id, op.hlc)
         return op.hlc
 

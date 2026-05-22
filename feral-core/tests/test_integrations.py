@@ -156,12 +156,18 @@ class TestHealthPlatforms:
 
     @pytest.mark.asyncio
     async def test_aggregator_summary_empty(self):
+        """Lane 05 W5: HealthAggregator.execute now wraps the bare
+        snapshot dict in the canonical {success, status_code, data,
+        error} envelope used by every other skill backend, so the
+        snapshot fields live under result['data'] instead of at the
+        top level."""
         from integrations.health_platforms import HealthAggregator
 
         agg = HealthAggregator()
         result = await agg.execute("health_summary", {})
-        assert result["sources"] == []
-        assert result["sleep_hours"] is None
+        assert result["success"] is True
+        assert result["data"]["sources"] == []
+        assert result["data"]["sleep_hours"] is None
 
 
 # ── Home Assistant ────────────────────────────────────────────────

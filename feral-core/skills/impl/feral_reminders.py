@@ -89,14 +89,43 @@ class FeralRemindersSkill(BaseSkill):
             title_raw = _arg_value(args, "title")
             title = str(title_raw or "").strip()
             if not title:
-                return {"success": False, "status_code": 400, "data": None, "error": "Missing reminder title"}
+                return {
+                    "success": False,
+                    "status_code": 400,
+                    "data": None,
+                    "error": "Missing reminder title",
+                    "reason": "missing_required_field",
+                    "field": "title",
+                }
+            # `due` is required at the dispatcher layer in addition to the
+            # JSON-schema gate in tool_dispatch_validator. The schema gate
+            # catches calls that arrive missing the key entirely; this
+            # second check rejects ``due=""`` / ``due=None`` / ``due="   "``
+            # which JSON-schema would accept as a string. Without this, an
+            # LLM that obeyed the tool signature literally ("due is a
+            # string, sure, here's an empty one") could create reminders
+            # with no scheduled time — silent data loss.
             due_value = _arg_value(args, "due")
             if due_value is None:
                 due_value = _arg_value(args, "when_iso")
+            due = str(due_value).strip() if due_value is not None else ""
+            if not due:
+                return {
+                    "success": False,
+                    "status_code": 400,
+                    "data": None,
+                    "error": (
+                        "Reminder 'due' is required. Pass an ISO-8601 timestamp "
+                        "(e.g. '2026-05-22T14:00:00-07:00') or a natural-language "
+                        "phrase the orchestrator can resolve."
+                    ),
+                    "reason": "missing_required_field",
+                    "field": "due",
+                }
             reminder = {
                 "id": f"rem_{uuid4().hex[:10]}",
                 "title": title,
-                "due": str(due_value).strip() if due_value else "",
+                "due": due,
                 "completed": False,
                 "created_at": _now_iso(),
                 "completed_at": None,

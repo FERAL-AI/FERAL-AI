@@ -19,15 +19,6 @@ from models.skill_manifest import SkillManifest  # noqa: E402
 
 MANIFEST_ROOT = ROOT / "skills" / "manifests"
 
-# Lane 05 (Wave 2) fixes these manifests; until then the contract test
-# documents drift as xfail rather than blocking Wave 1 merge.
-KNOWN_PENDING_MANIFEST_FIXES = frozenset({
-    "smart_home_hue",
-    "messaging_sms",
-    "calendar_google",
-    "spotify_music",
-})
-
 
 def _all_manifest_endpoints() -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
@@ -50,12 +41,14 @@ def test_manifest_endpoint_matches_backend_dispatch(
     skill_id: str,
     endpoint_id: str,
 ):
+    """Hard contract gate: every manifest endpoint must round-trip to a
+    backend dispatch key with matching parameter names.
+
+    Lane 05 (Wave 2) fixed the four lane-pending manifests; the
+    ``KNOWN_PENDING_MANIFEST_FIXES`` xfail allowlist that existed during
+    Wave 1 is gone — drift is now a hard failure.
+    """
     violations = validator.contract_violations(skill_id, endpoint_id)
-    if skill_id in KNOWN_PENDING_MANIFEST_FIXES:
-        if violations:
-            pytest.xfail(
-                f"known manifest drift (Lane 05): {violations}"
-            )
     assert not violations, (
         f"Manifest↔backend contract failed for {skill_id}__{endpoint_id}: "
         f"{violations}"

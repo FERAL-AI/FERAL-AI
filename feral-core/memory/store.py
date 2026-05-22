@@ -183,6 +183,11 @@ class MemoryStore:
         self._about_me_store = None
         self._embedder = EmbeddingProvider()
         self._kg = None
+        # Lane 05 W3 (AUDIT-r14 finding 14): track fire-and-forget
+        # extractor tasks so we can drain them on shutdown and so
+        # asyncio's "Task was destroyed but it is pending" warning
+        # doesn't fire when an event loop closes mid-extraction.
+        self._bg_tasks: set[asyncio.Task] = set()
 
         # Async connection pool. Lazily populated on first acquire so
         # we can be constructed outside a running event loop (the brain
@@ -216,6 +221,28 @@ class MemoryStore:
         a running event loop after construction."""
         self._embed_queue.start()
         logger.info("Embed queue started")
+
+    async def drain_background_tasks(self, timeout: float = 5.0) -> None:
+        """Wait for outstanding fire-and-forget tasks (AboutMe extractor
+        runs spawned by ``episode_save``) to finish.
+
+        Called from the brain shutdown path so we don't leak the
+        "Task was destroyed but it is pending" asyncio warning.
+        Tests that exercise ``episode_save`` should call this in a
+        finally clause to keep the loop clean.
+        """
+        if not self._bg_tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*list(self._bg_tasks), return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "drain_background_tasks: %d tasks still pending after %.1fs",
+                len(self._bg_tasks), timeout,
+            )
 
     def _init_knowledge_graph(self):
         try:
@@ -256,12 +283,20 @@ class MemoryStore:
         self._about_me_store = about_me_store
 
     def _log_sync(self, table: str, op_type: str, row_id: str, data: dict) -> str:
-        """Log a local write to the sync WAL. Returns the HLC string
-        so the caller can persist ``hlc_string`` into the row column
-        — without that the receiving side has no basis for the D12
-        LWW comparison. An empty string is returned when sync is
-        disabled or the WAL append failed (the row still lands
-        locally; replication just won't carry an HLC).
+        """Synchronous WAL log. Used by the few non-async writers
+        that survive in the codebase (boot path, peer-applied changes,
+        unit tests). Async hot paths MUST use :meth:`_log_sync_async`
+        — calling this from inside an ``await`` blocks the event
+        loop on the underlying ``sqlite3`` fsync (~tens of ms on a
+        slow disk, the dominant slow-callback offender flagged by
+        AUDIT-r14 finding 14).
+
+        Returns the HLC string so the caller can persist
+        ``hlc_string`` into the row column — without that the
+        receiving side has no basis for the D12 LWW comparison. An
+        empty string is returned when sync is disabled or the WAL
+        append failed (the row still lands locally; replication just
+        won't carry an HLC).
         """
         if not self._sync_engine:
             return ""
@@ -269,6 +304,29 @@ class MemoryStore:
             return self._sync_engine.log_operation(table, op_type, row_id, data) or ""
         except Exception as exc:
             logger.debug("_log_sync swallowed exception: %s", exc)
+            return ""
+
+    async def _log_sync_async(
+        self, table: str, op_type: str, row_id: str, data: dict
+    ) -> str:
+        """Async-offloaded WAL log. Same contract as :meth:`_log_sync`
+        but the underlying sqlite3 ``INSERT OR REPLACE`` runs on a
+        worker thread so the calling coroutine yields control while
+        the disk fsync resolves. Used by every async write path on
+        ``MemoryStore`` — episodes, knowledge graph entities/relations,
+        knowledge entries — to keep the event loop free.
+        """
+        if not self._sync_engine:
+            return ""
+        try:
+            return (
+                await self._sync_engine.log_operation_async(
+                    table, op_type, row_id, data
+                )
+                or ""
+            )
+        except Exception as exc:
+            logger.debug("_log_sync_async swallowed exception: %s", exc)
             return ""
 
     async def _conn(self) -> aiosqlite.Connection:
@@ -1034,7 +1092,10 @@ class MemoryStore:
         # Sync log first so we know the HLC string and can persist it
         # into ``episodes.hlc_string`` in the same INSERT — that gives
         # the receiving side a stable comparator for D12 LWW.
-        hlc = self._log_sync("episodes", "insert", eid, {
+        # AUDIT-r14 finding 14 fix: previously this was a sync sqlite3
+        # commit on the event loop, which the slow-callback monitor
+        # caught at >100ms on slow disks. Off-loaded to a worker thread.
+        hlc = await self._log_sync_async("episodes", "insert", eid, {
             "id": eid, "session_id": session_id, "event_type": event_type,
             "summary": summary, "detail": detail, "importance": importance, "created_at": now,
         })
@@ -1061,11 +1122,46 @@ class MemoryStore:
                 chunk_index=i, db_path=self.db_path,
             )
 
+        # AUDIT-r14 finding 14 fix: AboutMe extractor previously ran
+        # synchronously here (regex matching + N sqlite3 INSERTs per
+        # match) on the chat hot path. Schedule it as a fire-and-forget
+        # background task so episode_save returns as soon as the WAL
+        # commit lands; the extractor's failures are logged but never
+        # surfaced — they're best-effort UX.
         if self._about_me_store is not None and text:
+            extractor = getattr(
+                self._about_me_store, "extract_from_text_async", None
+            )
+
+            async def _run_extractor() -> None:
+                try:
+                    if extractor is not None:
+                        await extractor(text)
+                    else:
+                        # Fall through to the sync extractor on a worker
+                        # thread for stores that don't yet have the
+                        # async variant (older test doubles).
+                        await asyncio.to_thread(
+                            self._about_me_store.extract_from_text, text
+                        )
+                except Exception as exc:
+                    logger.debug("AboutMe auto-extractor failed silently: %s", exc)
+
             try:
-                self._about_me_store.extract_from_text(text)
-            except Exception as exc:
-                logger.debug("AboutMe auto-extractor failed silently: %s", exc)
+                task = asyncio.create_task(_run_extractor())
+                # Hold a strong reference so the GC doesn't yank the
+                # task mid-flight (asyncio only keeps weak refs); the
+                # discard callback removes the entry once the task
+                # resolves so the set doesn't grow unboundedly.
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
+            except RuntimeError:
+                # No running loop (synchronous test instantiation that
+                # somehow ended up here) — run inline as a last resort.
+                try:
+                    self._about_me_store.extract_from_text(text)
+                except Exception as exc:
+                    logger.debug("AboutMe auto-extractor failed silently: %s", exc)
 
         return {"id": eid, "event_type": event_type, "summary": summary, "created_at": now}
 

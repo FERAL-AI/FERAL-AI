@@ -29,7 +29,7 @@
       "id": "create",
       "method": "POST",
       "url": "python://feral_reminders/create",
-      "description": "Create a reminder with title and optional due date/time.",
+      "description": "Create a reminder with title and a required due date/time. The due value is mandatory; if you do not yet know the due time, ask the user before calling this tool.",
       "params": [
         {
           "name": "title",
@@ -40,8 +40,8 @@
         {
           "name": "due",
           "type": "string",
-          "required": false,
-          "description": "Optional due string (ISO timestamp or natural language)."
+          "required": true,
+          "description": "Required due time. Provide an ISO-8601 timestamp like '2026-05-22T14:00:00-07:00' or a natural-language phrase the orchestrator can resolve (e.g. 'tomorrow at 9am'). Empty string is rejected."
         }
       ],
       "returns_description": "{reminder, count}",

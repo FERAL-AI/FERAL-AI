@@ -822,13 +822,121 @@ class MCPClientManager:
     def get_server(self, name: str) -> Optional[MCPServerConnection]:
         return self._servers.get(name)
 
-    def all_tools(self) -> list[dict]:
-        """Get all tools from all connected MCP servers, prefixed with server name."""
-        tools = []
+    # ─────────────────────────────────────────────────────────────
+    # Lane 05 W10 (AUDIT-r14 finding 16 fix #5): tool dedup against
+    # the canonical FERAL skill set.
+    #
+    # The MCP filesystem reference server exposes 14 file primitives
+    # (read_file, write_file, list_directory, ...) that overlap with
+    # the FERAL ``computer_use__*`` skill 1:1. When both are present
+    # in the same LLM tool list:
+    #
+    #   * OpenAI / Anthropic models truncate after ~128 tools, so
+    #     the duplicated MCP filesystem tools push *real* MCP tools
+    #     (sequential-thinking, github, brave-search) off the end of
+    #     the list.
+    #   * Models that obey both manifests can confuse intent ("which
+    #     read_file does the user want?") and increment the wrong
+    #     metric on dispatch.
+    #
+    # We default to FERAL-wins (drop MCP filesystem) when the
+    # canonical skill list contains a ``computer_use__*`` entry. The
+    # operator can override by setting
+    # ``FERAL_MCP_FILESYSTEM_WINS=1`` in env. Both halves of the
+    # cascade are observable: the dropped tool count is logged once
+    # per all_tools() call so the dashboard can render a "duplicate
+    # MCP tools suppressed" badge.
+    # ─────────────────────────────────────────────────────────────
+
+    # Canonical filesystem-shaped tool stems exposed by the MCP
+    # filesystem reference server. We compare against the un-prefixed
+    # tool name (the MCP-server prefix is stripped before the test).
+    _MCP_FS_TOOL_NAMES = frozenset({
+        "read_file",
+        "read_multiple_files",
+        "write_file",
+        "edit_file",
+        "create_directory",
+        "list_directory",
+        "directory_tree",
+        "move_file",
+        "search_files",
+        "get_file_info",
+        "list_allowed_directories",
+        "tree",
+    })
+
+    @staticmethod
+    def _strip_mcp_prefix(name: str) -> str:
+        """``mcp_filesystem_read_file`` → ``read_file``."""
+        if not name.startswith("mcp_"):
+            return name
+        rest = name[4:]
+        # The MCP server name is everything between ``mcp_`` and the
+        # next underscore boundary — but server names themselves can
+        # contain underscores (e.g. ``brave-search`` becomes
+        # ``brave_search`` in the prefix). We can't recover the exact
+        # split without the server list, so we strip the *first*
+        # token only; that's good enough for the FS overlap check.
+        if "_" not in rest:
+            return rest
+        return rest.split("_", 1)[1]
+
+    def all_tools(
+        self,
+        *,
+        feral_skill_names: Optional[set[str]] = None,
+        prefer_mcp_filesystem: Optional[bool] = None,
+    ) -> list[dict]:
+        """Get all tools from all connected MCP servers, prefixed with
+        server name.
+
+        When *feral_skill_names* is provided AND it contains any
+        ``computer_use__*`` entry, MCP filesystem tools whose names
+        match :data:`_MCP_FS_TOOL_NAMES` are filtered out by default
+        so the LLM never sees both halves of the duplicate.
+
+        ``prefer_mcp_filesystem`` overrides the default policy:
+          * True: keep MCP filesystem tools, drop any
+            ``computer_use__*`` overlap from FERAL-side tool lists
+            (the orchestrator handles the FERAL side; we just signal
+            via the return value).
+          * False: drop MCP filesystem tools (the default when FERAL
+            has computer_use__*).
+          * None: read from ``FERAL_MCP_FILESYSTEM_WINS`` env (default
+            False — FERAL wins).
+        """
+        if prefer_mcp_filesystem is None:
+            prefer_mcp_filesystem = (
+                os.getenv("FERAL_MCP_FILESYSTEM_WINS", "").lower()
+                in ("1", "true", "yes")
+            )
+
+        feral_has_computer_use = bool(
+            feral_skill_names
+            and any(s.startswith("computer_use__") for s in feral_skill_names)
+        )
+        drop_mcp_fs = feral_has_computer_use and not prefer_mcp_filesystem
+
+        tools: list[dict] = []
+        dropped = 0
         for name, server in self._servers.items():
             for tool in server.tools:
-                prefixed_tool = {**tool, "name": f"mcp_{name}_{tool['name']}"}
-                tools.append(prefixed_tool)
+                prefixed_name = f"mcp_{name}_{tool['name']}"
+                if (
+                    drop_mcp_fs
+                    and tool.get("name") in self._MCP_FS_TOOL_NAMES
+                ):
+                    dropped += 1
+                    continue
+                tools.append({**tool, "name": prefixed_name})
+
+        if dropped:
+            logger.info(
+                "MCP tool dedup: dropped %d filesystem-overlap tools "
+                "(set FERAL_MCP_FILESYSTEM_WINS=1 to keep them)",
+                dropped,
+            )
         return tools
 
     def all_resources(self) -> list[dict]:
