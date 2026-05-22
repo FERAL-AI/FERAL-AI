@@ -2420,25 +2420,34 @@ def main():
         help="File path for export/import, peer_id for `now`, or subcommand for `peers`",
     )
 
-    # feral memory — backend selector + v2026.5.34 decay/forget/recall/compact.
-    mem_p = sub.add_parser("memory", help="Memory backend + decay management")
+    # feral memory — backend selector + v2026.5.34 decay/forget/recall/compact
+    # + Lane 07 W6 `query` (closes THESIS_SCENARIOS S1 from the CLI).
+    mem_p = sub.add_parser("memory", help="Memory backend + decay + query management")
     mem_p.add_argument(
         "action",
-        choices=["status", "switch", "list", "decay", "forget", "recall", "compact"],
+        choices=[
+            "status", "switch", "list", "decay",
+            "forget", "recall", "compact", "query",
+        ],
         help=(
             "status: show current backend | list: installed backends | "
             "switch <id>: select backend | "
             "decay now: run a one-shot Ebbinghaus sweep | "
             "forget <episode_id>: mark an episode forgotten | "
             "recall <episode_id>: reverse a forget | "
-            "compact [<session_id>]: promote conversation turns to episodes"
+            "compact [<session_id>]: promote conversation turns to episodes | "
+            "query <text>: search memory (THESIS S1)"
         ),
     )
     mem_p.add_argument(
         "backend_id",
         nargs="?",
         default=None,
-        help="Backend id for `switch` (e.g. sqlite_vec, chroma, qdrant)",
+        help=(
+            "Positional argument — backend id for `switch` "
+            "(sqlite_vec / chroma / qdrant), session id for `compact`, "
+            "or query text for `query` (quote multi-word queries)"
+        ),
     )
 
     # feral install-service / uninstall-service
