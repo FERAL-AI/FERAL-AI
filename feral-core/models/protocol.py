@@ -606,6 +606,62 @@ class NodeByePayload(BaseModel):
     restart_in_s: int = 0
 
 
+class GlassesFramePayload(BaseModel):
+    """Smart-glasses (or glasses-equivalent) vision frame envelope.
+
+    HUP_SPEC §5.4.3 (v1.3.0+). The brain stores accepted frames into the
+    per-device circular buffer at ``feral-core/perception/glasses_buffer.py``
+    which the orchestrator's vision-context-attach reads.
+
+    ``device_id`` is the stable hardware id (e.g. ``w610-D344`` for a
+    real W610 unit, or the iPhone node id when the phone camera is the
+    fallback source). It can differ from the HUP-level ``node_id`` that
+    forwarded the frame — a phone forwarding W610 frames carries the
+    phone as ``node_id`` and the glasses id as ``device_id``.
+
+    ``source`` is a free-form provenance label. The brain forwards it
+    verbatim into the buffer; the orchestrator may use it for cost
+    accounting (e.g. cheaper vision tier for ``camera_fallback`` than
+    ``w610``) but the wire itself doesn't gate on it.
+    """
+    device_id: str
+    timestamp: float = Field(default_factory=time)
+    encoding: Literal["jpeg", "png", "webp"] = "jpeg"
+    data_b64: str
+    width: Optional[int] = None
+    height: Optional[int] = None
+    source: str = "glasses"
+    sequence: Optional[int] = None
+
+
+class DeviceAnnouncePayload(BaseModel):
+    """Peripheral-discovery envelope (HUP_SPEC §5.4.4 — v1.3.0+).
+
+    Closes the "what BLE devices are around my phone?" loop without
+    exposing per-vendor BLE APIs. The brain upserts a knowledge-graph
+    entity keyed by ``device_id`` with ``category=device`` so device
+    queries land via the same memory tool path as everything else.
+    """
+    scanner_node_id: str = ""
+    device_id: str
+    device_kind: Literal[
+        "bluetooth_le",
+        "bluetooth_classic",
+        "mdns",
+        "usb",
+        "airplay",
+        "homekit",
+        "unknown",
+    ] = "unknown"
+    name: str = ""
+    manufacturer: str = ""
+    rssi_dbm: Optional[int] = None
+    advertised_services: list[str] = Field(default_factory=list)
+    first_seen: Optional[float] = None
+    last_seen: Optional[float] = None
+    metadata: dict = Field(default_factory=dict)
+
+
 MESSAGE_TYPES = {
     # Client → Brain
     "audio_chunk": AudioChunkPayload,
@@ -650,6 +706,10 @@ MESSAGE_TYPES = {
     # Vision Pipeline
     "vision_frame": VisionFramePayload,
     "vision_request": VisionRequestPayload,
+    "glasses_frame": GlassesFramePayload,
+
+    # Hardware mesh (peripheral discovery — HUP v1.3.0)
+    "device_announce": DeviceAnnouncePayload,
 
     # Phone Bridge
     "sensor_telemetry": SensorTelemetryPayload,

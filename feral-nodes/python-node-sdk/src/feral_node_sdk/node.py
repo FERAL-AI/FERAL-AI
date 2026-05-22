@@ -193,6 +193,73 @@ class FeralNode:
         )
         await self._send("device_event", envelope)
 
+    async def emit_glasses_frame(
+        self,
+        data_b64: str,
+        *,
+        device_id: Optional[str] = None,
+        encoding: str = "jpeg",
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        source: str = "glasses",
+        sequence: Optional[int] = None,
+    ) -> None:
+        """Send a HUP v1.3.0 ``glasses_frame`` to the brain (HUP_SPEC §5.4.3).
+
+        The brain stores accepted frames into the per-device glasses
+        circular buffer at ``feral-core/perception/glasses_buffer.py``
+        which the orchestrator's vision-context-attach reads.
+
+        ``device_id`` defaults to the node's own id when omitted — the
+        common case for nodes that are themselves the glasses (e.g. a
+        W300 daemon). A bridging node (e.g. the iPhone forwarding W610
+        frames) should set ``device_id`` to the glasses hardware id.
+        """
+        from .schemas import GlassesFramePayload
+
+        payload = GlassesFramePayload(
+            device_id=device_id or self.node_id,
+            encoding=encoding,
+            data_b64=data_b64,
+            width=width,
+            height=height,
+            source=source,
+            sequence=sequence,
+        )
+        await self._send("glasses_frame", payload)
+
+    async def send_device_announce(
+        self,
+        device_id: str,
+        *,
+        device_kind: str = "bluetooth_le",
+        name: str = "",
+        manufacturer: str = "",
+        rssi_dbm: Optional[int] = None,
+        advertised_services: Optional[list[str]] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Send a HUP v1.3.0 ``device_announce`` (HUP_SPEC §5.4.4).
+
+        Inform the brain of a peripheral observed by this node so the
+        hardware mesh can record it as a memory entity. Brain dedupes
+        by ``device_id`` and updates ``last_seen`` in place.
+        """
+        from .schemas import DeviceAnnouncePayload
+
+        payload = DeviceAnnouncePayload(
+            scanner_node_id=self.node_id,
+            device_id=device_id,
+            device_kind=device_kind,
+            name=name,
+            manufacturer=manufacturer,
+            rssi_dbm=rssi_dbm,
+            advertised_services=list(advertised_services or []),
+            last_seen=time.time(),
+            metadata=dict(metadata or {}),
+        )
+        await self._send("device_announce", payload)
+
     @staticmethod
     async def discover_brain(timeout_s: float = 3.0) -> Optional[str]:
         """Resolve a FERAL brain on the LAN via mDNS. See `discovery.py`."""

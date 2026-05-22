@@ -2576,6 +2576,21 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # when available; otherwise log and move on.
                 _handle_audio_frame(node_id, raw.get("payload", {}))
 
+            elif msg.type == "glasses_frame":
+                # HUP v1.3.0 §5.4.3 — smart-glasses (or glasses-equivalent
+                # phone-camera fallback) vision frame. Routes into the
+                # dedicated per-device circular buffer at
+                # ``state.glasses_buffer`` which the orchestrator's
+                # vision-context-attach (Lane 08) reads.
+                _handle_glasses_frame(node_id, raw.get("payload", {}), msg.msg_id)
+
+            elif msg.type == "device_announce":
+                # HUP v1.3.0 §5.4.4 — peripheral discovery from a scanning
+                # node. Routes through hardware_mesh into the knowledge
+                # graph so device queries answer via the same memory tool
+                # as everything else.
+                await _handle_device_announce(node_id, raw.get("payload", {}))
+
             elif msg.type == "device_event":
                 # HUP v1.1 `device_event` envelope. Unwrap to the concrete
                 # event_type and dispatch. Biometric / sensor / gesture
@@ -2859,6 +2874,93 @@ def _handle_audio_frame(node_id, frame_payload: dict) -> None:
         logger.debug(
             "Received audio_frame from %s but state.audio has no ingest_frame hook; dropping.",
             effective_node,
+        )
+
+
+def _handle_glasses_frame(node_id, frame_payload: dict, msg_id=None) -> None:
+    """Dispatch a HUP v1.3.0 ``glasses_frame`` payload into the glasses
+    buffer.
+
+    Shares the 512 KiB-per-frame decoded cap with ``_handle_video_frame``
+    (HUP §2). Over-cap frames are dropped with HUP error code 4020. The
+    buffer (``state.glasses_buffer``) is a per-``device_id`` ring; the
+    orchestrator's vision-context-attach reads it freshness-gated.
+
+    Tolerant of both flat payloads (canonical ``glasses_frame`` envelope)
+    and nested ``device_event``-style payloads via
+    :func:`_unwrap_hup_frame` — symmetric with the ``video_frame`` /
+    ``audio_frame`` handlers.
+    """
+    frame_payload = _unwrap_hup_frame(frame_payload)
+    data_b64 = frame_payload.get("data_b64", "") or ""
+    if len(data_b64) > VIDEO_FRAME_MAX_BYTES:
+        logger.warning(
+            "Rejecting oversized glasses_frame from %s: %dB > %dB (HUP error 4020)",
+            node_id, len(data_b64), VIDEO_FRAME_MAX_BYTES,
+        )
+        return
+
+    effective_node = node_id or frame_payload.get("node_id", "unknown")
+    buf = getattr(state, "glasses_buffer", None)
+    if buf is None:
+        logger.debug(
+            "Received glasses_frame from %s but state.glasses_buffer is not "
+            "wired; dropping. (boot wiring at api/state.py)",
+            effective_node,
+        )
+        return
+    try:
+        buf.ingest(frame_payload, node_id=effective_node)
+    except Exception as exc:
+        logger.warning(
+            "glasses_buffer.ingest raised for %s: %s", effective_node, exc
+        )
+        return
+
+    if msg_id and state.orchestrator:
+        # Allow orchestrators that explicitly requested a frame
+        # (e.g. ``vision_ask`` mode) to resolve their pending request.
+        try:
+            state.orchestrator.resolve_pending_frame(msg_id, frame_payload)
+        except Exception:  # noqa: BLE001 — best-effort signal
+            pass
+
+
+async def _handle_device_announce(node_id, frame_payload: dict) -> None:
+    """Route a HUP v1.3.0 ``device_announce`` payload through the
+    hardware mesh.
+
+    The mesh upserts a knowledge-graph entity (``category=device``) so
+    chat memory queries like "what BLE devices are around my phone?"
+    can answer via the standard memory tool surface. Repeated
+    announcements for the same ``device_id`` update ``last_seen`` /
+    ``rssi_dbm`` in place rather than duplicating the entity.
+
+    Defensive against missing mesh / memory wiring at boot — drops
+    cleanly with a debug log so a half-booted brain doesn't 500 on
+    an early peripheral scan.
+    """
+    payload = _unwrap_hup_frame(frame_payload)
+    mesh = getattr(state, "hardware_mesh", None)
+    ingest = getattr(mesh, "ingest_device_announce", None) if mesh else None
+    if not callable(ingest):
+        logger.debug(
+            "Received device_announce from %s but hardware_mesh has no "
+            "ingest_device_announce hook; dropping.", node_id,
+        )
+        return
+    # Brain falls back to the WS-level node id when the scanner_node_id
+    # field is missing — daemons SHOULD set it but the spec defaults to
+    # the WS-level id.
+    if not payload.get("scanner_node_id") and node_id:
+        payload["scanner_node_id"] = node_id
+    try:
+        await ingest(payload)
+    except Exception as exc:
+        logger.warning(
+            "hardware_mesh.ingest_device_announce raised for scanner=%s "
+            "device=%s: %s",
+            node_id, payload.get("device_id", "?"), exc,
         )
 
 
