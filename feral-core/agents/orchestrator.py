@@ -20,8 +20,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
-from typing import Optional, Callable, Awaitable, TYPE_CHECKING
+from typing import Any, Optional, Callable, Awaitable, TYPE_CHECKING
 from uuid import uuid4
 
 from fastapi import WebSocket
@@ -1805,44 +1806,331 @@ class Orchestrator:
     # Skill Routing
     # ─────────────────────────────────────────────
 
-    async def _route_prompt(self, text: str) -> list[SkillManifest]:
+    # ─────────────────────────────────────────────
+    # Heuristic-first routing (Lane 08 WS2)
+    # ─────────────────────────────────────────────
+    #
+    # AUDIT-r14 finding 20 fix #2 and AUDIT-r13 finding 6.3 documented
+    # the regression: ``_route_prompt`` used to fire a primary-model
+    # LLM call (Opus / GPT-4) on every chat turn to pick which skills
+    # the LLM should see, even when the user said "hi". The user
+    # experience was a 1-5s "brain idle" before any token streamed.
+    #
+    # ``_route_prompt`` is now heuristic-first. The LLM is consulted
+    # only when the heuristic signal is genuinely ambiguous, and even
+    # then through ``LLMProvider.route_call`` at the ``cheap`` tier
+    # (Wave 2 Lane 09 R-CONTRACT-001). The expected no-LLM coverage on
+    # the canned production prompt corpus is ≥ 70%.
+    #
+    # ## Heuristic table (each row exits without an LLM call)
+    #
+    # | Match                              | Action                                        |
+    # |------------------------------------|-----------------------------------------------|
+    # | Empty / whitespace-only            | Return []                                     |
+    # | ``/<skill>`` prefix                | Direct map to that skill                      |
+    # | Memory recall regex (R_MEMORY)     | Map to ``notes_memory``                       |
+    # | Calendar query regex (R_CALENDAR)  | Map to ``calendar_google``                    |
+    # | Reminder verb regex (R_REMINDER)   | Map to ``feral_reminders``                    |
+    # | Health query regex (R_HEALTH)      | Map to ``health_data``                        |
+    # | Vision query regex (R_VISION)      | Map to ``perception_query``                   |
+    # | Code/search prefix                 | Map to ``code_interpreter``/``web_search``    |
+    # | Strong trigger match (score ≥ 20)  | Use registry's keyword/trigger ranking        |
+    # | Confident lead (top1 ≥ 1.5× top2)  | Use registry's ranking                        |
+    # | Action verb + no skill match       | Expose all skills (existing fallback)         |
+    # | Skill catalog ≤ 5                  | Use registry's ranking unconditionally        |
+    #
+    # Only when none of the above apply does the orchestrator call
+    # ``LLMProvider.route_call(call_site="routing", tier="cheap")``.
+
+    # Explicit prefix → skill_id map. ``"/calendar what's tomorrow"``
+    # routes straight to calendar_google without further parsing.
+    _ROUTE_PREFIX_MAP: dict[str, str] = {
+        "/memory": "notes_memory",
+        "/note": "notes_memory",
+        "/notes": "notes_memory",
+        "/calendar": "calendar_google",
+        "/cal": "calendar_google",
+        "/remind": "feral_reminders",
+        "/reminder": "feral_reminders",
+        "/health": "health_data",
+        "/search": "web_search",
+        "/google": "web_search",
+        "/code": "code_interpreter",
+        "/run": "code_interpreter",
+        "/screen": "screen_capture",
+        "/vision": "perception_query",
+        "/see": "perception_query",
+    }
+
+    # Memory-recall phrasings — "what did I do yesterday", etc.
+    _R_MEMORY = re.compile(
+        r"\b("
+        r"what\s+did\s+i\s+(?:do|say|ask|save|note)|"
+        r"summari[sz]e\s+(?:today|yesterday|my\s+week|my\s+day)|"
+        r"what\s+(?:was|were)\s+(?:we\s+)?(?:talking|chatting)\s+about|"
+        r"recall(?:\s+(?:that|the))?|"
+        r"do\s+you\s+remember|"
+        r"my\s+notes(?:\b|\s+from)|"
+        r"what\s+did\s+we\s+discuss"
+        r")\b",
+        re.I,
+    )
+
+    # Calendar phrasings — explicit time + schedule words.
+    _R_CALENDAR = re.compile(
+        r"\b("
+        r"(?:what'?s|do\s+i\s+have)\s+on\s+(?:my\s+)?(?:calendar|agenda|schedule)|"
+        r"my\s+(?:calendar|agenda|schedule)\s+(?:for\s+)?(?:today|tomorrow|next\s+week|this\s+week)|"
+        r"next\s+meeting|"
+        r"upcoming\s+(?:meetings?|events?)|"
+        r"am\s+i\s+free|"
+        r"schedule\s+a\s+(?:meeting|call|event)"
+        r")\b",
+        re.I,
+    )
+
+    # Reminder verbs — "remind me to ..."
+    _R_REMINDER = re.compile(
+        r"\b("
+        r"remind\s+me\s+to|"
+        r"set\s+a?\s*reminder|"
+        r"create\s+a?\s*reminder|"
+        r"list\s+(?:my\s+)?reminders"
+        r")\b",
+        re.I,
+    )
+
+    # Health / vitals — "what's my heart rate", "how did I sleep"
+    _R_HEALTH = re.compile(
+        r"\b("
+        r"(?:what'?s|show\s+me)\s+my\s+(?:heart\s+rate|hrv|spo2|vitals?|sleep)|"
+        r"how\s+(?:did|was)\s+(?:my\s+)?sleep|"
+        r"how\s+(?:recovered|ready)\s+am\s+i|"
+        r"(?:my\s+)?(?:recovery|readiness|strain)"
+        r")\b",
+        re.I,
+    )
+
+    # Visual perception — "what do I see", "what is in front of me"
+    _R_VISION = re.compile(
+        r"\b("
+        r"what\s+(?:do\s+i|am\s+i)\s+(?:see(?:ing)?|looking\s+at)|"
+        r"what(?:'s|\s+is)\s+(?:in\s+front\s+of\s+me|on\s+the\s+(?:screen|table))|"
+        r"describe\s+(?:the\s+)?(?:scene|view|room)"
+        r")\b",
+        re.I,
+    )
+
+    def _heuristic_route(self, text: str) -> tuple[list["SkillManifest"], str]:
+        """Try to pick relevant skills without an LLM call.
+
+        Returns ``(skills, reason)`` where ``reason`` is one of
+        ``"empty"``, ``"prefix"``, ``"regex:<name>"``,
+        ``"trigger_strong"``, ``"confident_lead"``,
+        ``"action_fallback"``, ``"small_catalog"``, or ``"ambiguous"``
+        (the only value that triggers an LLM disambiguation call).
+
+        The orchestrator's primary contract: ``"ambiguous"`` is the
+        ONLY exit that fires an LLM call. Every other return value is
+        a free routing decision.
+        """
+        if not text or not text.strip():
+            return ([], "empty")
+        if not self.skills.skills:
+            return ([], "empty")
+
+        stripped = text.strip()
+
+        # 1. Explicit ``/skill`` prefix. The slash form is intentional
+        # — it can't collide with normal English.
+        first_token = stripped.split(maxsplit=1)[0].lower() if stripped else ""
+        if first_token.startswith("/"):
+            mapped = self._ROUTE_PREFIX_MAP.get(first_token)
+            if mapped and mapped in self.skills.skills:
+                return ([self.skills.skills[mapped]], "prefix")
+
+        # 2. Regex-driven memory / calendar / reminder / health / vision shortcuts.
+        for pattern, sid, label in (
+            (self._R_MEMORY, "notes_memory", "regex:memory"),
+            (self._R_CALENDAR, "calendar_google", "regex:calendar"),
+            (self._R_REMINDER, "feral_reminders", "regex:reminder"),
+            (self._R_HEALTH, "health_data", "regex:health"),
+            (self._R_VISION, "perception_query", "regex:vision"),
+        ):
+            if pattern.search(stripped) and sid in self.skills.skills:
+                return ([self.skills.skills[sid]], label)
+
+        # 3. Catalog ≤ 5 — registry's keyword ranking is always
+        # enough; LLM routing would be more expensive than just
+        # exposing the whole list.
+        if len(self.skills.skills) <= 5:
+            return (self._fallback_skills_for_query(stripped, top_k=5), "small_catalog")
+
+        # 4. Trigger-phrase / category ranking from the registry.
+        ranked = self.skills.find_skills_for_query(stripped, top_k=5)
+        if ranked:
+            # Re-score to get the raw numbers — ``find_skills_for_query``
+            # returns sorted skills but not scores. We approximate by
+            # re-running the trigger check on the top result; the
+            # registry's exact-match score is 25, "contained in" is
+            # 20, "contains" is 15. Anything ≥ 20 = a strong signal.
+            top = ranked[0]
+            top_score = self._trigger_score(stripped, top)
+            if top_score >= 20.0:
+                return (ranked, "trigger_strong")
+
+            # Confident lead: top1 score / max(top2 score, 1.0) ≥ 1.5
+            # The registry already sorted; we just need the second
+            # skill's score for the ratio.
+            if len(ranked) >= 2:
+                second_score = self._trigger_score(stripped, ranked[1])
+                if top_score >= 5.0 and (
+                    second_score == 0.0 or top_score / second_score >= 1.5
+                ):
+                    return (ranked, "confident_lead")
+            elif top_score >= 5.0:
+                # Only one match in the catalog — clear winner.
+                return (ranked, "confident_lead")
+
+            # Weak signal — fall through to ambiguous.
+
+        # 5. Action verbs with no skill match — surface every tool
+        # (preserves the prior "imply action → expose all" behaviour).
+        if self._query_implies_action(stripped):
+            return (list(self.skills.skills.values()), "action_fallback")
+
+        return (ranked or [], "ambiguous")
+
+    @staticmethod
+    def _trigger_score(query: str, skill: "SkillManifest") -> float:
+        """Compute the same trigger-phrase score the registry uses.
+
+        Mirrors ``SkillRegistry.find_skills_for_query`` so we can read
+        a numeric "confidence" without re-implementing the registry.
+        Phrases are matched case-insensitive; the registry's tiers
+        (exact 25, contained 20, contains 15, partial words 3×count)
+        are preserved here.
+        """
+        q = query.lower().strip()
+        q_words = set(q.split())
+        best = 0.0
+        for phrase in getattr(skill, "trigger_phrases", []) or []:
+            p = phrase.lower()
+            if p == q:
+                best = max(best, 25.0)
+            elif p in q:
+                best = max(best, 20.0)
+            elif q in p:
+                best = max(best, 15.0)
+            else:
+                p_words = set(p.split())
+                overlap = p_words & q_words
+                if overlap:
+                    ratio = len(overlap) / max(len(p_words), 1)
+                    best = max(best, len(overlap) * 3.0 * ratio)
+        # Category bonus mirrors the registry too.
+        for cat in getattr(skill, "categories", []) or []:
+            if cat.lower() in q:
+                best += 5.0
+        return best
+
+    async def _route_prompt(self, text: str) -> list["SkillManifest"]:
+        """Pick which skills the LLM sees this turn.
+
+        WS2 — heuristic-first; LLM disambiguation through
+        ``LLMProvider.route_call(call_site="routing", tier="cheap")``
+        only when the heuristic exit is ``"ambiguous"`` (see
+        ``_heuristic_route`` table above).
+        """
         if not self.skills.skills:
             return []
 
-        if not self.llm.available or len(self.skills.skills) <= 5:
-            results = self._fallback_skills_for_query(text, top_k=5)
+        # Pre-WS2 behaviour preserved when the LLM is unavailable:
+        # heuristic is the only available choice.
+        if not getattr(self.llm, "available", False):
+            results, _reason = self._heuristic_route(text)
+            if not results:
+                results = self._fallback_skills_for_query(text, top_k=5)
             return await self._apply_routing_penalties(results)
 
-        prompt = "You are a Semantic Tool Router. Select up to 5 relevant tool IDs for the user's query.\n"
-        prompt += "Available Tools:\n"
-        for skill_id, skill in self.skills.skills.items():
-            prompt += f"- {skill_id}: {skill.description}\n"
+        skills, reason = self._heuristic_route(text)
+        if reason != "ambiguous":
+            logger.debug(
+                "route_prompt heuristic exit=%s skills=%s",
+                reason, [s.skill_id for s in skills[:5]],
+            )
+            return await self._apply_routing_penalties(skills)
 
-        prompt += f"\nUser Query: {text}\n"
-        prompt += "\nOutput ONLY a JSON list of strings (tool IDs). [] if none match. No markdown."
+        # ── Ambiguous: ask the cheap-tier LLM to disambiguate ────
+        provider_ref: dict[str, Any] = {}
+        try:
+            provider_ref = self.llm.route_call(
+                call_site="routing", prompt=text, tier="cheap",
+            ) or {}
+        except Exception as exc:
+            logger.debug("route_call refused, falling back to heuristic: %s", exc)
+            return await self._apply_routing_penalties(skills)
+
+        # Build a tight prompt — the catalog inflates token usage so
+        # we pass the description in short form. The cheap tier
+        # returns a JSON list of skill ids.
+        catalog_lines = [
+            f"- {sid}: {sk.description}"
+            for sid, sk in self.skills.skills.items()
+        ]
+        prompt = (
+            "You are a Semantic Tool Router. Pick up to 5 skill_ids "
+            "relevant to the user's query.\nAvailable skills:\n"
+            + "\n".join(catalog_lines)
+            + f"\n\nUser Query: {text}\n"
+            "Output ONLY a JSON list of skill_id strings. [] if none "
+            "are clearly relevant. No prose. No markdown."
+        )
 
         try:
-            response = await self.llm.chat_with_failover([{"role": "user", "content": prompt}], tools=None)
+            # The router instructed which (provider, model) to use for
+            # the routing call; we surface it via the chat call's
+            # ``call_site`` so the budget gate bills against routing,
+            # not chat.
+            response = await self.llm.chat_with_failover(
+                [{"role": "user", "content": prompt}],
+                tools=None,
+                call_site="routing",
+                model=provider_ref.get("model") or None,
+            )
+        except TypeError:
+            # ``call_site`` / ``model`` kwargs may not be supported by
+            # every adapter shape used in tests. Fall through to the
+            # legacy positional form.
+            response = await self.llm.chat_with_failover(
+                [{"role": "user", "content": prompt}], tools=None,
+            )
+        except Exception as exc:
+            logger.warning("RoutePrompt LLM call failed: %s", exc)
+            return await self._apply_routing_penalties(skills)
+
+        try:
             text_content, _ = self.llm.extract_response(response)
+        except Exception:
+            text_content = ""
 
-            cleaned = text_content.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned[7:-3].strip()
-            elif cleaned.startswith("```"):
-                cleaned = cleaned[3:-3].strip()
+        cleaned = (text_content or "").strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:-3].strip()
+        elif cleaned.startswith("```"):
+            cleaned = cleaned[3:-3].strip()
+        try:
+            skill_ids = json.loads(cleaned) if cleaned else []
+        except Exception:
+            skill_ids = []
 
-            skill_ids = json.loads(cleaned)
+        relevant: list["SkillManifest"] = []
+        for sid in skill_ids:
+            if isinstance(sid, str) and sid in self.skills.skills:
+                relevant.append(self.skills.skills[sid])
 
-            relevant = []
-            for sid in skill_ids:
-                if isinstance(sid, str) and sid in self.skills.skills:
-                    relevant.append(self.skills.skills[sid])
-            results = relevant[:5] if relevant else self._fallback_skills_for_query(text, top_k=5)
-            return await self._apply_routing_penalties(results)
-        except Exception as e:
-            logger.warning(f"RoutePrompt failed, falling back to heuristic: {e}")
-            results = self._fallback_skills_for_query(text, top_k=5)
-            return await self._apply_routing_penalties(results)
+        results = relevant[:5] if relevant else (skills or self._fallback_skills_for_query(text, top_k=5))
+        return await self._apply_routing_penalties(results)
 
     def _ensure_core_skills(self, skills: list[SkillManifest]) -> list[SkillManifest]:
         """Guarantee core skills like desktop_control are always available to the LLM."""
