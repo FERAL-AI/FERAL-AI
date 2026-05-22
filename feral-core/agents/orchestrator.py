@@ -989,6 +989,77 @@ class Orchestrator:
             self._session_locks[session_id] = lock
         return lock
 
+    # ─────────────────────────────────────────────
+    # Fire-and-forget episode save (Lane 08 WS1)
+    # ─────────────────────────────────────────────
+    #
+    # ``MemoryStore.episode_save`` is async-safe (Wave 2 Lane 05 moved
+    # the SQLite write to a worker thread + the AboutMe extractor to a
+    # background task), but the orchestrator used to ``await`` it on
+    # the hot path. That made the user-visible time-to-first-token a
+    # function of WAL contention / disk fsync, not LLM latency.
+    #
+    # ``_save_episode_async`` schedules the save as a background task
+    # and returns immediately. Failures are logged + counted on
+    # ``feral_episode_save_fail_total`` so an operator can spot a
+    # broken memory layer without staring at the hot path.
+
+    def _save_episode_async(
+        self,
+        *,
+        session_id: str,
+        event_type: str,
+        summary: str,
+        detail: str = "",
+        importance: float | None = None,
+    ) -> Optional[asyncio.Task]:
+        """Schedule ``memory.episode_save`` as a fire-and-forget task.
+
+        Returns the scheduled ``asyncio.Task`` so tests can await on it
+        deterministically; production callers ignore the return value.
+        ``None`` when ``self.memory`` is unwired.
+        """
+        if not self.memory:
+            return None
+
+        kwargs: dict = {
+            "session_id": session_id,
+            "event_type": event_type,
+            "summary": summary,
+            "detail": detail,
+        }
+        if importance is not None:
+            kwargs["importance"] = importance
+
+        async def _runner() -> None:
+            try:
+                await self.memory.episode_save(**kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "episode_save failed (session=%s event=%s): %s",
+                    session_id[:8] if len(session_id) >= 8 else session_id,
+                    event_type,
+                    exc,
+                )
+                try:
+                    from observability.metrics import increment as _inc
+                    _inc(
+                        "feral_episode_save_fail_total",
+                        attributes={"event_type": event_type},
+                    )
+                except Exception:
+                    pass
+
+        try:
+            return asyncio.create_task(_runner())
+        except RuntimeError:
+            # No running loop — extremely rare on the orchestrator
+            # hot path, but defensively swallow so the caller can
+            # proceed instead of crashing the turn.
+            return None
+
     async def handle_command(self, session_id: str, text: str, context: Optional[dict] = None):
         """Process a user command through the full agentic pipeline.
 
@@ -1046,13 +1117,14 @@ class Orchestrator:
         if self._somatic_engine:
             self._somatic_engine.update_interaction(session_id, len(text))
 
-        if self.memory:
-            await self.memory.episode_save(
-                session_id=session_id,
-                event_type="user_command",
-                summary=text[:200],
-                detail=json.dumps(context or {}),
-            )
+        # WS1 — episode_save is fire-and-forget. Hot path returns
+        # before SQLite WAL commit / AboutMe extraction completes.
+        self._save_episode_async(
+            session_id=session_id,
+            event_type="user_command",
+            summary=text[:200],
+            detail=json.dumps(context or {}),
+        )
 
         context_data = context or {}
         vision_fast_path = context_data.get("channel") == "vision_ask"
@@ -1380,11 +1452,14 @@ class Orchestrator:
         if self._somatic_engine:
             self._somatic_engine.update_interaction(session_id, len(text))
 
-        if self.memory:
-            await self.memory.episode_save(
-                session_id=session_id, event_type="user_command",
-                summary=text[:200], detail=json.dumps(context or {}),
-            )
+        # WS1 — episode_save fire-and-forget on the stream path too.
+        # See ``_save_episode_async`` docstring.
+        self._save_episode_async(
+            session_id=session_id,
+            event_type="user_command",
+            summary=text[:200],
+            detail=json.dumps(context or {}),
+        )
 
         relevant_skills = await self._route_prompt(text)
         relevant_skills = self._ensure_core_skills(relevant_skills)
@@ -1681,13 +1756,14 @@ class Orchestrator:
         alert_text = " ".join(alerts)
         logger.info(f"[{session_id[:8]}] Proactive trigger: {alert_text}")
 
-        if self.memory:
-            await self.memory.episode_save(
-                session_id=session_id,
-                event_type="proactive_alert",
-                summary=alert_text,
-                importance=0.9,
-            )
+        # WS1 — proactive alert save is also fire-and-forget; the
+        # synthesized command below is what carries the actual work.
+        self._save_episode_async(
+            session_id=session_id,
+            event_type="proactive_alert",
+            summary=alert_text,
+            importance=0.9,
+        )
 
         await self.handle_command(
             session_id=session_id,
