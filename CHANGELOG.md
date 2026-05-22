@@ -6,6 +6,35 @@ All notable changes to FERAL are documented here.
 
 ## [Unreleased]
 
+## [2026.5.38] — Lane 10: first-party OAuth scaffolding + unified persistent webhooks + fail-closed signatures + outgoing delivery
+
+Wave 2 Lane 10 (AUDIT-r14 finding 19) lands the integrations + OAuth + webhooks rebuild. The brain now treats every OAuth-capable provider as a first-party integration with a real registration walkthrough, every integration's `connected` flag reflects an actual API probe (not just token presence), the two parallel webhook subsystems are unified behind a persistent sqlite registry with fail-closed signature verification, and outgoing webhooks ship for the first time so operators can wire FERAL into Zapier/n8n/CI alerts without polling.
+
+### OAuth — `provider_setup_required` is a first-class state
+
+`OAuthManager` resolves credentials in priority order: builtin → baked release artifact (`integrations/_first_party_clients.json`) → vault-stored values from the Settings UI → environment variables → `~/.feral/oauth_providers.json` overlay. When no client_id resolves, `setup_status` is `provider_setup_required` and `GET /api/oauth/authorize/{provider_id}` returns a structured `{success: false, reason: "provider_setup_required", setup_doc_url, setup_doc_summary}` so the WebUI can render a real registration walkthrough instead of an opaque error. Pending OAuth states (incl. PKCE `code_verifier`) persist to the vault under `oauth_pending_<state>` (or `~/.feral/oauth_pending.json` chmod 0600 when no vault is wired) so an in-flight authorization survives a brain restart. Refresh-token rejection (HTTP 400/401) clears the stored token so `is_connected` reports honestly. After a successful callback the manager runs the registered probe with `force=True` and surfaces the live result in the response so the UI can render a real "connected to Google" check immediately.
+
+### Probe-driven `connected`
+
+New `integrations/_probe_status.py` is a small in-process cache of the most recent probe outcome per provider. Every integration's `connected` property now consults it (Spotify, Notion, Microsoft 365, Google Drive, Google Contacts, Calendar, Email, Home Assistant, Whoop, Oura, Telegram, Slack, Discord). A failed probe overrides token presence so the LLM never tries to advertise an integration that's actually returning 401, and the calendar/email integrations no longer short-circuit `connected=True` when only an ICS feed or IMAP host is configured (`ics_configured` / `imap_configured` expose the fallback state separately). `security/probe.py` grew additive registrations for `microsoft`, `home_assistant`, `telegram`, `slack`, `discord` so the probe sweep covers every integration the brain talks to.
+
+### Webhooks — single persistent subsystem, fail-closed
+
+Custom webhooks moved off the in-memory `_webhooks` module dict to a durable aiosqlite-backed registry at `~/.feral/webhooks.db` (new `integrations/webhook_store.py`), routes mounted under `/api/custom-webhooks/*` to dodge the route collision with `POST /api/webhooks/{app_id}` integration ingress. The legacy `/api/webhooks/{id}/receive` URL keeps working as a backwards-compat alias. Inbound integration webhooks (`POST /api/webhooks/{app_id}`) now read the **raw** request body and forward the **real** request headers — pre-Lane-10 the route always passed `headers={}` which made HMAC verification unreachable through the public path even when a secret was configured. `WebhookReceiver.handle_request` returns structured rejection reasons (`unknown_app` / `missing_signature` / `invalid_signature`) instead of the old "accepted with `verified=false`" lying surface; the route maps reasons to HTTP 400/401/403/503 so failed verification never reaches the event bus.
+
+### Outgoing webhooks — POST internal events with HMAC + retries
+
+New `integrations/outgoing_webhooks.py` adds an aiosqlite-backed subscriber registry plus an `EventBus` global handler that POSTs each matching event to the operator's configured URL with `X-FERAL-Signature-256` HMAC-SHA256 + `X-FERAL-Event` / `X-FERAL-Webhook-Id` / `X-FERAL-Timestamp` / `X-FERAL-Delivery-Attempt` headers. Retries on 5xx and network errors with full-jitter exponential backoff (capped at 30s); 4xx responses are explicitly non-retriable. Pattern matching supports literal types, `"*"` wildcard, and namespace prefixes like `"memory.*"`. REST surface at `/api/outgoing-webhooks` (POST/GET/DELETE/test) — secrets are fingerprinted in the listing.
+
+### S5 actuator round-trip + WhatsApp signature verify
+
+`HomeAssistantIntegration` ships `vacuum_start`, `vacuum_stop`, `vacuum_return_to_base`, `light_turn_on`, `light_turn_off` on the dispatch table — finding 19 + THESIS_SCENARIOS S5. `vacuum_start` returns `{success: True, data: {started: True, entity_id, service: "vacuum.start"}}` so the orchestrator can render "Started the Roomba in the living room" without inspecting raw HA service responses. Lane 11 (Wave 3) builds the smart-glasses ingestion side that consumes this actuator surface. The WhatsApp inbound webhook (`POST /api/channels/whatsapp/webhook`) reads the raw body, calls `WhatsAppChannel.verify_signature` against the configured `app_secret`, and rejects with 403 + `reason=invalid_signature` when the X-Hub-Signature-256 header is missing or wrong. Existing operators without a secret are not regressed.
+
+### Coordination notes
+
+- Lane 05 will rewrite `skills/manifests/messaging.json` to advertise hub channels (telegram_send / slack_send / discord_send) instead of the orphaned Twilio SMS surface; Lane 10 leaves the `register_instance("messaging_sms", ...)` line in `api/state.py` untouched so Lane 05 can rebind the skill_id atomically when their manifest lands.
+- `test_real_integration_manifests.py` extension to cover smart_home / spotify / calendar / health_data / messaging is deferred to land alongside Lane 05's manifest fixes.
+
 ## [2026.5.36] — `feral doctor` honesty + first-run pairing dependency closure
 
 The first thing every new operator sees after `pip install feral-ai && feral` is the dashboard or the doctor, and both have to be honest. Pre-v2026.5.36, a clean install on macOS produced ~5 yellow warnings and 1 red failure from `feral doctor` for things that are *expected* to be absent on a fresh machine (memory DB not created yet, Chrome CDP not running, Local STT/TTS not installed, no voice key, no workspace grants pre-authorised, PyObjC ApplicationServices missing). Worse, hitting "pair a device" from a bare-base install crashed with a 500 because `qrcode` was only declared in the `[discovery]` / `[all]` extras and the dashboard's first-run feature couldn't import it. v2026.5.36 closes both gaps without papering over real degradations.
