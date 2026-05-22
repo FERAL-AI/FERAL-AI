@@ -49,7 +49,6 @@ from security.session_auth import (
     local_bypass_enabled,
     warn_if_unsafe_bypass,
 )
-from config.runtime import brain_bind_host
 from security.device_pairing import DevicePairingStore  # used in type hint
 
 from api.routes.dashboard import router as dashboard_router

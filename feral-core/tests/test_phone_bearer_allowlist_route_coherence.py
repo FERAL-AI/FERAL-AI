@@ -111,7 +111,8 @@ def app_with_middleware(monkeypatch):
     # and the shim would otherwise turn every assertion below into a 200.
     from security import session_auth as _sa
     from api import server as _server_for_patch
-    real_is_localhost = lambda host: host in ("127.0.0.1", "::1", "localhost")
+    def real_is_localhost(host):
+        return host in ("127.0.0.1", "::1", "localhost")
     monkeypatch.setattr(_sa, "is_localhost", real_is_localhost)
     monkeypatch.setattr(_server_for_patch, "is_localhost", real_is_localhost, raising=False)
 

@@ -722,6 +722,7 @@ class BrainState:
         # bus (Wave 3 Lane 12 renders ``cost_cap_hit``).
         from cost.budget import CostBudget
         from cost.loop_guard import BudgetLoopGuard
+        from config.loader import load_settings as _load_settings
         try:
             self.cost_budget = CostBudget(settings=_load_settings())
         except Exception as exc:
