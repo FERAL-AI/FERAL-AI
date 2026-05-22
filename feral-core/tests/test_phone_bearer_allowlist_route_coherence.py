@@ -104,6 +104,18 @@ def app_with_middleware(monkeypatch):
     monkeypatch.setenv("FERAL_API_KEY", _DASHBOARD_KEY)
     monkeypatch.setenv("FERAL_LOCAL_BYPASS", "0")
 
+    # audit-r14 / Lane 06 — restore the production ``is_localhost``
+    # so the conftest testclient-as-loopback shim doesn't short-circuit
+    # the off-loopback auth path these tests exercise. With the
+    # audit-r12 A1 middleware change, loopback bypass is unconditional
+    # and the shim would otherwise turn every assertion below into a 200.
+    from security import session_auth as _sa
+    from api import server as _server_for_patch
+    def real_is_localhost(host):
+        return host in ("127.0.0.1", "::1", "localhost")
+    monkeypatch.setattr(_sa, "is_localhost", real_is_localhost)
+    monkeypatch.setattr(_server_for_patch, "is_localhost", real_is_localhost, raising=False)
+
     def fake_verify(bearer: str):
         if bearer == _PHONE_BEARER:
             return "device-id-stub"

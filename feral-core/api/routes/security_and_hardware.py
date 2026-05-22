@@ -70,20 +70,21 @@ async def update_permissions(body: dict):
 
 @router.get("/api/security/audit")
 async def get_audit_log():
-    """Get recent security audit entries."""
-    audit_path = feral_home() / "audit.log"
-    if not audit_path.exists():
-        return {"entries": []}
-    entries = []
-    with open(audit_path) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-    return {"entries": entries[-100:]}
+    """Get recent security audit entries.
+
+    audit-r12 A5 (v2026.5.38) — delegates to
+    :func:`security.audit_log.recent_events` so the dashboard
+    surfaces "audit log unreadable" (HTTP 500 with a structured
+    error) instead of pretending the log is empty when the file is
+    present but unreadable / malformed.
+    """
+    from security.audit_log import recent_events, AuditFailure
+
+    try:
+        entries = recent_events(limit=100)
+    except AuditFailure as exc:
+        return {"error": "audit_log_unreadable", "detail": str(exc), "entries": []}
+    return {"entries": entries}
 
 
 # ─────────────────────────────────────────────

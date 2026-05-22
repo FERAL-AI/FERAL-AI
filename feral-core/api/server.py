@@ -47,6 +47,7 @@ from security.session_auth import (
     verify_session,
     is_localhost,
     local_bypass_enabled,
+    warn_if_unsafe_bypass,
 )
 from security.device_pairing import DevicePairingStore  # used in type hint
 
@@ -526,8 +527,16 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         if scope_type == "websocket":
             return await call_next(request)
 
+        # audit-r12 A1 (v2026.5.38) — secure-by-default.
+        # Loopback (127.0.0.1 / ::1 / localhost) ALWAYS bypasses HTTP auth so
+        # the local dashboard works out of the box. Off-loopback (LAN /
+        # Tailscale / 0.0.0.0) requires the API key or phone bearer; the
+        # dev escape hatch is ``FERAL_LOCAL_BYPASS=1``, which emits a loud
+        # boot warning via ``warn_if_unsafe_bypass``.
         client_host = request.client.host if request.client else None
-        if _session_auth_module.is_localhost(client_host) and _session_auth_module.local_bypass_enabled():
+        if _session_auth_module.is_localhost(client_host):
+            return await call_next(request)
+        if _session_auth_module.local_bypass_enabled():
             return await call_next(request)
 
         auth = request.headers.get("authorization", "")
@@ -763,6 +772,16 @@ async def metrics_endpoint(request: Request):
 
 @app.on_event("startup")
 async def startup():
+    # audit-r12 A1 — surface FERAL_LOCAL_BYPASS=1 on non-loopback bind
+    # as a loud boot warning. The middleware enforces the actual policy
+    # (loopback still bypasses by default); the warning makes the trust
+    # degradation visible the moment the brain comes up.
+    try:
+        _bind = brain_bind_host()
+    except Exception:
+        _bind = ""
+    warn_if_unsafe_bypass(_bind)
+
     await state.init()
     if state.memory:
         state.memory.start_background_tasks()
@@ -794,6 +813,27 @@ async def startup():
                         return
 
                 if prompt and state.orchestrator:
+                    # audit-r14 / S6 — pre-flight against the cron
+                    # cost cap before invoking the orchestrator. A
+                    # scheduled routine is the same cost class as a
+                    # user chat turn, so a paused cap must skip the
+                    # turn and let the operator see why via the UI
+                    # banner. CronService runs on a daemon thread so
+                    # the guard's broadcast is a no-op (no running
+                    # asyncio loop) — the structured log line is
+                    # still emitted.
+                    guard = getattr(state, "cron_cost_guard", None)
+                    if guard is not None and not guard.allow(
+                        model="gpt-4o-mini",
+                        estimated_max_tokens=512,
+                    ):
+                        state.cron_service.record_run_finish(
+                            run_id,
+                            "skipped",
+                            {},
+                            "cost cap reached; routine deferred",
+                        )
+                        return
                     session_id = job.session_id or f"routine-{job.id}"
                     # Pass an explicit context so the Supervisor audit log
                     # can distinguish cron-driven turns from user / web.
@@ -915,6 +955,20 @@ async def shutdown_event():
         except Exception as exc:
             logger.debug("Shutdown: %s.stop() raised: %s", owner_name, exc)
 
+    # audit-r14 finding 18 #1 — CronService runs on a daemon thread that
+    # the BrainState registry never owned, so the pre-fix shutdown left
+    # the cron loop polling the SQLite job DB until process death. Call
+    # stop() here so the join (35s timeout) drains the thread before
+    # the LLM client closes; without this, a routine that fires during
+    # shutdown raced ``llm.close()`` and produced
+    # "Cannot send a request, as the client has been closed"
+    # tracebacks in the operator log.
+    if getattr(state, "cron_service", None) is not None:
+        try:
+            state.cron_service.stop()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Shutdown: cron_service.stop() raised: %s", exc)
+
     # (a.2) Messaging + channel integrations that spawn their own
     # polling loops.
     for bridge_name in ("channel_manager", "mqtt_bridge", "email_watcher"):
@@ -1024,7 +1078,11 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
     client_host = ws.client.host if ws.client else None
     _ws_authed = False
 
-    if is_localhost(client_host) and local_bypass_enabled():
+    # audit-r12 A1 (v2026.5.38) — loopback always bypasses; off-loopback
+    # requires a token, with ``FERAL_LOCAL_BYPASS=1`` as the dev opt-in.
+    if is_localhost(client_host):
+        _ws_authed = True
+    elif local_bypass_enabled():
         _ws_authed = True
     elif token and (verify_session(token) or token == FERAL_API_KEY):
         _ws_authed = True
@@ -2584,9 +2642,26 @@ async def sync_peer_endpoint(ws: WebSocket):
                 peer_id = raw.get("node_id", "unknown")
                 remote_vc = raw.get("vector_clock", {})
 
-                expected_pass = os.getenv("FERAL_SYNC_PASSPHRASE", "")
+                # audit-r12 A2 (v2026.5.38) — handshake REJECTS when
+                # the local passphrase is unset (was: accepted, which
+                # made /sync a zero-auth endpoint on fresh installs).
+                # ``ensure_sync_passphrase`` runs at boot so a fresh
+                # install always has a value (auto-generated + printed
+                # to the operator banner). The remote-side mismatch
+                # check below stays identical.
+                from memory.sync import SYNC_PASSPHRASE as _local_pass
+                expected_pass = os.getenv("FERAL_SYNC_PASSPHRASE", "") or _local_pass
                 remote_pass = raw.get("passphrase", "")
-                if expected_pass and remote_pass != expected_pass:
+                if not expected_pass:
+                    await ws.send_json({
+                        "type": "sync_error",
+                        "message": (
+                            "Local sync passphrase unset — set "
+                            "FERAL_SYNC_PASSPHRASE on this brain and retry."
+                        ),
+                    })
+                    break
+                if remote_pass != expected_pass:
                     await ws.send_json({"type": "sync_error", "message": "Invalid passphrase"})
                     break
 

@@ -114,17 +114,63 @@ class TestLocalhostBypass:
         assert is_localhost("192.168.1.5") is False
         assert is_localhost(None) is False
 
-    def test_bypass_default_true(self, monkeypatch):
+    def test_bypass_default_false(self, monkeypatch):
+        """audit-r12 A1 (v2026.5.38) — FERAL_LOCAL_BYPASS defaults to False.
+
+        Loopback still bypasses HTTP/WS auth in the middleware via the
+        explicit ``is_localhost`` check; this knob only controls whether
+        off-loopback callers (LAN / Tailscale / 0.0.0.0 bind) also skip
+        auth. The secure default forces that to ``False``.
+        """
         from security.session_auth import local_bypass_enabled
 
         monkeypatch.delenv("FERAL_LOCAL_BYPASS", raising=False)
-        assert local_bypass_enabled() is True
+        assert local_bypass_enabled() is False
 
-    def test_bypass_disabled(self, monkeypatch):
+    def test_bypass_enabled_explicit(self, monkeypatch):
         from security.session_auth import local_bypass_enabled
 
-        monkeypatch.setenv("FERAL_LOCAL_BYPASS", "false")
-        assert local_bypass_enabled() is False
+        for raw in ("1", "true", "TRUE", "yes"):
+            monkeypatch.setenv("FERAL_LOCAL_BYPASS", raw)
+            assert local_bypass_enabled() is True
+
+    def test_bypass_disabled_explicit(self, monkeypatch):
+        from security.session_auth import local_bypass_enabled
+
+        for raw in ("0", "false", "no", ""):
+            monkeypatch.setenv("FERAL_LOCAL_BYPASS", raw)
+            assert local_bypass_enabled() is False
+
+
+class TestUnsafeBypassWarning:
+    """``warn_if_unsafe_bypass`` is the loud-warning helper for boot
+    + doctor. It fires only when bypass is enabled AND the bind is
+    non-loopback; loopback binds are silent, no-bypass is silent.
+    """
+
+    def test_silent_when_bypass_off(self, monkeypatch):
+        from security.session_auth import warn_if_unsafe_bypass
+
+        monkeypatch.delenv("FERAL_LOCAL_BYPASS", raising=False)
+        assert warn_if_unsafe_bypass("0.0.0.0") is None
+
+    def test_silent_on_loopback_bind(self, monkeypatch):
+        from security.session_auth import warn_if_unsafe_bypass
+
+        monkeypatch.setenv("FERAL_LOCAL_BYPASS", "1")
+        for bind in ("127.0.0.1", "::1", "localhost"):
+            assert warn_if_unsafe_bypass(bind) is None
+
+    def test_warns_on_lan_bind_with_bypass(self, monkeypatch, caplog):
+        from security.session_auth import warn_if_unsafe_bypass
+
+        monkeypatch.setenv("FERAL_LOCAL_BYPASS", "1")
+        with caplog.at_level("WARNING", logger="feral.session_auth"):
+            msg = warn_if_unsafe_bypass("0.0.0.0")
+        assert msg is not None
+        assert "FERAL_LOCAL_BYPASS" in msg
+        assert "0.0.0.0" in msg
+        assert any("FERAL_LOCAL_BYPASS" in r.message for r in caplog.records)
 
 
 # ─────────────────────────────────────────────

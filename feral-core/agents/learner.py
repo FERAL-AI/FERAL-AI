@@ -16,14 +16,30 @@ Three learning mechanisms:
 from __future__ import annotations
 import json
 import logging
+import os
 import time
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agents.llm_provider import LLMProvider
+    from cost.loop_guard import BudgetLoopGuard
     from memory.store import MemoryStore
 
 logger = logging.getLogger("feral.learner")
+
+
+# audit-r14 finding 18 #2 — ``FERAL_SELF_LEARNING`` was set by
+# ``api/routes/config.py`` but never honoured in ``Learner.on_message``,
+# so toggling it in Settings had no effect. The env var is now
+# authoritative: ``false`` short-circuits the extract + summarize
+# paths so they never call the LLM. Default ``true`` preserves the
+# v2026.5.36 behaviour for operators who never touched the setting.
+_LEARNER_ENV = "FERAL_SELF_LEARNING"
+
+
+def _self_learning_enabled() -> bool:
+    raw = os.environ.get(_LEARNER_ENV, "true").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 EXTRACT_PROMPT = """You are a knowledge extraction engine for a personal AI operating system.
 Analyze the following conversation excerpt and extract structured facts about the user.
@@ -59,14 +75,36 @@ class Learner:
     consolidates memories from conversations.
     """
 
-    def __init__(self, llm: "LLMProvider", memory: "MemoryStore"):
+    def __init__(
+        self,
+        llm: "LLMProvider",
+        memory: "MemoryStore",
+        *,
+        cost_guard: Optional["BudgetLoopGuard"] = None,
+        cost_model: str = "gpt-4o-mini",
+    ):
         self.llm = llm
         self.memory = memory
         self._extract_interval = 5  # run extraction every N messages
         self._message_counters: dict[str, int] = {}
+        # audit-r14 / S6 — paid extraction / summarisation calls are
+        # gated on the learner cost cap. A None guard means "no
+        # tracking" — the loop runs unbounded.
+        self._cost_guard = cost_guard
+        self._cost_model = cost_model
 
     async def on_message(self, session_id: str, role: str, text: str):
-        """Called after every message. Triggers extraction at intervals."""
+        """Called after every message. Triggers extraction at intervals.
+
+        audit-r14 finding 18 #2 — ``FERAL_SELF_LEARNING=false`` now
+        short-circuits this method end-to-end so no LLM call (extract,
+        summarise) fires while the operator has self-learning disabled.
+        Pre-v2026.5.38, the env was read by the Settings endpoint but
+        never re-checked on the hot path, so toggling it off in the UI
+        had zero observable effect on the brain log.
+        """
+        if not _self_learning_enabled():
+            return
         if not self.llm.available or not text.strip():
             return
 
@@ -111,12 +149,27 @@ class Learner:
             )
             return
 
+        # audit-r14 / S6 — cost-cap the KG extraction call. ``allow``
+        # accounts for the worst-case extract reply (~300 completion
+        # tokens). When the learner cap is hit the extraction is
+        # skipped and the loop guard emits the UI banner frame.
+        if self._cost_guard is not None and not self._cost_guard.allow(
+            model=self._cost_model, estimated_max_tokens=300,
+        ):
+            return
+
         try:
             stored = await kg.extract_and_store(conversation_text.strip(), self.llm)
             if stored:
                 logger.info(
                     "[%s] Learner extracted %d KG triples via extract_and_store",
                     session_id[:8], len(stored),
+                )
+            if self._cost_guard is not None:
+                await self._cost_guard.record(
+                    model=self._cost_model,
+                    prompt_tokens=max(50, len(conversation_text) // 4),
+                    completion_tokens=300,
                 )
         except Exception as e:
             logger.warning("Knowledge extraction failed: %s", e)
@@ -125,7 +178,13 @@ class Learner:
         """
         Summarize the full session conversation and store as an episodic memory.
         Called on session disconnect or explicit flush.
+
+        audit-r14 finding 18 #2 — also gated on
+        ``FERAL_SELF_LEARNING``; ``false`` short-circuits so a
+        disconnecting client never triggers a paid LLM call.
         """
+        if not _self_learning_enabled():
+            return
         recent = self.memory.working_get(session_id, limit=30)
         if len(recent) < 3:
             return
@@ -149,6 +208,11 @@ class Learner:
             )
             return
 
+        if self._cost_guard is not None and not self._cost_guard.allow(
+            model=self._cost_model, estimated_max_tokens=256,
+        ):
+            return
+
         prompt = SUMMARIZE_PROMPT + conversation_text.strip()
 
         try:
@@ -159,6 +223,12 @@ class Learner:
                 max_tokens=256,
             )
             summary, _ = self.llm.extract_response(response)
+            if self._cost_guard is not None:
+                await self._cost_guard.record(
+                    model=self._cost_model,
+                    prompt_tokens=max(50, len(prompt) // 4),
+                    completion_tokens=min(256, len(summary or "") // 4 + 1),
+                )
             if summary and len(summary) > 10:
                 await self.memory.episode_save(
                     session_id=session_id,

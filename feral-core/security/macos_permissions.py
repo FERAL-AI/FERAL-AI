@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import platform
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 
@@ -279,8 +280,22 @@ def _friendly_name(bundle_id: str) -> str:
 
 
 def all_gui_permission_statuses() -> list[TCCStatus]:
-    """Convenience wrapper that returns every GUI-relevant TCC probe."""
-    return [check_accessibility(), check_screen_recording()]
+    """Convenience wrapper that returns every GUI-relevant TCC probe.
+
+    audit-r12 ship — adds Calendar / Reminders / Contacts / Full Disk
+    Access alongside the original Accessibility + Screen Recording
+    pair so ``feral doctor`` (consumed by Lane 07) and the iOS Brain
+    Network row can surface every TCC the brain actually exercises
+    against, not just the two macOS provides a public preflight for.
+    """
+    return [
+        check_accessibility(),
+        check_screen_recording(),
+        check_calendar(),
+        check_reminders(),
+        check_contacts(),
+        check_full_disk_access(),
+    ]
 
 
 # Bundle IDs the brain's desktop_control facade will script. Probed
@@ -309,11 +324,241 @@ def all_desktop_control_permission_statuses() -> list[TCCStatus]:
     return out
 
 
+_CALENDAR_REMEDIATION = (
+    "Open System Settings -> Privacy & Security -> Calendars, click "
+    "the lock to unlock, and enable the FERAL host process. macOS "
+    "will populate the row the first time FERAL asks to read "
+    "calendar events."
+)
+
+_REMINDERS_REMEDIATION = (
+    "Open System Settings -> Privacy & Security -> Reminders, click "
+    "the lock to unlock, and enable the FERAL host process."
+)
+
+_CONTACTS_REMEDIATION = (
+    "Open System Settings -> Privacy & Security -> Contacts, click "
+    "the lock to unlock, and enable the FERAL host process."
+)
+
+_FULL_DISK_ACCESS_REMEDIATION = (
+    "Open System Settings -> Privacy & Security -> Full Disk Access, "
+    "click the lock to unlock, click '+' and add the FERAL host "
+    "process (Terminal / iTerm / your launching app). macOS forces a "
+    "quit-and-relaunch of the granted app the first time you enable "
+    "FDA — restart FERAL after toggling."
+)
+
+
+def _eventkit_status(entity_type_name: str) -> tuple[str, Optional[str]]:
+    """Return ``(status, error)`` from ``EKEventStore.authorizationStatusForEntityType``.
+
+    macOS EventKit publishes the authorization status as one of:
+
+    * ``EKAuthorizationStatusNotDetermined`` (``0``) — no decision yet
+    * ``EKAuthorizationStatusRestricted`` (``1``) — parental controls / MDM
+    * ``EKAuthorizationStatusDenied`` (``2``) — user said no
+    * ``EKAuthorizationStatusAuthorized`` (``3``) — granted (or
+      ``EKAuthorizationStatusFullAccess`` ``3`` / ``WriteOnly`` ``4``
+      on macOS 14+; we treat any positive grant as ``granted``).
+    """
+    try:
+        from EventKit import EKEventStore  # type: ignore[import-not-found]
+    except ImportError as exc:
+        return "unknown", f"PyObjC EventKit not importable: {exc}"
+    try:
+        entity_type = {"event": 0, "reminder": 1}[entity_type_name]
+        status = EKEventStore.authorizationStatusForEntityType_(entity_type)
+    except Exception as exc:
+        return "unknown", f"EventKit probe raised: {exc}"
+    # 3 = legacy authorized; 3/4 on macOS 14+ = full / write-only — both count.
+    if status in (3, 4):
+        return "granted", None
+    if status == 2:
+        return "denied", None
+    if status == 1:
+        return "restricted", None
+    return "denied", None  # not-determined treated as denied until the user grants
+
+
+def check_calendar() -> TCCStatus:
+    """Probe Calendar (EventKit) entitlement.
+
+    Uses ``EKEventStore.authorizationStatusForEntityType_(EKEntityTypeEvent)``,
+    which is a non-prompting read. PyObjC must be installed to resolve
+    the framework; without it we return ``unknown`` with the install
+    hint instead of guessing.
+    """
+    if platform.system() != "Darwin":
+        return _not_applicable("calendar", "EKEventStore.authorizationStatusForEntityType")
+    status, error = _eventkit_status("event")
+    if status == "granted":
+        return TCCStatus(
+            permission="calendar",
+            status="granted",
+            api="EKEventStore.authorizationStatusForEntityType",
+            setup_step="(no action needed)",
+        )
+    return TCCStatus(
+        permission="calendar",
+        status=status,
+        api="EKEventStore.authorizationStatusForEntityType",
+        setup_step=_CALENDAR_REMEDIATION,
+        error=error,
+    )
+
+
+def check_reminders() -> TCCStatus:
+    """Probe Reminders (EventKit) entitlement.
+
+    Same API surface as :func:`check_calendar` but with
+    ``EKEntityTypeReminder``. macOS 14+ split this from the Calendar
+    grant so they need separate doctor rows.
+    """
+    if platform.system() != "Darwin":
+        return _not_applicable("reminders", "EKEventStore.authorizationStatusForEntityType")
+    status, error = _eventkit_status("reminder")
+    if status == "granted":
+        return TCCStatus(
+            permission="reminders",
+            status="granted",
+            api="EKEventStore.authorizationStatusForEntityType",
+            setup_step="(no action needed)",
+        )
+    return TCCStatus(
+        permission="reminders",
+        status=status,
+        api="EKEventStore.authorizationStatusForEntityType",
+        setup_step=_REMINDERS_REMEDIATION,
+        error=error,
+    )
+
+
+def check_contacts() -> TCCStatus:
+    """Probe Contacts entitlement via
+    ``CNContactStore.authorizationStatusForEntityType``.
+
+    Non-prompting read; requires PyObjC's ``Contacts`` framework
+    bindings.
+    """
+    if platform.system() != "Darwin":
+        return _not_applicable("contacts", "CNContactStore.authorizationStatusForEntityType")
+    try:
+        from Contacts import CNContactStore  # type: ignore[import-not-found]
+    except ImportError as exc:
+        return TCCStatus(
+            permission="contacts",
+            status="unknown",
+            api="CNContactStore.authorizationStatusForEntityType",
+            setup_step=(
+                "Install PyObjC Contacts bindings: "
+                "pip install pyobjc-framework-Contacts"
+            ),
+            error=f"PyObjC Contacts not importable: {exc}",
+        )
+    try:
+        status = CNContactStore.authorizationStatusForEntityType_(0)
+    except Exception as exc:
+        return TCCStatus(
+            permission="contacts",
+            status="unknown",
+            api="CNContactStore.authorizationStatusForEntityType",
+            setup_step=_CONTACTS_REMEDIATION,
+            error=f"Contacts probe raised: {exc}",
+        )
+    # 3 = legacy authorized; 4 = limited (macOS 14+) — both count as
+    # "FERAL can read", which is what the doctor cares about.
+    if status in (3, 4):
+        return TCCStatus(
+            permission="contacts",
+            status="granted",
+            api="CNContactStore.authorizationStatusForEntityType",
+            setup_step="(no action needed)",
+        )
+    if status == 2:
+        return TCCStatus(
+            permission="contacts",
+            status="denied",
+            api="CNContactStore.authorizationStatusForEntityType",
+            setup_step=_CONTACTS_REMEDIATION,
+        )
+    if status == 1:
+        return TCCStatus(
+            permission="contacts",
+            status="restricted",
+            api="CNContactStore.authorizationStatusForEntityType",
+            setup_step=_CONTACTS_REMEDIATION,
+        )
+    return TCCStatus(
+        permission="contacts",
+        status="denied",
+        api="CNContactStore.authorizationStatusForEntityType",
+        setup_step=_CONTACTS_REMEDIATION,
+    )
+
+
+def check_full_disk_access() -> TCCStatus:
+    """Best-effort probe for Full Disk Access.
+
+    There is no public preflight Boolean for FDA on macOS — TCC
+    deliberately doesn't expose one. The convention is to attempt a
+    read of a TCC-protected file and observe success/failure. We try
+    ``~/Library/Application Support/com.apple.TCC/TCC.db`` (the TCC
+    DB itself; an FDA-granted process can ``os.access(... os.R_OK)``,
+    a non-FDA process gets ``False`` without prompting).
+
+    The probe is read-only and bounded by ``os.access`` — no file is
+    opened, no side effects. On non-macOS we return ``not_applicable``.
+    """
+    import os as _os
+
+    if platform.system() != "Darwin":
+        return _not_applicable("full_disk_access", "os.access ~/Library/.../TCC.db")
+    tcc_db = Path(
+        _os.path.expanduser("~/Library/Application Support/com.apple.TCC/TCC.db")
+    )
+    if not tcc_db.exists():
+        return TCCStatus(
+            permission="full_disk_access",
+            status="unknown",
+            api="os.access ~/Library/.../TCC.db",
+            setup_step=_FULL_DISK_ACCESS_REMEDIATION,
+            error="TCC database path missing — install path probe inconclusive",
+        )
+    try:
+        readable = _os.access(str(tcc_db), _os.R_OK)
+    except OSError as exc:
+        return TCCStatus(
+            permission="full_disk_access",
+            status="unknown",
+            api="os.access ~/Library/.../TCC.db",
+            setup_step=_FULL_DISK_ACCESS_REMEDIATION,
+            error=f"FDA probe raised: {exc}",
+        )
+    if readable:
+        return TCCStatus(
+            permission="full_disk_access",
+            status="granted",
+            api="os.access ~/Library/.../TCC.db",
+            setup_step="(no action needed)",
+        )
+    return TCCStatus(
+        permission="full_disk_access",
+        status="denied",
+        api="os.access ~/Library/.../TCC.db",
+        setup_step=_FULL_DISK_ACCESS_REMEDIATION,
+    )
+
+
 __all__ = [
     "TCCStatus",
     "check_accessibility",
     "check_screen_recording",
     "check_automation_for",
+    "check_calendar",
+    "check_reminders",
+    "check_contacts",
+    "check_full_disk_access",
     "all_gui_permission_statuses",
     "all_desktop_control_permission_statuses",
     "DESKTOP_CONTROL_TARGETS",

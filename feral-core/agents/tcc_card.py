@@ -82,6 +82,51 @@ TCC_CATALOG: dict[str, dict] = {
             "Privacy_AllFiles"
         ),
     },
+    # audit-r12 ship — Calendar / Reminders / Contacts get their own
+    # deeplink rows alongside the original Accessibility / Screen
+    # Recording / FDA entries so the new
+    # ``macos_permissions.check_calendar`` / ``check_reminders`` /
+    # ``check_contacts`` probes can mint a structured card on denial
+    # (consumed by the iOS PermissionCardView + Wave 3 Lane 07's
+    # ``feral doctor``).
+    "calendar": {
+        "title": "FERAL needs Calendar access on the Mac",
+        "description": (
+            "Calendar reads (event listing, conflict checks, ambient "
+            "morning briefing) require an EventKit grant. macOS will "
+            "add the row the first time FERAL asks; toggle it on in "
+            "System Settings -> Privacy & Security -> Calendars."
+        ),
+        "macos_deeplink": (
+            "x-apple.systempreferences:com.apple.preference.security?"
+            "Privacy_Calendars"
+        ),
+    },
+    "reminders": {
+        "title": "FERAL needs Reminders access on the Mac",
+        "description": (
+            "macOS 14 split Reminders out of the Calendar grant. "
+            "Toggle FERAL on in System Settings -> Privacy & "
+            "Security -> Reminders."
+        ),
+        "macos_deeplink": (
+            "x-apple.systempreferences:com.apple.preference.security?"
+            "Privacy_Reminders"
+        ),
+    },
+    "contacts": {
+        "title": "FERAL needs Contacts access on the Mac",
+        "description": (
+            "Contacts reads (resolving \"text my brother\" to a "
+            "phone number, listing recent senders) require a "
+            "Contacts grant. Toggle FERAL on in System Settings -> "
+            "Privacy & Security -> Contacts."
+        ),
+        "macos_deeplink": (
+            "x-apple.systempreferences:com.apple.preference.security?"
+            "Privacy_Contacts"
+        ),
+    },
 }
 
 _FRIENDLY_BUNDLE_NAMES = {

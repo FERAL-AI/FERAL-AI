@@ -93,22 +93,25 @@ class TestInitMetrics:
 
 
 class TestMetricsEndpoint:
-    def test_metrics_endpoint_returns_counters(self):
-        import os
-        os.environ["FERAL_METRICS_ENDPOINT"] = "1"
-        os.environ["FERAL_API_KEY"] = "test-key-metrics"
-        os.environ["FERAL_LOCAL_BYPASS"] = "1"
+    def test_metrics_endpoint_returns_counters(self, monkeypatch):
+        # NOTE: Use ``monkeypatch.setenv`` so pytest auto-restores each
+        # var at test teardown. The earlier raw ``os.environ[...] = "1"``
+        # form leaked ``FERAL_LOCAL_BYPASS=1`` into every subsequent test
+        # in the same process — which silently re-enabled the API-key
+        # middleware bypass and caused the off-loopback pairing security
+        # test (``test_pair_url_requires_auth_off_loopback``) to return
+        # 200 instead of 401 under the CI fast lane ordering.
+        monkeypatch.setenv("FERAL_METRICS_ENDPOINT", "1")
+        monkeypatch.setenv("FERAL_API_KEY", "test-key-metrics")
+        monkeypatch.setenv("FERAL_LOCAL_BYPASS", "1")
 
-        try:
-            increment("feral.test.requests_total", by=42)
-            observe("feral.test.latency_ms", 123.4)
+        increment("feral.test.requests_total", by=42)
+        observe("feral.test.latency_ms", 123.4)
 
-            from api.server import app
-            client = TestClient(app, raise_server_exceptions=False)
-            resp = client.get("/metrics")
-            assert resp.status_code == 200
-            body = resp.text
-            assert "feral.test.requests_total" in body
-            assert "42" in body
-        finally:
-            os.environ.pop("FERAL_METRICS_ENDPOINT", None)
+        from api.server import app
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/metrics")
+        assert resp.status_code == 200
+        body = resp.text
+        assert "feral.test.requests_total" in body
+        assert "42" in body

@@ -373,6 +373,18 @@ class BrainState:
         self.scheduler = None
         self.docker_sandbox = None
         self.taskflows: Optional[TaskFlowRuntime] = None
+        # audit-r14 / S6 — placeholders for CostBudget + the per-subsystem
+        # BudgetLoopGuard instances initialised in ``init()``. Declaring
+        # them here keeps ``BrainState`` introspection (e.g. doctor) and
+        # the CronService routine executor robust to the
+        # not-yet-initialised case.
+        self.cost_budget = None
+        self.screen_loop_cost_guard = None
+        self.proactive_cost_guard = None
+        self.learner_cost_guard = None
+        self.cron_cost_guard = None
+        self.email_cost_guard = None
+        self.mqtt_cost_guard = None
         # PR 10: canonical upload store. Initialised lazily on first
         # use so unit-test fixtures don't have to spin up the brain.
         self.uploads = None
@@ -702,7 +714,41 @@ class BrainState:
             except Exception as exc:
                 # Self-heal must NEVER block boot; degrade gracefully.
                 logger.warning("self_heal_llm_model: skipped (%s)", exc)
-        self.learner = Learner(llm=_shared_llm, memory=self.memory)
+        # audit-r14 / S6 — initialise the CostBudget + per-subsystem
+        # BudgetLoopGuard instances early so the constructors below
+        # (Learner, ScreenLoop, ProactiveEngine) can be wired in
+        # place. ``broadcaster=self.broadcast_event`` lets a cap hit
+        # light up the WebUI banner via the existing dashboard event
+        # bus (Wave 3 Lane 12 renders ``cost_cap_hit``).
+        from cost.budget import CostBudget
+        from cost.loop_guard import BudgetLoopGuard
+        from config.loader import load_settings as _load_settings
+        try:
+            self.cost_budget = CostBudget(settings=_load_settings())
+        except Exception as exc:
+            logger.warning("CostBudget init failed: %s", exc)
+            self.cost_budget = None
+
+        def _make_guard(call_site: str, subsystem: str) -> BudgetLoopGuard:
+            return BudgetLoopGuard(
+                call_site=call_site,
+                subsystem=subsystem,
+                budget=self.cost_budget,
+                broadcaster=self.broadcast_event,
+            )
+
+        self.screen_loop_cost_guard = _make_guard("screen_loop", "ScreenLoop")
+        self.proactive_cost_guard = _make_guard("proactive", "ProactiveEngine")
+        self.learner_cost_guard = _make_guard("learner", "Learner")
+        self.cron_cost_guard = _make_guard("chat", "CronService")
+        self.email_cost_guard = _make_guard("chat", "EmailWatcher")
+        self.mqtt_cost_guard = _make_guard("chat", "MQTTBridge")
+
+        self.learner = Learner(
+            llm=_shared_llm,
+            memory=self.memory,
+            cost_guard=self.learner_cost_guard,
+        )
 
         # v2026.5.34 (PR 2 D11): the MemoryDecayService runs an
         # Ebbinghaus + SM-2 sweep over ``episodes`` on a
@@ -731,6 +777,17 @@ class BrainState:
         self.sandbox = ExecutionSandbox(
             max_tier=os.environ.get("FERAL_MAX_TIER", "active")
         )
+
+        # audit-r12 A2 (v2026.5.38) — auto-generate the federated-sync
+        # passphrase on first boot when neither the env var nor a
+        # previously-persisted vault entry exists. The function prints
+        # the value once to stderr (and to
+        # ``$FERAL_HOME/sync_passphrase.first_boot`` chmod 0600) so
+        # the operator can pair another brain. Pre-fix, an unset env
+        # var made /sync a zero-auth endpoint.
+        with boot_subsystem(self._boot_report, "SyncPassphrase"):
+            from memory.sync import ensure_sync_passphrase
+            ensure_sync_passphrase()
 
         self.policy = SandboxPolicy.load_default()
         self.device_registry = DeviceRegistry()
@@ -1157,6 +1214,7 @@ class BrainState:
                 memory=self.memory,
                 llm=_shared_llm,
                 scene_analyzer=self.scene,
+                cost_guard=self.screen_loop_cost_guard,
             )
             # A6 — only start the ambient screen-capture loop when the
             # operator has explicitly opted in. Before this gate the
@@ -1367,6 +1425,7 @@ class BrainState:
                 calendar=self.calendar,
                 health_aggregator=self.health_aggregator,
                 baseline_engine=self.baseline_engine,
+                cost_guard=self.proactive_cost_guard,
             )
 
             async def _proactive_delivery(msg):
@@ -1403,26 +1462,69 @@ class BrainState:
             self.mqtt_bridge = MQTTBridge()
             if self.mqtt_bridge.configured:
                 await self.mqtt_bridge.start()
+                # audit-r14 finding 18 #3 — register MQTT's polling
+                # task in BrainState so shutdown_event cancels it
+                # symmetrically alongside ScreenLoop / Proactive /
+                # EmailWatcher rather than leaving it dangling.
+                mqtt_task = getattr(self.mqtt_bridge, "_task", None)
+                if mqtt_task is not None:
+                    self.register_background_task(mqtt_task)
 
         with boot_subsystem(self._boot_report, "EmailWatcher"):
             async def _handle_email(incoming):
-                text = (
-                    f'New email from {incoming.sender}: "{incoming.subject}"\n\n'
-                    f"{incoming.body[:2000]}"
+                # audit-r14 finding 18 #4 — bounded handler. Pre-fix,
+                # every inbound email fired a full ``handle_command``
+                # against the orchestrator (one chat turn per email
+                # at ~$0.05–$0.50). Replace that with a write to the
+                # episodic memory + a brain event for the operator
+                # UI; the operator (or an explicit downstream rule)
+                # decides whether to escalate to a chat turn. This
+                # caps inbound-email cost at memory-write only.
+                summary = (
+                    f'Email from {incoming.sender}: "{incoming.subject}"'
                 )
-                for sid in list(self.sessions.keys())[:1]:
-                    await self.orchestrator.handle_command(
-                        sid,
-                        text,
-                        context={
-                            "source": "email",
-                            "message_id": incoming.message_id,
-                        },
+                detail = incoming.body[:2000] if incoming.body else ""
+                if self.memory is not None:
+                    try:
+                        await self.memory.episode_save(
+                            session_id="email_watcher",
+                            event_type="email_received",
+                            summary=summary,
+                            detail=detail,
+                            importance=0.4,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "email_watcher: memory write failed: %s", exc,
+                        )
+                # Fan out the brain event so the WebUI can render an
+                # inbox card; chat escalation is operator-driven from
+                # there, not auto-invoked.
+                try:
+                    for sid in list(self.sessions.keys()):
+                        await self.broadcast_event(
+                            "email_received",
+                            {
+                                "from": incoming.sender,
+                                "subject": incoming.subject,
+                                "message_id": incoming.message_id,
+                                "preview": detail[:240],
+                            },
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "email_watcher: broadcast failed: %s", exc,
                     )
 
             self.email_watcher = EmailWatcher(on_email=_handle_email)
             if self.email_watcher.configured:
                 await self.email_watcher.start()
+                # audit-r14 finding 18 #3 — register the watcher's
+                # task in BrainState so shutdown_event cancels it
+                # symmetrically with the other background loops.
+                watcher_task = getattr(self.email_watcher, "_task", None)
+                if watcher_task is not None:
+                    self.register_background_task(watcher_task)
 
         with boot_subsystem(self._boot_report, "mDNS"):
             from services.mdns import advertise_brain, discover_phone_bridge

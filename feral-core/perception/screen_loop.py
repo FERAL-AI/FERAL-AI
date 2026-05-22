@@ -29,11 +29,18 @@ from typing import Any, Callable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agents.llm_provider import LLMProvider
+    from cost.loop_guard import BudgetLoopGuard
     from memory.store import MemoryStore
     from perception.fusion import PerceptionEngine
     from perception.scene import SceneAnalyzer
 
 logger = logging.getLogger("feral.perception.screen")
+
+# Conservative token estimates for the cost guard's reservation.
+# ``_VISION_PROMPT`` is ~25 tokens; the LLM reply is capped at 120.
+# The reservation uses the reply ceiling because the input side is
+# image-token-driven and modelled separately by the pricing module.
+_VISION_RESERVATION_TOKENS = 120
 
 _VISION_PROMPT = (
     "Describe in one sentence what the user is doing on their screen. "
@@ -231,6 +238,8 @@ class ScreenLoop:
         interval: float = 8.0,
         session_id: str = "screen_loop",
         on_transition: Optional[Callable[[TransitionEvent], Any]] = None,
+        cost_guard: Optional["BudgetLoopGuard"] = None,
+        model: str = "gpt-4o-mini",
     ):
         self._perception = perception
         self._memory = memory
@@ -239,6 +248,12 @@ class ScreenLoop:
         self._interval = max(1.0, interval)
         self._session_id = session_id
         self._on_transition = on_transition
+        # audit-r14 / S6 — gate every paid vision LLM call through the
+        # shared loop guard. When the guard is None the loop runs
+        # unbounded (operator opted out / cost tracking disabled).
+        self._cost_guard = cost_guard
+        self._cost_model = model
+        self._budget_pause_count = 0
 
         self._detector = ScreenTransitionDetector()
         self._task: Optional[asyncio.Task] = None
@@ -263,6 +278,10 @@ class ScreenLoop:
             "captures": self._capture_count,
             "errors": self._error_count,
             "last_description": self._last_description,
+            "budget_pauses": self._budget_pause_count,
+            "budget_paused": bool(
+                self._cost_guard and self._cost_guard.is_paused
+            ),
         }
 
     async def start(self):
@@ -301,6 +320,18 @@ class ScreenLoop:
             await asyncio.sleep(self._interval)
 
     async def _tick(self):
+        # audit-r14 / S6 — pre-flight against the cost cap BEFORE
+        # screenshotting. ``allow()`` returns False once the projected
+        # vision spend would exceed the hourly cap; the guard then
+        # auto-pauses the loop for the rest of the cap window and
+        # emits a ``cost_cap_hit`` WS frame for the UI banner.
+        if self._cost_guard is not None and not self._cost_guard.allow(
+            model=self._cost_model,
+            estimated_max_tokens=_VISION_RESERVATION_TOKENS,
+        ):
+            self._budget_pause_count += 1
+            return
+
         ok = await _capture_screenshot(self._tmp_path)
         if not ok:
             self._error_count += 1
@@ -330,6 +361,19 @@ class ScreenLoop:
                 detected = result.get("detected_objects")
         elif self._llm and self._llm.available:
             description = await _ask_vision_llm(self._llm, image_b64, mime)
+
+        # audit-r14 / S6 — record the post-call usage so the rollup
+        # reflects the real spend. We don't have an exact prompt/
+        # completion token count from the vision endpoint in the
+        # common path; pass the reservation as an upper bound on the
+        # completion side and 0 on the prompt side (image tokens are
+        # priced separately in the catalog).
+        if self._cost_guard is not None:
+            await self._cost_guard.record(
+                model=self._cost_model,
+                prompt_tokens=0,
+                completion_tokens=_VISION_RESERVATION_TOKENS,
+            )
 
         if not description:
             self._update_perception_frame(image_b64, mime)
