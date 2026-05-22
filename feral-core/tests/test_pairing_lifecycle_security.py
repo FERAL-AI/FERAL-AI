@@ -96,6 +96,17 @@ def non_loopback_client(tmp_path, monkeypatch, store):
     except Exception:
         pass
 
+    # SECURITY: this fixture pins the off-loopback branch of the API-key
+    # middleware. The middleware has *two* loopback escape hatches —
+    # ``is_localhost(client_host)`` (patched above) and
+    # ``local_bypass_enabled()`` (env-driven). If any earlier test in the
+    # same process leaked ``FERAL_LOCAL_BYPASS=1`` (e.g. via raw
+    # ``os.environ[...] = "1"`` without cleanup) the bypass would silently
+    # re-enable and the pairing security assertion would 200 instead of
+    # 401. Explicitly clear the opt-in here so the security property is
+    # self-contained and resilient to env-leak regressions elsewhere.
+    monkeypatch.delenv("FERAL_LOCAL_BYPASS", raising=False)
+
     config = ConfigLoader(project_dir=str(tmp_path))
     config.discover()
     config.update_settings("access", "pairing_mode", "local")
