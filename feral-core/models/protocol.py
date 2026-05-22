@@ -339,6 +339,36 @@ class GesturePayload(BaseModel):
     source: str = "imu"  # "imu", "camera", "touch"
 
 
+class RefusalPayload(BaseModel):
+    """Structured refusal from the supervisor / orchestrator.
+
+    Emitted when the brain explicitly declines to act — supervisor
+    paused, policy gate denied, autonomy mode rejected the request.
+    The consumer renders this as a yellow chip in chat plus an
+    actionable ``retry_hint`` (e.g. "resume supervisor in Settings →
+    Oversight"). Pinned by Lane 08 WS6.
+    """
+    reason: str
+    retry_hint: str = ""
+    source: str = "supervisor"  # supervisor | policy | autonomy | ...
+    kind: str = ""  # command | command_stream | ui_event | ...
+
+
+class BudgetExceededPayload(BaseModel):
+    """Structured cost-budget refusal.
+
+    Emitted when a CostBudget.check_and_reserve / record_usage call
+    flagged the request as breaching a per-call-site or global cap.
+    Lane 12 renders this as a yellow banner: "Chat budget reached
+    ($X.XX / hour). Resets at HH:MM." Pinned by Lane 08 WS8.
+    """
+    call_site: str
+    cap_dollars: float = 0.0
+    current_dollars: float = 0.0
+    window: str = "hour"  # hour | day
+    reset_at: float = 0.0  # unix epoch seconds when the cap resets
+
+
 class ErrorPayload(BaseModel):
     """Something went wrong."""
     code: str
@@ -689,6 +719,8 @@ MESSAGE_TYPES = {
     "tool_result": ToolResultPayload,
     "gesture": GesturePayload,
     "error": ErrorPayload,
+    "refusal": RefusalPayload,
+    "budget_exceeded": BudgetExceededPayload,
     "chat_response": ChatResponsePayload,
     "genui_push": GenUIPushPayload,
 

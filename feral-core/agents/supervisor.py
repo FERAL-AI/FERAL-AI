@@ -333,7 +333,19 @@ class Supervisor:
                 event.decision = "denied"
                 event.detail["reason"] = "supervisor_paused"
                 self._record(event)
-                raise SupervisorBlocked("Supervisor is paused")
+                # WS6 — surface as a structured ``refusal`` WS frame
+                # rather than raising into the WS handler (which used
+                # to render as a 500 / opaque error toast).
+                await self._emit_refusal(
+                    session_id=str(session_id or ""),
+                    kind=kind,
+                    reason="supervisor_paused",
+                    retry_hint=(
+                        "FERAL's supervisor is paused. Resume in "
+                        "Settings → Oversight, then send the request again."
+                    ),
+                )
+                return None
 
             if self.policy_gate is not None:
                 try:
@@ -345,7 +357,18 @@ class Supervisor:
                 if verdict == "denied":
                     event.detail["reason"] = "policy_denied"
                     self._record(event)
-                    raise SupervisorBlocked("Policy denied this action")
+                    # WS6 — structured refusal instead of raise.
+                    await self._emit_refusal(
+                        session_id=str(session_id or ""),
+                        kind=kind,
+                        reason="policy_denied",
+                        retry_hint=(
+                            "The current autonomy policy declined this "
+                            "action. Lower autonomy_mode requirements in "
+                            "Settings → Autonomy if you'd like to allow it."
+                        ),
+                    )
+                    return None
                 if verdict == "queued":
                     event.detail["reason"] = "policy_queued"
                     self._record(event)
@@ -364,6 +387,50 @@ class Supervisor:
                 self._record(event)
 
         return wrapped
+
+    async def _emit_refusal(
+        self,
+        *,
+        session_id: str,
+        kind: str,
+        reason: str,
+        retry_hint: str = "",
+    ) -> None:
+        """Send a structured ``refusal`` WS frame to the session.
+
+        Lane 08 WS6 — supervisor denials surface as a renderable
+        chip in chat, not a 500 from the WS handler. Best-effort:
+        we never raise from here, the orchestrator's lifecycle is
+        already finished as far as the user is concerned.
+        """
+        orch = self._orchestrator
+        if orch is None or not session_id:
+            return
+        try:
+            # Lazy import — supervisor.py is owned by Lane 08 and
+            # ``models.protocol`` is the public wire schema. The
+            # local import keeps the module-level imports free of a
+            # protocol dependency.
+            from models.protocol import FeralMessage, RefusalPayload
+        except Exception:
+            logger.debug("RefusalPayload import failed", exc_info=True)
+            return
+        try:
+            payload = RefusalPayload(
+                reason=reason,
+                retry_hint=retry_hint,
+                source="supervisor",
+                kind=kind,
+            ).model_dump()
+            msg = FeralMessage(
+                session_id=session_id, hop="brain", type="refusal", payload=payload,
+            )
+            send = getattr(orch, "send", None)
+            if send is None:
+                return
+            await send(session_id, msg)
+        except Exception:
+            logger.debug("refusal emit failed", exc_info=True)
 
     def _record(self, event: SupervisorEvent) -> None:
         try:

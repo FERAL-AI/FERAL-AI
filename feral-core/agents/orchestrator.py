@@ -20,8 +20,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
-from typing import Optional, Callable, Awaitable, TYPE_CHECKING
+from typing import Any, Optional, Callable, Awaitable, TYPE_CHECKING
 from uuid import uuid4
 
 from fastapi import WebSocket
@@ -989,6 +990,205 @@ class Orchestrator:
             self._session_locks[session_id] = lock
         return lock
 
+    # ─────────────────────────────────────────────
+    # Fire-and-forget episode save (Lane 08 WS1)
+    # ─────────────────────────────────────────────
+    #
+    # ``MemoryStore.episode_save`` is async-safe (Wave 2 Lane 05 moved
+    # the SQLite write to a worker thread + the AboutMe extractor to a
+    # background task), but the orchestrator used to ``await`` it on
+    # the hot path. That made the user-visible time-to-first-token a
+    # function of WAL contention / disk fsync, not LLM latency.
+    #
+    # ``_save_episode_async`` schedules the save as a background task
+    # and returns immediately. Failures are logged + counted on
+    # ``feral_episode_save_fail_total`` so an operator can spot a
+    # broken memory layer without staring at the hot path.
+
+    def _save_episode_async(
+        self,
+        *,
+        session_id: str,
+        event_type: str,
+        summary: str,
+        detail: str = "",
+        importance: float | None = None,
+    ) -> Optional[asyncio.Task]:
+        """Schedule ``memory.episode_save`` as a fire-and-forget task.
+
+        Returns the scheduled ``asyncio.Task`` so tests can await on it
+        deterministically; production callers ignore the return value.
+        ``None`` when ``self.memory`` is unwired.
+        """
+        if not self.memory:
+            return None
+
+        kwargs: dict = {
+            "session_id": session_id,
+            "event_type": event_type,
+            "summary": summary,
+            "detail": detail,
+        }
+        if importance is not None:
+            kwargs["importance"] = importance
+
+        async def _runner() -> None:
+            try:
+                await self.memory.episode_save(**kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "episode_save failed (session=%s event=%s): %s",
+                    session_id[:8] if len(session_id) >= 8 else session_id,
+                    event_type,
+                    exc,
+                )
+                try:
+                    from observability.metrics import increment as _inc
+                    _inc(
+                        "feral_episode_save_fail_total",
+                        attributes={"event_type": event_type},
+                    )
+                except Exception:
+                    pass
+
+        try:
+            return asyncio.create_task(_runner())
+        except RuntimeError:
+            # No running loop — extremely rare on the orchestrator
+            # hot path, but defensively swallow so the caller can
+            # proceed instead of crashing the turn.
+            return None
+
+    # ─────────────────────────────────────────────
+    # LLM call wrappers (Lane 08 WS8 — budget gate)
+    # ─────────────────────────────────────────────
+
+    async def _call_llm_chat(
+        self,
+        *,
+        messages: list[dict],
+        tools: Optional[list[dict]],
+        call_site: str = "chat",
+    ) -> dict:
+        """Wrapper around ``LLMProvider.chat_with_failover`` that
+        propagates the ``call_site`` label so the budget gate bills
+        the right bucket. Returns the raw provider dict — including
+        the ``budget_exceeded`` short-circuit shape from Lane 09 / 04
+        — so the caller can react.
+
+        Falls through to the legacy positional signature for adapters
+        in tests that don't accept ``call_site`` kw.
+        """
+        try:
+            return await self.llm.chat_with_failover(
+                messages=messages,
+                tools=tools,
+                call_site=call_site,
+            )
+        except TypeError:
+            return await self.llm.chat_with_failover(
+                messages=messages,
+                tools=tools,
+            )
+
+    async def _emit_budget_exceeded(
+        self,
+        *,
+        session_id: str,
+        budget: dict,
+        call_site: str = "chat",
+    ) -> None:
+        """Emit a structured ``budget_exceeded`` WS frame.
+
+        WS8 acceptance (parent reminder #3, 2026-05-22T18:40Z):
+        payload includes ``call_site``, ``cap_dollars``,
+        ``current_dollars``, ``reset_at`` so Lane 12 can render
+        ``"Chat budget reached ($X.XX / hour). Resets at HH:MM."``.
+
+        Followed by a brief assistant text so chat clients that don't
+        special-case the new frame type still see a sensible reply
+        instead of silence.
+        """
+        try:
+            from models.protocol import BudgetExceededPayload
+        except Exception:
+            logger.debug("BudgetExceededPayload import failed", exc_info=True)
+            return
+
+        payload = BudgetExceededPayload(
+            call_site=str(budget.get("call_site") or call_site),
+            cap_dollars=float(budget.get("cap_dollars") or 0.0),
+            current_dollars=float(budget.get("current_dollars") or 0.0),
+            window=str(budget.get("window") or "hour"),
+            reset_at=float(budget.get("reset_at") or 0.0),
+        )
+
+        try:
+            await self.send(
+                session_id,
+                FeralMessage(
+                    session_id=session_id,
+                    hop="brain",
+                    type="budget_exceeded",
+                    payload=payload.model_dump(),
+                ),
+            )
+        except Exception:
+            logger.warning("budget_exceeded frame emit failed", exc_info=True)
+
+        # Friendly text so older chat clients still see a banner.
+        try:
+            human = (
+                f"Cost cap reached ({payload.call_site}, "
+                f"${payload.cap_dollars:.2f}/{payload.window}). "
+                "Adjust in Settings → Cost, or wait for the cap to reset."
+            )
+            await self._send_text(session_id, human)
+        except Exception:
+            logger.debug("budget_exceeded follow-up text failed", exc_info=True)
+
+    # ─────────────────────────────────────────────
+    # Vision context attach (Lane 08 WS4 — S5 prereq)
+    # ─────────────────────────────────────────────
+
+    def _attach_vision_context(
+        self,
+        user_content: Any,
+        *,
+        context: Optional[dict],
+        session_id: str,
+    ) -> Any:
+        """Possibly augment ``user_content`` with a fresh glasses /
+        screen frame as an ``image_url`` content block.
+
+        Pulls from Lane 11's ``perception.glasses_buffer`` when the
+        turn is in voice mode AND ``vision.enabled=true`` in settings
+        AND a frame within 30s exists. Stale frames are NOT attached
+        (parent-acked reminder #1 — emit nothing rather than a stale
+        image; the LLM can ask if it needs visual context).
+
+        Falls back to the legacy ``api.state.VisionBuffer`` for the
+        existing phone vision_ask channel only when Lane 11's buffer
+        is empty.
+        """
+        try:
+            from perception.context_attach import attach_vision_context
+        except Exception:
+            logger.debug("context_attach module unavailable", exc_info=True)
+            return user_content
+        try:
+            return attach_vision_context(
+                user_content,
+                context=context,
+                session_id=session_id,
+                vision_buffer=self.vision_buffer,
+            )
+        except Exception:
+            logger.warning("vision context attach failed", exc_info=True)
+            return user_content
+
     async def handle_command(self, session_id: str, text: str, context: Optional[dict] = None):
         """Process a user command through the full agentic pipeline.
 
@@ -1046,13 +1246,14 @@ class Orchestrator:
         if self._somatic_engine:
             self._somatic_engine.update_interaction(session_id, len(text))
 
-        if self.memory:
-            await self.memory.episode_save(
-                session_id=session_id,
-                event_type="user_command",
-                summary=text[:200],
-                detail=json.dumps(context or {}),
-            )
+        # WS1 — episode_save is fire-and-forget. Hot path returns
+        # before SQLite WAL commit / AboutMe extraction completes.
+        self._save_episode_async(
+            session_id=session_id,
+            event_type="user_command",
+            summary=text[:200],
+            detail=json.dumps(context or {}),
+        )
 
         context_data = context or {}
         vision_fast_path = context_data.get("channel") == "vision_ask"
@@ -1147,6 +1348,13 @@ class Orchestrator:
             })
 
         user_content = perception_frame.to_llm_user_content(text)
+        # WS4 — vision context attach. Pulls the freshest glasses /
+        # screen frame from Lane 11's buffer when the turn is in
+        # voice mode + vision is enabled + frame ≤ 30s. Stale frames
+        # are NOT attached (parent reminder #1).
+        user_content = self._attach_vision_context(
+            user_content, context=context, session_id=session_id,
+        )
         user_message = {"role": "user", "content": user_content}
         self.conversation_history[session_id].append(user_message)
 
@@ -1177,7 +1385,23 @@ class Orchestrator:
             try:
                 model_name = getattr(self.llm, 'model_name', 'llm')
                 await self._emit_brain_event(session_id, "llm_call", {"model": model_name})
-                response = await self.llm.chat_with_failover(messages=messages, tools=tools if tools else None)
+                response = await self._call_llm_chat(
+                    messages=messages,
+                    tools=tools if tools else None,
+                    call_site="chat",
+                )
+
+                # WS8 — BudgetExceeded surfaces as a structured WS
+                # frame (NOT a stack trace) for Lane 12 to render as
+                # a yellow banner. The LLM provider already returns
+                # the structured shape; we just propagate.
+                if isinstance(response, dict) and response.get("budget_exceeded"):
+                    await self._emit_budget_exceeded(
+                        session_id=session_id,
+                        budget=response["budget_exceeded"],
+                    )
+                    return
+
                 text_content, tool_calls = self.llm.extract_response(response)
 
                 # Never-stall: empty response — no text, no tool calls.
@@ -1248,31 +1472,56 @@ class Orchestrator:
                 return
 
             if tool_calls:
-                # Parallel dispatch of every tool the LLM asked for in one
-                # turn. Results ARE interleaved in wall-clock but we rebuild
-                # ``history`` in the original ``tool_calls`` order so the
-                # next LLM turn sees tool_call_id → result in sequence (the
-                # OpenAI API requires that order for tool messages).
+                # WS5 — multi-actuator ordered WS frames. Tools still
+                # execute in parallel (cap = ``FERAL_MAX_PARALLEL_TOOLS``)
+                # for speed, but the ``tool_start`` AND ``tool_result``
+                # frames are emitted in the LLM's original tool_call
+                # index order so the consumer renders the chain
+                # consistently — e.g. ``vision__describe_scene`` →
+                # ``home_assistant__vacuum_start`` even when vacuum_start
+                # happens to finish first.
                 #
-                # Cap concurrency with ``FERAL_MAX_PARALLEL_TOOLS`` (default 6).
-                # Set to 1 to fall back to strict sequential execution.
+                # Step 1: emit tool_start frames synchronously in order.
+                # Step 2: execute everything in parallel.
+                # Step 3: emit tool_result frames in tool_call order.
+                #
+                # The OpenAI tool-message contract still requires
+                # ``history`` to be appended in tool_call order; that
+                # property is preserved below.
                 parallel_cap = max(1, int(os.environ.get("FERAL_MAX_PARALLEL_TOOLS", "6")))
                 sem = asyncio.Semaphore(parallel_cap)
 
+                # Step 1 — ordered tool_start emission.
+                for _tc in tool_calls:
+                    await self._emit_tool_start(session_id, _tc)
+
                 async def _run_tool(tc: dict) -> dict:
                     async with sem:
-                        await self._emit_tool_start(session_id, tc)
                         t_start = time.time()
-                        result_data = await self._execute_tool_call_for_llm(session_id, tc, relevant_skills)
+                        result_data = await self._execute_tool_call_for_llm(
+                            session_id, tc, relevant_skills,
+                        )
                         latency_ms = (time.time() - t_start) * 1000
-                        await self._emit_tool_result(session_id, tc, result_data, latency_ms)
                         return {
                             "tc": tc,
                             "result": result_data,
                             "latency_ms": latency_ms,
                         }
 
-                tool_outputs = await asyncio.gather(*[_run_tool(tc) for tc in tool_calls])
+                tool_outputs = await asyncio.gather(
+                    *[_run_tool(tc) for tc in tool_calls]
+                )
+
+                # Step 3 — ordered tool_result emission. ``tool_outputs``
+                # is already ordered because asyncio.gather preserves
+                # input order regardless of completion order.
+                for output in tool_outputs:
+                    await self._emit_tool_result(
+                        session_id,
+                        output["tc"],
+                        output["result"],
+                        output["latency_ms"],
+                    )
 
                 for tool_output in tool_outputs:
                     tc = tool_output["tc"]
@@ -1380,11 +1629,50 @@ class Orchestrator:
         if self._somatic_engine:
             self._somatic_engine.update_interaction(session_id, len(text))
 
-        if self.memory:
-            await self.memory.episode_save(
-                session_id=session_id, event_type="user_command",
-                summary=text[:200], detail=json.dumps(context or {}),
-            )
+        # WS1 — episode_save fire-and-forget on the stream path too.
+        # See ``_save_episode_async`` docstring.
+        self._save_episode_async(
+            session_id=session_id,
+            event_type="user_command",
+            summary=text[:200],
+            detail=json.dumps(context or {}),
+        )
+
+        # WS3 — multi-agent pre-path parity. The non-stream branch
+        # hands the turn to ``MultiAgentOrchestrator`` when enabled +
+        # not in vision_ask mode + not a proactive source. The stream
+        # branch used to skip this entirely, which meant enabling
+        # multi-agent changed the assistant's behaviour depending on
+        # whether the client opted in to streaming — drift the audit
+        # called out in finding 20.
+        context_data = context or {}
+        vision_fast_path = context_data.get("channel") == "vision_ask"
+        if (
+            not vision_fast_path
+            and self._multi_agent_enabled
+            and self._multi_agent
+            and self.llm
+            and self.llm.available
+            and context_data.get("source", "") != "proactive"
+        ):
+            try:
+                response_text = await self._multi_agent.run(session_id, text, context)
+                if response_text:
+                    await self._try_send_sdui(session_id, response_text)
+                    if self.memory:
+                        self.memory.working_push(
+                            session_id,
+                            {"role": "assistant", "text": response_text[:300]},
+                        )
+                    if self.learner:
+                        asyncio.ensure_future(
+                            self.learner.on_message(session_id, "user", text)
+                        )
+                    return
+            except Exception as e:
+                logger.warning(
+                    f"Multi-agent (stream) failed, falling back to single-agent: {e}"
+                )
 
         relevant_skills = await self._route_prompt(text)
         relevant_skills = self._ensure_core_skills(relevant_skills)
@@ -1427,7 +1715,27 @@ class Orchestrator:
         if session_id not in self.conversation_history:
             self.conversation_history[session_id] = []
 
+        # WS3 — paused-thoughts re-thread parity. Symmetric with the
+        # non-stream prelude: when ``/api/consciousness/resume``
+        # queued kind=thought fragments for this session, prepend
+        # them as synthetic assistant messages so the LLM continues
+        # the same thread instead of starting cold. The non-stream
+        # branch always did this; the stream branch used to drop the
+        # fragments on the floor.
+        for paused in self.drain_paused_thoughts(session_id):
+            fragment = paused.get("text") or ""
+            if not fragment:
+                continue
+            self.conversation_history[session_id].append({
+                "role": "assistant",
+                "content": f"[RESUMED THOUGHT] {fragment}",
+            })
+
         user_content = perception_frame.to_llm_user_content(text)
+        # WS4 — vision context attach mirrors the non-stream prelude.
+        user_content = self._attach_vision_context(
+            user_content, context=context, session_id=session_id,
+        )
         self.conversation_history[session_id].append({"role": "user", "content": user_content})
         history = self._compact_context(self.conversation_history[session_id].copy())
         from models.protocol import StreamDeltaPayload
@@ -1455,7 +1763,18 @@ class Orchestrator:
             try:
                 stream_model = getattr(self.llm, 'model_name', 'llm')
                 await self._emit_brain_event(session_id, "llm_call", {"model": stream_model})
-                async for delta in self.llm.chat_stream(messages=messages, tools=tools if tools else None):
+                try:
+                    stream_iter = self.llm.chat_stream(
+                        messages=messages,
+                        tools=tools if tools else None,
+                        call_site="chat",
+                    )
+                except TypeError:
+                    stream_iter = self.llm.chat_stream(
+                        messages=messages,
+                        tools=tools if tools else None,
+                    )
+                async for delta in stream_iter:
                     if delta["type"] == "text_delta":
                         piece = delta.get("content", "")
                         if not piece:
@@ -1480,6 +1799,14 @@ class Orchestrator:
                                     delta="", stream_id=stream_id, is_final=True,
                                 ).model_dump(),
                             ))
+                    elif delta["type"] == "budget_exceeded":
+                        # WS8 — surface as a structured frame, not a
+                        # stack trace. Lane 12 renders the banner.
+                        await self._emit_budget_exceeded(
+                            session_id=session_id,
+                            budget=delta.get("payload") or {},
+                        )
+                        return
                     elif delta["type"] == "error":
                         await self._send_text(session_id, f"Stream error: {delta.get('content', 'unknown')}")
                         return
@@ -1565,18 +1892,56 @@ class Orchestrator:
 
             if normalized_tool_calls:
                 any_tool_ran = True
+
+                # WS5 — multi-actuator ordered WS frames on the
+                # stream path. Symmetric with the non-stream branch:
+                # emit ``tool_start`` for every tool in tool_call
+                # order BEFORE any execution starts, then execute
+                # (in parallel under ``FERAL_MAX_PARALLEL_TOOLS``),
+                # then emit ``tool_result`` in the same order.
+                parallel_cap = max(
+                    1, int(os.environ.get("FERAL_MAX_PARALLEL_TOOLS", "6"))
+                )
+                sem = asyncio.Semaphore(parallel_cap)
+
                 for tc in normalized_tool_calls:
                     await self._emit_tool_start(session_id, tc)
-                    t_start = time.time()
-                    result_data = await self._execute_tool_call_for_llm(session_id, tc, relevant_skills)
-                    latency_ms = (time.time() - t_start) * 1000
 
-                    stream_tool_success = bool(result_data.get("success") or result_data.get("status") == "command_sent_to_hardware_daemon")
+                async def _stream_run(tc: dict) -> dict:
+                    async with sem:
+                        t_start = time.time()
+                        result_data = await self._execute_tool_call_for_llm(
+                            session_id, tc, relevant_skills,
+                        )
+                        latency_ms = (time.time() - t_start) * 1000
+                        return {
+                            "tc": tc,
+                            "result": result_data,
+                            "latency_ms": latency_ms,
+                        }
+
+                outputs = await asyncio.gather(
+                    *[_stream_run(tc) for tc in normalized_tool_calls]
+                )
+
+                for output in outputs:
+                    tc = output["tc"]
+                    result_data = output["result"]
+                    latency_ms = output["latency_ms"]
+                    stream_tool_success = bool(
+                        result_data.get("success")
+                        or result_data.get("status") == "command_sent_to_hardware_daemon"
+                    )
                     await self._emit_tool_result(session_id, tc, result_data, latency_ms)
-                    await self._emit_brain_event(session_id, "tool_exec", {"tool": tc["name"], "success": stream_tool_success})
+                    await self._emit_brain_event(
+                        session_id, "tool_exec",
+                        {"tool": tc["name"], "success": stream_tool_success},
+                    )
 
                     if self._tool_genesis:
-                        self._tool_genesis.record_tool_call(session_id, tc["name"], tc.get("args", {}))
+                        self._tool_genesis.record_tool_call(
+                            session_id, tc["name"], tc.get("args", {}),
+                        )
 
                     if self.memory:
                         parts = tc["name"].split("__", 1)
@@ -1681,13 +2046,14 @@ class Orchestrator:
         alert_text = " ".join(alerts)
         logger.info(f"[{session_id[:8]}] Proactive trigger: {alert_text}")
 
-        if self.memory:
-            await self.memory.episode_save(
-                session_id=session_id,
-                event_type="proactive_alert",
-                summary=alert_text,
-                importance=0.9,
-            )
+        # WS1 — proactive alert save is also fire-and-forget; the
+        # synthesized command below is what carries the actual work.
+        self._save_episode_async(
+            session_id=session_id,
+            event_type="proactive_alert",
+            summary=alert_text,
+            importance=0.9,
+        )
 
         await self.handle_command(
             session_id=session_id,
@@ -1729,44 +2095,331 @@ class Orchestrator:
     # Skill Routing
     # ─────────────────────────────────────────────
 
-    async def _route_prompt(self, text: str) -> list[SkillManifest]:
+    # ─────────────────────────────────────────────
+    # Heuristic-first routing (Lane 08 WS2)
+    # ─────────────────────────────────────────────
+    #
+    # AUDIT-r14 finding 20 fix #2 and AUDIT-r13 finding 6.3 documented
+    # the regression: ``_route_prompt`` used to fire a primary-model
+    # LLM call (Opus / GPT-4) on every chat turn to pick which skills
+    # the LLM should see, even when the user said "hi". The user
+    # experience was a 1-5s "brain idle" before any token streamed.
+    #
+    # ``_route_prompt`` is now heuristic-first. The LLM is consulted
+    # only when the heuristic signal is genuinely ambiguous, and even
+    # then through ``LLMProvider.route_call`` at the ``cheap`` tier
+    # (Wave 2 Lane 09 R-CONTRACT-001). The expected no-LLM coverage on
+    # the canned production prompt corpus is ≥ 70%.
+    #
+    # ## Heuristic table (each row exits without an LLM call)
+    #
+    # | Match                              | Action                                        |
+    # |------------------------------------|-----------------------------------------------|
+    # | Empty / whitespace-only            | Return []                                     |
+    # | ``/<skill>`` prefix                | Direct map to that skill                      |
+    # | Memory recall regex (R_MEMORY)     | Map to ``notes_memory``                       |
+    # | Calendar query regex (R_CALENDAR)  | Map to ``calendar_google``                    |
+    # | Reminder verb regex (R_REMINDER)   | Map to ``feral_reminders``                    |
+    # | Health query regex (R_HEALTH)      | Map to ``health_data``                        |
+    # | Vision query regex (R_VISION)      | Map to ``perception_query``                   |
+    # | Code/search prefix                 | Map to ``code_interpreter``/``web_search``    |
+    # | Strong trigger match (score ≥ 20)  | Use registry's keyword/trigger ranking        |
+    # | Confident lead (top1 ≥ 1.5× top2)  | Use registry's ranking                        |
+    # | Action verb + no skill match       | Expose all skills (existing fallback)         |
+    # | Skill catalog ≤ 5                  | Use registry's ranking unconditionally        |
+    #
+    # Only when none of the above apply does the orchestrator call
+    # ``LLMProvider.route_call(call_site="routing", tier="cheap")``.
+
+    # Explicit prefix → skill_id map. ``"/calendar what's tomorrow"``
+    # routes straight to calendar_google without further parsing.
+    _ROUTE_PREFIX_MAP: dict[str, str] = {
+        "/memory": "notes_memory",
+        "/note": "notes_memory",
+        "/notes": "notes_memory",
+        "/calendar": "calendar_google",
+        "/cal": "calendar_google",
+        "/remind": "feral_reminders",
+        "/reminder": "feral_reminders",
+        "/health": "health_data",
+        "/search": "web_search",
+        "/google": "web_search",
+        "/code": "code_interpreter",
+        "/run": "code_interpreter",
+        "/screen": "screen_capture",
+        "/vision": "perception_query",
+        "/see": "perception_query",
+    }
+
+    # Memory-recall phrasings — "what did I do yesterday", etc.
+    _R_MEMORY = re.compile(
+        r"\b("
+        r"what\s+did\s+i\s+(?:do|say|ask|save|note)|"
+        r"summari[sz]e\s+(?:today|yesterday|my\s+week|my\s+day)|"
+        r"what\s+(?:was|were)\s+(?:we\s+)?(?:talking|chatting)\s+about|"
+        r"recall(?:\s+(?:that|the))?|"
+        r"do\s+you\s+remember|"
+        r"my\s+notes(?:\b|\s+from)|"
+        r"what\s+did\s+we\s+discuss"
+        r")\b",
+        re.I,
+    )
+
+    # Calendar phrasings — explicit time + schedule words.
+    _R_CALENDAR = re.compile(
+        r"\b("
+        r"(?:what'?s|do\s+i\s+have)\s+on\s+(?:my\s+)?(?:calendar|agenda|schedule)|"
+        r"my\s+(?:calendar|agenda|schedule)\s+(?:for\s+)?(?:today|tomorrow|next\s+week|this\s+week)|"
+        r"next\s+meeting|"
+        r"upcoming\s+(?:meetings?|events?)|"
+        r"am\s+i\s+free|"
+        r"schedule\s+a\s+(?:meeting|call|event)"
+        r")\b",
+        re.I,
+    )
+
+    # Reminder verbs — "remind me to ..."
+    _R_REMINDER = re.compile(
+        r"\b("
+        r"remind\s+me\s+to|"
+        r"set\s+a?\s*reminder|"
+        r"create\s+a?\s*reminder|"
+        r"list\s+(?:my\s+)?reminders"
+        r")\b",
+        re.I,
+    )
+
+    # Health / vitals — "what's my heart rate", "how did I sleep"
+    _R_HEALTH = re.compile(
+        r"\b("
+        r"(?:what'?s|show\s+me)\s+my\s+(?:heart\s+rate|hrv|spo2|vitals?|sleep)|"
+        r"how\s+(?:did|was)\s+(?:my\s+)?sleep|"
+        r"how\s+(?:recovered|ready)\s+am\s+i|"
+        r"(?:my\s+)?(?:recovery|readiness|strain)"
+        r")\b",
+        re.I,
+    )
+
+    # Visual perception — "what do I see", "what is in front of me"
+    _R_VISION = re.compile(
+        r"\b("
+        r"what\s+(?:do\s+i|am\s+i)\s+(?:see(?:ing)?|looking\s+at)|"
+        r"what(?:'s|\s+is)\s+(?:in\s+front\s+of\s+me|on\s+the\s+(?:screen|table))|"
+        r"describe\s+(?:the\s+)?(?:scene|view|room)"
+        r")\b",
+        re.I,
+    )
+
+    def _heuristic_route(self, text: str) -> tuple[list["SkillManifest"], str]:
+        """Try to pick relevant skills without an LLM call.
+
+        Returns ``(skills, reason)`` where ``reason`` is one of
+        ``"empty"``, ``"prefix"``, ``"regex:<name>"``,
+        ``"trigger_strong"``, ``"confident_lead"``,
+        ``"action_fallback"``, ``"small_catalog"``, or ``"ambiguous"``
+        (the only value that triggers an LLM disambiguation call).
+
+        The orchestrator's primary contract: ``"ambiguous"`` is the
+        ONLY exit that fires an LLM call. Every other return value is
+        a free routing decision.
+        """
+        if not text or not text.strip():
+            return ([], "empty")
+        if not self.skills.skills:
+            return ([], "empty")
+
+        stripped = text.strip()
+
+        # 1. Explicit ``/skill`` prefix. The slash form is intentional
+        # — it can't collide with normal English.
+        first_token = stripped.split(maxsplit=1)[0].lower() if stripped else ""
+        if first_token.startswith("/"):
+            mapped = self._ROUTE_PREFIX_MAP.get(first_token)
+            if mapped and mapped in self.skills.skills:
+                return ([self.skills.skills[mapped]], "prefix")
+
+        # 2. Regex-driven memory / calendar / reminder / health / vision shortcuts.
+        for pattern, sid, label in (
+            (self._R_MEMORY, "notes_memory", "regex:memory"),
+            (self._R_CALENDAR, "calendar_google", "regex:calendar"),
+            (self._R_REMINDER, "feral_reminders", "regex:reminder"),
+            (self._R_HEALTH, "health_data", "regex:health"),
+            (self._R_VISION, "perception_query", "regex:vision"),
+        ):
+            if pattern.search(stripped) and sid in self.skills.skills:
+                return ([self.skills.skills[sid]], label)
+
+        # 3. Catalog ≤ 5 — registry's keyword ranking is always
+        # enough; LLM routing would be more expensive than just
+        # exposing the whole list.
+        if len(self.skills.skills) <= 5:
+            return (self._fallback_skills_for_query(stripped, top_k=5), "small_catalog")
+
+        # 4. Trigger-phrase / category ranking from the registry.
+        ranked = self.skills.find_skills_for_query(stripped, top_k=5)
+        if ranked:
+            # Re-score to get the raw numbers — ``find_skills_for_query``
+            # returns sorted skills but not scores. We approximate by
+            # re-running the trigger check on the top result; the
+            # registry's exact-match score is 25, "contained in" is
+            # 20, "contains" is 15. Anything ≥ 20 = a strong signal.
+            top = ranked[0]
+            top_score = self._trigger_score(stripped, top)
+            if top_score >= 20.0:
+                return (ranked, "trigger_strong")
+
+            # Confident lead: top1 score / max(top2 score, 1.0) ≥ 1.5
+            # The registry already sorted; we just need the second
+            # skill's score for the ratio.
+            if len(ranked) >= 2:
+                second_score = self._trigger_score(stripped, ranked[1])
+                if top_score >= 5.0 and (
+                    second_score == 0.0 or top_score / second_score >= 1.5
+                ):
+                    return (ranked, "confident_lead")
+            elif top_score >= 5.0:
+                # Only one match in the catalog — clear winner.
+                return (ranked, "confident_lead")
+
+            # Weak signal — fall through to ambiguous.
+
+        # 5. Action verbs with no skill match — surface every tool
+        # (preserves the prior "imply action → expose all" behaviour).
+        if self._query_implies_action(stripped):
+            return (list(self.skills.skills.values()), "action_fallback")
+
+        return (ranked or [], "ambiguous")
+
+    @staticmethod
+    def _trigger_score(query: str, skill: "SkillManifest") -> float:
+        """Compute the same trigger-phrase score the registry uses.
+
+        Mirrors ``SkillRegistry.find_skills_for_query`` so we can read
+        a numeric "confidence" without re-implementing the registry.
+        Phrases are matched case-insensitive; the registry's tiers
+        (exact 25, contained 20, contains 15, partial words 3×count)
+        are preserved here.
+        """
+        q = query.lower().strip()
+        q_words = set(q.split())
+        best = 0.0
+        for phrase in getattr(skill, "trigger_phrases", []) or []:
+            p = phrase.lower()
+            if p == q:
+                best = max(best, 25.0)
+            elif p in q:
+                best = max(best, 20.0)
+            elif q in p:
+                best = max(best, 15.0)
+            else:
+                p_words = set(p.split())
+                overlap = p_words & q_words
+                if overlap:
+                    ratio = len(overlap) / max(len(p_words), 1)
+                    best = max(best, len(overlap) * 3.0 * ratio)
+        # Category bonus mirrors the registry too.
+        for cat in getattr(skill, "categories", []) or []:
+            if cat.lower() in q:
+                best += 5.0
+        return best
+
+    async def _route_prompt(self, text: str) -> list["SkillManifest"]:
+        """Pick which skills the LLM sees this turn.
+
+        WS2 — heuristic-first; LLM disambiguation through
+        ``LLMProvider.route_call(call_site="routing", tier="cheap")``
+        only when the heuristic exit is ``"ambiguous"`` (see
+        ``_heuristic_route`` table above).
+        """
         if not self.skills.skills:
             return []
 
-        if not self.llm.available or len(self.skills.skills) <= 5:
-            results = self._fallback_skills_for_query(text, top_k=5)
+        # Pre-WS2 behaviour preserved when the LLM is unavailable:
+        # heuristic is the only available choice.
+        if not getattr(self.llm, "available", False):
+            results, _reason = self._heuristic_route(text)
+            if not results:
+                results = self._fallback_skills_for_query(text, top_k=5)
             return await self._apply_routing_penalties(results)
 
-        prompt = "You are a Semantic Tool Router. Select up to 5 relevant tool IDs for the user's query.\n"
-        prompt += "Available Tools:\n"
-        for skill_id, skill in self.skills.skills.items():
-            prompt += f"- {skill_id}: {skill.description}\n"
+        skills, reason = self._heuristic_route(text)
+        if reason != "ambiguous":
+            logger.debug(
+                "route_prompt heuristic exit=%s skills=%s",
+                reason, [s.skill_id for s in skills[:5]],
+            )
+            return await self._apply_routing_penalties(skills)
 
-        prompt += f"\nUser Query: {text}\n"
-        prompt += "\nOutput ONLY a JSON list of strings (tool IDs). [] if none match. No markdown."
+        # ── Ambiguous: ask the cheap-tier LLM to disambiguate ────
+        provider_ref: dict[str, Any] = {}
+        try:
+            provider_ref = self.llm.route_call(
+                call_site="routing", prompt=text, tier="cheap",
+            ) or {}
+        except Exception as exc:
+            logger.debug("route_call refused, falling back to heuristic: %s", exc)
+            return await self._apply_routing_penalties(skills)
+
+        # Build a tight prompt — the catalog inflates token usage so
+        # we pass the description in short form. The cheap tier
+        # returns a JSON list of skill ids.
+        catalog_lines = [
+            f"- {sid}: {sk.description}"
+            for sid, sk in self.skills.skills.items()
+        ]
+        prompt = (
+            "You are a Semantic Tool Router. Pick up to 5 skill_ids "
+            "relevant to the user's query.\nAvailable skills:\n"
+            + "\n".join(catalog_lines)
+            + f"\n\nUser Query: {text}\n"
+            "Output ONLY a JSON list of skill_id strings. [] if none "
+            "are clearly relevant. No prose. No markdown."
+        )
 
         try:
-            response = await self.llm.chat_with_failover([{"role": "user", "content": prompt}], tools=None)
+            # The router instructed which (provider, model) to use for
+            # the routing call; we surface it via the chat call's
+            # ``call_site`` so the budget gate bills against routing,
+            # not chat.
+            response = await self.llm.chat_with_failover(
+                [{"role": "user", "content": prompt}],
+                tools=None,
+                call_site="routing",
+                model=provider_ref.get("model") or None,
+            )
+        except TypeError:
+            # ``call_site`` / ``model`` kwargs may not be supported by
+            # every adapter shape used in tests. Fall through to the
+            # legacy positional form.
+            response = await self.llm.chat_with_failover(
+                [{"role": "user", "content": prompt}], tools=None,
+            )
+        except Exception as exc:
+            logger.warning("RoutePrompt LLM call failed: %s", exc)
+            return await self._apply_routing_penalties(skills)
+
+        try:
             text_content, _ = self.llm.extract_response(response)
+        except Exception:
+            text_content = ""
 
-            cleaned = text_content.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned[7:-3].strip()
-            elif cleaned.startswith("```"):
-                cleaned = cleaned[3:-3].strip()
+        cleaned = (text_content or "").strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:-3].strip()
+        elif cleaned.startswith("```"):
+            cleaned = cleaned[3:-3].strip()
+        try:
+            skill_ids = json.loads(cleaned) if cleaned else []
+        except Exception:
+            skill_ids = []
 
-            skill_ids = json.loads(cleaned)
+        relevant: list["SkillManifest"] = []
+        for sid in skill_ids:
+            if isinstance(sid, str) and sid in self.skills.skills:
+                relevant.append(self.skills.skills[sid])
 
-            relevant = []
-            for sid in skill_ids:
-                if isinstance(sid, str) and sid in self.skills.skills:
-                    relevant.append(self.skills.skills[sid])
-            results = relevant[:5] if relevant else self._fallback_skills_for_query(text, top_k=5)
-            return await self._apply_routing_penalties(results)
-        except Exception as e:
-            logger.warning(f"RoutePrompt failed, falling back to heuristic: {e}")
-            results = self._fallback_skills_for_query(text, top_k=5)
-            return await self._apply_routing_penalties(results)
+        results = relevant[:5] if relevant else (skills or self._fallback_skills_for_query(text, top_k=5))
+        return await self._apply_routing_penalties(results)
 
     def _ensure_core_skills(self, skills: list[SkillManifest]) -> list[SkillManifest]:
         """Guarantee core skills like desktop_control are always available to the LLM."""

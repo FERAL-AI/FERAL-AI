@@ -107,24 +107,42 @@ async def test_wrap_audits_every_call(supervisor):
 
 @pytest.mark.asyncio
 async def test_pause_blocks_every_call(supervisor):
+    """Lane 08 WS6 — paused supervisor returns None and emits a
+    structured ``refusal`` WS frame instead of raising
+    ``SupervisorBlocked``. The pre-WS6 contract used to surface as a
+    500 from the WS handler.
+    """
     inner = AsyncMock(return_value="ok")
     orch = MagicMock()
     orch.handle_command = inner
+    orch.send = AsyncMock()
     supervisor.wrap(orch)
 
     supervisor.set_paused(True)
-    with pytest.raises(SupervisorBlocked):
-        await orch.handle_command("sess", "msg", context={"source": "web"})
+    result = await orch.handle_command("sess", "msg", context={"source": "web"})
+    assert result is None
 
     rows = supervisor.recent()
     assert rows[0]["decision"] == "denied"
     inner.assert_not_called()
 
+    # WS6 — refusal frame emitted via orch.send.
+    sent = orch.send.call_args_list
+    assert len(sent) == 1
+    msg = sent[0].args[1]
+    dumped = msg.model_dump() if hasattr(msg, "model_dump") else dict(msg)
+    assert dumped["type"] == "refusal"
+    assert dumped["payload"]["reason"] == "supervisor_paused"
+
 
 @pytest.mark.asyncio
 async def test_policy_gate_denied(supervisor):
+    """Lane 08 WS6 — policy-gate denial returns None and emits a
+    structured ``refusal`` frame instead of raising.
+    """
     orch = MagicMock()
     orch.handle_command = AsyncMock(return_value="ok")
+    orch.send = AsyncMock()
 
     def gate(event):
         return "denied" if "dangerous" in event.payload_summary else "allowed"
@@ -132,13 +150,23 @@ async def test_policy_gate_denied(supervisor):
     supervisor.policy_gate = gate
     supervisor.wrap(orch)
 
-    with pytest.raises(SupervisorBlocked):
-        await orch.handle_command("sess", "dangerous act", context={"source": "web"})
+    result = await orch.handle_command("sess", "dangerous act", context={"source": "web"})
+    assert result is None
+
     # Allowed call goes through.
     await orch.handle_command("sess", "hello", context={"source": "web"})
     rows = supervisor.recent()
     assert rows[0]["decision"] == "allowed"
     assert rows[1]["decision"] == "denied"
+
+    # Exactly one refusal frame for the denied call.
+    refusal_calls = [
+        c for c in orch.send.call_args_list
+        if getattr(c.args[1], "type", "") == "refusal"
+    ]
+    assert len(refusal_calls) == 1
+    payload = refusal_calls[0].args[1].model_dump()["payload"]
+    assert payload["reason"] == "policy_denied"
 
 
 @pytest.mark.asyncio
