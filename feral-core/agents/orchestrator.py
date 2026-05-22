@@ -1062,6 +1062,94 @@ class Orchestrator:
             return None
 
     # ─────────────────────────────────────────────
+    # LLM call wrappers (Lane 08 WS8 — budget gate)
+    # ─────────────────────────────────────────────
+
+    async def _call_llm_chat(
+        self,
+        *,
+        messages: list[dict],
+        tools: Optional[list[dict]],
+        call_site: str = "chat",
+    ) -> dict:
+        """Wrapper around ``LLMProvider.chat_with_failover`` that
+        propagates the ``call_site`` label so the budget gate bills
+        the right bucket. Returns the raw provider dict — including
+        the ``budget_exceeded`` short-circuit shape from Lane 09 / 04
+        — so the caller can react.
+
+        Falls through to the legacy positional signature for adapters
+        in tests that don't accept ``call_site`` kw.
+        """
+        try:
+            return await self.llm.chat_with_failover(
+                messages=messages,
+                tools=tools,
+                call_site=call_site,
+            )
+        except TypeError:
+            return await self.llm.chat_with_failover(
+                messages=messages,
+                tools=tools,
+            )
+
+    async def _emit_budget_exceeded(
+        self,
+        *,
+        session_id: str,
+        budget: dict,
+        call_site: str = "chat",
+    ) -> None:
+        """Emit a structured ``budget_exceeded`` WS frame.
+
+        WS8 acceptance (parent reminder #3, 2026-05-22T18:40Z):
+        payload includes ``call_site``, ``cap_dollars``,
+        ``current_dollars``, ``reset_at`` so Lane 12 can render
+        ``"Chat budget reached ($X.XX / hour). Resets at HH:MM."``.
+
+        Followed by a brief assistant text so chat clients that don't
+        special-case the new frame type still see a sensible reply
+        instead of silence.
+        """
+        try:
+            from models.protocol import BudgetExceededPayload
+        except Exception:
+            logger.debug("BudgetExceededPayload import failed", exc_info=True)
+            return
+
+        payload = BudgetExceededPayload(
+            call_site=str(budget.get("call_site") or call_site),
+            cap_dollars=float(budget.get("cap_dollars") or 0.0),
+            current_dollars=float(budget.get("current_dollars") or 0.0),
+            window=str(budget.get("window") or "hour"),
+            reset_at=float(budget.get("reset_at") or 0.0),
+        )
+
+        try:
+            await self.send(
+                session_id,
+                FeralMessage(
+                    session_id=session_id,
+                    hop="brain",
+                    type="budget_exceeded",
+                    payload=payload.model_dump(),
+                ),
+            )
+        except Exception:
+            logger.warning("budget_exceeded frame emit failed", exc_info=True)
+
+        # Friendly text so older chat clients still see a banner.
+        try:
+            human = (
+                f"Cost cap reached ({payload.call_site}, "
+                f"${payload.cap_dollars:.2f}/{payload.window}). "
+                "Adjust in Settings → Cost, or wait for the cap to reset."
+            )
+            await self._send_text(session_id, human)
+        except Exception:
+            logger.debug("budget_exceeded follow-up text failed", exc_info=True)
+
+    # ─────────────────────────────────────────────
     # Vision context attach (Lane 08 WS4 — S5 prereq)
     # ─────────────────────────────────────────────
 
@@ -1297,7 +1385,23 @@ class Orchestrator:
             try:
                 model_name = getattr(self.llm, 'model_name', 'llm')
                 await self._emit_brain_event(session_id, "llm_call", {"model": model_name})
-                response = await self.llm.chat_with_failover(messages=messages, tools=tools if tools else None)
+                response = await self._call_llm_chat(
+                    messages=messages,
+                    tools=tools if tools else None,
+                    call_site="chat",
+                )
+
+                # WS8 — BudgetExceeded surfaces as a structured WS
+                # frame (NOT a stack trace) for Lane 12 to render as
+                # a yellow banner. The LLM provider already returns
+                # the structured shape; we just propagate.
+                if isinstance(response, dict) and response.get("budget_exceeded"):
+                    await self._emit_budget_exceeded(
+                        session_id=session_id,
+                        budget=response["budget_exceeded"],
+                    )
+                    return
+
                 text_content, tool_calls = self.llm.extract_response(response)
 
                 # Never-stall: empty response — no text, no tool calls.
@@ -1659,7 +1763,18 @@ class Orchestrator:
             try:
                 stream_model = getattr(self.llm, 'model_name', 'llm')
                 await self._emit_brain_event(session_id, "llm_call", {"model": stream_model})
-                async for delta in self.llm.chat_stream(messages=messages, tools=tools if tools else None):
+                try:
+                    stream_iter = self.llm.chat_stream(
+                        messages=messages,
+                        tools=tools if tools else None,
+                        call_site="chat",
+                    )
+                except TypeError:
+                    stream_iter = self.llm.chat_stream(
+                        messages=messages,
+                        tools=tools if tools else None,
+                    )
+                async for delta in stream_iter:
                     if delta["type"] == "text_delta":
                         piece = delta.get("content", "")
                         if not piece:
@@ -1684,6 +1799,14 @@ class Orchestrator:
                                     delta="", stream_id=stream_id, is_final=True,
                                 ).model_dump(),
                             ))
+                    elif delta["type"] == "budget_exceeded":
+                        # WS8 — surface as a structured frame, not a
+                        # stack trace. Lane 12 renders the banner.
+                        await self._emit_budget_exceeded(
+                            session_id=session_id,
+                            budget=delta.get("payload") or {},
+                        )
+                        return
                     elif delta["type"] == "error":
                         await self._send_text(session_id, f"Stream error: {delta.get('content', 'unknown')}")
                         return
