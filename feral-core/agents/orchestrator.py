@@ -1462,6 +1462,42 @@ class Orchestrator:
             detail=json.dumps(context or {}),
         )
 
+        # WS3 — multi-agent pre-path parity. The non-stream branch
+        # hands the turn to ``MultiAgentOrchestrator`` when enabled +
+        # not in vision_ask mode + not a proactive source. The stream
+        # branch used to skip this entirely, which meant enabling
+        # multi-agent changed the assistant's behaviour depending on
+        # whether the client opted in to streaming — drift the audit
+        # called out in finding 20.
+        context_data = context or {}
+        vision_fast_path = context_data.get("channel") == "vision_ask"
+        if (
+            not vision_fast_path
+            and self._multi_agent_enabled
+            and self._multi_agent
+            and self.llm
+            and self.llm.available
+            and context_data.get("source", "") != "proactive"
+        ):
+            try:
+                response_text = await self._multi_agent.run(session_id, text, context)
+                if response_text:
+                    await self._try_send_sdui(session_id, response_text)
+                    if self.memory:
+                        self.memory.working_push(
+                            session_id,
+                            {"role": "assistant", "text": response_text[:300]},
+                        )
+                    if self.learner:
+                        asyncio.ensure_future(
+                            self.learner.on_message(session_id, "user", text)
+                        )
+                    return
+            except Exception as e:
+                logger.warning(
+                    f"Multi-agent (stream) failed, falling back to single-agent: {e}"
+                )
+
         relevant_skills = await self._route_prompt(text)
         relevant_skills = self._ensure_core_skills(relevant_skills)
 
@@ -1502,6 +1538,22 @@ class Orchestrator:
 
         if session_id not in self.conversation_history:
             self.conversation_history[session_id] = []
+
+        # WS3 — paused-thoughts re-thread parity. Symmetric with the
+        # non-stream prelude: when ``/api/consciousness/resume``
+        # queued kind=thought fragments for this session, prepend
+        # them as synthetic assistant messages so the LLM continues
+        # the same thread instead of starting cold. The non-stream
+        # branch always did this; the stream branch used to drop the
+        # fragments on the floor.
+        for paused in self.drain_paused_thoughts(session_id):
+            fragment = paused.get("text") or ""
+            if not fragment:
+                continue
+            self.conversation_history[session_id].append({
+                "role": "assistant",
+                "content": f"[RESUMED THOUGHT] {fragment}",
+            })
 
         user_content = perception_frame.to_llm_user_content(text)
         self.conversation_history[session_id].append({"role": "user", "content": user_content})
