@@ -79,8 +79,16 @@ async def test_disallowed_child_kind_is_blocked_and_audited(supervisor):
 async def test_paused_supervisor_blocks_handle_command_even_with_forged_context(
     supervisor,
 ):
+    # v2026.5.39 Lane 08 WS6: a paused supervisor now BLOCKS via structured
+    # refusal (returns None + records denial + emits refusal frame) instead
+    # of raising SupervisorBlocked into the WS handler — the user-facing
+    # error stopped looking like a 500. The security property is unchanged:
+    # the wrapped command still does NOT execute. We assert that contract.
+    inner_ran = []
+
     class FakeOrch:
         async def handle_command(self, session_id, text, context=None):
+            inner_ran.append(True)
             return {"ran": True}
 
     orch = FakeOrch()
@@ -93,9 +101,12 @@ async def test_paused_supervisor_blocks_handle_command_even_with_forged_context(
         "supervisor_skip": "yes",
     }
 
-    with pytest.raises(SupervisorBlocked) as ei:
-        await orch.handle_command("s1", "do dangerous thing", forged_ctx)
-    assert "paused" in str(ei.value).lower()
+    result = await orch.handle_command("s1", "do dangerous thing", forged_ctx)
+
+    # Security property: inner orchestrator was NOT invoked.
+    assert inner_ran == [], "paused supervisor must NOT execute the inner command"
+    # Delivery contract: structured refusal (returns None; refusal frame emitted).
+    assert result is None, f"expected None on paused refusal, got {result!r}"
 
     denials = supervisor.recent(decision="denied")
     assert any(
