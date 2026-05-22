@@ -10,7 +10,14 @@ import Foundation
 public actor FeralNode {
     private let brainURL: URL
     private let apiKey: String
-    private let nodeId: String
+    /// HUP node id this FeralNode advertises in ``node_register``.
+    /// Exposed publicly (read-only) so adapters that emit envelopes
+    /// keyed by node id (e.g. ``glasses_frame.device_id`` for the
+    /// phone-camera-as-glasses fallback) can resolve it without
+    /// duplicating the value into every adapter init. ``nonisolated``
+    /// + ``let`` means callers can read this synchronously without
+    /// going through the actor's executor.
+    public nonisolated let nodeId: String
     private var socket: HUPWebSocket?
     private var adapters: [VendorAdapter] = []
     private var connected = false
