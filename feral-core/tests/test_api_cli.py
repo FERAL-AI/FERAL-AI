@@ -95,10 +95,16 @@ class TestMainEntrypoint:
         assert exc_info.value.code == 0
 
     def test_doctor_subcommand_dispatches(self, tmp_path, monkeypatch):
+        # v2026.5.39 Lane 07: doctor SystemExits 1 when any probe is red.
+        # Fresh tmp_path FERAL_HOME → red rows → exit 1. Test only verifies
+        # dispatch happened (no unhandled exception); exit 0 or 1 both OK.
         monkeypatch.setenv("FERAL_HOME", str(tmp_path))
         cli = _import_cli()
         with patch("sys.argv", ["feral", "doctor"]):
-            cli.main()
+            try:
+                cli.main()
+            except SystemExit as exc:
+                assert exc.code in (0, 1), f"unexpected doctor exit code: {exc.code!r}"
 
 
 # ═══════════════════════════════════════════════
