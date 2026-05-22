@@ -44,11 +44,21 @@ from cli import ui_kit
 
 
 def register_key_subparser(sub: "argparse._SubParsersAction") -> None:
-    """Register ``feral key {status,rotate,recover}`` under the main
-    ``feral`` argparse subparsers group."""
+    """Register ``feral key {status,rotate,recover,add,list,remove}``
+    under the main ``feral`` argparse subparsers group.
+
+    audit-r14 / lane-07 W3 — the per-provider multi-key surface
+    (``add``/``list``/``remove`` and the label-aware ``rotate``)
+    wraps Wave 2 Lane 09's ``security.vault_keys`` overlay. The
+    legacy master-key ``rotate`` (no ``--provider``) is preserved
+    so existing scripts keep working.
+    """
     key_p = sub.add_parser(
         "key",
-        help="Manage the encrypted credential vault (status, rotate, recover)",
+        help=(
+            "Manage the encrypted credential vault — status, master "
+            "rotate/recover, and per-provider multi-key add/list/remove."
+        ),
     )
     key_sub = key_p.add_subparsers(dest="action")
 
@@ -60,14 +70,35 @@ def register_key_subparser(sub: "argparse._SubParsersAction") -> None:
 
     rotate_p = key_sub.add_parser(
         "rotate",
-        help="Generate a new master key, re-encrypt the vault, and print "
-             "a fresh recovery code (shown ONCE).",
+        help=(
+            "Master rotate (no flags): generate a new master key, re-encrypt "
+            "the vault, and print a fresh recovery code (shown ONCE). "
+            "Per-provider rotate (with --provider --label): replace the "
+            "labeled API key with a new one (vault unaffected)."
+        ),
     )
     rotate_p.add_argument(
         "--yes",
         action="store_true",
         dest="key_confirm",
         help="Skip the interactive confirmation prompt (use in scripts).",
+    )
+    rotate_p.add_argument(
+        "--provider",
+        default="",
+        help="Provider id (e.g. openai, anthropic, gemini). When set, "
+             "rotates the per-provider labeled API key instead of the "
+             "vault master key.",
+    )
+    rotate_p.add_argument(
+        "--label",
+        default="",
+        help="Label of the per-provider key to rotate (default: 'default').",
+    )
+    rotate_p.add_argument(
+        "--api-key",
+        default="",
+        help="New API key. If omitted, you will be prompted interactively.",
     )
 
     recover_p = key_sub.add_parser(
@@ -83,18 +114,93 @@ def register_key_subparser(sub: "argparse._SubParsersAction") -> None:
              "leaves the secret in your shell history).",
     )
 
+    # ── audit-r14 / lane-07 W3 — multi-key per-provider commands ──
+
+    add_p = key_sub.add_parser(
+        "add",
+        help=(
+            "Add (or replace) a labeled API key for a provider. The key is "
+            "stored in the encrypted vault and a probe is run immediately "
+            "so you see green/red before the prompt closes."
+        ),
+    )
+    add_p.add_argument("--provider", required=True, help="Provider id (openai, anthropic, ...)")
+    add_p.add_argument(
+        "--label", default="default",
+        help="Short tag for this key (default 'default'). Use 'prod' / "
+             "'dev' / 'team-a' to keep multiple credentials per provider.",
+    )
+    add_p.add_argument(
+        "--api-key", default="",
+        help="The API key. If omitted, you will be prompted interactively "
+             "(recommended — keeps the secret out of shell history).",
+    )
+    add_p.add_argument(
+        "--set-active", action="store_true",
+        help="Make this label the runtime default for the provider.",
+    )
+    add_p.add_argument(
+        "--no-probe", action="store_true",
+        help="Skip the post-add probe (faster but you don't see validity).",
+    )
+
+    list_p = key_sub.add_parser(
+        "list",
+        help="List labeled keys for one or every provider with probe status.",
+    )
+    list_p.add_argument(
+        "--provider", default="",
+        help="Restrict to one provider id. Empty = list every provider that "
+             "has at least one labeled key.",
+    )
+
+    remove_p = key_sub.add_parser(
+        "remove",
+        help="Delete a labeled API key from the vault.",
+    )
+    remove_p.add_argument("--provider", required=True, help="Provider id")
+    remove_p.add_argument("--label", required=True, help="Label to remove")
+    remove_p.add_argument(
+        "--yes", action="store_true", dest="key_confirm",
+        help="Skip the interactive confirmation prompt.",
+    )
+
 
 def dispatch_key_subcommand(args) -> int:
     action = getattr(args, "action", None) or "status"
     if action == "status":
         return cmd_key_status()
     if action == "rotate":
+        provider = (getattr(args, "provider", "") or "").strip()
+        if provider:
+            return cmd_key_rotate_provider(
+                provider_id=provider,
+                label=(getattr(args, "label", "") or "").strip() or "default",
+                api_key=(getattr(args, "api_key", "") or "").strip(),
+                skip_confirm=getattr(args, "key_confirm", False),
+            )
         return cmd_key_rotate(skip_confirm=getattr(args, "key_confirm", False))
     if action == "recover":
         return cmd_key_recover(code=getattr(args, "code", "") or "")
+    if action == "add":
+        return cmd_key_add(
+            provider_id=getattr(args, "provider", "") or "",
+            label=(getattr(args, "label", "") or "").strip() or "default",
+            api_key=(getattr(args, "api_key", "") or "").strip(),
+            set_active=bool(getattr(args, "set_active", False)),
+            probe=not bool(getattr(args, "no_probe", False)),
+        )
+    if action == "list":
+        return cmd_key_list(provider_id=(getattr(args, "provider", "") or "").strip())
+    if action == "remove":
+        return cmd_key_remove(
+            provider_id=getattr(args, "provider", "") or "",
+            label=(getattr(args, "label", "") or "").strip(),
+            skip_confirm=getattr(args, "key_confirm", False),
+        )
     print(
         f"Unknown action: {action}. "
-        f"Try one of: status, rotate, recover."
+        f"Try one of: status, rotate, recover, add, list, remove."
     )
     return 2
 
@@ -256,6 +362,362 @@ def cmd_key_recover(*, code: str = "") -> int:
     print("  The OS keychain now holds the master key for this vault.")
     print("  You can run `feral key status` to confirm.")
     return 0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Per-provider multi-key (audit-r14 / lane-07 W3)
+# ─────────────────────────────────────────────────────────────────────
+#
+# These commands wrap ``security.vault_keys`` (Wave 2 Lane 09's
+# additive overlay on BlindVault). Multi-key support means an
+# operator can stash both a personal "dev" OpenAI key and a team
+# "prod" key under the same provider id without one clobbering the
+# other; ``set_active_label`` decides which one the runtime resolves.
+#
+# Every command runs in pure-local mode — no brain WebSocket round-
+# trip. ``add`` runs the post-add probe via ``security.probe.probe``
+# directly; ``list`` reads the stored ``last_probe_*`` metadata so
+# the operator sees green/red without paying another network call.
+
+
+def _format_ts(ts):
+    """Render an epoch second as 'Xs ago' / 'Xm ago' / 'Xh ago'."""
+    import time as _time
+
+    if ts is None:
+        return "—"
+    delta = max(0, _time.time() - float(ts))
+    if delta < 60:
+        return f"{int(delta)}s ago"
+    if delta < 3600:
+        return f"{int(delta // 60)}m ago"
+    if delta < 86400:
+        return f"{int(delta // 3600)}h ago"
+    return f"{int(delta // 86400)}d ago"
+
+
+def _probe_one_label(provider_id: str, *, force: bool = True) -> tuple[bool, str]:
+    """Run the registry probe for ``provider_id`` and return
+    ``(ok, detail)``. Imported lazily so ``feral key list`` (which
+    only reads cached metadata) doesn't pay the import cost when no
+    probe is needed."""
+    import asyncio
+
+    try:
+        from security.probe import probe
+    except Exception as exc:
+        return False, f"probe registry unavailable: {exc}"
+
+    try:
+        result = asyncio.run(probe(provider_id, force=force))
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(probe(provider_id, force=force))
+        finally:
+            loop.close()
+    return bool(result.ok), result.detail or result.reason or "no detail"
+
+
+def cmd_key_add(
+    *,
+    provider_id: str,
+    label: str,
+    api_key: str,
+    set_active: bool = False,
+    probe: bool = True,
+) -> int:
+    """Store a labeled API key under ``provider_id`` and probe it.
+
+    The actual write goes through Lane 09's ``vault_keys`` overlay.
+    After the write succeeds, we run ``security.probe.probe`` for
+    ``provider_id`` so the operator sees a green/red verdict before
+    the prompt returns. Probe metadata is persisted via
+    ``record_probe_result`` so ``feral key list`` can render the
+    same verdict later without another network call.
+    """
+    from security.vault_keys import (
+        add_provider_key,
+        record_probe_result,
+        InvalidProviderId,
+        InvalidLabel,
+    )
+
+    if not provider_id:
+        print("  --provider is required.")
+        return 2
+
+    if not api_key:
+        try:
+            api_key = ui_kit.password(
+                f"API key for {provider_id} (label='{label}')",
+                allow_empty=False,
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print("  Cancelled.")
+            return 1
+
+    if not api_key:
+        print("  No API key supplied. Aborting.")
+        return 1
+
+    try:
+        entry = add_provider_key(
+            provider_id, label, api_key, set_active=set_active,
+        )
+    except (InvalidProviderId, InvalidLabel, ValueError) as exc:
+        print(f"  {exc}")
+        return 2
+
+    print()
+    print(f"  Saved {entry.provider_id}:{entry.label}  "
+          f"({entry.fingerprint})"
+          + ("  [active]" if entry.is_active else ""))
+
+    if not probe:
+        print("  --no-probe set; skipping validity check.")
+        return 0
+
+    print()
+    print("  Probing key…")
+    ok, detail = _probe_one_label(entry.provider_id, force=True)
+    record_probe_result(entry.provider_id, entry.label, ok=ok)
+    if ok:
+        print(f"  ✔ Probe OK — {detail}")
+        return 0
+
+    print(f"  ✘ Probe FAILED — {detail}")
+    print()
+    print("  The key is stored but the API rejected it. Run")
+    print(f"  `feral key add --provider {entry.provider_id} --label {entry.label}`")
+    print("  again with a fresh key, or check the provider's dashboard.")
+    return 1
+
+
+def cmd_key_list(*, provider_id: str = "") -> int:
+    """Print labeled keys + probe status for one or every provider.
+
+    Empty ``provider_id`` lists every provider that has at least one
+    labeled key. The output never includes the secret — only the
+    fingerprint + metadata, matching the ``ProviderKeyEntry`` shape.
+    """
+    from security.vault_keys import (
+        PROVIDER_KEYS_NAMESPACE,
+        list_provider_keys,
+        InvalidProviderId,
+    )
+    from security.vault import get_vault, VaultError
+
+    try:
+        vault = get_vault()
+    except VaultError as exc:
+        print(f"  Vault unavailable: {exc}")
+        return 1
+
+    if provider_id:
+        try:
+            entries = list_provider_keys(provider_id, vault=vault)
+        except InvalidProviderId as exc:
+            print(f"  {exc}")
+            return 2
+        provider_groups = {provider_id.strip().lower(): entries}
+    else:
+        # Walk the keys namespace, group by provider prefix.
+        all_keys = vault.list_namespace(PROVIDER_KEYS_NAMESPACE)
+        groups: dict[str, list] = {}
+        for k in all_keys:
+            if ":" not in k:
+                continue
+            pid = k.split(":", 1)[0]
+            groups.setdefault(pid, [])
+        provider_groups = {
+            pid: list_provider_keys(pid, vault=vault) for pid in sorted(groups)
+        }
+
+    if not provider_groups:
+        print("  No labeled provider keys stored.")
+        print("  Add one with: feral key add --provider <id> --label default")
+        return 0
+
+    try:
+        from rich.console import Console
+        from rich.table import Table
+        console = Console()
+    except ImportError:
+        console = None
+
+    for pid, entries in provider_groups.items():
+        if not entries:
+            print(f"\n  [{pid}] (no labeled keys)")
+            continue
+        if console is not None:
+            table = Table(title=f"[bold]{pid}[/bold]", show_lines=False)
+            table.add_column("Label", style="bold")
+            table.add_column("Active")
+            table.add_column("Fingerprint", style="dim")
+            table.add_column("Probe")
+            table.add_column("Last probe")
+            table.add_column("Last used")
+            for e in entries:
+                if e.last_probe_ok is True:
+                    probe_cell = "[green]✔ ok[/green]"
+                elif e.last_probe_ok is False:
+                    probe_cell = "[red]✘ failed[/red]"
+                else:
+                    probe_cell = "[dim]—[/dim]"
+                table.add_row(
+                    e.label,
+                    "✔" if e.is_active else "",
+                    e.fingerprint,
+                    probe_cell,
+                    _format_ts(e.last_probe_at),
+                    _format_ts(e.last_used_at),
+                )
+            console.print(table)
+        else:
+            print(f"\n  [{pid}]")
+            for e in entries:
+                marker = "*" if e.is_active else " "
+                probe_str = (
+                    "ok" if e.last_probe_ok is True
+                    else ("failed" if e.last_probe_ok is False else "—")
+                )
+                print(
+                    f"   {marker} {e.label:<20} {e.fingerprint:<30}  "
+                    f"probe={probe_str}  "
+                    f"last_probe={_format_ts(e.last_probe_at)}"
+                )
+    return 0
+
+
+def cmd_key_remove(*, provider_id: str, label: str, skip_confirm: bool = False) -> int:
+    """Remove a labeled API key from the vault."""
+    from security.vault_keys import remove_provider_key, InvalidProviderId, InvalidLabel
+
+    if not provider_id or not label:
+        print("  Both --provider and --label are required.")
+        return 2
+
+    if not skip_confirm:
+        ui_kit.brand_panel(
+            "feral key remove",
+            body=(
+                f"About to remove the labeled key:\n"
+                f"  provider: {provider_id}\n"
+                f"  label:    {label}\n\n"
+                "The encrypted secret + metadata will be deleted from the\n"
+                "vault. Other labels for this provider are unaffected."
+            ),
+        )
+        try:
+            if not ui_kit.confirm("Continue?", default=False):
+                print("  Cancelled.")
+                return 1
+        except KeyboardInterrupt:
+            print()
+            print("  Cancelled.")
+            return 1
+
+    try:
+        removed = remove_provider_key(provider_id, label)
+    except (InvalidProviderId, InvalidLabel) as exc:
+        print(f"  {exc}")
+        return 2
+
+    if removed:
+        print(f"  Removed {provider_id}:{label}.")
+        return 0
+    print(f"  No labeled key found at {provider_id}:{label}.")
+    return 1
+
+
+def cmd_key_rotate_provider(
+    *,
+    provider_id: str,
+    label: str,
+    api_key: str = "",
+    skip_confirm: bool = False,
+) -> int:
+    """Rotate the per-provider labeled API key.
+
+    Distinct from ``cmd_key_rotate`` (which rotates the *master* key
+    that encrypts the whole vault). This path replaces just the
+    labeled secret in place — fingerprint changes, ``last_probe_*``
+    is cleared, and the post-rotate probe runs immediately so the
+    operator sees the new key's validity before the prompt closes.
+    """
+    from security.vault_keys import (
+        get_provider_key, add_provider_key, get_active_label,
+        record_probe_result, InvalidProviderId, InvalidLabel,
+    )
+
+    if not provider_id:
+        print("  --provider is required for per-provider rotate.")
+        return 2
+
+    if not skip_confirm:
+        ui_kit.brand_panel(
+            "feral key rotate (per-provider)",
+            body=(
+                f"Rotating {provider_id}:{label}.\n"
+                "The current secret will be REPLACED with the new one.\n"
+                "Other labels for this provider are unaffected.\n"
+                "The new key is probed immediately."
+            ),
+        )
+        try:
+            if not ui_kit.confirm("Continue with rotation?", default=False):
+                print("  Cancelled.")
+                return 1
+        except KeyboardInterrupt:
+            print()
+            print("  Cancelled.")
+            return 1
+
+    if not api_key:
+        try:
+            api_key = ui_kit.password(
+                f"New API key for {provider_id}:{label}", allow_empty=False,
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print("  Cancelled.")
+            return 1
+
+    if not api_key:
+        print("  No API key supplied. Aborting.")
+        return 1
+
+    try:
+        existing = get_provider_key(provider_id, label)
+    except (InvalidProviderId, InvalidLabel) as exc:
+        print(f"  {exc}")
+        return 2
+    if existing is None:
+        print(f"  No labeled key at {provider_id}:{label} — use `feral key add` instead.")
+        return 1
+
+    # Preserve active selection across the rotate.
+    active = get_active_label(provider_id)
+    keep_active = (active == label)
+
+    entry = add_provider_key(
+        provider_id, label, api_key, set_active=keep_active,
+    )
+    print(f"  Rotated {entry.provider_id}:{entry.label}  ({entry.fingerprint})"
+          + ("  [active]" if entry.is_active else ""))
+
+    print()
+    print("  Probing new key…")
+    ok, detail = _probe_one_label(provider_id, force=True)
+    record_probe_result(provider_id, label, ok=ok)
+    if ok:
+        print(f"  ✔ Probe OK — {detail}")
+        return 0
+    print(f"  ✘ Probe FAILED — {detail}")
+    print("  The new key is stored but the API rejected it; rotate again with a fresh key.")
+    return 1
 
 
 # ─────────────────────────────────────────────────────────────────────
