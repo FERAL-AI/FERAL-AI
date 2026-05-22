@@ -2530,6 +2530,10 @@ def main():
     from cli.model_commands import register_models_subparser
     register_models_subparser(sub)
 
+    # ── Lane 07 W5 — integrations connect (Gmail / OAuth / HA) ──
+    from cli.integration_commands import register_integrations_subparser
+    register_integrations_subparser(sub)
+
     # Parse known args — everything else is treated as a message
     args, remaining = parser.parse_known_args()
     _apply_connection_args(args)
@@ -2639,6 +2643,9 @@ def main():
     elif args.subcommand == "models":
         from cli.model_commands import dispatch_models_subcommand
         sys.exit(dispatch_models_subcommand(args))
+    elif args.subcommand == "integrations":
+        from cli.integration_commands import dispatch_integrations_subcommand
+        sys.exit(dispatch_integrations_subcommand(args))
     elif args.subcommand is None and not remaining:
         asyncio.run(repl())
     elif args.subcommand is None and remaining:
