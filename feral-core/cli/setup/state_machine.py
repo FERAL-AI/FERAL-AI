@@ -75,16 +75,26 @@ class StateMachine:
                 self.state.completed_steps.add(name)
                 # Persist resume sidecar after every successful step
                 # so a Ctrl+C / crash on the NEXT step doesn't lose
-                # the progress we just made. ``mark_complete`` (called
-                # from the finish step) deletes the sidecar at the
-                # very end of a successful run.
-                try:
-                    self.state.write_setup_state(
-                        last_step=name,
-                        completed_steps=sorted(self.state.completed_steps),
-                    )
-                except Exception:
-                    logger.debug("setup: could not persist resume sidecar", exc_info=True)
+                # the progress we just made. The finish step calls
+                # ``state.mark_complete()`` which deletes the sidecar
+                # — we MUST NOT re-write it here for the finish step,
+                # otherwise the operator's next ``feral setup`` would
+                # see a stale "resume?" prompt for an install that
+                # already completed.
+                already_complete = bool(
+                    (self.state.settings.get("meta") or {}).get("setup_complete")
+                )
+                if not already_complete:
+                    try:
+                        self.state.write_setup_state(
+                            last_step=name,
+                            completed_steps=sorted(self.state.completed_steps),
+                        )
+                    except Exception:
+                        logger.debug(
+                            "setup: could not persist resume sidecar",
+                            exc_info=True,
+                        )
                 idx += 1
             except BackNavigation:
                 if idx == 0:
