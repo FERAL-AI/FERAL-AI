@@ -26,16 +26,41 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from urllib.parse import urlparse
 
-try:
-    import websockets
-except ImportError:
-    print("websockets package required. Install: pip install websockets")
-    sys.exit(1)
+# audit-r14 / lane-07 (R2-002) — `feral --version` MUST NOT open a
+# WebSocket to the brain. Importing ``websockets`` at module load
+# also pulls in ``http``/``ssl`` machinery that the version probe
+# never needs; the repl/one_shot paths import lazily via
+# :func:`_require_websockets`. ``httpx`` import itself does NOT
+# make any network calls (verified by wave1-summary §R2-002), so we
+# import it eagerly to keep the existing ``cli_main.httpx`` mock
+# surface intact. Pure-local commands still exit before any
+# ``httpx.get/.post`` call site runs.
+websockets = None  # populated by _require_websockets()
 
 try:
     import httpx
 except ImportError:
     httpx = None
+
+
+def _require_websockets():
+    """Lazy-import + cache the ``websockets`` package.
+
+    Returns the imported module. Used by :func:`repl` and
+    :func:`one_shot` — the only paths that actually open a brain
+    WebSocket. Pure-local commands (``--version``, ``doctor``,
+    ``key`` …) MUST NOT call this helper.
+    """
+    global websockets
+    if websockets is None:
+        try:
+            import websockets as _ws
+        except ImportError:
+            print("websockets package required. Install: pip install websockets")
+            sys.exit(1)
+        websockets = _ws
+    return websockets
+
 
 from version import VERSION as __version__
 from config.loader import feral_home
@@ -48,6 +73,29 @@ from config.runtime import (
     brain_public_scheme,
     brain_tls_enabled,
 )
+
+
+# ── R2-002 ───────────────────────────────────────────────────────────
+# Pure-local commands MUST NOT touch the network. Needs-brain commands
+# may. The lists below are the source of truth referenced by:
+#   * the early dispatch in :func:`main` (so ``--version`` short-
+#     circuits before any parser cost)
+#   * ``tests/test_cli_pure_local.py`` (R2-002 CI gate)
+#   * ``tests/test_cli_no_phantom_commands.py`` (docs↔CLI parity)
+# Update both lists when adding a new top-level command.
+PURE_LOCAL_SUBCOMMANDS = frozenset({
+    "doctor", "setup", "key", "grant", "access", "pair",
+    "voice", "models", "integrations",
+    "install-service", "uninstall-service",
+    "service-status", "logs", "stop", "restart",
+    "wake-test", "publisher", "publish", "app",
+})
+NEEDS_BRAIN_SUBCOMMANDS = frozenset({
+    "status", "devices", "skills", "identity",
+    "memory", "sync", "twin", "marketplace", "install",
+    "bridge",  # bridge install runs a script that contacts brain
+    "start", "serve", "demo",
+})
 
 
 def _runtime_http_base() -> str:
@@ -339,13 +387,14 @@ async def repl():
     """
     print(BANNER)
     uri = WS_URL
+    ws_pkg = _require_websockets()
 
     backoff = 1.0
     max_backoff = 30.0
 
     while True:
         try:
-            async with websockets.connect(uri) as ws:
+            async with ws_pkg.connect(uri) as ws:
                 # Reset backoff once we're actually connected.
                 backoff = 1.0
                 try:
@@ -479,11 +528,12 @@ async def one_shot(text: str):
     one-shot call has no colocated brain to protect — exit codes are the
     contract for shell scripting, so we keep ``sys.exit(1)`` here.
     """
+    ws_pkg = _require_websockets()
     try:
         last_err: Exception | None = None
         for _attempt in range(3):
             try:
-                async with websockets.connect(WS_URL) as ws:
+                async with ws_pkg.connect(WS_URL) as ws:
                     _ = await asyncio.wait_for(ws.recv(), timeout=5)
 
                     await ws.send(json.dumps({
@@ -2005,12 +2055,39 @@ def _apply_connection_args(args):
 
 
 def main():
+    # ── R2-002 — pure-local fast path ─────────────────────────────────
+    # `feral --version` MUST print the version + exit 0 in <100ms with
+    # NO network calls. We short-circuit BEFORE the heavy argparse tree
+    # is built (registering 30+ subparsers, importing `cli.app_commands`,
+    # `cli.key_commands`, etc., easily costs another 50ms). The argparse
+    # `--version` action is also registered below for the canonical flag
+    # discovery in `feral --help`.
+    #
+    # Pure-local commands more broadly are listed in
+    # ``PURE_LOCAL_SUBCOMMANDS``; the network-touching ones in
+    # ``NEEDS_BRAIN_SUBCOMMANDS``. ``tests/test_cli_pure_local.py``
+    # pins both timing + no-network-on-pure-local behavior.
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("--version", "-V"):
+        print(f"feral-ai {__version__}")
+        return 0
+
     parser = argparse.ArgumentParser(
         description="FERAL — Open AI agent with computer use, voice, GenUI, and hardware control",
         usage="feral [command] [options]",
     )
     parser.add_argument("--host", default=None, help="Brain hostname")
     parser.add_argument("--port", default=None, help="Brain port")
+    # Argparse-driven --version: makes the flag visible in `feral --help`
+    # and supports `feral --host x --port y --version` after the global
+    # options. The fast-path above handles the bare `feral --version`
+    # case without paying the parser-build cost.
+    parser.add_argument(
+        "--version", "-V",
+        action="version",
+        version=f"feral-ai {__version__}",
+        help="Print the installed feral-ai package version and exit",
+    )
 
     sub = parser.add_subparsers(dest="subcommand")
 
@@ -2342,6 +2419,18 @@ def main():
         sys.exit(dispatch_key_subcommand(args))
     elif args.subcommand is None and not remaining:
         asyncio.run(repl())
+    elif args.subcommand is None and remaining:
+        # R2-002: never silently route unknown flags to the brain. The
+        # pre-Lane-07 fall-through joined `remaining` and pushed it to
+        # ``one_shot()`` which then opened a WebSocket and printed
+        # ``Cannot connect to FERAL Brain at ws://...`` — confusing and
+        # wrong for typos like ``feral --verison``. Bare-word remainders
+        # are still chat (``feral search the web``); flag-shaped
+        # remainders raise a parser error.
+        if remaining[0].startswith("-"):
+            parser.error(f"unrecognized arguments: {' '.join(remaining)}")
+        full_text = " ".join(remaining).strip()
+        asyncio.run(one_shot(full_text))
     else:
         full_text = " ".join([args.subcommand or ""] + remaining).strip()
         if full_text:
