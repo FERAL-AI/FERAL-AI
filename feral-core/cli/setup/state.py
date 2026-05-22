@@ -4,6 +4,34 @@ Each step reads + mutates three plain dicts (``settings``,
 ``credentials``, ``identity``) so a step can be invoked in isolation
 under tests without the full wizard running.
 
+audit-r14 / lane-07 W7 — wizard contract changes
+-----------------------------------------------
+
+Pre-Lane-07 the wizard had two tightly-coupled bugs:
+
+1. ``state.save()`` unconditionally set
+   ``settings.meta.setup_complete = True`` even when the user quit
+   the wizard at step 2, so the dashboard "you're done!" gate fired
+   on a half-completed install (finding 09 — quit semantics: 1/5).
+2. There was no resume-from-last-step path; a user who Ctrl+C'd on
+   the home_assistant step had to re-walk every previous step on
+   the next ``feral setup`` invocation (finding 09 — re-run/resume:
+   3/5).
+
+The fix:
+
+* ``save()`` no longer sets ``setup_complete``. The wizard's finish
+  step explicitly calls :meth:`mark_complete` after the summary
+  renders. Quit / Ctrl+C / crash mid-flow → ``meta.setup_complete``
+  stays False (or whatever value it had before the wizard ran).
+* New ``setup_state.json`` sidecar (``~/.feral/setup_state.json``)
+  tracks ``last_step`` + ``completed_steps`` + ``ts``. The state
+  machine rewrites it after each successful step. Quit / crash
+  leaves the file in place so the next ``feral setup`` invocation
+  can offer "resume from <step>?" without losing partial input.
+* The finish step's :meth:`mark_complete` deletes the sidecar and
+  rewrites ``settings.json`` with ``meta.setup_complete = True``.
+
 Credentials persistence (A7)
 ----------------------------
 Credentials are written to the W9 encrypted ``BlindVault`` — NEVER to
@@ -61,13 +89,82 @@ class WizardState:
         )
 
     def save(self) -> None:
+        """Persist settings / credentials / identity to disk.
+
+        audit-r14 / lane-07 W7 — this method NO LONGER sets
+        ``setup_complete``. Use :meth:`mark_complete` from the
+        wizard's finish step. Mid-flow quits and Ctrl+C save partial
+        settings + credentials but leave ``setup_complete`` alone, so
+        the brain dashboard's "you're done" gate doesn't fire on a
+        half-finished wizard.
+        """
         self.home.mkdir(parents=True, exist_ok=True)
+        # Preserve any existing ``meta`` block (including a pre-
+        # existing ``setup_complete=True`` from a previous successful
+        # run) — never downgrade to False here. Only the finish step
+        # via :meth:`mark_complete` flips this flag to True.
         self.settings.setdefault("meta", {})
-        self.settings["meta"]["setup_complete"] = True
         _write_json(self.home / "settings.json", self.settings)
         _persist_credentials(self.home, self.credentials)
         if self.identity:
             _write_json(self.home / "identity.json", self.identity)
+
+    def mark_complete(self) -> None:
+        """Called by the wizard's finish step after the summary renders.
+
+        Sets ``meta.setup_complete = True`` in ``settings.json`` and
+        deletes the resume sidecar at ``~/.feral/setup_state.json``.
+        """
+        self.home.mkdir(parents=True, exist_ok=True)
+        self.settings.setdefault("meta", {})
+        self.settings["meta"]["setup_complete"] = True
+        _write_json(self.home / "settings.json", self.settings)
+        # Best-effort cleanup of the resume sidecar.
+        sidecar = self.home / "setup_state.json"
+        try:
+            if sidecar.is_file():
+                sidecar.unlink()
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Resume sidecar (~/.feral/setup_state.json) — Lane 07 W7
+    # ------------------------------------------------------------------
+
+    def write_setup_state(self, *, last_step: str, completed_steps: list[str]) -> None:
+        """Persist `last_step` + `completed_steps` so the next
+        ``feral setup`` invocation can resume from where this one
+        stopped (or crashed). Atomic write via parent-dir rename so
+        a crash mid-write can't leave a half-flushed JSON behind.
+        """
+        import time as _time
+
+        self.home.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "last_step": last_step,
+            "completed_steps": list(completed_steps),
+            "ts": _time.time(),
+            "schema": 1,
+        }
+        path = self.home / "setup_state.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        tmp.replace(path)
+
+    @classmethod
+    def read_setup_state(cls, home: Path) -> dict:
+        """Read the resume sidecar (if any). Returns an empty dict on
+        missing / corrupt file."""
+        path = home / "setup_state.json"
+        if not path.is_file():
+            return {}
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return data
 
     # ------------------------------------------------------------------
     # Helpers

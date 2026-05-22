@@ -91,7 +91,12 @@ class TestWizardState:
         assert state.settings["llm"]["provider"] == "ollama"
         assert state.credentials["OPENAI_API_KEY"] == "sk-old"
 
-    def test_save_writes_both_files_and_marks_complete(self, tmp_path):
+    def test_save_writes_both_files_but_does_not_mark_complete(self, tmp_path):
+        """audit-r14 / lane-07 W7 — ``state.save()`` no longer flips
+        ``setup_complete`` (the wizard's finish step does, via
+        :meth:`WizardState.mark_complete`). Quit / Ctrl+C / crash that
+        ends in the finally block calling ``state.save()`` MUST NOT
+        mark the install as complete."""
         state = WizardState.load(tmp_path / "feral")
         state.set_setting("llm", "provider", "openai")
         state.set_credential("OPENAI_API_KEY", "sk-new")
@@ -99,7 +104,17 @@ class TestWizardState:
         import json
         saved = json.loads((state.home / "settings.json").read_text())
         assert saved["llm"]["provider"] == "openai"
+        assert saved.get("meta", {}).get("setup_complete") is not True
+
+        # Now invoke ``mark_complete()`` (what the finish step does)
+        # and confirm the flag flips + the resume sidecar is gone.
+        state.write_setup_state(last_step="audio", completed_steps=["welcome"])
+        assert (state.home / "setup_state.json").is_file()
+        state.mark_complete()
+        saved = json.loads((state.home / "settings.json").read_text())
         assert saved["meta"]["setup_complete"] is True
+        assert not (state.home / "setup_state.json").is_file()
+
         # A7 contract: setup credentials are encrypted at rest through
         # BlindVault and must not leave a plaintext credentials.json.
         from security.vault import BlindVault, reset_vault
@@ -321,6 +336,9 @@ class TestAudioStep:
 
 class TestEndToEndState:
     def test_after_wizard_run_all_keys_round_trip(self, tmp_path):
+        """audit-r14 / lane-07 W7 — call ``mark_complete()`` to model
+        the finish step running. Without it ``state.save()`` alone
+        leaves ``setup_complete`` unset (the new contract)."""
         state = WizardState.load(tmp_path / "feral")
         state.set_setting("llm", "provider", "ollama")
         state.set_setting("llm", "model", "llama3.3:8b")
@@ -330,6 +348,7 @@ class TestEndToEndState:
         state.set_setting("audio", "tts_voice", "en_GB-alan-medium")
         state.set_credential("OPENAI_API_KEY", "")
         state.save()
+        state.mark_complete()
 
         # Re-load into a second state; everything persists.
         reloaded = WizardState.load(tmp_path / "feral")

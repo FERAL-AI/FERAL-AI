@@ -59,23 +59,37 @@ def run_setup() -> None:
 
 async def _run_async() -> None:
     state = WizardState.load(feral_home())
+
+    # Lane 07 W7 — voice + TCC preflight steps. Voice preflight runs
+    # AFTER llm_model so the LLM choice is locked in first; TCC
+    # preflight runs LAST before finish so the operator's most
+    # recent action is granting permissions and re-probing.
+    from .steps import voice_preflight, tcc_preflight
+
     machine = StateMachine(
         state=state,
         steps=[
             ("welcome", welcome.run),
             ("llm_provider", llm.run_provider_step),
             ("llm_model", llm.run_model_step),
+            ("voice_preflight", voice_preflight.run),
             ("audio", audio.run),
             ("identity", identity.run),
             ("network", network_step.run),
             ("home_assistant", home_assistant.run),
             ("channels", channels.run),
+            ("tcc_preflight", tcc_preflight.run),
             ("finish", finish.run),
         ],
     )
     try:
         await machine.run()
     finally:
+        # Lane 07 W7 — finally block no longer marks setup_complete.
+        # ``state.save()`` persists settings/credentials/identity but
+        # the meta.setup_complete flag stays untouched unless the
+        # finish step ran (which calls ``state.mark_complete()``
+        # explicitly). Closes finding 09's quit-marks-complete bug.
         state.save()
 
 
