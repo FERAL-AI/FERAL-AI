@@ -119,9 +119,13 @@ jobs:
       - name: Run tests with coverage (50% threshold)
         # --timeout=60 per-test ceiling: surfaces any single hanging test as a
         # named failure instead of swallowing the whole job into a 30-min CI
-        # cancel. --ignore=tests/perf skips Lane 08 latency + Lane 11 hardware
-        # benchmarks (those run on full matrix push-to-main only).
-        run: pytest tests/ -x -v --tb=short --cov=. --cov-report=term-missing --cov-fail-under=50 --ignore=tests/perf --timeout=60
+        # cancel. --timeout-method=thread is required because signal-based
+        # interruption conflicts with asyncio's own signal handlers on Linux
+        # runners (tests that complete instantly on macOS hang forever on
+        # GitHub ubuntu otherwise — see PR #157 investigation). --ignore=
+        # tests/perf skips Lane 08 latency + Lane 11 hardware benchmarks
+        # (those run on full matrix push-to-main only).
+        run: pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-fail-under=50 --ignore=tests/perf --timeout=60 --timeout-method=thread
 
   client-build:
     name: Client — vite build
