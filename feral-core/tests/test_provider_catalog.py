@@ -542,16 +542,17 @@ class TestChatReadinessSignal:
                 f"(got {status.stub_reason!r})"
             )
 
-    def test_bedrock_flagged_as_not_chat_ready(self, catalog):
-        # Bedrock's ``chat()`` raises at stub level today — the catalog
-        # must surface that through ``chat_ready`` so the UI can render
-        # a "preview" chip instead of a green "ready" dot.
+    def test_bedrock_flagged_as_chat_ready(self, catalog):
+        # W2 Lane 09: the Bedrock adapter (BedrockProvider.chat /
+        # stream_chat) is live — speaks bedrock-runtime.converse via
+        # boto3 and returns the canonical ChatResponse shape. The
+        # descriptor was previously pinned to chat_ready=False which
+        # made the UI show a stale "preview" chip; aligning the
+        # descriptor with the live adapter is fix #2 in
+        # findings/13-llm-core.md.
         status = catalog.status_for("bedrock")
-        assert status.chat_ready is False
-        assert status.stub_reason, (
-            "bedrock must carry a human-readable stub_reason so the "
-            "Settings UI has something to render in the chip"
-        )
+        assert status.chat_ready is True
+        assert status.stub_reason == ""
         # Discovery must still work — the picker relies on the descriptor
         # being configured / reachable independent of chat readiness.
         desc = catalog.get_descriptor("bedrock")
@@ -563,8 +564,8 @@ class TestChatReadinessSignal:
         # serialise the status. Both new fields must ride along so the
         # v2 picker can render the chip without a second round-trip.
         payload = catalog.status_for("bedrock").to_dict()
-        assert payload["chat_ready"] is False
-        assert payload["stub_reason"]
+        assert payload["chat_ready"] is True  # W2 Lane 09 alignment
+        assert payload["stub_reason"] == ""
         ready_payload = catalog.status_for("openai").to_dict()
         assert ready_payload["chat_ready"] is True
         assert ready_payload["stub_reason"] == ""
@@ -603,25 +604,42 @@ class TestChatReadinessSignal:
         assert status.stub_reason == ""
 
     def test_adapter_cannot_upgrade_descriptor_stub(self, catalog):
-        # Inverse of the previous test: a descriptor that declares the
-        # adapter is stubbed must NOT be silently upgraded by an
-        # adapter that happens to expose ``chat_ready=True``. The
-        # descriptor carries the package-author's verdict and a
-        # downstream adapter reassigning the class attr shouldn't
-        # paper over a known stub. (Only adapter-level ``False`` wins.)
-        class BedrockLike(FakeAdapter):
+        # Inverse of test_adapter_override_downgrades_descriptor: a
+        # descriptor that declares the adapter is stubbed must NOT be
+        # silently upgraded by an adapter that happens to expose
+        # ``chat_ready=True``. The descriptor carries the
+        # package-author's verdict and a downstream adapter reassigning
+        # the class attr shouldn't paper over a known stub. (Only
+        # adapter-level ``False`` wins.)
+        #
+        # Pre-W2 this test used Bedrock as the canonical "stubbed"
+        # descriptor. After W2 Lane 09 aligned Bedrock with its live
+        # adapter, we validate the contract using a synthetic
+        # descriptor — the same precedence rule still applies and
+        # any future stubbed-by-default provider will rely on it.
+        # ProviderDescriptor is already imported at the top of this module.
+
+        STUB_ID = "synthetic-stub"
+        catalog._descriptors[STUB_ID] = ProviderDescriptor(
+            provider_id=STUB_ID,
+            display_name="Synthetic Stub",
+            supports_local=False,
+            requires_api_key=False,
+            default_base_url="",
+            default_model="",
+            chat_ready=False,
+            stub_reason="synthetic stub for precedence test",
+        )
+        status = catalog.status_for(STUB_ID)
+        assert status.chat_ready is False
+
+        class StubAdapterButReady(FakeAdapter):
             chat_ready = True
 
-        # Rebind the openai adapter to prove the rule; then re-assert
-        # bedrock which has a chat_ready=False descriptor.
-        status = catalog.status_for("bedrock")
-        assert status.chat_ready is False
-        # Swapping in a "ready" adapter for the bedrock slot must not
-        # flip the verdict — descriptor says stub, stay stub.
-        stub_like = BedrockLike(models=["m"])
-        stub_like.provider_id = "bedrock"
-        catalog.register_adapter(stub_like)
-        status2 = catalog.status_for("bedrock")
+        ready_adapter = StubAdapterButReady(models=["m"])
+        ready_adapter.provider_id = STUB_ID
+        catalog.register_adapter(ready_adapter)
+        status2 = catalog.status_for(STUB_ID)
         assert status2.chat_ready is False, (
             "adapter-level chat_ready=True must not upgrade a "
             "descriptor-level stub verdict"

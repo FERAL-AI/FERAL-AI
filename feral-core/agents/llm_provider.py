@@ -61,6 +61,15 @@ from agents.llm_anthropic_shape import (
     _enforce_anthropic_thinking_max_tokens,
 )
 
+# Cost-budget surface (Wave 1 Lane 04). The runtime gate lives on the
+# public chat entry points — see ``_budget_check`` /
+# ``_budget_record`` / ``_budget_exceeded_response`` below.
+try:
+    from cost.budget import BudgetExceeded
+except Exception:  # pragma: no cover - defensive
+    class BudgetExceeded(Exception):  # type: ignore[no-redef]
+        """Stand-in when the cost module is unavailable in stripped builds."""
+
 logger = logging.getLogger("feral.llm")
 
 
@@ -151,7 +160,13 @@ _PROVIDER_REGISTRY: dict[str, tuple[str, str]] = {
     "anthropic": ("https://api.anthropic.com/v1", "ANTHROPIC_API_KEY"),
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY"),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
-    "deepseek": ("https://api.deepseek.com", "DEEPSEEK_API_KEY"),
+    # DeepSeek's documented OpenAI-compat base URL is ``/v1``. Pre-W2
+    # this entry was missing the ``/v1`` suffix while the adapter and
+    # ``__init__`` defaulted to ``/v1`` — the divergence meant
+    # failover candidates resolved through ``_get_provider_config``
+    # hit ``api.deepseek.com/chat/completions`` (404) while the
+    # primary path worked. See findings/13-llm-core.md fix #3.
+    "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
     "kimi": ("https://api.moonshot.cn/v1", "MOONSHOT_API_KEY"),
     "qwen": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY"),
     "lmstudio": ("http://localhost:1234/v1", ""),
@@ -288,6 +303,20 @@ class LLMProvider:
         self._config: dict = {}
         self._cooldown = ProviderCooldownTracker(storage_path=_cooldown_state_path())
         self._last_budget_routing: dict[str, Any] = {}
+        # Per-call cross-provider failover record. ``None`` means the
+        # primary answered on its first hop (steady state). Populated
+        # by ``chat_with_failover`` and read by ``health_snapshot`` /
+        # the WebUI fallback chip. See findings/13-llm-core.md fix #5.
+        self._last_failover: Optional[dict] = None
+        # Optional ``CostBudget`` (Wave 1 Lane 04). When set, every
+        # chat / chat_stream / chat_with_failover call is gated through
+        # ``check_and_reserve`` AND records actual token usage via
+        # ``record_usage``. ``BudgetExceeded`` surfaces as structured
+        # response shape (``{error, budget_exceeded: {...}}``) so the
+        # orchestrator can render a banner instead of an error toast.
+        # See findings/13-llm-core.md fix #5 + audit-r13
+        # 05-token-billing-leakage.md.
+        self._cost_budget: Any = None
 
         # When `chat()` (the direct path, not chat_with_failover) sees a
         # permanent auth failure for a provider+key combination, we
@@ -340,7 +369,11 @@ class LLMProvider:
             self.api_key = os.getenv("OPENROUTER_API_KEY", self.api_key)
             self.model = self.model or _default_model_for("openrouter")
         elif self.provider == "deepseek":
-            self.base_url = self.base_url or "https://api.deepseek.com"
+            # Keep aligned with ``_PROVIDER_REGISTRY`` — both must end
+            # in ``/v1`` so the failover candidate path through
+            # ``_get_provider_config`` and the primary boot path can
+            # never disagree on the URL shape.
+            self.base_url = self.base_url or "https://api.deepseek.com/v1"
             self.api_key = os.getenv("DEEPSEEK_API_KEY", self.api_key)
             self.model = self.model or _default_model_for("deepseek")
         elif self.provider == "kimi":
@@ -499,6 +532,8 @@ class LLMProvider:
         tools: Optional[list[dict]] = None,
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        *,
+        call_site: str = "chat",
     ) -> dict:
         """Send a chat completion request and return the full response dict.
 
@@ -539,6 +574,21 @@ class LLMProvider:
                     "auth_permanent": True,
                 }
 
+        # Cost-budget pre-flight (Wave 2 Lane 09). Runs once at the
+        # top of the public ``chat`` entry; downstream paths
+        # (chat_with_failover, _chat_anthropic, etc.) are invoked from
+        # here and get gated implicitly. We use ``call_site`` (default
+        # ``"chat"``) so background loops can opt into their own caps
+        # (``screen_loop``, ``proactive``, ``learner``) without
+        # spending the user's chat budget. ``getattr`` for ``model``
+        # because tests routinely build LLMProvider via ``__new__``
+        # without populating every attribute.
+        budget_block = await self._budget_check(
+            call_site, getattr(self, "model", ""), max_tokens,
+        )
+        if budget_block is not None:
+            return budget_block
+
         # v2026.5.23 — Responses-API route for OpenAI Pro / o-Pro /
         # deep-research / Codex / computer-use models. Must run BEFORE
         # the fallback-providers short-circuit so the primary actually
@@ -551,6 +601,7 @@ class LLMProvider:
                     messages, tools, temperature, max_tokens,
                 )
                 if result and not result.get("error"):
+                    await self._budget_record(call_site, self.model, result)
                     return result
                 # Responses path failed — fall through to the normal
                 # failover ladder so fallback providers (OpenRouter)
@@ -566,10 +617,18 @@ class LLMProvider:
         fallbacks = self._config.get("fallback_providers") if isinstance(self._config, dict) else None
         if fallbacks and not (self._local_engine and self.provider in ("local", "hybrid")):
             try:
+                # Forward the same ``call_site`` so the failover path
+                # bills against the right cap. ``chat_with_failover``
+                # also runs its own ``_budget_check`` — the second
+                # check is a no-op when the first reserved nothing
+                # (we don't double-bill until ``record_usage`` lands).
                 return await self.chat_with_failover(
                     messages, tools,
                     temperature=temperature, max_tokens=max_tokens,
+                    call_site=call_site,
                 )
+            except BudgetExceeded as exc:
+                return self._budget_exceeded_response(exc)
             except Exception as exc:
                 logger.warning("chat_with_failover exhausted: %s", exc)
                 return {"error": str(exc), "choices": []}
@@ -667,6 +726,15 @@ class LLMProvider:
 
             with measure("feral.llm.latency", {"provider": self.provider, "model": self.model}):
                 result = await _retry_llm_call(_do_chat)
+            try:
+                await self._budget_record(call_site, self.model, result)
+            except BudgetExceeded as bx:
+                # ``record_usage`` raises when this very call tipped us
+                # over a cap. Surface it in the response so the
+                # orchestrator can render the banner; the result data
+                # is already complete so no token spend is wasted.
+                if isinstance(result, dict):
+                    result["budget_exceeded"] = self._budget_exceeded_response(bx)["budget_exceeded"]
             return result
         except httpx.HTTPStatusError as e:
             increment("feral.llm.errors_total", attributes={"provider": self.provider, "model": self.model})
@@ -1785,18 +1853,38 @@ class LLMProvider:
         tools: Optional[list[dict]] = None,
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        *,
+        call_site: str = "chat",
     ) -> AsyncGenerator[dict, None]:
         """
         Stream a chat completion. Yields delta dicts:
           {"type": "text_delta", "content": "..."}
           {"type": "tool_call_delta", "tool_call": {...}}
           {"type": "done"}
+          {"type": "error", "content": "..."}
+          {"type": "budget_exceeded", "payload": {...}}  # W2 Lane 09
+
+        ``call_site`` defaults to ``"chat"``; background loops opt
+        into their own caps by passing ``call_site="screen_loop"``,
+        ``"learner"``, etc. (Wave 2 Lane 09).
         """
         if self._messages_contain_vision(messages):
             ok, reason = self._vision_support_status()
             if not ok:
                 yield {"type": "error", "content": reason}
                 return
+
+        # Cost-budget pre-flight (Wave 2 Lane 09). We can't stream a
+        # call we already know will exceed the cap; the caller sees
+        # ``budget_exceeded`` and stops.
+        budget_block = await self._budget_check(call_site, self.model, max_tokens)
+        if budget_block is not None:
+            yield {
+                "type": "budget_exceeded",
+                "payload": budget_block.get("budget_exceeded", {}),
+                "content": budget_block.get("error", "budget exceeded"),
+            }
+            return
 
         if not is_supported_runtime_provider(self.provider) and self.provider not in ("local", "hybrid"):
             yield {
@@ -1858,7 +1946,13 @@ class LLMProvider:
                     yield {"type": "error", "content": str(e)}
                 return
 
-        # Anthropic native streaming (Messages API with SSE)
+        # Anthropic native streaming (Messages API with SSE).
+        # The Anthropic branch tracks first-token state internally and,
+        # on a pre-token failure, hands off to
+        # ``_stream_via_nonstream_failover`` so cross-provider failover
+        # has the same parity as the OpenAI-compat path below. Pre-W2
+        # this branch returned ``error`` events with no failover at
+        # all — see findings/13-llm-core.md fix #1 + #5.
         if self.provider == "anthropic":
             async for delta in self._chat_stream_anthropic(messages, tools, temperature, max_tokens):
                 yield delta
@@ -2023,8 +2117,39 @@ class LLMProvider:
         temperature: float = 0.7,
         max_tokens: int = 1024,
     ) -> AsyncGenerator[dict, None]:
-        """Native Anthropic Messages API streaming via SSE."""
-        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        """Native Anthropic Messages API streaming via SSE.
+
+        Two structural changes vs. the pre-W2 implementation:
+
+        1. **base_url propagation.** The POST URL is now derived from
+           ``self.base_url`` (which is in turn driven by the
+           ``FERAL_LLM_BASE_URL`` override / ``switch_provider`` /
+           ``reconfigure`` plumbing). The previous hard-coded literal
+           silently ignored every operator override — including the
+           override we use to test failover by pointing the primary
+           at a deliberately-broken host. See findings/13-llm-core.md
+           fix #1 + #3.
+
+        2. **Pre-token failover parity with OpenAI.** When the request
+           fails before any text/tool-call delta has been emitted, we
+           hand off to ``_stream_via_nonstream_failover`` (the same
+           helper the OpenAI-compat branch uses ~line 1984). Pre-W2
+           this branch yielded a single ``error`` event and returned —
+           there was no cross-provider failover for Anthropic streams
+           at all, even when ``fallback_providers`` had viable
+           candidates. The handoff respects ``streamed_text`` so a
+           mid-stream failure (after the user has already seen tokens)
+           is not silently restarted.
+        """
+        # ``self.api_key`` is the source of truth — it's what
+        # ``switch_provider`` and ``reconfigure`` write. Falling back
+        # to the env var keeps direct-instantiation tests working.
+        api_key = self.api_key or os.getenv("ANTHROPIC_API_KEY", "")
+        # ``self.base_url`` already includes ``/v1`` for Anthropic
+        # (see ``__init__``); the messages endpoint is path-relative.
+        base = (self.base_url or "https://api.anthropic.com/v1").rstrip("/")
+        url = f"{base}/messages"
+
         # A5: same OpenAI → Anthropic conversion as the non-stream path.
         # Streaming previously forwarded ``role: "tool"`` as-is and
         # produced the same 400 on tool-using transcripts.
@@ -2055,10 +2180,12 @@ class LLMProvider:
             ]
 
         accumulated_tool_calls: dict[str, dict] = {}
+        streamed_text = False
+        primary_error: Optional[Exception] = None
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 async with client.stream(
-                    "POST", "https://api.anthropic.com/v1/messages",
+                    "POST", url,
                     headers={
                         "x-api-key": api_key,
                         "anthropic-version": "2023-06-01",
@@ -2066,6 +2193,16 @@ class LLMProvider:
                     },
                     json=body,
                 ) as resp:
+                    # Pull the body for non-2xx so the upstream JSON
+                    # error message survives into
+                    # ``_describe_http_status_error`` instead of being
+                    # collapsed to a bare status line.
+                    _status = getattr(resp, "status_code", None)
+                    if isinstance(_status, int) and _status >= 400:
+                        try:
+                            await resp.aread()
+                        except Exception:
+                            pass
                     resp.raise_for_status()
                     current_tool_id = ""
                     async for line in resp.aiter_lines():
@@ -2096,6 +2233,7 @@ class LLMProvider:
                             if delta.get("type") == "text_delta":
                                 piece = sanitize_assistant_display_text(delta.get("text", ""))
                                 if piece:
+                                    streamed_text = True
                                     yield {"type": "text_delta", "content": piece}
                             elif delta.get("type") == "input_json_delta":
                                 if current_tool_id in accumulated_tool_calls:
@@ -2110,19 +2248,45 @@ class LLMProvider:
                                     tc["args"] = json.loads(tc.get("arguments", "{}"))
                                 except json.JSONDecodeError:
                                     tc["args"] = {}
+                                # A tool-call counts as forward
+                                # progress for the failover guard:
+                                # we've already committed to this
+                                # response, restarting it on a
+                                # different provider would re-fire
+                                # the tool.
+                                streamed_text = True
                                 yield {"type": "tool_call_delta", "tool_call": tc}
                             yield {"type": "done"}
                             return
 
             yield {"type": "done"}
+            return
         except httpx.HTTPStatusError as e:
+            primary_error = e
             detail = _describe_http_status_error(e)
             logger.error("Anthropic stream error: %s", detail)
-            yield {"type": "error", "content": detail}
         except Exception as e:
+            primary_error = e
             detail = _describe_error(e)
             logger.error("Anthropic stream failed: %s", detail)
-            yield {"type": "error", "content": detail}
+
+        # Pre-token failure → try cross-provider failover (parity with
+        # the OpenAI-compat branch). When tokens already streamed we
+        # can't safely restart on another provider, so surface the
+        # error so the orchestrator can show a degraded-output banner.
+        if not streamed_text and primary_error is not None:
+            failover_events = await self._stream_via_nonstream_failover(
+                messages,
+                tools,
+                temperature,
+                max_tokens,
+                primary_error=primary_error,
+            )
+            if failover_events:
+                for event in failover_events:
+                    yield event
+                return
+        yield {"type": "error", "content": detail}
 
     async def switch_provider(
         self,
@@ -2319,7 +2483,19 @@ class LLMProvider:
             os.environ["FERAL_LLM_BASE_URL"] = base_url
         previous_provider = self.provider
         try:
-            await self.switch_provider(provider=provider, model=model, api_key=api_key)
+            # ``base_url`` is now threaded through to ``switch_provider``
+            # so local providers (LM Studio, custom Ollama port,
+            # OpenAI-compat gateway) actually land. Pre-W2 the kwarg
+            # was set on ``os.environ`` but never passed to
+            # ``switch_provider``, so the override only took effect
+            # at the next ``__init__`` boot — see findings/13-llm-core.md
+            # fix #3.
+            await self.switch_provider(
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+            )
         except Exception as exc:
             logger.warning("reconfigure(%s) failed: %s", provider, exc)
             return {
@@ -2360,6 +2536,211 @@ class LLMProvider:
             "reason": reason,
         }
 
+    # ── Per-call-site tier picker (W2 Lane 09) ────────────────────
+    #
+    # Wave 3 Lane 08 (orchestrator) builds against this contract.
+    # ``route_call(call_site, prompt)`` returns a :class:`ProviderRef`
+    # naming WHICH provider + model + tier the caller should use for
+    # THIS turn — the orchestrator then calls
+    # ``chat_with_failover(messages, model=ref.model, ...)``.
+    #
+    # Tier mapping (cheap / balanced / premium):
+    #
+    #   * routing  — the "should I call any tools?" pre-flight. Defaults
+    #                to *cheap* because routing burns tokens on every
+    #                turn (see audit-r13 04-llm-router-and-picker.md).
+    #   * chat     — the user-facing reasoning turn. Defaults to
+    #                *balanced* — premium frontier models when the
+    #                operator opts in.
+    #   * vision   — Image / screen-loop perception. Defaults to *cheap*
+    #                because vision LLM calls fire on every frame
+    #                (see audit-r13 05-token-billing-leakage.md S1).
+    #   * embedding — Memory / search vectorisation. Always *cheap*
+    #                because the embedding endpoint is orthogonal to
+    #                quality tiers.
+    #
+    # The mapping is configurable via
+    # ``settings.llm.tier_map[call_site][tier]`` so an operator can
+    # pin chat→cheap (Sonnet/mini) or vision→balanced (full vision
+    # frontier) without code edits. Defaults below are conservative.
+
+    CALL_SITES: tuple[str, ...] = ("routing", "chat", "vision", "embedding")
+    TIERS: tuple[str, ...] = ("cheap", "balanced", "premium")
+
+    # Default tier per call_site. Operators override via
+    # ``settings.llm.call_site_tiers``. Vision LLM stays cheap because
+    # the screen loop hits it ~ once per second; routing stays cheap
+    # because every chat turn pays for it.
+    _DEFAULT_TIER_PER_CALL_SITE: dict[str, str] = {
+        "routing": "cheap",
+        "chat": "balanced",
+        "vision": "cheap",
+        "embedding": "cheap",
+    }
+
+    # Conservative provider+model slate per (call_site, tier). The
+    # operator can override every entry via
+    # ``settings.llm.tier_map[call_site][tier] = {"provider": ...,
+    # "model": ...}``. Defaults bias toward providers that have a
+    # runtime adapter in this build AND a curated catalog entry — so
+    # ``route_call`` never returns a reference the runtime can't
+    # actually call.
+    _DEFAULT_TIER_MAP: dict[str, dict[str, dict[str, str]]] = {
+        "routing": {
+            "cheap": {"provider": "openai", "model": "gpt-5-mini"},
+            "balanced": {"provider": "openai", "model": "gpt-5-mini"},
+            "premium": {"provider": "anthropic", "model": "claude-haiku-4-5"},
+        },
+        "chat": {
+            "cheap": {"provider": "openai", "model": "gpt-5-mini"},
+            "balanced": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+            "premium": {"provider": "anthropic", "model": "claude-opus-4-7"},
+        },
+        "vision": {
+            "cheap": {"provider": "ollama", "model": "llava"},
+            "balanced": {"provider": "openai", "model": "gpt-5"},
+            "premium": {"provider": "anthropic", "model": "claude-opus-4-7"},
+        },
+        "embedding": {
+            "cheap": {"provider": "openai", "model": "text-embedding-3-small"},
+            "balanced": {"provider": "openai", "model": "text-embedding-3-large"},
+            "premium": {"provider": "openai", "model": "text-embedding-3-large"},
+        },
+    }
+
+    def _resolve_call_site_tier(self, call_site: str) -> str:
+        """Pick the tier for *call_site* from settings, with default."""
+        cfg = self._config if isinstance(self._config, dict) else {}
+        tiers = cfg.get("call_site_tiers") if isinstance(cfg.get("call_site_tiers"), dict) else {}
+        tier = tiers.get(call_site) if isinstance(tiers, dict) else None
+        if isinstance(tier, str) and tier in self.TIERS:
+            return tier
+        return self._DEFAULT_TIER_PER_CALL_SITE.get(call_site, "balanced")
+
+    def _resolve_tier_target(self, call_site: str, tier: str) -> dict[str, str]:
+        """Resolve ``(call_site, tier)`` to a ``{provider, model}`` dict
+        consulting operator overrides first, then bundled defaults."""
+        cfg = self._config if isinstance(self._config, dict) else {}
+        overrides = cfg.get("tier_map") if isinstance(cfg.get("tier_map"), dict) else {}
+        site_overrides = overrides.get(call_site) if isinstance(overrides, dict) else {}
+        if isinstance(site_overrides, dict):
+            tier_override = site_overrides.get(tier)
+            if isinstance(tier_override, dict):
+                provider = str(tier_override.get("provider") or "").strip()
+                model = str(tier_override.get("model") or "").strip()
+                if provider:
+                    return {
+                        "provider": provider,
+                        "model": model or _default_model_for(provider),
+                    }
+        bundled = self._DEFAULT_TIER_MAP.get(call_site, {}).get(tier)
+        if bundled:
+            return dict(bundled)
+        # Final fallback: whatever's currently primary.
+        return {"provider": self.provider, "model": self.model}
+
+    def route_call(
+        self,
+        call_site: str,
+        prompt: Any = None,
+        *,
+        tier: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Pick a (provider, model) for *call_site* via the tier picker.
+
+        **Public API contract** (Wave 3 Lane 08 builds against this):
+
+        Args:
+            call_site: One of ``"routing"`` / ``"chat"`` / ``"vision"``
+                / ``"embedding"``. Other values raise
+                :class:`ValueError` so a typo can't silently swing the
+                whole call onto the wrong tier.
+            prompt: Optional opaque payload. Currently unused at the
+                router level (the orchestrator already estimates
+                length via ``_estimate_tokens_for_budget``); reserved
+                for future per-prompt heuristics
+                (e.g. "this prompt has an image attached, force a
+                vision-capable target"). Passing ``None`` is fine.
+            tier: Optional override of the operator's settings tier
+                ("cheap" / "balanced" / "premium"). When omitted the
+                tier comes from ``settings.llm.call_site_tiers`` with
+                a conservative default per :attr:`_DEFAULT_TIER_PER_CALL_SITE`.
+
+        Returns:
+            ``ProviderRef`` shape: ::
+
+                {
+                    "call_site":  str,        # echoed
+                    "tier":       str,        # one of TIERS
+                    "provider":   str,        # runtime provider id
+                    "model":      str,        # model id (catalog-resolved)
+                    "supported":  bool,       # True iff runtime has
+                                              # an adapter for `provider`
+                    "fallback_providers": list[str],  # ordered chain
+                    "source":     str,        # "settings" | "default"
+                }
+
+            The orchestrator then dispatches via:
+
+                ref = llm.route_call("chat", prompt=user_prompt)
+                result = await llm.chat_with_failover(
+                    messages,
+                    model=ref["model"],
+                    # provider override applied by the orchestrator if
+                    # `ref["provider"] != llm.provider`
+                )
+
+            Lane 08 owns the orchestrator wiring; this contract MUST
+            stay stable across W2 → W3.
+
+        Raises:
+            ValueError: when ``call_site`` is not one of
+                :attr:`CALL_SITES` or ``tier`` is not one of
+                :attr:`TIERS`.
+        """
+        if call_site not in self.CALL_SITES:
+            raise ValueError(
+                f"unknown call_site {call_site!r}; "
+                f"must be one of {sorted(self.CALL_SITES)}"
+            )
+        if tier is None:
+            resolved_tier = self._resolve_call_site_tier(call_site)
+            source = "settings" if (
+                isinstance(self._config, dict)
+                and isinstance(self._config.get("call_site_tiers"), dict)
+                and call_site in self._config["call_site_tiers"]
+            ) else "default"
+        else:
+            if tier not in self.TIERS:
+                raise ValueError(
+                    f"unknown tier {tier!r}; must be one of {sorted(self.TIERS)}"
+                )
+            resolved_tier = tier
+            source = "explicit"
+        target = self._resolve_tier_target(call_site, resolved_tier)
+        provider = target["provider"]
+        model = target["model"]
+        supported = is_supported_runtime_provider(provider) or provider in ("local", "hybrid")
+        fallbacks: list[str] = []
+        if isinstance(self._config, dict):
+            fb = self._config.get("fallback_providers") or []
+            if isinstance(fb, list):
+                fallbacks = [str(p) for p in fb if isinstance(p, str)]
+        ref = {
+            "call_site": call_site,
+            "tier": resolved_tier,
+            "provider": provider,
+            "model": model,
+            "supported": supported,
+            "fallback_providers": fallbacks,
+            "source": source,
+        }
+        logger.debug(
+            "route_call(%s, tier=%s) -> %s/%s (supported=%s)",
+            call_site, resolved_tier, provider, model, supported,
+        )
+        return ref
+
     async def apply_preset(self, preset_id: str) -> dict:
         preset = LLM_PRESETS.get(preset_id)
         if not preset:
@@ -2382,6 +2763,176 @@ class LLMProvider:
     def set_config(self, config: dict):
         """Accept external config (e.g. from ConfigLoader) for fallback routing."""
         self._config = config
+
+    def set_cost_budget(self, budget: Any) -> None:
+        """Wire a Wave 1 ``CostBudget`` instance into this LLMProvider.
+
+        After this call every ``chat`` / ``chat_stream`` /
+        ``chat_with_failover`` invocation:
+
+        * pre-flights ``check_and_reserve`` — if the projected cost
+          would breach a cap, the call short-circuits with a
+          structured ``{error, budget_exceeded: {...}}`` response
+          shape (no upstream HTTP traffic, no token spend).
+        * records actual token usage via
+          ``record_usage`` on success. Reasoning tokens
+          (``usage.completion_tokens_details.reasoning_tokens``) are
+          billed at the output rate per OpenAI's documented policy.
+
+        Pass ``None`` to disable the budget gate (e.g. tests). The
+        gate is also a no-op when the budget instance has
+        ``enabled=False``.
+        """
+        self._cost_budget = budget
+
+    @staticmethod
+    def _extract_usage(result: Any) -> tuple[int, int, int]:
+        """Pull (prompt_tokens, completion_tokens, reasoning_tokens) from
+        whatever response shape the provider returned.
+
+        Tolerant of the three shapes we see in the wild:
+
+        * OpenAI: ``{usage: {prompt_tokens, completion_tokens,
+          completion_tokens_details: {reasoning_tokens}}}``
+        * Anthropic (post-normalisation): ``{usage: {input_tokens,
+          output_tokens}}``
+        * Bare ``{usage: {input_tokens, output_tokens}}`` (already
+          normalised at adapter level)
+
+        Returns ``(0, 0, 0)`` when the response carries no usage data
+        (streaming without ``stream_options.include_usage``); the
+        budget then records the call without billing tokens.
+        """
+        if not isinstance(result, dict):
+            return (0, 0, 0)
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        prompt = (
+            usage.get("prompt_tokens")
+            if usage.get("prompt_tokens") is not None
+            else usage.get("input_tokens")
+        ) or 0
+        completion = (
+            usage.get("completion_tokens")
+            if usage.get("completion_tokens") is not None
+            else usage.get("output_tokens")
+        ) or 0
+        reasoning = 0
+        details = usage.get("completion_tokens_details")
+        if isinstance(details, dict):
+            reasoning = details.get("reasoning_tokens") or 0
+        # Anthropic reports thinking tokens at the top level when
+        # extended-thinking is enabled — pick those up too so the
+        # billing surface is symmetric across providers.
+        if not reasoning:
+            reasoning = usage.get("reasoning_tokens") or usage.get("thinking_tokens") or 0
+        try:
+            return int(prompt), int(completion), int(reasoning)
+        except (TypeError, ValueError):
+            return (0, 0, 0)
+
+    def _budget_exceeded_response(self, exc: Any) -> dict:
+        """Build the structured ``BudgetExceeded`` response shape.
+
+        Orchestrator + WebUI consume this directly — see
+        findings/13-llm-core.md fix #5. The shape carries enough
+        information for the WebUI banner ("Chat budget exceeded —
+        $0.10/hour cap. Resets at 14:00 UTC.") without any further
+        introspection.
+        """
+        return {
+            "error": str(exc),
+            "choices": [],
+            "budget_exceeded": {
+                "call_site": getattr(exc, "call_site", "chat"),
+                "cap_dollars": float(getattr(exc, "cap_dollars", 0.0)),
+                "current_dollars": float(getattr(exc, "current_dollars", 0.0)),
+                "window": getattr(exc, "window", "hour"),
+                "reset_at": float(getattr(exc, "reset_at", 0.0)),
+            },
+        }
+
+    async def _budget_check(
+        self,
+        call_site: str,
+        model: str,
+        max_tokens: int,
+    ) -> Optional[dict]:
+        """Return a structured response if the budget would be exceeded,
+        else ``None``. Used as a pre-flight in chat / chat_stream /
+        chat_with_failover.
+        """
+        # ``getattr`` rather than direct attribute access — tests
+        # routinely instantiate ``LLMProvider`` via ``__new__`` (skipping
+        # ``__init__``) to mock candidate lists, and the attribute
+        # may not be present.
+        budget = getattr(self, "_cost_budget", None)
+        if budget is None:
+            return None
+        try:
+            await budget.ensure_ready()
+        except Exception as exc:
+            logger.debug("CostBudget.ensure_ready failed (non-fatal): %s", exc)
+            return None
+        try:
+            ok = budget.check_and_reserve(call_site, model, int(max_tokens or 0))
+        except Exception as exc:
+            logger.debug("CostBudget.check_and_reserve raised (non-fatal): %s", exc)
+            return None
+        if ok:
+            return None
+        # Build a synthetic BudgetExceeded so the response shape is
+        # uniform whether the cap is detected pre- or post-call.
+        try:
+            from cost.budget import BudgetExceeded, window_reset_at
+            cap = (
+                budget._cap_for(call_site, "hour")
+                or budget._cap_for("__global__", "hour")
+                or 0.0
+            )
+            current = budget.current_spend(call_site, "hour")
+            exc = BudgetExceeded(
+                call_site=call_site,
+                cap_dollars=float(cap),
+                current_dollars=float(current),
+                window="hour",
+                reset_at=window_reset_at("hour"),
+            )
+            return self._budget_exceeded_response(exc)
+        except Exception as exc:
+            logger.debug("Failed to build BudgetExceeded response: %s", exc)
+            return {
+                "error": "budget exceeded",
+                "choices": [],
+                "budget_exceeded": {"call_site": call_site, "window": "hour"},
+            }
+
+    async def _budget_record(
+        self,
+        call_site: str,
+        model: str,
+        result: Any,
+    ) -> None:
+        """Best-effort post-call usage recording. Never raises."""
+        budget = getattr(self, "_cost_budget", None)
+        if budget is None:
+            return
+        try:
+            prompt, completion, reasoning = self._extract_usage(result)
+            await budget.record_usage(
+                call_site=call_site,
+                model=model,
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                reasoning_tokens=reasoning,
+            )
+        except Exception as exc:
+            # Non-fatal: a billing failure must never take down a chat
+            # turn. The cap-exceeded path is exercised through
+            # ``_budget_check`` instead.
+            logger.debug(
+                "CostBudget.record_usage(%s, %s) failed (non-fatal): %s",
+                call_site, model, exc,
+            )
 
     @staticmethod
     def _float_or_default(value: Any, default: float = 0.0) -> float:
@@ -2595,17 +3146,36 @@ class LLMProvider:
         exact footgun this method used to hide behind its two-arg
         ``dict.get`` fallback.
         """
+        # For local providers we honour the operator-configured base
+        # URL (``self.base_url`` when the primary IS the local
+        # provider, otherwise ``FERAL_LLM_BASE_URL`` /
+        # ``FERAL_LMSTUDIO_BASE_URL`` env overrides). Pre-W2 these
+        # branches hard-coded ``http://localhost:1234/v1`` /
+        # ``ollama_openai_base_url()`` even when the primary was
+        # already pointed at a non-default port — the failover loop
+        # then silently retried against the wrong URL. See
+        # findings/13-llm-core.md fix #3.
         if provider_name == "ollama":
+            configured = (
+                self.base_url
+                if self.provider == "ollama" and self.base_url
+                else os.getenv("FERAL_OLLAMA_BASE_URL", "")
+            )
             return {
-                "base_url": ollama_openai_base_url(),
+                "base_url": configured or ollama_openai_base_url(),
                 "api_key": "ollama",
                 "model": _default_model_for("ollama") or self._detect_ollama() or "",
                 "supported": True,
             }
         if provider_name == "lmstudio":
             detected = self._detect_lmstudio()
+            configured = (
+                self.base_url
+                if self.provider == "lmstudio" and self.base_url
+                else os.getenv("FERAL_LMSTUDIO_BASE_URL", "")
+            )
             return {
-                "base_url": "http://localhost:1234/v1",
+                "base_url": configured or "http://localhost:1234/v1",
                 "api_key": "lm-studio",
                 "model": detected or _default_model_for("lmstudio"),
                 "supported": True,
@@ -2847,6 +3417,18 @@ class LLMProvider:
 
         Same-provider transient retries are handled by ``_retry_llm_call``.
         Cross-provider routing is handled here based on error classification.
+
+        On a successful failover hop the response carries a
+        ``last_failover`` metadata block:
+
+        ``{"from": "<primary>", "to": "<provider that answered>",
+           "reason": "<FailoverReason.value>",
+           "candidates_tried": [{"provider": str, "reason": str}, ...]}``
+
+        Callers (orchestrator, WebUI) use this to render the
+        "fallback active" chip / banner without parsing log lines.
+        ``last_failover`` is omitted entirely when the primary
+        succeeded on its first attempt.
         """
         if self._messages_contain_vision(messages):
             ok, reason = self._vision_support_status()
@@ -2856,6 +3438,17 @@ class LLMProvider:
 
         if self._local_engine and self.provider in ("local", "hybrid"):
             return await self.chat(messages, tools, **kwargs)
+
+        # Cost-budget pre-flight (Wave 2 Lane 09). The orchestrator
+        # passes ``call_site="chat"`` for user-facing turns;
+        # background loops (screen_loop, proactive, learner) pass
+        # their own call_site name. Defaults to "chat" so a missing
+        # kwarg does the safe thing.
+        call_site = str(kwargs.pop("call_site", "chat") or "chat")
+        max_tokens_kw = int(kwargs.get("max_tokens", 1024) or 1024)
+        budget_block = await self._budget_check(call_site, self.model, max_tokens_kw)
+        if budget_block is not None:
+            return budget_block
 
         from observability.metrics import increment, measure
 
@@ -2867,6 +3460,13 @@ class LLMProvider:
         )
         self._last_budget_routing = budget_ctx
         last_error: Optional[Exception] = None
+        # Track per-call cross-provider failover history so the
+        # response surfaces it (and ``health_snapshot`` can report
+        # the most recent hop). The first candidate is the primary,
+        # so ``failed_candidates`` collects each candidate that was
+        # attempted-and-failed BEFORE the eventual success.
+        failed_candidates: list[dict] = []
+        primary_provider = candidates[0][0] if candidates else self.provider
 
         # When at least one supported fallback exists beyond the
         # primary, use the fast-fail retry profile so a transient 5xx
@@ -2898,8 +3498,16 @@ class LLMProvider:
                 last_error = last_error or RuntimeError(
                     f"Provider {provider_name!r} has no runtime adapter"
                 )
+                failed_candidates.append({
+                    "provider": provider_name,
+                    "reason": FailoverReason.NOT_SUPPORTED.value,
+                })
                 continue
             if not self._cooldown.should_probe(provider_name):
+                failed_candidates.append({
+                    "provider": provider_name,
+                    "reason": FailoverReason.COOLDOWN.value,
+                })
                 continue
             increment("feral.llm.calls_total", attributes={"provider": provider_name, "model": config.get("model", self.model)})
             try:
@@ -2909,6 +3517,42 @@ class LLMProvider:
                         **retry_kwargs, **kwargs,
                     )
                 self._cooldown.record_success(provider_name)
+                if failed_candidates and provider_name != primary_provider:
+                    last_failover = {
+                        "from": primary_provider,
+                        "to": provider_name,
+                        "reason": failed_candidates[-1].get("reason", "unknown"),
+                        "candidates_tried": list(failed_candidates),
+                    }
+                    if isinstance(result, dict):
+                        result.setdefault("metadata", {})
+                        if isinstance(result["metadata"], dict):
+                            result["metadata"]["last_failover"] = last_failover
+                        result["last_failover"] = last_failover
+                    self._last_failover = last_failover
+                else:
+                    # Primary won on first hop — clear stale state so
+                    # the next call's health snapshot doesn't keep
+                    # advertising an out-of-date fallback chip.
+                    self._last_failover = None
+                # Bill actual token usage. ``record_usage`` itself
+                # checks the per-call-site / global caps after the
+                # fact and raises ``BudgetExceeded`` if THIS call
+                # tipped us over — the caller sees the response
+                # normally and the NEXT pre-flight short-circuits.
+                try:
+                    await self._budget_record(
+                        call_site,
+                        config.get("model") or self.model,
+                        result,
+                    )
+                except Exception as exc:
+                    # Already swallowed inside _budget_record; this
+                    # belt is in case it ever propagates.
+                    logger.debug(
+                        "_budget_record raised after success (non-fatal): %s",
+                        exc,
+                    )
                 return result
             except Exception as e:
                 increment("feral.llm.errors_total", attributes={"provider": provider_name})
@@ -2963,10 +3607,26 @@ class LLMProvider:
                     },
                 )
                 last_error = e
+                failed_candidates.append({
+                    "provider": provider_name,
+                    "reason": reason.value,
+                    "http_status": http_status if http_status != "" else None,
+                    "error_type": error_type or None,
+                    "error_code": error_code or None,
+                })
                 if reason == FailoverReason.CONTEXT_OVERFLOW:
                     raise
                 continue
 
+        # Every candidate failed. Record the chain so health snapshot
+        # / clients can show what was attempted.
+        if failed_candidates:
+            self._last_failover = {
+                "from": primary_provider,
+                "to": None,
+                "reason": "exhausted",
+                "candidates_tried": list(failed_candidates),
+            }
         if last_error:
             raise last_error
         raise RuntimeError("All LLM providers exhausted")
@@ -3029,6 +3689,10 @@ class LLMProvider:
             "candidates": candidates,
             "fallback_providers": fallbacks,
             "budget": budget,
+            # ``last_failover`` is None during steady state (primary
+            # answered on first hop). The WebUI fallback chip reads
+            # this directly — see findings/13-llm-core.md fix #5.
+            "last_failover": getattr(self, "_last_failover", None),
             # Total ready-to-serve = supported AND has key AND not in cooldown.
             # Unsupported candidates were counted as "available" before W1 A3
             # whenever a lookalike env var happened to be set, inflating the

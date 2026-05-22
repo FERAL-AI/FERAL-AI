@@ -138,13 +138,29 @@ class BaseProvider:
     """Convenience base that fills in no-ops + defaults.
 
     Concrete providers override ``chat`` (and optionally ``stream_chat``,
-    ``pricing_per_1k``, ``supports``, ``refresh_models``).
+    ``supports``, ``refresh_models``). They MUST NOT override
+    :meth:`pricing_per_1k` with adapter-local rate literals — pricing
+    is the single source of truth in
+    ``feral-core/providers/model_catalog.json`` and is loaded through
+    :func:`cost.pricing.get_shared_pricing`. See
+    findings/13-llm-core.md fix #4 for the rationale (adapter-local
+    ``_pricing`` blobs drifted from the catalog and made budget
+    routing dishonest by 30-200% per provider).
+
+    The legacy ``_pricing`` class attribute is preserved as an
+    *override hint* for community-installed adapters that need to
+    advertise rates the upstream catalog hasn't curated yet — it's
+    consulted ONLY when the catalog has no entry for the model.
+    Built-in adapters do not populate it.
     """
 
     provider_id: str = "base"
     display_name: str = "Base Provider"
 
     _models: list[str] = []
+    # Backstop for community adapters whose models aren't in the
+    # canonical catalog yet. Built-in adapters keep this empty —
+    # ``cost/pricing.py`` is the single source of truth.
     _pricing: dict[str, dict[str, float]] = {}
     _capabilities: set[str] = set()
 
@@ -189,7 +205,32 @@ class BaseProvider:
         return out
 
     def pricing_per_1k(self, model: str) -> dict[str, float]:
-        return dict(self._pricing.get(model, {"input": 0.0, "output": 0.0}))
+        """Return ``{"input": $/1k, "output": $/1k}`` for *model*.
+
+        Lookup order:
+
+        1. ``cost.pricing.get_shared_pricing().lookup(model)`` — the
+           canonical catalog. This is the path every built-in adapter
+           hits.
+        2. Adapter-local ``_pricing`` override — only consulted if the
+           catalog returned the fallback rate AND the adapter has an
+           explicit entry for ``model``. Provided as an escape hatch
+           for community adapters whose models the catalog hasn't
+           curated.
+
+        Catalog lookups never raise; an unknown model returns the
+        ``_FALLBACK_PER_1K`` rate so cost accounting never blocks
+        a chat turn. Callers that want to detect "fallback" should
+        compare against ``cost.pricing._FALLBACK_PER_1K`` directly.
+        """
+        from cost.pricing import _FALLBACK_PER_1K, get_shared_pricing
+
+        rates = get_shared_pricing().lookup(model)
+        if rates == _FALLBACK_PER_1K and model in self._pricing:
+            # Catalog has no curated rate for this id; fall through to
+            # the adapter's community-supplied override.
+            return dict(self._pricing[model])
+        return rates
 
     def supports(self, capability: str) -> bool:
         return capability in self._capabilities

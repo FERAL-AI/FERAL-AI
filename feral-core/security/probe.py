@@ -67,6 +67,41 @@ def clear_probe_cache() -> None:
     _PROBE_CACHE.clear()
 
 
+def cached_probe_result(provider_id: str) -> Optional["ProbeResult"]:
+    """Return the cached probe result for *provider_id* if still fresh.
+
+    Lets sync callers (``ProviderCatalog._is_configured``,
+    ``LLMProvider.health_snapshot``) consult the probe state without
+    triggering a new round-trip. Returns ``None`` when the cache is
+    cold or stale — callers MUST treat ``None`` as "no probe-derived
+    information available" and fall back to whatever heuristic they
+    used pre-W2 (env var presence) so a fresh process never lies
+    about availability before the first probe lands.
+    """
+    cached = _PROBE_CACHE.get(provider_id.lower().strip())
+    if cached is None:
+        return None
+    cached_at, cached_result = cached
+    if (time.time() - cached_at) >= PROBE_CACHE_TTL_SECONDS:
+        return None
+    return cached_result
+
+
+def probe_ok_or_unknown(provider_id: str) -> Optional[bool]:
+    """Sync helper: ``True``/``False`` from cached probe, ``None`` if cold.
+
+    Three-state return so callers can distinguish "definitely up",
+    "definitely down" and "haven't looked yet". This is what
+    ``ProviderCatalog._is_configured`` consults to upgrade an
+    env-var-only "configured" verdict to a real probe-derived
+    "configured AND keys actually authenticate" verdict.
+    """
+    cached = cached_probe_result(provider_id)
+    if cached is None:
+        return None
+    return bool(cached.ok)
+
+
 def _resolve_env_or_vault(
     vault: Any,
     env_keys: tuple[str, ...],

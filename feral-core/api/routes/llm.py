@@ -433,10 +433,264 @@ async def llm_health():
     Used by the v2 Settings → Providers → Fallbacks card to render
     green/amber/red dots per candidate so the user can see exactly why
     the agent fell over to a different provider this minute.
+
+    The W2 expansion (Lane 09) adds:
+
+    * ``last_failover`` — ``{from, to, reason, candidates_tried}`` for
+      the most recent ``chat_with_failover`` hop, or ``None`` when the
+      primary won on first attempt. Drives the "fallback active" chip.
+    * ``budget`` — current per-call-site CostBudget remainings + caps.
+    * Per-candidate ``probe_ok`` (from ``security.probe`` cache) so the
+      Settings card can flag "configured AND authenticates" vs.
+      "configured but 401".
     """
     if not state.orchestrator or not state.orchestrator.llm:
         return {"available": False, "active": None, "candidates": [], "fallback_providers": []}
-    return state.orchestrator.llm.health_snapshot()
+    snapshot = state.orchestrator.llm.health_snapshot()
+    # Decorate every candidate with the last cached probe verdict so
+    # the picker can render "auth ok" / "401" / "not probed yet" without
+    # firing a fresh probe on every page load.
+    try:
+        from security.probe import cached_probe_result
+    except Exception:
+        cached_probe_result = None  # type: ignore[assignment]
+    if cached_probe_result is not None:
+        for cand in snapshot.get("candidates", []) or []:
+            pr = cached_probe_result(cand.get("provider", ""))
+            if pr is None:
+                cand["probe_ok"] = None
+                cand["probe_status"] = None
+                cand["probe_at"] = None
+            else:
+                cand["probe_ok"] = bool(pr.ok)
+                cand["probe_status"] = pr.status_code
+                cand["probe_at"] = pr.probed_at
+                cand["probe_reason"] = pr.reason
+    return snapshot
+
+
+# ----------------------------------------------------------------------
+# Multi-key per provider (W2 Lane 09)
+# ----------------------------------------------------------------------
+#
+# Operators can stash multiple labeled API keys per provider (a prod
+# key + a dev key + a team-shared key) and switch between them without
+# re-typing the secret. The labeled-key feature is layered on top of
+# BlindVault via security/vault_keys.py — vault.py core is unchanged
+# (Lane 03 owns it). See the Lane 09 PR body for the contract Lane 07
+# (CLI) wraps as `feral key add/remove/list --provider --label`.
+
+
+class ProviderKeyRequest(BaseModel):
+    label: str = Field(..., min_length=1, max_length=64)
+    api_key: str = Field(..., min_length=1)
+    set_active: bool = False
+
+
+def _require_vault():
+    if state.vault is None:
+        raise HTTPException(status_code=503, detail="vault not initialised")
+    return state.vault
+
+
+@router.post("/api/llm/providers/{provider_id}/keys")
+async def add_provider_key(provider_id: str, req: ProviderKeyRequest):
+    """Add or replace a labeled key for *provider_id*.
+
+    Idempotent: posting the same ``label`` again replaces the secret
+    while preserving ``created_at``. Pass ``set_active=true`` to make
+    this label the runtime's default selection (the next chat turn
+    will use this key).
+    """
+    catalog = _require_catalog()
+    if catalog.get_descriptor(provider_id) is None:
+        raise HTTPException(status_code=404, detail=f"unknown provider_id {provider_id!r}")
+    vault = _require_vault()
+    try:
+        from security import vault_keys
+        entry = vault_keys.add_provider_key(
+            provider_id,
+            req.label,
+            req.api_key,
+            set_active=req.set_active,
+            vault=vault,
+        )
+    except (vault_keys.InvalidProviderId, vault_keys.InvalidLabel) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # When set_active landed the key in the active slot, also push the
+    # raw secret through the legacy persistence path (env + default
+    # vault namespace + credentials.json) so the running LLMProvider
+    # picks it up without a reboot. This mirrors what
+    # /api/llm/providers/{id}/configure does for unlabeled writes.
+    if req.set_active:
+        desc = catalog.get_descriptor(provider_id)
+        env_var = desc.credential_env_var if desc else ""
+        if env_var:
+            _persist_key(env_var, req.api_key)
+            try:
+                catalog.configure(provider_id, api_key=req.api_key)
+            except Exception as exc:
+                logger.warning(
+                    "catalog.configure(%s) after add_provider_key failed: %s",
+                    provider_id, exc,
+                )
+    return {"success": True, "key": entry.to_dict()}
+
+
+@router.get("/api/llm/providers/{provider_id}/keys")
+async def list_provider_keys(provider_id: str):
+    """Return every labeled key for *provider_id*. Never includes
+    secrets — only label, fingerprint, timestamps, last probe verdict.
+    """
+    catalog = _require_catalog()
+    if catalog.get_descriptor(provider_id) is None:
+        raise HTTPException(status_code=404, detail=f"unknown provider_id {provider_id!r}")
+    vault = _require_vault()
+    from security import vault_keys
+    entries = vault_keys.list_provider_keys(provider_id, vault=vault)
+    return {
+        "provider_id": provider_id,
+        "active_label": vault_keys.get_active_label(provider_id, vault=vault),
+        "keys": [entry.to_dict() for entry in entries],
+        "count": len(entries),
+    }
+
+
+@router.delete("/api/llm/providers/{provider_id}/keys/{label}")
+async def delete_provider_key(provider_id: str, label: str):
+    """Remove the labeled key. If it was the active selection, the
+    active pointer is cleared and the runtime falls back to the legacy
+    default-namespace credential.
+    """
+    catalog = _require_catalog()
+    if catalog.get_descriptor(provider_id) is None:
+        raise HTTPException(status_code=404, detail=f"unknown provider_id {provider_id!r}")
+    vault = _require_vault()
+    from security import vault_keys
+    try:
+        removed = vault_keys.remove_provider_key(provider_id, label, vault=vault)
+    except (vault_keys.InvalidProviderId, vault_keys.InvalidLabel) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not removed:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no labeled key {label!r} stored for provider {provider_id!r}",
+        )
+    return {"success": True, "provider_id": provider_id, "label": label}
+
+
+class ProviderActiveRequest(BaseModel):
+    label: str = Field(..., min_length=1, max_length=64)
+
+
+@router.post("/api/llm/providers/{provider_id}/keys/active")
+async def set_provider_active_key(provider_id: str, req: ProviderActiveRequest):
+    """Mark *label* as the active selection for *provider_id*.
+
+    Also pushes the secret into the legacy env / default vault
+    namespace so the running ``LLMProvider`` picks it up on the next
+    chat turn (no reboot needed).
+    """
+    catalog = _require_catalog()
+    desc = catalog.get_descriptor(provider_id)
+    if desc is None:
+        raise HTTPException(status_code=404, detail=f"unknown provider_id {provider_id!r}")
+    vault = _require_vault()
+    from security import vault_keys
+    try:
+        active = vault_keys.set_active_label(provider_id, req.label, vault=vault)
+    except (vault_keys.InvalidProviderId, vault_keys.InvalidLabel) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    secret = vault_keys.get_provider_key(provider_id, active, vault=vault, record_use=True)
+    env_var = desc.credential_env_var or ""
+    if secret and env_var:
+        _persist_key(env_var, secret)
+        try:
+            catalog.configure(provider_id, api_key=secret)
+        except Exception as exc:
+            logger.warning(
+                "catalog.configure(%s) after set_active_label failed: %s",
+                provider_id, exc,
+            )
+    return {"success": True, "provider_id": provider_id, "active_label": active}
+
+
+@router.get("/api/llm/route")
+async def llm_route(call_site: str, tier: Optional[str] = None):
+    """Resolve a (provider, model) reference for a given call_site.
+
+    Thin REST wrapper around ``LLMProvider.route_call`` — used by Lane
+    08's orchestrator to pre-flight tier decisions and by the v2
+    Settings → Tier picker UI to render "what would happen if I
+    selected this tier" without actually firing a chat. See
+    ``LLMProvider.route_call`` docstring for the full contract.
+    """
+    if not state.orchestrator or not state.orchestrator.llm:
+        raise HTTPException(status_code=503, detail="brain not initialized")
+    try:
+        ref = state.orchestrator.llm.route_call(call_site, tier=tier)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return ref
+
+
+@router.post("/api/llm/providers/{provider_id}/keys/{label}/probe")
+async def probe_provider_key(provider_id: str, label: str):
+    """Probe the key behind ``label``: does it actually authenticate?
+
+    Temporarily exports the labeled secret into the env var the probe
+    helper reads, runs the probe, then restores the previous env value.
+    The labeled-keys metadata is updated with the verdict so the list
+    endpoint can render "Probe: ok 30s ago" without re-issuing.
+    """
+    catalog = _require_catalog()
+    desc = catalog.get_descriptor(provider_id)
+    if desc is None:
+        raise HTTPException(status_code=404, detail=f"unknown provider_id {provider_id!r}")
+    vault = _require_vault()
+    from security import vault_keys
+    try:
+        secret = vault_keys.get_provider_key(provider_id, label, vault=vault)
+    except (vault_keys.InvalidProviderId, vault_keys.InvalidLabel) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if secret is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no labeled key {label!r} stored for provider {provider_id!r}",
+        )
+
+    env_var = desc.credential_env_var or ""
+    saved = os.environ.get(env_var) if env_var else None
+    if env_var:
+        os.environ[env_var] = secret
+    try:
+        from security.probe import probe as run_probe, clear_probe_cache
+        clear_probe_cache()
+        result = await run_probe(provider_id, vault=vault, force=True)
+    finally:
+        if env_var:
+            if saved is None:
+                os.environ.pop(env_var, None)
+            else:
+                os.environ[env_var] = saved
+    vault_keys.record_probe_result(
+        provider_id, label, ok=bool(result.ok), vault=vault,
+    )
+    payload = {
+        "provider_id": provider_id,
+        "label": label,
+        "ok": bool(result.ok),
+        "status_code": result.status_code,
+        "reason": result.reason,
+        "detail": result.detail,
+        "latency_ms": result.latency_ms,
+        "probed_at": result.probed_at,
+    }
+    return payload
 
 
 @router.post("/api/llm/config")

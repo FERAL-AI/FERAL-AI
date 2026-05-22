@@ -82,19 +82,9 @@ class AnthropicProvider(BaseProvider):
     ]
     # Pricing (USD per 1k tokens) from anthropic.com/docs/about-claude/pricing
     # verified 2026-04-26. Dated snapshots share the base alias price.
-    _pricing = {
-        "claude-opus-4-7": {"input": 0.005, "output": 0.025},
-        "claude-sonnet-4-6": {"input": 0.003, "output": 0.015},
-        "claude-haiku-4-5": {"input": 0.001, "output": 0.005},
-        "claude-haiku-4-5-20251001": {"input": 0.001, "output": 0.005},
-        "claude-opus-4-6": {"input": 0.005, "output": 0.025},
-        "claude-sonnet-4-5": {"input": 0.003, "output": 0.015},
-        "claude-sonnet-4-5-20250929": {"input": 0.003, "output": 0.015},
-        "claude-opus-4-5": {"input": 0.005, "output": 0.025},
-        "claude-opus-4-5-20251101": {"input": 0.005, "output": 0.025},
-        "claude-opus-4-1": {"input": 0.015, "output": 0.075},
-        "claude-opus-4-1-20250805": {"input": 0.015, "output": 0.075},
-    }
+    # Pricing lives in providers/model_catalog.json — see
+    # findings/13-llm-core.md fix #4.
+    _pricing: dict[str, dict[str, float]] = {}
     _capabilities = {"tool_calling", "vision", "streaming", "thinking"}
     # Adaptive-thinking models decline the explicit ``thinking`` block;
     # extended-thinking models accept it with ``budget_tokens``. This
