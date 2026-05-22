@@ -1207,6 +1207,18 @@ class BrainState:
                 device_registry=self.device_registry,
                 daemons=self.daemons,
             )
+            # Bind the KG so device_announce ingest can write
+            # ``category=device`` entities. The KG is built earlier in
+            # MemoryStore.__init__ but exposed lazily on the store.
+            try:
+                kg = getattr(self.memory, "knowledge_graph", None)
+                if kg is not None:
+                    self.hardware_mesh.set_knowledge_graph(kg)
+            except Exception:
+                # Best-effort wiring — the mesh tolerates a missing KG
+                # and the boot report already surfaces the underlying
+                # failure if memory isn't ready yet.
+                pass
 
         with boot_subsystem(self._boot_report, "IdentityWorkspace"):
             self.identity_workspace = IdentityWorkspace()

@@ -238,7 +238,28 @@ async def hardware_invoke(body: dict):
 
 @router.get("/api/hardware/mesh")
 async def hardware_mesh_status():
-    """Get hardware mesh status with all connected nodes."""
+    """Get hardware mesh status — connected daemons + discovered peripherals.
+
+    Lane 12's Devices page consumes both fields:
+
+    * ``nodes`` — daemons that registered over /v1/node and are still
+      attached. Lane 12 lists them as the operator-actionable surface
+      (rename / disconnect).
+    * ``announced_devices`` — peripherals observed by any scanner-class
+      daemon (typically the iOS companion app). Each entry carries
+      ``device_id``, ``device_kind``, ``name``, ``manufacturer``,
+      ``rssi_dbm``, ``advertised_services``, ``first_seen``,
+      ``last_seen``, ``scanner_node_id``, ``metadata``. Lane 12 renders
+      these grouped under their scanner so the operator sees "iPhone
+      → AirPods, Apple Watch, …" without us inventing a separate
+      grouping API.
+
+    Both fields are always present (possibly empty) so the Lane 12
+    client can do a single fetch.
+    """
     if not state.hardware_mesh:
-        return {"nodes": []}
-    return {"nodes": state.hardware_mesh.connected_nodes}
+        return {"nodes": [], "announced_devices": []}
+    return {
+        "nodes": state.hardware_mesh.connected_nodes,
+        "announced_devices": state.hardware_mesh.list_announced_devices(),
+    }

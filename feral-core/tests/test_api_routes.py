@@ -80,6 +80,9 @@ def _make_mock_state():
     s.hardware_mesh.ledger.get_recent.return_value = []
     s.hardware_mesh.ledger.stats.return_value = {"total": 0}
     s.hardware_mesh.node_health.get_all.return_value = {}
+    # HUP v1.3.0 §5.4.4 — Lane 11 device_announce ingest exposes
+    # peripherals here for /api/hardware/mesh + Lane 12's Devices page.
+    s.hardware_mesh.list_announced_devices.return_value = []
 
     # mcp
     s.mcp_server = MagicMock()
@@ -421,7 +424,13 @@ class TestHardware:
     def test_hardware_mesh_status(self, client):
         r = client.get("/api/hardware/mesh")
         assert r.status_code == 200
-        assert "nodes" in r.json()
+        body = r.json()
+        # Both keys must always be present so Lane 12's Devices page
+        # never has to branch on shape. HUP v1.3.0 §5.4.4 announce
+        # ingest writes into ``announced_devices``.
+        assert "nodes" in body
+        assert "announced_devices" in body
+        assert isinstance(body["announced_devices"], list)
 
     def test_hardware_stats(self, client):
         r = client.get("/api/hardware/stats")
