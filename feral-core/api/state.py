@@ -1220,6 +1220,20 @@ class BrainState:
                 # failure if memory isn't ready yet.
                 pass
 
+        with boot_subsystem(self._boot_report, "MockRoomba"):
+            # Closes THESIS_SCENARIOS S5 on demo machines without HA.
+            # Default-on; operator can disable with FERAL_MOCK_ROOMBA=0
+            # once a real Roomba is wired through HA.
+            from hardware.mock_roomba import (
+                MockRoomba,
+                is_enabled as _mock_roomba_enabled,
+                register_with_mesh as _register_mock_roomba,
+            )
+            self.mock_roomba = None
+            if _mock_roomba_enabled():
+                self.mock_roomba = MockRoomba(memory=self.memory)
+                _register_mock_roomba(self.hardware_mesh, self.mock_roomba)
+
         with boot_subsystem(self._boot_report, "IdentityWorkspace"):
             self.identity_workspace = IdentityWorkspace()
             self.identity_workspace.sync_tools_from_registry(self.skill_registry)
