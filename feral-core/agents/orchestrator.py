@@ -1061,6 +1061,46 @@ class Orchestrator:
             # proceed instead of crashing the turn.
             return None
 
+    # ─────────────────────────────────────────────
+    # Vision context attach (Lane 08 WS4 — S5 prereq)
+    # ─────────────────────────────────────────────
+
+    def _attach_vision_context(
+        self,
+        user_content: Any,
+        *,
+        context: Optional[dict],
+        session_id: str,
+    ) -> Any:
+        """Possibly augment ``user_content`` with a fresh glasses /
+        screen frame as an ``image_url`` content block.
+
+        Pulls from Lane 11's ``perception.glasses_buffer`` when the
+        turn is in voice mode AND ``vision.enabled=true`` in settings
+        AND a frame within 30s exists. Stale frames are NOT attached
+        (parent-acked reminder #1 — emit nothing rather than a stale
+        image; the LLM can ask if it needs visual context).
+
+        Falls back to the legacy ``api.state.VisionBuffer`` for the
+        existing phone vision_ask channel only when Lane 11's buffer
+        is empty.
+        """
+        try:
+            from perception.context_attach import attach_vision_context
+        except Exception:
+            logger.debug("context_attach module unavailable", exc_info=True)
+            return user_content
+        try:
+            return attach_vision_context(
+                user_content,
+                context=context,
+                session_id=session_id,
+                vision_buffer=self.vision_buffer,
+            )
+        except Exception:
+            logger.warning("vision context attach failed", exc_info=True)
+            return user_content
+
     async def handle_command(self, session_id: str, text: str, context: Optional[dict] = None):
         """Process a user command through the full agentic pipeline.
 
@@ -1220,6 +1260,13 @@ class Orchestrator:
             })
 
         user_content = perception_frame.to_llm_user_content(text)
+        # WS4 — vision context attach. Pulls the freshest glasses /
+        # screen frame from Lane 11's buffer when the turn is in
+        # voice mode + vision is enabled + frame ≤ 30s. Stale frames
+        # are NOT attached (parent reminder #1).
+        user_content = self._attach_vision_context(
+            user_content, context=context, session_id=session_id,
+        )
         user_message = {"role": "user", "content": user_content}
         self.conversation_history[session_id].append(user_message)
 
@@ -1556,6 +1603,10 @@ class Orchestrator:
             })
 
         user_content = perception_frame.to_llm_user_content(text)
+        # WS4 — vision context attach mirrors the non-stream prelude.
+        user_content = self._attach_vision_context(
+            user_content, context=context, session_id=session_id,
+        )
         self.conversation_history[session_id].append({"role": "user", "content": user_content})
         history = self._compact_context(self.conversation_history[session_id].copy())
         from models.protocol import StreamDeltaPayload
