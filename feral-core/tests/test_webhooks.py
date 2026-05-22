@@ -148,15 +148,20 @@ async def test_webhook_receiver_github_hmac_verified_when_secret_matches():
 
 
 @pytest.mark.asyncio
-async def test_webhook_receiver_github_bad_signature_marks_unverified():
+async def test_webhook_receiver_github_bad_signature_failclosed():
+    """Lane 10: a configured secret + bad signature is now fail-closed.
+    Pre-Lane-10 this returned ``accepted=True, verified=False`` which
+    let unauthenticated callers trigger downstream handlers anyway —
+    finding 19 calls this out as the lying surface to fix.
+    """
     bus = EventBus()
     recv = WebhookReceiver(bus)
     recv.set_secret("github", "mysecret")
     body = b"{}"
     headers = {"X-Hub-Signature-256": "sha256=deadbeef", "X-GitHub-Event": "push"}
     out = await recv.handle_request("github", body, headers, "application/json")
-    assert out["accepted"] is True
-    assert out["verified"] is False
+    assert out["accepted"] is False
+    assert out["reason"] == "invalid_signature"
 
 
 @pytest.mark.asyncio
@@ -225,12 +230,17 @@ def test_list_webhooks_route_returns_configs_and_recent_events():
 
 
 def test_receive_webhook_route_when_receiver_missing():
+    """Lane 10: an unconfigured receiver returns 503 (service
+    unavailable) rather than 200 with an error string in the body —
+    that matches how the integration ingress now signals "this brain
+    can't accept webhook traffic yet" without confusing the caller
+    into thinking the request was processed."""
     with patch("api.routes.integrations_webhooks.state") as st:
         st.webhook_receiver = None
         st.event_bus = None
         client = TestClient(app)
         r = client.post("/api/webhooks/github", json={})
-    assert r.status_code == 200
+    assert r.status_code == 503
     assert "error" in r.json()
 
 

@@ -1,0 +1,15 @@
+{
+  "_comment": "Placeholder for first-party OAuth client credentials. The release pipeline overlays this file with real Client ID + Secret values pulled from the FERAL-AI operator vault. Empty client_id values mean 'fall through to operator-supplied credentials' — see oauth_manager.py:_load_first_party_clients. Adding a real client_id here turns the provider into 'ready' for a fresh user out of the box; leaving it empty keeps the provider in 'provider_setup_required' mode with a doc link.",
+  "google": {
+    "client_id": "",
+    "client_secret": ""
+  },
+  "notion": {
+    "client_id": "",
+    "client_secret": ""
+  },
+  "spotify": {
+    "client_id": "",
+    "client_secret": ""
+  }
+}

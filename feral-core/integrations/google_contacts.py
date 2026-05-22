@@ -58,7 +58,22 @@ class GoogleContactsIntegration:
 
     @property
     def connected(self) -> bool:
-        return self._oauth is not None and self._oauth.is_connected("google")
+        from integrations._probe_status import is_connected_cached
+
+        token_present = (
+            self._oauth is not None and self._oauth.is_connected("google")
+        )
+        return is_connected_cached("google", fallback=token_present)
+
+    async def probe_connected(self) -> bool:
+        """Force a live Google ``/oauth2/v3/userinfo`` probe."""
+        from integrations._probe_status import refresh
+
+        result = await refresh("google",
+                               vault=getattr(self._oauth, "_vault", None))
+        if result is None:
+            return self.connected
+        return result
 
     async def execute(self, endpoint_id: str, args: dict[str, Any], vault: dict[str, str] | None = None) -> dict[str, Any]:
         dispatch = {

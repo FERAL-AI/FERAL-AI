@@ -43,6 +43,16 @@ class WebhookConfig:
 EventHandler = Callable[[WebhookEvent], Awaitable[None]]
 
 
+def _normalize_headers(headers: dict) -> dict:
+    """Return a lowercase-keyed copy of ``headers`` so signature and
+    event-type lookups are case-insensitive regardless of where the
+    headers came from (FastAPI's ``Request.headers`` is case-
+    insensitive; raw dicts from tests are not)."""
+    if headers is None:
+        return {}
+    return {str(k).lower(): v for k, v in headers.items()}
+
+
 class EventBus:
     """
     Internal event bus that routes WebhookEvents to registered handlers.
@@ -152,13 +162,61 @@ class WebhookReceiver:
     ) -> dict:
         """
         Process an incoming webhook request.
-        Returns {"accepted": True/False, "error": ...}
+
+        **Fail-closed** when a secret is configured: a missing or
+        invalid signature returns ``{accepted: False, reason: ...}``
+        instead of accepting the request with ``verified: False``.
+        Pre-Lane-10 the receiver always emitted the event into the bus
+        regardless of signature validity, which let unauthenticated
+        callers trigger downstream handlers as long as they knew an
+        ``app_id``. Finding 19: "bad sig still **accepted** with
+        ``verified=False``."
+
+        Returns one of:
+          * ``{accepted: True, event_type, verified: bool}`` — happy
+            path. ``verified`` reflects whether a valid signature was
+            present (always ``True`` when a secret is configured;
+            ``True`` for unsigned providers without a secret).
+          * ``{accepted: False, reason, error}`` — rejected. ``reason``
+            is one of ``unknown_app``, ``missing_signature``,
+            ``invalid_signature``.
         """
         config = self._configs.get(app_id)
         if not config or not config.enabled:
-            return {"accepted": False, "error": f"Unknown or disabled webhook: {app_id}"}
+            return {
+                "accepted": False,
+                "reason": "unknown_app",
+                "error": f"Unknown or disabled webhook: {app_id}",
+            }
 
-        verified = self._verify_signature(config, body, headers)
+        norm_headers = _normalize_headers(headers)
+        verify_decision = self._verify_signature(config, body, norm_headers)
+        if verify_decision == "missing_signature":
+            return {
+                "accepted": False,
+                "reason": "missing_signature",
+                "error": (
+                    f"webhook {app_id}: secret configured but no "
+                    f"{config.signature_header!r} header on request"
+                ),
+            }
+        if verify_decision == "invalid_signature":
+            return {
+                "accepted": False,
+                "reason": "invalid_signature",
+                "error": (
+                    f"webhook {app_id}: HMAC signature mismatch"
+                ),
+            }
+        # ``unsigned`` providers (e.g. Home Assistant, internal Notion
+        # webhooks without a secret) report ``verified=True`` because
+        # there's nothing TO verify — the operator opted not to enforce
+        # a signature for that app. The flag is reserved for "we have a
+        # signature config and we ran it"; with no config there's no
+        # security claim to make either way, so a downstream handler
+        # that wants stricter behaviour can require a secret on the
+        # registered ``WebhookConfig``.
+        verified = verify_decision in ("verified", "unsigned")
 
         try:
             if content_type.startswith("application/json"):
@@ -168,13 +226,14 @@ class WebhookReceiver:
         except json.JSONDecodeError:
             payload = {"raw": body.decode("utf-8", errors="replace")[:5000]}
 
-        event_type = self._extract_event_type(app_id, payload, headers)
+        event_type = self._extract_event_type(app_id, payload, norm_headers)
 
         event = WebhookEvent(
             app_id=app_id,
             event_type=event_type,
             payload=payload,
-            raw_headers={k: v for k, v in headers.items() if k.lower().startswith("x-")},
+            raw_headers={k: v for k, v in headers.items()
+                         if k.lower().startswith("x-")},
             verified=verified,
         )
 
@@ -183,13 +242,25 @@ class WebhookReceiver:
         logger.info(f"Webhook [{app_id}] event={event_type} verified={verified}")
         return {"accepted": True, "event_type": event_type, "verified": verified}
 
-    def _verify_signature(self, config: WebhookConfig, body: bytes, headers: dict) -> bool:
-        if not config.secret or not config.signature_header:
-            return True
+    def _verify_signature(
+        self, config: WebhookConfig, body: bytes, headers: dict,
+    ) -> str:
+        """Return one of:
 
-        sig_header = headers.get(config.signature_header, "")
+        * ``"unsigned"`` — no secret/header configured; nothing to
+          verify (verified=True downstream).
+        * ``"verified"`` — signature header present and matches.
+        * ``"missing_signature"`` — secret configured but no header on
+          the request. Caller MUST reject.
+        * ``"invalid_signature"`` — header present but HMAC mismatch.
+          Caller MUST reject.
+        """
+        if not config.secret or not config.signature_header:
+            return "unsigned"
+
+        sig_header = headers.get(config.signature_header.lower(), "")
         if not sig_header:
-            return False
+            return "missing_signature"
 
         expected_sig = sig_header
         if config.signature_prefix and expected_sig.startswith(config.signature_prefix):
@@ -204,13 +275,17 @@ class WebhookReceiver:
                 config.secret.encode(), body, hashlib.sha1,
             ).hexdigest()
         else:
-            return False
+            return "invalid_signature"
 
-        return hmac.compare_digest(computed, expected_sig)
+        return "verified" if hmac.compare_digest(computed, expected_sig) else "invalid_signature"
 
     def _extract_event_type(self, app_id: str, payload: dict, headers: dict) -> str:
+        # ``headers`` is the normalized lowercase view returned by
+        # ``_normalize_headers``. We look up each header in lowercase
+        # so the function works regardless of how the caller cased
+        # them coming in.
         if app_id == "github":
-            return headers.get("X-GitHub-Event", "unknown")
+            return headers.get("x-github-event", "unknown")
         elif app_id == "stripe":
             return payload.get("type", "unknown")
         elif app_id == "home_assistant":

@@ -37,7 +37,26 @@ class SpotifyIntegration:
 
     @property
     def connected(self) -> bool:
-        return self._oauth is not None and self._oauth.is_connected("spotify")
+        from integrations._probe_status import is_connected_cached
+
+        token_present = (
+            self._oauth is not None and self._oauth.is_connected("spotify")
+        )
+        return is_connected_cached("spotify", fallback=token_present)
+
+    async def probe_connected(self) -> bool:
+        """Force a live API round-trip to verify Spotify connectivity.
+
+        Updates the shared probe-status cache so subsequent
+        ``connected`` reads reflect the live result.
+        """
+        from integrations._probe_status import refresh
+
+        result = await refresh("spotify",
+                               vault=getattr(self._oauth, "_vault", None))
+        if result is None:
+            return self.connected
+        return result
 
     async def execute(self, endpoint_id: str, args: dict, vault: dict = None) -> dict:
         """Skill executor interface — called by SkillExecutor when matching spotify_music."""

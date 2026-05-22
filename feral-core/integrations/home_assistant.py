@@ -56,9 +56,46 @@ class HomeAssistantIntegration:
 
     @property
     def connected(self) -> bool:
-        return bool(self._token) or (
+        from integrations._probe_status import is_connected_cached
+
+        token_present = bool(self._token) or (
             self._oauth is not None and self._oauth.is_connected("home_assistant")
         )
+        return is_connected_cached("home_assistant", fallback=token_present)
+
+    async def probe_connected(self) -> bool:
+        """Force a live ``GET {base_url}/api/states`` probe with the
+        configured long-lived token."""
+        from integrations._probe_status import refresh, mark_probe_result
+
+        result = await refresh(
+            "home_assistant",
+            vault=getattr(self._oauth, "_vault", None),
+        )
+        if result is not None:
+            return result
+        # No registered probe — do a one-off direct check so the cache
+        # gets populated. Without this the integration would never
+        # transition out of token-presence fallback.
+        await self._ensure_client()
+        try:
+            resp = await self._http.get("/api/states")
+            ok = resp.status_code == 200
+            mark_probe_result(
+                "home_assistant",
+                ok=ok,
+                reason="ok" if ok else f"http_{resp.status_code}",
+                detail=("" if ok else (resp.text or "")[:200]),
+            )
+            return ok
+        except Exception as exc:
+            mark_probe_result(
+                "home_assistant",
+                ok=False,
+                reason="network_error",
+                detail=str(exc),
+            )
+            return False
 
     async def execute(self, endpoint_id: str, args: dict, vault: dict = None) -> dict:
         """Skill executor interface."""
@@ -71,6 +108,22 @@ class HomeAssistantIntegration:
             "get_automations": self.get_automations,
             "trigger_automation": self.trigger_automation,
             "get_entity_state": self.get_entity_state,
+            # THESIS_SCENARIOS S5 — actuator round-trip for the
+            # "Roomba scenario". The vision side (smart-glasses
+            # frame stream) is Lane 11's job; Lane 10 ships the
+            # actuator side so the orchestrator can dispatch a
+            # ``home_assistant__vacuum_start`` tool call once vision
+            # decides "this room looks dirty, send the Roomba" — see
+            # AUDIT-r14/phase2/THESIS_SCENARIOS.md S5 step 4.
+            "vacuum_start": self.vacuum_start,
+            "vacuum_stop": self.vacuum_stop,
+            "vacuum_return_to_base": self.vacuum_return_to_base,
+            # ``light.turn_on`` already worked through ``set_light``;
+            # this alias matches the natural skill-manifest naming so
+            # an LLM tool plan that asks for ``light_turn_on`` (with
+            # an underscore) doesn't fall off the dispatch table.
+            "light_turn_on": self.light_turn_on,
+            "light_turn_off": self.light_turn_off,
         }
         fn = dispatch.get(endpoint_id)
         if not fn:
@@ -174,6 +227,105 @@ class HomeAssistantIntegration:
 
     async def trigger_automation(self, entity_id: str = "", **kwargs) -> dict:
         return await self.call_service(domain="automation", service="trigger", entity_id=entity_id)
+
+    # ─────────────────────────────────────────────────────────────────
+    # THESIS_SCENARIOS S5 — Roomba actuator round-trip.
+    # ``vacuum.start`` is the canonical Home Assistant service for any
+    # vacuum entity (iRobot/Roomba via the official integration,
+    # Roborock, Xiaomi etc.). ``vacuum_start`` returns a structured
+    # ``{success, data: {started: True, entity}}`` payload so the
+    # orchestrator can render "Started the Roomba in the living room"
+    # without inspecting raw HA service responses.
+    # ─────────────────────────────────────────────────────────────────
+
+    async def vacuum_start(self, entity_id: str = "", **kwargs) -> dict:
+        """Start a vacuum cleaning cycle. ``entity_id`` should be the
+        full HA entity id (e.g. ``vacuum.living_room``)."""
+        if not entity_id:
+            return {
+                "success": False,
+                "error": "entity_id is required",
+                "reason": "missing_entity_id",
+            }
+        result = await self.call_service(
+            domain="vacuum", service="start", entity_id=entity_id,
+        )
+        if result.get("success"):
+            return {
+                "success": True,
+                "data": {
+                    "started": True,
+                    "entity_id": entity_id,
+                    "service": "vacuum.start",
+                },
+            }
+        return result
+
+    async def vacuum_stop(self, entity_id: str = "", **kwargs) -> dict:
+        if not entity_id:
+            return {"success": False, "error": "entity_id is required",
+                    "reason": "missing_entity_id"}
+        return await self.call_service(
+            domain="vacuum", service="stop", entity_id=entity_id,
+        )
+
+    async def vacuum_return_to_base(self, entity_id: str = "", **kwargs) -> dict:
+        if not entity_id:
+            return {"success": False, "error": "entity_id is required",
+                    "reason": "missing_entity_id"}
+        return await self.call_service(
+            domain="vacuum", service="return_to_base", entity_id=entity_id,
+        )
+
+    async def light_turn_on(
+        self,
+        entity_id: str = "",
+        brightness: Optional[int] = None,
+        color_temp: Optional[int] = None,
+        rgb_color: Optional[list] = None,
+        **kwargs,
+    ) -> dict:
+        """Manifest-friendly alias for ``set_light``. Returns the same
+        structured shape as ``vacuum_start`` so a single tool plan
+        ("turn the lights on, send the Roomba") gets parallel-shaped
+        results from each step."""
+        if not entity_id:
+            return {"success": False, "error": "entity_id is required",
+                    "reason": "missing_entity_id"}
+        result = await self.set_light(
+            entity_id=entity_id,
+            brightness=brightness,
+            color_temp=color_temp,
+            rgb_color=rgb_color,
+        )
+        if result.get("success"):
+            return {
+                "success": True,
+                "data": {
+                    "on": True,
+                    "entity_id": entity_id,
+                    "service": "light.turn_on",
+                },
+            }
+        return result
+
+    async def light_turn_off(self, entity_id: str = "", **kwargs) -> dict:
+        if not entity_id:
+            return {"success": False, "error": "entity_id is required",
+                    "reason": "missing_entity_id"}
+        result = await self.call_service(
+            domain="light", service="turn_off", entity_id=entity_id,
+        )
+        if result.get("success"):
+            return {
+                "success": True,
+                "data": {
+                    "on": False,
+                    "entity_id": entity_id,
+                    "service": "light.turn_off",
+                },
+            }
+        return result
 
     def on_event(self, handler):
         """Register a callback for HA events (from WebSocket subscription)."""

@@ -46,9 +46,35 @@ class EmailIntegration:
 
     @property
     def connected(self) -> bool:
-        if self._imap_host:
-            return True
-        return self._oauth is not None and self._oauth.is_connected("google")
+        """Live-verified Gmail connection.
+
+        Pre-Lane-10 we returned ``True`` as soon as the IMAP host env
+        var was present, lying about whether Gmail itself was actually
+        usable. Now ``connected`` reflects the Google probe (or the
+        OAuth token-presence baseline when no probe has run yet).
+        IMAP readiness is exposed separately via
+        :attr:`imap_configured` so the UI can advertise the IMAP
+        fallback path without misrepresenting Gmail as connected.
+        """
+        from integrations._probe_status import is_connected_cached
+
+        token_present = (
+            self._oauth is not None and self._oauth.is_connected("google")
+        )
+        return is_connected_cached("google", fallback=token_present)
+
+    @property
+    def imap_configured(self) -> bool:
+        return self._imap_host is not None
+
+    async def probe_connected(self) -> bool:
+        from integrations._probe_status import refresh
+
+        result = await refresh("google",
+                               vault=getattr(self._oauth, "_vault", None))
+        if result is None:
+            return self.connected
+        return result
 
     @property
     def _use_imap(self) -> bool:
