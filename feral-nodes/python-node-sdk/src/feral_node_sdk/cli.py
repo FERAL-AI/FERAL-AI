@@ -58,6 +58,51 @@ def _cmd_key(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_run(args: argparse.Namespace) -> int:
+    """Lane 11 (audit-r14) — long-lived bridge daemon.
+
+    Stores the pre-minted ``--token`` to
+    ``~/.feral/node-keys/<node_id>.key`` (matching the pair flow's
+    persistence) and opens a HUP WebSocket loop against ``--brain-url``
+    so the LaunchAgent / systemd unit installed by
+    ``scripts/install-phone-bridge.sh`` keeps the node connected
+    across reboots.
+
+    The daemon is deliberately tiny — heartbeats + reconnect handled
+    by the SDK. Adapters can be registered by importing
+    ``feral_node_sdk.FeralNode`` in a host process; this command is
+    the no-host fallback the install script ships.
+    """
+    from .node import FeralNode
+    from .pairing import save_key
+
+    save_key(args.node_id, args.token)
+
+    async def _loop() -> None:
+        node = FeralNode(
+            node_id=args.node_id,
+            brain_url=args.brain_url,
+            api_key=args.token,
+            name=args.name or args.node_id,
+            node_type=args.node_type,
+            capabilities=args.capabilities or [],
+        )
+        # The SDK's connect() already runs the handshake + heartbeat
+        # loop; sleep forever until the process is killed.
+        await node.connect()
+        try:
+            while True:
+                await asyncio.sleep(60.0)
+        finally:
+            await node.disconnect()
+
+    try:
+        asyncio.run(_loop())
+        return 0
+    except KeyboardInterrupt:
+        return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="feral-node",
@@ -82,6 +127,28 @@ def build_parser() -> argparse.ArgumentParser:
     sk = sub.add_parser("key", help="Print the stored API key for a node (if any).")
     sk.add_argument("--node-id", required=True)
     sk.set_defaults(func=_cmd_key)
+
+    sr = sub.add_parser(
+        "run",
+        help=(
+            "Long-lived bridge daemon: persists --token, opens the HUP "
+            "WebSocket to --brain-url, and stays connected until killed. "
+            "Used by scripts/install-phone-bridge.sh under launchctl/systemd."
+        ),
+    )
+    sr.add_argument("--node-id", required=True)
+    sr.add_argument("--brain-url", required=True, help="ws:// or wss:// URL.")
+    sr.add_argument("--token", required=True, help="Pre-minted pair token.")
+    sr.add_argument("--name", default="", help="Human-readable device name.")
+    sr.add_argument(
+        "--node-type", default="bridge",
+        help="HUP node_type advertised in node_register (default: bridge).",
+    )
+    sr.add_argument(
+        "--capability", dest="capabilities", action="append", default=[],
+        help="Capability to advertise; repeat for multiple.",
+    )
+    sr.set_defaults(func=_cmd_run)
 
     return p
 

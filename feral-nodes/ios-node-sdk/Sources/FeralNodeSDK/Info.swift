@@ -3,12 +3,15 @@ import Foundation
 public enum FeralNodeSDKInfo {
     public static let version = "0.3.0"
     /// HUP wire-protocol version this SDK implements. Synced with
-    /// `feral-core/models/protocol.py` which reports `1.3.1`. Bumped
-    /// when the phone-as-peer envelopes (chat_request,
-    /// voice_session_start, audio_chunk) were fixed to match the
-    /// brain's strict Pydantic schemas (literal-typed reply_mode,
-    /// channel; required session_id; required stream_id+channels).
-    public static let hupVersion = "1.3.1"
+    /// `feral-core/models/protocol.py` (1.3.0). The phone-as-peer
+    /// envelopes (chat_request, voice_session_start, audio_chunk)
+    /// match the brain's strict Pydantic schemas: literal-typed
+    /// `reply_mode`, `channel`; required `session_id` on
+    /// `voice_session_start`; required `stream_id` + `channels` on
+    /// `audio_chunk`. Adds `glasses_frame` (§5.4.3) for smart-glasses
+    /// vision streaming under a per-device circular buffer in
+    /// `feral-core/perception/glasses_buffer.py`.
+    public static let hupVersion = "1.3.0"
 }
 
 // MARK: - Schema-correct enums for phone-as-peer envelopes

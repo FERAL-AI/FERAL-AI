@@ -26,8 +26,8 @@ def _b64_of(size: int) -> str:
     return base64.b64encode(b"\x00" * size).decode("ascii")
 
 
-def test_hup_version_is_1_2_0():
-    assert HUP_VERSION == "1.2.0"
+def test_hup_version_is_1_3_0():
+    assert HUP_VERSION == "1.3.0"
 
 
 def test_audio_frame_valid_opus():
@@ -103,7 +103,7 @@ def test_build_frame_wraps_audio_payload_into_device_event():
         },
     )
     frame = build_frame("device_event", payload)
-    assert frame["hup_version"] == "1.2.0"
+    assert frame["hup_version"] == "1.3.0"
     assert frame["type"] == "device_event"
     assert frame["payload"]["event_type"] == "audio_frame"
 

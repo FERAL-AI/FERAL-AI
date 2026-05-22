@@ -71,7 +71,11 @@ cat > "$RUN" <<RUN_SCRIPT
 set -euo pipefail
 cd "$PREFIX"
 source "$PREFIX/venv/bin/activate"
-exec python -m feral_node_sdk.cli \
+# Lane 11 (audit-r14) — the daemon command is ``feral_node_sdk run``
+# (added in v2026.5.39); previously the script invoked the bare
+# module, which only exposed pair/discover/key — the actual long-
+# lived bridge had no entrypoint and the LaunchAgent was a no-op.
+exec python -m feral_node_sdk run \
     --node-id "$NODE_ID" \
     --brain-url "$BRAIN_URL" \
     --token "$TOKEN"

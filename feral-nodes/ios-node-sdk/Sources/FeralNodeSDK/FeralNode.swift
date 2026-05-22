@@ -10,7 +10,14 @@ import Foundation
 public actor FeralNode {
     private let brainURL: URL
     private let apiKey: String
-    private let nodeId: String
+    /// HUP node id this FeralNode advertises in ``node_register``.
+    /// Exposed publicly (read-only) so adapters that emit envelopes
+    /// keyed by node id (e.g. ``glasses_frame.device_id`` for the
+    /// phone-camera-as-glasses fallback) can resolve it without
+    /// duplicating the value into every adapter init. ``nonisolated``
+    /// + ``let`` means callers can read this synchronously without
+    /// going through the actor's executor.
+    public nonisolated let nodeId: String
     private var socket: HUPWebSocket?
     private var adapters: [VendorAdapter] = []
     private var connected = false
@@ -182,6 +189,75 @@ public actor FeralNode {
             "frame_ms": .int(frameMs),
             "data_b64": .string(opusBase64),
         ])
+    }
+
+    /// Ergonomic helper for HUP v1.3.0 ``glasses_frame`` (HUP_SPEC §5.4.3).
+    ///
+    /// Emits a top-level ``glasses_frame`` envelope (not a nested
+    /// ``device_event``) so the brain's `/v1/node` handler routes the
+    /// payload straight into ``state.glasses_buffer`` for the
+    /// orchestrator's vision-context-attach.
+    ///
+    /// ``deviceId`` is the stable id of the glasses hardware. For the
+    /// real W610 path it's the W610 unit id (e.g. ``w610-D344``); for
+    /// the phone-camera-as-glasses fallback it's the iPhone node id.
+    /// ``source`` is forwarded verbatim and labels the provenance
+    /// (``"w610"``, ``"camera_fallback"``, ``"jw_w300"``, ...).
+    public func emitGlassesFrame(
+        deviceId: String,
+        jpegBase64: String,
+        width: Int? = nil,
+        height: Int? = nil,
+        source: String = "glasses",
+        sequence: Int? = nil
+    ) async throws {
+        guard let socket, connected else { throw FeralNodeError.notConnected }
+        var payload: [String: AnyCodable] = [
+            "device_id": .string(deviceId),
+            "timestamp": .double(Date().timeIntervalSince1970),
+            "encoding": .string("jpeg"),
+            "data_b64": .string(jpegBase64),
+            "source": .string(source),
+        ]
+        if let width = width { payload["width"] = .int(width) }
+        if let height = height { payload["height"] = .int(height) }
+        if let sequence = sequence { payload["sequence"] = .int(sequence) }
+        try await socket.send(HUPFrame(type: "glasses_frame", payload: payload))
+    }
+
+    /// Ergonomic helper for HUP v1.3.0 ``device_announce`` (HUP_SPEC §5.4.4).
+    ///
+    /// Used by the iOS BLE scanner to inform the brain of nearby
+    /// peripherals so the hardware mesh can record them as memory
+    /// entities. Discovery is observation-only — emit this every time
+    /// the peripheral is observed; the brain dedupes by ``deviceId``
+    /// and updates ``last_seen`` in place.
+    public func sendDeviceAnnounce(
+        deviceId: String,
+        deviceKind: String = "bluetooth_le",
+        name: String = "",
+        manufacturer: String = "",
+        rssiDbm: Int? = nil,
+        advertisedServices: [String] = [],
+        metadata: [String: AnyCodable] = [:]
+    ) async throws {
+        guard let socket, connected else { throw FeralNodeError.notConnected }
+        var payload: [String: AnyCodable] = [
+            "scanner_node_id": .string(nodeId),
+            "device_id": .string(deviceId),
+            "device_kind": .string(deviceKind),
+            "name": .string(name),
+            "manufacturer": .string(manufacturer),
+            "last_seen": .double(Date().timeIntervalSince1970),
+        ]
+        if let rssiDbm = rssiDbm { payload["rssi_dbm"] = .int(rssiDbm) }
+        if !advertisedServices.isEmpty {
+            payload["advertised_services"] = .array(advertisedServices.map { .string($0) })
+        }
+        if !metadata.isEmpty {
+            payload["metadata"] = .object(metadata)
+        }
+        try await socket.send(HUPFrame(type: "device_announce", payload: payload))
     }
 
     // MARK: - HUP v1.3 phone-as-peer envelopes

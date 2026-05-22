@@ -86,11 +86,63 @@ function pickNodeId() {
   return nodeId;
 }
 
+/**
+ * Resolve a pair token for the perception-share WebSocket.
+ *
+ * The brain's ``/v1/node`` endpoint requires authentication
+ * (``feral-core/api/server.py`` ``daemon_session``). Browsers can't
+ * set ``Authorization`` headers on WebSockets, so we follow the
+ * ``BrowserNode`` convention and pass the token via the
+ * ``Sec-WebSocket-Protocol`` subprotocol as ``feral-token-<TOKEN>``.
+ *
+ * Token source priority (Lane 11 R2 fix — was previously a zero-auth
+ * open socket):
+ *   1. explicit ``token`` arg to ``usePerceptionShare`` — useful when
+ *      the parent already pair-minted a token via Devices → Pair.
+ *   2. ``window.sessionStorage`` (``feral.session.pair_token``) so a
+ *      previously-paired browser session reuses its token.
+ *   3. ``POST /api/devices/pair`` (kind=browser_camera) — same path
+ *      ``BrainPairFlow.swift`` and ``Pair.jsx`` use. Requires the user
+ *      to be authenticated in the web UI (cookie session) — anonymous
+ *      requests fail-closed and the hook surfaces ``status="error"``
+ *      with a clear ``error`` message rather than opening the WS.
+ */
+async function resolvePairToken({ apiBase, explicit }) {
+  if (explicit && typeof explicit === 'string') return explicit;
+  try {
+    const cached = window.sessionStorage.getItem('feral.session.pair_token');
+    if (cached) return cached;
+  } catch { /* sessionStorage may be disabled */ }
+  try {
+    const resp = await fetch(`${apiBase}/api/devices/pair`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'browser_camera', name: 'Web Perception Share' }),
+    });
+    if (!resp.ok) {
+      throw new Error(`pair endpoint returned HTTP ${resp.status}`);
+    }
+    const data = await resp.json();
+    const token = data?.token;
+    if (!token) throw new Error('pair response missing token');
+    try { window.sessionStorage.setItem('feral.session.pair_token', token); } catch { /* ignore */ }
+    return token;
+  } catch (err) {
+    const msg = err?.message || String(err);
+    throw new Error(
+      `Perception share requires authentication; ` +
+      `${msg}. Sign in to FERAL and try again.`
+    );
+  }
+}
+
 export function usePerceptionShare({
   fps = DEFAULT_FPS,
   jpegQuality = DEFAULT_JPEG_QUALITY,
   audio = true,
   video = true,
+  token = null,
 } = {}) {
   const [status, setStatus] = useState('idle'); // idle | requesting | running | paused | error
   const [error, setError] = useState(null);
@@ -216,9 +268,24 @@ export function usePerceptionShare({
     audioCtxRef.current = null;
   }, []);
 
-  const openSocket = useCallback(async () => new Promise((resolve, reject) => {
+  const openSocket = useCallback(async (pairToken) => new Promise((resolve, reject) => {
+    if (!pairToken) {
+      reject(new Error(
+        'Perception share requires a pair token; ' +
+        'caller must authenticate via /api/devices/pair before opening /v1/node.'
+      ));
+      return;
+    }
     try {
-      const ws = new WebSocket(`${WS_BASE}/v1/node`);
+      // Follow the BrowserNode.js convention: pass the token via the
+      // Sec-WebSocket-Protocol subprotocol (browsers cannot set
+      // Authorization headers on WebSocket constructors).
+      // Brain side reads this in feral-core/api/server.py
+      // daemon_session via _extract_protocol_bearer.
+      const ws = new WebSocket(
+        `${WS_BASE}/v1/node`,
+        [`feral-token-${pairToken}`]
+      );
       socketRef.current = ws;
       ws.onopen = () => {
         ws.send(JSON.stringify(buildEnvelope('node_register', {
@@ -304,19 +371,28 @@ export function usePerceptionShare({
     setError(null);
     setStatus('requesting');
     try {
+      // Lane 11 fix — auth-gate the WS before requesting camera/mic
+      // so a denied auth doesn't leave the user with a permission
+      // prompt and no working connection. Throws when the user isn't
+      // signed in OR the brain isn't reachable.
+      const pairToken = await resolvePairToken({ apiBase: API_BASE, explicit: token });
       const stream = await navigator.mediaDevices.getUserMedia({ video, audio });
       streamRef.current = stream;
       await attachVideo(stream);
-      await openSocket();
+      await openSocket(pairToken);
       await attachAudioWorklet(stream);
       startFrameLoop();
       setStatus('running');
     } catch (e) {
+      // Tear down side effects first (mic / camera tracks, partial
+      // WS) — then flip to ``error`` so the caller's UI shows the
+      // failure. ``stop()`` resets status to ``idle``; the error
+      // state must come AFTER so the user sees what went wrong.
+      stop();
       setError(e?.message || 'permission denied');
       setStatus('error');
-      stop();
     }
-  }, [attachAudioWorklet, attachVideo, audio, openSocket, startFrameLoop, status, stop, video]);
+  }, [attachAudioWorklet, attachVideo, audio, openSocket, startFrameLoop, status, stop, token, video]);
 
   const pause = useCallback(() => {
     stopFrameLoop();

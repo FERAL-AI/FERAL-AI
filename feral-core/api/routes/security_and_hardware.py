@@ -236,9 +236,82 @@ async def hardware_invoke(body: dict):
     )
 
 
+@router.get("/api/hardware/mock_roomba")
+async def mock_roomba_status():
+    """Status of the brain-side mock Roomba (THESIS_SCENARIOS S5).
+
+    Returns the mock's ``entity_id`` + ``is_running`` so the Lane 12
+    Devices page can render the demo node. Returns
+    ``{enabled: False}`` when the operator disabled the mock with
+    ``FERAL_MOCK_ROOMBA=0``.
+    """
+    mock = getattr(state, "mock_roomba", None)
+    if mock is None:
+        return {"enabled": False}
+    return mock.status()
+
+
+@router.post("/api/hardware/mock_roomba/start")
+async def mock_roomba_start(body: dict | None = None):
+    """Start the brain-side mock Roomba.
+
+    Body: ``{"entity_id": "vacuum.mock_roomba"}`` — optional; defaults
+    to the mock's configured id. Returns the same structured shape as
+    Lane 10's ``HomeAssistantIntegration.vacuum_start`` so the
+    orchestrator's tool dispatch path can use either backend
+    interchangeably:
+
+    ``{success: True, data: {started: True, entity_id, service:
+    "vacuum.start", duration_ms}}``
+
+    Lane 11 SLA: < 500 ms on commodity hardware. Live verify in PR
+    body asserts the elapsed time fits inside this budget.
+    """
+    mock = getattr(state, "mock_roomba", None)
+    if mock is None:
+        return {"success": False, "error": "mock_roomba disabled", "reason": "disabled"}
+    entity_id = ""
+    if isinstance(body, dict):
+        entity_id = str(body.get("entity_id") or "")
+    return await mock.start(entity_id=entity_id)
+
+
+@router.post("/api/hardware/mock_roomba/stop")
+async def mock_roomba_stop(body: dict | None = None):
+    """Stop the brain-side mock Roomba. Parity with HA vacuum.stop."""
+    mock = getattr(state, "mock_roomba", None)
+    if mock is None:
+        return {"success": False, "error": "mock_roomba disabled", "reason": "disabled"}
+    entity_id = ""
+    if isinstance(body, dict):
+        entity_id = str(body.get("entity_id") or "")
+    return await mock.stop(entity_id=entity_id)
+
+
 @router.get("/api/hardware/mesh")
 async def hardware_mesh_status():
-    """Get hardware mesh status with all connected nodes."""
+    """Get hardware mesh status — connected daemons + discovered peripherals.
+
+    Lane 12's Devices page consumes both fields:
+
+    * ``nodes`` — daemons that registered over /v1/node and are still
+      attached. Lane 12 lists them as the operator-actionable surface
+      (rename / disconnect).
+    * ``announced_devices`` — peripherals observed by any scanner-class
+      daemon (typically the iOS companion app). Each entry carries
+      ``device_id``, ``device_kind``, ``name``, ``manufacturer``,
+      ``rssi_dbm``, ``advertised_services``, ``first_seen``,
+      ``last_seen``, ``scanner_node_id``, ``metadata``. Lane 12 renders
+      these grouped under their scanner so the operator sees "iPhone
+      → AirPods, Apple Watch, …" without us inventing a separate
+      grouping API.
+
+    Both fields are always present (possibly empty) so the Lane 12
+    client can do a single fetch.
+    """
     if not state.hardware_mesh:
-        return {"nodes": []}
-    return {"nodes": state.hardware_mesh.connected_nodes}
+        return {"nodes": [], "announced_devices": []}
+    return {
+        "nodes": state.hardware_mesh.connected_nodes,
+        "announced_devices": state.hardware_mesh.list_announced_devices(),
+    }

@@ -550,6 +550,305 @@ def check_full_disk_access() -> TCCStatus:
     )
 
 
+# ─────────────────────────────────────────────
+# REQUEST flow (Lane 11 / R-PROD-004b)
+# ─────────────────────────────────────────────
+#
+# The check_* probes above are read-only — they tell you the current
+# TCC state but never trigger the native consent prompt. Lane 06's
+# audit-r12 ship covered that read side. R-PROD-004b in WORK_LOG
+# routed in the REQUEST flow: trigger the OS dialog, then re-probe.
+#
+# Each request_* function:
+#
+# * Calls the official macOS API that surfaces the consent dialog
+#   (CGRequestScreenCaptureAccess, EKEventStore.requestAccessToEvents,
+#   CNContactStore.requestAccessForEntityType, etc.). The user clicks
+#   "Allow" / "Don't Allow" on a system dialog; FERAL does NOT
+#   re-implement the dialog.
+# * Returns the TCCStatus immediately after the request finishes —
+#   ``granted`` on success, ``denied`` if the user clicked "Don't
+#   Allow", ``unknown`` if PyObjC is missing.
+# * Includes the deeplink fallback in ``setup_step`` so the UI can
+#   show a "Open System Settings" button when the prompt was denied
+#   (re-asking via the API would no-op until the user opens Settings
+#   and toggles the row manually).
+#
+# Accessibility + Full Disk Access have NO request API — Apple
+# requires the user to add the host process to the Privacy & Security
+# pane manually. For those we expose a ``deeplink_for(permission)``
+# helper instead so the UI can pop the right pane.
+
+
+def _deny_unknown(name: str, api: str, *, error: str) -> TCCStatus:
+    return TCCStatus(
+        permission=name,
+        status="unknown",
+        api=api,
+        setup_step=(
+            "PyObjC framework bindings missing — install with "
+            "`pip install pyobjc-framework-{Quartz,EventKit,Contacts}`."
+        ),
+        error=error,
+    )
+
+
+def request_screen_recording() -> TCCStatus:
+    """Trigger the Screen Recording consent dialog (macOS 10.15+).
+
+    Calls ``CGRequestScreenCaptureAccess`` which, unlike the
+    ``CGPreflight`` variant, shows the native consent dialog on the
+    first call. The function returns synchronously after the user
+    answers; on "Don't Allow" macOS won't re-prompt until the user
+    opens Settings manually (the deeplink in ``setup_step`` is the
+    remediation path).
+    """
+    if platform.system() != "Darwin":
+        return _not_applicable("screen_recording", "CGRequestScreenCaptureAccess")
+    try:
+        from Quartz import (  # type: ignore[import-not-found]
+            CGRequestScreenCaptureAccess,
+        )
+    except ImportError as exc:
+        return _deny_unknown(
+            "screen_recording",
+            "CGRequestScreenCaptureAccess",
+            error=f"PyObjC Quartz not importable: {exc}",
+        )
+    try:
+        granted = bool(CGRequestScreenCaptureAccess())
+    except Exception as exc:
+        return TCCStatus(
+            permission="screen_recording",
+            status="unknown",
+            api="CGRequestScreenCaptureAccess",
+            setup_step=_SCREEN_RECORDING_REMEDIATION,
+            error=f"Screen capture request raised: {exc}",
+        )
+    return TCCStatus(
+        permission="screen_recording",
+        status="granted" if granted else "denied",
+        api="CGRequestScreenCaptureAccess",
+        setup_step="(no action needed)" if granted else _SCREEN_RECORDING_REMEDIATION,
+    )
+
+
+def _request_eventkit(entity_type_name: str, *, permission: str, remediation: str) -> TCCStatus:
+    """Drive the EventKit request flow synchronously.
+
+    macOS's ``EKEventStore.requestFullAccessToEvents`` / equivalents
+    take a completion handler. We bridge to a synchronous result via
+    a ``threading.Event`` so the brain can call this from a regular
+    request handler without async glue.
+    """
+    if platform.system() != "Darwin":
+        return _not_applicable(permission, "EKEventStore.requestAccess")
+    try:
+        from EventKit import EKEventStore  # type: ignore[import-not-found]
+    except ImportError as exc:
+        return _deny_unknown(
+            permission,
+            "EKEventStore.requestAccess",
+            error=f"PyObjC EventKit not importable: {exc}",
+        )
+    import threading
+    done = threading.Event()
+    result: dict = {"granted": False, "error": None}
+    store = EKEventStore.alloc().init()
+    entity_int = {"event": 0, "reminder": 1}[entity_type_name]
+
+    def _handler(granted, err):  # noqa: ANN001 — ObjC completion handler
+        try:
+            result["granted"] = bool(granted)
+            if err is not None:
+                result["error"] = str(err)
+        finally:
+            done.set()
+
+    try:
+        # macOS 14+ split the API into requestFullAccessToEvents_ /
+        # requestFullAccessToReminders_; older OSes use
+        # requestAccessToEntityType_completion_. Try the modern path
+        # first.
+        modern = getattr(store, "requestFullAccessToEvents_", None) if entity_type_name == "event" else getattr(store, "requestFullAccessToReminders_", None)
+        if modern is not None:
+            modern(_handler)
+        else:
+            store.requestAccessToEntityType_completion_(entity_int, _handler)
+    except Exception as exc:
+        return TCCStatus(
+            permission=permission,
+            status="unknown",
+            api="EKEventStore.requestAccess",
+            setup_step=remediation,
+            error=f"EventKit request raised: {exc}",
+        )
+    # 5 s is comfortably longer than the OS dialog round-trip; if it
+    # doesn't fire (e.g. headless test runner) we surface the
+    # timeout as ``unknown`` rather than blocking the brain.
+    if not done.wait(timeout=5.0):
+        return TCCStatus(
+            permission=permission,
+            status="unknown",
+            api="EKEventStore.requestAccess",
+            setup_step=remediation,
+            error="EventKit completion handler did not fire within 5s",
+        )
+    if result["error"]:
+        return TCCStatus(
+            permission=permission,
+            status="unknown",
+            api="EKEventStore.requestAccess",
+            setup_step=remediation,
+            error=result["error"],
+        )
+    return TCCStatus(
+        permission=permission,
+        status="granted" if result["granted"] else "denied",
+        api="EKEventStore.requestAccess",
+        setup_step="(no action needed)" if result["granted"] else remediation,
+    )
+
+
+def request_calendar() -> TCCStatus:
+    return _request_eventkit("event", permission="calendar", remediation=_CALENDAR_REMEDIATION)
+
+
+def request_reminders() -> TCCStatus:
+    return _request_eventkit(
+        "reminder", permission="reminders", remediation=_REMINDERS_REMEDIATION,
+    )
+
+
+def request_contacts() -> TCCStatus:
+    """Trigger the Contacts consent dialog (CNContactStore.requestAccess)."""
+    if platform.system() != "Darwin":
+        return _not_applicable("contacts", "CNContactStore.requestAccess")
+    try:
+        from Contacts import CNContactStore  # type: ignore[import-not-found]
+    except ImportError as exc:
+        return _deny_unknown(
+            "contacts",
+            "CNContactStore.requestAccess",
+            error=f"PyObjC Contacts not importable: {exc}",
+        )
+    import threading
+    done = threading.Event()
+    result: dict = {"granted": False, "error": None}
+    store = CNContactStore.alloc().init()
+
+    def _handler(granted, err):  # noqa: ANN001 — ObjC completion handler
+        try:
+            result["granted"] = bool(granted)
+            if err is not None:
+                result["error"] = str(err)
+        finally:
+            done.set()
+
+    try:
+        # 0 = CNEntityTypeContacts
+        store.requestAccessForEntityType_completionHandler_(0, _handler)
+    except Exception as exc:
+        return TCCStatus(
+            permission="contacts",
+            status="unknown",
+            api="CNContactStore.requestAccess",
+            setup_step=_CONTACTS_REMEDIATION,
+            error=f"Contacts request raised: {exc}",
+        )
+    if not done.wait(timeout=5.0):
+        return TCCStatus(
+            permission="contacts",
+            status="unknown",
+            api="CNContactStore.requestAccess",
+            setup_step=_CONTACTS_REMEDIATION,
+            error="Contacts completion handler did not fire within 5s",
+        )
+    if result["error"]:
+        return TCCStatus(
+            permission="contacts",
+            status="unknown",
+            api="CNContactStore.requestAccess",
+            setup_step=_CONTACTS_REMEDIATION,
+            error=result["error"],
+        )
+    return TCCStatus(
+        permission="contacts",
+        status="granted" if result["granted"] else "denied",
+        api="CNContactStore.requestAccess",
+        setup_step="(no action needed)" if result["granted"] else _CONTACTS_REMEDIATION,
+    )
+
+
+# Deeplinks to System Settings privacy panes. These are stable URL
+# schemes documented by Apple
+# (https://developer.apple.com/library/archive/technotes/tn2459/_index.html);
+# kept in one place so the UI doesn't hardcode them inline.
+_PRIVACY_DEEPLINKS = {
+    "accessibility": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+    "screen_recording": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+    "calendar": "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars",
+    "reminders": "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders",
+    "contacts": "x-apple.systempreferences:com.apple.preference.security?Privacy_Contacts",
+    "full_disk_access": "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
+    "automation": "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation",
+    "bluetooth": "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth",
+    "microphone": "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+    "camera": "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera",
+    "location": "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices",
+}
+
+
+def deeplink_for(permission: str) -> Optional[str]:
+    """Return an ``x-apple.systempreferences:`` URL for a permission pane.
+
+    Lane 11 R-PROD-004b: the iOS companion (when running on the same
+    Mac as the brain) and the macOS desktop UI use this to open the
+    correct System Settings pane after the user denies a request. For
+    Full Disk Access there is no request API so the deeplink IS the
+    only path forward.
+
+    Returns ``None`` for unknown permissions so callers can surface a
+    "no deeplink" message rather than a broken URL.
+    """
+    return _PRIVACY_DEEPLINKS.get(permission)
+
+
+def request_permission(name: str) -> TCCStatus:
+    """Dispatch ``name`` to the corresponding ``request_*`` function.
+
+    Convenience wrapper for the REST surface in
+    ``feral-core/api/routes/security_and_hardware.py`` — accepts the
+    short permission name (matches ``TCCStatus.permission``) and
+    returns the post-prompt status.
+
+    ``full_disk_access`` + ``accessibility`` have no request API; the
+    function returns the current status + the deeplink so the UI can
+    point the user at Settings.
+    """
+    name = (name or "").strip()
+    if name == "screen_recording":
+        return request_screen_recording()
+    if name == "calendar":
+        return request_calendar()
+    if name == "reminders":
+        return request_reminders()
+    if name == "contacts":
+        return request_contacts()
+    if name == "accessibility":
+        # No public request API; re-probe and rely on deeplink.
+        return check_accessibility()
+    if name == "full_disk_access":
+        return check_full_disk_access()
+    return TCCStatus(
+        permission=name,
+        status="unknown",
+        api="(none)",
+        setup_step=f"Unknown permission name {name!r}",
+        error="no request handler registered",
+    )
+
+
 __all__ = [
     "TCCStatus",
     "check_accessibility",
@@ -562,4 +861,11 @@ __all__ = [
     "all_gui_permission_statuses",
     "all_desktop_control_permission_statuses",
     "DESKTOP_CONTROL_TARGETS",
+    # Lane 11 R-PROD-004b additions.
+    "request_screen_recording",
+    "request_calendar",
+    "request_reminders",
+    "request_contacts",
+    "request_permission",
+    "deeplink_for",
 ]

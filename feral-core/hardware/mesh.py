@@ -138,6 +138,8 @@ class HardwareMesh:
         daemons: dict,
         ledger: Optional[CommandLedger] = None,
         node_health: Optional[NodeHealth] = None,
+        *,
+        knowledge_graph=None,
     ):
         self._registry = device_registry
         self._daemons = daemons
@@ -145,6 +147,22 @@ class HardwareMesh:
         self._node_metadata: dict[str, dict] = {}
         self.ledger: CommandLedger = ledger or CommandLedger()
         self.node_health: NodeHealth = node_health or NodeHealth()
+        # HUP v1.3.0 §5.4.4 — discovered peripherals. Maps
+        # ``device_id`` → discovery record (last_seen, scanner_node_id,
+        # rssi, metadata). Lane 12 reads from /api/hardware/mesh; the
+        # KG entity write happens in ``ingest_device_announce``.
+        self._announced_devices: dict[str, dict] = {}
+        self._kg = knowledge_graph
+
+    def set_knowledge_graph(self, kg) -> None:
+        """Late-bind the knowledge graph after BrainState wires memory.
+
+        ``BrainState.init`` constructs HardwareMesh in ``_boot_subsystems``
+        before MemoryStore.knowledge_graph is reachable from every call
+        site; this lets the boot wiring set the reference explicitly
+        once the KG is available without re-creating the mesh.
+        """
+        self._kg = kg
 
     async def on_node_connected(self, node_id: str, registration_payload: dict):
         """Auto-register a daemon as a HUP device when it connects."""
@@ -313,6 +331,143 @@ class HardwareMesh:
             for nid, meta in self._node_metadata.items()
             if nid in self._daemons
         ]
+
+    # ─────────────────────────────────────────────
+    # HUP v1.3.0 — peripheral discovery (§5.4.4)
+    # ─────────────────────────────────────────────
+
+    async def ingest_device_announce(self, payload: dict) -> dict:
+        """Ingest a HUP v1.3.0 ``device_announce`` payload.
+
+        Closes THESIS_SCENARIOS S3 (hardware peripheral memory). Stores
+        the discovery in-memory under ``self._announced_devices`` for
+        the Lane 12 Devices page REST surface, and upserts a
+        knowledge-graph entity (``category=device``) so the orchestrator
+        can answer chat queries via the standard memory tool path.
+
+        Repeat announcements for the same ``device_id`` update
+        ``last_seen`` / ``rssi_dbm`` in place and bump the KG entity's
+        mention count (via ``add_entity`` → ``_bump_mention``) rather
+        than duplicating rows.
+
+        Returns the merged in-memory record (useful for tests and the
+        Lane 11 ``test_device_announce_*`` pytest).
+        """
+        device_id = str(payload.get("device_id") or "").strip()
+        if not device_id:
+            logger.debug("device_announce dropped: missing device_id")
+            return {}
+
+        now = time.time()
+        scanner_node_id = str(payload.get("scanner_node_id") or "").strip()
+        device_kind = str(payload.get("device_kind") or "unknown")
+        name = str(payload.get("name") or "")
+        manufacturer = str(payload.get("manufacturer") or "")
+        rssi_dbm = payload.get("rssi_dbm")
+        if rssi_dbm is not None:
+            try:
+                rssi_dbm = int(rssi_dbm)
+            except (TypeError, ValueError):
+                rssi_dbm = None
+        advertised_services = list(payload.get("advertised_services") or [])
+        first_seen = payload.get("first_seen")
+        last_seen = payload.get("last_seen", now) or now
+        metadata = dict(payload.get("metadata") or {})
+
+        existing = self._announced_devices.get(device_id)
+        if existing:
+            existing["last_seen"] = float(last_seen)
+            if rssi_dbm is not None:
+                existing["rssi_dbm"] = rssi_dbm
+            if name:
+                existing["name"] = name
+            if manufacturer:
+                existing["manufacturer"] = manufacturer
+            if scanner_node_id:
+                existing["scanner_node_id"] = scanner_node_id
+            if advertised_services:
+                existing["advertised_services"] = advertised_services
+            if metadata:
+                existing["metadata"].update(metadata)
+            record = existing
+        else:
+            record = {
+                "device_id": device_id,
+                "scanner_node_id": scanner_node_id,
+                "device_kind": device_kind,
+                "name": name,
+                "manufacturer": manufacturer,
+                "rssi_dbm": rssi_dbm,
+                "advertised_services": advertised_services,
+                "first_seen": float(first_seen) if first_seen is not None else now,
+                "last_seen": float(last_seen),
+                "metadata": metadata,
+            }
+            self._announced_devices[device_id] = record
+
+        await self._write_kg_entity_for_announce(record)
+        logger.debug(
+            "device_announce ingested: device=%s scanner=%s kind=%s rssi=%s",
+            device_id, scanner_node_id, device_kind, rssi_dbm,
+        )
+        return record
+
+    async def _write_kg_entity_for_announce(self, record: dict) -> None:
+        """Upsert a KG entity for an announced peripheral.
+
+        Skips silently when the KG is unavailable (e.g. during early
+        boot or in unit tests that don't wire memory). The KG itself
+        dedupes by name + entity_type so repeat calls bump the entity
+        mention count instead of inserting a duplicate row.
+        """
+        kg = self._kg
+        if kg is None:
+            return
+        add_entity = getattr(kg, "add_entity", None)
+        if not callable(add_entity):
+            return
+
+        device_id = record["device_id"]
+        name = record.get("name") or device_id
+        kind = record.get("device_kind") or "unknown"
+        metadata = {
+            "category": "device",
+            "device_id": device_id,
+            "device_kind": kind,
+            "scanner_node_id": record.get("scanner_node_id") or "",
+            "manufacturer": record.get("manufacturer") or "",
+            "rssi_dbm": record.get("rssi_dbm"),
+            "first_seen": record.get("first_seen"),
+            "last_seen": record.get("last_seen"),
+            "advertised_services": record.get("advertised_services") or [],
+            "tags": [kind, "peripheral", record.get("scanner_node_id") or ""],
+        }
+        # Strip empty tag entries; the KG search expects a clean list.
+        metadata["tags"] = [t for t in metadata["tags"] if t]
+
+        try:
+            await add_entity(
+                name=name,
+                entity_type="device",
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.debug("kg.add_entity raised for device %s: %s", device_id, exc)
+
+    def list_announced_devices(self) -> list[dict]:
+        """Return the in-memory peripheral discoveries for REST consumers.
+
+        Lane 12's Devices page reads from ``/api/hardware/mesh`` which
+        composes this with ``connected_nodes`` so the UI can show
+        "connected daemons" alongside "peripherals their scanners
+        observed" without two separate fetches.
+        """
+        return [dict(rec) for rec in self._announced_devices.values()]
+
+    def find_announced_device(self, device_id: str) -> Optional[dict]:
+        """Lookup a single discovered peripheral by id."""
+        rec = self._announced_devices.get(device_id)
+        return dict(rec) if rec is not None else None
 
 
 class WebSocketNodeAdapter:

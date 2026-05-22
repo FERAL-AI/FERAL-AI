@@ -5,7 +5,17 @@
 **License:** Apache-2.0
 **Canonical schemas:** this file (normative) + Pydantic mirror in
 `feral-nodes/python-node-sdk/src/feral_node_sdk/schemas.py` + Zod mirror in
-`feral-nodes/ts-node-sdk/src/schemas.ts`.
+`feral-nodes/ts-node-sdk/src/schemas.ts` + Swift mirror in
+`feral-nodes/ios-node-sdk/Sources/FeralNodeSDK/HUPFrame.swift`.
+
+Every surface that participates in HUP MUST advertise `1.3.0` as
+`hup_version` in every outbound envelope. The five surfaces that the
+`feral-core/tests/test_hup_version_unified.py` CI test pins together
+are: this spec, `feral-core/models/protocol.py` (`HUP_VERSION`), the
+Python node SDK (`feral_node_sdk.schemas.HUP_VERSION`), the TypeScript
+node SDK (`HUP_VERSION` in `schemas.ts`), and the iOS node SDK
+(`FeralNodeSDKInfo.hupVersion`). The iOS companion app surfaces the
+same value via `Info.plist` `FERALHUPVersion`.
 
 HUP is FERAL's public wire contract between a "brain" (the FERAL orchestrator
 runtime) and a "node daemon" (a process running on or near a piece of
@@ -36,8 +46,7 @@ If you can terminate TLS and speak JSON over WebSocket, you can speak HUP.
 
 | Version | Status | Additions |
 |---|---|---|
-| `v1.3.1` | Stable | Patch: strict Pydantic-v2 schema enforcement on phone-as-peer envelopes — literal-typed `chat_request.reply_mode` + `chat_request.channel`, required `session_id` on `voice_session_start`, required `stream_id` + `channels` on `audio_chunk`. Non-normative tightening; v1.3.0 daemons stay conformant. |
-| `v1.3.0` | Stable | Phone-as-peer envelopes: `chat_request`, `chat_response`, `voice_session_start`, `voice_interrupt`, `genui_push`, `genui_event`, `peripheral_bridge_register`, `backchannel_request` (§5.9). |
+| `v1.3.0` | Stable | Phone-as-peer envelopes (§5.9): `chat_request`, `chat_response`, `voice_session_start`, `voice_interrupt`, `genui_push`, `genui_event`, `peripheral_bridge_register`, `backchannel_request`. Strict Pydantic-v2 schemas: literal-typed `chat_request.reply_mode` + `chat_request.channel`, required `session_id` on `voice_session_start`, required `stream_id` + `channels` on `audio_chunk`. Smart-glasses vision streaming via `glasses_frame` (§5.4.3) + per-device circular buffer in `feral-core/perception/glasses_buffer.py`. Hardware peripheral memory via `device_announce` (§5.4.4) routed through `feral-core/hardware/mesh.py` into the knowledge graph. |
 | `v1.2.0` | Stable | Canonical `node_ack`, `node_heartbeat`, `hup_action_request`, `hup_action_response`, and `node_bye` handling (§5.2-§5.8). |
 
 ---
@@ -401,6 +410,122 @@ keyframe of an H.264 stream. Route every decoded frame into
 `state.vision_buffer.push(node_id, payload)`. Every 10 s, run a
 vision-LLM caption on the most recent frame and store it in episodic
 memory.
+
+### 5.4.3 `glasses_frame` (v1.3.0+)
+
+A first-class envelope for smart-glasses (and glasses-equivalent
+phone-camera-fallback) vision streams. The brain stores incoming frames
+in a per-device circular buffer (`feral-core/perception/glasses_buffer.py`)
+that the orchestrator's vision-context-attach reads when the active
+turn is in voice mode and recent frames exist. Existing `video_frame`
+remains valid for non-glasses cameras (e.g. `feral-w300` USB UVC) —
+the brain treats `glasses_frame` as the canonical channel for
+"vision context for the assistant" and `video_frame` as the generic
+camera channel.
+
+```json
+{
+  "hup_version": "1.3.0",
+  "type": "glasses_frame",
+  "ts": 1734369931.250,
+  "msg_id": "f2c3e1a2-...",
+  "payload": {
+    "device_id": "feral-iphone-abc123",
+    "timestamp": 1734369931.123,
+    "encoding": "jpeg",
+    "data_b64": "…base64(frame)…",
+    "width": 1280,
+    "height": 720,
+    "source": "camera_fallback",
+    "sequence": 42
+  }
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `device_id` | string | yes | Stable id of the glasses (or glasses-equivalent) device. May differ from the HUP `node_id` that forwarded the frame — a phone forwarding W610 frames carries the phone as `node_id` and `w610-<serial>` as `device_id`. |
+| `timestamp` | float | yes | Capture time (unix epoch seconds). Drives the 30s freshness gate in `context_attach.py`. |
+| `encoding` | `"jpeg" \| "png" \| "webp"` | yes | JPEG is the recommended default for cost-budgeted vision-LLM input. |
+| `data_b64` | string | yes | Base64 of the encoded image. Decoded size MUST be ≤ 512 KiB per §2 (shared with `video_frame`). |
+| `width` | int | no | Pixels. Used for downscale heuristics. |
+| `height` | int | no | Pixels. |
+| `source` | string | no | Provenance label. One of `glasses`, `phone_camera`, `screen_loop`, `w610`, `camera_fallback`, `jw_w300`, `browser_camera`. Unknown values are accepted and forwarded verbatim. |
+| `sequence` | int | no | Per-device monotonic counter (helps the buffer dedupe replays). |
+
+Brain behaviour:
+
+- Reject frames with decoded size > 512 KiB with HUP error code 4020
+  (same cap as `video_frame`).
+- Ingest accepted frames into `state.glasses_buffer.push(device_id,
+  GlassesFrame(...))`. The buffer keeps the last 30 frames per
+  `device_id` (configurable via the `vision.glasses_buffer.max_frames`
+  setting) and exposes `latest(device_id, max_age_s=30)` for
+  `perception/context_attach.py`.
+- Frames older than `vision.glasses_buffer.max_age_s` (default 30 s)
+  are still ingested but the read path filters them out so a momentarily
+  paused stream doesn't surface stale context to the LLM.
+
+### 5.4.4 `device_announce` (v1.3.0+)
+
+A peripheral-discovery envelope. A node scans its local environment
+(typically BLE, mDNS, USB) and emits `device_announce` for each
+peripheral it sees. The brain routes each frame through
+`feral-core/hardware/mesh.py` which records a memory entity
+(`category=device`) and tracks the device under the announcing node's
+mesh entry. This closes the "what BLE devices are around my phone right
+now?" loop without exposing the peripheral discovery API surface to
+every individual capability.
+
+```json
+{
+  "hup_version": "1.3.0",
+  "type": "device_announce",
+  "ts": 1734369931.500,
+  "msg_id": "1d6c0d4d-...",
+  "payload": {
+    "scanner_node_id": "feral-iphone-abc123",
+    "device_id": "AA:BB:CC:DD:EE:FF",
+    "device_kind": "bluetooth_le",
+    "name": "AirPods Pro",
+    "manufacturer": "Apple",
+    "rssi_dbm": -54,
+    "advertised_services": ["180F"],
+    "first_seen": 1734369900.0,
+    "last_seen": 1734369931.5,
+    "metadata": {
+      "tx_power": 4,
+      "appearance": 961
+    }
+  }
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `scanner_node_id` | string | yes | HUP node id of the daemon doing the scanning. Brain falls back to the WS-level `node_id` when omitted. |
+| `device_id` | string | yes | Stable id of the discovered peripheral. BLE: MAC address or platform-stable UUID. mDNS: service instance name. USB: VID:PID + serial when available. |
+| `device_kind` | string | yes | One of `bluetooth_le`, `bluetooth_classic`, `mdns`, `usb`, `airplay`, `homekit`, `unknown`. Unknown values are accepted. |
+| `name` | string | no | Operator-readable label from the peripheral's advertisement. |
+| `manufacturer` | string | no | Decoded from BLE manufacturer data when available. |
+| `rssi_dbm` | int | no | Last-known received signal strength. |
+| `advertised_services` | string[] | no | BLE GATT service UUIDs, mDNS service types, etc. |
+| `first_seen` | float | no | Unix epoch seconds of first observation. Brain stamps server-side when omitted. |
+| `last_seen` | float | no | Unix epoch seconds of most recent observation. Defaults to `ts`. |
+| `metadata` | object | no | Vendor-specific scratch space. Brain stores verbatim under the memory entity's `attributes`. |
+
+Brain behaviour:
+
+- Upserts a knowledge-graph entity keyed by `device_id` with
+  `category=device` and `tags=[device_kind, "peripheral",
+  scanner_node_id]`. Repeated announcements update `last_seen` and
+  `rssi_dbm` without creating duplicate entities.
+- Records a `device.advertise` event with the timestamp pair so chat
+  queries like "did my AirPods disconnect today?" can answer from the
+  event log.
+- Does NOT issue commands to the discovered peripheral — discovery is
+  observation-only. To actuate, a separate `hup_action_request` flow
+  must be set up by a vendor-specific daemon.
 
 ### 5.5 `hup_action_request` (brain → daemon, canonical)
 

@@ -5,7 +5,7 @@
 
 import { z } from "zod";
 
-export const HUP_VERSION = "1.2.0";
+export const HUP_VERSION = "1.3.0";
 
 // Per-frame decoded-size caps from HUP_SPEC.md §5.4.1 / §5.4.2.
 export const AUDIO_FRAME_MAX_BYTES = 64 * 1024;
@@ -106,6 +106,45 @@ export const VideoFramePayload = z.object({
 });
 export type VideoFramePayload = z.infer<typeof VideoFramePayload>;
 
+// HUP v1.3.0 glasses_frame payload — per HUP_SPEC.md §5.4.3.
+export const GlassesFramePayload = z.object({
+  device_id: z.string().min(1).max(128),
+  timestamp: z.number().default(() => Date.now() / 1000),
+  encoding: z.enum(["jpeg", "png", "webp"]).default("jpeg"),
+  data_b64: z.string().refine(
+    (v) => decodedBase64Size(v) <= VIDEO_FRAME_MAX_BYTES,
+    { message: `glasses_frame data_b64 exceeds ${VIDEO_FRAME_MAX_BYTES} bytes decoded` },
+  ),
+  width: z.number().int().min(1).max(8192).nullable().optional(),
+  height: z.number().int().min(1).max(8192).nullable().optional(),
+  source: z.string().default("glasses"),
+  sequence: z.number().int().min(0).nullable().optional(),
+});
+export type GlassesFramePayload = z.infer<typeof GlassesFramePayload>;
+
+// HUP v1.3.0 device_announce payload — per HUP_SPEC.md §5.4.4.
+export const DeviceAnnouncePayload = z.object({
+  scanner_node_id: z.string().default(""),
+  device_id: z.string().min(1).max(128),
+  device_kind: z.enum([
+    "bluetooth_le",
+    "bluetooth_classic",
+    "mdns",
+    "usb",
+    "airplay",
+    "homekit",
+    "unknown",
+  ]).default("unknown"),
+  name: z.string().default(""),
+  manufacturer: z.string().default(""),
+  rssi_dbm: z.number().int().min(-127).max(20).nullable().optional(),
+  advertised_services: z.array(z.string()).default([]),
+  first_seen: z.number().nullable().optional(),
+  last_seen: z.number().nullable().optional(),
+  metadata: z.record(z.any()).default({}),
+});
+export type DeviceAnnouncePayload = z.infer<typeof DeviceAnnouncePayload>;
+
 export const HUPActionRequestPayload = z.object({
   action_id: z.string().min(1).max(64),
   name: z.string().min(1).max(64),
@@ -148,6 +187,8 @@ export const HUPMessageType = z.enum([
   "hup_action_response",
   "node_bye",
   "error",
+  "glasses_frame",
+  "device_announce",
 ]);
 export type HUPMessageType = z.infer<typeof HUPMessageType>;
 
@@ -160,6 +201,8 @@ const SCHEMAS: Record<string, z.ZodTypeAny> = {
   hup_action_response: HUPActionResponsePayload,
   node_bye: NodeByePayload,
   error: ErrorPayload,
+  glasses_frame: GlassesFramePayload,
+  device_announce: DeviceAnnouncePayload,
 };
 
 export interface HUPFrame {

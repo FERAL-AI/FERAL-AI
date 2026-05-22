@@ -312,6 +312,12 @@ class BrainState:
         # missing deps without crashing module import.
         self.memory = MemoryStore(vec_index=_load_configured_vec_index_or_default())
         self.vision_buffer = VisionBuffer()
+        # HUP v1.3.0 §5.4.3 — per-device ring buffer for smart-glasses
+        # (and glasses-equivalent phone-camera fallback) frames. Lane
+        # 11 writes via api.server._handle_glasses_frame; Lane 08
+        # reads via perception/context_attach.py.
+        from perception.glasses_buffer import GlassesBuffer
+        self.glasses_buffer = GlassesBuffer()
         self.perception = PerceptionEngine()
         self.audio = AudioPipeline()
         self.scene: Optional[SceneAnalyzer] = None
@@ -1201,6 +1207,32 @@ class BrainState:
                 device_registry=self.device_registry,
                 daemons=self.daemons,
             )
+            # Bind the KG so device_announce ingest can write
+            # ``category=device`` entities. The KG is built earlier in
+            # MemoryStore.__init__ but exposed lazily on the store.
+            try:
+                kg = getattr(self.memory, "knowledge_graph", None)
+                if kg is not None:
+                    self.hardware_mesh.set_knowledge_graph(kg)
+            except Exception:
+                # Best-effort wiring — the mesh tolerates a missing KG
+                # and the boot report already surfaces the underlying
+                # failure if memory isn't ready yet.
+                pass
+
+        with boot_subsystem(self._boot_report, "MockRoomba"):
+            # Closes THESIS_SCENARIOS S5 on demo machines without HA.
+            # Default-on; operator can disable with FERAL_MOCK_ROOMBA=0
+            # once a real Roomba is wired through HA.
+            from hardware.mock_roomba import (
+                MockRoomba,
+                is_enabled as _mock_roomba_enabled,
+                register_with_mesh as _register_mock_roomba,
+            )
+            self.mock_roomba = None
+            if _mock_roomba_enabled():
+                self.mock_roomba = MockRoomba(memory=self.memory)
+                _register_mock_roomba(self.hardware_mesh, self.mock_roomba)
 
         with boot_subsystem(self._boot_report, "IdentityWorkspace"):
             self.identity_workspace = IdentityWorkspace()

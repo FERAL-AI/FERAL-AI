@@ -11,7 +11,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-HUP_VERSION = "1.2.0"
+HUP_VERSION = "1.3.0"
 # Per-frame decoded-size caps from HUP_SPEC.md §5.4.1 / §5.4.2.
 AUDIO_FRAME_MAX_BYTES = 64 * 1024
 VIDEO_FRAME_MAX_BYTES = 512 * 1024
@@ -138,6 +138,63 @@ class VideoFramePayload(BaseModel):
         return v
 
 
+class GlassesFramePayload(BaseModel):
+    """HUP v1.3.0 ``glasses_frame`` payload (per HUP_SPEC.md §5.4.3).
+
+    The Python SDK validator mirrors the brain's ``GlassesFramePayload``
+    in ``feral-core/models/protocol.py``. ``device_id`` and ``data_b64``
+    are required; everything else has a wire-friendly default so a
+    minimal daemon can emit a frame with just three fields.
+    """
+
+    device_id: str = Field(..., min_length=1, max_length=128)
+    timestamp: float = Field(default_factory=_time.time)
+    encoding: Literal["jpeg", "png", "webp"] = "jpeg"
+    data_b64: str
+    width: Optional[int] = Field(default=None, ge=1, le=8192)
+    height: Optional[int] = Field(default=None, ge=1, le=8192)
+    source: str = "glasses"
+    sequence: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator("data_b64")
+    @classmethod
+    def _data_b64_decoded_size(cls, v: str) -> str:
+        import base64
+        try:
+            decoded = base64.b64decode(v, validate=False)
+        except Exception as exc:
+            raise ValueError(f"data_b64 is not valid base64: {exc}") from exc
+        if len(decoded) > VIDEO_FRAME_MAX_BYTES:
+            raise ValueError(
+                f"glasses_frame data_b64 decoded to {len(decoded)} bytes; "
+                f"cap is {VIDEO_FRAME_MAX_BYTES}"
+            )
+        return v
+
+
+class DeviceAnnouncePayload(BaseModel):
+    """HUP v1.3.0 ``device_announce`` payload (per HUP_SPEC.md §5.4.4)."""
+
+    scanner_node_id: str = ""
+    device_id: str = Field(..., min_length=1, max_length=128)
+    device_kind: Literal[
+        "bluetooth_le",
+        "bluetooth_classic",
+        "mdns",
+        "usb",
+        "airplay",
+        "homekit",
+        "unknown",
+    ] = "unknown"
+    name: str = ""
+    manufacturer: str = ""
+    rssi_dbm: Optional[int] = Field(default=None, ge=-127, le=20)
+    advertised_services: list[str] = Field(default_factory=list)
+    first_seen: Optional[float] = None
+    last_seen: Optional[float] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class HUPActionRequestPayload(BaseModel):
     action_id: str = Field(..., min_length=1, max_length=64)
     name: str = Field(..., min_length=1, max_length=64)
@@ -176,6 +233,9 @@ MESSAGE_TYPES: dict[str, type[BaseModel]] = {
     "hup_action_response": HUPActionResponsePayload,
     "node_bye": NodeByePayload,
     "error": ErrorPayload,
+    # HUP v1.3.0
+    "glasses_frame": GlassesFramePayload,
+    "device_announce": DeviceAnnouncePayload,
 }
 
 

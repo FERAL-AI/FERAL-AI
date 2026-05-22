@@ -10,11 +10,11 @@ import XCTest
 final class HeartbeatTests: XCTestCase {
 
     /// Verify HUP version is synced with `feral-core/models/protocol.py`
-    /// (1.3.1 — the version that includes phone-as-peer envelopes
-    /// with strict Pydantic schemas for chat_request /
-    /// voice_session_start).
-    func testHupVersionIs1_3_1() {
-        XCTAssertEqual(FeralNodeSDKInfo.hupVersion, "1.3.1")
+    /// (1.3.0 — the version that includes phone-as-peer envelopes,
+    /// strict Pydantic schemas for chat_request / voice_session_start,
+    /// and `glasses_frame` smart-glasses vision streaming).
+    func testHupVersionIs1_3_0() {
+        XCTAssertEqual(FeralNodeSDKInfo.hupVersion, "1.3.0")
     }
 
     /// Verify that an HUPFrame with type "node_heartbeat" is
@@ -55,7 +55,7 @@ final class HeartbeatTests: XCTestCase {
     func testNodeAckDecoding() throws {
         let json = """
         {
-            "hup_version": "1.3.1",
+            "hup_version": "1.3.0",
             "type": "node_ack",
             "ts": 1234567890.0,
             "payload": {
