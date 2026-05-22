@@ -92,6 +92,12 @@ jobs:
 
   brain-tests-pr:
     name: Brain — pytest PR fast lane (3.11, ubuntu)
+    # ─────────────────────────────────────────────────────────────
+    # Fast lane skips tests/perf/ so PRs aren't blocked by Lane 08's
+    # latency benchmarks + Lane 11's hardware perf tests + memory
+    # perf suite that legitimately take 10+ minutes. The full matrix
+    # job above still runs them on push-to-main.
+    # ─────────────────────────────────────────────────────────────
     needs: lint
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -111,7 +117,7 @@ jobs:
         run: pip install -e ".[all,dev]"
 
       - name: Run tests with coverage (50% threshold)
-        run: pytest tests/ -x -v --tb=short --cov=. --cov-report=term-missing --cov-fail-under=50
+        run: pytest tests/ -x -v --tb=short --cov=. --cov-report=term-missing --cov-fail-under=50 --ignore=tests/perf
 
   client-build:
     name: Client — vite build
