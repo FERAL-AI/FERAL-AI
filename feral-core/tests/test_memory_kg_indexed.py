@@ -176,7 +176,7 @@ async def test_link_entity_via_indexed_search(tmp_path):
 
     # Re-add with a slightly different name; entity_linking should
     # detect the duplicate via embedding similarity.
-    result = await kg.add_entity("alice johnson", entity_type="person")
+    await kg.add_entity("alice johnson", entity_type="person")
 
     # Both calls should resolve to the same entity id (case-insensitive
     # name match wins first, then embedding linking handles spacing /
