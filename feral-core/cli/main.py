@@ -2519,9 +2519,16 @@ def main():
     except Exception:
         pass
 
-    # feral key — vault key lifecycle (W9)
+    # feral key — vault key lifecycle (W9 + Lane 07 W3 multi-key)
     from cli.key_commands import register_key_subparser
     register_key_subparser(sub)
+
+    # ── Lane 07 W4 — voice + models pure-local subcommands ──
+    from cli.voice_commands import register_voice_subparser
+    register_voice_subparser(sub)
+
+    from cli.model_commands import register_models_subparser
+    register_models_subparser(sub)
 
     # Parse known args — everything else is treated as a message
     args, remaining = parser.parse_known_args()
@@ -2626,6 +2633,12 @@ def main():
     elif args.subcommand == "key":
         from cli.key_commands import dispatch_key_subcommand
         sys.exit(dispatch_key_subcommand(args))
+    elif args.subcommand == "voice":
+        from cli.voice_commands import dispatch_voice_subcommand
+        sys.exit(dispatch_voice_subcommand(args))
+    elif args.subcommand == "models":
+        from cli.model_commands import dispatch_models_subcommand
+        sys.exit(dispatch_models_subcommand(args))
     elif args.subcommand is None and not remaining:
         asyncio.run(repl())
     elif args.subcommand is None and remaining:
