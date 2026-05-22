@@ -312,6 +312,12 @@ class BrainState:
         # missing deps without crashing module import.
         self.memory = MemoryStore(vec_index=_load_configured_vec_index_or_default())
         self.vision_buffer = VisionBuffer()
+        # HUP v1.3.0 §5.4.3 — per-device ring buffer for smart-glasses
+        # (and glasses-equivalent phone-camera fallback) frames. Lane
+        # 11 writes via api.server._handle_glasses_frame; Lane 08
+        # reads via perception/context_attach.py.
+        from perception.glasses_buffer import GlassesBuffer
+        self.glasses_buffer = GlassesBuffer()
         self.perception = PerceptionEngine()
         self.audio = AudioPipeline()
         self.scene: Optional[SceneAnalyzer] = None
