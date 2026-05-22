@@ -43,8 +43,14 @@ def _isolated_audit_home(tmp_path, monkeypatch):
 
 
 def _reload_audit_log():
-    sys.modules.pop("security.audit_log", None)
-    from security import audit_log  # noqa: WPS433 — fresh import
+    """Return the ``security.audit_log`` module.
+
+    The fixture above pins ``FERAL_HOME`` per-test so the module-level
+    audit-log path resolves through the temp dir without needing a
+    reload. The function-level name is kept for backward compatibility
+    with the helper sites inside the test class.
+    """
+    from security import audit_log  # noqa: WPS433
     return audit_log
 
 
@@ -150,7 +156,11 @@ class TestVaultPropagatesAuditFailure:
     """``BlindVault`` does not swallow ``AuditFailure``."""
 
     def _make_vault(self, tmp_path, monkeypatch):
-        sys.modules.pop("security.vault", None)
+        """Construct a per-test BlindVault. Uses
+        :py:meth:`reset_vault` to clear the module-level singleton
+        without popping the module (popping would orphan downstream
+        ``import security.vault as v`` references in the rest of the
+        suite)."""
         monkeypatch.setenv("FERAL_HOME", str(tmp_path))
         from security import vault as vault_mod
 

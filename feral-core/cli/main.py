@@ -1458,16 +1458,39 @@ def cmd_doctor():
                         probe.setup_step,
                     )
                 elif probe.status == "unknown":
-                    # v2026.5.36 — PyObjC ApplicationServices + Quartz
-                    # are now base dependencies on Darwin (see
-                    # pyproject.toml). Reaching this branch means the
-                    # user installed FERAL from a pre-v2026.5.36 wheel
-                    # or a custom resolver skipped the deps. Keep as
-                    # warn with explicit upgrade remediation.
+                    # v2026.5.38 (audit-r12 / Lane 06) — the new
+                    # Calendar / Reminders / Contacts / FDA probes
+                    # rely on PyObjC EventKit / Contacts bindings
+                    # which are NOT base dependencies (they're only
+                    # needed when the operator actually uses those
+                    # skills). Demote those to _info so a clean
+                    # install stays warning-free. Accessibility +
+                    # Screen Recording stay as _warn because their
+                    # PyObjC bindings ARE base deps; reaching
+                    # ``unknown`` there is a real install issue.
                     detail = probe.error or "PyObjC not available"
+                    if probe.permission in (
+                        "calendar",
+                        "reminders",
+                        "contacts",
+                        "full_disk_access",
+                    ):
+                        _info(
+                            label,
+                            f"{detail} — install with "
+                            f"`pip install 'feral-ai[macos-extras]'` if you "
+                            f"plan to use this surface",
+                        )
+                    else:
+                        _warn(
+                            label,
+                            f"{detail} (upgrade to feral-ai>=2026.5.36 to fix)",
+                            probe.setup_step,
+                        )
+                elif probe.status == "restricted":
                     _warn(
                         label,
-                        f"{detail} (upgrade to feral-ai>=2026.5.36 to fix)",
+                        f"{probe.api}: restricted (MDM/parental controls)",
                         probe.setup_step,
                     )
                 else:

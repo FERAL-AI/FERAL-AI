@@ -50,6 +50,20 @@ def app_with_middleware(monkeypatch):
     # Force "localhost bypass" off so tests exercise the middleware
     # acceptance path, not the loopback exception.
     monkeypatch.setenv("FERAL_LOCAL_BYPASS", "0")
+    # audit-r14 / Lane 06 — the conftest ``_disable_api_key_middleware_for_tests``
+    # autouse fixture monkeypatches ``is_localhost`` to treat the
+    # Starlette TestClient host (``"testclient"``) as loopback. With
+    # the audit-r12 A1 middleware change (loopback bypass is now
+    # unconditional, not gated on ``FERAL_LOCAL_BYPASS``), the
+    # testclient-as-loopback shim would force every request below to
+    # 200 — defeating the whole point of testing the off-loopback
+    # auth paths. Restore the real ``is_localhost`` for these tests
+    # so testclient is treated as a remote host.
+    from security import session_auth as _sa
+    from api import server as _server_for_patch
+    real_is_localhost = lambda host: host in ("127.0.0.1", "::1", "localhost")
+    monkeypatch.setattr(_sa, "is_localhost", real_is_localhost)
+    monkeypatch.setattr(_server_for_patch, "is_localhost", real_is_localhost, raising=False)
 
     # Stub the pairing store: returns a fake device_id for valid
     # bearer, None otherwise. Mirrors the real

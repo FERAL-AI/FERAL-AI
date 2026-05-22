@@ -16,13 +16,22 @@ from __future__ import annotations
 
 import errno
 import socket
-import sys
 
 import pytest
 
 
 def _reload_mdns():
-    sys.modules.pop("services.mdns", None)
+    """Return the ``services.mdns`` module.
+
+    Deliberately does NOT pop ``sys.modules`` or call
+    :func:`importlib.reload`: both approaches break other tests in
+    the suite that hold module references — pop replaces the object
+    (orphaning prior ``monkeypatch.setattr(mdns, ...)`` calls) and
+    reload rebuilds module-level constants in a way that races sibling
+    fixtures. The tests below monkeypatch the symbols they need
+    (``_wired_ip``, ``socket.socket``, ``_register_blocking``) so the
+    module-level state stays stable for everyone else.
+    """
     from services import mdns  # noqa: WPS433
     return mdns
 

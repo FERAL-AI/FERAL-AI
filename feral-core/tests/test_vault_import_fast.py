@@ -42,6 +42,18 @@ IMPORT_BUDGET_MS = 200
 SUBPROCESS_WALLCLOCK_BUDGET_S = 2.5  # generous bound to absorb cold-venv variance
 
 
+# Capture the production ``_keyring_get_password`` (the daemon-thread
+# wrapped variant from ``security/vault.py``) BEFORE conftest's
+# ``isolate_os_keychain`` autouse fixture monkeypatches it. We need
+# the real implementation to test the timeout machinery; conftest's
+# dict-shim has no timeout. Using a module-level constant keeps the
+# vault module identity stable so sibling tests that
+# ``pytest.raises(VaultError)`` keep working.
+from security import vault as _vault_for_capture  # noqa: E402
+_ORIGINAL_KEYRING_GET = _vault_for_capture._keyring_get_password
+del _vault_for_capture
+
+
 def _run_timed_import(spec: str) -> float:
     """Spawn a child interpreter, measure how long *spec* takes to
     import, return the elapsed milliseconds. Uses a fresh subprocess
@@ -166,33 +178,38 @@ class TestImportSideEffectFree:
         )
 
 
+@pytest.fixture
+def restore_real_keyring_wrapper(monkeypatch):
+    """Re-install the production ``_keyring_get_password`` for the
+    test that opts in. The conftest ``isolate_os_keychain``
+    autouse fixture replaces the function with a synchronous
+    dict shim for every other test in the suite; this fixture
+    flips it back to the daemon-thread-wrapped variant so the
+    timeout machinery is exercised.
+
+    Opt-in (not autouse) because every test that doesn't actually
+    exercise the keychain unlock path stays under the conftest
+    isolation — autouse'ing this would re-install the production
+    function for ``test_unlock_timeout_env_overrides_default``
+    (which only reads env vars) and leave a sliver of state that
+    sibling encryption tests pick up at teardown.
+    """
+    from security import vault as vault_mod
+    monkeypatch.setattr(
+        vault_mod, "_keyring_get_password", _ORIGINAL_KEYRING_GET,
+    )
+    yield
+
+
 class TestUnlockTimeout:
-    """The unlock-timeout tests must exercise the REAL
-    ``_keyring_get_password`` (the conftest ``isolate_os_keychain``
-    fixture replaces it with a synchronous dict shim for the rest of
-    the suite, so the timeout machinery would be invisible to those
-    tests). The fixture below stashes the post-conftest fakes, restores
-    the production function from the module source, and re-applies the
-    fakes on teardown so the rest of the suite is unaffected."""
-
-    @pytest.fixture(autouse=True)
-    def _restore_real_keyring_wrapper(self):
-        import importlib
-        from security import vault as vault_mod
-        # Re-import a clean copy of the function so we bypass the
-        # conftest monkeypatch without restoring it (the conftest
-        # fixture handles its own teardown).
-        src = importlib.reload(importlib.import_module("security.vault"))
-        original_get = src._keyring_get_password
-        previous = vault_mod._keyring_get_password
-        vault_mod._keyring_get_password = original_get
-        try:
-            yield
-        finally:
-            vault_mod._keyring_get_password = previous
-
     def test_unlock_timeout_env_overrides_default(self, monkeypatch):
-        sys.modules.pop("security.vault", None)
+        # Deliberately do NOT pop ``sys.modules["security.vault"]``
+        # here: popping orphans the module so subsequent tests that
+        # imported ``security.vault`` at collection time keep using
+        # the orphaned reference, while conftest's per-test
+        # ``isolate_os_keychain`` monkeypatches the NEW module — the
+        # two diverge and the encryption tests can no longer decrypt
+        # their own .enc files.
         from security import vault as vault_mod
 
         monkeypatch.setenv("FERAL_VAULT_UNLOCK_TIMEOUT_S", "1.25")
@@ -207,13 +224,15 @@ class TestUnlockTimeout:
         monkeypatch.setenv("FERAL_VAULT_UNLOCK_TIMEOUT_S", "-3")
         assert vault_mod._unlock_timeout_seconds() == vault_mod._DEFAULT_UNLOCK_TIMEOUT_S
 
-    def test_keychain_unlock_timeout_raises(self, monkeypatch, caplog):
+    def test_keychain_unlock_timeout_raises(
+        self, monkeypatch, caplog, restore_real_keyring_wrapper,
+    ):
         """Simulate a frozen ``securityd``: ``keyring.get_password``
         blocks indefinitely. The worker thread bound must trip the
         configured timeout and raise ``VaultKeyUnavailableError``."""
         import types
 
-        from security import vault as vault_mod
+        from security import vault as vault_mod  # noqa: WPS433
 
         frozen = types.ModuleType("keyring")
 
@@ -244,10 +263,12 @@ class TestUnlockTimeout:
             "see when the keychain is being touched"
         )
 
-    def test_keychain_unlock_success_logs_done(self, monkeypatch, caplog):
+    def test_keychain_unlock_success_logs_done(
+        self, monkeypatch, caplog, restore_real_keyring_wrapper,
+    ):
         import types
 
-        from security import vault as vault_mod
+        from security import vault as vault_mod  # noqa: WPS433
 
         good = types.ModuleType("keyring")
         good.get_password = lambda service, user: "deadbeef" * 8

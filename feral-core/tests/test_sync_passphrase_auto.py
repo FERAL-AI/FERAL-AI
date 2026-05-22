@@ -21,22 +21,33 @@ Post-fix:
 
 from __future__ import annotations
 
-import importlib
 import os
-import sys
 
 import pytest
 
 
 @pytest.fixture
 def fresh_sync_module(tmp_path, monkeypatch):
-    """Reload ``memory.sync`` so module-level constants pick up
-    the per-test env + home overrides."""
+    """Return ``memory.sync`` with per-test ``FERAL_HOME`` /
+    ``FERAL_SYNC_PASSPHRASE`` and a reset ``SYNC_PASSPHRASE``
+    module constant.
+
+    Deliberately does NOT pop ``sys.modules['memory.sync']`` or call
+    :func:`importlib.reload` because both approaches break other
+    tests in the suite that hold module references — pop replaces
+    the object (orphaning prior ``monkeypatch.setattr(sync_mod, ...)``
+    calls) and reload rebuilds class identities (breaking
+    ``isinstance`` against pre-existing exception types). Instead we
+    monkeypatch the single module-level constant the function under
+    test reads (``SYNC_PASSPHRASE``) and let the env-var resolution
+    inside :func:`memory.sync.ensure_sync_passphrase` pick up the
+    fixture's ``monkeypatch.setenv`` calls.
+    """
     monkeypatch.setenv("FERAL_HOME", str(tmp_path))
     monkeypatch.delenv("FERAL_SYNC_PASSPHRASE", raising=False)
-    sys.modules.pop("memory.sync", None)
     import memory.sync as sync_mod  # noqa: WPS433
 
+    monkeypatch.setattr(sync_mod, "SYNC_PASSPHRASE", "", raising=False)
     return sync_mod
 
 
