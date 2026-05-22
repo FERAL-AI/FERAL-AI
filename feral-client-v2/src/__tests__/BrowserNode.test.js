@@ -86,7 +86,7 @@ describe('BrowserNode', () => {
     expect(ws.sent).toHaveLength(1);
     const frame = JSON.parse(ws.sent[0]);
     expect(frame.type).toBe('node_register');
-    expect(frame.hup_version).toBe('1.0');
+    expect(frame.hup_version).toBe('1.3.0');
     expect(frame.payload.node_type).toBe('browser_node');
     expect(frame.payload.name).toBe('My Phone');
     expect(frame.payload.capabilities).toContain('location');
