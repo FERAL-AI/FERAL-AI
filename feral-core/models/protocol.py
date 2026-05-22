@@ -12,7 +12,7 @@ from typing import Optional, Literal, Any
 from uuid import uuid4
 from time import time
 
-HUP_VERSION = "1.3.1"
+HUP_VERSION = "1.3.0"
 
 
 # ─────────────────────────────────────────────

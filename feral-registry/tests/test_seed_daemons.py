@@ -7,7 +7,7 @@ Track B daemons (``wristband_daemon`` + ``w300_daemon``) live under
 Asserts:
 1. Both directories exist with a parsable ``manifest.json``.
 2. The registry loader returns both as ``kind=daemon`` seeds.
-3. Each manifest declares the HUP v1.1 hookup (``hup_version == "1.1.0"``)
+3. Each manifest declares the HUP v1.3.0 hookup (``hup_version == "1.3.0"``)
    and the ``live_test_env`` gate name so the docs never drift from
    what the tests expect.
 """
@@ -39,8 +39,8 @@ def test_daemon_manifest_exists_and_is_parsable(name: str):
     assert manifest_path.is_file(), f"Missing manifest.json for {name}"
     data = json.loads(manifest_path.read_text())
     assert data.get("name") == name, f"manifest.name != {name!r}"
-    assert data.get("hup_version") == "1.1.0", (
-        f"{name}: hup_version must be pinned to 1.1.0 in the manifest"
+    assert data.get("hup_version") == "1.3.0", (
+        f"{name}: hup_version must be pinned to 1.3.0 in the manifest"
     )
     assert data.get("live_test_env"), f"{name}: missing live_test_env"
 

@@ -3,7 +3,7 @@
   "version": "1.1.0",
   "node_id": "feral-w300",
   "node_type": "glasses",
-  "hup_version": "1.1.0",
+  "hup_version": "1.3.0",
   "description": "First-party FERAL HUP v1.1 daemon for W300-class smart glasses. Streams JPEG video frames over HUP v1.1 video_frame (§5.4.2) and optional microphone audio over audio_frame (§5.4.1). Drives the glasses' tap-to-capture / nod gestures back to the brain as device_event. Also accepts hup_action_request for display actuators when present.",
   "manufacturer": "Theora",
   "capabilities": [

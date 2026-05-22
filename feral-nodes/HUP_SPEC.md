@@ -5,7 +5,17 @@
 **License:** Apache-2.0
 **Canonical schemas:** this file (normative) + Pydantic mirror in
 `feral-nodes/python-node-sdk/src/feral_node_sdk/schemas.py` + Zod mirror in
-`feral-nodes/ts-node-sdk/src/schemas.ts`.
+`feral-nodes/ts-node-sdk/src/schemas.ts` + Swift mirror in
+`feral-nodes/ios-node-sdk/Sources/FeralNodeSDK/HUPFrame.swift`.
+
+Every surface that participates in HUP MUST advertise `1.3.0` as
+`hup_version` in every outbound envelope. The five surfaces that the
+`feral-core/tests/test_hup_version_unified.py` CI test pins together
+are: this spec, `feral-core/models/protocol.py` (`HUP_VERSION`), the
+Python node SDK (`feral_node_sdk.schemas.HUP_VERSION`), the TypeScript
+node SDK (`HUP_VERSION` in `schemas.ts`), and the iOS node SDK
+(`FeralNodeSDKInfo.hupVersion`). The iOS companion app surfaces the
+same value via `Info.plist` `FERALHUPVersion`.
 
 HUP is FERAL's public wire contract between a "brain" (the FERAL orchestrator
 runtime) and a "node daemon" (a process running on or near a piece of
@@ -36,8 +46,7 @@ If you can terminate TLS and speak JSON over WebSocket, you can speak HUP.
 
 | Version | Status | Additions |
 |---|---|---|
-| `v1.3.1` | Stable | Patch: strict Pydantic-v2 schema enforcement on phone-as-peer envelopes — literal-typed `chat_request.reply_mode` + `chat_request.channel`, required `session_id` on `voice_session_start`, required `stream_id` + `channels` on `audio_chunk`. Non-normative tightening; v1.3.0 daemons stay conformant. |
-| `v1.3.0` | Stable | Phone-as-peer envelopes: `chat_request`, `chat_response`, `voice_session_start`, `voice_interrupt`, `genui_push`, `genui_event`, `peripheral_bridge_register`, `backchannel_request` (§5.9). |
+| `v1.3.0` | Stable | Phone-as-peer envelopes (§5.9): `chat_request`, `chat_response`, `voice_session_start`, `voice_interrupt`, `genui_push`, `genui_event`, `peripheral_bridge_register`, `backchannel_request`. Strict Pydantic-v2 schemas: literal-typed `chat_request.reply_mode` + `chat_request.channel`, required `session_id` on `voice_session_start`, required `stream_id` + `channels` on `audio_chunk`. Smart-glasses vision streaming via `glasses_frame` (§5.4.3) + per-device circular buffer in `feral-core/perception/glasses_buffer.py`. Hardware peripheral memory via `device_announce` (§5.4.4) routed through `feral-core/hardware/mesh.py` into the knowledge graph. |
 | `v1.2.0` | Stable | Canonical `node_ack`, `node_heartbeat`, `hup_action_request`, `hup_action_response`, and `node_bye` handling (§5.2-§5.8). |
 
 ---

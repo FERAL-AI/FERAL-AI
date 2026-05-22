@@ -9,10 +9,10 @@ Covers the canonical HUP wire shape between brain and daemons:
 
 Version assertions reference ``models.protocol.HUP_VERSION`` rather
 than a literal string so the test cannot drift from the canonical
-constant. Pre-audit-r12 this asserted the stale literal ``"1.2.0"``
-while three brain envelopes hardcoded the same stale literal and the
-canonical constant was already ``"1.3.1"`` — none of the four
-agreed.
+constant. The unification gate lives in
+``feral-core/tests/test_hup_version_unified.py`` — that pins every
+shipped surface (spec, Python brain, Python SDK, TS SDK, Swift SDK,
+iOS Info.plist) to the same canonical string.
 """
 
 from __future__ import annotations
@@ -225,7 +225,7 @@ class TestNodeRegisterReturnsNodeAck:
                 # v2026.5.32 (audit-r12 D3): both the envelope-level
                 # `hup_version` and the payload-level `hup_version` MUST
                 # equal the canonical constant. Pre-r12 these hardcoded
-                # "1.2.0" while the constant was already "1.3.1".
+                # "1.2.0" while the constant was already "1.3.0".
                 assert ack["hup_version"] == HUP_VERSION
                 p = ack["payload"]
                 assert p["hup_version"] == HUP_VERSION
@@ -341,7 +341,7 @@ class TestHupVersionCoherence:
     """v2026.5.32 (audit-r12 D3): every ``hup_version`` literal that the
     brain emits over the wire MUST equal ``models.protocol.HUP_VERSION``.
     Pre-r12 three envelopes hardcoded ``"1.2.0"`` while the constant was
-    already ``"1.3.1"``; iOS clients saw a brain that announced one
+    already ``"1.3.0"``; iOS clients saw a brain that announced one
     version on register and another on every other frame.
     """
 

@@ -11,7 +11,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-HUP_VERSION = "1.2.0"
+HUP_VERSION = "1.3.0"
 # Per-frame decoded-size caps from HUP_SPEC.md §5.4.1 / §5.4.2.
 AUDIO_FRAME_MAX_BYTES = 64 * 1024
 VIDEO_FRAME_MAX_BYTES = 512 * 1024

@@ -22,7 +22,7 @@
  *   • stop() revokes getUserMedia tracks + closes the WS.
  */
 
-const HUP_VERSION = "1.0";
+const HUP_VERSION = "1.3.0";
 const AUDIO_TARGET_SAMPLE_RATE = 24000;
 const AUDIO_CHUNK_MS = 250; // 200-400ms per chunk — matches the VoiceRouter contract
 const VIDEO_INTERVAL_MS = 750;

@@ -1,4 +1,4 @@
-"""Verify node_register payload advertises HUP v1.2.0."""
+"""Verify node_register payload advertises HUP v1.3.0."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ from feral_node_sdk import FeralNode
 from feral_node_sdk.schemas import HUP_VERSION
 
 
-def test_hup_version_is_1_2_0():
-    assert HUP_VERSION == "1.2.0"
+def test_hup_version_is_1_3_0():
+    assert HUP_VERSION == "1.3.0"
 
 
 def test_node_register_frame_contains_version():
-    """The handshake frame must carry hup_version='1.2.0' in the envelope."""
+    """The handshake frame must carry hup_version='1.3.0' in the envelope."""
     sent_frames: list[str] = []
 
     node = FeralNode(
@@ -36,4 +36,4 @@ def test_node_register_frame_contains_version():
     assert len(sent_frames) >= 1
     register_frame = json.loads(sent_frames[0])
     assert register_frame["type"] == "node_register"
-    assert register_frame["hup_version"] == "1.2.0"
+    assert register_frame["hup_version"] == "1.3.0"

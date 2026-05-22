@@ -358,7 +358,7 @@ def test_malformed_phone_payload_sends_protocol_error(message_type, malformed_pa
             assert "payload validation failed" in err["payload"]["message"]
 
 
-# ── HUP v1.3.1: location_update over the daemon WS ───────────────
+# ── HUP v1.3.0: location_update over the daemon WS ───────────────
 
 
 def test_location_update_routes_to_location_engine():
@@ -380,7 +380,7 @@ def test_location_update_routes_to_location_engine():
             )
             ws.send_json({
                 "type": "location_update",
-                "hup_version": "1.3.1",
+                "hup_version": "1.3.0",
                 "ts": 1734369999.0,
                 "payload": {
                     "node_id": "phone-loc-1",
@@ -417,7 +417,7 @@ def test_location_update_skips_null_island():
             )
             ws.send_json({
                 "type": "location_update",
-                "hup_version": "1.3.1",
+                "hup_version": "1.3.0",
                 "ts": 1734369999.0,
                 "payload": {"node_id": "phone-loc-2", "lat": 0, "lon": 0},
             })
@@ -442,7 +442,7 @@ def test_location_update_denies_when_engine_missing():
             )
             ws.send_json({
                 "type": "location_update",
-                "hup_version": "1.3.1",
+                "hup_version": "1.3.0",
                 "ts": 1734369999.0,
                 "payload": {
                     "node_id": "phone-loc-3",
