@@ -66,6 +66,13 @@ ALLOWED_FAIL_LABELS: set[str] = {
     "Config directory",
     # No LLM key in vault, no key in env, and no local Ollama.
     "LLM credentials",
+    # Lane 07 (W2) — probe-driven catch-all. When EVERY LLM probe
+    # returns red or unconfigured, doctor fires this single
+    # ``_fail`` so the operator sees one actionable line instead of
+    # a wall of yellow rows. The per-provider rows themselves are
+    # rendered by ``_render_probe_row`` (outside ``cmd_doctor``), so
+    # they don't appear in this allowlist.
+    "LLM providers",
     # Memory DB present but unreadable (corrupt / permission denied).
     # Reaching this branch means the operator has a file at
     # ~/.feral/memory.db that SQLite refuses to open — the brain will
@@ -286,6 +293,32 @@ def doctor_clean_env(monkeypatch, tmp_path):
         return _Resp()
 
     monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+
+    # Lane 07 (W2) — doctor now drives everything off
+    # ``security.probe.probe()``; the fresh-install behaviour test
+    # therefore needs deterministic probe results. We model the
+    # cleanest possible "user just ran `feral setup` with Ollama" by:
+    #   * Ollama → ok (so the LLM-providers section has at least one
+    #     green row and the catch-all _fail does not fire).
+    #   * every other registered provider → ``no_key`` (renders ℹ).
+    import time as _t
+    from security import probe as _probe_mod
+
+    async def _fake_probe(pid, **_kw):
+        if pid == "ollama":
+            return _probe_mod.ProbeResult(
+                provider="ollama", ok=True, status_code=200,
+                reason="ok", detail="Ollama running locally",
+                probed_at=_t.time(), latency_ms=5.0,
+            )
+        return _probe_mod.ProbeResult(
+            provider=pid, ok=False, status_code=None,
+            reason="no_key", detail="not configured",
+            probed_at=_t.time(), latency_ms=0.0,
+        )
+
+    monkeypatch.setattr(_probe_mod, "probe", _fake_probe)
+    _probe_mod.clear_probe_cache()
 
     # Plant a non-empty USER.md so the identity probe passes — we are
     # testing severity classification, not first-run wizard completion.

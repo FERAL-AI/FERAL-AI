@@ -92,6 +92,41 @@ def _http_request(method: str, path: str) -> dict:
 
 
 def cmd_memory(action: str, backend_id: str | None) -> None:
+    # Lane 07 W6 — `feral memory query <text>` closes THESIS_SCENARIOS
+    # S1 from the CLI side. The argparse positional ``backend_id`` is
+    # repurposed as the query string for ``query``; main.py forwards
+    # everything after ``feral memory query`` as ``args.backend_id``.
+    if action == "query":
+        if not backend_id:
+            print("  Usage: feral memory query \"<text>\"")
+            sys.exit(2)
+        from urllib.parse import quote
+        path = f"/internal/memory/search?query={quote(backend_id)}&limit=20"
+        result = _http_request("GET", path)
+        if isinstance(result, dict) and result.get("ok") is False:
+            err = result.get("error") or result.get("detail") or result
+            print(f"  Memory query failed: {err}")
+            sys.exit(1)
+
+        rows = result if isinstance(result, list) else []
+        if not rows:
+            print(f"  No memory hits for {backend_id!r}.")
+            return
+        print(f"  {len(rows)} hit(s) for {backend_id!r}:")
+        for i, row in enumerate(rows, start=1):
+            content = row.get("content") or row.get("text") or ""
+            ts = row.get("created_at") or row.get("timestamp") or ""
+            tags = row.get("tags") or []
+            score = row.get("score")
+            score_str = f" score={score:.3f}" if isinstance(score, (int, float)) else ""
+            preview = content.strip().replace("\n", " ")
+            if len(preview) > 200:
+                preview = preview[:200] + "…"
+            print()
+            print(f"  {i}. [{ts}{score_str}]  tags={','.join(tags) or '-'}")
+            print(f"     {preview}")
+        return
+
     if action == "decay":
         if backend_id != "now":
             print("  Usage: feral memory decay now")

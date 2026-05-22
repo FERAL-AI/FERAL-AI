@@ -1,0 +1,213 @@
+"""Voice provider preflight (audit-r14 / lane-07 W7).
+
+After the operator picks an LLM provider + model, this step runs the
+Wave 2 Lane 05 voice catalogue through ``security.probe.probe`` and
+shows them which realtime provider + STT/TTS chain are usable. The
+operator picks a primary realtime provider (or skips voice) which is
+persisted as ``audio.realtime_primary`` in ``settings.json``.
+
+The catalogue is the single source of truth shared with
+``feral voice providers`` (parent ack reminder #3) — no separate
+provider list lives in this step.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+from cli import ui_kit
+
+from ..helpers import (
+    BackNavigation,
+    QuitNavigation,
+    SkipStep,
+    Option,
+    ask_choice,
+    confirm,
+    get_console,
+    _RICH_AVAILABLE,
+)
+from ..state import WizardState
+
+
+async def run(state: WizardState) -> None:
+    console = get_console()
+
+    try:
+        from security.probe import voice_provider_catalogue, probe
+    except Exception as exc:
+        console.print(
+            f"[yellow]Voice catalogue unavailable: {exc}[/]"
+            if _RICH_AVAILABLE else f"Voice catalogue unavailable: {exc}"
+        )
+        raise SkipStep()
+
+    catalogue = voice_provider_catalogue()
+    if not catalogue:
+        raise SkipStep()
+
+    if _RICH_AVAILABLE:
+        console.print(
+            "FERAL supports two voice modes — "
+            "[bold]realtime[/bold] (single bidirectional WebSocket: OpenAI Realtime "
+            "/ Gemini Live) or [bold]chained[/bold] (Deepgram/Whisper STT + "
+            "ElevenLabs/Cartesia TTS). Pick the primary mode now; you can change it "
+            "later with `feral voice providers` or in Settings → Voice."
+        )
+
+    try:
+        wants_voice = confirm(
+            "Configure voice now? (Skip if you only need text chat — voice can be set up later.)",
+            default=True,
+        )
+    except (KeyboardInterrupt, BackNavigation, QuitNavigation):
+        raise
+
+    if not wants_voice:
+        # Stamp a sentinel so we don't re-prompt next time.
+        state.set_setting("audio", "configured_via_wizard", False)
+        raise SkipStep()
+
+    # Probe every catalogue entry once and group results by kind.
+    realtime_entries = [e for e in catalogue if e["kind"] == "realtime"]
+    stt_entries = [e for e in catalogue if e["kind"] == "stt"]
+    tts_entries = [e for e in catalogue if e["kind"] == "tts"]
+
+    console.print()
+    console.print("Probing voice providers… (5s ceiling per provider)")
+    probe_results = await _probe_all(probe, [e["id"] for e in catalogue])
+
+    # Render the side-by-side preflight table — same columns as
+    # `feral voice providers` for parity with the standalone CLI
+    # surface (parent ack reminder #3).
+    _render_table(console, catalogue, probe_results)
+
+    # ── Pick primary realtime provider (optional) ────────────────────
+    if realtime_entries:
+        opts = []
+        for entry in realtime_entries:
+            res = probe_results.get(entry["id"])
+            status = _option_status(res)
+            opts.append(Option(
+                id=entry["id"],
+                label=entry["name"],
+                aliases=(entry["id"], entry["kind"]),
+                status=status,
+            ))
+        opts.append(Option(id="__none__", label="(skip realtime)", status=""))
+
+        default_id = state.get_setting("audio", "realtime_primary") or _first_ready(opts)
+        chosen = ask_choice(
+            "Pick the primary realtime voice provider",
+            opts, default=default_id,
+        )
+        if chosen.id != "__none__":
+            state.set_setting("audio", "realtime_primary", chosen.id)
+        else:
+            state.set_setting("audio", "realtime_primary", "")
+
+    # ── Pick chained STT (optional) ──────────────────────────────────
+    if stt_entries:
+        opts = []
+        for entry in stt_entries:
+            res = probe_results.get(entry["id"])
+            status = _option_status(res)
+            opts.append(Option(
+                id=entry["id"], label=entry["name"], aliases=(entry["id"],),
+                status=status,
+            ))
+        opts.append(Option(id="__none__", label="(skip STT)", status=""))
+        default_id = state.get_setting("audio", "chained_stt_provider") or _first_ready(opts)
+        chosen = ask_choice(
+            "Pick the chained-pipeline STT provider",
+            opts, default=default_id,
+        )
+        if chosen.id != "__none__":
+            state.set_setting("audio", "chained_stt_provider", chosen.id)
+
+    # ── Pick chained TTS (optional) ──────────────────────────────────
+    if tts_entries:
+        opts = []
+        for entry in tts_entries:
+            res = probe_results.get(entry["id"])
+            status = _option_status(res)
+            opts.append(Option(
+                id=entry["id"], label=entry["name"], aliases=(entry["id"],),
+                status=status,
+            ))
+        opts.append(Option(id="__none__", label="(skip TTS)", status=""))
+        default_id = state.get_setting("audio", "chained_tts_provider") or _first_ready(opts)
+        chosen = ask_choice(
+            "Pick the chained-pipeline TTS provider",
+            opts, default=default_id,
+        )
+        if chosen.id != "__none__":
+            state.set_setting("audio", "chained_tts_provider", chosen.id)
+
+    state.set_setting("audio", "configured_via_wizard", True)
+
+
+async def _probe_all(probe_fn, provider_ids):
+    """Run all probes in parallel and return id→ProbeResult."""
+    results = await asyncio.gather(*[probe_fn(pid) for pid in provider_ids], return_exceptions=True)
+    out = {}
+    for pid, res in zip(provider_ids, results):
+        out[pid] = res if not isinstance(res, Exception) else None
+    return out
+
+
+def _render_table(console, catalogue, results):
+    if _RICH_AVAILABLE:
+        try:
+            from rich.table import Table
+        except ImportError:
+            Table = None
+        if Table is not None:
+            table = Table(title="Voice catalogue", show_lines=False)
+            table.add_column("Kind", style="dim")
+            table.add_column("Provider", style="bold")
+            table.add_column("Probe")
+            for entry in catalogue:
+                res = results.get(entry["id"])
+                cell = _probe_cell(res)
+                table.add_row(entry["kind"], entry["name"], cell)
+            console.print(table)
+            return
+    for entry in catalogue:
+        res = results.get(entry["id"])
+        mark = "ok " if (res and getattr(res, "ok", False)) else "off"
+        console.print(f"  [{entry['kind']:<8}] {entry['name']:<28} {mark}")
+
+
+def _probe_cell(res) -> str:
+    if res is None:
+        return "[dim]—[/dim]"
+    if getattr(res, "ok", False):
+        return "[green]✔ ready[/green]"
+    reason = (getattr(res, "reason", "") or "").lower()
+    if any(s in reason for s in ("missing", "no_key", "no_token", "not_configured")):
+        return "[cyan]ℹ not configured[/cyan]"
+    if getattr(res, "status_code", None) in (401, 403):
+        return "[red]✘ key rejected[/red]"
+    return f"[yellow]⚠ {reason or 'error'}[/yellow]"
+
+
+def _option_status(res) -> str:
+    """Map a ProbeResult to the helpers.Option status string."""
+    if res is None or not getattr(res, "ok", False):
+        reason = (getattr(res, "reason", "") or "").lower() if res else ""
+        if any(s in reason for s in ("missing", "no_key", "no_token", "not_configured")):
+            return "needs_api_key"
+        if res is None:
+            return "unavailable"
+        return "unreachable"
+    return "ready"
+
+
+def _first_ready(options) -> str:
+    for opt in options:
+        if opt.status == "ready":
+            return opt.id
+    if options and options[0].id != "__none__":
+        return options[0].id
+    return "__none__"

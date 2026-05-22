@@ -26,16 +26,41 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from urllib.parse import urlparse
 
-try:
-    import websockets
-except ImportError:
-    print("websockets package required. Install: pip install websockets")
-    sys.exit(1)
+# audit-r14 / lane-07 (R2-002) — `feral --version` MUST NOT open a
+# WebSocket to the brain. Importing ``websockets`` at module load
+# also pulls in ``http``/``ssl`` machinery that the version probe
+# never needs; the repl/one_shot paths import lazily via
+# :func:`_require_websockets`. ``httpx`` import itself does NOT
+# make any network calls (verified by wave1-summary §R2-002), so we
+# import it eagerly to keep the existing ``cli_main.httpx`` mock
+# surface intact. Pure-local commands still exit before any
+# ``httpx.get/.post`` call site runs.
+websockets = None  # populated by _require_websockets()
 
 try:
     import httpx
 except ImportError:
     httpx = None
+
+
+def _require_websockets():
+    """Lazy-import + cache the ``websockets`` package.
+
+    Returns the imported module. Used by :func:`repl` and
+    :func:`one_shot` — the only paths that actually open a brain
+    WebSocket. Pure-local commands (``--version``, ``doctor``,
+    ``key`` …) MUST NOT call this helper.
+    """
+    global websockets
+    if websockets is None:
+        try:
+            import websockets as _ws
+        except ImportError:
+            print("websockets package required. Install: pip install websockets")
+            sys.exit(1)
+        websockets = _ws
+    return websockets
+
 
 from version import VERSION as __version__
 from config.loader import feral_home
@@ -48,6 +73,29 @@ from config.runtime import (
     brain_public_scheme,
     brain_tls_enabled,
 )
+
+
+# ── R2-002 ───────────────────────────────────────────────────────────
+# Pure-local commands MUST NOT touch the network. Needs-brain commands
+# may. The lists below are the source of truth referenced by:
+#   * the early dispatch in :func:`main` (so ``--version`` short-
+#     circuits before any parser cost)
+#   * ``tests/test_cli_pure_local.py`` (R2-002 CI gate)
+#   * ``tests/test_cli_no_phantom_commands.py`` (docs↔CLI parity)
+# Update both lists when adding a new top-level command.
+PURE_LOCAL_SUBCOMMANDS = frozenset({
+    "doctor", "setup", "key", "grant", "access", "pair",
+    "voice", "models", "integrations",
+    "install-service", "uninstall-service",
+    "service-status", "logs", "stop", "restart",
+    "wake-test", "publisher", "publish", "app",
+})
+NEEDS_BRAIN_SUBCOMMANDS = frozenset({
+    "status", "devices", "skills", "identity",
+    "memory", "sync", "twin", "marketplace", "install",
+    "bridge",  # bridge install runs a script that contacts brain
+    "start", "serve", "demo",
+})
 
 
 def _runtime_http_base() -> str:
@@ -339,13 +387,14 @@ async def repl():
     """
     print(BANNER)
     uri = WS_URL
+    ws_pkg = _require_websockets()
 
     backoff = 1.0
     max_backoff = 30.0
 
     while True:
         try:
-            async with websockets.connect(uri) as ws:
+            async with ws_pkg.connect(uri) as ws:
                 # Reset backoff once we're actually connected.
                 backoff = 1.0
                 try:
@@ -479,11 +528,12 @@ async def one_shot(text: str):
     one-shot call has no colocated brain to protect — exit codes are the
     contract for shell scripting, so we keep ``sys.exit(1)`` here.
     """
+    ws_pkg = _require_websockets()
     try:
         last_err: Exception | None = None
         for _attempt in range(3):
             try:
-                async with websockets.connect(WS_URL) as ws:
+                async with ws_pkg.connect(WS_URL) as ws:
                     _ = await asyncio.wait_for(ws.recv(), timeout=5)
 
                     await ws.send(json.dumps({
@@ -1065,6 +1115,124 @@ def _open_browser(port: int):
         pass
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Doctor — probe-driven helpers (Lane 07 W2)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _voice_catalogue_or_empty() -> list:
+    """Lazy-load + degrade: if Lane 05's voice catalogue is missing
+    (e.g. partial install), doctor returns an empty list rather
+    than crashing the whole probe sweep."""
+    try:
+        from security.probe import voice_provider_catalogue
+        return voice_provider_catalogue()
+    except Exception:
+        return []
+
+
+def _run_doctor_probes(console) -> dict:
+    """Run every registered probe in parallel and return id→ProbeResult.
+
+    Doctor MUST not block on a slow provider for >~5s; ``probe()``
+    itself enforces ``PROBE_TIMEOUT_SECONDS``. We use ``asyncio.gather``
+    so the whole sweep completes in roughly the slowest probe's time
+    (typically <1s when keys are present, ~5s when they time out).
+    """
+    try:
+        from security.probe import probe, registered_probe_ids
+    except Exception as exc:
+        console.print(f"[red]✘[/red]  Probe registry unavailable: {exc}")
+        return {}
+
+    ids = registered_probe_ids()
+    if not ids:
+        return {}
+
+    async def _gather():
+        tasks = [probe(pid) for pid in ids]
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    try:
+        raw = asyncio.run(_gather())
+    except RuntimeError:
+        # Already inside an event loop — fall back to sequential.
+        loop = asyncio.new_event_loop()
+        try:
+            raw = loop.run_until_complete(_gather())
+        finally:
+            loop.close()
+
+    out = {}
+    for pid, res in zip(ids, raw):
+        if isinstance(res, Exception):
+            # Synthesize a degraded ProbeResult so the renderer
+            # still has a uniform shape to work with.
+            from security.probe import ProbeResult
+            import time as _t
+            out[pid] = ProbeResult(
+                provider=pid, ok=False, status_code=None,
+                reason="probe_exception", detail=str(res),
+                probed_at=_t.time(), latency_ms=0.0,
+            )
+        else:
+            out[pid] = res
+    return out
+
+
+def _render_probe_row(pid: str, result, _pass, _info, _warn, _fail):
+    """Render one probe row with consistent green/yellow/red semantics."""
+    label_map = {
+        "openai": "OpenAI", "anthropic": "Anthropic", "gemini": "Gemini",
+        "openrouter": "OpenRouter", "deepseek": "DeepSeek", "groq": "Groq",
+        "ollama": "Ollama (local)", "lmstudio": "LM Studio (local)",
+        "bedrock": "AWS Bedrock",
+        "google": "Google (Calendar / Gmail / Drive / Contacts)",
+        "notion": "Notion", "spotify": "Spotify",
+        "whoop": "Whoop", "oura": "Oura",
+        "microsoft": "Microsoft 365",
+        "home_assistant": "Home Assistant",
+        "telegram": "Telegram", "slack": "Slack", "discord": "Discord",
+        "openai_realtime": "OpenAI Realtime",
+        "gemini_live": "Gemini Live",
+        "deepgram": "Deepgram (STT)",
+        "elevenlabs": "ElevenLabs (TTS)",
+        "cartesia": "Cartesia (TTS)",
+        "openai_whisper": "OpenAI Whisper (STT)",
+        "groq_whisper": "Groq Whisper (STT)",
+        "openai_tts": "OpenAI TTS",
+    }
+    label = label_map.get(pid, pid)
+    detail = f"{result.detail} ({result.latency_ms:.0f}ms)"
+    if result.ok:
+        _pass(label, detail)
+        return
+    reason = (result.reason or "").lower()
+    # "missing_credential" / "no_credentials_loaded" / "missing_api_key"
+    # / "no_key" / "no_token" are all "not yet configured" — render as
+    # info (cyan ℹ), not warning. The probe registry uses any of these
+    # values; we match permissively rather than coupling the renderer
+    # to the registry's exact spelling.
+    if any(
+        s in reason
+        for s in (
+            "missing", "no_credential", "no_key", "no_token",
+            "unconfigured", "not_set", "not_configured",
+        )
+    ):
+        _info(label, "not configured")
+        return
+    if reason in ("auth_failed",) or result.status_code in (401, 403):
+        _fail(
+            label,
+            f"key rejected by API: {result.detail}",
+            f"Run: feral key add --provider {pid} --label default  (or set the env var and re-probe)",
+        )
+        return
+    # Everything else (timeout, transient 5xx, unknown_provider): yellow.
+    _warn(label, f"{reason or 'error'}: {result.detail}")
+
+
 def cmd_doctor():
     """Run comprehensive diagnostics and report what's working."""
     try:
@@ -1171,64 +1339,78 @@ def cmd_doctor():
     else:
         _fail("Config directory", f"{home} does not exist", "Run: feral setup")
 
-    # ── 4. Credentials — at least one LLM key (vault or env) or Ollama ──
+    # ── 4. Provider probes (validity, not just presence) ──
     #
-    # Pre-v2026.5.28 this probe read the legacy plaintext
-    # ``credentials.json`` file directly, which silently diverged from
-    # the encrypted vault that the setup wizard + the brain runtime
-    # actually use. Operators on a vault-only install saw "No API key"
-    # from `feral doctor` despite their key being live in the brain.
-    # The fix queries ``BlindVault`` first (matching the runtime path)
-    # and never reads the plaintext file.
-    llm_keys = [
-        "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
-        "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY",
-    ]
-    vaulted_keys: list[str] = []
-    try:
-        from security.vault import BlindVault  # type: ignore
+    # Pre-Lane-07 this section only checked vault/env *presence* of
+    # an LLM key — finding 07's D-D defect ("`feral doctor` reports
+    # ✔ LLM credentials when the key is invalid / 401"). The fix
+    # routes every provider/integration/voice probe through the
+    # Wave 1 ``security.probe.probe()`` registry so doctor reflects
+    # actual API round-trip validity. Each probe runs once with a
+    # 5s ceiling (``PROBE_TIMEOUT_SECONDS``); first invocation
+    # populates the in-process cache so the brain runtime can read
+    # the same result without re-paying the network cost.
+    probe_results = _run_doctor_probes(console)
 
-        vault = BlindVault()
-        for k in llm_keys:
-            try:
-                if vault.get_credential(k):
-                    vaulted_keys.append(k)
-            except Exception:
-                # Vault may be locked / corrupt — fall through silently.
-                pass
-    except Exception:
-        # No vault available — env-only / Ollama paths still work.
-        pass
+    # Categorise probe ids so doctor renders three labelled
+    # sections instead of one undifferentiated wall. The catalogue
+    # is pinned in ``security.probe`` (LLM ids match
+    # ``providers/catalog.py``; voice ids match
+    # ``VOICE_PROVIDER_CATALOGUE``; integration ids match
+    # ``integrations/oauth_manager.BUILTIN_PROVIDERS`` + the
+    # messaging hub).
+    LLM_PROBE_IDS = (
+        "openai", "anthropic", "gemini", "openrouter", "deepseek",
+        "groq", "ollama", "lmstudio", "bedrock",
+    )
+    INTEGRATION_PROBE_IDS = (
+        "google", "notion", "spotify", "whoop", "oura", "microsoft",
+        "home_assistant", "telegram", "slack", "discord",
+    )
+    VOICE_PROBE_IDS = tuple(p["id"] for p in _voice_catalogue_or_empty())
 
-    env_keys = [k for k in llm_keys if os.environ.get(k)]
-    available_keys = sorted(set(env_keys) | set(vaulted_keys))
+    # Render each section. We reuse ``_render_probe_row`` so green/
+    # yellow/red semantics stay consistent across sections:
+    #   * ok=True → green ✔ (passed)
+    #   * ok=False & reason="missing_credential" → cyan ℹ (info,
+    #     opt-in / not-yet-configured); doesn't add to warnings
+    #   * ok=False & status_code=401 / 403 → red ✘ (real failure)
+    #   * ok=False & other → yellow ⚠ (transient / unknown error)
+    console.print()
+    console.print("[bold]LLM providers[/bold]")
+    any_llm_ok = False
+    for pid in LLM_PROBE_IDS:
+        result = probe_results.get(pid)
+        if result is None:
+            continue  # registry is single-source-of-truth; tolerate gaps
+        if result.ok:
+            any_llm_ok = True
+        _render_probe_row(pid, result, _pass, _info, _warn, _fail)
+    if not any_llm_ok:
+        # Closes finding 07's D-D: at least one LLM provider must
+        # actually authenticate, not just be "configured". The fix
+        # tag steers the operator to the wizard or `feral key add`.
+        _fail(
+            "LLM providers",
+            "no provider passed probe — chat will not work until at least one is green",
+            "Run: feral setup  OR  feral key add --provider <id> --label default",
+        )
 
-    ollama_ok = False
-    try:
-        import urllib.request
-        with urllib.request.urlopen("http://127.0.0.1:11434/api/version", timeout=2) as resp:
-            if resp.status == 200:
-                ollama_ok = True
-    except Exception:
-        pass
+    console.print()
+    console.print("[bold]Integrations[/bold]")
+    for pid in INTEGRATION_PROBE_IDS:
+        result = probe_results.get(pid)
+        if result is None:
+            continue
+        _render_probe_row(pid, result, _pass, _info, _warn, _fail)
 
-    if available_keys:
-        providers = [
-            k.replace("_API_KEY", "").replace("_", " ").title()
-            for k in available_keys
-        ]
-        source_bits = []
-        if env_keys:
-            source_bits.append(f"{len(env_keys)} from env")
-        if vaulted_keys:
-            source_bits.append(f"{len(vaulted_keys)} in vault")
-        detail = f"{', '.join(providers)}  ({'; '.join(source_bits)})"
-        _pass("LLM credentials", detail)
-    elif ollama_ok:
-        _pass("LLM credentials", "Ollama running locally")
-    else:
-        _fail("LLM credentials", "No API key in vault or env, and Ollama not reachable",
-              "Run: feral setup  (or start Ollama: ollama serve)")
+    console.print()
+    console.print("[bold]Voice providers[/bold]")
+    for pid in VOICE_PROBE_IDS:
+        result = probe_results.get(pid)
+        if result is None:
+            continue
+        _render_probe_row(pid, result, _pass, _info, _warn, _fail)
 
     # ── 5. Identity files — USER.md ──
     user_md = home / "USER.md"
@@ -1435,6 +1617,22 @@ def cmd_doctor():
     if platform.system() == "Darwin":
         console.print()
         console.print("[bold]macOS GUI Permissions[/bold]")
+        # Lane 07 W2 — surface the canonical macOS Settings deeplink
+        # alongside the human remediation text. Lane 06's TCC_CATALOG
+        # holds the ``x-apple.systempreferences:`` URL per permission;
+        # rendering it makes the doctor row "click-to-fix" once the
+        # operator's terminal supports OSC-8 hyperlinks.
+        try:
+            from agents.tcc_card import TCC_CATALOG
+        except Exception:
+            TCC_CATALOG = {}
+
+        def _tcc_remediation(probe) -> str:
+            deeplink = (TCC_CATALOG.get(probe.permission) or {}).get("macos_deeplink", "")
+            if deeplink:
+                return f"{probe.setup_step}  ({deeplink})"
+            return probe.setup_step
+
         try:
             from security.macos_permissions import all_gui_permission_statuses
             for probe in all_gui_permission_statuses():
@@ -1455,7 +1653,7 @@ def cmd_doctor():
                     _warn(
                         label,
                         f"{probe.api}: denied (only blocks GUI computer-use)",
-                        probe.setup_step,
+                        _tcc_remediation(probe),
                     )
                 elif probe.status == "unknown":
                     # v2026.5.38 (audit-r12 / Lane 06) — the new
@@ -1623,6 +1821,57 @@ def cmd_doctor():
             "Ensure $FERAL_HOME is writable.",
         )
 
+    # ── Cost budget (Lane 04 / Lane 07 W2) ─────────────────────────
+    #
+    # Surfaces per-call-site caps + current spend + reset times. The
+    # data is read straight off Lane 04's CostBudget rollups; if the
+    # brain is running, its in-process state lives in ``cost.db`` so
+    # doctor reads the same source of truth without a brain RTT. When
+    # CostBudget is unavailable (degraded install), we render a single
+    # info row rather than failing the whole doctor.
+    console.print()
+    console.print("[bold]Cost budget[/bold]")
+    try:
+        from cost.budget import CostBudget, DEFAULT_COST_SETTINGS, window_reset_at
+        cb = CostBudget()
+        # ``ensure_ready`` opens the persistent rollup DB and loads
+        # the current hour/day spend snapshot for each call_site.
+        asyncio.run(cb.ensure_ready())
+        try:
+            now_ts = __import__("time").time()
+            for site, cap_cfg in DEFAULT_COST_SETTINGS["cost"]["per_call_site_caps"].items():
+                hour_cap = cap_cfg.get("per_hour_usd", 0.0)
+                spent = cb.current_spend(site, "hour")
+                reset_at = window_reset_at("hour", now_ts)
+                reset_min = max(0, int((reset_at - now_ts) / 60.0))
+                detail = (
+                    f"${spent:.4f} / ${hour_cap:.2f} per hour "
+                    f"(resets in {reset_min}m)"
+                )
+                if hour_cap > 0 and spent >= hour_cap:
+                    _fail(
+                        f"cost.{site}",
+                        detail,
+                        f"Wait {reset_min}m for the cap to reset, or raise it via Settings → Cost.",
+                    )
+                elif hour_cap > 0 and spent >= hour_cap * 0.8:
+                    _warn(f"cost.{site}", detail)
+                else:
+                    _pass(f"cost.{site}", detail)
+            # Global caps
+            global_hour = DEFAULT_COST_SETTINGS["cost"].get("global_per_hour_usd", 0.0)
+            global_day = DEFAULT_COST_SETTINGS["cost"].get("global_per_day_usd", 0.0)
+            if global_hour > 0:
+                spent_h = cb.current_spend(None, "hour")
+                _pass("cost.__global__/hour", f"${spent_h:.4f} / ${global_hour:.2f}")
+            if global_day > 0:
+                spent_d = cb.current_spend(None, "day")
+                _pass("cost.__global__/day", f"${spent_d:.4f} / ${global_day:.2f}")
+        finally:
+            asyncio.run(cb.close())
+    except Exception as exc:
+        _info("Cost budget", f"unavailable ({exc})")
+
     # ── Summary ──
     console.print()
     parts = []
@@ -1652,6 +1901,16 @@ def cmd_doctor():
         for i, fix in enumerate(fixes, 1):
             console.print(f"  {i}. {fix}")
         console.print()
+
+    # ── Lane 07 W2 — exit code reflects severity ──
+    #
+    # Pre-Lane-07 doctor always returned 0; finding 07 #1 calls out
+    # the operator-facing acceptance "exit 0 if all green or only-
+    # yellow; 1 if any red." Shell scripts (CI, install wrappers)
+    # rely on this contract.
+    if failures:
+        sys.exit(1)
+    return 0
 
 
 def cmd_setup(*, browser: bool = False, terminal: bool = False):
@@ -2005,12 +2264,39 @@ def _apply_connection_args(args):
 
 
 def main():
+    # ── R2-002 — pure-local fast path ─────────────────────────────────
+    # `feral --version` MUST print the version + exit 0 in <100ms with
+    # NO network calls. We short-circuit BEFORE the heavy argparse tree
+    # is built (registering 30+ subparsers, importing `cli.app_commands`,
+    # `cli.key_commands`, etc., easily costs another 50ms). The argparse
+    # `--version` action is also registered below for the canonical flag
+    # discovery in `feral --help`.
+    #
+    # Pure-local commands more broadly are listed in
+    # ``PURE_LOCAL_SUBCOMMANDS``; the network-touching ones in
+    # ``NEEDS_BRAIN_SUBCOMMANDS``. ``tests/test_cli_pure_local.py``
+    # pins both timing + no-network-on-pure-local behavior.
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("--version", "-V"):
+        print(f"feral-ai {__version__}")
+        return 0
+
     parser = argparse.ArgumentParser(
         description="FERAL — Open AI agent with computer use, voice, GenUI, and hardware control",
         usage="feral [command] [options]",
     )
     parser.add_argument("--host", default=None, help="Brain hostname")
     parser.add_argument("--port", default=None, help="Brain port")
+    # Argparse-driven --version: makes the flag visible in `feral --help`
+    # and supports `feral --host x --port y --version` after the global
+    # options. The fast-path above handles the bare `feral --version`
+    # case without paying the parser-build cost.
+    parser.add_argument(
+        "--version", "-V",
+        action="version",
+        version=f"feral-ai {__version__}",
+        help="Print the installed feral-ai package version and exit",
+    )
 
     sub = parser.add_subparsers(dest="subcommand")
 
@@ -2134,25 +2420,34 @@ def main():
         help="File path for export/import, peer_id for `now`, or subcommand for `peers`",
     )
 
-    # feral memory — backend selector + v2026.5.34 decay/forget/recall/compact.
-    mem_p = sub.add_parser("memory", help="Memory backend + decay management")
+    # feral memory — backend selector + v2026.5.34 decay/forget/recall/compact
+    # + Lane 07 W6 `query` (closes THESIS_SCENARIOS S1 from the CLI).
+    mem_p = sub.add_parser("memory", help="Memory backend + decay + query management")
     mem_p.add_argument(
         "action",
-        choices=["status", "switch", "list", "decay", "forget", "recall", "compact"],
+        choices=[
+            "status", "switch", "list", "decay",
+            "forget", "recall", "compact", "query",
+        ],
         help=(
             "status: show current backend | list: installed backends | "
             "switch <id>: select backend | "
             "decay now: run a one-shot Ebbinghaus sweep | "
             "forget <episode_id>: mark an episode forgotten | "
             "recall <episode_id>: reverse a forget | "
-            "compact [<session_id>]: promote conversation turns to episodes"
+            "compact [<session_id>]: promote conversation turns to episodes | "
+            "query <text>: search memory (THESIS S1)"
         ),
     )
     mem_p.add_argument(
         "backend_id",
         nargs="?",
         default=None,
-        help="Backend id for `switch` (e.g. sqlite_vec, chroma, qdrant)",
+        help=(
+            "Positional argument — backend id for `switch` "
+            "(sqlite_vec / chroma / qdrant), session id for `compact`, "
+            "or query text for `query` (quote multi-word queries)"
+        ),
     )
 
     # feral install-service / uninstall-service
@@ -2233,9 +2528,20 @@ def main():
     except Exception:
         pass
 
-    # feral key — vault key lifecycle (W9)
+    # feral key — vault key lifecycle (W9 + Lane 07 W3 multi-key)
     from cli.key_commands import register_key_subparser
     register_key_subparser(sub)
+
+    # ── Lane 07 W4 — voice + models pure-local subcommands ──
+    from cli.voice_commands import register_voice_subparser
+    register_voice_subparser(sub)
+
+    from cli.model_commands import register_models_subparser
+    register_models_subparser(sub)
+
+    # ── Lane 07 W5 — integrations connect (Gmail / OAuth / HA) ──
+    from cli.integration_commands import register_integrations_subparser
+    register_integrations_subparser(sub)
 
     # Parse known args — everything else is treated as a message
     args, remaining = parser.parse_known_args()
@@ -2340,8 +2646,29 @@ def main():
     elif args.subcommand == "key":
         from cli.key_commands import dispatch_key_subcommand
         sys.exit(dispatch_key_subcommand(args))
+    elif args.subcommand == "voice":
+        from cli.voice_commands import dispatch_voice_subcommand
+        sys.exit(dispatch_voice_subcommand(args))
+    elif args.subcommand == "models":
+        from cli.model_commands import dispatch_models_subcommand
+        sys.exit(dispatch_models_subcommand(args))
+    elif args.subcommand == "integrations":
+        from cli.integration_commands import dispatch_integrations_subcommand
+        sys.exit(dispatch_integrations_subcommand(args))
     elif args.subcommand is None and not remaining:
         asyncio.run(repl())
+    elif args.subcommand is None and remaining:
+        # R2-002: never silently route unknown flags to the brain. The
+        # pre-Lane-07 fall-through joined `remaining` and pushed it to
+        # ``one_shot()`` which then opened a WebSocket and printed
+        # ``Cannot connect to FERAL Brain at ws://...`` — confusing and
+        # wrong for typos like ``feral --verison``. Bare-word remainders
+        # are still chat (``feral search the web``); flag-shaped
+        # remainders raise a parser error.
+        if remaining[0].startswith("-"):
+            parser.error(f"unrecognized arguments: {' '.join(remaining)}")
+        full_text = " ".join(remaining).strip()
+        asyncio.run(one_shot(full_text))
     else:
         full_text = " ".join([args.subcommand or ""] + remaining).strip()
         if full_text:
