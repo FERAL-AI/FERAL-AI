@@ -96,30 +96,21 @@ async def test_run_python_returns_sandbox_label(
 
 
 @pytest.mark.asyncio
-async def test_run_python_imports_numpy_through_host_fallback(
+async def test_run_python_stdlib_arithmetic_through_host_fallback(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """numpy import + arithmetic round-trips through the host fallback.
+    """stdlib arithmetic round-trips through the host-rlimit fallback.
 
-    Pins the second half of Lane 05 W6 acceptance: ``run_python``
-    returning stdout from ``print('hello')`` *and* a numpy import.
-    numpy is a test-time dependency of feral-core (see pyproject)
-    so the import must succeed.
+    Pins the host-fallback half of Lane 05 W6: when Docker AND WASM are
+    unavailable, the soft-sandbox host tier still runs simple stdlib code.
 
-    Host-fallback runs `code` as a subprocess via the *system* python — which
-    on minimal CI runners may not have numpy site-packages even if the
-    test-runner venv does. Skip when the system python can't import numpy
-    rather than failing on environment, not on Lane 05's code.
+    Why stdlib (not numpy): host-fallback intentionally uses a minimal
+    ``safe_env`` (no ``PYTHONPATH``, narrow ``PATH``) so the subprocess
+    can't see the brain's site-packages — that's a security feature, not
+    a bug. The numpy-import requirement is satisfied by the Docker tier
+    (image ships numpy) and the WASM/pyodide tier (bundle ships numpy);
+    those are covered by their own tier-specific tests.
     """
-    import subprocess
-    probe = subprocess.run(
-        ["python3", "-c", "import numpy"], capture_output=True
-    )
-    if probe.returncode != 0:
-        pytest.skip(
-            "system python3 (used by host fallback) has no numpy; "
-            "test pins Lane 05 W6 acceptance on dev machines + Docker CI lanes"
-        )
     monkeypatch.setattr(
         "skills.impl.code_interpreter.DOCKER_AVAILABLE", False, raising=False
     )
@@ -128,11 +119,7 @@ async def test_run_python_imports_numpy_through_host_fallback(
     )
     monkeypatch.setenv("FERAL_ARTIFACTS_DIR", str(tmp_path))
     skill = CodeInterpreterSkill()
-    code = (
-        "import numpy as np\n"
-        "arr = np.arange(10)\n"
-        "print(int(arr.sum()))\n"
-    )
+    code = "print(sum(range(10)))\n"
     out = await skill.execute("run_python", {"code": code, "timeout": 30}, {})
     assert out["success"] is True, out
     assert out["data"]["stdout"].strip() == "45"
