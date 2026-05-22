@@ -1068,6 +1068,148 @@ async def shutdown_event():
 
 
 # ─────────────────────────────────────────────
+# Lane 08 WS7 — shared chat-turn dispatch (WebUI + HUP parity)
+# ─────────────────────────────────────────────
+
+
+async def _prepare_chat_turn_context(
+    *,
+    session_id: str,
+    text: str,
+    raw_context: dict | None,
+    attachments: list[dict] | None = None,
+    source_node: str | None = None,
+) -> tuple[str, dict, str]:
+    """Build the (refined_text, ctx, user_msg_text) triple that the
+    orchestrator should be invoked with.
+
+    Both the WebUI session WS (``/v1/session``) and the HUP node WS
+    (``/v1/node`` ``text_command``) call this so they produce
+    IDENTICAL orchestrator invocations for the same input — closes
+    Lane 08 WS7 phone-chat parity drift.
+
+    Side effects:
+      * ``state.memory.working_push`` records the user turn with the
+        same shape on both paths (``{"role": "user", "text": ...}``).
+      * Runs ``PromptRefiner`` so ``ctx["refinement"]`` is always
+        present (Phase 2 audit-r10 contract). On failure the original
+        text passes through verbatim.
+
+    Returns:
+        ``(refined_text, ctx, user_msg_text)``.
+    """
+    user_msg_text = text
+    ctx: dict = dict(raw_context or {})
+    if attachments:
+        # Inline a summary into the working-memory transcript so the
+        # LLM history visibly carries the attachment list; symmetric
+        # with the legacy WebUI path.
+        attach_summary = ", ".join(
+            f"{a.get('filename') or a.get('upload_id')} "
+            f"({a.get('content_type') or 'unknown'}, "
+            f"{int(a.get('size_bytes') or 0)} bytes, "
+            f"upload_id={a.get('upload_id')})"
+            for a in attachments
+        )
+        user_msg_text = f"{text}\n\n[attached files: {attach_summary}]"
+        ctx["attachments"] = attachments
+    if source_node:
+        ctx["source_node"] = source_node
+
+    try:
+        state.memory.working_push(
+            session_id, {"role": "user", "text": user_msg_text},
+        )
+    except Exception:
+        logger.debug("working_push (chat prelude) failed", exc_info=True)
+
+    refined_text = text
+    try:
+        from agents.prompt_refiner import refine as _refine_prompt
+        history: list[dict] = []
+        try:
+            history = state.memory.working_get(session_id) or []
+        except Exception:
+            history = []
+        envelope = await _refine_prompt(
+            text,
+            llm=getattr(state.orchestrator, "llm", None),
+            device_target_hint=ctx.get("device_target"),
+            history=history,
+        )
+        if envelope.refined_text:
+            refined_text = envelope.refined_text
+        if envelope.device_target and "device_target" not in ctx:
+            ctx["device_target"] = envelope.device_target
+        ctx["refinement"] = envelope.model_dump()
+    except Exception as exc:
+        logger.debug("PromptRefiner skipped: %s", exc)
+
+    return refined_text, ctx, user_msg_text
+
+
+def _build_chat_turn_runner(
+    *,
+    ws: WebSocket,
+    session_id: str,
+    refined_text: str,
+    ctx: dict,
+) -> "Awaitable[None]":
+    """Construct the coroutine that drives ``handle_command_stream``
+    plus the optional skill-gen detection. Identical between WebUI
+    and HUP so the parity test diffs the same execution path.
+    """
+
+    async def _run() -> None:
+        try:
+            await state.orchestrator.handle_command_stream(
+                session_id=session_id,
+                text=refined_text,
+                context=ctx,
+            )
+            if state.skill_gen:
+                history = state.memory.working_get(session_id) or []
+                need = await state.skill_gen.detect_unmet_need(history)
+                if need:
+                    manifest = await state.skill_gen.generate_skill(
+                        capability=need.get("capability", ""),
+                        service=need.get("service", ""),
+                    )
+                    if manifest:
+                        await ws.send_json(FeralMessage(
+                            session_id=session_id,
+                            hop="brain",
+                            type="skill_proposal",
+                            payload={
+                                "manifest": manifest,
+                                "reason": need.get("capability", ""),
+                            },
+                        ).model_dump())
+        except asyncio.CancelledError:
+            raise
+        except Exception as turn_err:
+            logger.error(
+                "background chat turn failed for %s: %s",
+                session_id[:8] if len(session_id) >= 8 else session_id,
+                turn_err,
+                exc_info=True,
+            )
+            try:
+                await ws.send_json(FeralMessage(
+                    session_id=session_id,
+                    hop="brain",
+                    type="text_response",
+                    payload=TextResponsePayload(
+                        text=f"Sorry, something went wrong: {turn_err}",
+                    ).model_dump(),
+                ).model_dump())
+            except Exception:
+                pass
+
+    return _run()
+
+
+# ─────────────────────────────────────────────
 # Main Client WebSocket
 # ─────────────────────────────────────────────
 
@@ -1190,127 +1332,29 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                 msg, payload = parse_message(raw)
 
                 if msg.type == "text_command" and isinstance(payload, TextCommandPayload):
-                    # PR 10 — pipe attachments into the orchestrator
-                    # context so the model can ground on them. Each
-                    # attachment is the AttachmentRef dump from
-                    # /api/uploads. We also inline a short marker into
-                    # working memory so the LLM transcript visibly
-                    # carries the attachment list (the context dict
-                    # alone wouldn't appear in the chat history the
-                    # brain shows the model).
-                    attachments = []
+                    # Lane 08 WS7 + WS9 — single shared helper for
+                    # WebUI + HUP so the response shape never drifts.
+                    attachments: list[dict] = []
                     if payload.attachments:
-                        attachments = [a.model_dump() if hasattr(a, "model_dump") else dict(a) for a in payload.attachments]
-                    user_msg_text = payload.text
-                    if attachments:
-                        attach_summary = ", ".join(
-                            f"{a.get('filename') or a.get('upload_id')} ({a.get('content_type') or 'unknown'}, "
-                            f"{int(a.get('size_bytes') or 0)} bytes, upload_id={a.get('upload_id')})"
-                            for a in attachments
-                        )
-                        user_msg_text = (
-                            f"{payload.text}\n\n[attached files: {attach_summary}]"
-                        )
-                    state.memory.working_push(session_id, {"role": "user", "text": user_msg_text})
-                    ctx = dict(payload.context or {})
-                    if attachments:
-                        ctx["attachments"] = attachments
+                        attachments = [
+                            a.model_dump() if hasattr(a, "model_dump") else dict(a)
+                            for a in payload.attachments
+                        ]
 
-                    # Phase 2 (audit-r10 overhaul) — PromptRefiner runs
-                    # on the web path too so web + phone share the same
-                    # refinement contract + observability. Feature-flag
-                    # gated; identity envelope when off.
-                    refined_text_web = payload.text
-                    refined_envelope_web = None
-                    try:
-                        from agents.prompt_refiner import refine as _refine_prompt
-                        history_web = []
-                        try:
-                            history_web = state.memory.working_get(session_id) or []
-                        except Exception:
-                            history_web = []
-                        refined_envelope_web = await _refine_prompt(
-                            payload.text,
-                            llm=getattr(state.orchestrator, "llm", None),
-                            device_target_hint=ctx.get("device_target"),
-                            history=history_web,
+                    refined_text_web, ctx, _ = await _prepare_chat_turn_context(
+                        session_id=session_id,
+                        text=payload.text,
+                        raw_context=payload.context,
+                        attachments=attachments,
+                    )
+                    _spawn_chat_task(
+                        _build_chat_turn_runner(
+                            ws=ws,
+                            session_id=session_id,
+                            refined_text=refined_text_web,
+                            ctx=ctx,
                         )
-                        if refined_envelope_web.refined_text:
-                            refined_text_web = refined_envelope_web.refined_text
-                        if (
-                            refined_envelope_web.device_target
-                            and "device_target" not in ctx
-                        ):
-                            ctx["device_target"] = refined_envelope_web.device_target
-                        ctx["refinement"] = refined_envelope_web.model_dump()
-                    except Exception as _refine_exc:
-                        logger.debug("PromptRefiner skipped (web): %s", _refine_exc)
-
-                    # Lane 08 WS9 — fire the orchestrator turn as a
-                    # background task so the WS loop keeps receiving
-                    # frames. AUDIT-r13 finding 6.2 was: under pool
-                    # contention ``handle_command_stream`` would block
-                    # for 5-110s and the WS appeared dead to the
-                    # client. The per-session lock inside the
-                    # orchestrator still serialises concurrent turns
-                    # on the SAME session_id, so queued turns are
-                    # still ordered.
-                    async def _run_chat_turn(
-                        _sid: str = session_id,
-                        _text: str = refined_text_web,
-                        _ctx: dict = ctx,
-                    ) -> None:
-                        try:
-                            await state.orchestrator.handle_command_stream(
-                                session_id=_sid,
-                                text=_text,
-                                context=_ctx,
-                            )
-                            if state.skill_gen:
-                                history = state.memory.working_get(_sid) or []
-                                need = await state.skill_gen.detect_unmet_need(history)
-                                if need:
-                                    manifest = await state.skill_gen.generate_skill(
-                                        capability=need.get("capability", ""),
-                                        service=need.get("service", ""),
-                                    )
-                                    if manifest:
-                                        await ws.send_json(FeralMessage(
-                                            session_id=_sid,
-                                            hop="brain",
-                                            type="skill_proposal",
-                                            payload={
-                                                "manifest": manifest,
-                                                "reason": need.get("capability", ""),
-                                            },
-                                        ).model_dump())
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as turn_err:
-                            # Preserve the pre-WS9 behaviour where a
-                            # crashed orchestrator surfaced a "Sorry,
-                            # something went wrong: <err>" text_response
-                            # in chat instead of disappearing into the
-                            # logs.
-                            logger.error(
-                                "background chat turn failed for %s: %s",
-                                _sid[:8] if len(_sid) >= 8 else _sid,
-                                turn_err,
-                                exc_info=True,
-                            )
-                            try:
-                                await ws.send_json(FeralMessage(
-                                    session_id=_sid,
-                                    hop="brain",
-                                    type="text_response",
-                                    payload=TextResponsePayload(
-                                        text=f"Sorry, something went wrong: {turn_err}",
-                                    ).model_dump(),
-                                ).model_dump())
-                            except Exception:
-                                pass
-
-                    _spawn_chat_task(_run_chat_turn())
+                    )
 
                 elif msg.type == "voice_config":
                     vcfg = raw.get("payload", {})
@@ -2629,12 +2673,34 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         target_sid = f"daemon-{node_id}"
                         state.sessions[target_sid] = ws
                         state.bind_session_to_daemon(target_sid, node_id)
-                    state.memory.working_push(target_sid, {"role": "user", "text": text})
-                    context["source_node"] = node_id
-                    await state.orchestrator.handle_command_stream(
+
+                    # Lane 08 WS7 — route the phone HUP text_command
+                    # through the same prelude as the WebUI session
+                    # WS so the orchestrator sees an identical
+                    # invocation shape (same working_push, same
+                    # PromptRefiner output, same ctx["refinement"]
+                    # contract for Lane 12). Without this the phone
+                    # path bypassed PromptRefiner and the assistant
+                    # saw raw text without device_target resolution.
+                    refined_text, refined_ctx, _ = await _prepare_chat_turn_context(
                         session_id=target_sid,
                         text=text,
-                        context=context,
+                        raw_context=context,
+                        source_node=node_id,
+                    )
+
+                    # Lane 08 WS9 — non-blocking; identical task
+                    # lifecycle to WebUI. The /v1/node WS keeps
+                    # receiving daemon frames while the turn runs.
+                    state.register_background_task(
+                        asyncio.create_task(
+                            _build_chat_turn_runner(
+                                ws=ws,
+                                session_id=target_sid,
+                                refined_text=refined_text,
+                                ctx=refined_ctx,
+                            )
+                        )
                     )
                     logger.info(f"Text command from daemon {node_id}: {text[:80]}")
 
