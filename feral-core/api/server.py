@@ -487,6 +487,7 @@ del _p
 # has WebSocket equivalents (so the security envelope is unchanged).
 _PHONE_BEARER_POST = _PathAllowlist("_PHONE_BEARER_POST")
 _PHONE_BEARER_POST.add_literal("/api/system/permissions/open")  # Phase 13 — open Settings pane
+_PHONE_BEARER_POST.add_literal("/api/system/permissions/request")  # Lane 11 R-PROD-004b — trigger native prompt
 # Operator approval surface. Path-parameterised on `request_id`; the
 # matcher uses Starlette's `compile_path`, the same function FastAPI's
 # router uses to dispatch the request — so a match here is by

@@ -25,7 +25,11 @@ import subprocess
 
 from fastapi import APIRouter, Body, HTTPException
 
-from security.macos_permissions import all_desktop_control_permission_statuses
+from security.macos_permissions import (
+    all_desktop_control_permission_statuses,
+    deeplink_for,
+    request_permission,
+)
 
 logger = logging.getLogger("feral.api.system_permissions")
 
@@ -39,6 +43,42 @@ async def get_system_permissions():
         "platform": platform.system().lower(),
         "permissions": [s.to_dict() for s in statuses],
     }
+
+
+@router.post("/api/system/permissions/request")
+async def request_system_permission(body: dict = Body(...)):
+    """Lane 11 R-PROD-004b — trigger the native macOS consent prompt.
+
+    Wire shape::
+
+        POST /api/system/permissions/request
+        { "permission": "screen_recording" | "calendar" | "reminders" |
+                        "contacts" | "accessibility" | "full_disk_access" }
+
+    Returns the post-prompt status:
+
+        {
+          "permission": "screen_recording",
+          "status": "granted" | "denied" | "unknown" | "not_applicable",
+          "api": "CGRequestScreenCaptureAccess",
+          "setup_step": "(no action needed)" | "Open System Settings…",
+          "deeplink": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+          "error": "PyObjC Quartz not importable: …" (optional)
+        }
+
+    Accessibility + Full Disk Access have no public request API; this
+    endpoint returns the current status + the deeplink so the iOS
+    companion can pop System Settings via the URL.
+    """
+    permission = (body.get("permission") or "").strip()
+    if not permission:
+        raise HTTPException(status_code=400, detail="permission is required")
+    status = request_permission(permission)
+    out = status.to_dict()
+    deeplink = deeplink_for(permission)
+    if deeplink:
+        out["deeplink"] = deeplink
+    return out
 
 
 @router.post("/api/system/permissions/open")
