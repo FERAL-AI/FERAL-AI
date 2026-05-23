@@ -21,10 +21,21 @@ async def get_timeline(
     since_ts = time.time() - (days * 86400)
 
     if type in ("all", "memories"):
+        # AUDIT-r14 round2 wave3-followup-001: pre-fix this called
+        # ``state.memory.search("", limit=100)`` which is the legacy
+        # *notes* search API. With 0 notes (the canonical case for a
+        # brain whose user hasn't run ``feral memory save`` explicitly)
+        # the timeline reported 0 entries even though the brain held
+        # thousands of *episodes* — exactly the scenario the v2026.5.40
+        # live verify caught (4601 episodes on disk, /api/timeline
+        # returned []). The chronological life view's canonical source
+        # is ``episode_recent`` (memory/store.py:1318), which orders
+        # by ``created_at DESC`` and honors the same forgotten/decay
+        # filter as the rest of the episode read paths.
         try:
-            memories = await state.memory.search("", limit=100)
-            for m in memories:
-                ts = m.get("timestamp") or m.get("created_at", 0)
+            episodes = await state.memory.episode_recent(limit=200)
+            for ep in episodes:
+                ts = ep.get("created_at") or ep.get("timestamp", 0)
                 if isinstance(ts, str):
                     try:
                         from datetime import datetime
@@ -32,15 +43,44 @@ async def get_timeline(
                     except Exception:
                         ts = 0
                 if ts >= since_ts:
+                    # Episode rows expose ``user_message`` /
+                    # ``assistant_message`` / ``summary`` depending on
+                    # how they were written. The timeline card needs
+                    # one short title + a slightly longer body; pick
+                    # the most informative non-empty pair without
+                    # loading raw fields the UI doesn't render.
+                    summary = ep.get("summary") or ""
+                    user_msg = ep.get("user_message") or ""
+                    assistant_msg = ep.get("assistant_message") or ""
+                    title = (
+                        summary.strip()
+                        or (user_msg[:80].strip() if user_msg else "")
+                        or "Episode"
+                    )
+                    content = assistant_msg or user_msg or summary or ""
                     entries.append({
                         "type": "memory",
                         "timestamp": ts,
-                        "title": m.get("summary", "Memory"),
-                        "content": m.get("content", m.get("summary", "")),
-                        "metadata": m.get("metadata", {}),
+                        "title": title,
+                        "content": content,
+                        "metadata": {
+                            "id": ep.get("id"),
+                            "session_id": ep.get("session_id"),
+                            "tags": ep.get("tags", []),
+                        },
                     })
-        except Exception:
-            pass
+        except Exception as exc:
+            # Never let the read fail silently — surface a single
+            # error entry into the response so the timeline UI can
+            # render an honest "memory unavailable" row instead of
+            # an empty page.
+            entries.append({
+                "type": "memory_error",
+                "timestamp": time.time(),
+                "title": "Memory unavailable",
+                "content": f"{exc.__class__.__name__}: {exc}",
+                "metadata": {},
+            })
 
     if type in ("all", "health") and state.health_aggregator:
         try:
