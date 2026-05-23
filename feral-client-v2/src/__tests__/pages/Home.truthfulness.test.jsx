@@ -8,11 +8,28 @@
  * tests below render the page against a mocked /api/dashboard and
  * verify the strings that ship to the user.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { waitFor } from '@testing-library/react';
 import { renderV2 } from '../_helpers/renderV2';
 import Home from '../../pages/Home';
 import { _getSharedSocketForTesting } from '../../hooks/useFeralSocket';
+import { _resetSystemHealthForTesting } from '../../hooks/useSystemHealth';
+
+// AUDIT-r14 Lane 12 — Home + GlassBrain + Shell now share a single
+// module-level useSystemHealth store. That cache is correct in
+// production but leaks across the 6 cases below, since each test
+// renders Home with a *different* dashboardFetch() mock. Without a
+// reset, the previous case's snapshot (e.g. {subdevices_total:1,
+// subdevices_live:1}) would briefly paint into the next case's tile
+// before the new fetch lands. Linux CI under v8 coverage was the
+// canary — its scheduler interleaved the prior-test promise with the
+// new test's render, so the failing assertions read ' 1/1' instead of
+// the case's expected '0/2' / 'unavailable'. Reset the store and the
+// fetch-mock counter at the start of every case so each test sees a
+// clean slate.
+beforeEach(() => {
+  _resetSystemHealthForTesting();
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
