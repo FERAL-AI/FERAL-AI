@@ -14,6 +14,7 @@ import ResumeCockpit from '../components/ResumeCockpit';
 import ForYouToday from '../components/ForYouToday';
 import { apiJson, apiFetch } from '../lib/api';
 import { useSomatic } from '../hooks/useSomatic';
+import { useSystemHealth, refreshSystemHealth } from '../hooks/useSystemHealth';
 import { useBrainEvents, EVENT_TYPES } from '../hooks/useBrainEvents';
 import { useConnectionStatus } from '../hooks/useConnectionStatus';
 import { useFeralSocket } from '../hooks/useFeralSocket';
@@ -71,6 +72,13 @@ export default function Home() {
   const somatic = useSomatic();
   const [time, setTime] = useState(new Date());
   const [mode, setMode] = useState(autoModeFromHour(new Date().getHours()));
+  // AUDIT-r14 finding 03 dedup: Home no longer owns a `/api/dashboard`
+  // poll. It subscribes to the shared useSystemHealth store (mirrored
+  // into local state for the legacy render path) so that the Shell
+  // somatic strip + GlassBrain + Hub launcher all share the same
+  // 15s tick. The brain's 5s server cache on /api/dashboard (Lane 06)
+  // makes any racey concurrent fetches collapse to one upstream call.
+  const sysHealth = useSystemHealth();
   const [dashboard, setDashboard] = useState(null);
   const [skills, setSkills] = useState([]);
   const [channels, setChannels] = useState({});
@@ -153,8 +161,15 @@ export default function Home() {
   });
 
   const refresh = useCallback(async () => {
+    // Kick the shared dashboard store on every refresh tick. Fire-and-
+    // forget: we never await this and never read sysHealth.* in this
+    // closure, which is what kept the previous draft's useCallback
+    // identity stable across ticks (a sysHealth dep here would loop
+    // with the useEffect below that schedules `refresh`). The store's
+    // own tick still drives the dashboard-derived state via the
+    // separate `useEffect([sysHealth.data, ...])` further down.
+    refreshSystemHealth();
     const results = await Promise.allSettled([
-      apiJson('/api/dashboard'),
       apiJson('/skills'),
       apiJson('/api/llm/status'),
       apiJson('/api/jobs?limit=10'),
@@ -163,45 +178,13 @@ export default function Home() {
       apiJson('/api/ambient/next_event'),
       apiJson('/api/ambient/wind_down'),
       apiJson('/api/ambient/snapshot'),
-      // /health is a separate, cheap probe. We poll it alongside the
-      // composite /api/dashboard so the Brain hero stat has THREE
-      // independent signals: WS open, /api/dashboard ok, and /health
-      // ok. /health responds even when the heavier /api/dashboard
-      // composite path is wedged on a sub-system, so it's the
-      // strongest "brain process alive" indicator we have.
+      // /health is a separate, cheap probe so the hero "Brain" stat
+      // has independent signals (WS open + dashboard ok via store +
+      // /health ok). /health responds even when the heavier
+      // /api/dashboard composite path is wedged on a sub-system.
       apiJson('/health'),
     ]);
-    const [d, s, l, j, c, b, n, w, snap, healthRes] = results;
-    if (d.status === 'fulfilled') {
-      setDashboard(d.value);
-      setDashboardError(null);
-      setLastDashboardAt(Date.now());
-      // Seed / re-seed the sub-device map from the dashboard
-      // payload. Subsequent WS deltas mutate this map in place so
-      // the tile updates without waiting for the 15s poll. We use
-      // a Map keyed by `${node_id}:${capability}` so updates and
-      // removes are O(1) without index drift.
-      const seedRows = new Map();
-      let seedLive = 0;
-      for (const dev of (d.value?.devices || [])) {
-        for (const s of (dev?.subdevices || [])) {
-          const key = `${s.node_id || dev.node_id}:${s.capability}`;
-          seedRows.set(key, { ...s, node_id: s.node_id || dev.node_id });
-          if (s.live) seedLive += 1;
-        }
-      }
-      setSubdevices({
-        total: d.value?.subdevices_total ?? seedRows.size,
-        live: d.value?.subdevices_live ?? seedLive,
-        rows: seedRows,
-      });
-    } else {
-      // Truth-in-status: the previous `dashboard` value stays available
-      // so transient failures don't blank the page, but we record the
-      // failure so the hero brain stat can render "offline" instead of
-      // continuing to claim "online" against a stale payload.
-      setDashboardError(d.reason?.message || 'dashboard fetch failed');
-    }
+    const [s, l, j, c, b, n, w, snap, healthRes] = results;
     if (s.status === 'fulfilled') setSkills(s.value?.skills || (Array.isArray(s.value) ? s.value : []));
     if (l.status === 'fulfilled') setLlm(l.value);
     if (j.status === 'fulfilled') {
@@ -238,6 +221,41 @@ export default function Home() {
     const r = setInterval(refresh, 15000);
     return () => { clearInterval(t); clearInterval(r); };
   }, [refresh]);
+
+  // AUDIT-r14 finding 03: the dashboard payload is owned by the shared
+  // useSystemHealth store. Mirror its current snapshot into the legacy
+  // local `dashboard` state, derive the sub-device seed, and update the
+  // truthful dashboard-error / last-fetched-at signals here so the
+  // `refresh` callback above can stay free of sysHealth.* deps (which
+  // would otherwise create a useCallback identity loop with the
+  // useEffect that schedules `refresh`).
+  useEffect(() => {
+    if (sysHealth.data) {
+      setDashboard(sysHealth.data);
+      setDashboardError(null);
+      setLastDashboardAt(sysHealth.lastFetched || Date.now());
+      const seedRows = new Map();
+      let seedLive = 0;
+      for (const dev of (sysHealth.data?.devices || [])) {
+        for (const sd of (dev?.subdevices || [])) {
+          const key = `${sd.node_id || dev.node_id}:${sd.capability}`;
+          seedRows.set(key, { ...sd, node_id: sd.node_id || dev.node_id });
+          if (sd.live) seedLive += 1;
+        }
+      }
+      setSubdevices({
+        total: sysHealth.data?.subdevices_total ?? seedRows.size,
+        live: sysHealth.data?.subdevices_live ?? seedLive,
+        rows: seedRows,
+      });
+    } else if (sysHealth.error) {
+      setDashboardError(
+        sysHealth.error?.message
+        || sysHealth.error?.detail
+        || 'dashboard fetch failed',
+      );
+    }
+  }, [sysHealth.data, sysHealth.error, sysHealth.lastFetched]);
 
   // Real-time sub-device deltas. Without this, the Subdevices tile
   // only refreshes on the 15s poll and a glasses BLE drop looks
@@ -664,6 +682,52 @@ export default function Home() {
               <ul className="v2-ambient-list">
                 {briefing.goals.slice(0, 3).map((g) => (
                   <li key={g.id}>{g.title} · <span className="v2-p v2-p--muted">{Math.round((g.progress || 0) * 100)}%</span></li>
+                ))}
+              </ul>
+            </Glass>
+          )}
+        </div>
+      )}
+
+      {/*
+        * AUDIT-r14 finding 03 fix #3 — Desk mode content. The toggle
+        * existed in the mode tabs but no `mode === 'desk'` block ever
+        * rendered, so clicking Desk did nothing visible. We surface
+        * the most useful in-the-moment surfaces for "deep work" — the
+        * highest-priority job queue + a live somatic/vitals chip
+        * + the most relevant intent for "now".
+        */}
+      {mode === 'desk' && (
+        <div className="v2-home-grid">
+          <Glass level={1} radius="md" padding="md">
+            <div className="v2-stat-label">In-flight jobs</div>
+            {jobs.length === 0 ? (
+              <div className="v2-p v2-p--muted">Quiet. Nothing queued.</div>
+            ) : (
+              <ul className="v2-ambient-list">
+                {jobs.slice(0, 6).map((j) => (
+                  <li key={j.id || j.job_id}>
+                    <strong>{j.kind || 'job'}</strong>{j.description ? ` · ${j.description}` : ''}{j.status ? ` · ${j.status}` : ''}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Glass>
+          <Glass level={1} radius="md" padding="md">
+            <div className="v2-stat-label">Body</div>
+            <div className="v2-stat-value">
+              {Math.round((somatic?.heartRate || 0))} bpm
+            </div>
+            <div className="v2-p v2-p--muted">
+              Cognitive load {(somatic?.cognitiveLoad ?? 0).toFixed(2)} · orb {somatic?.orbMode}
+            </div>
+          </Glass>
+          {briefing?.agenda?.length > 0 && (
+            <Glass level={1} radius="md" padding="md">
+              <div className="v2-stat-label">Next on calendar</div>
+              <ul className="v2-ambient-list">
+                {briefing.agenda.slice(0, 3).map((evt, i) => (
+                  <li key={evt.id || i}>{evt.title || evt.summary}{evt.start ? ` · ${evt.start}` : ''}</li>
                 ))}
               </ul>
             </Glass>
