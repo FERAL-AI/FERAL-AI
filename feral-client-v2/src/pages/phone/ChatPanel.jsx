@@ -18,6 +18,8 @@ import { Mic, Send } from 'lucide-react';
 import { useWebSpeech } from '../../hooks/useWebSpeech';
 import { unlockSharedAudioContext } from '../../lib/audioContext';
 import { VoiceFullscreen } from './VoiceFullscreen';
+import MarkdownMessage from '../../lib/markdown.jsx';
+import BudgetExceededBanner from '../../components/BudgetExceededBanner';
 
 const LONG_PRESS_MS = 400;
 
@@ -56,11 +58,14 @@ export default function ChatPanel({ shell: shellProp }) {
   const [input, setInput] = useState('');
   const [voiceFullscreenOpen, setVoiceFullscreenOpen] = useState(false);
   const [dictationError, setDictationError] = useState(null);
+  const [streamingText, setStreamingText] = useState('');
+  const [budgetBanners, setBudgetBanners] = useState({});
 
   const longPressTimerRef = useRef(null);
   const longPressTriggeredRef = useRef(false);
   const bottomRef = useRef(null);
   const historyRef = useRef(null);
+  const streamBufferRef = useRef('');
 
   const speech = useWebSpeech({ continuous: false, interimResults: true });
 
@@ -87,16 +92,65 @@ export default function ChatPanel({ shell: shellProp }) {
     }
   }, [shell]);
 
-  // ─ Subscribe to brain's chat_response frames ─────────────────
+  // ─ Subscribe to brain frames: chat_response + stream_delta + budget ─
+  // Finding 02: phone ChatPanel previously only listened for
+  // `chat_response` and so the streaming reply appeared as a lump-sum
+  // at the end rather than chunk-by-chunk. We now mirror Chat.jsx and
+  // VoiceFullscreen by subscribing to `stream_delta` too, and pre-
+  // empt the final `chat_response` if streaming already delivered
+  // longer text (avoids the double-bubble).
   useEffect(() => {
     if (typeof shell?.subscribeFrame !== 'function') return undefined;
     return shell.subscribeFrame((frame) => {
-      if (frame?.type !== 'chat_response') return;
-      const text = extractChatText(frame.payload);
-      if (!text) return;
-      setMessages((prev) => [...prev, { id: newId(), role: 'assistant', text }]);
+      const type = frame?.type;
+      if (type === 'stream_delta') {
+        const p = frame.payload || {};
+        if (p.is_final) {
+          const finalText = streamBufferRef.current;
+          streamBufferRef.current = '';
+          setStreamingText('');
+          if (finalText.trim()) {
+            setMessages((prev) => [...prev, { id: newId(), role: 'assistant', text: finalText }]);
+          }
+          return;
+        }
+        // Skip reasoning deltas on the mobile compact surface — we
+        // don't have screen real estate for a collapsed disclosure.
+        if (p.kind === 'reasoning') return;
+        const delta = String(p.delta || '');
+        if (!delta) return;
+        streamBufferRef.current += delta;
+        setStreamingText(streamBufferRef.current);
+        return;
+      }
+      if (type === 'chat_response' || type === 'text_response') {
+        const text = extractChatText(frame.payload);
+        if (!text) return;
+        // If we already streamed more than the final payload, keep
+        // the streamed copy (some providers don't include the full
+        // text in the close frame).
+        const streamed = streamBufferRef.current;
+        streamBufferRef.current = '';
+        setStreamingText('');
+        const finalText = streamed && streamed.length > text.length ? streamed : text;
+        setMessages((prev) => [...prev, { id: newId(), role: 'assistant', text: finalText }]);
+        return;
+      }
+      if (type === 'budget_exceeded') {
+        const p = frame.payload || frame || {};
+        const site = p.call_site || 'chat';
+        setBudgetBanners((prev) => ({
+          ...prev,
+          [site]: {
+            callSite: site,
+            capDollars: Number(p.cap_dollars || 0),
+            currentDollars: Number(p.current_dollars || 0),
+            resetAt: p.reset_at,
+          },
+        }));
+      }
     });
-  }, [shell]);
+  }, [shell, setMessages]);
 
   // ─ Dictation → input field ───────────────────────────────────
   useEffect(() => {
@@ -219,9 +273,32 @@ export default function ChatPanel({ shell: shellProp }) {
         ) : (
           messages.map((m) => (
             <div key={m.id} className={`phone-chat-row phone-chat-row--${m.role}`}>
-              <div className="phone-chat-bubble">{m.text}</div>
+              <div className="phone-chat-bubble">
+                {m.role === 'assistant' ? <MarkdownMessage text={m.text} className="v2-md--inline" /> : m.text}
+              </div>
             </div>
           ))
+        )}
+        {Object.values(budgetBanners).map((b) => (
+          <BudgetExceededBanner
+            key={b.callSite}
+            callSite={b.callSite}
+            capDollars={b.capDollars}
+            currentDollars={b.currentDollars}
+            resetAt={b.resetAt}
+            onDismiss={() => setBudgetBanners((prev) => {
+              const next = { ...prev };
+              delete next[b.callSite];
+              return next;
+            })}
+          />
+        ))}
+        {streamingText && (
+          <div className="phone-chat-row phone-chat-row--assistant">
+            <div className="phone-chat-bubble">
+              <MarkdownMessage text={streamingText} className="v2-md--inline" />
+            </div>
+          </div>
         )}
         <div ref={bottomRef} />
       </div>
