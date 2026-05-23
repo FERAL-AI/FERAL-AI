@@ -150,8 +150,15 @@ function InstalledTab() {
 
   const refresh = useCallback(async () => {
     try {
+      // AUDIT-r14 finding 05 fix: `/api/marketplace/installed`
+      // returns `{skills: [...]}`. The UI was reading `installed`,
+      // which never existed, so the tab always rendered "Nothing
+      // installed yet" no matter how many skills the user had
+      // installed. Read `skills` first; keep `installed`/`items` as
+      // back-compat fallbacks.
       const d = await apiJson('/api/marketplace/installed');
-      setItems(d.installed || d.items || d || []);
+      const rows = d.skills || d.installed || d.items || (Array.isArray(d) ? d : []);
+      setItems(Array.isArray(rows) ? rows : []);
     } finally { setLoading(false); }
   }, []);
 
