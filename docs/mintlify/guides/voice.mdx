@@ -73,14 +73,10 @@ voice:
     cooldown_seconds: 2    # ignore repeated triggers
 ```
 
-Custom wake words can be trained with ~50 positive samples:
+The default wake phrase ("hey feral") is the only one shipped today. Custom wake-word training is on the post-v1.0 roadmap and **not** currently a CLI command — earlier docs claimed a `feral voice train-wakeword` subcommand that was never implemented. To verify the built-in detector is loaded and microphones are wired, run:
 
 ```bash
-feral voice train-wakeword \
-  --name "hey jarvis" \
-  --positive-dir ./samples/positive \
-  --negative-dir ./samples/negative \
-  --output ~/.feral/wakewords/hey_jarvis.onnx
+feral wake-test
 ```
 
 The wake word detector runs in a dedicated thread with ~2% CPU overhead on modern hardware.

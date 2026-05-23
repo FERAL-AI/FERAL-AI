@@ -89,16 +89,16 @@ FERAL merges configuration from four sources, each overriding the previous:
 
 ## Credentials Vault
 
-Sensitive values (API keys, tokens) are stored separately in an encrypted vault:
+Sensitive values (API keys, OAuth tokens) are stored separately in the encrypted **BlindVault**:
 
 ```
-~/.feral/credentials.json
+~/.feral/credentials.enc
 ```
 
-This file is AES-256 encrypted at rest using a key derived from your system keychain. FERAL decrypts it in memory at startup.
+The vault is encrypted at rest with **ChaCha20-Poly1305** (AEAD). The encryption key is derived via Argon2id from your master passphrase and held in your OS keychain (macOS Keychain, GNOME Keyring, Windows Credential Manager) so the vault unlocks transparently when you start the brain. FERAL decrypts it in memory and the LLM never sees raw credential values — keys are injected at the HTTP layer at request time.
 
 <Warning>
-  Never commit `credentials.json` to version control. The setup wizard creates it automatically.
+  Never commit `credentials.enc` to version control. The setup wizard creates it automatically and `pip install feral-ai` adds `~/.feral/` to your gitignore patterns when you run `feral setup`.
 </Warning>
 
 ### Managing credentials

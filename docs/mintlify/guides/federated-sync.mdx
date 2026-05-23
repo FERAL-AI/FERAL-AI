@@ -6,7 +6,7 @@ description: "Peer-to-peer memory replication with TLS mutual auth, mDNS discove
 ## Overview
 
 FERAL instances on the same network automatically discover each other via mDNS
-and replicate memory using CRDTs (Conflict-free Replicated Data Types). All sync
+and replicate memory using **HLC (Hybrid Logical Clock) timestamps + last-write-wins** at the row level, backed by a per-node write-ahead log. All sync
 is peer-to-peer — no cloud relay is involved.
 
 ## TLS Setup
@@ -79,10 +79,10 @@ Node A                          Node B
   │◄──────────────── mDNS reply ──┤
   │                               │
   ├─ WS connect (TLS) ──────────►│
-  ├─ sync_request + VC ─────────►│
-  │◄──── sync_response + VC ─────┤
-  ├─ sync_data (my ops) ────────►│
-  │◄──── sync_data (your ops) ───┤
+  ├─ sync_request + HLC ────────►│
+  │◄──── sync_response + HLC ────┤
+  ├─ sync_data (rows ≥ HLC) ────►│
+  │◄──── sync_data (rows ≥ HLC) ─┤
   │                               │
-  └─ CRDT merge locally           └─ CRDT merge locally
+  └─ HLC + LWW merge locally      └─ HLC + LWW merge locally
 ```

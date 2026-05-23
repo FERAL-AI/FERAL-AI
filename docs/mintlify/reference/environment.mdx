@@ -154,8 +154,11 @@ These tune the runtime flags applied to every container started by `security/doc
 | `FERAL_PROACTIVE_ENABLED` | `true` | Enable proactive intelligence engine |
 | `FERAL_GENUI_ENABLED` | `true` | Enable server-driven UI generation |
 | `FERAL_DIGITAL_TWIN` | `true` | Enable digital twin reasoning |
-| `FERAL_COMPUTER_USE` | `true` | Enable computer-use (screen, browser, files) |
 | `FERAL_LOCATION_TRACKING` | `false` | Enable GPS geofencing triggers |
+
+<Note>
+  Earlier versions of these docs listed a `FERAL_COMPUTER_USE` flag — that variable was never wired into the code. To gate computer-use, change **autonomy mode** in the WebUI **Settings → Autonomy** picker (writes `security.autonomy_mode` in `~/.feral/settings.json`); `strict` requires approval for every action, `hybrid` (default) requires approval for destructive / `dangerous`-tier actions only, `loose` auto-runs everything.
+</Note>
 
 <Tip>
   Set feature flags to `false` to disable subsystems you don't need — this reduces memory usage and startup time.

@@ -108,7 +108,7 @@ FERAL subscribes to Home Assistant's WebSocket event stream. When state changes 
 
 ## Security
 
-- The long-lived access token is stored in FERAL's encrypted credentials file (`~/.feral/credentials.json`, mode `0600`)
+- The long-lived access token is stored in FERAL's encrypted vault (`~/.feral/credentials.enc`, ChaCha20-Poly1305 AEAD, mode `0600`)
 - When running as an add-on, the Supervisor token is ephemeral and rotated automatically
 - FERAL never exposes your HA token to external services
 

@@ -228,4 +228,4 @@ feral backup restore /backups/feral-2025-06-15.tar.gz
 0 3 * * * /opt/feral/venv/bin/feral backup create --output /backups/feral-$(date +\%F).tar.gz
 ```
 
-The backup includes `memory.db`, `settings.json`, `USER.md`, `SOUL.md`, `credentials.json` (encrypted), wiki pages, and skill manifests.
+The backup includes `memory.db`, `settings.json`, `USER.md`, `SOUL.md`, `credentials.enc` (ChaCha20-Poly1305 encrypted vault), wiki pages, and skill manifests.

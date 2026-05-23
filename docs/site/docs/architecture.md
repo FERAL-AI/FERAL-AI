@@ -152,7 +152,7 @@ WebSocket endpoints:
 | Path | Contents |
 |:-----|:---------|
 | `~/.feral/settings.json` | Feature flags, LLM provider, voice mode |
-| `~/.feral/credentials.json` | API keys (chmod 600) |
+| `~/.feral/credentials.enc` | API keys + OAuth tokens — ChaCha20-Poly1305 AEAD, Argon2id KDF, OS keychain (chmod 600) |
 | `~/.feral/USER.md` | User profile and identity |
 | `~/.feral/SOUL.md` | Agent personality and rules |
 | `~/.feral/memory.db` | Memory tiers + knowledge graph (SQLite) |

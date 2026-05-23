@@ -173,10 +173,7 @@ playwright install chromium
 ```
 
 <Note>
-  If you don't need computer-use features, disable them to skip the Playwright requirement:
-  ```bash
-  export FERAL_COMPUTER_USE=false
-  ```
+  If you don't need computer-use features, you can skip the Playwright install — the brain boots cleanly without it; the affected skills will report `Browser unavailable` until Playwright is present. Earlier docs claimed a `FERAL_COMPUTER_USE` env flag, but that variable was never wired into the code. The supported way to keep computer-use cold is to set autonomy mode to `strict` from the WebUI **Settings → Autonomy** picker — every action then needs explicit approval before it runs.
 </Note>
 
 ### pip Install Failures
