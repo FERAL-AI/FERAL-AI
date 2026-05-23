@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { History, Save, GitBranch, Plus, Trash2, ChevronRight, X, Mic, MicOff, Paperclip, FileText } from 'lucide-react';
+import { History, Save, GitBranch, Plus, Trash2, X, Mic, MicOff, Paperclip, FileText } from 'lucide-react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import Orb from '../ui/Orb';
@@ -12,6 +12,11 @@ import { unlockSharedAudioContext } from '../lib/audioContext';
 import { friendlyToolLabel } from '../lib/toolDisplay';
 import { useChatThread } from '../shell/Shell';
 import { useVoice } from '../shell/VoiceContext';
+import MarkdownMessage from '../lib/markdown.jsx';
+import BudgetExceededBanner from '../components/BudgetExceededBanner';
+import { ToolCallList } from '../components/ToolCallCard';
+import ReasoningSection from '../components/ReasoningSection';
+import TimelineCard from '../components/TimelineCard';
 
 function newId() {
   return `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -54,8 +59,12 @@ export default function Chat() {
   const [input, setInput] = useState('');
   const [thinking, setThinking] = useState(false);
   const [streamingText, setStreamingText] = useState('');
+  const [streamingReasoning, setStreamingReasoning] = useState('');
   const [toolChip, setToolChip] = useState(null);
-  const [expandedTraces, setExpandedTraces] = useState({});
+  // S6 — yellow inline banner emitted by Lane 08's `budget_exceeded`
+  // WS frame. Multiple call-sites can exceed simultaneously (chat +
+  // vision), so we key the active banners by call_site.
+  const [budgetBanners, setBudgetBanners] = useState({});
   const [paneOpen, setPaneOpen] = useState(null); // 'threads' | 'snapshots' | null
   const [pausedThoughts, setPausedThoughts] = useState([]);
   // PR 9 (gap-fill) — in-composer voice mic state. Sourced from the
@@ -72,6 +81,7 @@ export default function Chat() {
 
   const bottomRef = useRef(null);
   const streamBufferRef = useRef('');
+  const streamReasoningRef = useRef('');
   const pendingTraceRef = useRef([]);
   const greetingSeenRef = useRef(false);
   const chatReady = thread?.ready ?? true;
@@ -139,15 +149,25 @@ export default function Chat() {
       return trace.length > 0 ? trace : undefined;
     };
 
-    const commit = (text) => {
+    const commit = (text, extras = {}) => {
       const clean = text.trim();
-      if (!clean) return;
+      const reasoning = (streamReasoningRef.current || '').trim();
+      const tools = flushTrace();
+      const timeline = extras.timeline || null;
+      // If there's literally nothing to render (no text, no reasoning,
+      // no tool trace, no timeline), drop the row — otherwise an empty
+      // assistant bubble appears after every cancelled stream.
+      if (!clean && !reasoning && (!tools || tools.length === 0) && !timeline) return;
       const id = newId();
+      streamReasoningRef.current = '';
+      setStreamingReasoning('');
       setMessages((prev) => [...prev, {
         id,
         role: 'assistant',
         text: clean,
-        tools: flushTrace(),
+        reasoning,
+        tools,
+        timeline,
       }]);
     };
 
@@ -164,14 +184,31 @@ export default function Chat() {
           commit(final);
           return;
         }
+        // Reasoning deltas (extended thinking, R1-style models) come
+        // through the same frame with `kind: "reasoning"`. Keep them
+        // out of the visible buffer; surface them via the collapsed
+        // ReasoningSection on the committed assistant row.
+        if (p.kind === 'reasoning') {
+          const r = String(p.delta || '');
+          if (!r) return;
+          streamReasoningRef.current += r;
+          setStreamingReasoning(streamReasoningRef.current);
+          setThinking(false);
+          return;
+        }
         const delta = sanitizeAssistantText(p.delta || '');
         if (!delta) return;
         streamBufferRef.current += delta;
         setStreamingText(streamBufferRef.current);
         setThinking(false);
-      } else if (type === 'text_response') {
-        const text = sanitizeAssistantText(msg.payload?.text || '');
-        if (!text) return;
+      } else if (type === 'text_response' || type === 'chat_response') {
+        const p = msg.payload || {};
+        const text = sanitizeAssistantText(p.text || p.message || '');
+        // Pick up reasoning attached to the final payload if the brain
+        // didn't stream it as deltas.
+        if (typeof p.reasoning === 'string' && p.reasoning.trim() && !streamReasoningRef.current) {
+          streamReasoningRef.current = p.reasoning;
+        }
         if (text === 'FERAL Brain connected. How can I help?') {
           if (greetingSeenRef.current) return;
           greetingSeenRef.current = true;
@@ -179,25 +216,28 @@ export default function Chat() {
         setThinking(false);
         setToolChip(null);
         const streamed = streamBufferRef.current;
-        if (streamed && streamed.length > text.length) {
-          streamBufferRef.current = '';
-          setStreamingText('');
-          commit(streamed);
-        } else {
-          streamBufferRef.current = '';
-          setStreamingText('');
-          commit(text);
-        }
+        const finalText = streamed && streamed.length > (text?.length || 0) ? streamed : text;
+        streamBufferRef.current = '';
+        setStreamingText('');
+        commit(finalText || '', { timeline: p.timeline || null });
       } else if (type === 'tool_start' || type === 'tool_call' || type === 'skill_start') {
         const p = msg.payload || {};
         const key = traceKey(p);
         const label = friendlyToolLabel(p);
+        // Capture the args preview from whichever field the brain
+        // happened to use this turn — different skills emit different
+        // shapes (args_preview, args, arguments, params).
+        const argsPreview = p.args_preview
+          || (p.args != null ? p.args : null)
+          || (p.arguments != null ? p.arguments : null)
+          || (p.params != null ? p.params : null)
+          || '';
         pendingTraceRef.current = [
           ...pendingTraceRef.current.filter((t) => t.key !== key),
           {
             key,
             label,
-            args_preview: p.args_preview || '',
+            args_preview: argsPreview,
             success: null,
             error: '',
             latency_ms: 0,
@@ -214,6 +254,10 @@ export default function Chat() {
           key,
           label,
           args_preview: '',
+          result_preview: p.result_preview
+            || (p.result != null ? p.result : null)
+            || (p.output != null ? p.output : null)
+            || '',
           success: p.success !== false,
           error: p.error || '',
           latency_ms: Number(p.latency_ms || 0),
@@ -224,12 +268,36 @@ export default function Chat() {
             success: result.success,
             error: result.error,
             latency_ms: result.latency_ms,
+            result_preview: result.result_preview,
           };
         } else {
           next.push(result);
         }
         pendingTraceRef.current = next;
         setToolChip(null);
+      } else if (type === 'budget_exceeded') {
+        // S6 closer — yellow inline banner. Keyed by call_site so
+        // multiple budgets can be exceeded at once.
+        const p = msg.payload || msg || {};
+        const site = p.call_site || 'chat';
+        setBudgetBanners((prev) => ({
+          ...prev,
+          [site]: {
+            callSite: site,
+            capDollars: Number(p.cap_dollars || 0),
+            currentDollars: Number(p.current_dollars || 0),
+            resetAt: p.reset_at,
+          },
+        }));
+      } else if (type === 'budget_reset') {
+        const site = msg?.payload?.call_site || msg?.call_site;
+        if (!site) return;
+        setBudgetBanners((prev) => {
+          if (!prev[site]) return prev;
+          const next = { ...prev };
+          delete next[site];
+          return next;
+        });
       } else if (type === 'transcript') {
         const p = msg.payload || {};
         if (p.is_partial) return;
@@ -415,10 +483,6 @@ export default function Chat() {
     voice.toggle();
   }, [voice]);
 
-  const toggleTrace = (messageId) => {
-    setExpandedTraces((prev) => ({ ...prev, [messageId]: !prev[messageId] }));
-  };
-
   const respondToPermission = useCallback((requestId, granted) => {
     if (!requestId) return;
     sendUiEvent(socket, {
@@ -508,24 +572,47 @@ export default function Chat() {
                   </div>
                 ) : (
                   <>
-                    {m.text}
+                    {m.role === 'assistant' ? (
+                      <MarkdownMessage text={m.text} />
+                    ) : (
+                      m.text
+                    )}
+                    {m.reasoning && (
+                      <ReasoningSection text={m.reasoning} defaultOpen={false} />
+                    )}
+                    {m.timeline && (
+                      <TimelineCard timeline={m.timeline} />
+                    )}
                     {m.tools?.length > 0 && (
-                      <ToolTrace
-                        tools={m.tools}
-                        expanded={!!expandedTraces[m.id]}
-                        onToggle={() => toggleTrace(m.id)}
-                      />
+                      <ToolCallList traces={m.tools} />
                     )}
                   </>
                 )}
               </div>
             </div>
           ))}
-          {streamingText && (
+          {Object.values(budgetBanners).map((b) => (
+            <BudgetExceededBanner
+              key={b.callSite}
+              callSite={b.callSite}
+              capDollars={b.capDollars}
+              currentDollars={b.currentDollars}
+              resetAt={b.resetAt}
+              onDismiss={() => setBudgetBanners((prev) => {
+                const next = { ...prev };
+                delete next[b.callSite];
+                return next;
+              })}
+            />
+          ))}
+          {(streamingText || streamingReasoning) && (
             <div className="v2-chat-row v2-chat-row--assistant">
               <div className="v2-chat-role" aria-hidden="true"><Orb size={22} mode="speaking" /></div>
               <div className="v2-chat-body">
-                {streamingText}
+                {streamingText && <MarkdownMessage text={streamingText} />}
+                {streamingReasoning && !streamingText && (
+                  <ReasoningSection text={streamingReasoning} defaultOpen />
+                )}
                 <span className="v2-chat-cursor" aria-hidden="true" />
               </div>
             </div>
@@ -654,7 +741,7 @@ export default function Chat() {
           }}
         />
       )}
-      {paneOpen === 'snapshots' && <SnapshotsPane onClose={() => setPaneOpen(null)} messages={messages} onRestore={(msgs) => { setMessages(msgs); setPaneOpen(null); }} />}
+      {paneOpen === 'snapshots' && <SnapshotsPane onClose={() => setPaneOpen(null)} onRestore={(msgs) => { setMessages(msgs); setPaneOpen(null); }} />}
     </div>
   );
 }
@@ -682,38 +769,6 @@ function PermissionCard({ path, operation, reason, onAllow, onDeny }) {
         <code style={{ marginLeft: 4 }}>feral grant revoke {path || '<path>'}</code>).
       </div>
     </Glass>
-  );
-}
-
-function ToolTrace({ tools, expanded, onToggle }) {
-  const failures = tools.filter((t) => t.success === false).length;
-  return (
-    <div className="v2-chat-trace">
-      <button
-        type="button"
-        className="v2-chat-trace-toggle"
-        onClick={onToggle}
-        aria-expanded={expanded}
-      >
-        <ChevronRight size={13} className={expanded ? 'is-open' : ''} />
-        <span>{failures ? `used ${tools.length} tools, ${failures} failed` : `used ${tools.length} ${tools.length === 1 ? 'tool' : 'tools'}`}</span>
-      </button>
-      {expanded && (
-        <div className="v2-chat-trace-list">
-          {tools.map((tool) => (
-            <div key={tool.key} className="v2-chat-trace-row">
-              <span className={`v2-chat-trace-dot${tool.success === false ? ' is-error' : ''}`} />
-              <span className="v2-chat-trace-label">{tool.label}</span>
-              {tool.latency_ms > 0 && (
-                <span className="v2-chat-trace-meta">{Math.round(tool.latency_ms)}ms</span>
-              )}
-              {tool.error && <span className="v2-chat-trace-error">{tool.error}</span>}
-              {tool.args_preview && <code className="v2-chat-trace-args">{tool.args_preview}</code>}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -783,47 +838,103 @@ function ThreadsPane({ onClose, onOpenConversation, onStartNewConversation }) {
   );
 }
 
-function SnapshotsPane({ onClose, messages, onRestore }) {
+function SnapshotsPane({ onClose, onRestore }) {
   const [snapshots, setSnapshots] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [sessionId, setSessionId] = useState('');
+  const [busy, setBusy] = useState('');
+  const [err, setErr] = useState('');
+
+  // Resolve the primary session_id once on mount. The snapshot
+  // endpoints all require it — the UI used to omit it which is why
+  // save returned `{error: "session_id is required"}` silently.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await apiJson('/api/sessions/primary', { silent: true });
+        if (!cancelled) setSessionId(r?.session_id || '');
+      } catch {
+        // leave blank — UI surfaces error on save/restore
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const refresh = useCallback(async () => {
+    setLoading(true);
     try {
-      const d = await apiJson('/api/session/snapshots');
+      const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+      const d = await apiJson(`/api/session/snapshots${params}`);
       setSnapshots(d.snapshots || d.items || []);
+    } catch (e) {
+      setErr(e?.message || 'failed to list snapshots');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
   const save = async () => {
-    await apiFetch('/api/session/snapshot', {
-      method: 'POST',
-      body: JSON.stringify({ messages }),
-    });
-    refresh();
+    if (!sessionId) { setErr('No active session yet'); return; }
+    setBusy('save');
+    setErr('');
+    try {
+      await apiJson('/api/session/snapshot', {
+        method: 'POST',
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || 'snapshot failed');
+    } finally {
+      setBusy('');
+    }
   };
 
+  // Restore parses the snapshot's own message history via the
+  // /api/session/snapshots/{id} GET (since /session/restore returns
+  // metadata, not the messages themselves).
   const restore = async (id) => {
-    const r = await apiFetch('/api/session/restore', {
-      method: 'POST',
-      body: JSON.stringify({ snapshot_id: id }),
-    });
-    if (r.ok) {
-      const body = await r.json();
-      const msgs = (body.messages || []).map((m) => ({ id: m.id || newId(), role: m.role, text: m.content || m.text || '' }));
+    setBusy(`restore:${id}`);
+    setErr('');
+    try {
+      await apiJson('/api/session/restore', {
+        method: 'POST',
+        body: JSON.stringify({ snapshot_id: id, session_id: sessionId }),
+      });
+      const snap = await apiJson(`/api/session/snapshots/${encodeURIComponent(id)}`);
+      const history = Array.isArray(snap?.history) ? snap.history : [];
+      const msgs = history
+        .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+        .map((m) => ({
+          id: newId(),
+          role: m.role,
+          text: typeof m.content === 'string' ? m.content : (m.text || ''),
+        }));
       onRestore(msgs);
+    } catch (e) {
+      setErr(e?.message || 'restore failed');
+    } finally {
+      setBusy('');
     }
   };
 
   const branch = async (id) => {
-    await apiFetch('/api/session/branch', {
-      method: 'POST',
-      body: JSON.stringify({ snapshot_id: id }),
-    });
-    refresh();
+    setBusy(`branch:${id}`);
+    setErr('');
+    try {
+      await apiJson('/api/session/branch', {
+        method: 'POST',
+        body: JSON.stringify({ snapshot_id: id, session_id: sessionId }),
+      });
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || 'branch failed');
+    } finally {
+      setBusy('');
+    }
   };
 
   return (
@@ -833,25 +944,38 @@ function SnapshotsPane({ onClose, messages, onRestore }) {
         <button type="button" className="v2-btn v2-btn--ghost" onClick={onClose} aria-label="Close"><X size={13} /></button>
       </header>
       <div className="v2-forge-actions">
-        <button type="button" className="v2-btn v2-btn--primary" onClick={save}><Save size={12} /> Snapshot now</button>
+        <button type="button" className="v2-btn v2-btn--primary" onClick={save} disabled={busy === 'save' || !sessionId}>
+          <Save size={12} /> {busy === 'save' ? 'Saving…' : 'Snapshot now'}
+        </button>
       </div>
+      {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
       {loading && <EmptyState title="Loading…" />}
       {!loading && snapshots.length === 0 && <EmptyState title="No snapshots yet" />}
       <ul className="v2-mem-list">
-        {snapshots.map((s) => (
-          <li key={s.id}>
-            <Glass level={0} radius="sm" padding="sm">
-              <div className="v2-flow-card-head">
-                <span className="v2-flow-card-title">{s.title || s.id.slice(0, 16)}</span>
-              </div>
-              {s.created_at && <div className="v2-mem-meta">{new Date(s.created_at * 1000).toLocaleString()}</div>}
-              <div className="v2-forge-actions">
-                <button type="button" className="v2-btn" onClick={() => restore(s.id)}>Restore</button>
-                <button type="button" className="v2-btn" onClick={() => branch(s.id)}><GitBranch size={12} /> Branch</button>
-              </div>
-            </Glass>
-          </li>
-        ))}
+        {snapshots.map((s) => {
+          // Backend stores snapshots with `snapshot_id` (preferred) but
+          // some older rows surface as `id`. Normalise so the UI never
+          // dispatches an empty id (the bug that made Restore a no-op).
+          const sid = s.snapshot_id || s.id;
+          return (
+            <li key={sid}>
+              <Glass level={0} radius="sm" padding="sm">
+                <div className="v2-flow-card-head">
+                  <span className="v2-flow-card-title">{s.label || s.title || sid.slice(0, 16)}</span>
+                </div>
+                {s.created_at && <div className="v2-mem-meta">{new Date(s.created_at * 1000).toLocaleString()}</div>}
+                <div className="v2-forge-actions">
+                  <button type="button" className="v2-btn" onClick={() => restore(sid)} disabled={busy === `restore:${sid}`}>
+                    {busy === `restore:${sid}` ? 'Restoring…' : 'Restore'}
+                  </button>
+                  <button type="button" className="v2-btn" onClick={() => branch(sid)} disabled={busy === `branch:${sid}`}>
+                    <GitBranch size={12} /> {busy === `branch:${sid}` ? 'Branching…' : 'Branch'}
+                  </button>
+                </div>
+              </Glass>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

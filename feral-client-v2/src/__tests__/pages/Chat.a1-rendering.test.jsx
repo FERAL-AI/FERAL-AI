@@ -79,14 +79,23 @@ describe('Chat — A1 rendering fixes', () => {
       emit({ type: 'tool_result', payload: { tool: 'web_search__run', call_id: 'c1', success: true, latency_ms: 17 } });
       emit({ type: 'text_response', payload: { text: 'Done.' } });
     });
+    // Lane 12 rebuild: tool traces now render as ToolCallCard rows
+    // attached to the assistant turn (one card per call). The legacy
+    // aggregate "used N tools" summary chip + global trace toggle was
+    // replaced with per-card collapse so power users can inspect each
+    // call independently. Assert on the per-card surface contract:
+    // friendly label + latency, no raw `provider__action` id.
     const after = Array.from(container.querySelectorAll('.v2-chat-body'))
       .map((n) => n.textContent).join(' | ');
-    expect(after).toContain('used 1 tool');
+    expect(after).toContain('Search web');
+    expect(after).toContain('17ms');
     expect(after).not.toContain('web_search__run');
 
-    const toggle = container.querySelector('.v2-chat-trace-toggle');
+    // Each tool card is independently expandable via its head button.
+    const toolHead = container.querySelector('.v2-tool-card__head');
+    expect(toolHead).toBeTruthy();
     await act(async () => {
-      fireEvent.click(toggle);
+      fireEvent.click(toolHead);
     });
     const expanded = Array.from(container.querySelectorAll('.v2-chat-body'))
       .map((n) => n.textContent).join(' | ');
