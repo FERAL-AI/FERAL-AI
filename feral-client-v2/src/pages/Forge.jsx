@@ -74,23 +74,36 @@ function PendingTab() {
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // AUDIT-r14 finding 05 fix: tool-genesis backend reads
+  // `body.get("tool_id")` (api/routes/tool_genesis.py:73), not `id` /
+  // `skill_id`. The reject ordering used to try `/api/skills/reject`
+  // FIRST which accepted the wrong-shape payload and returned ok,
+  // so tool-genesis drafts were never actually rejected on the
+  // tool_genesis side. Reordered to try the tool-genesis route first,
+  // and send all three shapes so the legacy skills approve/reject
+  // still works for plain-skill rows.
   const decide = async (id, approve) => {
     setBusy(id);
     try {
       const path = approve
         ? ['/api/tool-genesis/approve', '/api/skills/approve']
-        : ['/api/skills/reject', '/api/tool-genesis/reject'];
+        : ['/api/tool-genesis/reject', '/api/skills/reject'];
       let ok = false;
+      let lastErr = '';
       for (const p of path) {
         try {
           const r = await apiFetch(p, {
             method: 'POST',
-            body: JSON.stringify({ id, skill_id: id }),
+            body: JSON.stringify({ tool_id: id, id, skill_id: id }),
           });
           if (r.ok) { ok = true; break; }
-        } catch { /* try the next */ }
+          const body = await r.json().catch(() => ({}));
+          lastErr = body?.detail || body?.error || `${r.status}`;
+        } catch (e) {
+          lastErr = e?.message || 'request failed';
+        }
       }
-      if (!ok) throw new Error('Neither approve endpoint accepted the id');
+      if (!ok) throw new Error(lastErr || 'No approve endpoint accepted the id');
       await refresh();
     } finally {
       setBusy(null);
@@ -218,6 +231,13 @@ function GenerateTab() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
 
+  // AUDIT-r14 finding 05 fix: `/api/tool-genesis/generate` reads
+  // `body.get("sequence_id")` and only works when wired up to an
+  // existing sequence record — it never accepted a free-form prompt.
+  // The natural-language "Generate" flow is actually
+  // `/api/tool-genesis/propose` which reads `body.get("intent", "")`
+  // (tool_genesis.py:51-67). Switch to it and surface the returned
+  // `tool_id` so the user sees the draft id straight away.
   const go = async (e) => {
     e.preventDefault();
     if (!prompt.trim()) return;
@@ -225,13 +245,22 @@ function GenerateTab() {
     setResult(null);
     setError(null);
     try {
-      const r = await apiFetch('/api/tool-genesis/generate', {
+      const r = await apiFetch('/api/tool-genesis/propose', {
         method: 'POST',
-        body: JSON.stringify({ prompt, description: prompt }),
+        body: JSON.stringify({ intent: prompt.trim() }),
       });
       const body = await r.json().catch(() => ({}));
-      if (!r.ok) setError(body?.error || `${r.status}`);
-      else setResult(body);
+      if (!r.ok) {
+        setError(body?.detail || body?.error || `${r.status}`);
+        return;
+      }
+      if (body?.tool_id) {
+        setResult(body);
+      } else if (body?.error) {
+        setError(body.error);
+      } else {
+        setError('Brain rejected the proposal (no tool_id returned). Try a more specific intent.');
+      }
     } catch (err) {
       setError(err.message);
     } finally {

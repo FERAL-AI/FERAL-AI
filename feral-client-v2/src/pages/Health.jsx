@@ -160,7 +160,27 @@ function TodayTab() {
   const [today, setToday] = useState(null);
   const [sources, setSources] = useState([]);
   useEffect(() => {
-    apiJson('/api/health-summary').then(setToday).catch(() => setToday({}));
+    // AUDIT-r14 finding 06 fix for Health/Today: backend at
+    // api/routes/timeline.py:154-163 returns `{data: {...vitals},
+    // error?}`. The page used to set `today` to the whole response,
+    // so the metric tiles rendered "data" / "error" as keys instead
+    // of the actual vital names. Unpack `.data` (with a back-compat
+    // fall-through if a future build flattens the shape).
+    apiJson('/api/health-summary')
+      .then((resp) => {
+        if (resp && typeof resp === 'object') {
+          if (resp.error) {
+            setToday({ _error: resp.error });
+          } else if (resp.data && typeof resp.data === 'object') {
+            setToday(resp.data);
+          } else {
+            setToday(resp);
+          }
+        } else {
+          setToday({});
+        }
+      })
+      .catch(() => setToday({}));
     // Pull the dashboard so we can render a real pipeline+source line
     // alongside the metric tiles. The vital values themselves come from
     // the aggregator above; the sources list comes from the brain's
@@ -184,11 +204,17 @@ function TodayTab() {
       .catch(() => setSources([]));
   }, []);
   if (!today) return <Pane title="Today"><EmptyState title="Loading…" /></Pane>;
+  const errOnly = today._error;
+  const visibleEntries = Object.entries(today).filter(([k]) => !k.startsWith('_'));
   return (
     <>
       <Pane title="Today's vitals">
+        {errOnly && <div className="v2-chip v2-chip--error" role="alert">{errOnly}</div>}
+        {!errOnly && visibleEntries.length === 0 && (
+          <EmptyState title="No vitals yet" hint="Pair a wearable or HealthKit-enabled iPhone to populate today's snapshot." />
+        )}
         <div className="v2-grid v2-grid--stats">
-          {Object.entries(today).filter(([k]) => !k.startsWith('_')).map(([k, v]) => (
+          {visibleEntries.map(([k, v]) => (
             <Glass key={k} level={1} radius="md" padding="md">
               <div className="v2-stat-label">{k.replace(/_/g, ' ')}</div>
               <div className="v2-stat-value">{typeof v === 'number' ? v : JSON.stringify(v).slice(0, 40)}</div>

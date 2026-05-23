@@ -44,11 +44,31 @@ function RecentTab() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showNew, setShowNew] = useState(false);
+  // AUDIT-r14 D-L fix: surface real per-tier totals from /api/memory/stats
+  // so the tab title shows e.g. "Recent (4361 episodes · 12 notes)"
+  // instead of always claiming 0. The recent-notes list still renders
+  // the bounded `/internal/memory/recent` slice — the count above is
+  // the truthful number.
+  const [totals, setTotals] = useState({ notes: 0, episodes: 0, knowledge: 0 });
 
   const refresh = useCallback(async () => {
     try {
-      const d = await apiJson('/internal/memory/recent');
-      setItems(d.memories || d.notes || d || []);
+      const [recent, stats] = await Promise.allSettled([
+        apiJson('/internal/memory/recent'),
+        apiJson('/api/memory/stats', { silent: true }),
+      ]);
+      if (recent.status === 'fulfilled') {
+        const d = recent.value;
+        setItems(d.memories || d.notes || d || []);
+      }
+      if (stats.status === 'fulfilled') {
+        const t = stats.value?.totals || {};
+        setTotals({
+          notes: Number(t.notes ?? 0),
+          episodes: Number(t.episodes ?? 0),
+          knowledge: Number(t.knowledge ?? 0),
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -56,13 +76,15 @@ function RecentTab() {
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  const title = `Recent (${totals.episodes} episodes · ${totals.notes} notes · ${totals.knowledge} knowledge)`;
+
   return (
     <Pane
-      title={`Recent (${items.length})`}
+      title={title}
       actions={<button type="button" className="v2-btn v2-btn--primary" onClick={() => setShowNew(true)}><Plus size={13} /> Save memory</button>}
     >
       {loading && <EmptyState title="Loading…" />}
-      {!loading && items.length === 0 && <EmptyState title="No memories saved yet" hint="Every chat turn writes episodic entries automatically." />}
+      {!loading && items.length === 0 && <EmptyState title="No notes saved yet" hint="Episodes are written automatically per chat turn; notes are explicit Save Memory items." />}
       <ul className="v2-mem-list">
         {items.slice(0, 30).map((m, i) => (
           <li key={m.id || i}>

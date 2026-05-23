@@ -213,10 +213,25 @@ export default function Devices() {
     refresh();
   }, [refresh]);
 
+  // AUDIT-r14 finding 06 fix: forget used to dispatch the DELETE
+  // and assume success. A failed delete (404 / 403) left the row
+  // visible with no error surfaced. Now we wait for the response,
+  // surface non-OK as a chip, and only re-fetch on a successful
+  // delete (refresh on failure too so the user sees the truth).
   const forget = async (id) => {
     if (!window.confirm(`Forget device ${id}? This removes the pairing.`)) return;
-    await apiFetch(`/api/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    refresh();
+    setError(null);
+    try {
+      const r = await apiFetch(`/api/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        setError(body?.detail || body?.error || `delete returned ${r.status}`);
+      }
+    } catch (e) {
+      setError(e?.message || 'delete failed');
+    } finally {
+      refresh();
+    }
   };
 
   return (
@@ -474,6 +489,11 @@ function DeviceDetailModal({ device, onClose, onForget }) {
     apiJson(`/api/hardware/device/${encodeURIComponent(id)}`).then(setDetail).catch(() => {});
   }, [id]);
 
+  // AUDIT-r14 finding 06 fix: previously invalid JSON args were
+  // silently coerced to `{}` and the actuator fired with no
+  // arguments — so the user thought they sent {brightness: 50} and
+  // got an undefined result back. Now we validate and surface the
+  // parse error before the request leaves the browser.
   const doInvoke = async (e) => {
     e.preventDefault();
     setBusy(true);
@@ -481,14 +501,33 @@ function DeviceDetailModal({ device, onClose, onForget }) {
     setResult(null);
     try {
       let args = {};
-      try { args = JSON.parse(invoke.args); } catch { /* ignore */ }
+      const raw = (invoke.args || '').trim();
+      if (raw && raw !== '{}') {
+        try {
+          args = JSON.parse(raw);
+        } catch (parseErr) {
+          setError(`Args JSON is malformed: ${parseErr?.message || parseErr}`);
+          setBusy(false);
+          return;
+        }
+        if (args === null || typeof args !== 'object' || Array.isArray(args)) {
+          setError('Args must be a JSON object.');
+          setBusy(false);
+          return;
+        }
+      }
+      if (!invoke.method?.trim()) {
+        setError('Method name is required.');
+        setBusy(false);
+        return;
+      }
       const r = await apiFetch('/api/hardware/invoke', {
         method: 'POST',
-        body: JSON.stringify({ device_id: id, method: invoke.method, args }),
+        body: JSON.stringify({ device_id: id, method: invoke.method.trim(), args }),
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok || body?.error) {
-        setError(body?.error || `${r.status}`);
+        setError(body?.detail || body?.error || `${r.status}`);
       } else {
         setResult(body);
       }

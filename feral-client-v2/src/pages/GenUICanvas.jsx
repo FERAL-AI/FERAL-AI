@@ -223,42 +223,86 @@ function InstalledAppsTab() {
 }
 
 function ThemesTab() {
+  // AUDIT-r14 finding 05 fix: `/api/genui/themes` returns
+  // `{themes: [string, ...], active: string}` — flat names, not
+  // objects. The activate endpoint reads `body.get("name", "")`; the
+  // UI used to send `{theme_id: id}` which the brain silently ignored.
+  // We now normalise strings → {name} objects, mark the active one
+  // via the matching server-reported `active` field, and POST `{name}`.
   const [themes, setThemes] = useState([]);
+  const [activeName, setActiveName] = useState('');
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState('');
+  const [err, setErr] = useState('');
 
   const refresh = useCallback(async () => {
-    try { const d = await apiJson('/api/genui/themes'); setThemes(d.themes || d || []); }
-    finally { setLoading(false); }
+    setErr('');
+    try {
+      const d = await apiJson('/api/genui/themes');
+      const rows = Array.isArray(d?.themes) ? d.themes : (Array.isArray(d) ? d : []);
+      const normalised = rows.map((row) => {
+        if (typeof row === 'string') return { name: row, id: row };
+        return { name: row.name || row.id, id: row.id || row.name, ...row };
+      });
+      setThemes(normalised);
+      setActiveName(d?.active || '');
+    } catch (e) {
+      setErr(e?.message || 'failed to load themes');
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const activate = async (id) => {
-    await apiFetch('/api/genui/themes/activate', {
-      method: 'POST',
-      body: JSON.stringify({ theme_id: id }),
-    });
-    refresh();
+  const activate = async (name) => {
+    setBusy(name);
+    setErr('');
+    try {
+      const r = await apiFetch('/api/genui/themes/activate', {
+        method: 'POST',
+        body: JSON.stringify({ name }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body?.detail || body?.error || `${r.status}`);
+      }
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || 'activate failed');
+    } finally {
+      setBusy('');
+    }
   };
 
   return (
     <Pane title={`Themes · ${themes.length}`} actions={<button type="button" className="v2-btn v2-btn--ghost" onClick={refresh}><RefreshCw size={13} /></button>}>
+      {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
       {loading && <EmptyState title="Loading…" />}
       {!loading && themes.length === 0 && <EmptyState title="No themes" />}
       <div className="v2-skills-grid">
-        {themes.map((t) => (
-          <Glass key={t.id} level={0} radius="md" padding="md" className="v2-skill-card">
-            <header className="v2-skill-card-head">
-              <h3 className="v2-skill-card-name"><Palette size={12} /> {t.name || t.id}</h3>
-              {t.active && <span className="v2-chip v2-chip--live">active</span>}
-            </header>
-            <div className="v2-forge-actions">
-              <button type="button" className={`v2-btn ${t.active ? '' : 'v2-btn--primary'}`} onClick={() => activate(t.id)} disabled={t.active}>
-                {t.active ? 'In use' : 'Activate'}
-              </button>
-            </div>
-          </Glass>
-        ))}
+        {themes.map((t) => {
+          const isActive = activeName && t.name === activeName;
+          return (
+            <Glass key={t.name} level={0} radius="md" padding="md" className="v2-skill-card">
+              <header className="v2-skill-card-head">
+                <h3 className="v2-skill-card-name"><Palette size={12} /> {t.name}</h3>
+                {isActive && <span className="v2-chip v2-chip--live">active</span>}
+              </header>
+              <div className="v2-forge-actions">
+                <button
+                  type="button"
+                  className={`v2-btn ${isActive ? '' : 'v2-btn--primary'}`}
+                  onClick={() => activate(t.name)}
+                  disabled={isActive || busy === t.name}
+                  data-testid={`theme-activate-${t.name}`}
+                >
+                  {isActive ? 'In use' : busy === t.name ? 'Activating…' : 'Activate'}
+                </button>
+              </div>
+            </Glass>
+          );
+        })}
       </div>
     </Pane>
   );

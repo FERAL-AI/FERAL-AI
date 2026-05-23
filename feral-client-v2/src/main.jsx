@@ -4,6 +4,11 @@ import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import './styles/tokens.css';
 import './index.css';
+// Markdown stack stylesheets — imported once at the app root so they
+// land in the shared bundle and every chat surface that mounts
+// MarkdownMessage gets code highlighting + math typesetting for free.
+import 'highlight.js/styles/github-dark.css';
+import 'katex/dist/katex.min.css';
 import { bootstrapLocalApiKey, maybeRedirectToSetup } from './bootstrap';
 
 // Default to light mode. Users can flip to dark via the menubar toggle;

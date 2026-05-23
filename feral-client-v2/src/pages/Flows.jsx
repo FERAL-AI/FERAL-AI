@@ -346,15 +346,39 @@ function FlowDetailModal({ flow, onClose, onAction }) {
 
 // ── Routines ───────────────────────────────────────────────────
 
+// AUDIT-r14 finding 06 fix for Routines:
+//   Backend POST /api/routines reads
+//     {cron_expr | schedule, description, payload, job_type,
+//      session_id, skill, endpoint, prompt}
+//   The UI used to send {name, cron, steps} so `cron`/`steps` were
+//   silently ignored and routines never matched a real cron schedule.
+//   Status used to read `r.paused` but the brain returns `enabled`.
+//   Both fixed below — and we now derive the cron + description from
+//   the modal's structured fields, while still letting power users
+//   stash arbitrary payload via the JSON box.
+
+function routineStatus(r) {
+  // Backend returns `enabled`. Some older builds (and our test
+  // fixtures) also surface `paused`. Treat them as mutually
+  // exclusive: enabled=true and paused=false both mean "armed".
+  if (r.enabled === false) return { paused: true, tone: 'warn', label: 'paused' };
+  if (r.paused === true) return { paused: true, tone: 'warn', label: 'paused' };
+  return { paused: false, tone: 'live', label: 'armed' };
+}
+
 function RoutinesTab({ skills }) {
   const [routines, setRoutines] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState('');
   const [showCreate, setShowCreate] = useState(false);
 
   const refresh = useCallback(async () => {
+    setErr('');
     try {
       const d = await apiJson('/api/routines');
       setRoutines(d.routines || []);
+    } catch (e) {
+      setErr(e?.message || 'failed to list routines');
     } finally {
       setLoading(false);
     }
@@ -363,8 +387,17 @@ function RoutinesTab({ skills }) {
   useEffect(() => { refresh(); }, [refresh]);
 
   const action = async (id, verb, method = 'POST') => {
-    await apiFetch(`/api/routines/${id}${verb ? '/' + verb : ''}`, { method });
-    refresh();
+    setErr('');
+    try {
+      const r = await apiFetch(`/api/routines/${id}${verb ? '/' + verb : ''}`, { method });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body?.detail || body?.error || `${verb || 'delete'} returned ${r.status}`);
+      }
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || `${verb || 'delete'} failed`);
+    }
   };
 
   return (
@@ -377,29 +410,33 @@ function RoutinesTab({ skills }) {
           </button>
         )}
       >
+        {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
         {loading && <EmptyState title="Loading…" />}
         {!loading && routines.length === 0 && (
-          <EmptyState title="No routines" hint="Routines run on a cron schedule and execute a step list." />
+          <EmptyState title="No routines" hint="Routines run on a cron schedule and call a skill or shell prompt." />
         )}
         <div className="v2-flow-list">
-          {routines.map((r) => (
-            <Glass key={r.id} level={0} radius="md" padding="md" className="v2-flow-card">
-              <div className="v2-flow-card-head">
-                <StatusDot tone={r.paused ? 'warn' : 'live'} />
-                <div className="v2-flow-card-title">{r.name || r.id}</div>
-                <div className="v2-flow-card-status">{r.cron || '—'}</div>
-              </div>
-              <div className="v2-flow-card-actions">
-                {r.paused
-                  ? <button type="button" className="v2-btn" onClick={() => action(r.id, 'resume')}><Play size={12} /> Resume</button>
-                  : <button type="button" className="v2-btn" onClick={() => action(r.id, 'pause')}><Pause size={12} /> Pause</button>
-                }
-                <button type="button" className="v2-btn" onClick={() => action(r.id, '', 'DELETE')}>
-                  <X size={12} /> Delete
-                </button>
-              </div>
-            </Glass>
-          ))}
+          {routines.map((r) => {
+            const st = routineStatus(r);
+            return (
+              <Glass key={r.id} level={0} radius="md" padding="md" className="v2-flow-card">
+                <div className="v2-flow-card-head">
+                  <StatusDot tone={st.tone} label={st.label} />
+                  <div className="v2-flow-card-title">{r.description || r.name || r.id}</div>
+                  <div className="v2-flow-card-status">{r.cron_expr || r.cron || '—'}</div>
+                </div>
+                <div className="v2-flow-card-actions">
+                  {st.paused
+                    ? <button type="button" className="v2-btn" onClick={() => action(r.id, 'resume')}><Play size={12} /> Resume</button>
+                    : <button type="button" className="v2-btn" onClick={() => action(r.id, 'pause')}><Pause size={12} /> Pause</button>
+                  }
+                  <button type="button" className="v2-btn" onClick={() => action(r.id, '', 'DELETE')}>
+                    <X size={12} /> Delete
+                  </button>
+                </div>
+              </Glass>
+            );
+          })}
         </div>
       </Pane>
 
@@ -409,22 +446,39 @@ function RoutinesTab({ skills }) {
 }
 
 function CreateRoutineModal({ skills, onClose, onCreated }) {
-  const [name, setName] = useState('New routine');
-  const [cron, setCron] = useState('0 9 * * 1-5');
-  const [steps, setSteps] = useState([{ type: 'noop' }]);
+  const [description, setDescription] = useState('New routine');
+  const [cronExpr, setCronExpr] = useState('0 9 * * 1-5');
+  const [skillId, setSkillId] = useState('');
+  const [endpoint, setEndpoint] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [payloadJson, setPayloadJson] = useState('{}');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true);
+    setError(null);
     try {
+      let payload = {};
+      try { payload = JSON.parse(payloadJson || '{}'); }
+      catch { setError('Payload JSON is malformed.'); setBusy(false); return; }
+      const body = {
+        cron_expr: cronExpr.trim(),
+        description: description.trim(),
+        payload,
+        job_type: prompt.trim() ? 'prompt' : (skillId ? 'skill' : 'scheduled'),
+      };
+      if (skillId) body.skill = skillId;
+      if (endpoint) body.endpoint = endpoint.trim();
+      if (prompt.trim()) body.prompt = prompt.trim();
       const r = await apiFetch('/api/routines', {
         method: 'POST',
-        body: JSON.stringify({ name, cron, steps }),
+        body: JSON.stringify(body),
       });
       if (!r.ok) {
-        setError(`${r.status} ${await r.text()}`);
+        const e2 = await r.json().catch(() => ({}));
+        setError(e2?.detail || e2?.error || `${r.status}`);
         return;
       }
       onCreated();
@@ -452,17 +506,52 @@ function CreateRoutineModal({ skills, onClose, onCreated }) {
     >
       <div className="v2-setting-stack">
         <label className="v2-setting-row">
-          <div className="v2-setting-label"><div>Name</div></div>
-          <div className="v2-setting-control"><input className="v2-input" value={name} onChange={(e) => setName(e.target.value)} /></div>
+          <div className="v2-setting-label"><div>Description</div></div>
+          <div className="v2-setting-control"><input className="v2-input" value={description} onChange={(e) => setDescription(e.target.value)} /></div>
         </label>
         <label className="v2-setting-row">
           <div className="v2-setting-label"><div>Cron schedule</div><div className="v2-setting-hint">e.g. "0 9 * * 1-5" = weekdays 9am</div></div>
-          <div className="v2-setting-control"><input className="v2-input" value={cron} onChange={(e) => setCron(e.target.value)} /></div>
+          <div className="v2-setting-control"><input className="v2-input" value={cronExpr} onChange={(e) => setCronExpr(e.target.value)} /></div>
+        </label>
+        <label className="v2-setting-row">
+          <div className="v2-setting-label"><div>Skill (optional)</div></div>
+          <div className="v2-setting-control">
+            <select className="v2-select" value={skillId} onChange={(e) => setSkillId(e.target.value)}>
+              <option value="">— none —</option>
+              {skills.map((s) => (
+                <option key={s.skill_id || s.id} value={s.skill_id || s.id}>{s.name || s.skill_id || s.id}</option>
+              ))}
+            </select>
+          </div>
+        </label>
+        <label className="v2-setting-row">
+          <div className="v2-setting-label"><div>Endpoint (optional)</div></div>
+          <div className="v2-setting-control"><input className="v2-input" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="list_today" /></div>
+        </label>
+        <label className="v2-setting-row">
+          <div className="v2-setting-label"><div>Prompt (optional)</div><div className="v2-setting-hint">If set, the routine runs this as a chat prompt instead of calling a skill.</div></div>
+          <div className="v2-setting-control" style={{ flex: 1, minWidth: 220 }}>
+            <textarea className="v2-code-editor" rows={2} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+          </div>
+        </label>
+        <label className="v2-setting-row">
+          <div className="v2-setting-label"><div>Payload (JSON)</div></div>
+          <div className="v2-setting-control" style={{ flex: 1, minWidth: 220 }}>
+            <textarea className="v2-code-editor" rows={3} value={payloadJson} onChange={(e) => setPayloadJson(e.target.value)} />
+          </div>
         </label>
       </div>
-      <div className="v2-p v2-p--muted" style={{ marginTop: 16 }}>Steps</div>
-      <StepBuilder steps={steps} onChange={setSteps} skills={skills} />
-      {error && <div className="v2-chip v2-chip--error" style={{ marginTop: 12 }}>{error}</div>}
+      {/* StepBuilder UI is retained as a hint for users who like the
+       * v1 mental model: visualise steps then transpose to payload.
+       * Backend doesn't read `steps` directly for routines (it reads
+       * payload), so we just show a helper note. */}
+      <p className="v2-p v2-p--muted v2-p--tiny" style={{ marginTop: 12 }}>
+        Looking for a step builder? Steps for routines belong inside <code>payload</code> (the brain decides
+        how to interpret them). TaskFlows have the visual step builder.
+      </p>
+      {/* eslint-disable-next-line no-unused-vars */}
+      {false && <StepBuilder steps={[]} onChange={() => {}} skills={skills} />}
+      {error && <div className="v2-chip v2-chip--error" style={{ marginTop: 12 }} role="alert">{error}</div>}
     </Modal>
   );
 }
@@ -547,8 +636,17 @@ function AutomationsTab({ skills }) {
   );
 }
 
+// AUDIT-r14 finding 06 fix for Automations:
+//   Backend `POST /api/automations` (api/routes/timeline.py:130) reads
+//   `body.get("text")` — it parses natural language into a job. The
+//   UI used to send structured fields (`{name, trigger_type, ...}`)
+//   which the brain ignored, so the create call ALWAYS returned
+//   "text is required". Now the modal lets the user paste plain
+//   English (e.g. "every Monday at 9am, summarise my inbox") AND
+//   provides a structured-builder fallback that we serialise into
+//   the same `text` payload the backend expects.
 function CreateAutomationModal({ skills, onClose, onCreated }) {
-  const [name, setName] = useState('New automation');
+  const [text, setText] = useState('');
   const [trigger, setTrigger] = useState('event');
   const [triggerValue, setTriggerValue] = useState('');
   const [skillId, setSkillId] = useState('');
@@ -557,25 +655,38 @@ function CreateAutomationModal({ skills, onClose, onCreated }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
+  const buildSerialisedText = () => {
+    if (text.trim()) return text.trim();
+    // Compose a natural-language string from the structured fields
+    // so users who prefer the form still get an automation created.
+    const parts = [];
+    if (trigger === 'cron' && triggerValue) parts.push(`On schedule ${triggerValue}`);
+    else if (trigger && triggerValue) parts.push(`On ${trigger} ${triggerValue}`);
+    else if (trigger) parts.push(`On ${trigger}`);
+    if (skillId) parts.push(`run skill ${skillId}${endpoint ? `.${endpoint}` : ''}`);
+    if (args && args.trim() !== '{}') parts.push(`with args ${args.trim()}`);
+    return parts.join(' ').trim();
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true);
+    setError(null);
     try {
-      let parsedArgs = {};
-      try { parsedArgs = JSON.parse(args); } catch { /* args stays {} */ }
+      const composed = buildSerialisedText();
+      if (!composed) { setError('Describe the automation in natural language, or fill in the trigger + skill fields.'); setBusy(false); return; }
       const r = await apiFetch('/api/automations', {
         method: 'POST',
-        body: JSON.stringify({
-          name,
-          trigger_type: trigger,
-          trigger: triggerValue,
-          skill_id: skillId,
-          endpoint,
-          args: parsedArgs,
-        }),
+        body: JSON.stringify({ text: composed }),
       });
       if (!r.ok) {
-        setError(`${r.status} ${await r.text()}`);
+        const body = await r.json().catch(() => ({}));
+        setError(body?.detail || body?.error || `${r.status}`);
+        return;
+      }
+      const body = await r.json().catch(() => ({}));
+      if (body?.success === false) {
+        setError(body?.error || 'Brain could not parse the automation. Try a more specific description.');
         return;
       }
       onCreated();
@@ -602,48 +713,64 @@ function CreateAutomationModal({ skills, onClose, onCreated }) {
       )}
     >
       <div className="v2-setting-stack">
+        <p className="v2-p v2-p--muted v2-p--tiny">
+          Describe the automation in plain English — the brain parses it into a cron + skill call.
+          Or fill the structured fields below and we'll compose the sentence for you.
+        </p>
         <label className="v2-setting-row">
-          <div className="v2-setting-label"><div>Name</div></div>
-          <div className="v2-setting-control"><input className="v2-input" value={name} onChange={(e) => setName(e.target.value)} /></div>
-        </label>
-        <label className="v2-setting-row">
-          <div className="v2-setting-label"><div>Trigger type</div></div>
-          <div className="v2-setting-control">
-            <select className="v2-select" value={trigger} onChange={(e) => setTrigger(e.target.value)}>
-              <option value="event">Event (brain event name)</option>
-              <option value="cron">Cron</option>
-              <option value="webhook">Webhook</option>
-              <option value="geofence">Geofence</option>
-            </select>
+          <div className="v2-setting-label"><div>Natural-language description</div></div>
+          <div className="v2-setting-control" style={{ flex: 1, minWidth: 240 }}>
+            <textarea
+              className="v2-code-editor"
+              rows={2}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder='Every weekday at 9am, summarise my inbox.'
+              data-testid="automation-text"
+            />
           </div>
         </label>
-        <label className="v2-setting-row">
-          <div className="v2-setting-label"><div>Trigger value</div><div className="v2-setting-hint">event name, cron, webhook id, or geofence id</div></div>
-          <div className="v2-setting-control"><input className="v2-input" value={triggerValue} onChange={(e) => setTriggerValue(e.target.value)} /></div>
-        </label>
-        <label className="v2-setting-row">
-          <div className="v2-setting-label"><div>Skill</div></div>
-          <div className="v2-setting-control">
-            <select className="v2-select" value={skillId} onChange={(e) => setSkillId(e.target.value)}>
-              <option value="">-- pick a skill --</option>
-              {skills.map((s) => (
-                <option key={s.skill_id || s.id} value={s.skill_id || s.id}>{s.name || s.skill_id || s.id}</option>
-              ))}
-            </select>
-          </div>
-        </label>
-        <label className="v2-setting-row">
-          <div className="v2-setting-label"><div>Endpoint</div></div>
-          <div className="v2-setting-control"><input className="v2-input" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="list_today" /></div>
-        </label>
-        <label className="v2-setting-row">
-          <div className="v2-setting-label"><div>Args (JSON)</div></div>
-          <div className="v2-setting-control" style={{ flex: 1, minWidth: 220 }}>
-            <textarea className="v2-code-editor" rows={3} value={args} onChange={(e) => setArgs(e.target.value)} />
-          </div>
-        </label>
+        <details>
+          <summary className="v2-p v2-p--muted v2-p--tiny" style={{ cursor: 'pointer' }}>Structured builder (optional)</summary>
+          <label className="v2-setting-row">
+            <div className="v2-setting-label"><div>Trigger type</div></div>
+            <div className="v2-setting-control">
+              <select className="v2-select" value={trigger} onChange={(e) => setTrigger(e.target.value)}>
+                <option value="event">Event (brain event name)</option>
+                <option value="cron">Cron</option>
+                <option value="webhook">Webhook</option>
+                <option value="geofence">Geofence</option>
+              </select>
+            </div>
+          </label>
+          <label className="v2-setting-row">
+            <div className="v2-setting-label"><div>Trigger value</div></div>
+            <div className="v2-setting-control"><input className="v2-input" value={triggerValue} onChange={(e) => setTriggerValue(e.target.value)} /></div>
+          </label>
+          <label className="v2-setting-row">
+            <div className="v2-setting-label"><div>Skill</div></div>
+            <div className="v2-setting-control">
+              <select className="v2-select" value={skillId} onChange={(e) => setSkillId(e.target.value)}>
+                <option value="">-- pick a skill --</option>
+                {skills.map((s) => (
+                  <option key={s.skill_id || s.id} value={s.skill_id || s.id}>{s.name || s.skill_id || s.id}</option>
+                ))}
+              </select>
+            </div>
+          </label>
+          <label className="v2-setting-row">
+            <div className="v2-setting-label"><div>Endpoint</div></div>
+            <div className="v2-setting-control"><input className="v2-input" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="list_today" /></div>
+          </label>
+          <label className="v2-setting-row">
+            <div className="v2-setting-label"><div>Args (JSON)</div></div>
+            <div className="v2-setting-control" style={{ flex: 1, minWidth: 220 }}>
+              <textarea className="v2-code-editor" rows={3} value={args} onChange={(e) => setArgs(e.target.value)} />
+            </div>
+          </label>
+        </details>
       </div>
-      {error && <div className="v2-chip v2-chip--error" style={{ marginTop: 12 }}>{error}</div>}
+      {error && <div className="v2-chip v2-chip--error" style={{ marginTop: 12 }} role="alert">{error}</div>}
     </Modal>
   );
 }

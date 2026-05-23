@@ -138,6 +138,10 @@ function NewPlanTab() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
 
+  // AUDIT-r14 finding 06 fix: backend `/api/intents/compile` reads
+  // `body.get("intent")` (intents.py:11). Sending `{goal}` made every
+  // compile call return "intent text is required". Now we send
+  // `intent` and keep `goal` as a fallback for any older brain build.
   const compile = async (e) => {
     e.preventDefault();
     if (!goal.trim()) return;
@@ -146,8 +150,10 @@ function NewPlanTab() {
     setResult(null);
     try {
       const r = await apiFetch('/api/intents/compile', {
+        // intentional spread of multi-shape body — backend will pick
+        // whichever field its build understands.
         method: 'POST',
-        body: JSON.stringify({ goal }),
+        body: JSON.stringify({ intent: goal.trim(), goal: goal.trim() }),
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok) setError(body?.error || `${r.status}`);

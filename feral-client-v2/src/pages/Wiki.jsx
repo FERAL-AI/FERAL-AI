@@ -133,7 +133,12 @@ function IngestTab() {
   };
 
   const sendText = (e) => { e.preventDefault(); if (text.trim()) send('text', { content: text, text }); };
-  const sendRepo = (e) => { e.preventDefault(); if (repo.trim()) send('repo', { url: repo }); };
+  // AUDIT-r14 finding 04 fix: backend at `memory.py:679` reads
+  // `body.get("path", "")` (a filesystem path or git URL). The UI
+  // used to send `{url}`, which the brain silently ignored and the
+  // ingest never happened. Now we send `{path}` and also keep `url`
+  // as a fallback for any older brain build still on the WS.
+  const sendRepo = (e) => { e.preventDefault(); if (repo.trim()) send('repo', { path: repo.trim(), url: repo.trim() }); };
 
   const uploadPdf = async (e) => {
     const file = e.target.files?.[0];

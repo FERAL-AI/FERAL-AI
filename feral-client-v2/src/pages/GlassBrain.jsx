@@ -6,6 +6,7 @@ import Glass from '../ui/Glass';
 import ConsciousnessMindMap from '../components/ConsciousnessMindMap';
 import { useFeralSocket } from '../hooks/useFeralSocket';
 import { apiJson } from '../lib/api';
+import { useSystemHealth, refreshSystemHealth } from '../hooks/useSystemHealth';
 
 /**
  * Glass Brain v2 — a live, introspective view of everything alive inside
@@ -36,8 +37,14 @@ export default function GlassBrain() {
   const socket = useFeralSocket();
   const [events, setEvents] = useState([]);
   const [summary, setSummary] = useState({ total: 0, byKind: {}, byStatus: {} });
-  const [dashboard, setDashboard] = useState(null);
+  // AUDIT-r14 finding 03 dedup: the page used to mount its own 8s
+  // /api/dashboard poll on top of Home's 15s + Shell's 10s. Now it
+  // subscribes to the single shared store via useSystemHealth; only
+  // consciousness/state stays page-local because no other surface
+  // consumes it.
+  const { data: dashboard, error: dashboardError } = useSystemHealth();
   const [refreshKey, setRefreshKey] = useState(0);
+  const [consErr, setConsErr] = useState('');
 
   useEffect(() => {
     const unsub = socket.subscribe((msg) => {
@@ -51,10 +58,7 @@ export default function GlassBrain() {
     let cancelled = false;
     async function load() {
       try {
-        const [cons, dash] = await Promise.all([
-          apiJson('/api/consciousness/state?include_abandoned=false').catch(() => null),
-          apiJson('/api/dashboard').catch(() => null),
-        ]);
+        const cons = await apiJson('/api/consciousness/state?include_abandoned=false', { silent: true });
         if (cancelled) return;
         if (cons && Array.isArray(cons.entities)) {
           const byKind = {};
@@ -65,8 +69,9 @@ export default function GlassBrain() {
           }
           setSummary({ total: cons.entities.length, byKind, byStatus });
         }
-        if (dash) setDashboard(dash);
-      } catch { /* ignore */ }
+      } catch (e) {
+        setConsErr(e?.message || 'consciousness fetch failed');
+      }
     }
     load();
     const id = setInterval(load, 8000);
@@ -75,14 +80,21 @@ export default function GlassBrain() {
 
   const vitals = useMemo(() => {
     const d = dashboard || {};
+    // AUDIT-r14 finding 03 fix #4: the prior Brain tile checked
+    // `d.health?.status === 'ok'` but `/api/dashboard` returns
+    // `health` as a vitals map (heart_rate, hrv, …) with no `status`
+    // key, so the tile rendered "—" forever. The brain is "online"
+    // when the shared system-health store has a non-error snapshot;
+    // no need for a string check inside `health`.
+    const brainOnline = !dashboardError && !!dashboard;
     return [
-      { icon: Cpu, label: 'Brain', value: d.health?.status === 'ok' ? 'online' : (d.health?.status || '—'), tone: d.health?.status === 'ok' ? 'live' : 'muted' },
+      { icon: Cpu, label: 'Brain', value: brainOnline ? 'online' : (dashboardError?.detail || 'offline'), tone: brainOnline ? 'live' : 'warn' },
       { icon: Activity, label: 'In-flight', value: summary.total, tone: summary.total > 0 ? 'live' : 'muted' },
       { icon: Layers, label: 'Sessions', value: d.session_count ?? '—' },
       { icon: Radio, label: 'Devices', value: d.device_count ?? '—' },
-      { icon: Zap, label: 'Skills', value: d.health?.skills?.count ?? '—' },
+      { icon: Zap, label: 'Skills', value: d.skill_count ?? d.skills_count ?? (Array.isArray(d.skills) ? d.skills.length : '—') },
     ];
-  }, [dashboard, summary]);
+  }, [dashboard, dashboardError, summary]);
 
   const hasNodes = summary.total > 0;
   // Legend rows: when at least one entity is in flight we anchor the
@@ -115,7 +127,7 @@ export default function GlassBrain() {
             <button
               type="button"
               className="v2-btn"
-              onClick={() => setRefreshKey((k) => k + 1)}
+              onClick={() => { setRefreshKey((k) => k + 1); refreshSystemHealth(); }}
               title="Refresh"
             >
               <RefreshCw size={13} /> Refresh
