@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import EmptyState from '../ui/EmptyState';
@@ -9,19 +10,36 @@ import { apiFetch, apiJson } from '../lib/api';
 import { API_BASE } from '../lib/config';
 
 /**
- * Settings — fifteen real sections. Self is the first section users
+ * Settings — sixteen real sections. Self is the first section users
  * expect to find for "about me / my agent's personality" and it embeds
  * the same IDENTITY / SOUL / MEMORY editors that live at /identity so
  * users never have to hunt through the ⌘K hub to find them.
+ *
+ * `?section=Cost&call_site=chat` deeplink (S6 budget banner) lands the
+ * user directly on the Cost panel with the relevant call-site
+ * pre-selected.
  */
 
 const SECTIONS = [
   'Self', 'General', 'Providers', 'Memory', 'Channels', 'Autonomy', 'Voice',
-  'Access', 'Twin', 'Security', 'Integrations', 'Sync', 'Handoff', 'Push', 'MCP',
+  'Access', 'Twin', 'Security', 'Integrations', 'Cost', 'Sync', 'Handoff', 'Push', 'MCP',
 ];
 
 export default function Settings() {
-  const [section, setSection] = useState('Self');
+  const [searchParams] = useSearchParams();
+  const initialSection = (() => {
+    const q = searchParams.get('section');
+    if (q && SECTIONS.includes(q)) return q;
+    return 'Self';
+  })();
+  const [section, setSection] = useState(initialSection);
+  // Sync the URL `?section=` so the budget-banner deeplink + browser
+  // back/forward never desync from the rendered panel.
+  useEffect(() => {
+    const q = searchParams.get('section');
+    if (q && SECTIONS.includes(q) && q !== section) setSection(q);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   return (
     <div className="v2-page v2-page--split" data-testid="v2-marker">
@@ -34,6 +52,7 @@ export default function Settings() {
                   type="button"
                   className={`v2-settings-btn${section === s ? ' is-active' : ''}`}
                   onClick={() => setSection(s)}
+                  data-testid={`settings-tab-${s.toLowerCase()}`}
                 >
                   {s}
                 </button>
@@ -53,6 +72,7 @@ export default function Settings() {
         {section === 'Access' && <AccessSection />}
         {section === 'Security' && <SecuritySection />}
         {section === 'Integrations' && <IntegrationsSection />}
+        {section === 'Cost' && <CostSection initialCallSite={searchParams.get('call_site') || ''} />}
         {section === 'Sync' && <SyncSection />}
         {section === 'Handoff' && <HandoffSection />}
         {section === 'Push' && <PushSection />}
@@ -467,7 +487,282 @@ function ProvidersSection() {
           );
         })}
       </div>
+
+      {/*
+       * Multi-key + tier router (Lane 09 Wave 2 consumer).
+       * Lists every labeled key per provider with per-key probe,
+       * "Make active" + "Remove", and a row to add a new label. Below
+       * that, a Tier picker per call-site (chat / routing / vision /
+       * embedding) hits `/api/llm/route?call_site=X&tier=Y` so users
+       * can pre-flight what provider + model would be selected for
+       * each tier without sending a chat.
+       */}
+      <ProviderKeysCard providers={providers} />
+      <TierRouteCard />
     </div>
+  );
+}
+
+// ── Multi-key + tier (Lane 09 consumer) ──────────────────────
+
+const TIER_OPTIONS = [
+  { id: 'cheap', label: 'Cheap' },
+  { id: 'balanced', label: 'Balanced' },
+  { id: 'premium', label: 'Premium' },
+];
+const CALL_SITES = [
+  { id: 'chat', label: 'Chat' },
+  { id: 'routing', label: 'Routing' },
+  { id: 'vision', label: 'Vision' },
+  { id: 'embedding', label: 'Embedding' },
+];
+
+function ProviderKeysCard({ providers }) {
+  const supportedIds = (providers || [])
+    .map((p) => p.id || p.provider_id)
+    .filter(Boolean);
+  const [pid, setPid] = useState(supportedIds[0] || '');
+  useEffect(() => {
+    if (supportedIds.length && !supportedIds.includes(pid)) setPid(supportedIds[0]);
+  }, [supportedIds.join(','), pid]);
+
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [newLabel, setNewLabel] = useState('');
+  const [newKey, setNewKey] = useState('');
+  const [setActive, setSetActive] = useState(true);
+
+  const refresh = useCallback(async () => {
+    if (!pid) return;
+    setErr('');
+    try {
+      const d = await apiJson(`/api/llm/providers/${encodeURIComponent(pid)}/keys`);
+      setData(d);
+    } catch (e) {
+      setErr(e?.message || 'failed to load keys');
+    }
+  }, [pid]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const probe = async (label) => {
+    setBusy(`probe:${label}`);
+    setErr('');
+    try {
+      await apiJson(`/api/llm/providers/${encodeURIComponent(pid)}/keys/${encodeURIComponent(label)}/probe`, { method: 'POST' });
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || 'probe failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const makeActive = async (label) => {
+    setBusy(`active:${label}`);
+    try {
+      await apiJson(`/api/llm/providers/${encodeURIComponent(pid)}/keys/active`, {
+        method: 'POST',
+        body: JSON.stringify({ label }),
+      });
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || 'set-active failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const remove = async (label) => {
+    if (!window.confirm(`Remove ${pid} key ${label}? The runtime will fall back to the default credential.`)) return;
+    setBusy(`del:${label}`);
+    try {
+      await apiFetch(`/api/llm/providers/${encodeURIComponent(pid)}/keys/${encodeURIComponent(label)}`, {
+        method: 'DELETE',
+      });
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || 'delete failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const add = async () => {
+    if (!pid || !newLabel.trim() || !newKey.trim()) {
+      setErr('Both label and API key are required.');
+      return;
+    }
+    setBusy('add');
+    try {
+      await apiJson(`/api/llm/providers/${encodeURIComponent(pid)}/keys`, {
+        method: 'POST',
+        body: JSON.stringify({
+          label: newLabel.trim(),
+          api_key: newKey.trim(),
+          set_active: setActive,
+        }),
+      });
+      setNewLabel('');
+      setNewKey('');
+      setAdding(false);
+      await refresh();
+      // Immediately probe the freshly-added key so the row renders
+      // its real verdict (not "not probed yet").
+      try { await probe(newLabel.trim()); } catch { /* swallow */ }
+    } catch (e) {
+      setErr(e?.message || 'add failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const keys = data?.keys || [];
+  const activeLabel = data?.active_label || '';
+
+  return (
+    <Glass level={1} radius="md" padding="md" className="v2-providers-keys" data-testid="provider-keys-card">
+      <div className="v2-flow-card-head" style={{ marginBottom: 8 }}>
+        <strong>Labeled keys</strong>
+        <select className="v2-select" value={pid} onChange={(e) => setPid(e.target.value)} aria-label="Provider">
+          {supportedIds.map((id) => <option key={id} value={id}>{id}</option>)}
+        </select>
+        <button type="button" className="v2-btn v2-btn--ghost" onClick={refresh}>Refresh</button>
+        <button type="button" className="v2-btn v2-btn--primary" onClick={() => setAdding((v) => !v)}>
+          {adding ? 'Cancel' : '+ Add key'}
+        </button>
+      </div>
+      <p className="v2-p v2-p--muted v2-p--tiny" style={{ marginBottom: 8 }}>
+        Stash multiple keys per provider (dev / prod / team). The active label is what the next chat turn uses.
+        Per-key Test runs the brain's probe and renders the real verdict — no more "configured" lies.
+      </p>
+
+      {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
+
+      {adding && (
+        <Glass level={0} radius="sm" padding="sm" style={{ marginBottom: 8 }}>
+          <Row label="Label">
+            <input className="v2-input" placeholder="prod / dev / team" value={newLabel} onChange={(e) => setNewLabel(e.target.value)} />
+          </Row>
+          <Row label="API key">
+            <input type="password" className="v2-input" placeholder="sk-…" value={newKey} onChange={(e) => setNewKey(e.target.value)} autoComplete="off" />
+          </Row>
+          <Row label="Make active">
+            <Toggle checked={setActive} onChange={setSetActive} />
+          </Row>
+          <div className="v2-forge-actions" style={{ marginTop: 6 }}>
+            <button type="button" className="v2-btn v2-btn--primary" onClick={add} disabled={busy === 'add'}>
+              {busy === 'add' ? 'Adding…' : 'Save key'}
+            </button>
+          </div>
+        </Glass>
+      )}
+
+      <div className="v2-keylist" data-testid="provider-keys-list">
+        {keys.length === 0 && !adding && <EmptyState title="No labeled keys yet" hint="Add at least one to enable per-key probes + tier routing." />}
+        {keys.map((k) => {
+          const label = k.label;
+          const status = k.probe?.status || k.probe_status || 'unknown';
+          const cls = status === 'ok' ? 'v2-keylist__probe--ok'
+            : status === 'invalid' || status === 'unauthorized' || status === 'forbidden' ? 'v2-keylist__probe--err'
+            : 'v2-keylist__probe--warn';
+          const isActive = label === activeLabel;
+          return (
+            <div key={label} className="v2-keylist__row" data-testid={`provider-key-row-${label}`}>
+              <div>
+                <div className="v2-keylist__label">{label}{isActive && <span className="v2-chip v2-chip--live" style={{ marginLeft: 8 }}>active</span>}</div>
+                <div className="v2-keylist__fp">{k.fingerprint || '—'}</div>
+              </div>
+              <span className={`v2-keylist__probe ${cls}`}>{status}</span>
+              <button type="button" className="v2-btn" onClick={() => probe(label)} disabled={busy === `probe:${label}`}>
+                {busy === `probe:${label}` ? 'Probing…' : 'Test'}
+              </button>
+              <div style={{ display: 'flex', gap: 4 }}>
+                {!isActive && (
+                  <button type="button" className="v2-btn" onClick={() => makeActive(label)} disabled={busy === `active:${label}`}>
+                    {busy === `active:${label}` ? 'Switching…' : 'Make active'}
+                  </button>
+                )}
+                <button type="button" className="v2-btn v2-btn--ghost" onClick={() => remove(label)} disabled={busy === `del:${label}`}>
+                  {busy === `del:${label}` ? '…' : 'Remove'}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Glass>
+  );
+}
+
+function TierRouteCard() {
+  const [tier, setTier] = useState('balanced');
+  const [results, setResults] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const route = useCallback(async () => {
+    setBusy(true);
+    setErr('');
+    const out = {};
+    try {
+      for (const cs of CALL_SITES) {
+        try {
+          const d = await apiJson(`/api/llm/route?call_site=${encodeURIComponent(cs.id)}&tier=${encodeURIComponent(tier)}`, { silent: true });
+          out[cs.id] = d;
+        } catch (e) {
+          out[cs.id] = { error: e?.message || 'route failed' };
+        }
+      }
+      setResults(out);
+    } finally {
+      setBusy(false);
+    }
+  }, [tier]);
+
+  useEffect(() => { route(); }, [route]);
+
+  return (
+    <Glass level={1} radius="md" padding="md" data-testid="tier-route-card">
+      <div className="v2-flow-card-head" style={{ marginBottom: 8 }}>
+        <strong>Per call-site routing</strong>
+        <select className="v2-select" value={tier} onChange={(e) => setTier(e.target.value)} aria-label="Tier">
+          {TIER_OPTIONS.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+        </select>
+        <button type="button" className="v2-btn v2-btn--ghost" onClick={route} disabled={busy}>
+          {busy ? 'Routing…' : 'Refresh'}
+        </button>
+      </div>
+      <p className="v2-p v2-p--muted v2-p--tiny" style={{ marginBottom: 8 }}>
+        Pre-flight which provider + model Lane 08's orchestrator would pick for each call-site at the selected tier. Hits <code>/api/llm/route</code>.
+      </p>
+      {err && <div className="v2-chip v2-chip--error">{err}</div>}
+      <div className="v2-setting-stack">
+        {CALL_SITES.map((cs) => {
+          const r = results[cs.id];
+          if (!r) return <Row key={cs.id} label={cs.label}><span className="v2-p v2-p--muted">—</span></Row>;
+          if (r.error) {
+            return (
+              <Row key={cs.id} label={cs.label}>
+                <Status tone="error">{r.error}</Status>
+              </Row>
+            );
+          }
+          return (
+            <Row key={cs.id} label={cs.label}>
+              <span>
+                <strong>{r.provider || '—'}</strong>
+                <span className="v2-p v2-p--muted" style={{ marginLeft: 6 }}>{r.model || ''}</span>
+                {r.label && <span className="v2-chip" style={{ marginLeft: 6 }}>{r.label}</span>}
+                {r.reason && <span className="v2-p v2-p--muted v2-p--tiny" style={{ display: 'block' }}>{r.reason}</span>}
+              </span>
+            </Row>
+          );
+        })}
+      </div>
+    </Glass>
   );
 }
 
@@ -758,6 +1053,18 @@ function ProviderForm({ provider, isCurrent, onCancel, onSaved }) {
       const body = await r.json().catch(() => ({}));
       if (!r.ok || body?.success === false) {
         setErr(body?.detail || body?.error || `${r.status}`);
+        return;
+      }
+      // AUDIT-r14 finding 01 fix #2: the brain returns
+      // `{success: true, reconfigured: {ok: false, reason: "..."}}`
+      // on hot-swap failure (e.g. invalid key, unsupported model).
+      // Pre-fix this UI lit a green "Saved and switched ✓" even when
+      // the next chat turn would have failed. Now: if reconfigured.ok
+      // is explicitly false, surface the reason as the error path —
+      // don't pretend success.
+      const reconfigured = body?.reconfigured;
+      if (reconfigured && reconfigured.ok === false) {
+        setErr(reconfigured.reason || reconfigured.detail || 'Hot-swap failed; key persisted but provider did not switch.');
         return;
       }
       const p = body.persisted || {};
@@ -1092,39 +1399,146 @@ function AutonomySection() {
 // ── Voice ─────────────────────────────────────────────────────
 
 function VoiceSection() {
+  // Lane 05 Wave 2 surface — `/api/voice/providers` returns an 8-entry
+  // catalogue keyed by `kind` (realtime | stt | tts) with cached probe
+  // status. The Settings panel groups them into three pickers
+  // (realtime / chained STT / chained TTS) and persists the operator's
+  // choice into `audio.realtime_providers` / `audio.chained_providers`
+  // via `/api/config/update` (the same lists the audio router reads
+  // on every voice session).
+  //
+  // Phone Settings → Voice mirrors this exact shape via SettingsPanel.jsx
+  // so a user pairing from iPhone sees identical labels and status.
   const [status, setStatus] = useState(null);
   const [config, setConfig] = useState(null);
+  const [providers, setProviders] = useState([]);
   const [busy, setBusy] = useState('');
+  const [err, setErr] = useState('');
   const [wakeWord, setWakeWord] = useState({ enabled: false, supported: true });
 
   const refresh = useCallback(async () => {
-    const [s, c, ww] = await Promise.allSettled([
+    setErr('');
+    const [s, c, ww, vp] = await Promise.allSettled([
       apiJson('/api/voice/status'),
       apiJson('/api/config'),
       apiJson('/api/ambient/wake_word/status'),
+      apiJson('/api/voice/providers'),
     ]);
     if (s.status === 'fulfilled') setStatus(s.value);
     if (c.status === 'fulfilled') setConfig(c.value);
     if (ww.status === 'fulfilled') setWakeWord({ enabled: !!ww.value?.enabled, supported: ww.value?.supported !== false });
+    if (vp.status === 'fulfilled') setProviders(vp.value?.providers || []);
+    else setErr(vp.reason?.message || 'voice catalogue unavailable');
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  if (!status || !config) return <EmptyState title="Loading voice status…" />;
-  const audio = config.audio || {};
-
   const updateAudio = async (key, value) => {
     setBusy(key);
+    setErr('');
     try {
-      await apiFetch('/api/config/update', { method: 'POST', body: JSON.stringify({ section: 'audio', key, value }) });
+      const r = await apiFetch('/api/config/update', { method: 'POST', body: JSON.stringify({ section: 'audio', key, value }) });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(formatApiDetail(body, `failed to update ${key}`));
+      }
       await refresh();
+    } catch (e) {
+      setErr(e?.message || `update ${key} failed`);
     } finally { setBusy(''); }
   };
 
   const toggleWake = async () => {
     const next = !wakeWord.enabled;
-    await apiFetch('/api/ambient/wake_word/toggle', { method: 'POST', body: JSON.stringify({ enabled: next }) });
-    refresh();
+    setBusy('wake');
+    try {
+      await apiFetch('/api/ambient/wake_word/toggle', { method: 'POST', body: JSON.stringify({ enabled: next }) });
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || 'wake-word toggle failed');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const probeProvider = async (providerId) => {
+    setBusy(`probe:${providerId}`);
+    setErr('');
+    try {
+      const r = await apiJson('/api/voice/providers/probe', {
+        method: 'POST',
+        body: JSON.stringify({ provider_id: providerId }),
+      });
+      // Update the inline row immediately so the user sees the verdict.
+      setProviders((prev) => prev.map((p) => (
+        p.id === providerId ? { ...p, probe_status: r.reason, configured: r.ok, latency_ms: r.latency_ms } : p
+      )));
+    } catch (e) {
+      setErr(e?.message || `probe ${providerId} failed`);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  if (!status || !config) return <EmptyState title="Loading voice status…" />;
+  const audio = config.audio || {};
+  const realtimeList = Array.isArray(audio.realtime_providers) && audio.realtime_providers.length
+    ? audio.realtime_providers
+    : (audio.realtime_provider ? [audio.realtime_provider] : []);
+  const chainedList = Array.isArray(audio.chained_providers) && audio.chained_providers.length
+    ? audio.chained_providers
+    : [];
+
+  const byKind = { realtime: [], stt: [], tts: [] };
+  for (const p of providers) {
+    if (byKind[p.kind]) byKind[p.kind].push(p);
+  }
+
+  const toggleInList = async (key, currentList, providerId) => {
+    const next = currentList.includes(providerId)
+      ? currentList.filter((p) => p !== providerId)
+      : [providerId, ...currentList.filter((p) => p !== providerId)];
+    await updateAudio(key, next);
+  };
+
+  const renderGroup = (kind, title, listKey, currentList) => {
+    const rows = byKind[kind] || [];
+    return (
+      <div className="v2-voice-group" data-testid={`voice-group-${kind}`}>
+        <div className="v2-voice-group__title">{title}</div>
+        {rows.length === 0 && <EmptyState title="No providers in catalogue" />}
+        {rows.map((p) => {
+          const active = currentList.includes(p.id);
+          const status = p.probe_status || (p.configured ? 'ok' : 'no_key');
+          const tone = status === 'ok' ? 'v2-keylist__probe--ok'
+            : status === 'no_key' || status === 'not_configured' ? 'v2-keylist__probe--warn'
+            : 'v2-keylist__probe--err';
+          return (
+            <div key={p.id} className={`v2-voice-card${active ? ' v2-voice-card--active' : ''}`} data-testid={`voice-card-${p.id}`}>
+              <div>
+                <div className="v2-voice-card__name">{p.name || p.id}</div>
+                <div className="v2-voice-card__sub">
+                  <span className={`v2-keylist__probe ${tone}`}>{status}</span>
+                  {p.probe_detail && <span style={{ marginLeft: 6 }}>{p.probe_detail}</span>}
+                </div>
+              </div>
+              <span className="v2-voice-card__lat">{p.latency_ms != null ? `${Math.round(p.latency_ms)}ms` : ''}</span>
+              <button type="button" className="v2-btn" onClick={() => probeProvider(p.id)} disabled={busy === `probe:${p.id}`}>
+                {busy === `probe:${p.id}` ? 'Testing…' : 'Test'}
+              </button>
+              <button
+                type="button"
+                className={`v2-btn ${active ? '' : 'v2-btn--primary'}`}
+                onClick={() => toggleInList(listKey, currentList, p.id)}
+                disabled={busy === listKey}
+              >
+                {active ? 'Remove' : 'Use'}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    );
   };
 
   return (
@@ -1133,21 +1547,23 @@ function VoiceSection() {
       <Row label="Local TTS/STT"><Status tone={status.audio_available ? 'live' : 'warn'}>{status.audio_available ? 'ready' : 'unavailable'}</Status></Row>
       <Row label="Active sessions"><Status>{status.active_realtime_sessions ?? 0}</Status></Row>
       <Row label="Wake word" hint={wakeWord.supported ? '' : 'Install feral-ai[wake] to enable.'}>
-        <Toggle checked={!!wakeWord.enabled} disabled={!wakeWord.supported} onChange={toggleWake} />
+        <Toggle checked={!!wakeWord.enabled} disabled={!wakeWord.supported || busy === 'wake'} onChange={toggleWake} />
       </Row>
-      <Row label="STT provider">
-        <Select
-          value={audio.stt_provider || 'openai'}
-          disabled={busy === 'stt_provider'}
-          onChange={(v) => updateAudio('stt_provider', v)}
-          options={[
-            { value: 'openai', label: 'OpenAI Whisper' },
-            { value: 'gemini', label: 'Gemini' },
-            { value: 'local', label: 'Local Whisper' },
-          ]}
-        />
-      </Row>
-      <Row label="TTS voice">
+
+      {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
+
+      <Glass level={0} radius="md" padding="md" data-testid="voice-pickers">
+        <p className="v2-p v2-p--muted v2-p--tiny" style={{ marginBottom: 6 }}>
+          Pick providers per pipeline. Realtime is a single full-duplex endpoint (OpenAI Realtime / Gemini Live).
+          Chained pipelines compose Speech-to-Text → LLM → Text-to-Speech; the audio router walks the lists in
+          order and falls back automatically if one provider returns no_key or unauthorized.
+        </p>
+        {renderGroup('realtime', 'Realtime', 'realtime_providers', realtimeList)}
+        {renderGroup('stt', 'Chained — Speech-to-Text', 'chained_providers', chainedList)}
+        {renderGroup('tts', 'Chained — Text-to-Speech', 'chained_providers', chainedList)}
+      </Glass>
+
+      <Row label="TTS voice" hint="Default voice name passed to the active TTS provider (provider-specific).">
         <input
           className="v2-input"
           defaultValue={audio.tts_voice || ''}
@@ -1380,40 +1796,691 @@ function PolicySub() {
 
 // ── Integrations ──────────────────────────────────────────────
 
+// ── Integrations (R-PROD-001/002 + Lane 10) ────────────────────
+//
+// Three integration shapes, one row per provider:
+//
+//   1. R-PROD-001 — Gmail = inline App Password walkthrough.
+//      5 steps with copy-buttons; the app name copy is literally
+//      "FERAL". Save POSTs to `/api/integrations/token` (the same
+//      surface HA tokens use) with `{provider_id: "gmail",
+//      address: ..., app_password: ...}`. Backend IMAP+SMTP probe
+//      determines `connected`. NO OAuth flow.
+//
+//   2. R-PROD-002 — Google Calendar / Drive / Contacts / Notion /
+//      Spotify / Microsoft 365 = "Use your own OAuth app" expand-
+//      card. Shows the redirect URI (`{API_BASE}/api/oauth/callback`)
+//      with a copy-button, links to the vendor's create-app docs
+//      from the brain's `setup_doc_url`, takes client_id +
+//      client_secret in two fields, persists via
+//      `/api/integrations/token` with `{client_id, client_secret}`,
+//      then opens the OAuth popup. Existing Lane 10 OAuthManager
+//      handles the rest.
+//
+//   3. Home Assistant = long-lived token paste field, exactly the
+//      same `/api/integrations/token` POST.
+//
+// Probe-based `connected` comes from `/api/integrations` (Lane 10).
+// Disconnect revokes vault entries via `/api/integrations/disconnect`.
+
+const GMAIL_STEPS = [
+  { n: 1, body: <>Open <a href="https://myaccount.google.com/security" target="_blank" rel="noopener noreferrer">Google Account → Security</a> and turn on 2-Step Verification (required to mint App Passwords).</> },
+  { n: 2, body: <>Go to <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer">App passwords</a>.</> },
+  { n: 3, body: <>For "App", choose "Mail". For "Device", choose "Other (Custom name)" and paste the app name below.</>, copyText: 'FERAL' },
+  { n: 4, body: <>Click <strong>Generate</strong>. Copy the 16-character password Google shows.</> },
+  { n: 5, body: <>Paste your Gmail address + that 16-char password below and click Save. The brain runs an IMAP+SMTP probe; green = working.</> },
+];
+
+const GMAIL_PROVIDER_ID = 'gmail';
+const OAUTH_SELF_SERVE = new Set([
+  'google_calendar', 'google_drive', 'google_contacts', 'google',
+  'notion', 'spotify', 'microsoft', 'microsoft_365', 'm365',
+]);
+const HA_PROVIDER_ID = 'home_assistant';
+
+function CopyButton({ value, label }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* swallow — clipboard may be disabled */
+    }
+  };
+  return (
+    <button type="button" className="v2-int-copy" onClick={copy} title="Copy to clipboard" data-testid={`copy-${label || value}`}>
+      <code>{value}</code>
+      <span>{copied ? '✓' : '⎘'}</span>
+    </button>
+  );
+}
+
+function GmailWalkthrough({ provider, onSaved, onDisconnect, connected }) {
+  const [address, setAddress] = useState('');
+  const [pw, setPw] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+
+  const save = async () => {
+    if (!address.trim() || !pw.trim()) {
+      setErr('Email and 16-character App Password are both required.');
+      return;
+    }
+    setBusy(true);
+    setErr('');
+    setMsg('');
+    try {
+      const r = await apiFetch('/api/integrations/token', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider_id: GMAIL_PROVIDER_ID,
+          token: pw.replace(/\s+/g, ''),
+          address: address.trim(),
+          app_password: pw.replace(/\s+/g, ''),
+        }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || body?.error) {
+        throw new Error(formatApiDetail(body, `save failed (${r.status})`));
+      }
+      setMsg('Saved. IMAP+SMTP probe pending — refresh to see live status.');
+      setPw('');
+      await onSaved();
+    } catch (e) {
+      setErr(e?.message || 'save failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Glass level={0} radius="md" padding="md" data-testid="gmail-walkthrough">
+      <div className="v2-flow-card-head" style={{ marginBottom: 6 }}>
+        <strong>Gmail (App Password)</strong>
+        <Status tone={connected ? 'live' : 'off'}>{connected ? 'connected' : 'disconnected'}</Status>
+        {connected && (
+          <button type="button" className="v2-btn" onClick={onDisconnect}>Disconnect</button>
+        )}
+      </div>
+      <p className="v2-p v2-p--muted v2-p--tiny" style={{ marginBottom: 8 }}>
+        FERAL connects to Gmail via IMAP+SMTP with a Google App Password — no OAuth, no Google Cloud project.
+        Takes ~30 seconds. {provider?.description}
+      </p>
+      <div className="v2-int-expand">
+        {GMAIL_STEPS.map((s) => (
+          <div key={s.n} className="v2-int-walkstep">
+            <span className="v2-int-walkstep__num">{s.n}</span>
+            <div>
+              {s.body}
+              {s.copyText && (
+                <div style={{ marginTop: 4 }}>
+                  Copy the app name: <CopyButton value={s.copyText} label="gmail-app-name" />
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
+        <Row label="Gmail address">
+          <input
+            type="email"
+            className="v2-input"
+            value={address}
+            onChange={(e) => setAddress(e.target.value)}
+            placeholder="you@gmail.com"
+            autoComplete="username"
+            data-testid="gmail-address"
+          />
+        </Row>
+        <Row label="16-char App Password">
+          <input
+            type="password"
+            className="v2-input"
+            value={pw}
+            onChange={(e) => setPw(e.target.value)}
+            placeholder="xxxx xxxx xxxx xxxx"
+            autoComplete="new-password"
+            data-testid="gmail-app-password"
+          />
+        </Row>
+        {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
+        {msg && <div className="v2-chip v2-chip--live">{msg}</div>}
+        <div>
+          <button
+            type="button"
+            className="v2-btn v2-btn--primary"
+            onClick={save}
+            disabled={busy}
+            data-testid="gmail-save"
+          >
+            {busy ? 'Saving + probing…' : 'Save and probe'}
+          </button>
+        </div>
+      </div>
+    </Glass>
+  );
+}
+
+function OAuthSelfServeCard({ provider, onSaved, onDisconnect, connected }) {
+  const pid = provider.id || provider.provider_id;
+  const [expanded, setExpanded] = useState(false);
+  const [clientId, setClientId] = useState(provider.client_id || '');
+  const [clientSecret, setClientSecret] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+  const redirectUri = `${API_BASE}/api/oauth/callback`;
+  const hasClientId = !!(provider.has_client_id || provider.client_id);
+
+  const saveCreds = async () => {
+    if (!clientId.trim() || !clientSecret.trim()) {
+      setErr('Both client_id and client_secret are required.');
+      return;
+    }
+    setBusy(true);
+    setErr('');
+    setMsg('');
+    try {
+      const r = await apiFetch('/api/integrations/token', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider_id: pid,
+          token: clientSecret.trim(),
+          client_id: clientId.trim(),
+          client_secret: clientSecret.trim(),
+        }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || body?.error) throw new Error(formatApiDetail(body, `save failed (${r.status})`));
+      setMsg('Credentials saved. Click "Authorize" to complete OAuth.');
+      setClientSecret('');
+      await onSaved();
+    } catch (e) {
+      setErr(e?.message || 'save failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const authorize = () => {
+    window.open(`${API_BASE}/api/oauth/authorize/${encodeURIComponent(pid)}`, '_blank', 'width=520,height=640');
+  };
+
+  return (
+    <Glass level={0} radius="md" padding="md" data-testid={`oauth-card-${pid}`}>
+      <div className="v2-flow-card-head" style={{ marginBottom: 6 }}>
+        <strong>{provider.name || pid}</strong>
+        <Status tone={connected ? 'live' : (hasClientId ? 'warn' : 'off')}>
+          {connected ? 'connected' : (hasClientId ? 'configured' : 'needs-setup')}
+        </Status>
+        {connected ? (
+          <button type="button" className="v2-btn" onClick={onDisconnect}>Disconnect</button>
+        ) : hasClientId ? (
+          <button type="button" className="v2-btn v2-btn--primary" onClick={authorize}>Authorize</button>
+        ) : (
+          <button type="button" className="v2-btn v2-btn--primary" onClick={() => setExpanded((v) => !v)}>
+            {expanded ? 'Cancel' : 'Use your own OAuth app'}
+          </button>
+        )}
+      </div>
+      {provider.setup_doc_summary && (
+        <p className="v2-p v2-p--muted v2-p--tiny" style={{ marginBottom: 6 }}>{provider.setup_doc_summary}</p>
+      )}
+      {expanded && (
+        <div className="v2-int-expand">
+          <div className="v2-int-walkstep">
+            <span className="v2-int-walkstep__num">1</span>
+            <div>
+              Open the vendor's OAuth console and create a new app.
+              {provider.setup_doc_url && (
+                <> See: <a href={provider.setup_doc_url} target="_blank" rel="noopener noreferrer">setup guide</a>.</>
+              )}
+            </div>
+          </div>
+          <div className="v2-int-walkstep">
+            <span className="v2-int-walkstep__num">2</span>
+            <div>
+              Set the OAuth redirect URI to: <CopyButton value={redirectUri} label={`${pid}-redirect`} />
+            </div>
+          </div>
+          <div className="v2-int-walkstep">
+            <span className="v2-int-walkstep__num">3</span>
+            <div>
+              Paste the resulting Client ID and Client Secret below and click Save.
+              FERAL persists them to the local vault — they never leave this machine.
+            </div>
+          </div>
+          <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
+            <Row label="Client ID">
+              <input
+                className="v2-input"
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                placeholder="…apps.googleusercontent.com"
+                data-testid={`${pid}-client-id`}
+              />
+            </Row>
+            <Row label="Client secret">
+              <input
+                type="password"
+                className="v2-input"
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+                placeholder="GOCSPX-…"
+                autoComplete="off"
+                data-testid={`${pid}-client-secret`}
+              />
+            </Row>
+            {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
+            {msg && <div className="v2-chip v2-chip--live">{msg}</div>}
+            <div className="v2-forge-actions">
+              <button type="button" className="v2-btn v2-btn--primary" onClick={saveCreds} disabled={busy}>
+                {busy ? 'Saving…' : 'Save credentials'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Glass>
+  );
+}
+
+function HomeAssistantCard({ provider, onSaved, onDisconnect, connected }) {
+  const pid = HA_PROVIDER_ID;
+  const [token, setToken] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+
+  const save = async () => {
+    if (!token.trim()) { setErr('Long-lived token is required.'); return; }
+    setBusy(true);
+    setErr('');
+    setMsg('');
+    try {
+      const r = await apiFetch('/api/integrations/token', {
+        method: 'POST',
+        body: JSON.stringify({ provider_id: pid, token: token.trim() }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || body?.error) throw new Error(formatApiDetail(body, `save failed (${r.status})`));
+      setMsg('Saved. Probing Home Assistant…');
+      setToken('');
+      await onSaved();
+    } catch (e) {
+      setErr(e?.message || 'save failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Glass level={0} radius="md" padding="md" data-testid="ha-card">
+      <div className="v2-flow-card-head" style={{ marginBottom: 6 }}>
+        <strong>{provider?.name || 'Home Assistant'}</strong>
+        <Status tone={connected ? 'live' : 'off'}>{connected ? 'connected' : 'disconnected'}</Status>
+        {connected && <button type="button" className="v2-btn" onClick={onDisconnect}>Disconnect</button>}
+      </div>
+      <p className="v2-p v2-p--muted v2-p--tiny" style={{ marginBottom: 8 }}>
+        In Home Assistant: <strong>Profile → Security → Long-lived access tokens → Create token</strong> →
+        paste it below. No OAuth.
+      </p>
+      <Row label="Long-lived token">
+        <input
+          type="password"
+          className="v2-input"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          placeholder="eyJ0eXAi…"
+          autoComplete="off"
+          data-testid="ha-token"
+        />
+      </Row>
+      {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
+      {msg && <div className="v2-chip v2-chip--live">{msg}</div>}
+      <div className="v2-forge-actions" style={{ marginTop: 8 }}>
+        <button type="button" className="v2-btn v2-btn--primary" onClick={save} disabled={busy} data-testid="ha-save">
+          {busy ? 'Saving + probing…' : 'Save and probe'}
+        </button>
+      </div>
+    </Glass>
+  );
+}
+
 function IntegrationsSection() {
   const [providers, setProviders] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState('');
 
   const refresh = useCallback(async () => {
-    try { const d = await apiJson('/api/integrations'); setProviders(d.providers || d.integrations || d || []); }
-    finally { setLoading(false); }
+    setErr('');
+    try {
+      const d = await apiJson('/api/integrations');
+      const rows = d.providers || d.integrations || [];
+      // Some legacy fields surface alongside the providers list
+      // (`spotify_connected`, etc.); normalise into proper rows so
+      // every tile renders the right card.
+      setProviders(Array.isArray(rows) ? rows : []);
+    } catch (e) {
+      setErr(e?.message || 'failed to load integrations');
+    } finally { setLoading(false); }
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const connect = (id) => {
-    window.open(`${API_BASE}/api/oauth/authorize/${encodeURIComponent(id)}`, '_blank', 'width=520,height=640');
-  };
-
   const disconnect = async (id) => {
-    await apiFetch(`/api/integrations/disconnect/${encodeURIComponent(id)}`, { method: 'POST' });
-    refresh();
+    if (!window.confirm(`Disconnect ${id}? Vault credentials will be revoked.`)) return;
+    try {
+      await apiFetch(`/api/integrations/disconnect/${encodeURIComponent(id)}`, { method: 'POST' });
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || 'disconnect failed');
+    }
   };
 
-  if (loading) return <EmptyState title="Loading…" />;
+  if (loading) return <EmptyState title="Loading integrations…" />;
+
+  // Make sure gmail + home_assistant tiles always render even when the
+  // backend hasn't yet produced an entry for them (e.g. first boot).
+  const byId = new Map();
+  for (const p of providers) byId.set(p.id || p.provider_id, p);
+  if (!byId.has(GMAIL_PROVIDER_ID)) {
+    byId.set(GMAIL_PROVIDER_ID, { id: GMAIL_PROVIDER_ID, name: 'Gmail', connected: false });
+  }
+  if (!byId.has(HA_PROVIDER_ID)) {
+    byId.set(HA_PROVIDER_ID, { id: HA_PROVIDER_ID, name: 'Home Assistant', connected: false });
+  }
+
+  const all = Array.from(byId.values());
+  const gmail = byId.get(GMAIL_PROVIDER_ID);
+  const ha = byId.get(HA_PROVIDER_ID);
+  const oauthRows = all.filter((p) => {
+    const pid = (p.id || p.provider_id || '').toLowerCase();
+    if (pid === GMAIL_PROVIDER_ID || pid === HA_PROVIDER_ID) return false;
+    if (OAUTH_SELF_SERVE.has(pid)) return true;
+    if (p.auth_type === 'oauth2' || p.auth_type === 'oauth') return true;
+    return false;
+  });
 
   return (
     <div className="v2-setting-stack">
-      {providers.length === 0 && <EmptyState title="No integrations configured" />}
-      {providers.map((p) => (
-        <Row key={p.id || p.provider_id} label={p.name || p.id} hint={p.description}>
-          <Status tone={p.connected ? 'live' : 'off'}>{p.connected ? 'connected' : 'disconnected'}</Status>
-          {p.connected
-            ? <button type="button" className="v2-btn" onClick={() => disconnect(p.id || p.provider_id)}>Disconnect</button>
-            : <button type="button" className="v2-btn v2-btn--primary" onClick={() => connect(p.id || p.provider_id)}>Connect</button>
-          }
-        </Row>
+      {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
+      <p className="v2-p v2-p--muted v2-p--tiny">
+        Each integration's connection status comes from a real backend probe (Lane 10). Gmail uses an App Password
+        (no OAuth); every other provider uses your own OAuth app — paste your client_id + client_secret once and
+        FERAL handles the rest.
+      </p>
+
+      <GmailWalkthrough
+        provider={gmail}
+        connected={!!gmail.connected}
+        onSaved={refresh}
+        onDisconnect={() => disconnect(GMAIL_PROVIDER_ID)}
+      />
+
+      {oauthRows.length === 0 && <EmptyState title="No OAuth integrations available" />}
+      {oauthRows.map((p) => (
+        <OAuthSelfServeCard
+          key={p.id || p.provider_id}
+          provider={p}
+          connected={!!p.connected}
+          onSaved={refresh}
+          onDisconnect={() => disconnect(p.id || p.provider_id)}
+        />
       ))}
+
+      <HomeAssistantCard
+        provider={ha}
+        connected={!!ha.connected}
+        onSaved={refresh}
+        onDisconnect={() => disconnect(HA_PROVIDER_ID)}
+      />
+    </div>
+  );
+}
+
+// ── Cost (Lane 04 + Lane 06 consumer) ──────────────────────────
+//
+// Reads caps from `/api/config` (settings dict has
+// `cost.per_call_site_caps` per the CostBudget._merged_settings
+// contract). Writes via `/api/config/update`. Live spend is delivered
+// by the `budget_exceeded` WS frame (Lane 08) when a cap is hit.
+//
+// Known gap: the brain doesn't yet expose `/api/cost/snapshot`
+// returning per-window current spend. Filed as a parent follow-up in
+// WORK_LOG; until then, the "Current spend" column reads from the
+// last received WS frame, which is sufficient to prove the panel and
+// the S6 banner deeplink work end-to-end.
+
+const DEFAULT_CALL_SITES_FOR_COST = [
+  'chat', 'vision', 'embedding', 'routing', 'screen_loop', 'proactive', 'learner', 'compaction',
+];
+
+function CostSection({ initialCallSite }) {
+  const [config, setConfig] = useState(null);
+  const [editing, setEditing] = useState({});
+  const [busy, setBusy] = useState('');
+  const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+  const [spends, setSpends] = useState({});
+
+  const refresh = useCallback(async () => {
+    setErr('');
+    try {
+      const c = await apiJson('/api/config');
+      setConfig(c);
+    } catch (e) {
+      setErr(e?.message || 'failed to load cost settings');
+    }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // S6 — listen to the live `budget_exceeded` WS frame so the panel
+  // updates spend + reset time without a poll. The same shared
+  // FeralSocket the Chat panel uses.
+  useEffect(() => {
+    let unsub = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { useFeralSocket } = await import('../hooks/useFeralSocket');
+        // can't call hook outside React; instead grab the shared
+        // socket via the test seam (or fall back to a fresh
+        // subscription)
+        const { _getSharedSocketForTesting } = await import('../hooks/useFeralSocket');
+        const socket = _getSharedSocketForTesting();
+        if (cancelled || !socket) return;
+        unsub = socket.subscribe((msg) => {
+          if (msg?.type !== 'budget_exceeded') return;
+          const p = msg.payload || msg || {};
+          const site = p.call_site || 'unknown';
+          setSpends((prev) => ({
+            ...prev,
+            [site]: {
+              current_dollars: Number(p.current_dollars || 0),
+              cap_dollars: Number(p.cap_dollars || 0),
+              reset_at: p.reset_at,
+              at: Date.now(),
+            },
+          }));
+        });
+      } catch {
+        /* the shared socket may not be initialised in test envs */
+      }
+    })();
+    return () => { cancelled = true; if (unsub) unsub(); };
+  }, []);
+
+  if (!config) {
+    return (
+      <div className="v2-setting-stack">
+        {err ? <div className="v2-chip v2-chip--error">{err}</div> : <EmptyState title="Loading cost caps…" />}
+      </div>
+    );
+  }
+
+  const costCfg = (config.cost && typeof config.cost === 'object') ? config.cost : {};
+  const perSiteCaps = (costCfg.per_call_site_caps && typeof costCfg.per_call_site_caps === 'object') ? costCfg.per_call_site_caps : {};
+  const globalDay = Number(costCfg.global_per_day_usd ?? 0);
+  const globalHour = Number(costCfg.global_per_hour_usd ?? 5);
+
+  const callSites = Array.from(new Set([
+    ...DEFAULT_CALL_SITES_FOR_COST,
+    ...Object.keys(perSiteCaps),
+    ...(initialCallSite ? [initialCallSite] : []),
+  ]));
+
+  const capForSite = (site) => {
+    const cfg = perSiteCaps[site];
+    if (!cfg) return 0;
+    return Number(cfg.per_hour_usd ?? 0);
+  };
+
+  const updateCap = async (site) => {
+    const raw = editing[site];
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0) {
+      setErr(`Cap for ${site} must be a non-negative number.`);
+      return;
+    }
+    setBusy(`cap:${site}`);
+    setErr('');
+    setMsg('');
+    try {
+      const nextSiteCaps = { ...perSiteCaps, [site]: { ...(perSiteCaps[site] || {}), per_hour_usd: value } };
+      const r = await apiFetch('/api/config/update', {
+        method: 'POST',
+        body: JSON.stringify({ section: 'cost', key: 'per_call_site_caps', value: nextSiteCaps }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(formatApiDetail(body, `failed to update ${site}`));
+      }
+      setMsg(`Updated ${site} cap to $${value.toFixed(2)}/hour.`);
+      setEditing((prev) => { const n = { ...prev }; delete n[site]; return n; });
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || `update ${site} failed`);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const updateGlobal = async (key, raw) => {
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0) {
+      setErr(`Global cap must be non-negative.`);
+      return;
+    }
+    setBusy(`global:${key}`);
+    setErr('');
+    setMsg('');
+    try {
+      const r = await apiFetch('/api/config/update', {
+        method: 'POST',
+        body: JSON.stringify({ section: 'cost', key, value }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(formatApiDetail(body, `failed to update ${key}`));
+      }
+      setMsg(`Updated ${key} to $${value.toFixed(2)}.`);
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || `update ${key} failed`);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  return (
+    <div className="v2-setting-stack" data-testid="cost-section">
+      <p className="v2-p v2-p--muted v2-p--tiny">
+        Per-call-site hourly caps in USD. When a cap is exceeded the chat receives a yellow inline banner
+        (the same one rendered in Chat → S6). 0 disables the cap for that site.
+      </p>
+      {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
+      {msg && <div className="v2-chip v2-chip--live">{msg}</div>}
+
+      <Glass level={0} radius="md" padding="md">
+        <div className="v2-voice-group__title">Per call-site (hourly)</div>
+        {callSites.map((site) => {
+          const cap = capForSite(site);
+          const current = spends[site];
+          const editingValue = editing[site];
+          const inputValue = editingValue != null ? editingValue : String(cap);
+          const resetStr = current?.reset_at ? new Date(
+            typeof current.reset_at === 'string' ? Date.parse(current.reset_at) : Number(current.reset_at) * 1000,
+          ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+          return (
+            <div key={site} className="v2-cost-cap-row" data-testid={`cost-row-${site}`}>
+              <div className="v2-cost-cap-row__label">{site}{site === initialCallSite && <span className="v2-chip" style={{ marginLeft: 6 }}>from chat</span>}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span className="v2-p v2-p--muted">$</span>
+                <input
+                  type="number"
+                  step="0.05"
+                  min="0"
+                  className="v2-input"
+                  style={{ width: 90, textAlign: 'right' }}
+                  value={inputValue}
+                  onChange={(e) => setEditing((p) => ({ ...p, [site]: e.target.value }))}
+                  data-testid={`cost-cap-${site}`}
+                />
+                <span className="v2-p v2-p--muted v2-p--tiny">/hr</span>
+              </div>
+              <span className="v2-cost-cap-row__spend">
+                {current ? `$${current.current_dollars.toFixed(2)}` : '—'}
+              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'flex-end' }}>
+                {resetStr && <span className="v2-cost-cap-row__reset">resets {resetStr}</span>}
+                <button
+                  type="button"
+                  className="v2-btn v2-btn--primary"
+                  onClick={() => updateCap(site)}
+                  disabled={busy === `cap:${site}` || editingValue == null}
+                  data-testid={`cost-save-${site}`}
+                >
+                  {busy === `cap:${site}` ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </Glass>
+
+      <Glass level={0} radius="md" padding="md">
+        <div className="v2-voice-group__title">Global limits</div>
+        <Row label="Global per hour (USD)" hint="Stops every call-site once the combined hourly spend reaches this number.">
+          <input
+            type="number"
+            step="0.10"
+            min="0"
+            className="v2-input"
+            style={{ width: 100, textAlign: 'right' }}
+            defaultValue={globalHour}
+            onBlur={(e) => { if (Number(e.target.value) !== globalHour) updateGlobal('global_per_hour_usd', e.target.value); }}
+            data-testid="cost-global-hour"
+          />
+        </Row>
+        <Row label="Global per day (USD)" hint="0 = disabled. Resets at midnight local time.">
+          <input
+            type="number"
+            step="0.50"
+            min="0"
+            className="v2-input"
+            style={{ width: 100, textAlign: 'right' }}
+            defaultValue={globalDay}
+            onBlur={(e) => { if (Number(e.target.value) !== globalDay) updateGlobal('global_per_day_usd', e.target.value); }}
+            data-testid="cost-global-day"
+          />
+        </Row>
+      </Glass>
     </div>
   );
 }
