@@ -62,11 +62,11 @@ description: "Frequently asked questions about FERAL — what it is, how it work
   </Accordion>
 
   <Accordion title="How are my API keys stored?">
-    Keys are stored in `~/.feral/credentials.json`, which is AES-256 encrypted at rest using a key derived from your system keychain. The vault is decrypted in memory only while FERAL is running. See [Configuration](/getting-started/configuration) for details.
+    Keys are stored in `~/.feral/credentials.enc`, encrypted with ChaCha20-Poly1305 (AEAD) and a key derived from your master passphrase via Argon2id. The derived key is cached in your OS keychain so the vault unlocks transparently. The vault decrypts in memory only while FERAL is running and the raw values are never shown to the LLM — credentials are injected at the HTTP layer at request time. See [Configuration](/getting-started/configuration) for details.
   </Accordion>
 
   <Accordion title="Can FERAL access my screen and files?">
-    Only if you enable it. Computer-use features (screen capture, browser automation, file operations) are controlled by the `FERAL_COMPUTER_USE` flag. When enabled, actions are gated by your autonomy level — in **strict** mode, every file or screen action requires explicit approval.
+    Only if you enable it. Computer-use skills (screen capture, browser automation, file operations) are gated by your **autonomy mode** — set this in **Settings → Autonomy** in the WebUI (the picker writes to `~/.feral/settings.json` under `security.autonomy_mode`). In `strict` mode every file or screen action requires explicit approval; in `hybrid` (default) destructive or `dangerous`-tier actions still require approval; in `loose` everything auto-runs. macOS additionally enforces native TCC permission prompts (Screen Recording, Accessibility) before the brain can start a screen-capture loop.
   </Accordion>
 </AccordionGroup>
 

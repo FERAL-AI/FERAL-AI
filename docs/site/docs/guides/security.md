@@ -11,7 +11,7 @@ FERAL assumes the LLM is untrusted. Credentials, tool execution, and autonomy ar
 
 ## BlindVault
 
-The **BlindVault** stores all secrets (API keys, OAuth tokens, database passwords) encrypted at rest in `~/.feral/credentials.json` (mode `0600`). The LLM never sees raw credential values — the vault injects them at the HTTP layer right before a request leaves the process.
+The **BlindVault** stores all secrets (API keys, OAuth tokens, database passwords) encrypted at rest in `~/.feral/credentials.enc` (mode `0600`). Encryption is **ChaCha20-Poly1305** (AEAD) with a key derived from your master passphrase via **Argon2id**; the derived key is cached in your OS keychain so the vault unlocks transparently. The LLM never sees raw credential values — the vault injects them at the HTTP layer right before a request leaves the process.
 
 ```python
 from feral_core.security import BlindVault

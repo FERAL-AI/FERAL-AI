@@ -1,12 +1,16 @@
 ---
 title: "GUI Computer Use"
-description: "Let FERAL control your desktop — click, type, scroll, and read the screen"
-status: "Stable"
+description: "Let FERAL control your desktop — click, type, scroll, and read the screen (macOS / Linux only)"
+status: "Stable (macOS, Linux). Windows: not supported."
 ---
 
 # GUI Computer Use
 
 FERAL can see your screen and interact with any desktop application using Anthropic-style computer-use primitives: screenshots, mouse clicks, typing, key combos, scrolling, and window management.
+
+<Warning>
+  GUI computer-use is supported on **macOS** and **Linux** only. On Windows the implementation returns `{"success": false, "reason": "unsupported_platform"}` for every action — earlier docs marked Windows as "Stable", which was wrong. If you need GUI control on Windows today, run FERAL inside WSL2 (Linux subsystem) — the X11 path works there.
+</Warning>
 
 ## Permission Requirements
 
@@ -21,7 +25,7 @@ No special permissions needed on X11. Wayland requires `xdg-portal` or running F
 Install one of: `gnome-screenshot`, `scrot`, or `imagemagick` (for the `import` command).
 
 ### Windows
-Run FERAL as Administrator if clicking in elevated windows. No special setup otherwise.
+Not supported — see warning above. WSL2 (Ubuntu running an X11 server) is the supported path.
 
 ## Rate Limits
 

@@ -75,7 +75,12 @@ voice:
 Custom wake words can be trained with ~50 positive samples:
 
 ```bash
-feral voice train-wakeword \
+feral wake-test \
+  # NOTE: `feral voice train-wakeword` was claimed by older docs but
+  # never shipped; only `feral wake-test` is implemented today. Custom
+  # wake-word training is post-v1.0 roadmap.
+  # Original (non-functional) call shown below for archival reference:
+  # feral voice train-wakeword \
   --name "hey jarvis" \
   --positive-dir ./samples/positive \
   --negative-dir ./samples/negative \

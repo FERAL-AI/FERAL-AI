@@ -152,10 +152,17 @@ The compaction flow:
 
 The **Memory Wiki** compiles episodes, notes, and knowledge graph entries into durable, human-readable wiki pages organized by topic.
 
+Compilation runs automatically on a schedule. To trigger a manual compile or browse pages, use the HTTP API or the WebUI Memory → Wiki tab:
+
 ```bash
-feral memory wiki compile
-feral memory wiki list
-feral memory wiki read "health"
+# Compile now (HTTP)
+curl -X POST http://localhost:9090/api/wiki/compile
+
+# List wiki pages
+curl http://localhost:9090/api/wiki/list
+
+# Read a single page
+curl http://localhost:9090/api/wiki/page/health
 ```
 
 Wiki pages are stored in `~/.feral/wiki/` as Markdown files with YAML frontmatter tracking provenance:
@@ -195,15 +202,20 @@ For multi-device setups (laptop + phone + home server), FERAL supports peer-to-p
 }
 ```
 
-Sync uses a CRDT-based merge strategy for knowledge graph triples and last-write-wins for episodes. Each node maintains a vector clock to detect and resolve conflicts.
+Sync uses **HLC (Hybrid Logical Clock)** timestamps with last-write-wins conflict resolution at the row level. Each peer maintains a write-ahead log (WAL) and exchanges deltas since the peer's last-seen HLC; clock drift between peers is tolerated up to a configurable skew window. There is no CRDT merge — earlier docs incorrectly described the model as CRDT-based; the implementation is HLC + LWW + WAL replication, which is simpler and matches the data-loss profile the user signs up for ("the latest write wins").
 
 ```bash
-# Check sync status
-feral memory sync status
+# Check sync status (HLC lag, peer reachability, WAL backlog)
+feral sync status
 
-# Force sync now
-feral memory sync push
-feral memory sync pull
+# Force a sync round-trip with all peers now
+feral sync now
+
+# List configured peers + their HLC lag
+feral sync peers
+
+# Show this node's HLC node-id
+feral sync node-id
 ```
 
 ## API Reference

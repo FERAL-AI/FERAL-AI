@@ -101,7 +101,7 @@ The watcher uses IMAP IDLE for real-time push notifications where supported, fal
 
 ## Privacy
 
-- Email credentials are stored in FERAL's encrypted credentials file (`~/.feral/credentials.json`, mode `0600`)
+- Email credentials are stored in FERAL's encrypted vault (`~/.feral/credentials.enc`, ChaCha20-Poly1305 AEAD, mode `0600`)
 - Email content is processed locally by your FERAL brain — nothing is sent to external services beyond your configured LLM provider
 - Summaries stored in the knowledge graph stay on your machine
 - You can disable any action via `FERAL_EMAIL_ACTIONS`

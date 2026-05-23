@@ -2133,54 +2133,114 @@ class MemoryStore:
     async def count(self) -> int:
         return await count_notes(self)
 
-    async def stats(self) -> dict:
-        conn = await self._conn()
-        try:
-            async with conn.execute("SELECT COUNT(*) FROM notes") as cur:
-                notes_count = (await cur.fetchone())[0]
-            async with conn.execute("SELECT COUNT(*) FROM episodes") as cur:
-                episodes_count = (await cur.fetchone())[0]
-            # F1 (v2026.5.35) — when the unified KG is on, the canonical
-            # knowledge surface is ``relations``. Count from there so
-            # ``stats["knowledge_triples"]`` keeps meaning "how many
-            # facts does the brain know" across the flat→KG cutover.
-            knowledge_table = "knowledge"
-            if self._kg_unified_enabled():
-                knowledge_table = "relations"
-            async with conn.execute(f"SELECT COUNT(*) FROM {knowledge_table}") as cur:
-                knowledge_count = (await cur.fetchone())[0]
-            async with conn.execute("SELECT COUNT(*) FROM execution_log") as cur:
-                exec_count = (await cur.fetchone())[0]
-            async with conn.execute("SELECT COUNT(*) FROM wiki_pages") as cur:
-                wiki_count = (await cur.fetchone())[0]
-            async with conn.execute("SELECT COUNT(*) FROM session_snapshots") as cur:
-                snapshot_count = (await cur.fetchone())[0]
-            try:
-                async with conn.execute("SELECT COUNT(*) FROM memory_chunks") as cur:
-                    chunk_count = (await cur.fetchone())[0]
-            except Exception:
-                chunk_count = 0
-        finally:
-            await self._release(conn)
-        working_sessions = len(self._working)
+    # Per-stats() pool-acquire + total-budget timeouts. AUDIT-r14
+    # round2 wave3-followup-001: live brain on v2026.5.40 hung
+    # /api/memory/stats for 85s+ under runtime contention because
+    # background services (sync_scheduler, decay sweeper, screen_loop
+    # episode writes) hold long-running transactions on the shared
+    # aiosqlite pool. The dashboard then renders 0/0/0 until the
+    # request finally returns. Defaulting to a 2.5s budget keeps the
+    # health probe + Memory page Recent tile responsive at the cost
+    # of an occasional ``{"ok": false, "reason": "stats_timeout"}``
+    # row — the UI handles that case honestly.
+    _STATS_TOTAL_BUDGET_S = 2.5
+    _STATS_CONN_BUDGET_S = 1.0
 
+    async def stats(self) -> dict:
+        async def _read_counts() -> dict:
+            conn = await asyncio.wait_for(
+                self._conn(), timeout=self._STATS_CONN_BUDGET_S,
+            )
+            try:
+                async with conn.execute("SELECT COUNT(*) FROM notes") as cur:
+                    notes_count = (await cur.fetchone())[0]
+                async with conn.execute("SELECT COUNT(*) FROM episodes") as cur:
+                    episodes_count = (await cur.fetchone())[0]
+                # F1 (v2026.5.35) — when the unified KG is on, the canonical
+                # knowledge surface is ``relations``. Count from there so
+                # ``stats["knowledge_triples"]`` keeps meaning "how many
+                # facts does the brain know" across the flat→KG cutover.
+                knowledge_table = "knowledge"
+                if self._kg_unified_enabled():
+                    knowledge_table = "relations"
+                async with conn.execute(f"SELECT COUNT(*) FROM {knowledge_table}") as cur:
+                    knowledge_count = (await cur.fetchone())[0]
+                async with conn.execute("SELECT COUNT(*) FROM execution_log") as cur:
+                    exec_count = (await cur.fetchone())[0]
+                async with conn.execute("SELECT COUNT(*) FROM wiki_pages") as cur:
+                    wiki_count = (await cur.fetchone())[0]
+                async with conn.execute("SELECT COUNT(*) FROM session_snapshots") as cur:
+                    snapshot_count = (await cur.fetchone())[0]
+                try:
+                    async with conn.execute("SELECT COUNT(*) FROM memory_chunks") as cur:
+                        chunk_count = (await cur.fetchone())[0]
+                except Exception:
+                    chunk_count = 0
+            finally:
+                await self._release(conn)
+            return {
+                "notes": notes_count,
+                "episodes": episodes_count,
+                "knowledge_triples": knowledge_count,
+                "execution_logs": exec_count,
+                "wiki_pages": wiki_count,
+                "session_snapshots": snapshot_count,
+                "embedded_chunks": chunk_count,
+            }
+
+        try:
+            counts = await asyncio.wait_for(
+                _read_counts(), timeout=self._STATS_TOTAL_BUDGET_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "memory.stats: aiosqlite COUNT queries exceeded the "
+                "%.1fs budget — likely background services holding the "
+                "pool. Returning a degraded payload so the dashboard "
+                "stays responsive instead of hanging.",
+                self._STATS_TOTAL_BUDGET_S,
+            )
+            return {
+                "ok": False,
+                "reason": "stats_timeout",
+                "notes": 0,
+                "episodes": 0,
+                "knowledge_triples": 0,
+                "execution_logs": 0,
+                "wiki_pages": 0,
+                "session_snapshots": 0,
+                "active_working_sessions": len(self._working),
+                "embedded_chunks": 0,
+                "vec_index_count": 0,
+                "vec_index_mode": self._backend_id + " (degraded — stats timeout)",
+                "embedding_provider": self._embedder.provider_name,
+                "embed_queue_pending": self._embed_queue.pending,
+                "knowledge_graph": {"entities": 0, "relations": 0},
+            }
+
+        working_sessions = len(self._working)
         kg_stats = self._kg.stats() if self._kg else {"entities": 0, "relations": 0}
 
         vec_count = 0
         try:
-            vec_count = await self._vec_index.count()
+            vec_count = await asyncio.wait_for(
+                self._vec_index.count(), timeout=0.5,
+            )
+        except asyncio.TimeoutError:
+            logger.debug("memory.stats: vec_index.count() exceeded 0.5s budget; reporting 0")
         except Exception as exc:
             logger.debug("vec_index.count() failed: %s", exc)
 
         return {
-            "notes": notes_count,
-            "episodes": episodes_count,
-            "knowledge_triples": knowledge_count,
-            "execution_logs": exec_count,
-            "wiki_pages": wiki_count,
-            "session_snapshots": snapshot_count,
+            "ok": True,
+            "notes": counts["notes"],
+            "episodes": counts["episodes"],
+            "knowledge_triples": counts["knowledge_triples"],
+            "execution_logs": counts["execution_logs"],
+            "wiki_pages": counts["wiki_pages"],
+            "session_snapshots": counts["session_snapshots"],
             "active_working_sessions": working_sessions,
-            "embedded_chunks": chunk_count,
+            "embedded_chunks": counts["embedded_chunks"],
             "vec_index_count": vec_count,
             "vec_index_mode": self._backend_id + (" (indexed)" if self._vec_index.indexed else " (degraded)"),
             "embedding_provider": self._embedder.provider_name,

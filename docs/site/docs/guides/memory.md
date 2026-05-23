@@ -152,9 +152,9 @@ The compaction flow:
 The **Memory Wiki** compiles episodes, notes, and knowledge graph entries into durable, human-readable wiki pages organized by topic.
 
 ```bash
-feral memory wiki compile
-feral memory wiki list
-feral memory wiki read "health"
+curl -X POST http://localhost:9090/api/wiki/compile
+curl http://localhost:9090/api/wiki/list
+curl http://localhost:9090/api/wiki/page/health
 ```
 
 Wiki pages are stored in `~/.feral/wiki/` as Markdown files with YAML frontmatter tracking provenance:
@@ -192,15 +192,15 @@ For multi-device setups (laptop + phone + home server), FERAL supports peer-to-p
   conflict_resolution: last_write_wins  # or manual
 ```
 
-Sync uses a CRDT-based merge strategy for knowledge graph triples and last-write-wins for episodes. Each node maintains a vector clock to detect and resolve conflicts.
+Sync uses **HLC (Hybrid Logical Clock)** timestamps with last-write-wins conflict resolution at the row level. Each peer maintains a write-ahead log (WAL) and exchanges deltas since the peer's last-seen HLC. There is no CRDT merge — the implementation is HLC + LWW + WAL replication.
 
 ```bash
 # Check sync status
-feral memory sync status
+feral sync status
 
 # Force sync now
-feral memory sync push
-feral memory sync pull
+feral sync now
+feral sync peers
 ```
 
 ## API Reference
