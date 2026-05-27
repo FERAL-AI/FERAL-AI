@@ -17,6 +17,29 @@ logger = logging.getLogger("feral.voice.router")
 _ENV_VOICE_PROVIDER = "FERAL_VOICE_PROVIDER"
 
 
+def _settings_realtime_model() -> str:
+    """Resolve the operator-configured OpenAI Realtime model.
+
+    Reads ``audio.realtime_model`` from the merged settings tree
+    (config/loader.py default: ``"gpt-realtime"``). When the settings
+    layer is unavailable (e.g. in narrow unit tests) or the key is
+    blank, fall back to :data:`voice.realtime_proxy.DEFAULT_MODEL` so
+    the proxy still opens a session with a valid GA model id (Lane U2).
+    """
+    try:
+        from config.loader import load_settings
+        value = (load_settings().get("audio", {}) or {}).get("realtime_model")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    except Exception:
+        logger.debug("settings.audio.realtime_model lookup failed", exc_info=True)
+    try:
+        from voice.realtime_proxy import DEFAULT_MODEL
+        return DEFAULT_MODEL
+    except Exception:
+        return "gpt-realtime"
+
+
 class VoiceRouter:
     """
     Central audio routing layer.  Both web clients and daemon nodes can
@@ -196,7 +219,7 @@ class VoiceRouter:
                 rs = await self._realtime.start_session(
                     session_id,
                     node_id,
-                    model=cfg.get("model", "gpt-realtime"),
+                    model=cfg.get("model") or _settings_realtime_model(),
                     voice=cfg.get("voice", "marin"),
                     input_sample_rate=int(cfg.get("sample_rate") or sample_rate or 24000),
                     language_hint=cfg.get("language_hint", ""),
@@ -252,6 +275,7 @@ class VoiceRouter:
                 rs = await self._realtime.start_session(
                     session_id,
                     client_node,
+                    model=_settings_realtime_model(),
                     input_sample_rate=sample_rate or 24000,
                 )
             if rs and rs.connected:
@@ -700,7 +724,7 @@ class VoiceRouter:
                 logger.warning("openai_realtime requested but proxy unavailable")
                 return None
             node_id = opts.get("node_id", f"webclient_{session_id[:8]}")
-            model = opts.get("model", "gpt-realtime")
+            model = opts.get("model") or _settings_realtime_model()
             voice = opts.get("voice", "marin")
             input_sample_rate = int(opts.get("sample_rate") or 24000)
             language_hint = opts.get("language_hint", "")

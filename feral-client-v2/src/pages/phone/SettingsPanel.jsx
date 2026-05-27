@@ -55,9 +55,21 @@ const GEMINI_MODELS = [
   { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
 ];
 
+// Lane U2 — OpenAI Realtime model fallback list. Mirrors the GA +
+// preview ids surfaced by /api/voice/providers; kept inline so the
+// phone Settings card can render even before the catalogue fetch
+// completes. The Settings card upgrades to the live list when
+// /api/voice/providers returns one.
+const OPENAI_REALTIME_MODELS = [
+  { value: 'gpt-realtime', label: 'GPT Realtime (GA)' },
+  { value: 'gpt-realtime-mini', label: 'GPT Realtime Mini' },
+  { value: 'gpt-4o-realtime-preview', label: 'GPT-4o Realtime (preview)' },
+  { value: 'gpt-4o-mini-realtime-preview', label: 'GPT-4o Mini Realtime (preview)' },
+];
+
 const DEFAULT_VOICE_CONFIG = {
   mode: 'openai_realtime',
-  realtime: { openai_voice: 'marin', gemini_model: 'gemini-2.0-flash-exp' },
+  realtime: { openai_voice: 'marin', openai_model: 'gpt-realtime', gemini_model: 'gemini-2.0-flash-exp' },
   chained: { stt_provider: 'deepgram', stt_model: 'nova-3', tts_provider: 'openai', tts_voice: 'alloy' },
 };
 
@@ -146,6 +158,25 @@ export default function SettingsPanel({ initialConfig }) {
 
         {voiceConfig.mode === 'openai_realtime' && (
           <div className="phone-settings-sub" data-testid="openai-sub">
+            <div className="phone-settings-row">
+              <label htmlFor="openai-model-select">Model</label>
+              <select id="openai-model-select" value={voiceConfig.realtime?.openai_model || 'gpt-realtime'}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  updateVoice((prev) => ({ ...prev, realtime: { ...prev.realtime, openai_model: next } }));
+                  // Lane U2 — keep audio.realtime_model in lockstep
+                  // with the phone picker so the Brain's RealtimeProxy
+                  // picks up the operator's choice on the next session
+                  // open regardless of which surface set it.
+                  apiFetch('/api/config/update', {
+                    method: 'POST',
+                    body: JSON.stringify({ section: 'audio', key: 'realtime_model', value: next }),
+                  }).catch(() => {});
+                }}
+                data-testid="openai-realtime-model-picker">
+                {OPENAI_REALTIME_MODELS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+              </select>
+            </div>
             <div className="phone-settings-row">
               <label htmlFor="openai-voice-select">Voice</label>
               <select id="openai-voice-select" value={voiceConfig.realtime?.openai_voice || 'marin'}

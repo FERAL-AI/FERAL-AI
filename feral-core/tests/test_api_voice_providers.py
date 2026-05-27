@@ -113,3 +113,32 @@ def test_probe_all_when_provider_id_omitted(client):
     rows = r.json()["providers"]
     assert len(rows) == 8
     assert all(row["reason"] == "no_key" for row in rows)
+
+
+# ----------------------------------------------------------------------
+# Lane U2 — realtime model picker contract
+# ----------------------------------------------------------------------
+
+
+def test_openai_realtime_entry_has_models(client):
+    """Pin: ``/api/voice/providers`` attaches a ``models[]`` and
+    ``default_model`` to the OpenAI Realtime entry so the WebUI Voice
+    card + CLI preflight can render an in-list picker instead of the
+    LLM free-text fallback (Lane U2)."""
+    rows = client.get("/api/voice/providers").json()["providers"]
+    row = next(p for p in rows if p["id"] == "openai_realtime")
+    assert "models" in row and isinstance(row["models"], list)
+    assert len(row["models"]) >= 1
+    assert "gpt-realtime" in row["models"]
+    assert row.get("default_model") == "gpt-realtime"
+
+
+def test_non_realtime_entries_omit_models(client):
+    """Pin: catalogue entries without a curated model list MUST NOT
+    invent one. The route + clients treat absence as "use the runtime
+    default — no picker"."""
+    rows = client.get("/api/voice/providers").json()["providers"]
+    for row in rows:
+        if row["id"] == "openai_realtime":
+            continue
+        assert "models" not in row, row

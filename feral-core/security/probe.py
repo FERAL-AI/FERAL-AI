@@ -743,14 +743,69 @@ VOICE_PROVIDER_CATALOGUE: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def voice_provider_catalogue() -> list[dict[str, str]]:
+OPENAI_REALTIME_DEFAULT_MODEL = "gpt-realtime"
+
+
+def _openai_realtime_models() -> list[str]:
+    """Return the realtime-classified OpenAI model ids from the bundled
+    catalog. Used by :func:`voice_provider_catalogue` to attach a
+    ``models`` list to the ``openai_realtime`` entry so CLI + WebUI can
+    render an honest model picker instead of a free-text fallback.
+
+    The list is derived deterministically by running the bundled OpenAI
+    catalog ids through ``providers.model_classes.filter_models`` with
+    ``model_class="realtime"``. When the catalog file is missing or the
+    classifier import fails the function degrades to a single-element
+    ``[OPENAI_REALTIME_DEFAULT_MODEL]`` so the WebUI dropdown still has
+    one entry instead of disappearing entirely.
+    """
+    try:
+        from pathlib import Path as _Path
+        catalog_path = (
+            _Path(__file__).resolve().parent.parent
+            / "providers"
+            / "model_catalog.json"
+        )
+        with catalog_path.open() as fh:
+            blob = json.load(fh)
+        ids = list(
+            blob.get("providers", {}).get("openai", {}).get("models", [])
+        )
+        from providers.model_classes import filter_models
+
+        realtime = filter_models("openai", ids, model_class="realtime")
+        if realtime:
+            # Surface the GA default first so the dropdown's leading
+            # option matches the runtime fallback.
+            ordered = [OPENAI_REALTIME_DEFAULT_MODEL] + [
+                m for m in realtime if m != OPENAI_REALTIME_DEFAULT_MODEL
+            ]
+            return ordered
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("openai realtime model list unavailable: %s", exc)
+    return [OPENAI_REALTIME_DEFAULT_MODEL]
+
+
+def voice_provider_catalogue() -> list[dict[str, Any]]:
     """Return the structured catalogue of voice providers the brain
     knows about (regardless of whether they're configured / probed
-    OK). Used by the boot wiring + the REST surface."""
-    return [
-        {"id": pid, "kind": kind, "name": name}
-        for pid, kind, name in VOICE_PROVIDER_CATALOGUE
-    ]
+    OK). Used by the boot wiring + the REST surface.
+
+    Realtime entries that have a known model family carry an extra
+    ``models: list[str]`` plus ``default_model: str`` so the CLI
+    preflight and the WebUI Voice card can render an in-list picker
+    instead of a free-text fallback (Lane U2). Entries that have no
+    curated model list omit both keys; callers MUST treat absence as
+    "no picker — use the runtime default".
+    """
+    entries: list[dict[str, Any]] = []
+    for pid, kind, name in VOICE_PROVIDER_CATALOGUE:
+        entry: dict[str, Any] = {"id": pid, "kind": kind, "name": name}
+        if pid == "openai_realtime":
+            entry["models"] = _openai_realtime_models()
+            entry["default_model"] = OPENAI_REALTIME_DEFAULT_MODEL
+        entries.append(entry)
+    return entries
 
 
 async def probe(

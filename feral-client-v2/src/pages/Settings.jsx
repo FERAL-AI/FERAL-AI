@@ -1620,6 +1620,20 @@ function VoiceSection() {
           const tone = status === 'ok' ? 'v2-keylist__probe--ok'
             : status === 'no_key' || status === 'not_configured' ? 'v2-keylist__probe--warn'
             : 'v2-keylist__probe--err';
+          // Lane U2 — when /api/voice/providers attaches a realtime
+          // model list (today: only openai_realtime) and the card is
+          // active, render an in-list <select> instead of falling
+          // back to the LLM picker's free-text behaviour. Entries
+          // that omit ``models`` keep the original Use/Test layout.
+          const showRealtimeModelPicker = (
+            p.id === 'openai_realtime'
+            && active
+            && Array.isArray(p.models)
+            && p.models.length > 0
+          );
+          const currentModel = audio.realtime_model
+            || p.default_model
+            || (showRealtimeModelPicker ? p.models[0] : '');
           return (
             <div key={p.id} className={`v2-voice-card${active ? ' v2-voice-card--active' : ''}`} data-testid={`voice-card-${p.id}`}>
               <div>
@@ -1628,6 +1642,23 @@ function VoiceSection() {
                   <span className={`v2-keylist__probe ${tone}`}>{status}</span>
                   {p.probe_detail && <span style={{ marginLeft: 6 }}>{p.probe_detail}</span>}
                 </div>
+                {showRealtimeModelPicker && (
+                  <div className="v2-voice-card__sub" style={{ marginTop: 6 }}>
+                    <label htmlFor={`realtime-model-${p.id}`} style={{ marginRight: 6 }}>Model</label>
+                    <select
+                      id={`realtime-model-${p.id}`}
+                      data-testid="openai-realtime-model-picker"
+                      className="v2-input"
+                      value={currentModel}
+                      disabled={busy === 'realtime_model'}
+                      onChange={(e) => updateAudio('realtime_model', e.target.value)}
+                    >
+                      {p.models.map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </div>
               <span className="v2-voice-card__lat">{p.latency_ms != null ? `${Math.round(p.latency_ms)}ms` : ''}</span>
               <button type="button" className="v2-btn" onClick={() => probeProvider(p.id)} disabled={busy === `probe:${p.id}`}>

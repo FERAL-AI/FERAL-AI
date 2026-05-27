@@ -86,6 +86,9 @@ def test_voice_preflight_persists_realtime_and_chained_picks(
     pick_seq = iter([
         # 1) realtime → openai_realtime
         Option(id="openai_realtime", label="OpenAI Realtime"),
+        # 1a) realtime model — Lane U2 surfaces the catalogue model
+        # list right after the provider pick when one is present.
+        Option(id="gpt-realtime", label="gpt-realtime"),
         # 2) STT → deepgram
         Option(id="deepgram", label="Deepgram"),
         # 3) TTS → user skips
@@ -105,6 +108,42 @@ def test_voice_preflight_persists_realtime_and_chained_picks(
     # User skipped TTS → setting NOT persisted (the value stays unset).
     assert state.get_setting("audio", "chained_tts_provider") is None
     assert state.get_setting("audio", "configured_via_wizard") is True
+
+
+def test_voice_preflight_asks_model_after_openai_realtime(
+    feral_home, stub_voice_probes, monkeypatch,
+):
+    """Lane U2 — after the operator picks ``openai_realtime`` the
+    wizard MUST ask for a realtime model and persist it under
+    ``audio.realtime_model``. Pre-Lane-U2 the wizard stopped at the
+    provider step and the runtime silently defaulted to
+    ``gpt-realtime`` with no operator visibility."""
+    from cli.setup.steps import voice_preflight as vp
+    from cli.setup.helpers import Option
+    from cli.setup.state import WizardState
+
+    monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+
+    pick_seq = iter([
+        Option(id="openai_realtime", label="OpenAI Realtime"),
+        # The new realtime-model picker — the catalogue advertises a
+        # populated ``models`` list so the wizard offers an in-list
+        # ask_choice and the user picks the GA default.
+        Option(id="gpt-realtime", label="gpt-realtime"),
+        Option(id="__none__", label="(skip STT)"),
+        Option(id="__none__", label="(skip TTS)"),
+    ])
+
+    def _ask(_prompt, _opts, default=None):
+        return next(pick_seq)
+
+    monkeypatch.setattr(vp, "ask_choice", _ask)
+
+    state = WizardState.load(feral_home)
+    asyncio.run(vp.run(state))
+
+    assert state.get_setting("audio", "realtime_primary") == "openai_realtime"
+    assert state.get_setting("audio", "realtime_model") == "gpt-realtime"
 
 
 # ----------------------------------------------------------------------

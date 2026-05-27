@@ -103,6 +103,33 @@ async def run(state: WizardState) -> None:
         )
         if chosen.id != "__none__":
             state.set_setting("audio", "realtime_primary", chosen.id)
+            # Lane U2 — after the operator picks a realtime provider,
+            # offer the catalogue's model list (when present) so they
+            # don't have to type the id by hand. Entries without a
+            # ``models`` list (every realtime entry except OpenAI
+            # today) silently skip with a single console hint.
+            chosen_entry = next(
+                (e for e in realtime_entries if e["id"] == chosen.id),
+                None,
+            )
+            model_ids = list((chosen_entry or {}).get("models") or [])
+            if model_ids:
+                default_model = (
+                    state.get_setting("audio", "realtime_model")
+                    or (chosen_entry or {}).get("default_model")
+                    or model_ids[0]
+                )
+                model_opts = [
+                    Option(id=mid, label=mid, aliases=(mid,), status="ready")
+                    for mid in model_ids
+                ]
+                chosen_model = ask_choice(
+                    f"Pick the {chosen_entry.get('name', chosen.id)} model",
+                    model_opts, default=default_model,
+                )
+                state.set_setting("audio", "realtime_model", chosen_model.id)
+            else:
+                console.print("(no model picker — using default)")
         else:
             state.set_setting("audio", "realtime_primary", "")
 

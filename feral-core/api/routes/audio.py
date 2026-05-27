@@ -222,6 +222,11 @@ async def list_voice_providers():
 
     rows: list[dict] = []
     for entry in voice_provider_catalogue():
+        # Catalogue entries may carry optional ``models`` /
+        # ``default_model`` keys (Lane U2 — realtime model picker).
+        # The dict-spread below propagates them transparently so the
+        # response shape stays additive and clients that don't read
+        # them keep working unchanged.
         try:
             result = await probe(entry["id"])
         except Exception as exc:  # pragma: no cover - defensive
