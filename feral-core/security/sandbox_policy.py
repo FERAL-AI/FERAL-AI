@@ -156,12 +156,34 @@ class SandboxPolicy:
             # allowlist that must match the first argv token after shlex
             # parsing; everything else is rejected. Lane 05 wires
             # ``validate_shell_command()`` into ``skills/executor.py``.
+            # v2026.5.42 — daemon shell allowlist expanded to cover vetted
+            # macOS staples that the pre-fix substring blocklist used to let
+            # through. Every entry below is a non-destructive program that
+            # does not require sudo, does not write outside its argv
+            # contract, and was implicitly trusted under the legacy
+            # blocklist. ``validate_shell_command`` still rejects shell
+            # metacharacters ($ ` | & ; > < \\n \\r \\) so an allowlisted
+            # binary cannot smuggle a different program through (e.g.
+            # ``say "$(rm -rf /)"`` rejects on the metachar check before the
+            # argv[0] check).
             "daemon": {
                 "shell": {
                     "allowed_commands": [
+                        # Original audit-r12 A3 triple
                         "open",
                         "osascript",
                         "screencapture",
+                        # v2026.5.42 vetted macOS staples
+                        "say",            # text-to-speech (demo + notification surface)
+                        "pbcopy",         # write to clipboard
+                        "pbpaste",        # read from clipboard
+                        "defaults",       # read/write user defaults (system-settings skill)
+                        "system_profiler", # hardware/software inventory (read-only)
+                        "sw_vers",        # OS version (read-only)
+                        "caffeinate",     # prevent sleep (long-running task UX)
+                        "mdfind",         # Spotlight query (read-only)
+                        "date",           # current date (read-only)
+                        "uname",          # system info (read-only)
                     ],
                 },
             },

@@ -125,7 +125,15 @@ def _shell_policy(*, allow_exec: bool = True, allowed: list[str] | None = None) 
 class TestDaemonShellAllowlist:
     def test_default_allowlist_matches_audit_decision(self):
         p = SandboxPolicy()
-        assert p.daemon_shell_allowlist() == ["open", "osascript", "screencapture"]
+        allowlist = p.daemon_shell_allowlist()
+        # audit-r12 A3 triple (v2026.5.38)
+        assert "open" in allowlist
+        assert "osascript" in allowlist
+        assert "screencapture" in allowlist
+        # v2026.5.42 vetted macOS staples expansion
+        for cmd in ("say", "pbcopy", "pbpaste", "defaults", "system_profiler",
+                    "sw_vers", "caffeinate", "mdfind", "date", "uname"):
+            assert cmd in allowlist, f"{cmd!r} should be in default daemon shell allowlist"
 
     def test_allowed_programs_pass(self):
         p = _shell_policy()
