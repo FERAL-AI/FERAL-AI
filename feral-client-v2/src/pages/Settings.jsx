@@ -2419,7 +2419,10 @@ function CostSection({ initialCallSite }) {
   useEffect(() => { refresh(); }, [refresh]);
 
   // S6 — listen to the live `budget_exceeded` WS frame so the panel
-  // updates spend + reset time without a poll. The same shared
+  // updates spend + reset time without a poll. Also pick up the
+  // background-subsystem `cost_cap_hit` event (wrapped by BrainState
+  // as {type:state_push, event, data}) so ScreenLoop / proactive /
+  // cron caps light up the same live spend chips. Same shared
   // FeralSocket the Chat panel uses.
   useEffect(() => {
     let unsub = null;
@@ -2434,8 +2437,14 @@ function CostSection({ initialCallSite }) {
         const socket = _getSharedSocketForTesting();
         if (cancelled || !socket) return;
         unsub = socket.subscribe((msg) => {
-          if (msg?.type !== 'budget_exceeded') return;
-          const p = msg.payload || msg || {};
+          let p = null;
+          if (msg?.type === 'budget_exceeded') {
+            p = msg.payload || msg || {};
+          } else if (msg?.type === 'state_push' && msg?.event === 'cost_cap_hit') {
+            p = msg.data || {};
+          } else {
+            return;
+          }
           const site = p.call_site || 'unknown';
           setSpends((prev) => ({
             ...prev,

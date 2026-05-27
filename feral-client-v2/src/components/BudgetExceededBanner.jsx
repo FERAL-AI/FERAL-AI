@@ -41,7 +41,9 @@ function formatResetTime(reset) {
 
 function pretty(siteId) {
   if (!siteId || typeof siteId !== 'string') return 'Chat';
-  return siteId.charAt(0).toUpperCase() + siteId.slice(1);
+  // Humanize snake_case call_site ids: "screen_loop" → "Screen loop".
+  const spaced = siteId.replace(/_/g, ' ');
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
 /**
@@ -50,6 +52,9 @@ function pretty(siteId) {
  * @param {number} props.capDollars
  * @param {number} [props.currentDollars]
  * @param {number|string} props.resetAt
+ * @param {string} [props.subsystem] - friendly subsystem label from
+ *   the broadcast `cost_cap_hit` payload (e.g. "ScreenLoop"). When
+ *   present we prefer it over the snake_cased `callSite`.
  * @param {() => void} [props.onDismiss] - if provided, renders an X dismiss button
  */
 export default function BudgetExceededBanner({
@@ -57,9 +62,12 @@ export default function BudgetExceededBanner({
   capDollars,
   currentDollars,
   resetAt,
+  subsystem,
   onDismiss,
 }) {
-  const label = pretty(callSite);
+  const label = (typeof subsystem === 'string' && subsystem.trim())
+    ? subsystem
+    : pretty(callSite);
   const resetStr = formatResetTime(resetAt);
   const capStr = formatDollars(capDollars);
   const currentStr = currentDollars != null ? formatDollars(currentDollars) : null;

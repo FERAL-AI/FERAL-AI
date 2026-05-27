@@ -65,6 +65,23 @@ CREATE TABLE IF NOT EXISTS custom_webhooks (
     trigger_count   INTEGER NOT NULL DEFAULT 0,
     url             TEXT NOT NULL DEFAULT ''
 );
+
+-- W19 (finding-19 cross-cut): per-integration ingress webhook config
+-- (GitHub/Stripe/Home Assistant/Notion …). Pre-v2026.5.43 these lived
+-- in a process-local ``WebhookReceiver._configs`` dict so the
+-- operator's HMAC secrets vanished every brain restart and external
+-- services silently started failing signature verification. Same DB
+-- as ``custom_webhooks`` but a separate identity model: ``app_id`` is
+-- a well-known integration slug (no UUIDs).
+CREATE TABLE IF NOT EXISTS integration_webhooks (
+    app_id            TEXT PRIMARY KEY,
+    secret            TEXT NOT NULL DEFAULT '',
+    signature_header  TEXT NOT NULL DEFAULT '',
+    signature_prefix  TEXT NOT NULL DEFAULT '',
+    hash_algorithm    TEXT NOT NULL DEFAULT 'sha256',
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    updated_at        REAL NOT NULL
+);
 """
 
 
@@ -216,8 +233,108 @@ class WebhookStore:
             )
             await db.commit()
 
+    # ──────────────────────────────────────────────────────────────
+    # W19 — integration ingress webhook config (GitHub/Stripe/HA/Notion)
+    #
+    # These methods own the ``integration_webhooks`` table. The
+    # ``custom_webhooks`` API above is intentionally untouched — the
+    # two surfaces have different identity models (UUIDs vs app slugs)
+    # and different consumers (operator-defined automations vs the
+    # known-integration ingress in ``webhook_receiver.py``).
+    # ──────────────────────────────────────────────────────────────
+
+    async def upsert_integration(self, config) -> None:
+        """Insert-or-update a per-integration webhook config.
+
+        ``config`` is an ``integrations.webhook_receiver.WebhookConfig``
+        (dataclass). We accept it duck-typed to avoid a module-level
+        import cycle.
+        """
+        await self._ensure_init()
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO integration_webhooks
+                    (app_id, secret, signature_header, signature_prefix,
+                     hash_algorithm, enabled, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(app_id) DO UPDATE SET
+                    secret = excluded.secret,
+                    signature_header = excluded.signature_header,
+                    signature_prefix = excluded.signature_prefix,
+                    hash_algorithm = excluded.hash_algorithm,
+                    enabled = excluded.enabled,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    config.app_id,
+                    config.secret or "",
+                    config.signature_header or "",
+                    config.signature_prefix or "",
+                    config.hash_algorithm or "sha256",
+                    1 if config.enabled else 0,
+                    time.time(),
+                ),
+            )
+            await db.commit()
+
+    async def get_integration(self, app_id: str):
+        """Return a ``WebhookConfig`` or ``None``."""
+        await self._ensure_init()
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                "SELECT app_id, secret, signature_header, signature_prefix, "
+                "hash_algorithm, enabled "
+                "FROM integration_webhooks WHERE app_id = ?",
+                (app_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        if row is None:
+            return None
+        return _integration_row_to_config(row)
+
+    async def list_integrations(self) -> list:
+        """Return a list of ``WebhookConfig`` rows ordered by app_id."""
+        await self._ensure_init()
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                "SELECT app_id, secret, signature_header, signature_prefix, "
+                "hash_algorithm, enabled "
+                "FROM integration_webhooks ORDER BY app_id ASC"
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [_integration_row_to_config(r) for r in rows]
+
+    async def delete_integration(self, app_id: str) -> bool:
+        await self._ensure_init()
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                "DELETE FROM integration_webhooks WHERE app_id = ?",
+                (app_id,),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
     async def close(self) -> None:
         """No-op for now — we open per-call connections so there's
         nothing to release. Kept for symmetry with other stateful
         services so future pooling won't break callers."""
         return None
+
+
+def _integration_row_to_config(row):
+    """Convert a SELECT row from ``integration_webhooks`` into a
+    ``WebhookConfig`` dataclass. Lazy import keeps the store module
+    free of receiver-side dependencies at import time."""
+    from integrations.webhook_receiver import WebhookConfig
+
+    return WebhookConfig(
+        app_id=row[0],
+        secret=row[1] or "",
+        signature_header=row[2] or "",
+        signature_prefix=row[3] or "",
+        hash_algorithm=row[4] or "sha256",
+        enabled=bool(row[5]),
+    )

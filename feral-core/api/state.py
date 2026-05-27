@@ -356,6 +356,12 @@ class BrainState:
         self.push_channel = None
         self.event_bus: Optional[EventBus] = None
         self.webhook_receiver: Optional[WebhookReceiver] = None
+        # W19 (finding-19): integration ingress webhook config now
+        # persists via this store (same sqlite DB as custom-webhooks,
+        # separate table). Pre-W19 it was lazily created by the
+        # custom-webhooks route on first hit; ``init()`` now
+        # eagerly constructs it so the receiver can hydrate at boot.
+        self.webhook_store = None
         self.marketplace: Optional[MarketplaceClient] = None
         self.sync_engine: Optional[SyncEngine] = None
         self.wasm_sandbox: Optional[WASMSandbox] = None
@@ -876,7 +882,22 @@ class BrainState:
             set_twin(self.digital_twin)
             _register_twin("digital_twin", DigitalTwinSkillBridge())
         self.event_bus = EventBus()
-        self.webhook_receiver = WebhookReceiver(event_bus=self.event_bus)
+        # W19 (finding-19): integration ingress webhook secrets now
+        # persist to the same sqlite DB as custom webhooks
+        # (``~/.feral/webhooks.db``, table ``integration_webhooks``).
+        # The receiver still answers HMAC verification from a hot
+        # in-process cache; ``hydrate_from_store()`` populates it at
+        # boot and seeds default integrations only if the store
+        # doesn't already have a row for them (operator-edited
+        # secrets win).
+        if self.webhook_store is None:
+            from integrations.webhook_store import WebhookStore
+            self.webhook_store = WebhookStore()
+        self.webhook_receiver = WebhookReceiver(
+            event_bus=self.event_bus, store=self.webhook_store,
+        )
+        with boot_subsystem(self._boot_report, "WebhookReceiverHydrate"):
+            await self.webhook_receiver.hydrate_from_store()
         self.marketplace = MarketplaceClient(skill_registry=self.skill_registry)
 
         # v2026.5.34 (PR 2 D12): the HLC node_id is now a persistent

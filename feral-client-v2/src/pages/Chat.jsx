@@ -35,6 +35,23 @@ const ORPHAN_OPEN_RE = new RegExp(`<\\s*${TOOL_TAG}\\b[^>]*\\/?>`, 'gi');
 const INVOKE_RE = /\binvoke\s*\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\]/gi;
 const TRAILING_MARKER_RE = /(?:^|\s)(?:FUNCTION|FUNCTIONS|TOOL|TOOLS)\s*$/;
 
+// S6 helper — normalize both the session-scoped `budget_exceeded`
+// frame (chat path, payload from agents/orchestrator.py) and the
+// brain-broadcast `cost_cap_hit` event (background-subsystem path
+// wrapped by BrainState.broadcast_event as state_push) into the
+// shared shape consumed by <BudgetExceededBanner>. Exported for the
+// vitest in __tests__/pages/Chat.cost-cap-hit.test.jsx.
+export function budgetBannerFromCapHit(p, fallbackSite = 'unknown') {
+  const src = p || {};
+  return {
+    callSite: src.call_site || fallbackSite,
+    capDollars: Number(src.cap_dollars || 0),
+    currentDollars: Number(src.current_dollars || 0),
+    resetAt: src.reset_at,
+    subsystem: src.subsystem || null,
+  };
+}
+
 export function sanitizeAssistantText(input) {
   if (!input) return input;
   let out = String(input);
@@ -282,17 +299,25 @@ export default function Chat() {
         setToolChip(null);
       } else if (type === 'budget_exceeded') {
         // S6 closer — yellow inline banner. Keyed by call_site so
-        // multiple budgets can be exceeded at once.
+        // multiple budgets can be exceeded at once. Same banner now
+        // also fires for ScreenLoop / proactive / cron / email / mqtt
+        // background subsystems via the state_push branch below.
         const p = msg.payload || msg || {};
         const site = p.call_site || 'chat';
         setBudgetBanners((prev) => ({
           ...prev,
-          [site]: {
-            callSite: site,
-            capDollars: Number(p.cap_dollars || 0),
-            currentDollars: Number(p.current_dollars || 0),
-            resetAt: p.reset_at,
-          },
+          [site]: budgetBannerFromCapHit(p, site),
+        }));
+      } else if (type === 'state_push' && msg.event === 'cost_cap_hit') {
+        // S6 closer (ScreenLoop / background subsystem path) — the
+        // brain's BudgetLoopGuard emits cost_cap_hit which BrainState
+        // wraps as {type: state_push, event, data}. Normalize and
+        // render the same yellow banner.
+        const p = msg.data || {};
+        const site = p.call_site || 'unknown';
+        setBudgetBanners((prev) => ({
+          ...prev,
+          [site]: budgetBannerFromCapHit(p, site),
         }));
       } else if (type === 'budget_reset') {
         const site = msg?.payload?.call_site || msg?.call_site;
@@ -655,6 +680,7 @@ export default function Chat() {
               capDollars={b.capDollars}
               currentDollars={b.currentDollars}
               resetAt={b.resetAt}
+              subsystem={b.subsystem}
               onDismiss={() => setBudgetBanners((prev) => {
                 const next = { ...prev };
                 delete next[b.callSite];

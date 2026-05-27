@@ -131,3 +131,71 @@ async def list_webhooks():
         "webhooks": state.webhook_receiver.list_webhooks(),
         "events": state.event_bus.recent_events(20) if state.event_bus else [],
     }
+
+
+@router.put("/api/webhooks/{app_id}/config")
+async def update_webhook_config(app_id: str, body: dict):
+    """Persist per-app HMAC secret / signature header / enabled flag
+    for an integration ingress webhook (GitHub, Stripe, Home
+    Assistant, Notion, …).
+
+    W19 (finding-19): pre-v2026.5.43 there was no production HTTP
+    surface for setting these secrets — operators had to monkey-patch
+    ``_configs`` in a Python shell and the value vanished on restart.
+    The receiver now writes through to the WebhookStore so the secret
+    survives a brain restart and external services keep validating
+    against the same shared key.
+
+    Body fields (all optional):
+
+    * ``secret`` — HMAC shared secret. Stored in the integration
+      webhook table; never echoed back in cleartext.
+    * ``signature_header`` — header the provider stamps the HMAC into
+      (e.g. ``X-Hub-Signature-256``).
+    * ``signature_prefix`` — e.g. ``sha256=``.
+    * ``hash_algorithm`` — ``sha256`` (default) or ``sha1``.
+    * ``enabled`` — bool, default true.
+
+    Returns the updated config with the secret **fingerprinted** so
+    the UI can show "has_secret: true" without surfacing the raw key.
+    """
+    if not state.webhook_receiver:
+        return Response(
+            status_code=503,
+            content='{"error":"Webhook receiver not initialized"}',
+            media_type="application/json",
+        )
+
+    from integrations.webhook_receiver import WebhookConfig
+
+    existing = state.webhook_receiver._configs.get(app_id)
+    if existing is None:
+        existing = WebhookConfig(app_id=app_id)
+
+    secret = body.get("secret")
+    if secret is not None:
+        existing.secret = str(secret)
+    sig_header = body.get("signature_header")
+    if sig_header is not None:
+        existing.signature_header = str(sig_header)
+    sig_prefix = body.get("signature_prefix")
+    if sig_prefix is not None:
+        existing.signature_prefix = str(sig_prefix)
+    hash_algo = body.get("hash_algorithm")
+    if hash_algo is not None:
+        existing.hash_algorithm = str(hash_algo)
+    enabled = body.get("enabled")
+    if enabled is not None:
+        existing.enabled = bool(enabled)
+
+    await state.webhook_receiver.upsert_config(existing)
+
+    return {
+        "ok": True,
+        "app_id": app_id,
+        "enabled": existing.enabled,
+        "has_secret": bool(existing.secret),
+        "signature_header": existing.signature_header,
+        "signature_prefix": existing.signature_prefix,
+        "hash_algorithm": existing.hash_algorithm,
+    }

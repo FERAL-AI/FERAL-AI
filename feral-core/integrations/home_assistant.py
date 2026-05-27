@@ -265,17 +265,37 @@ class HomeAssistantIntegration:
         if not entity_id:
             return {"success": False, "error": "entity_id is required",
                     "reason": "missing_entity_id"}
-        return await self.call_service(
+        result = await self.call_service(
             domain="vacuum", service="stop", entity_id=entity_id,
         )
+        if result.get("success"):
+            return {
+                "success": True,
+                "data": {
+                    "stopped": True,
+                    "entity_id": entity_id,
+                    "service": "vacuum.stop",
+                },
+            }
+        return result
 
     async def vacuum_return_to_base(self, entity_id: str = "", **kwargs) -> dict:
         if not entity_id:
             return {"success": False, "error": "entity_id is required",
                     "reason": "missing_entity_id"}
-        return await self.call_service(
+        result = await self.call_service(
             domain="vacuum", service="return_to_base", entity_id=entity_id,
         )
+        if result.get("success"):
+            return {
+                "success": True,
+                "data": {
+                    "returning": True,
+                    "entity_id": entity_id,
+                    "service": "vacuum.return_to_base",
+                },
+            }
+        return result
 
     async def light_turn_on(
         self,

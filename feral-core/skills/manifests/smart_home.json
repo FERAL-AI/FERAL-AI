@@ -124,6 +124,39 @@
             ],
             "returns_description": "{called, entity}",
             "ui_hint": "detail_card"
+        },
+        {
+            "id": "vacuum_start",
+            "method": "PYTHON",
+            "url": "python://smart_home_hue/vacuum_start",
+            "description": "Start a vacuum cleaning cycle. Calls the canonical Home Assistant service vacuum.start, which works for Roomba/iRobot, Roborock, Xiaomi and any other vacuum entity exposed by HA. Returns a structured {started, entity_id, service} payload.",
+            "params": [
+                {"name": "entity_id", "type": "string", "required": true, "description": "Vacuum entity id, e.g. 'vacuum.living_room' or 'vacuum.roomba'."}
+            ],
+            "returns_description": "{started: true, entity_id, service: 'vacuum.start'}",
+            "ui_hint": "detail_card"
+        },
+        {
+            "id": "vacuum_stop",
+            "method": "PYTHON",
+            "url": "python://smart_home_hue/vacuum_stop",
+            "description": "Stop an in-progress vacuum cleaning cycle. Calls the HA service vacuum.stop. The vacuum stays where it is; use vacuum_return_to_base to send it back to the dock.",
+            "params": [
+                {"name": "entity_id", "type": "string", "required": true, "description": "Vacuum entity id, e.g. 'vacuum.living_room'."}
+            ],
+            "returns_description": "{stopped: true, entity_id, service: 'vacuum.stop'}",
+            "ui_hint": "detail_card"
+        },
+        {
+            "id": "vacuum_return_to_base",
+            "method": "PYTHON",
+            "url": "python://smart_home_hue/vacuum_return_to_base",
+            "description": "Send a vacuum back to its dock. Calls the HA service vacuum.return_to_base.",
+            "params": [
+                {"name": "entity_id", "type": "string", "required": true, "description": "Vacuum entity id, e.g. 'vacuum.living_room'."}
+            ],
+            "returns_description": "{returning: true, entity_id, service: 'vacuum.return_to_base'}",
+            "ui_hint": "detail_card"
         }
     ],
     "flows": [

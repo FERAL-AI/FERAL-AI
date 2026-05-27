@@ -146,6 +146,22 @@ export default function ChatPanel({ shell: shellProp }) {
             capDollars: Number(p.cap_dollars || 0),
             currentDollars: Number(p.current_dollars || 0),
             resetAt: p.reset_at,
+            subsystem: p.subsystem || null,
+          },
+        }));
+      } else if (type === 'state_push' && frame.event === 'cost_cap_hit') {
+        // S6 — ScreenLoop / background subsystem cap path. Same yellow
+        // banner, payload is wrapped in frame.data by BrainState.
+        const p = frame.data || {};
+        const site = p.call_site || 'unknown';
+        setBudgetBanners((prev) => ({
+          ...prev,
+          [site]: {
+            callSite: site,
+            capDollars: Number(p.cap_dollars || 0),
+            currentDollars: Number(p.current_dollars || 0),
+            resetAt: p.reset_at,
+            subsystem: p.subsystem || null,
           },
         }));
       }
@@ -286,6 +302,7 @@ export default function ChatPanel({ shell: shellProp }) {
             capDollars={b.capDollars}
             currentDollars={b.currentDollars}
             resetAt={b.resetAt}
+            subsystem={b.subsystem}
             onDismiss={() => setBudgetBanners((prev) => {
               const next = { ...prev };
               delete next[b.callSite];
