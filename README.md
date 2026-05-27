@@ -247,7 +247,7 @@ cd ../feral-client-v2 && npm test
 
 - User docs: `docs/mintlify/` (also published at <https://docs.feral.sh>)
 - Architecture deep dive: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/orchestration.md`](docs/orchestration.md)
-- Capability scorecard (shipped vs partial vs planned): [`docs/SCORECARD.md`](docs/SCORECARD.md)
+- Capability status: <https://docs.feral.sh/reference/capability-status>
 - Roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md)
 - Contribution guide: [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - Security policy: [`SECURITY.md`](SECURITY.md)

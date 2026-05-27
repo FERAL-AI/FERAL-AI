@@ -1,0 +1,32 @@
+name: docs-no-internal-leakage
+
+on:
+  pull_request:
+    paths:
+      - 'docs/mintlify/**'
+      - 'docs/site/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'scripts/check_docs_no_internal_leakage.py'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/mintlify/**'
+      - 'docs/site/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+
+concurrency:
+  group: docs-no-internal-leakage-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: forbid internal audit artifacts in shipped docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run internal-leakage linter
+        run: python3 scripts/check_docs_no_internal_leakage.py
+        shell: bash
+        continue-on-error: false

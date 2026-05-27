@@ -1,0 +1,165 @@
+---
+title: "Capability status"
+description: "What's available today in FERAL, what depends on operator setup, and what's coming soon."
+---
+
+This page is the source of truth for which FERAL capabilities are usable today, which need operator configuration to come online, and which are still in active development. It's regenerated against the running code at each release; the version stamp is the published wheel on PyPI.
+
+**Version:** v2026.5.41 — `pip install feral-ai==2026.5.41`
+
+| Legend | Meaning |
+|--------|---------|
+| **Available** | Shipped and usable; tested in CI; ready out of the box. |
+| **Available — operator setup** | Shipped and tested, but requires you to provide credentials, hardware, or external services. |
+| **In development** | Code is being actively wired; ships in a follow-up release. See the linked guide for current state. |
+
+## Brain
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| LLM orchestration (9 providers) | Available | OpenAI, Anthropic, Gemini, OpenRouter, Groq, Mistral, Cohere, DeepSeek, Ollama. Per-call routing with automatic failover. |
+| Multi-key per provider | Available | Add multiple labeled keys per provider in **Settings → Providers**; switch the active key without restarting. |
+| Skill registry + tool dispatch | Available | 157 manifest endpoints, contract-tested. See [Skills](/guides/skills). |
+| MCP client | Available | Connects to external MCP servers (HTTP, stdio, SSE). |
+| MCP server | Available | Exposes FERAL tools at `/mcp` for other agents. |
+| Autonomy modes (strict / hybrid / loose) | Available | Enforced on every tool dispatch path. See [Autonomy](/guides/autonomy). |
+| Approval queue | Available | Blocks dangerous operations until you confirm in the WebUI or CLI. |
+| Cost budget + per-call caps | Available | Chat-path budgets emit a banner when exceeded. ScreenLoop pause banner is **In development**. |
+
+## Memory
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| Working memory (per session) | Available | Scoped to session lifetime. |
+| Episodic memory (SQLite + FTS5 + vector) | Available | Hybrid full-text + vector search with MMR re-ranking. |
+| Knowledge graph | Available | Entities and relations queryable via API and CLI. |
+| Timeline (`/api/timeline`) | Available | Reads episodes for a unified life view; degrades gracefully under load. |
+| Wiki compilation | Available | Ingest repositories, PDFs, plain text; browse and search. |
+| HLC-based peer sync | Available — operator setup | Requires at least two paired FERAL nodes on the same network or remote tunnel. |
+| At-rest encryption | In development | Today the database is protected by your OS keychain-derived vault for credentials only; full database envelope encryption ships in a follow-up. |
+
+## Voice
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| OpenAI Realtime (GA) | Available — operator setup | Bidirectional WebSocket, function calling, exponential-backoff reconnect. Needs an OpenAI key. |
+| Gemini Live | Available — operator setup | Bidirectional audio streaming. Needs a Google key. |
+| Chained voice pipeline (STT → LLM → TTS) | Available — operator setup | 4 STT providers (Deepgram, Groq Whisper, OpenAI Whisper, classic), 4 TTS providers (OpenAI, ElevenLabs, Cartesia, Gemini). |
+| Provider catalogue (`/api/voice/providers`) | Available | Lists all 8 providers with live probe status. |
+| Push-to-talk + hot-mic modes | Available | Configurable per device in **Settings → Voice**. |
+| Wake word | Available — operator setup | `openwakeword` integration; quality varies by environment. |
+| Realtime → chained automatic fallback on quota | In development | Today, an OpenAI quota error triggers a TTS-only fallback; switching to the full chained pipeline is operator-driven. |
+
+## Perception
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| Screen capture (ScreenLoop) | Available | macOS native today; Windows/Linux are operator-built fallbacks. |
+| Sensor fusion (`PerceptionFrame`) | Available | Merges multi-modal inputs (audio, vision, sensors) into a unified frame. |
+| Scene analysis | Available | LLM-based vision attach on voice/chat turns when frames are available. |
+| Glasses frame buffer | Available | `glasses_frame` events flow through `GlassesBuffer` for vision attach. |
+
+## Hardware
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| HUP 1.3.0 (Hardware Unified Protocol) | Available | Unified across brain, SDKs, and daemon manifests. CI-gated. |
+| Device registry + pairing | Available | QR pair / WebUI pair / CLI `feral devices`. |
+| Hardware mesh | Available | Request/response correlation across nodes. |
+| Home Assistant bridge | Available — operator setup | Requires a running HA instance and long-lived access token. |
+| Smart-glasses ingest (camera node) | Available — operator setup | Phone-camera node streams `glasses_frame`. |
+| Smart-glasses BLE adapter (W610 / QCSDK) | In development | Hardware-specific adapter wiring; phone-camera path is the supported alternative today. |
+
+## iOS companion app
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| Keychain-backed bearer auth | Available | Pair via QR; tokens stored in iOS Keychain. |
+| Local network discovery | Available | `LocalNetworkAuthorization` probe + Bonjour discovery on first launch. |
+| HealthKit ingest | Available — operator setup | Requires HealthKit permissions; sends biometrics to brain via HUP. |
+| Generic BLE peripheral scanner | In development | Today the iOS app advertises specific glasses; generic AirPods/Watch/scale discovery ships in a follow-up. |
+
+## Skills (built-in)
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| Computer use | Available | Desktop GUI primitives + coding tools (macOS focus). See [GUI computer use](/guides/gui-computer-use). |
+| Browser use | Available | CDP + Playwright, cookie persistence, network interception, iframe support. See [Browser automation](/guides/browser-automation). |
+| PDF | Available | Tables, images, OCR, metadata, layout preservation. See [PDF](/guides/pdf). |
+| Code interpreter | Available | Docker sandbox isolated by default; refuses host fallback when Docker is missing. |
+| Search | Available | 7 providers with failover, caching, and deduplication. |
+| Cron | Available | Time-zone aware, missed-job catch-up, concurrency limits. |
+| Smart-home control | Available — operator setup | Lights / switches / climate / media via Home Assistant. Vacuum control is **In development**. |
+| Health summary aggregation | Available — operator setup | Whoop and Oura integrations live; HealthKit fusion is **In development**. |
+
+## Generative UI (GenUI / SDUI)
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| GenUI generator | Available | LLM-driven UI components rendered in the WebUI. |
+| Provider registration | Available | Dynamic surface contracts. |
+| SDUI React renderer | Available | Cards, maps, charts, forms, media. |
+| Provider signing + sandbox | Available | Ed25519 signed bundles + CSP-isolated iframe sandbox. See [GenUI signing](/genui/signing). |
+
+## Integrations
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| Calendar (Google) | Available — operator setup | OAuth self-serve: register your own OAuth app and paste credentials. See [Pairing & access](/guides/pairing-access). |
+| Email (Gmail) | Available — operator setup | App Password flow (recommended) or OAuth self-serve. |
+| Telegram / Slack / Discord | Available — operator setup | Bot or app token per channel. See [Channels](/guides/channels). |
+| Notion / Spotify | Available — operator setup | OAuth self-serve. |
+| Microsoft 365 (Outlook / OneDrive) | Available — operator setup | OAuth self-serve. |
+| Push notifications (FCM / APNs) | Available — operator setup | Operator provides FCM or APNs credentials; brain refuses to send when missing. |
+| Custom webhooks | Available | Persistent SQLite store, signed receive URLs, action routing. |
+| Integration ingress webhooks (GitHub / Stripe / HA / Notion) | Available — operator setup | Per-app secret + signature header validated. Persistent storage ships in a follow-up. |
+
+## Security
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| BlindVault (encrypted secrets) | Available | ChaCha20-Poly1305 AEAD; master key derived from your OS keychain. |
+| Audit log (fail-loud) | Available | Append-only; tampering surfaces in `feral doctor`. |
+| Sandbox policy module | Available | YAML-loaded; enforced for skill execution and computer use. Daemon shell command policy enforcement ships in a follow-up. |
+| Approval bypass tests | Available | CI-gated; ships in every release. |
+| Local-bypass for paired LAN | Available | Off by default; opt-in per device. |
+
+## Clients
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| Web dashboard | Available | Primary client; full feature coverage. |
+| Desktop app (Tauri shell) | Available — operator setup | Same WebUI shipped as a standalone macOS / Windows / Linux app. |
+| iOS companion | Available | Pair with QR; full HUP node support. |
+| Android companion | Available | Camera capture, location, QR pair, wake-word gating. |
+| Browser extension | Available — operator setup | Companion extension for browser automation; pair via QR. |
+
+## Install & operations
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| `pip install feral-ai` | Available | PyPI live. |
+| Docker Compose | Available | Full-stack `docker compose up`. |
+| `feral doctor` | Available | Environment + provider + permission diagnostics. |
+| `feral setup` | Available | Interactive wizard for first-run configuration. |
+| Continuous integration | Available | Lint + tests + build on every PR. |
+| Mintlify documentation | Available | Published at <https://docs.feral.sh>. |
+
+---
+
+### How this page stays honest
+
+Every row is verified against shipped code at the version stamped above. If you find a row that doesn't match what your installation actually does, [open an issue](https://github.com/FERAL-AI/FERAL-AI/issues) — that's a bug, not a documentation oversight.
+
+For the runtime version of this matrix, run:
+
+```bash
+feral doctor
+```
+
+For per-provider availability and credentials probe, run:
+
+```bash
+feral key list
+feral voice providers
+```

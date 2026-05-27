@@ -95,7 +95,7 @@ See [`HARDWARE_ECOSYSTEM.md`](./HARDWARE_ECOSYSTEM.md) for the full daemon contr
 | Linux permission plane | Planned |
 | Installer and first-boot experience | Planned |
 
-See [`SCORECARD.md`](./SCORECARD.md) for detailed status.
+See the [Capability status](https://docs.feral.sh/reference/capability-status) page for the full matrix.
 
 ## How To Contribute
 

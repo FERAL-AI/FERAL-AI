@@ -20,8 +20,7 @@ format. Two environment switches gate it:
 | `FERAL_METRICS_PUBLIC` | `0` (off) | Off-loopback callers receive `404` unless this is set to `1`. Loopback (`127.0.0.1`, `::1`, `localhost`) is always allowed when the kill switch is on. |
 
 The off-loopback default returns `404` (not `401`/`403`) so the response is
-indistinguishable from "endpoint not mounted" — preserving the pre-W13
-public-internet behaviour for unconfigured installs.
+indistinguishable from "endpoint not mounted" for unconfigured installs.
 
 ## Registered metrics
 
@@ -29,25 +28,24 @@ Every metric below is defined in `feral-core/observability/metrics.py` and
 referenced by either the bundled dashboard, the alert rules, or both. The
 `tests/test_metrics_registry.py` suite enforces that contract.
 
-| Metric | Type | Labels | Emitter (owning workstream) |
+| Metric | Type | Labels | Emitter |
 |---|---|---|---|
-| `feral_http_requests_total` | counter | `method`, `route`, `status` | `api/server.py` HTTP middleware (W13) |
-| `feral_http_request_duration_seconds` | histogram | `method`, `route` | `api/server.py` HTTP middleware (W13) |
-| `feral_llm_429_total` | counter | `provider` | `agents/llm_provider.py` (W19, deferred) |
-| `feral_llm_failover_chain_exhausted_total` | counter | — | `agents/llm_provider.py` (W19, deferred) |
-| `feral_sync_active_peers` | gauge | — | `memory/sync.py` (W11, deferred) |
-| `feral_sync_failures_total` | counter | `reason` | `memory/sync.py` (W11, deferred) |
-| `feral_sync_was_active_recent` | gauge | — | `memory/sync.py` (W11, deferred) |
-| `feral_supervisor_approval_queue` | gauge | — | `agents/supervisor.py` (W17, deferred) |
-| `feral_tool_denials_total` | counter | `tool` | `security/sandbox_policy.py` (W4, deferred) |
-| `feral_sandbox_kills_total` | counter | `reason` | sandbox runner (W4, deferred) |
-| `feral_vault_decrypt_errors_total` | counter | — | `security/vault.py` (W9, deferred) |
-| `feral_ws_active_sessions` | gauge | — | `api/server.py` WS endpoints (W13.1, deferred) |
+| `feral_http_requests_total` | counter | `method`, `route`, `status` | `api/server.py` HTTP middleware |
+| `feral_http_request_duration_seconds` | histogram | `method`, `route` | `api/server.py` HTTP middleware |
+| `feral_llm_429_total` | counter | `provider` | `agents/llm_provider.py` |
+| `feral_llm_failover_chain_exhausted_total` | counter | — | `agents/llm_provider.py` |
+| `feral_sync_active_peers` | gauge | — | `memory/sync.py` |
+| `feral_sync_failures_total` | counter | `reason` | `memory/sync.py` |
+| `feral_sync_was_active_recent` | gauge | — | `memory/sync.py` |
+| `feral_supervisor_approval_queue` | gauge | — | `agents/supervisor.py` |
+| `feral_tool_denials_total` | counter | `tool` | `security/sandbox_policy.py` |
+| `feral_sandbox_kills_total` | counter | `reason` | sandbox runner |
+| `feral_vault_decrypt_errors_total` | counter | — | `security/vault.py` |
+| `feral_ws_active_sessions` | gauge | — | `api/server.py` WS endpoints |
 
-W13 ships the registry surface and the proof-of-concept `emit()` call inside
-the existing HTTP middleware. The remaining call sites are tracked as
-**W13.1** follow-ups so each owning workstream lands its own changes inside
-its own owned-paths set.
+Some emitters are still being wired into all call sites; the registry surface
+and the underlying metrics are stable. Missing emit() calls show up as
+zero-valued series, not as registry errors.
 
 ## Retention
 
@@ -102,12 +100,12 @@ Prometheus (`SIGHUP` or `POST /-/reload`).
 
 1. Check `journalctl -u feral` (or your equivalent log aggregator) for tracebacks.
 2. `curl -fsSL http://localhost:9090/health` to confirm the Brain is up.
-3. If the spike correlates with a deploy, roll back via `feral upgrade --to <previous-version>`.
+3. If the spike correlates with a deploy, roll back via `pip install 'feral-ai==<previous-version>'` and restart.
 
 #### `LLMAllProvidersDown`
 
-1. `feral providers status` to see which providers errored.
-2. Validate API keys via `feral providers test <id>`.
+1. `feral doctor` to see which providers errored and which keys are configured.
+2. Validate API keys via `feral key list` and probe each provider in **Settings → Providers**.
 3. If a provider is genuinely down, the chain will recover automatically once it comes back; the alert auto-resolves.
 
 #### `SyncPeerDown`
@@ -118,31 +116,24 @@ Prometheus (`SIGHUP` or `POST /-/reload`).
 
 #### `SupervisorBacklog`
 
-1. Drain the queue from the Supervisor UI or `feral supervisor approve --all-stale`.
+1. Drain the queue from the WebUI **Supervisor → Approvals** page.
 2. If approvals are blocked because the deciding human is offline, increase the alert threshold or page the on-call.
 
 #### `VaultDecryptFailed`
 
 1. Treat as a security-relevant signal: AEAD failures should never happen in steady state.
-2. Confirm the OS keychain still holds the master key (`feral vault status`).
+2. Confirm the OS keychain still holds the master key (`feral key status`).
 3. Inspect `feral-core/security/vault.py` logs for the failing entry.
 
 ## Adding a new metric
 
 1. Define the metric in `feral-core/observability/metrics.py` against
    `REGISTRY`, register it in the `_METRICS` map, and write a one-line
-   docstring naming the eventual emitter and owning workstream.
+   docstring naming the eventual emitter module.
 2. Add at least one panel in `ops/grafana/feral-overview.json` **or** an
    alert rule in `ops/prometheus/alerts.yml` that consumes it. The
    `test_metrics_registry.py::test_no_orphan_metrics` test fails the build
    otherwise.
-3. Add an `emit()` call site inside your owned module. Keep it cheap — the
+3. Add an `emit()` call site inside the owning module. Keep it cheap — the
    helper no-ops when the kill switch is off, but the label dict still
    allocates.
-
-## Mintlify nav
-
-This page lives at `docs/mintlify/operations/metrics.mdx`. As of the W13 PR,
-the `operations/` sub-tree has no entry in `docs/mintlify/docs.json`; the
-nav owner adds metrics + soak in a single sweep once enough operations
-pages exist. Tracked in `docs/AGENT_PROMPTS_FOLLOWUPS.md`.

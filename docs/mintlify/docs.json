@@ -137,7 +137,6 @@
           "guides/observability",
           "guides/federated-sync",
           "operations/soak",
-          "operations/benchmarks",
           "operations/metrics"
         ]
       },
@@ -156,6 +155,7 @@
           "reference/environment",
           "reference/cli",
           "reference/a2ui-schema",
+          "reference/capability-status",
           "providers/model-classes",
           "providers/reasoning-models"
         ]

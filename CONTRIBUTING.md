@@ -51,7 +51,7 @@ Project layout:
 | `feral-extension/` | Browser extension surface |
 | `registry/`, `feral-registry/` | Skill / app marketplace + signing flow |
 | `scripts/` | Install, release, sync, audit scripts |
-| `docs/` | Architecture, capability scorecard, roadmap |
+| `docs/` | Architecture, capability status, roadmap |
 
 ## Contributor lanes
 
@@ -165,7 +165,7 @@ Open an issue at <https://github.com/FERAL-AI/FERAL-AI/issues> with:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system architecture overview
 - [`docs/GENUI_PROVIDER_SPEC.md`](docs/GENUI_PROVIDER_SPEC.md) — GenUI provider surface contract
 - [`docs/HARDWARE_ECOSYSTEM.md`](docs/HARDWARE_ECOSYSTEM.md) — hardware daemon contract
-- [`docs/SCORECARD.md`](docs/SCORECARD.md) — capability status (shipped / partial / planned)
+- [Capability status](https://docs.feral.sh/reference/capability-status) — what's available today, what needs operator setup, what's coming
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — strategic execution order
 
 ## Community

@@ -118,7 +118,7 @@ Before diving in, read these to understand the system:
 - [`docs/GENUI_PROVIDER_SPEC.md`](https://github.com/FERAL-AI/FERAL-AI/blob/main/docs/GENUI_PROVIDER_SPEC.md) — building GenUI provider surfaces
 - [`docs/HARDWARE_ECOSYSTEM.md`](https://github.com/FERAL-AI/FERAL-AI/blob/main/docs/HARDWARE_ECOSYSTEM.md) — building hardware daemons
 - [`docs/ROADMAP.md`](https://github.com/FERAL-AI/FERAL-AI/blob/main/docs/ROADMAP.md) — strategic execution order
-- [`docs/SCORECARD.md`](https://github.com/FERAL-AI/FERAL-AI/blob/main/docs/SCORECARD.md) — honest capability status
+- [Capability status](https://docs.feral.sh/reference/capability-status) — what's available today, what needs operator setup, what's coming
 
 ## Reporting Issues
 

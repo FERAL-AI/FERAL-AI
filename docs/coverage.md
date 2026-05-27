@@ -4,61 +4,47 @@ Coverage is **enforced on every `pytest` and `vitest` run**, not a special
 invocation. Regressions fail the PR. Raising the floor is a one-file change;
 lowering it requires a commit-message justification.
 
-## Current floors (as of this commit)
+## Current floors
 
-| Surface        | Tool         | Floor             | Evidence                                    |
-|----------------|--------------|-------------------|---------------------------------------------|
-| `feral-core/`  | pytest-cov   | 50% lines         | `feral-core/pyproject.toml [tool.coverage]` |
-| `feral-client-v2/` | vitest v8 | 33/26/27/35 (stmts/branches/funcs/lines) | `feral-client-v2/vitest.config.js` |
+| Surface | Tool | Floor | Evidence |
+|---------|------|-------|----------|
+| `feral-core/` | pytest-cov | 50% lines | `feral-core/pyproject.toml [tool.coverage]` |
+| `feral-client-v2/` | vitest v8 | 33 / 26 / 27 / 35 (stmts/branches/funcs/lines) | `feral-client-v2/vitest.config.js` |
 
-The 50% backend target reflects the 51.51% measured across 1875 tests on
-this commit — we set the gate just below so a small single-PR regression
-blocks. The v2 thresholds sit one point below the 2026.4.27 measurement
-(25.39 / 17.34 / 19.01 / 27.06) so a single-comment edit cannot break
+The backend gate is set just below the most recent measurement so a single
+small regression blocks. The client-v2 thresholds sit roughly one point
+below the most recent measurement so a single-comment edit cannot break
 CI while a real regression (skipped page, broken hook) still trips the
 gate.
 
-## Ratchet plan
+## How to raise the floor
 
-| Milestone         | Backend floor | v2 thresholds (s/b/f/l) |
-|-------------------|---------------|--------------------------|
-| **2026.4.27**     | 50%           | 24 / 17 / 18 / 26        |
-| **Stage 5.1**     | 50%           | 26 / 19 / 20 / 28        |
-| **Stage 5.2**     | 50%           | 28 / 21 / 22 / 30        |
-| **Stage 5.3**     | 50%           | 31 / 24 / 25 / 33        |
-| **Stage 5.4 (this commit)** | 50%  | 33 / 26 / 27 / 35        |
+The rule of thumb is:
 
-The 2026.4.27 plan targeted 50% v2 branches. Stage 5.1-5.4 pushed from
-17.34 to 27.14 — +9.8 points, nearly doubling the branch coverage, but
-not all the way to 50. The remaining gap requires deep interaction
-tests on Chat, Flows, AppSurface, SduiRenderer and Settings sub-panes
-that exercise both fetch success AND error branches. That's a
-follow-up commit, tracked as a new roadmap entry in
-`docs/roadmap/coverage.md` (to be written).
-| +3 commits (Supervisor + Twin tests landing) | 55%           | 30 / 22 / 25 / 32        |
-| Stable ambient-OS 2026 Q2 | 65% | 45 / 35 / 40 / 45 |
-| Stable ambient-OS 2026 Q3 | 75% | 60 / 50 / 55 / 60 |
-| **Target**                | 90% | 80 / 70 / 75 / 80 |
+> After every commit that adds meaningful tests, check the new measurement
+> and bump the floor to (measured − 1%). Never bump statements, branches,
+> functions, and lines all at once; let the suite prove it.
 
-Raising the floor follows a simple rule: **after every commit that adds
-meaningful tests, check the new measurement and bump the floor to (measured
-- 1%)**. Never bump both at once; let the suite prove it.
+Track-changes log lives in this file's git history — each `coverage.md`
+edit since the gate was introduced bumps either the backend percent or
+the per-axis client-v2 thresholds.
 
-## What's under-covered (honest list)
+## What's under-covered
 
-Low-coverage modules identified from the most recent pytest-cov run:
+A few backend modules are routinely under-covered because they're heavy on
+real I/O or third-party calls:
 
-| Module                                | Line cov | Reason                         |
-|---------------------------------------|----------|--------------------------------|
-| `skills/impl/system_settings.py`      | 19%      | Heavy side-effect code (fs + OS) |
-| `skills/marketplace.py`               | 19%      | Needs integration harness      |
-| `skills/impl/weather.py`              | 25%      | Third-party API calls          |
-| `skills/package.py`                   | 27%      | Tarball I/O                    |
-| `voice/gemini_realtime.py`            | 34%      | Live WebSocket session needed  |
-| `skills/impl/workspace_scripts.py`    | 29%      | Spawns subprocesses            |
+| Module | Reason |
+|--------|--------|
+| `skills/impl/system_settings.py` | Heavy side-effect code (filesystem + OS) |
+| `skills/marketplace.py` | Needs integration harness |
+| `skills/impl/weather.py` | Third-party API calls |
+| `skills/package.py` | Tarball I/O |
+| `voice/gemini_realtime.py` | Live WebSocket session needed |
+| `skills/impl/workspace_scripts.py` | Spawns subprocesses |
 
-Each follow-up commit that backfills one of these will update this table +
-ratchet the floor.
+Each follow-up commit that backfills one of these should bump the
+corresponding entry up — or remove the row when the module clears 70%.
 
 ## How to check locally
 
