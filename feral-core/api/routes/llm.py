@@ -524,6 +524,7 @@ async def add_provider_key(provider_id: str, req: ProviderKeyRequest):
     # vault namespace + credentials.json) so the running LLMProvider
     # picks it up without a reboot. This mirrors what
     # /api/llm/providers/{id}/configure does for unlabeled writes.
+    reconfigure_result: dict | None = None
     if req.set_active:
         desc = catalog.get_descriptor(provider_id)
         env_var = desc.credential_env_var if desc else ""
@@ -536,7 +537,32 @@ async def add_provider_key(provider_id: str, req: ProviderKeyRequest):
                     "catalog.configure(%s) after add_provider_key failed: %s",
                     provider_id, exc,
                 )
-    return {"success": True, "key": entry.to_dict()}
+        # Cross-cut #1 (v2026.5.42): push the newly-active labeled key
+        # into the running LLMProvider so the next chat turn uses it
+        # without a brain restart. Pre-fix the vault was updated but
+        # ``self.api_key`` / the httpx client stayed stale until the
+        # operator hit Settings → Save & switch.
+        if state.orchestrator and getattr(state.orchestrator, "llm", None) is not None:
+            try:
+                from security.vault_keys import get_active_key
+                secret = get_active_key(provider_id)
+                if secret and provider_id == state.orchestrator.llm.provider:
+                    reconfigure_result = await state.orchestrator.llm.reconfigure(
+                        provider=provider_id,
+                        model=state.orchestrator.llm.model or "",
+                        api_key=secret,
+                        base_url=state.orchestrator.llm.base_url or "",
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "reconfigure after add_provider_key(%s) failed: %s",
+                    provider_id, exc,
+                )
+                reconfigure_result = {"ok": False, "reason": str(exc)}
+    payload: dict = {"success": True, "key": entry.to_dict()}
+    if reconfigure_result is not None:
+        payload["reconfigured"] = reconfigure_result
+    return payload
 
 
 @router.get("/api/llm/providers/{provider_id}/keys")
@@ -616,7 +642,37 @@ async def set_provider_active_key(provider_id: str, req: ProviderActiveRequest):
                 "catalog.configure(%s) after set_active_label failed: %s",
                 provider_id, exc,
             )
-    return {"success": True, "provider_id": provider_id, "active_label": active}
+    # Cross-cut #1 (v2026.5.42): propagate the active-label swap into
+    # the running LLMProvider so the next chat turn uses the new key
+    # without a restart. Pre-fix the vault active pointer flipped but
+    # ``self.api_key`` / the httpx client stayed pinned to the
+    # previously-active secret until full Save & switch.
+    reconfigure_result: dict | None = None
+    if (
+        secret
+        and state.orchestrator
+        and getattr(state.orchestrator, "llm", None) is not None
+        and provider_id == state.orchestrator.llm.provider
+    ):
+        try:
+            reconfigure_result = await state.orchestrator.llm.reconfigure(
+                provider=provider_id,
+                model=state.orchestrator.llm.model or "",
+                api_key=secret,
+                base_url=state.orchestrator.llm.base_url or "",
+            )
+        except Exception as exc:
+            logger.warning(
+                "reconfigure after set_active_label(%s -> %s) failed: %s",
+                provider_id, active, exc,
+            )
+            reconfigure_result = {"ok": False, "reason": str(exc)}
+    payload: dict = {
+        "success": True, "provider_id": provider_id, "active_label": active,
+    }
+    if reconfigure_result is not None:
+        payload["reconfigured"] = reconfigure_result
+    return payload
 
 
 @router.get("/api/llm/route")

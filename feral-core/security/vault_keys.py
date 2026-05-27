@@ -51,8 +51,13 @@ When the operator stores a key without specifying a label, we use
 ``OPENAI_API_KEY`` style entry is still honoured; the labeled API is
 strictly additive. ``set_active_label`` picks which labeled key the
 runtime should treat as "the" provider key — that selection is what
-``LLMProvider.switch_provider`` reads when it goes to look up the
-current credential.
+:func:`get_active_key` consults on every LLM hot path entry (boot
+hydration in ``api/state.py``, ``LLMProvider.__init__`` /
+``_build_client`` / ``switch_provider`` / ``_get_provider_config``,
+plus the Anthropic native stream). The resolution order is documented
+on :func:`get_active_key`. Cross-cut #1 of v2026.5.42 wave wired this
+in — prior to that release, ``LLMProvider`` never called any
+``vault_keys`` helper and the active label was a no-op on chat.
 
 REST contract
 -------------
@@ -77,6 +82,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -419,6 +425,91 @@ def get_active_provider_key(
         if secret:
             return secret
     return get_provider_key(pid, DEFAULT_LABEL, vault=v, record_use=record_use)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# LLM hot-path resolver (Cross-cut #1, v2026.5.42)
+# ─────────────────────────────────────────────────────────────────────
+
+
+# Per-provider env var fallback consulted by :func:`get_active_key`.
+# Mirrors ``agents.llm_provider._PROVIDER_REGISTRY`` but lives here so
+# the security layer never has to import the LLM runtime (would form a
+# cycle). Keep in sync when a new runtime provider lands in
+# ``_PROVIDER_REGISTRY``.
+_PROVIDER_ENV_KEYS: dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "kimi": "MOONSHOT_API_KEY",
+    "qwen": "DASHSCOPE_API_KEY",
+}
+
+
+def get_active_key(provider_id: str, *, vault: Any = None) -> str:
+    """Resolve the live API key for *provider_id* on the LLM hot path.
+
+    Resolution order (first non-empty wins):
+
+    1. The labeled secret pointed at by ``set_active_label`` (falling
+       back to :data:`DEFAULT_LABEL` per
+       :func:`get_active_provider_key`). ``record_use=True`` so the
+       REST list endpoint can render "Used 3 minutes ago".
+    2. The legacy default-namespace vault entry keyed by the
+       provider's canonical env var name (``OPENAI_API_KEY``,
+       ``ANTHROPIC_API_KEY``, …). This is what
+       ``api/state._load_stored_credentials`` populates on boot and is
+       the historical "unlabeled" credential.
+    3. The process env var of the same name.
+    4. ``""`` — signals "no key" so the caller can flip
+       ``available=False`` instead of dialling an endpoint with an
+       empty ``Authorization`` header.
+
+    Never raises. Vault read failures degrade silently to env lookup so
+    a corrupt / locked vault cannot break the chat path entirely.
+    Cross-cut #1 of v2026.5.42 wave (see
+    ``AUDIT-r14/round3/findings/lane4-vault-keys-hot-path.md``).
+    """
+    try:
+        pid = _validate_provider_id(provider_id)
+    except InvalidProviderId:
+        return ""
+
+    v: Any
+    try:
+        v = _vault_or_raise(vault)
+    except Exception as exc:
+        logger.debug("get_active_key(%s): vault unavailable (%s)", pid, exc)
+        v = None
+
+    if v is not None:
+        try:
+            labeled = get_active_provider_key(pid, vault=v, record_use=True)
+        except Exception as exc:
+            logger.debug("get_active_key(%s): labeled lookup failed (%s)", pid, exc)
+            labeled = None
+        if labeled:
+            return labeled
+
+    env_key = _PROVIDER_ENV_KEYS.get(pid, "")
+    if v is not None and env_key:
+        try:
+            legacy = v.get_credential(env_key)
+        except Exception as exc:
+            logger.debug("get_active_key(%s): legacy vault read failed (%s)", pid, exc)
+            legacy = None
+        if legacy:
+            return legacy
+
+    if env_key:
+        env_val = os.getenv(env_key, "") or ""
+        if env_val:
+            return env_val
+
+    return ""
 
 
 def record_probe_result(

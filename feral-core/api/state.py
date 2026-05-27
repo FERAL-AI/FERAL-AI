@@ -660,6 +660,42 @@ class BrainState:
                 # classify_error-triggered failover actually uses them.
                 _shared_llm.set_config(_llm_cfg)
 
+            # Cross-cut #1 (v2026.5.42): hydrate the active labeled
+            # vault key onto the running provider so ``feral key add
+            # --set-active`` (and the equivalent WebUI POST) lands on
+            # the next chat turn after a reboot — and OVERRIDES a
+            # stale env var when the operator chose a labeled key
+            # specifically. We skip the heavyweight
+            # ``reconfigure`` round-trip (which probes the chat
+            # endpoint) because the labeled secret has already been
+            # validated by ``feral key add`` / the WebUI probe path;
+            # a fresh client + slot write is enough to land it on the
+            # hot path without adding network latency to every boot.
+            # Idempotent when the vault is empty.
+            try:
+                from security.vault_keys import get_active_key as _get_active_key
+                _labeled = _get_active_key(_shared_llm.provider)
+                if _labeled and _labeled != getattr(_shared_llm, "api_key", ""):
+                    _shared_llm.api_key = _labeled
+                    _old = getattr(_shared_llm, "client", None)
+                    if _old is not None:
+                        try:
+                            await _old.aclose()
+                        except Exception:
+                            pass
+                    _shared_llm.client = _shared_llm._build_client()
+                    if not _shared_llm.available:
+                        _shared_llm.available = bool(_shared_llm.api_key) and bool(_shared_llm.base_url)
+                    logger.info(
+                        "vault_keys: hydrated labeled active key for provider=%s "
+                        "(available=%s)", _shared_llm.provider, _shared_llm.available,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "vault_keys: post-LLMProvider hydration failed: %s "
+                    "(brain falls back to env / legacy vault credential)", exc,
+                )
+
             # Self-heal contract (operator report 2026-05-09):
             # ``settings.json`` had ``llm.model`` pinned to
             # ``gpt-4o-mini-transcribe-2025-12-15`` (an audio-class

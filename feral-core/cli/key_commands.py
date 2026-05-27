@@ -38,6 +38,49 @@ from typing import Optional
 from cli import ui_kit
 
 
+def _signal_brain_reload(provider_id: str) -> str:
+    """Cross-cut #1 (v2026.5.42) — nudge the running brain to pick up
+    the newly-active labeled key without a restart.
+
+    Posts to the local ``/api/llm/providers/{pid}/keys/active``
+    endpoint with the just-written label. Best effort: a connection
+    refused (brain not running) or non-2xx response returns a short
+    operator-facing hint string instead of raising. Returns ``""`` on
+    success so the caller can stay quiet on the happy path.
+
+    Never raises, never blocks for more than a couple of seconds.
+    """
+    try:
+        from security import vault_keys
+        from config.runtime import brain_port
+    except Exception:
+        return ""
+    try:
+        active = vault_keys.get_active_label(provider_id)
+    except Exception:
+        active = None
+    if not active:
+        return ""
+    try:
+        import json as _json
+        import urllib.error
+        import urllib.request
+        url = f"http://127.0.0.1:{brain_port()}/api/llm/providers/{provider_id}/keys/active"
+        body = _json.dumps({"label": active}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            if 200 <= resp.status < 300:
+                return ""
+            return f"(brain returned HTTP {resp.status} — restart will pick up the new key)"
+    except urllib.error.URLError:
+        return "(brain not running — restart will pick up the new key)"
+    except Exception:
+        return "(brain hot-swap failed — restart will pick up the new key)"
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Argparse registration (called from cli/main.py)
 # ─────────────────────────────────────────────────────────────────────
@@ -474,6 +517,16 @@ def cmd_key_add(
     print(f"  Saved {entry.provider_id}:{entry.label}  "
           f"({entry.fingerprint})"
           + ("  [active]" if entry.is_active else ""))
+
+    # Cross-cut #1 (v2026.5.42): when the new key is the active one,
+    # poke the running brain so the next chat turn picks it up without
+    # a restart. Best effort — if the brain isn't running, we print a
+    # one-line hint instead of erroring out (the vault write is the
+    # operator's source of truth either way).
+    if set_active:
+        _hint = _signal_brain_reload(entry.provider_id)
+        if _hint:
+            print(f"  {_hint}")
 
     if not probe:
         print("  --no-probe set; skipping validity check.")

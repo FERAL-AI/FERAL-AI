@@ -78,6 +78,31 @@ def _gemini_api_key() -> str | None:
     return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
 
+def _resolve_api_key(provider: str) -> str:
+    """Hot-path credential resolver — labeled vault → legacy vault → env.
+
+    Thin wrapper around :func:`security.vault_keys.get_active_key` so
+    every call site in this module shares the same resolution order
+    (Cross-cut #1 of v2026.5.42 wave). Returns ``""`` when nothing is
+    configured so the caller can flip ``available=False`` instead of
+    sending a bare ``Authorization: Bearer`` header upstream.
+
+    Import is lazy so a stripped build without the security overlay
+    (e.g. early bootstrap, unit tests that monkeypatch the vault) can
+    still construct an ``LLMProvider`` with env-only credentials.
+    """
+    try:
+        from security.vault_keys import get_active_key
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("_resolve_api_key(%s): vault_keys import failed (%s)", provider, exc)
+        return ""
+    try:
+        return get_active_key(provider) or ""
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("_resolve_api_key(%s): get_active_key raised (%s)", provider, exc)
+        return ""
+
+
 VISION_READY_OLLAMA_MODELS = (
     "llava",
     "moondream",
@@ -429,6 +454,18 @@ class LLMProvider:
                 self.model = self.model or _default_model_for(self.provider)
                 self.available = False
 
+        # Cross-cut #1 (v2026.5.42): if env / per-provider branch left
+        # ``self.api_key`` empty, consult the labeled-keys vault overlay
+        # before declaring the slot unconfigured. Prior to this the
+        # operator could ``feral key add --provider X --set-active``
+        # successfully and the brain would still refuse to boot with a
+        # usable key because ``vault_keys`` was never read on the hot
+        # path. ``ollama`` / ``lmstudio`` keep their literal stubs.
+        if not self.api_key and self.provider not in ("ollama", "lmstudio"):
+            resolved = _resolve_api_key(self.provider)
+            if resolved:
+                self.api_key = resolved
+
         # Check if API key is available — if not, try local fallbacks
         if not self.api_key and self.provider not in ("ollama", "lmstudio"):
             logger.warning(f"No API key for provider '{self.provider}'. Trying local fallbacks...")
@@ -466,6 +503,15 @@ class LLMProvider:
         return [{"id": k, **v} for k, v in LLM_PRESETS.items()]
 
     def _build_client(self) -> httpx.AsyncClient:
+        # Cross-cut #1 (v2026.5.42): if the slot is empty, late-bind
+        # from the labeled-keys vault overlay just before the headers
+        # are baked into the httpx client. Explicit ``api_key`` writes
+        # from ``switch_provider`` / ``reconfigure`` are preserved —
+        # we only fill the slot when the caller left it blank.
+        if not self.api_key and self.provider not in ("ollama", "lmstudio"):
+            resolved = _resolve_api_key(self.provider)
+            if resolved:
+                self.api_key = resolved
         headers = {"Content-Type": "application/json"}
         if self.provider == "anthropic":
             headers["x-api-key"] = self.api_key
@@ -2142,9 +2188,11 @@ class LLMProvider:
            is not silently restarted.
         """
         # ``self.api_key`` is the source of truth — it's what
-        # ``switch_provider`` and ``reconfigure`` write. Falling back
-        # to the env var keeps direct-instantiation tests working.
-        api_key = self.api_key or os.getenv("ANTHROPIC_API_KEY", "")
+        # ``switch_provider`` and ``reconfigure`` write. When empty,
+        # Cross-cut #1 (v2026.5.42) routes the lookup through the
+        # labeled-keys vault overlay first, env second (kept here as
+        # the final fallback ``_resolve_api_key`` covers internally).
+        api_key = self.api_key or _resolve_api_key("anthropic")
         # ``self.base_url`` already includes ``/v1`` for Anthropic
         # (see ``__init__``); the messages endpoint is path-relative.
         base = (self.base_url or "https://api.anthropic.com/v1").rstrip("/")
@@ -2365,10 +2413,15 @@ class LLMProvider:
             # PROVIDER_BASES dict and silently fell through to OpenAI).
             base, env_key = _PROVIDER_REGISTRY[provider]
             self.base_url = _base_url_override or base
+            # Cross-cut #1 (v2026.5.42): when the caller did not
+            # supply an explicit ``api_key``, consult the labeled vault
+            # overlay before falling back to env. ``get_active_key``
+            # already covers env, so the OR chain here is the gemini
+            # GOOGLE_API_KEY tail.
             if provider == "gemini":
-                self.api_key = api_key or _gemini_api_key() or ""
+                self.api_key = api_key or _resolve_api_key("gemini") or _gemini_api_key() or ""
             elif env_key:
-                self.api_key = api_key or os.getenv(env_key, "")
+                self.api_key = api_key or _resolve_api_key(provider) or os.getenv(env_key, "")
             else:
                 self.api_key = api_key
             if not model:
@@ -3192,10 +3245,17 @@ class LLMProvider:
                 "supported": False,
             }
         base_url, env_key = reg
+        # Cross-cut #1 (v2026.5.42): prefer the labeled-vault active
+        # key for failover candidates too. Pre-fix the failover loop
+        # only honoured ``os.getenv(env_key)`` so an operator who only
+        # ever set the secret via ``feral key add`` lost cross-provider
+        # failover for the candidate.
         if provider_name == "gemini":
-            api_key = _gemini_api_key() or ""
+            api_key = _resolve_api_key("gemini") or _gemini_api_key() or ""
         else:
-            api_key = os.getenv(env_key, "") if env_key else ""
+            api_key = _resolve_api_key(provider_name) or (
+                os.getenv(env_key, "") if env_key else ""
+            )
         return {
             "base_url": base_url,
             "api_key": api_key,
