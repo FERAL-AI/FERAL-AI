@@ -391,6 +391,7 @@ class GeminiRealtimeProxy:
                         session_id=session_id,
                         reason=reason,
                         detail=detail,
+                        provider="gemini",
                     )
                 except Exception:
                     logger.exception(
@@ -671,6 +672,7 @@ class GeminiRealtimeProxy:
                     session_id=session_id,
                     reason=reason,
                     detail=str(error)[:200],
+                    provider="gemini",
                 )
             except Exception:
                 logger.exception(

@@ -133,6 +133,24 @@ def test_openai_realtime_entry_has_models(client):
     assert row.get("default_model") == "gpt-realtime"
 
 
+def test_openai_realtime_models_list_has_full_set(client):
+    """v2026.5.43 Nit-1 — the OpenAI Realtime entry surfaces every
+    realtime model the API will accept, not just the GA default.
+    Operators on legacy mini quotas, dated snapshot pins, or the
+    preview family all need an in-list option."""
+    rows = client.get("/api/voice/providers").json()["providers"]
+    row = next(p for p in rows if p["id"] == "openai_realtime")
+    models = row["models"]
+    assert "gpt-realtime" in models
+    assert "gpt-realtime-mini" in models
+    assert any("preview" in m for m in models), models
+    assert row.get("default_model") == "gpt-realtime"
+    # was 1 in v2026.5.42; v2026.5.43 ships the curated multi-entry list.
+    assert len(models) >= 5
+    # GA leads so the dropdown's first option matches the runtime default.
+    assert models[0] == "gpt-realtime"
+
+
 def test_non_realtime_entries_omit_models(client):
     """Pin: catalogue entries without a curated model list MUST NOT
     invent one. The route + clients treat absence as "use the runtime

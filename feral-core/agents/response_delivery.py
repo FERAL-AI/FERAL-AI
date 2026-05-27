@@ -51,6 +51,15 @@ async def send_text(orchestrator, session_id: str, text: str):
         and getattr(router, "is_session_degraded", None)
         and router.is_session_degraded(session_id)
     ):
+        # v2026.5.43 — after S4 morph (router.handle_realtime_failure
+        # promoted the session onto the chained STT→LLM→TTS pipeline),
+        # the chained pipeline's own ``send_text`` path emits
+        # ``tts_chunk`` frames. Running the whisper synthesiser too
+        # would play the assistant turn twice. Skip the whisper fan-out
+        # whenever the session is already on the chained path.
+        voice_mode = getattr(router, "_session_voice_mode", {}) or {}
+        if voice_mode.get(session_id) == "chained":
+            return
         try:
             await router.synthesize_assistant_speech(session_id, clean)
         except Exception:

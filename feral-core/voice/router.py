@@ -504,21 +504,56 @@ class VoiceRouter:
         detail: str = "",
         provider: str = "openai",
     ) -> None:
-        """Mark ``session_id`` as degraded and emit a ``voice_status``
-        frame so the client can swap to a banner. Does NOT close the
-        WebSocket — subsequent assistant text will be synthesised by
-        ``_audio.synthesize_speech`` (whisper / OpenAI ``/audio/speech``)
-        and emitted as ``tts_chunk`` frames the same shape the chained
-        / whisper path already uses today. Idempotent.
+        """Recover voice for ``session_id`` after a realtime provider
+        failure.
 
-        Picks ``fallback_provider`` from the configured
-        ``audio.fallback_tts_providers`` list (see
-        ``api/state.py:load_settings``), defaulting to ``whisper``
-        which is what ``AudioPipeline.synthesize_speech`` resolves to
-        when no alt TTS provider is wired.
+        Two recovery modes, selected by ``audio.fallback_mode``:
+
+        ``"chained"`` (S4 acceptance, default) — morph the live
+        session in place onto the chained STT→LLM→TTS pipeline so
+        the call keeps going on Deepgram + ElevenLabs. Steps:
+          1. Skip if the session already morphed (idempotent).
+          2. ``stop_session`` on the dead realtime/gemini proxy.
+          3. Retarget every bound node's voice config to
+             ``mode="chained"`` so subsequent ``audio_chunk`` frames
+             land on the chained pipeline.
+          4. ``open_chained_session`` with the providers configured
+             under ``audio.chained_fallback``.
+          5. Emit ``voice_status state=degraded
+             fallback_provider="chained"`` so the UI banner switches.
+          6. Do NOT populate ``_session_degraded`` — the chained
+             pipeline owns TTS via its own ``tts_chunk`` frames, and
+             ``response_delivery.send_text`` skips the whisper
+             synthesiser when ``_session_voice_mode[session_id] ==
+             "chained"`` (prevents double audio).
+
+        ``"whisper"`` (legacy v2026.5.31) — keep streaming chunked
+        TTS from the dead session's residual text via
+        ``AudioPipeline.synthesize_speech`` (mp3 ``tts_chunk``
+        frames). Used when ``fallback_mode`` is explicitly set to
+        ``"whisper"`` OR when chained keys (``DEEPGRAM_API_KEY``,
+        ``ELEVENLABS_API_KEY``) are missing — the user still gets
+        audible feedback rather than going silent.
+
+        Both modes are idempotent — calling this twice on the same
+        session emits one voice_status / opens one chained session.
         """
+        if self._session_voice_mode.get(session_id) == "chained":
+            return  # already morphed
         if session_id in self._session_degraded:
-            return  # already emitted
+            return  # already on the legacy whisper path
+
+        audio_cfg = self._load_audio_settings()
+        fallback_mode = str(audio_cfg.get("fallback_mode") or "whisper").lower()
+
+        if fallback_mode == "chained" and await self._try_chained_morph(
+            session_id,
+            audio_cfg=audio_cfg,
+            reason=reason,
+            detail=detail,
+            provider=provider,
+        ):
+            return
 
         fallback_provider = self._pick_fallback_provider()
         meta = {
@@ -534,6 +569,135 @@ class VoiceRouter:
             session_id[:8], reason, provider, fallback_provider or "(none)",
         )
         await self._emit_voice_status(session_id, meta)
+
+    @staticmethod
+    def _load_audio_settings() -> dict:
+        """Return the ``audio`` settings block, tolerant of missing
+        ``config.loader`` (narrow unit tests).
+        """
+        try:
+            from config.loader import load_settings
+            cfg = load_settings() or {}
+            return dict((cfg.get("audio") or {}))
+        except Exception:
+            return {}
+
+    async def _try_chained_morph(
+        self,
+        session_id: str,
+        *,
+        audio_cfg: dict,
+        reason: str,
+        detail: str,
+        provider: str,
+    ) -> bool:
+        """Attempt the S4 chained-pipeline morph. Returns True iff
+        the morph completed (voice_status emitted, session flipped).
+        Falls back to whisper degrade on missing keys / missing
+        chained pipeline / open_chained_session failure.
+        """
+        chained_cfg = audio_cfg.get("chained_fallback") or {}
+        stt_name = str(chained_cfg.get("stt_provider") or "deepgram")
+        tts_name = str(chained_cfg.get("tts_provider") or "elevenlabs")
+
+        # Vault preflight — every chained TTS / STT we ship needs a
+        # key, but only deepgram + elevenlabs are wired as the S4
+        # defaults. Other operator-pinned pairs (groq_whisper,
+        # cartesia, ...) need the matching env var set; missing →
+        # whisper degrade so the user still hears something.
+        env_keys = {
+            "deepgram": "DEEPGRAM_API_KEY",
+            "openai_whisper": "OPENAI_API_KEY",
+            "groq_whisper": "GROQ_API_KEY",
+            "elevenlabs": "ELEVENLABS_API_KEY",
+            "cartesia": "CARTESIA_API_KEY",
+            "openai": "OPENAI_API_KEY",
+        }
+        required = {
+            env_keys.get(stt_name, "DEEPGRAM_API_KEY"),
+            env_keys.get(tts_name, "ELEVENLABS_API_KEY"),
+        }
+        missing = [k for k in required if not os.getenv(k)]
+        if missing:
+            logger.warning(
+                "Chained morph for %s aborted — missing vault keys: %s",
+                session_id[:8], ",".join(sorted(missing)),
+            )
+            return False
+
+        if not getattr(self, "_chained", None):
+            logger.warning(
+                "Chained morph for %s aborted — pipeline not wired",
+                session_id[:8],
+            )
+            return False
+
+        # Stop the dead realtime / gemini session before retargeting
+        # so we don't race with a final on_error landing while the
+        # chained pipeline is booting.
+        try:
+            if provider == "gemini" and self._gemini:
+                await self._gemini.stop_session(session_id)
+            elif self._realtime:
+                await self._realtime.stop_session(session_id)
+        except Exception:
+            logger.exception(
+                "stop_session during chained morph failed for %s", session_id[:8],
+            )
+
+        # Retarget every bound node so the next inbound audio_chunk
+        # lands on handle_chained_audio instead of the dead proxy.
+        bound_node = ""
+        bound_sample_rate = 0
+        for node_id, sid in list(self._node_session_map.items()):
+            if sid != session_id:
+                continue
+            if not bound_node:
+                bound_node = node_id
+                bound_sample_rate = int(
+                    (self._node_voice_config.get(node_id) or {}).get("sample_rate") or 0
+                )
+            self.register_voice_config(node_id, {
+                "mode": "chained",
+                "supports_realtime": False,
+            })
+
+        provider_opts = {
+            "stt_provider": stt_name,
+            "tts_provider": tts_name,
+            "node_id": bound_node,
+        }
+        if bound_sample_rate:
+            provider_opts["sample_rate"] = bound_sample_rate
+
+        try:
+            session = await self.open_chained_session(session_id, provider_opts)
+        except Exception:
+            logger.exception(
+                "open_chained_session during morph failed for %s", session_id[:8],
+            )
+            session = None
+
+        if session is None:
+            return False
+
+        # open_chained_session already flips _session_voice_mode but
+        # set it defensively in case a test stubs the method.
+        self._session_voice_mode[session_id] = "chained"
+
+        meta = {
+            "state": "degraded",
+            "reason": reason,
+            "provider": provider,
+            "fallback_provider": "chained",
+            "detail": detail,
+        }
+        logger.warning(
+            "Voice morphed session=%s reason=%s provider=%s → chained(%s+%s)",
+            session_id[:8], reason, provider, stt_name, tts_name,
+        )
+        await self._emit_voice_status(session_id, meta)
+        return True
 
     async def emit_unavailable(
         self,
@@ -799,8 +963,12 @@ class VoiceRouter:
         from voice.stt_providers import get_stt_provider
         from voice.tts_providers import get_tts_provider
 
-        stt_name = opts.get("stt_provider", "deepgram")
-        tts_name = opts.get("tts_provider", "openai")
+        chained_cfg = self._load_audio_settings().get("chained_fallback") or {}
+        default_stt = str(chained_cfg.get("stt_provider") or "deepgram")
+        default_tts = str(chained_cfg.get("tts_provider") or "elevenlabs")
+
+        stt_name = opts.get("stt_provider", default_stt)
+        tts_name = opts.get("tts_provider", default_tts)
         stt_model = opts.get("stt_model", "nova-3")
         tts_model = opts.get("tts_model", "gpt-4o-mini-tts")
         tts_voice = opts.get("tts_voice", "alloy")

@@ -81,6 +81,28 @@ DEFAULT_SETTINGS = {
         # for; ``elevenlabs`` / ``cartesia`` / ``azure`` activate when
         # the matching credential is stored in the vault.
         "fallback_tts_providers": ["whisper"],
+        # When a realtime provider dies mid-session (OpenAI 1013
+        # insufficient_quota, Gemini 429 quota), the router can either
+        # keep streaming chunked TTS from the dead session's residual
+        # text (``"whisper"`` — legacy v2026.5.31 behavior, mp3
+        # ``tts_chunk`` frames) or morph the whole session in place
+        # to the chained STT→LLM→TTS pipeline (``"chained"`` — S4
+        # acceptance, keeps the call alive on Deepgram + ElevenLabs).
+        # The chained path requires ``DEEPGRAM_API_KEY`` and
+        # ``ELEVENLABS_API_KEY`` in the vault; when either is missing
+        # the router degrades to ``"whisper"`` regardless of this
+        # setting so the user still gets audible feedback.
+        "fallback_mode": "chained",
+        # Provider pair the router activates when ``fallback_mode``
+        # is ``"chained"``. Operators can pin different providers
+        # (e.g. ``groq_whisper`` STT + ``cartesia`` TTS) via
+        # ``~/.feral/settings.json``; the runtime reads these from
+        # ``audio.chained_fallback`` and passes them straight into
+        # ``open_chained_session``'s ``provider_opts``.
+        "chained_fallback": {
+            "stt_provider": "deepgram",
+            "tts_provider": "elevenlabs",
+        },
     },
     "vision": {
         "enabled": False,

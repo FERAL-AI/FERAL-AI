@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
@@ -752,12 +753,23 @@ def _openai_realtime_models() -> list[str]:
     ``models`` list to the ``openai_realtime`` entry so CLI + WebUI can
     render an honest model picker instead of a free-text fallback.
 
-    The list is derived deterministically by running the bundled OpenAI
-    catalog ids through ``providers.model_classes.filter_models`` with
-    ``model_class="realtime"``. When the catalog file is missing or the
-    classifier import fails the function degrades to a single-element
-    ``[OPENAI_REALTIME_DEFAULT_MODEL]`` so the WebUI dropdown still has
-    one entry instead of disappearing entirely.
+    v2026.5.43 — the classifier's realtime regex (``providers/model_classes.py``)
+    intentionally excludes the ``gpt-4o-mini-realtime-preview`` family
+    (the regex collapses ``4o-`` directly with ``realtime`` and won't
+    accept the ``mini-`` infix). The picker surfaces those preview
+    snapshots anyway so operators on legacy mini quotas can still
+    target them, by unioning the classifier hits with a catalog scan
+    for any id containing ``realtime``. The combined list is then
+    sorted into the canonical UI order:
+
+      1. GA ``gpt-realtime`` (default — leads the dropdown).
+      2. Other ``gpt-realtime-*`` variants (mini, point releases).
+      3. Dated GA snapshots (``gpt-realtime-2025-...``).
+      4. Legacy ``gpt-4o-realtime-preview*`` family (including mini).
+
+    When the catalog file is missing or the classifier import fails
+    the function degrades to ``[OPENAI_REALTIME_DEFAULT_MODEL]`` so
+    the dropdown never disappears entirely.
     """
     try:
         from pathlib import Path as _Path
@@ -773,17 +785,48 @@ def _openai_realtime_models() -> list[str]:
         )
         from providers.model_classes import filter_models
 
-        realtime = filter_models("openai", ids, model_class="realtime")
-        if realtime:
-            # Surface the GA default first so the dropdown's leading
-            # option matches the runtime fallback.
-            ordered = [OPENAI_REALTIME_DEFAULT_MODEL] + [
-                m for m in realtime if m != OPENAI_REALTIME_DEFAULT_MODEL
-            ]
-            return ordered
+        classified = filter_models("openai", ids, model_class="realtime")
+        # Catch the mini-preview family the classifier rejects so the
+        # picker mirrors what the OpenAI Realtime API actually accepts.
+        extras = [
+            mid for mid in ids
+            if "realtime" in mid and mid not in classified
+        ]
+        merged = list(classified) + extras
+        if merged:
+            seen: set[str] = set()
+            unique = []
+            for mid in merged:
+                if mid not in seen:
+                    seen.add(mid)
+                    unique.append(mid)
+
+            def _bucket(mid: str) -> tuple[int, int, str]:
+                # (bucket_index, sub_order, id) — sorted ascending.
+                if mid == OPENAI_REALTIME_DEFAULT_MODEL:
+                    return (0, 0, mid)
+                if mid.startswith("gpt-realtime-mini"):
+                    has_date = bool(_DATE_TAIL.search(mid))
+                    return (1, 1 if has_date else 0, mid)
+                if mid.startswith("gpt-realtime"):
+                    has_date = bool(_DATE_TAIL.search(mid))
+                    return (2, 1 if has_date else 0, mid)
+                if mid.startswith("gpt-4o-mini-realtime"):
+                    return (4, 0, mid)
+                if mid.startswith("gpt-4o-realtime"):
+                    return (3, 0, mid)
+                return (5, 0, mid)
+
+            unique.sort(key=_bucket)
+            return unique
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("openai realtime model list unavailable: %s", exc)
     return [OPENAI_REALTIME_DEFAULT_MODEL]
+
+
+# Dated-snapshot suffix (matches ``-2025-12-15`` etc.) used by the
+# realtime model sort to push snapshots below the bare GA ids.
+_DATE_TAIL = re.compile(r"-\d{4}-\d{2}-\d{2}$")
 
 
 def voice_provider_catalogue() -> list[dict[str, Any]]:
