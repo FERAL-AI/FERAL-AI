@@ -23,7 +23,7 @@ ha addons rebuild feral-brain
 Edit `Dockerfile` and set the `FERAL_VERSION` build arg:
 
 ```dockerfile
-ARG FERAL_VERSION=2026.5.41
+ARG FERAL_VERSION=2026.5.42
 ```
 
 Then rebuild. The add-on will install exactly that pip version.

@@ -1,10 +1,72 @@
 # Changelog
 
-<!-- feral-version: 2026.5.41 -->
+<!-- feral-version: 2026.5.42 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.5.42] — Honesty + UX wave: scrubbed internal-audit leak, three picker bugs, vault-key hot-swap, daemon-shell sandbox
+
+User-reported friction was eating into demo reliability and a "brutally honest" internal capability scorecard had leaked into the published docs tree. v2026.5.42 closes both, plus the multi-key vault hot-path gap and the daemon-shell `shell=True` regression — seven focused commits stacked on v2026.5.41, no thesis scenarios touched (that's v2026.5.43).
+
+### Internal capability scorecard moved out of shipped docs
+
+`docs/SCORECARD.md` — a "brutally honest" internal readiness matrix linked from `README.md`, `CONTRIBUTING.md`, `docs/DEVELOPER_MISSION.md`, and the Mintlify + Docusaurus contributing pages — is removed from the public repo. The shipped replacement is `docs/mintlify/reference/capability-status.mdx`, a calmer operator-facing matrix that uses product language (Available / Available — operator setup / In development) and matches what the v2026.5.41 code actually does. Five contributor link sites now point there. Mintlify operations pages (`operations/metrics.mdx`, `operations/soak.mdx`), the channels contributor doc, and the coverage ratchet doc were also scrubbed of internal workstream identifiers and phantom CLI commands (`feral providers status`, `feral upgrade --to`, `feral supervisor approve`, `feral vault status` → `feral doctor`, `pip install 'feral-ai==<v>'`, "Supervisor UI → Approvals", `feral key status`). The broken `operations/benchmarks` Mintlify nav entry (no source file) was removed. `.gitignore` grew explicit rules so internal-audit dossiers, scoreboards, lane reports, wave handoffs, and thesis-scenario sheets can never be re-added to the public tree. New CI workflow `docs-no-internal-leakage.yml` runs `scripts/check_docs_no_internal_leakage.py` on every PR touching `docs/mintlify/**`, `docs/site/**`, `README.md`, or `CONTRIBUTING.md` — any future PR that reintroduces audit terminology, internal "finding-NN" pointers, or conductor workstream IDs in shipped doc prose fails fast.
+
+### Settings → Providers Reconfigure no longer silently switches your active model on key rotation
+
+`ProvidersSection` now passes the runtime `status.model` into the per-provider `ProviderForm` as `activeModel` when the card represents the current provider. `selectedModel` initializes from `activeModel` (not the catalog's `default_model` or `list[0]`), and `loadModels` prefers `activeModel` when present. The current provider's card gets a new **Save key** button that calls `saveCredentialsOnly` (hits `/configure` only, no `model:` payload to `/api/llm/config`) — pre-v2026.5.42 the only available action on the current card was **Save & apply**, which always sent the dropdown's `model` value, so rotating an API key could silently swap the model. Freshness badge tone now respects `modelWarning` and `modelSource`: a stale-cache row with an HTTP 401 chip no longer reads "Live · 5m ago". Switching the active labeled key in `ProviderKeysCard` triggers a `keysRefreshTokens`-driven re-fetch in any open `ProviderForm` for that provider so the model dropdown reflects the new key's catalog. The recommended-models filter still hides non-recommended ids by default, but the active model and the typed value are always merged into the datalist so a runtime `gpt-4-turbo-preview` no longer disappears from suggestions.
+
+### `/api/voice/providers` finally exposes `models[]` for OpenAI Realtime
+
+`security/probe.py::voice_provider_catalogue()` now attaches `models: list[str]` and `default_model: str` per entry. For `openai_realtime` the models are derived from the bundled OpenAI catalog filtered to `model_class=realtime` (`gpt-realtime`, `gpt-realtime-mini`, dated snapshots, `gpt-4o-realtime-preview` legacy variants); `default_model = "gpt-realtime"`. `api/routes/audio.py` passes the new fields through; `voice/router.py` honors a new `audio.realtime_model` setting before falling back to the proxy default. The Settings VoiceSection realtime card and the phone `SettingsPanel` OpenAI block now render a real `<select data-testid="openai-realtime-model-picker">` populated from `p.models` instead of falling through to LLM-style "type any model id" free-text. The CLI setup wizard's voice preflight asks for a realtime model after the operator picks `openai_realtime`. `audio.realtime_providers` / `realtime_primary` drift (laneH-14) is unchanged — that's a v2026.5.43 follow-up.
+
+### CLI: voice/model picker no longer falls through to "type the model name"
+
+`cli/ui_kit.fuzzy_pick` unwraps `Choice` objects so the InquirerPy path returns the same string shape as `_fallback_pairs` (the bug at the heart of the audio model "always asks for a typed model" report). The `llm` setup step normalizes the picker return before the custom-sentinel compare. The custom sentinel was relabeled `[custom] type a model id not in the live catalog` so a normal fuzzy filter on real model ids (`gpt`, `claude`, `llama`) can't accidentally select it. The audio setup step now uses `fuzzy_pick` over the provider's model list (and the TTS voice list) instead of `ask_text(" Model")` — operators only see a typed prompt when the live catalog is empty.
+
+New `feral models add --provider <id> [--model <name>]` appends to a new `settings["llm"]["models"]` array without disturbing the scalar `llm.model` (active choice). `feral models set` also ensures the model is in the list. `feral setup --from-step <name>` lets the operator re-enter a wizard step (e.g. `llm_model`) without deleting `~/.feral/setup_state.json`.
+
+### Multi-key vault keys are finally on the LLM hot path
+
+`security.vault_keys.get_active_key(provider_id)` is the new canonical resolver: active labeled key → legacy default-namespace vault key → `os.getenv(env_key)` → empty. `agents/llm_provider.py` calls it from `_build_client`, the constructor's per-provider branches, `switch_provider`, `_get_provider_config` (failover candidates), and the Anthropic stream native path — replacing the pre-v2026.5.42 mix of `os.getenv` snapshots that were fixed at construction. `api/state.py` hydrates the active labeled key into the shared `LLMProvider` right after construction (writes `api_key` directly + rebuilds the httpx client — skips the `reconfigure` probe at boot because the CLI/WebUI probe paths already validated). `POST /api/llm/providers/{pid}/keys` and `POST .../keys/active` now call `orchestrator.llm.reconfigure(...)` after persisting so the hot-swap propagates without a brain restart. `feral key add --set-active` attempts a `POST` to a local brain (no auth header; assumes 127.0.0.1) and prints `(brain not running — restart will pick up the new key)` when the brain isn't up. `_PROVIDER_ENV_KEYS` in `vault_keys.py` mirrors `_PROVIDER_REGISTRY` in `llm_provider.py` and must be kept in sync when a new runtime provider id ships (commented in place; no enforcement test).
+
+### Daemon `daemon://local/shell` is no longer `shell=True` + substring blocklist
+
+`skills/executor.py`'s `path == "shell"` branch now calls `SandboxPolicy.validate_shell_command(command)`. On reject → `{success: False, status_code: 403, error: reason}`. On accept → `subprocess.run(shlex.split(command), shell=False, ...)`. The substring `BLOCKED_COMMANDS` set and `_check_shell_quotes` are gone. The shipped default policy `execution.allow_shell_commands` flips `False → True` (SECURITY.md does not pin a shell-disabled posture, and the safety surface is now the allowlist + metachar reject inside `validate_shell_command`, which rejects `$ ` ` `| & ; > < \n \r \` and an inline `$(rm -rf /)`). The shipped `daemon_shell_allowlist` remains the conservative `[open, osascript, screencapture]` — operators who relied on the old blocklist letting through `say`, `pbcopy`, `pbpaste`, `defaults`, `system_profiler`, `sw_vers`, `date`, `uname`, `ls`, `cat`, `echo`, `caffeinate`, `mdfind`, `networksetup` should override locally via `~/.feral/policies/default.yaml::daemon.shell.allowed_commands` (a vetted allowlist expansion is queued for v2026.5.43).
+
+### Chat composer survives a failed send; thread-swap clears stale streaming state
+
+`feral-client-v2/src/lib/ws.js` exposes a new `sendOrFail()` sibling export that returns `{ok, reason}`; the legacy boolean `send()` is unchanged for every existing caller. `Chat.jsx` snapshots the composer text before clearing, calls `sendOrFail` (or falls back to `send` for older test stubs), restores the composer on failure, and surfaces an inline `[data-testid="chat-send-error"]` chip. A new `resetStreamingState()` clears `thinking`, `streamingText`, `streamingReasoning`, `streamBufferRef`, `streamReasoningRef`, `pendingTraceRef`, `toolChip` on every thread swap — open-conversation, new-thread, and snapshot-restore paths included — so a mid-stream "thinking…" indicator never carries over to a different thread.
+
+### Memory Recent + `/api/timeline` filter contracts aligned
+
+`/api/memory/stats` reads canonical `knowledge_triples` from the store and emits BOTH `totals.knowledge_triples` (canonical) and `totals.knowledge` (legacy alias), and propagates `ok=False` + `reason` from the store's degraded path. `Memory.jsx` prefers the canonical key and renders `[data-testid="memory-stats-degraded"]` when `ok===false`. `api/routes/timeline.py` accepts both old (`memory` → `memories`, `calendar` → `events`) and canonical (`memories`, `events`, `chat`, `health`, `all`) `type` filters via an alias map. The Timeline UI now sends canonical names; dropdown options were tidied — the dead `screen` and `email` options are gone.
+
+### Tests
+
+| Lane | Tests added / extended | Result |
+|------|------------------------|--------|
+| Lane 9 docs | `scripts/check_docs_no_internal_leakage.py` against 83 doc files | OK |
+| U3 Settings | `Settings.providers.test.jsx` +7 cases (10 pre-existing → 17 total) | 17/17 pass |
+| U1 CLI picker | `test_cli_setup.py` + `test_cli_voice_models.py` + `test_cli_ui_kit.py` + new `test_cli_models_picker.py` | 77/77 pass |
+| U2 Realtime catalogue | `test_api_voice_providers.py` +4, `test_setup_wizard_preflights.py` +2, new `test_voice_router_realtime_model_settings.py` +3, new `Settings.voice-realtime.test.jsx` ×5 | 16 pytest + 5 vitest pass |
+| Cross-cut #1 vault keys | new `test_llm_vault_hot_path.py` ×7, new `test_api_llm_keys_hot_swap.py` ×3, existing `test_llm_router_w2.py` ×28, `test_cli_key_multikey.py` ×4 | 42/42 pass |
+| Cross-cut #6 daemon shell | new `test_executor_daemon_shell.py` ×5, existing `test_sandbox_policy.py` (TestDaemonShellAllowlist + renamed `test_shell_enabled_by_default`) | 44/44 pass |
+| RC polish | new `Chat.send-failure.test.jsx`, new `Chat.thread-switch-streaming.test.jsx`, new `Memory.degraded-chip.test.jsx` ×2, `test_api_memory_stats.py` +3, `test_timeline_episode_source.py` +2 alias cases | 11 pytest + 4 vitest pass |
+
+### Not in this release (queued for v2026.5.43)
+
+- Voice `handle_realtime_failure` → `open_chained_session` auto-fallback on `insufficient_quota` (S4 thesis scenario closure).
+- HealthKit `sensor_type` → `sensor` field unification on iOS ingest path (S2 thesis closure).
+- iOS generic BLE peripheral scanner emitting `device_announce` (S3 thesis closure).
+- Fused-timeline orchestrator + chat `timeline` WS payload (S1 thesis closure).
+- WebUI consumer for ScreenLoop `cost_cap_hit` banner (full S6 closure).
+- `vacuum_start` manifest + QCSDK glasses adapter wiring (S5 thesis closure).
+- `feral memory encrypt` implementation + phantom-CLI scrub.
+- Integration-ingress `WebhookReceiver._configs` → persistent store.
+- Daemon shell allowlist expansion (vetted desktop staples: `say`, `pbcopy`, `pbpaste`, `defaults`, `system_profiler`, `sw_vers`, `caffeinate`, `mdfind`, `date`, `uname`).
 
 ## [2026.5.38] — Lane 10: first-party OAuth scaffolding + unified persistent webhooks + fail-closed signatures + outgoing delivery
 
