@@ -95,7 +95,7 @@ Sensitive values (API keys, OAuth tokens) are stored separately in the encrypted
 ~/.feral/credentials.enc
 ```
 
-The vault is encrypted at rest with **ChaCha20-Poly1305** (AEAD). The encryption key is derived via Argon2id from your master passphrase and held in your OS keychain (macOS Keychain, GNOME Keyring, Windows Credential Manager) so the vault unlocks transparently when you start the brain. FERAL decrypts it in memory and the LLM never sees raw credential values — keys are injected at the HTTP layer at request time.
+The vault is encrypted at rest with **ChaCha20-Poly1305** (AEAD). The 32-byte master key lives in your OS keychain (macOS Keychain, GNOME Keyring, Windows Credential Manager) — there is no master password stored on disk; unlocking the vault requires the keychain entry to be present, so the brain decrypts transparently inside your OS account and refuses to start anywhere that entry is missing. At first boot FERAL prints a one-time **recovery code** (the master key, base32-encoded) you can use to recover the vault if the keychain entry is ever wiped; FERAL has no escrow. The decrypted credentials live only in process memory and the LLM never sees raw values — keys are injected at the HTTP layer at request time.
 
 <Warning>
   Never commit `credentials.enc` to version control. The setup wizard creates it automatically and `pip install feral-ai` adds `~/.feral/` to your gitignore patterns when you run `feral setup`.

@@ -1907,7 +1907,17 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
 
             elif msg.type == "sensor_telemetry":
                 payload_dict = raw.get("payload", {})
-                sensor_name = payload_dict.get("sensor", "")
+                # Defense in depth: pre-v2026.5.43 iOS builds ship the
+                # field as ``sensor_type`` (string overload of
+                # ``FeralBrainClient.sendSensorData``). The Pydantic
+                # alias on ``SensorTelemetryPayload`` coerces that for
+                # ``parse_message`` callers; this raw-dict ingest path
+                # honours the same legacy key explicitly so HealthKit
+                # frames from un-updated phones still flow through
+                # update_biometric / sensors_map under the canonical
+                # name. Remove once the iOS App Store update has
+                # propagated.
+                sensor_name = payload_dict.get("sensor") or payload_dict.get("sensor_type", "")
                 sensor_data = payload_dict.get("data", {})
                 source = payload_dict.get("source", "unknown")
                 logger.info(f"Sensor [{sensor_name}] from {node_id} ({source}): {sensor_data}")

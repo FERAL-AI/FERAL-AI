@@ -7,7 +7,7 @@ This is the single source of truth for all message types.
 """
 
 from __future__ import annotations
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from typing import Optional, Literal, Any
 from uuid import uuid4
 from time import time
@@ -478,9 +478,22 @@ class DeviceRegisterPayload(BaseModel):
 # ─────────────────────────────────────────────
 
 class SensorTelemetryPayload(BaseModel):
-    """Single sensor reading from FERAL glasses via phone bridge."""
+    """Single sensor reading from FERAL glasses via phone bridge.
+
+    ``sensor`` is the canonical field name ("heart_rate", "spo2",
+    "temperature", "uv", "steps", ...). Legacy iOS clients that still
+    ship the pre-v2026.5.43 ``FeralBrainClient.sendSensorData(type:
+    String, ...)`` overload emit the field as ``sensor_type``; the
+    Pydantic alias below auto-maps that legacy key onto ``sensor`` so
+    ``parse_message`` succeeds against both wire shapes until the
+    iOS-side fix rolls out via the App Store. See
+    ``AUDIT-r14/round3/findings/lane8-daemon-shell-and-healthkit.md``
+    §B3 for the migration plan.
+    """
     node_id: str
-    sensor: str  # "heart_rate", "spo2", "temperature", "uv", "steps"
+    sensor: str = Field(
+        validation_alias=AliasChoices("sensor", "sensor_type"),
+    )
     data: dict  # Sensor-specific values
     timestamp: str = ""
     source: str = "feral_glasses"
