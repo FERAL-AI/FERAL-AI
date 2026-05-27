@@ -35,6 +35,14 @@ DEFAULT_SETTINGS = {
     "llm": {
         "provider": "openai",
         "model": "gpt-4o-mini",
+        # Lane U1 — multi-model favorites. ``llm.model`` stays the
+        # active scalar choice (back-compat for every caller that
+        # reads it). ``llm.models`` is the additive favorites list
+        # that ``feral models add`` appends to and ``feral models
+        # set`` keeps deduped. Empty default keeps the existing
+        # contract: callers that only know about ``llm.model``
+        # continue to work unchanged.
+        "models": [],
         "base_url": "",
         "fallback_providers": [],
         # Optional spend controls for failover routing. Zero budget keeps
@@ -55,6 +63,12 @@ DEFAULT_SETTINGS = {
         # ``GeminiRealtimeProxy``. Override per install via
         # ``~/.feral/settings.json``.
         "realtime_providers": ["openai", "gemini"],
+        # OpenAI Realtime model id passed to the RealtimeProxy when
+        # opening a session. Operator-overridable via
+        # ``feral setup`` (voice preflight) or the WebUI Voice card;
+        # the runtime falls back to ``RealtimeProxy.DEFAULT_MODEL``
+        # when this key is unset (Lane U2).
+        "realtime_model": "gpt-realtime",
         # Ordered list of fallback TTS providers consulted when the
         # primary realtime provider fails (OpenAI 1013
         # insufficient_quota, 429, invalid_api_key). The router walks

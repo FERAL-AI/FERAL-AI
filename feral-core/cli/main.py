@@ -1913,12 +1913,16 @@ def cmd_doctor():
     return 0
 
 
-def cmd_setup(*, browser: bool = False, terminal: bool = False):
+def cmd_setup(*, browser: bool = False, terminal: bool = False, from_step: str = ""):
     """Launch the guided setup wizard, then auto-generate a session token.
 
     When ``browser=True`` the CLI opens http://localhost:9090/setup in
     the default browser so the user gets the v2 /setup page instead of
     the terminal. Requires the brain to be running.
+
+    Lane U1 — ``from_step`` mirrors the ``--from-step`` CLI flag and
+    re-enters one specific wizard step (e.g. ``llm_model``) without
+    deleting the resume sidecar or re-prompting on all earlier steps.
     """
     if browser and not terminal:
         _open_browser_setup()
@@ -1937,7 +1941,7 @@ def cmd_setup(*, browser: bool = False, terminal: bool = False):
             pass
         try:
             from cli.setup import run_setup
-            run_setup()
+            run_setup(from_step=from_step)
         except ImportError:
             print("Setup wizard not available.")
             sys.exit(1)
@@ -2349,6 +2353,15 @@ def main():
         "--browser", action="store_true", dest="setup_browser",
         help="Open http://localhost:9090/setup in a browser window.",
     )
+    # Lane U1 — re-enter one wizard step without deleting the resume
+    # sidecar. Operators caught a model typo and want to re-run JUST
+    # the model picker (``feral setup --from-step llm_model``) rather
+    # than walk through provider / voice / audio / channels again.
+    setup_p.add_argument(
+        "--from-step", dest="setup_from_step", default="",
+        help="Re-enter the wizard at the named step (e.g. llm_model, "
+             "audio, identity). Bypasses the resume prompt.",
+    )
 
     # feral doctor
     sub.add_parser("doctor", help="Run diagnostics — check deps, keys, brain health")
@@ -2579,6 +2592,7 @@ def main():
         cmd_setup(
             browser=getattr(args, "setup_browser", False),
             terminal=getattr(args, "setup_terminal", False),
+            from_step=getattr(args, "setup_from_step", "") or "",
         )
     elif args.subcommand == "doctor":
         cmd_doctor()

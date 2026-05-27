@@ -42,22 +42,25 @@ from .steps import network as network_step
 logger = logging.getLogger("feral.cli.setup")
 
 
-def run_setup() -> None:
+def run_setup(*, from_step: str = "") -> None:
     """Entry point used by :func:`cli.main.cmd_setup`.
 
     Historical call sites import ``cli.setup_wizard.run_setup``; the
     legacy module now delegates here so we don't have to touch every
     installer script.
+
+    Lane U1 — ``from_step`` lets the operator re-enter one step
+    (e.g. ``llm_model``) without deleting the resume sidecar.
     """
     try:
-        asyncio.run(_run_async())
+        asyncio.run(_run_async(from_step=from_step))
     except KeyboardInterrupt:
         from rich.console import Console
 
         Console().print("\n[yellow]Setup cancelled — run `feral setup` again when ready.[/]")
 
 
-async def _run_async() -> None:
+async def _run_async(*, from_step: str = "") -> None:
     state = WizardState.load(feral_home())
 
     # Lane 07 W7 — voice + TCC preflight steps. Voice preflight runs
@@ -68,6 +71,7 @@ async def _run_async() -> None:
 
     machine = StateMachine(
         state=state,
+        from_step=from_step,
         steps=[
             ("welcome", welcome.run),
             ("llm_provider", llm.run_provider_step),

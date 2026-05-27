@@ -183,7 +183,15 @@ async def run_model_step(state: WizardState) -> None:
         # released gpt-N).
         custom_sentinel = "__feral_custom_model__"
         choices: list[dict] = [{"name": m, "value": m} for m in models]
-        choices.append({"name": "↳ type a custom model id…", "value": custom_sentinel})
+        # Sentinel is appended LAST so a normal Enter on the first
+        # filtered live-catalog row never accidentally lands on the
+        # custom-id row. The label is bracketed so a fuzzy filter
+        # built from real model-id substrings (gpt, claude, llama)
+        # won't surface the sentinel above the real choices.
+        choices.append({
+            "name": "[custom] type a model id not in the live catalog",
+            "value": custom_sentinel,
+        })
         try:
             # v2026.5.28 — fuzzy_pick (enter-on-cursor-position) instead
             # of fuzzy_select (space-to-mark + enter-to-confirm). The
@@ -201,6 +209,12 @@ async def run_model_step(state: WizardState) -> None:
         except KeyboardInterrupt:
             from ..helpers import QuitNavigation
             raise QuitNavigation()
+        # Defensive unwrap — ``fuzzy_pick`` already normalises away
+        # InquirerPy ``Choice`` objects to their ``.value``, but a
+        # caller-supplied Choice would still bypass that if the
+        # InquirerPy path failed and the fallback path returned a
+        # dict / Choice. Cheap to be explicit here.
+        picked = getattr(picked, "value", picked)
         if picked == custom_sentinel:
             picked = ask_text(
                 "Custom model id",

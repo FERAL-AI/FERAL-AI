@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from perception.audio_pipeline import detect_local_audio_capabilities
 
+from cli import ui_kit
+
 from ..helpers import (
     STATUS_NEEDS_KEY,
     STATUS_READY,
@@ -229,18 +231,64 @@ def _configure_provider(
     models = list(prov_def["available_models"])
     if chosen.id == "faster-whisper":
         models = list(caps.get("stt_models") or models)
-    if models:
-        console.print("  Models: " + ", ".join(models))
     default_model = state.get_setting("audio", f"{kind}_model", prov_def["default_model"])
-    model = ask_text("  Model", default=default_model, allow_empty=False)
+    model = _pick_or_text(
+        "  Model",
+        models,
+        default=default_model,
+        console=console,
+    )
     state.set_setting("audio", f"{kind}_model", model)
 
     if kind == "tts":
         voices = list(prov_def.get("available_voices") or [])
         if chosen.id == "piper":
             voices = list(caps.get("tts_voices") or voices)
-        if voices:
-            console.print("  Voices: " + ", ".join(voices))
         default_voice = state.get_setting("audio", "tts_voice", prov_def.get("default_voice", ""))
-        voice = ask_text("  Voice", default=default_voice or (voices[0] if voices else ""), allow_empty=False)
+        voice = _pick_or_text(
+            "  Voice",
+            voices,
+            default=default_voice or (voices[0] if voices else ""),
+            console=console,
+        )
         state.set_setting("audio", "tts_voice", voice)
+
+
+def _pick_or_text(
+    prompt: str,
+    options: list[str],
+    *,
+    default: str,
+    console,
+) -> str:
+    """Picker-first selector for audio model / voice fields.
+
+    When ``options`` is non-empty we use ``ui_kit.fuzzy_pick`` so the
+    operator gets the same one-keystroke filter UX as the LLM model
+    step instead of having to retype the model id from the printed
+    Models: line. When the live catalog is empty we fall back to
+    ``ask_text`` with a clear "no live catalog available" message so
+    the operator still has an escape hatch for newly-released voices.
+    """
+    if not options:
+        return ask_text(
+            f"{prompt} (no live catalog available — type the id)",
+            default=default,
+            allow_empty=False,
+        )
+    if _RICH_AVAILABLE:
+        console.print(f"  {prompt.strip()} catalog: " + ", ".join(options))
+    choices = [{"name": opt, "value": opt} for opt in options]
+    try:
+        picked = ui_kit.fuzzy_pick(
+            prompt.strip() or "Choose",
+            choices,
+            default=default if default in options else None,
+        )
+    except KeyboardInterrupt:
+        from ..helpers import QuitNavigation
+        raise QuitNavigation()
+    picked = getattr(picked, "value", picked)
+    if not picked:
+        return ask_text(prompt, default=default, allow_empty=False)
+    return picked

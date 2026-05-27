@@ -594,7 +594,14 @@ def fuzzy_pick(
                     cycle=False,
                 ).execute()
 
-            return _run_inquirer_safely(_build)
+            result = _run_inquirer_safely(_build)
+            # InquirerPy returns the raw Choice object when callers
+            # pass Choice instances; ``_fallback_pairs`` already
+            # unwraps via ``.value`` (see ``_fallback_pairs`` above),
+            # so do the same here so sentinel comparisons and
+            # downstream string equality checks behave identically
+            # regardless of which path produced the value.
+            return getattr(result, "value", result)
         except KeyboardInterrupt:
             raise
         except Exception as exc:  # pragma: no cover

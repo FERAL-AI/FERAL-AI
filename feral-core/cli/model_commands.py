@@ -74,6 +74,23 @@ def register_models_subparser(sub: "argparse._SubParsersAction") -> None:
     set_p.add_argument("--provider", required=True, help="Provider id")
     set_p.add_argument("--model", required=True, help="Model id to make default")
 
+    # Lane U1 — multi-model favorites. ``add`` appends to
+    # ``settings.llm.models[]`` without disturbing the active scalar
+    # ``settings.llm.model``. Re-running with the same --model is a
+    # no-op (dedup). When --model is omitted we run the same picker
+    # the wizard uses over the provider's live catalog so the
+    # operator never has to retype an id by hand.
+    add_p = models_sub.add_parser(
+        "add",
+        help="Append a model id to llm.models[] (favorites list); "
+             "does not change the active llm.model.",
+    )
+    add_p.add_argument("--provider", required=True, help="Provider id")
+    add_p.add_argument(
+        "--model", default="",
+        help="Model id to append. Omit to pick from the provider's live catalog.",
+    )
+
 
 def dispatch_models_subcommand(args) -> int:
     action = getattr(args, "action", None) or "list"
@@ -93,7 +110,12 @@ def dispatch_models_subcommand(args) -> int:
             provider=getattr(args, "provider", "") or "",
             model=getattr(args, "model", "") or "",
         )
-    print(f"Unknown action: {action}. Try one of: list, test, set.")
+    if action == "add":
+        return cmd_models_add(
+            provider=getattr(args, "provider", "") or "",
+            model=getattr(args, "model", "") or "",
+        )
+    print(f"Unknown action: {action}. Try one of: list, test, set, add.")
     return 2
 
 
@@ -279,17 +301,13 @@ def cmd_models_test(*, provider: str, model: str = "") -> int:
 # ─────────────────────────────────────────────────────────────────────
 
 
-def cmd_models_set(*, provider: str, model: str) -> int:
-    """Persist ``llm.provider`` + ``llm.model`` in ``settings.json``.
+def _load_settings() -> tuple[Path, dict, Optional[int]]:
+    """Load settings.json (creating parents).
 
-    The brain re-reads settings on next start (or on the runtime hot-
-    reload path); this command does NOT restart the brain. Same path
-    the wizard uses, so values land in the canonical location.
+    Returns ``(path, settings, error_code)``. ``error_code`` is None
+    on success and a non-zero integer when the existing file is
+    unreadable (caller should propagate it as the command exit code).
     """
-    if not provider or not model:
-        print("  Both --provider and --model are required.")
-        return 2
-
     settings_path = feral_home() / "settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings: dict = {}
@@ -298,13 +316,130 @@ def cmd_models_set(*, provider: str, model: str) -> int:
             settings = json.loads(settings_path.read_text())
         except Exception as exc:
             print(f"  Existing settings.json is invalid: {exc}")
-            return 1
+            return settings_path, settings, 1
+    return settings_path, settings, None
+
+
+def _dedup_append_model(settings: dict, model: str) -> None:
+    """Append ``model`` to ``settings['llm']['models']`` if absent."""
+    llm = settings.setdefault("llm", {})
+    models = llm.get("models")
+    if not isinstance(models, list):
+        models = []
+    if model and model not in models:
+        models.append(model)
+    llm["models"] = models
+
+
+def cmd_models_set(*, provider: str, model: str) -> int:
+    """Persist ``llm.provider`` + ``llm.model`` in ``settings.json``.
+
+    The brain re-reads settings on next start (or on the runtime hot-
+    reload path); this command does NOT restart the brain. Same path
+    the wizard uses, so values land in the canonical location.
+
+    Lane U1 — also ensures ``llm.models`` (favorites list) contains
+    the newly-active model so the multi-model contract is honoured
+    even when operators flip back and forth between ``set`` and
+    ``add``. Deduped, never removes existing entries.
+    """
+    if not provider or not model:
+        print("  Both --provider and --model are required.")
+        return 2
+
+    settings_path, settings, err = _load_settings()
+    if err is not None:
+        return err
 
     settings.setdefault("llm", {})
     settings["llm"]["provider"] = provider
     settings["llm"]["model"] = model
+    _dedup_append_model(settings, model)
     settings_path.write_text(json.dumps(settings, indent=2, sort_keys=True))
 
     print(f"  Set llm.provider={provider}, llm.model={model} in {settings_path}.")
     print("  Restart the brain (`feral restart`) for the change to take effect.")
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# add — append a model to the favorites list (llm.models[])
+# ─────────────────────────────────────────────────────────────────────
+
+
+def cmd_models_add(*, provider: str, model: str = "") -> int:
+    """Append ``model`` to ``settings['llm']['models']`` (favorites).
+
+    Does **not** flip the active ``llm.model`` scalar — that's
+    ``feral models set``'s job. When ``--model`` is omitted we run
+    the same fuzzy picker the setup wizard uses over the provider's
+    live catalog so the operator never has to retype an id.
+    """
+    if not provider:
+        print("  --provider is required.")
+        return 2
+
+    try:
+        catalog = _build_catalog()
+    except Exception as exc:
+        print(f"  Provider catalog unavailable: {exc}")
+        return 1
+
+    pid = catalog.resolve_alias(provider) or provider
+    desc = catalog.get_descriptor(pid)
+    if desc is None:
+        print(f"  Unknown provider: {provider!r}")
+        return 2
+
+    if not model:
+        # Interactive pick — mirrors cli/setup/steps/llm.run_model_step.
+        try:
+            cached = asyncio.run(catalog.list_models(pid, live=True, force=True))
+        except Exception:
+            try:
+                cached = asyncio.run(catalog.list_models(pid, live=False))
+            except Exception as exc:
+                print(f"  Could not load models for {pid!r}: {exc}")
+                return 1
+        models = list(cached.models)
+        if not models:
+            print(f"  No live catalog for {pid!r}. Pass --model <id> explicitly.")
+            return 2
+        if ui_kit.is_inquirer_available() and ui_kit.is_interactive():
+            choices = [{"name": m, "value": m} for m in models]
+            try:
+                picked = ui_kit.fuzzy_pick(
+                    f"Add which {desc.display_name} model to favorites?",
+                    choices,
+                    default=desc.default_model if desc.default_model in models else None,
+                )
+            except KeyboardInterrupt:
+                print("  Cancelled.")
+                return 130
+            model = getattr(picked, "value", picked) or ""
+        else:
+            print(f"  Models for {pid}:")
+            for i, m in enumerate(models[:50], start=1):
+                print(f"    {i:>3}. {m}")
+            print("  Pass --model <id> to pick one non-interactively.")
+            return 2
+
+    if not model:
+        print("  No model selected.")
+        return 2
+
+    settings_path, settings, err = _load_settings()
+    if err is not None:
+        return err
+
+    before = list((settings.get("llm") or {}).get("models") or [])
+    _dedup_append_model(settings, model)
+    after = list(settings["llm"]["models"])
+    settings_path.write_text(json.dumps(settings, indent=2, sort_keys=True))
+
+    if model in before:
+        print(f"  llm.models already contained {model!r} — no change.")
+    else:
+        print(f"  Appended {model!r} to llm.models (now {len(after)} entr{'y' if len(after) == 1 else 'ies'}).")
+    print(f"  Active llm.model unchanged. Use `feral models set --provider {pid} --model {model}` to make it the default.")
     return 0

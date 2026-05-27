@@ -44,10 +44,22 @@ _STEP_TITLES = {
 class StateMachine:
     """Run steps in order, supporting ``back`` and ``quit`` navigation."""
 
-    def __init__(self, *, state: WizardState, steps: Sequence[tuple[str, StepFn]]):
+    def __init__(
+        self,
+        *,
+        state: WizardState,
+        steps: Sequence[tuple[str, StepFn]],
+        from_step: str = "",
+    ):
         self.state = state
         self.steps = list(steps)
         self.console = get_console()
+        # Lane U1 — explicit re-entry point. When set, skip the
+        # resume-sidecar prompt entirely and jump straight to the
+        # named step so operators can re-run the LLM model picker
+        # (or any other single step) without deleting
+        # ``~/.feral/setup_state.json`` by hand.
+        self.from_step = (from_step or "").strip()
 
     async def run(self) -> None:
         # Total visible steps for the "Step N of M" indicator excludes
@@ -57,11 +69,31 @@ class StateMachine:
         total_visible = len(visible_steps)
         visible_idx = 0
 
-        # Lane 07 W7 — resume support. If a sidecar exists from a
-        # previous interrupted run, offer to skip ahead to the next
-        # un-completed step instead of forcing the user to re-walk the
-        # provider / model / audio prompts.
-        idx = self._maybe_resume()
+        # Lane U1 — explicit --from-step short-circuits the resume
+        # prompt and jumps straight to the requested step. Useful for
+        # re-running just the LLM model picker after a typo without
+        # walking the whole wizard again.
+        if self.from_step:
+            try:
+                idx = next(
+                    i for i, (name, _) in enumerate(self.steps)
+                    if name == self.from_step
+                )
+            except StopIteration:
+                known = ", ".join(name for name, _ in self.steps)
+                self.console.print(
+                    f"[yellow]Unknown setup step {self.from_step!r}.[/] "
+                    f"Known: {known}"
+                    if _RICH_AVAILABLE
+                    else f"Unknown setup step {self.from_step!r}. Known: {known}"
+                )
+                return
+        else:
+            # Lane 07 W7 — resume support. If a sidecar exists from a
+            # previous interrupted run, offer to skip ahead to the next
+            # un-completed step instead of forcing the user to re-walk
+            # the provider / model / audio prompts.
+            idx = self._maybe_resume()
 
         while idx < len(self.steps):
             name, fn = self.steps[idx]

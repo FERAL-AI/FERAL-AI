@@ -236,6 +236,113 @@ class TestLLMStep:
         assert state.get_setting("llm", "model") == "gpt-6-omega"
 
     @pytest.mark.asyncio
+    async def test_model_step_fuzzy_pick_commits_without_ask_text(
+        self, tmp_path, monkeypatch,
+    ):
+        """Lane U1 fix #2 — when the interactive picker returns a real
+        model id, ``run_model_step`` must persist it directly without
+        ever calling ``ask_text`` (which is what triggered the
+        original "picker then type the model name" double-prompt bug).
+        """
+        from cli.setup.steps import llm as llm_step
+        from cli import ui_kit
+
+        state = WizardState.load(tmp_path / "feral")
+        state.set_setting("llm", "provider", "openai")
+
+        fake_catalog = MagicMock()
+        fake_desc = MagicMock()
+        fake_desc.default_model = "gpt-4o-mini"
+        fake_desc.display_name = "OpenAI"
+        fake_catalog.get_descriptor.return_value = fake_desc
+
+        async def _list_models(*a, **kw):
+            from providers.catalog import CachedModelList
+            return CachedModelList(
+                models=["gpt-4o-mini", "gpt-4o"],
+                last_refresh=0.0,
+                source="cache",
+            )
+        fake_catalog.list_models = AsyncMock(side_effect=_list_models)
+        monkeypatch.setattr(llm_step, "get_shared_catalog", lambda: fake_catalog)
+        setattr(state, "_catalog", fake_catalog)
+
+        monkeypatch.setattr(ui_kit, "is_inquirer_available", lambda: True)
+        monkeypatch.setattr(ui_kit, "is_interactive", lambda: True)
+        monkeypatch.setattr(
+            ui_kit, "fuzzy_pick", lambda *a, **kw: "gpt-4o",
+        )
+
+        ask_text_mock = MagicMock(side_effect=AssertionError(
+            "ask_text must NOT be called when the picker returned a real model id."
+        ))
+        monkeypatch.setattr(llm_step, "ask_text", ask_text_mock)
+
+        await llm_step.run_model_step(state)
+        assert state.get_setting("llm", "model") == "gpt-4o"
+        ask_text_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_model_step_fuzzy_pick_unwraps_choice_object(
+        self, tmp_path, monkeypatch,
+    ):
+        """Lane U1 fix #1+#2 — when InquirerPy returns a ``Choice``
+        wrapper (or any object with a ``.value`` attribute) the model
+        step must persist the unwrapped string id, not the wrapper's
+        ``repr`` and certainly not the custom-id sentinel."""
+        from cli.setup.steps import llm as llm_step
+        from cli import ui_kit
+
+        state = WizardState.load(tmp_path / "feral")
+        state.set_setting("llm", "provider", "openai")
+
+        fake_catalog = MagicMock()
+        fake_desc = MagicMock()
+        fake_desc.default_model = "gpt-4o-mini"
+        fake_desc.display_name = "OpenAI"
+        fake_catalog.get_descriptor.return_value = fake_desc
+
+        async def _list_models(*a, **kw):
+            from providers.catalog import CachedModelList
+            return CachedModelList(
+                models=["gpt-4o-mini", "gpt-4o"],
+                last_refresh=0.0,
+                source="cache",
+            )
+        fake_catalog.list_models = AsyncMock(side_effect=_list_models)
+        monkeypatch.setattr(llm_step, "get_shared_catalog", lambda: fake_catalog)
+        setattr(state, "_catalog", fake_catalog)
+
+        class _FakeChoice:
+            def __init__(self, value, name):
+                self.value = value
+                self.name = name
+
+            def __eq__(self, other):  # match-on-attribute parity with InquirerPy.Choice
+                return getattr(other, "value", other) == self.value
+
+            def __repr__(self):  # pragma: no cover
+                return f"_FakeChoice({self.value!r})"
+
+        monkeypatch.setattr(ui_kit, "is_inquirer_available", lambda: True)
+        monkeypatch.setattr(ui_kit, "is_interactive", lambda: True)
+        monkeypatch.setattr(
+            ui_kit, "fuzzy_pick",
+            lambda *a, **kw: _FakeChoice("gpt-4o", "gpt-4o display"),
+        )
+
+        ask_text_mock = MagicMock(side_effect=AssertionError(
+            "ask_text must NOT be called when the picker returned a Choice"
+            " wrapping a real model id."
+        ))
+        monkeypatch.setattr(llm_step, "ask_text", ask_text_mock)
+
+        await llm_step.run_model_step(state)
+        stored = state.get_setting("llm", "model")
+        assert stored == "gpt-4o", f"expected unwrapped id, got {stored!r}"
+        ask_text_mock.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_model_step_numeric_picker(self, tmp_path, monkeypatch):
         """Typing '2' should pick the second listed model."""
         from cli.setup.steps import llm as llm_step
@@ -317,9 +424,31 @@ class TestAudioStep:
             Option(id="whisper", label="OpenAI /audio/speech (cheap mp3)"),
         ])
         monkeypatch.setattr(audio_step, "ask_choice", lambda *a, **kw: next(choices))
-        # ask_text is called for model + voice
-        texts = iter(["whisper-1", "tts-1-hd", "shimmer"])
-        monkeypatch.setattr(audio_step, "ask_text", lambda *a, **kw: next(texts))
+        # Lane U1 — model + voice are now picker-first (fuzzy_pick over
+        # the available_models / available_voices catalog) instead of
+        # ask_text. Mock the picker so the test still drives values.
+        picks = iter(["tts-1-hd", "shimmer"])  # STT models is single-element so picker auto-confirms; TTS model + voice picked here
+        stt_picks = iter(["whisper-1"])
+
+        def fake_pick(message, choices, *, default=None, **kw):
+            label = (message or "").strip().lower()
+            if "model" in label and "shimmer" not in label:
+                # STT or TTS model. STT has only ["whisper-1"], TTS has
+                # ["tts-1", "tts-1-hd"] — distinguish by whether
+                # whisper-1 is a valid choice.
+                values = [getattr(c, "value", c.get("value") if isinstance(c, dict) else c) for c in choices]
+                if "whisper-1" in values:
+                    return next(stt_picks)
+                return next(picks)
+            return next(picks)
+
+        monkeypatch.setattr(audio_step.ui_kit, "fuzzy_pick", fake_pick)
+        # ask_text should NOT be called for Model/Voice now that the
+        # picker is the primary path. If something regresses we want a
+        # loud test failure rather than a silent free-text prompt.
+        def _no_ask_text(*a, **kw):
+            raise AssertionError(f"ask_text called unexpectedly: {a!r} {kw!r}")
+        monkeypatch.setattr(audio_step, "ask_text", _no_ask_text)
         asyncio.run(audio_step.run(state))
         assert state.get_setting("audio", "stt_model") == "whisper-1"
         assert state.get_setting("audio", "tts_model") == "tts-1-hd"
@@ -327,6 +456,132 @@ class TestAudioStep:
         # Audit-r11: fallback TTS chain must be persisted so the voice
         # router can degrade gracefully when Realtime hits a quota.
         assert state.get_setting("audio", "fallback_tts_providers") == ["whisper"]
+
+    def test_audio_step_model_uses_picker_not_ask_text(self, tmp_path, monkeypatch):
+        """Lane U1 fix #4 — the STT/TTS model field must use the same
+        fuzzy picker as the LLM model step. If anything tries to fall
+        back to ``ask_text(" Model", ...)`` the test fails loud."""
+        from cli.setup.steps import audio as audio_step
+
+        state = WizardState.load(tmp_path / "feral")
+        monkeypatch.setattr(
+            audio_step,
+            "detect_local_audio_capabilities",
+            lambda: {"local_stt": False, "local_tts": False},
+        )
+        # configure voice? yes. fully-local? no.
+        answers = iter([True, False])
+        monkeypatch.setattr(audio_step, "confirm", lambda *a, **kw: next(answers))
+        choices = iter([
+            Option(id="openai", label="OpenAI Whisper (cloud)"),
+            Option(id="openai", label="OpenAI TTS (cloud)"),
+            Option(id="whisper", label="OpenAI /audio/speech (cheap mp3)"),
+        ])
+        monkeypatch.setattr(audio_step, "ask_choice", lambda *a, **kw: next(choices))
+
+        # Track every picker invocation; assert ask_text never fires.
+        picker_calls: list[tuple[str, list]] = []
+
+        def fake_pick(message, choices, *, default=None, **kw):
+            values = [getattr(c, "value", c.get("value") if isinstance(c, dict) else c) for c in choices]
+            picker_calls.append((message, values))
+            # STT models is ["whisper-1"]; TTS models is ["tts-1", "tts-1-hd"];
+            # TTS voices includes "shimmer". Pick deterministically.
+            if "whisper-1" in values:
+                return "whisper-1"
+            if "tts-1-hd" in values:
+                return "tts-1-hd"
+            if "shimmer" in values:
+                return "shimmer"
+            return values[0]
+
+        monkeypatch.setattr(audio_step.ui_kit, "fuzzy_pick", fake_pick)
+        monkeypatch.setattr(
+            audio_step, "ask_text",
+            MagicMock(side_effect=AssertionError(
+                "ask_text must NOT be called for Model/Voice when the "
+                "live catalog is non-empty."
+            )),
+        )
+
+        asyncio.run(audio_step.run(state))
+        assert state.get_setting("audio", "stt_model") == "whisper-1"
+        assert state.get_setting("audio", "tts_model") == "tts-1-hd"
+        assert state.get_setting("audio", "tts_voice") == "shimmer"
+        # Picker should have been invoked at least three times: STT
+        # model, TTS model, TTS voice.
+        assert len(picker_calls) >= 3
+
+    def test_audio_step_falls_back_to_ask_text_when_models_empty(
+        self, tmp_path, monkeypatch,
+    ):
+        """Lane U1 fix #4 — when a provider's live catalog is empty
+        (e.g. faster-whisper with no caps.stt_models) the picker is
+        useless. Fall back to ``ask_text`` with a clear "no live
+        catalog available" message so the operator still has an
+        escape hatch."""
+        from cli.setup.steps import audio as audio_step
+
+        # Inject a synthetic provider with no available_models.
+        empty_stt = (
+            {
+                "id": "empty",
+                "label": "Empty STT",
+                "needs_key": False,
+                "env": "",
+                "is_local": True,
+                "aliases": ("empty",),
+                "default_model": "",
+                "available_models": [],
+            },
+        )
+
+        state = WizardState.load(tmp_path / "feral")
+        monkeypatch.setattr(
+            audio_step,
+            "detect_local_audio_capabilities",
+            lambda: {"local_stt": True, "local_tts": False, "stt_models": []},
+        )
+
+        ask_text_log: list[tuple[tuple, dict]] = []
+
+        def fake_ask_text(*a, **kw):
+            ask_text_log.append((a, kw))
+            return "type-it-yourself-v1"
+
+        monkeypatch.setattr(audio_step, "ask_text", fake_ask_text)
+        monkeypatch.setattr(
+            audio_step, "ask_choice",
+            lambda *a, **kw: Option(id="empty", label="Empty STT"),
+        )
+
+        # Picker must never be invoked when models list is empty.
+        def _no_pick(*a, **kw):
+            raise AssertionError(
+                "fuzzy_pick must NOT be called when the live model catalog is empty."
+            )
+        monkeypatch.setattr(audio_step.ui_kit, "fuzzy_pick", _no_pick)
+
+        # _configure_provider is synchronous; drive it directly to
+        # exercise the empty-catalog branch without involving the
+        # outer interactive confirm() chain.
+        audio_step._configure_provider(
+            state,
+            "stt",
+            empty_stt,
+            True,  # local_available
+            False,  # has_openai_key
+            {"stt_models": []},
+            audio_step.get_console(),
+        )
+
+        # ask_text should have been called with the "no live catalog
+        # available" hint baked into the prompt.
+        assert any(
+            "no live catalog available" in (a[0] if a else kw.get("prompt", ""))
+            for a, kw in ask_text_log
+        ), f"expected fallback hint in ask_text prompts, got {ask_text_log!r}"
+        assert state.get_setting("audio", "stt_model") == "type-it-yourself-v1"
 
 
 # ----------------------------------------------------------------------
