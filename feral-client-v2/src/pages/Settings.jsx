@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
@@ -388,6 +388,15 @@ function ProvidersSection() {
   const [health, setHealth] = useState(null);
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null); // currently-edited provider card
+  // Per-provider refresh counter bumped by ProviderKeysCard when the
+  // user switches the active labeled key. Open ProviderForm instances
+  // watch their entry and re-fetch models so the dropdown reflects
+  // what the new key can actually see (Lane 3 U3 fix #4).
+  const [keysRefreshTokens, setKeysRefreshTokens] = useState({});
+  const bumpKeysRefresh = useCallback((pid) => {
+    if (!pid) return;
+    setKeysRefreshTokens((prev) => ({ ...prev, [pid]: (prev[pid] || 0) + 1 }));
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -474,11 +483,19 @@ function ProvidersSection() {
       <div className="v2-providers-grid">
         {providers.map((p) => {
           const pid = p.id || p.provider_id;
+          const isCurrent = (status?.provider || '').toLowerCase() === (pid || '').toLowerCase();
           return (
             <ProviderCard
               key={pid}
               provider={{ ...p, provider_id: pid }}
-              isCurrent={(status?.provider || '').toLowerCase() === (pid || '').toLowerCase()}
+              isCurrent={isCurrent}
+              // Seed the Reconfigure form with the runtime model (not
+              // the cloud descriptor's empty default_model). Lane 3 U3
+              // fix #1: previously selectedModel fell back to list[0]
+              // of the recommended catalog and Save & apply silently
+              // swapped the brain model on key rotation.
+              activeModel={isCurrent ? (status?.model || '') : ''}
+              keysRefreshToken={keysRefreshTokens[pid] || 0}
               isEditing={selected === pid}
               onEdit={() => setSelected(pid)}
               onCancel={() => setSelected(null)}
@@ -497,7 +514,7 @@ function ProvidersSection() {
        * can pre-flight what provider + model would be selected for
        * each tier without sending a chat.
        */}
-      <ProviderKeysCard providers={providers} />
+      <ProviderKeysCard providers={providers} onActiveChange={bumpKeysRefresh} />
       <TierRouteCard />
     </div>
   );
@@ -517,7 +534,7 @@ const CALL_SITES = [
   { id: 'embedding', label: 'Embedding' },
 ];
 
-function ProviderKeysCard({ providers }) {
+function ProviderKeysCard({ providers, onActiveChange }) {
   const supportedIds = (providers || [])
     .map((p) => p.id || p.provider_id)
     .filter(Boolean);
@@ -568,6 +585,13 @@ function ProviderKeysCard({ providers }) {
         body: JSON.stringify({ label }),
       });
       await refresh();
+      // Lane 3 U3 fix #4: tell any open ProviderForm for this
+      // provider that its credential basis just changed so it
+      // re-fetches /models with force=true. Backend already
+      // invalidates the catalog cache (catalog.py:configure), but the
+      // open form doesn't poll keys and would otherwise keep showing
+      // models visible to the previous key.
+      if (typeof onActiveChange === 'function') onActiveChange(pid);
     } catch (e) {
       setErr(e?.message || 'set-active failed');
     } finally {
@@ -848,7 +872,7 @@ function FallbacksCard({ health, onChange }) {
   );
 }
 
-function ProviderCard({ provider, isCurrent, isEditing, onEdit, onCancel, onSaved }) {
+function ProviderCard({ provider, isCurrent, activeModel, keysRefreshToken, isEditing, onEdit, onCancel, onSaved }) {
   const supportsLocal = !!provider.supports_local;
   const requiresKey = !!provider.requires_api_key;
   // `reachable` is null until the user probes; `configured` = has a key
@@ -890,6 +914,8 @@ function ProviderCard({ provider, isCurrent, isEditing, onEdit, onCancel, onSave
         <ProviderForm
           provider={provider}
           isCurrent={isCurrent}
+          activeModel={activeModel}
+          keysRefreshToken={keysRefreshToken}
           onCancel={onCancel}
           onSaved={onSaved}
         />
@@ -904,7 +930,7 @@ function ProviderCard({ provider, isCurrent, isEditing, onEdit, onCancel, onSave
   );
 }
 
-function ProviderForm({ provider, isCurrent, onCancel, onSaved }) {
+function ProviderForm({ provider, isCurrent, activeModel, keysRefreshToken, onCancel, onSaved }) {
   const [models, setModels] = useState([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [modelError, setModelError] = useState(null);
@@ -918,7 +944,13 @@ function ProviderForm({ provider, isCurrent, onCancel, onSaved }) {
   // Live/Cached/Stale badge below.
   const [modelLastRefresh, setModelLastRefresh] = useState(0);
   const [modelFilter, setModelFilter] = useState('');
-  const [selectedModel, setSelectedModel] = useState(provider.default_model || '');
+  // Lane 3 U3 fix #1: seed from `activeModel` (the runtime model
+  // surfaced by /api/llm/status) when reconfiguring the current
+  // provider. Cloud descriptors ship `default_model=""` so the old
+  // initializer let `loadModels` auto-pick `list[0]` of the
+  // recommended catalog, and Save & apply then silently swapped the
+  // brain model whenever the user only intended to rotate keys.
+  const [selectedModel, setSelectedModel] = useState(activeModel || provider.default_model || '');
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState(provider.default_base_url || '');
   const [busy, setBusy] = useState(false);
@@ -956,8 +988,16 @@ function ProviderForm({ provider, isCurrent, onCancel, onSaved }) {
       // the user picks a model — without this, the auto-stale-refresh
       // useEffect below would be cancelled mid-flight by the
       // setSelectedModel state churn.
+      //
+      // Lane 3 U3 fix #1: prefer the runtime `activeModel` over the
+      // first recommended entry. Only auto-pick `list[0]` when no
+      // model is currently selected AND no runtime model is known.
       if (list.length > 0) {
-        setSelectedModel((current) => current || (list[0].id || list[0]));
+        setSelectedModel((current) => {
+          if (current) return current;
+          if (activeModel) return activeModel;
+          return list[0].id || list[0];
+        });
       }
       return d;
     } catch (e) {
@@ -966,7 +1006,7 @@ function ProviderForm({ provider, isCurrent, onCancel, onSaved }) {
     } finally {
       setLoadingModels(false);
     }
-  }, [provider.provider_id]);
+  }, [provider.provider_id, activeModel]);
 
   useEffect(() => {
     // Initial mount: do the cheap cached fetch first, then force a
@@ -988,6 +1028,17 @@ function ProviderForm({ provider, isCurrent, onCancel, onSaved }) {
     })();
     return () => { cancelled = true; };
   }, [loadModels]);
+
+  // Lane 3 U3 fix #4: when the parent ProviderKeysCard switches the
+  // active labeled key, our credential basis changes — force a live
+  // re-fetch so the dropdown reflects what the new key can see, not
+  // what the previous key could.
+  const keysRefreshRef = useRef(keysRefreshToken);
+  useEffect(() => {
+    if (keysRefreshToken === keysRefreshRef.current) return;
+    keysRefreshRef.current = keysRefreshToken;
+    loadModels({ force: true }).catch(() => { /* swallow */ });
+  }, [keysRefreshToken, loadModels]);
 
   // Save credentials for this provider WITHOUT switching the active
   // provider/model. Hits the provider-scoped
@@ -1101,6 +1152,26 @@ function ProviderForm({ provider, isCurrent, onCancel, onSaved }) {
   })();
   const showFilter = models.length > SEARCHABLE_THRESHOLD;
 
+  // Lane 3 U3 fix #5: the recommended chat-class filter hides models
+  // that are valid (e.g. older snapshots, custom fine-tunes) but not
+  // on the curated shortlist. If the user's active model or the value
+  // currently typed in the input is one of those, it would otherwise
+  // be absent from the datalist suggestions. Smaller fix than a "Show
+  // all" toggle: always merge them in so the user can re-select them
+  // without typing the full id by hand.
+  const datalistOptions = (() => {
+    const ids = visibleModels.map((m) => (typeof m === 'string' ? m : (m.id || m.name || '')));
+    const merged = ids.slice();
+    const seen = new Set(ids.filter(Boolean));
+    for (const extra of [activeModel, selectedModel]) {
+      if (extra && !seen.has(extra)) {
+        merged.push(extra);
+        seen.add(extra);
+      }
+    }
+    return merged;
+  })();
+
   return (
     <div className="v2-provider-form">
       {provider.requires_api_key && (
@@ -1164,6 +1235,19 @@ function ProviderForm({ provider, isCurrent, onCancel, onSaved }) {
             let label = 'Stale';
             if (modelLastRefresh > 0 && ageSec < 2 * 3600) { tone = 'live'; label = 'Live'; }
             else if (modelLastRefresh > 0 && ageSec < 24 * 3600) { tone = 'cached'; label = 'Cached'; }
+            // Lane 3 U3 fix #3: never lie. If the backend reported a
+            // warning (e.g. "provider rejected the API key (HTTP
+            // 401)") the dropdown is the cached row, not live —
+            // force error tone regardless of `last_refresh`. Same for
+            // explicit non-live sources (`cache` / `fallback`): the
+            // tone must not read `Live` next to a yellow warning chip.
+            if (modelWarning) {
+              tone = 'error';
+              label = 'Stale';
+            } else if (modelSource && modelSource !== 'live') {
+              tone = 'stale';
+              label = 'Stale';
+            }
             const ageHuman = (() => {
               if (!isFinite(ageSec)) return 'never refreshed';
               if (ageSec < 60) return 'just now';
@@ -1190,11 +1274,10 @@ function ProviderForm({ provider, isCurrent, onCancel, onSaved }) {
           >
             {loadingModels ? 'Loading…' : 'Refresh models'}
           </button>
-          <datalist id={`models-${provider.provider_id}`}>
-            {visibleModels.map((m, i) => {
-              const id = typeof m === 'string' ? m : (m.id || m.name || '');
-              return <option key={id || i} value={id}>{id}</option>;
-            })}
+          <datalist id={`models-${provider.provider_id}`} data-testid={`models-datalist-${provider.provider_id}`}>
+            {datalistOptions.map((id, i) => (
+              <option key={id || i} value={id}>{id}</option>
+            ))}
           </datalist>
         </div>
         {loadingModels && <span className="v2-p v2-p--muted v2-p--tiny">Probing /models…</span>}
@@ -1220,15 +1303,39 @@ function ProviderForm({ provider, isCurrent, onCancel, onSaved }) {
       <div className="v2-provider-actions" style={{ justifyContent: 'flex-end' }}>
         <button type="button" className="v2-btn" onClick={onCancel} disabled={busy}>Cancel</button>
         {isCurrent ? (
-          <button
-            type="button"
-            className="v2-btn v2-btn--primary"
-            onClick={save}
-            disabled={busy || !selectedModel}
-            data-testid={`provider-save-apply-${provider.provider_id}`}
-          >
-            {busy ? 'Saving…' : 'Save & apply'}
-          </button>
+          <>
+            {/*
+             * Lane 3 U3 fix #2: split the current-provider action into
+             * Save key (configure-only, no model swap) and Save & apply
+             * (full /api/llm/config POST). Before this split, key
+             * rotation always sent the picker's `model:` field, which
+             * — combined with fix #1's seeding bug — silently swapped
+             * the running model whenever the user only meant to paste
+             * a fresh key. `saveCredentialsOnly` hits
+             * /api/llm/providers/{id}/configure which re-binds the
+             * adapter without touching llm.provider / llm.model.
+             */}
+            <button
+              type="button"
+              className="v2-btn"
+              onClick={saveCredentialsOnly}
+              disabled={busy}
+              data-testid={`provider-save-key-${provider.provider_id}`}
+              title="Persist credentials without changing the active model. Use this for key rotation."
+            >
+              {busy ? 'Saving…' : 'Save key'}
+            </button>
+            <button
+              type="button"
+              className="v2-btn v2-btn--primary"
+              onClick={save}
+              disabled={busy || !selectedModel}
+              data-testid={`provider-save-apply-${provider.provider_id}`}
+              title="Persist credentials and apply the currently selected model now."
+            >
+              {busy ? 'Saving…' : 'Save & apply'}
+            </button>
+          </>
         ) : (
           <>
             <button

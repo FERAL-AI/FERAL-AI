@@ -470,3 +470,340 @@ describe('Settings → Providers credential saving (A2)', () => {
     });
   });
 });
+
+/**
+ * Settings → Providers Reconfigure / model-picker regression tests
+ * for Lane 3 U3 (v2026.5.42 wave).
+ *
+ * Defects covered:
+ *   (U3-#1) Reconfigure seeded `selectedModel` from
+ *     `provider.default_model` (== "" for cloud descriptors), so the
+ *     auto-pick fell back to `list[0]` of the recommended catalog and
+ *     Save & apply silently swapped the brain model on key rotation.
+ *   (U3-#2) The current-provider card had no Save-key button; the
+ *     only action was Save & apply which always POSTed `model:`.
+ *   (U3-#3) Freshness badge could read "Live · 5m ago" while a yellow
+ *     warning chip reported HTTP 401 — same row, contradictory signal.
+ *   (U3-#4) Switching the active labeled key did not refresh an open
+ *     ProviderForm; the dropdown stayed pinned to the previous key's
+ *     view of /models.
+ *   (U3-#5) The recommended chat-class filter hid valid active /
+ *     custom models from the datalist suggestions.
+ *   (U3-existing-gap) `reconfigured.ok === false` had no regression
+ *     test — the false-success bug could silently come back.
+ */
+describe('Settings → Providers Reconfigure (Lane 3 U3)', () => {
+  // OpenAI is current, runtime model is gpt-4-turbo-preview (a chat
+  // model that is NOT in the conductor's 2026 recommended shortlist),
+  // and the recommended /models response is the new gpt-5.5-pro.
+  // Pre-fix, Reconfigure showed gpt-5.5-pro in the input box.
+  function makeCurrentProviderFetcher({
+    runtimeModel = 'gpt-4-turbo-preview',
+    recommendedModels = ['gpt-5.5-pro'],
+    configResponse,
+    configureResponse,
+    captureCalls,
+  } = {}) {
+    return (url, init) => {
+      if (captureCalls) {
+        captureCalls.push({ url, method: init?.method || 'GET', body: init?.body });
+      }
+      if (url.includes('/api/llm/providers/openai/models')) {
+        return {
+          provider_id: 'openai',
+          models: recommendedModels,
+          source: 'live',
+          last_refresh: Date.now() / 1000,
+          count: recommendedModels.length,
+          warning: '',
+        };
+      }
+      if (url.includes('/api/llm/providers/openai/configure')) {
+        return configureResponse || {
+          success: true,
+          status: { ...baseProvider, configured: true },
+          persisted: { ok: true, warnings: [] },
+          active_provider: true,
+        };
+      }
+      if (url.includes('/api/llm/config') && init?.method === 'POST') {
+        return configResponse || {
+          success: true,
+          provider: 'openai',
+          model: runtimeModel,
+          persisted: { ok: true, warnings: [] },
+          reconfigured: { ok: true },
+        };
+      }
+      if (url.endsWith('/api/llm/providers') || url.includes('/api/llm/providers?')) {
+        return { providers: [baseProvider], count: 1 };
+      }
+      if (url.includes('/api/llm/status')) {
+        return { available: true, provider: 'openai', model: runtimeModel };
+      }
+      if (url.includes('/api/llm/health')) {
+        return { active: { provider: 'openai', model: runtimeModel }, candidates: [] };
+      }
+      if (url.includes('/api/llm/presets')) {
+        return { presets: [] };
+      }
+      return {};
+    };
+  }
+
+  it('(U3-#1) seeds the model input from runtime status.model, not list[0]', async () => {
+    // status.model = the actually running model; recommended list
+    // omits it. Pre-fix the picker showed gpt-5.5-pro on Reconfigure.
+    const { getByText, findByText, findByRole } = renderV2(<Settings />, {
+      fetch: makeCurrentProviderFetcher({
+        runtimeModel: 'gpt-4-turbo-preview',
+        recommendedModels: ['gpt-5.5-pro'],
+      }),
+    });
+    await openProviderForm(getByText, findByText, findByRole);
+
+    // After both the cached + auto-force model fetches settle, the
+    // input bound to `selectedModel` must read the runtime model.
+    await waitFor(() => {
+      const modelInputs = document.querySelectorAll(
+        '.v2-provider-model-row input.v2-input',
+      );
+      expect(modelInputs.length).toBeGreaterThanOrEqual(1);
+      expect(modelInputs[0].value).toBe('gpt-4-turbo-preview');
+    });
+  });
+
+  it('(U3-#1) Save & apply without editing sends the runtime model, not list[0]', async () => {
+    const calls = [];
+    const { getByText, findByText, findByRole, findByTestId } = renderV2(<Settings />, {
+      fetch: makeCurrentProviderFetcher({
+        runtimeModel: 'gpt-4-turbo-preview',
+        recommendedModels: ['gpt-5.5-pro'],
+        captureCalls: calls,
+      }),
+    });
+    await openProviderForm(getByText, findByText, findByRole);
+
+    const saveApply = await findByTestId('provider-save-apply-openai');
+    await waitFor(() => { expect(saveApply.disabled).toBe(false); });
+    fireEvent.click(saveApply);
+
+    await waitFor(() => {
+      const cfgPost = calls.find((c) =>
+        c.method === 'POST' && c.url.match(/\/api\/llm\/config(\?|$)/));
+      expect(cfgPost).toBeTruthy();
+      const body = JSON.parse(cfgPost.body || '{}');
+      expect(body.model).toBe('gpt-4-turbo-preview');
+    });
+  });
+
+  it('(U3-#2) current provider exposes a Save key button that hits /configure (no /api/llm/config)', async () => {
+    const calls = [];
+    const { getByText, findByText, findByRole, findByTestId } = renderV2(<Settings />, {
+      fetch: makeCurrentProviderFetcher({
+        runtimeModel: 'gpt-4-turbo-preview',
+        recommendedModels: ['gpt-5.5-pro'],
+        captureCalls: calls,
+      }),
+    });
+    await openProviderForm(getByText, findByText, findByRole);
+
+    // Wait for the form to settle so the model state stabilises.
+    await waitFor(() => {
+      const inputs = document.querySelectorAll('.v2-provider-form input[type="password"]');
+      expect(inputs.length).toBeGreaterThanOrEqual(1);
+    });
+    const keyInput = document.querySelectorAll(
+      '.v2-provider-form input[type="password"]',
+    )[0];
+    fireEvent.change(keyInput, { target: { value: 'sk-rotated' } });
+
+    // The new button must be present on the current-provider branch.
+    const saveKey = await findByTestId('provider-save-key-openai');
+    expect(saveKey).toBeTruthy();
+    fireEvent.click(saveKey);
+
+    // After the click settles, /configure must have been POSTed and
+    // /api/llm/config must NOT have been called (so the runtime model
+    // is not touched by a key-rotation).
+    await waitFor(() => {
+      const cfgurePosts = calls.filter((c) =>
+        c.method === 'POST'
+        && c.url.includes('/api/llm/providers/openai/configure'));
+      expect(cfgurePosts.length).toBeGreaterThanOrEqual(1);
+    });
+    const cfgPosts = calls.filter((c) =>
+      c.method === 'POST' && c.url.match(/\/api\/llm\/config(\?|$)/));
+    expect(cfgPosts.length).toBe(0);
+  });
+
+  it('(U3-#3) freshness badge shows error tone when backend reports a warning, regardless of last_refresh', async () => {
+    // 1-minute-old cache row with a 401 warning. Pre-fix, badge said
+    // "Live · 1m ago" alongside the warning chip — a direct lie.
+    const fetcher = (url) => {
+      if (url.includes('/api/llm/providers/openai/models')) {
+        return {
+          provider_id: 'openai',
+          models: ['gpt-5.5-pro'],
+          source: 'cache',
+          last_refresh: (Date.now() / 1000) - 60,
+          count: 1,
+          warning: 'provider rejected the API key (HTTP 401)',
+        };
+      }
+      if (url.endsWith('/api/llm/providers') || url.includes('/api/llm/providers?')) {
+        return { providers: [baseProvider], count: 1 };
+      }
+      if (url.includes('/api/llm/status')) {
+        return { available: true, provider: 'openai', model: 'gpt-4-turbo-preview' };
+      }
+      if (url.includes('/api/llm/health')) {
+        return { active: { provider: 'openai', model: 'gpt-4-turbo-preview' }, candidates: [] };
+      }
+      if (url.includes('/api/llm/presets')) return { presets: [] };
+      return {};
+    };
+    const { getByText, findByText, findByRole, findByTestId } = renderV2(<Settings />, { fetch: fetcher });
+    await openProviderForm(getByText, findByText, findByRole);
+
+    const badge = await findByTestId('model-age-openai');
+    // The tone must NOT read "live" — either error (warning present)
+    // or stale (non-live source) is acceptable; never the cheery
+    // green chip while a HTTP 401 is sitting right next to it.
+    await waitFor(() => {
+      const tone = badge.getAttribute('data-age-tone');
+      expect(['error', 'stale']).toContain(tone);
+      expect(tone).not.toBe('live');
+    });
+  });
+
+  it('(U3-#4) switching the active labeled key triggers a force=true model re-fetch', async () => {
+    // Render with one labeled key, then post a Make-active for a
+    // second label. Pre-fix, the open ProviderForm kept showing the
+    // models the previous key could see.
+    const calls = [];
+    const keysSnapshots = [
+      { keys: [
+        { label: 'prod', fingerprint: 'sk-...aaa', probe: { status: 'ok' } },
+        { label: 'dev', fingerprint: 'sk-...bbb', probe: { status: 'ok' } },
+      ], active_label: 'prod' },
+      { keys: [
+        { label: 'prod', fingerprint: 'sk-...aaa', probe: { status: 'ok' } },
+        { label: 'dev', fingerprint: 'sk-...bbb', probe: { status: 'ok' } },
+      ], active_label: 'dev' },
+    ];
+    let keysCallIdx = 0;
+    const fetcher = (url, init) => {
+      calls.push({ url, method: init?.method || 'GET' });
+      if (url.includes('/api/llm/providers/openai/keys/active')) {
+        return { ok: true, active_label: 'dev' };
+      }
+      if (url.includes('/api/llm/providers/openai/keys')) {
+        const snap = keysSnapshots[Math.min(keysCallIdx, keysSnapshots.length - 1)];
+        keysCallIdx += 1;
+        return snap;
+      }
+      if (url.includes('/api/llm/providers/openai/models')) {
+        return {
+          provider_id: 'openai',
+          models: ['gpt-5.5-pro'],
+          source: 'live',
+          last_refresh: Date.now() / 1000,
+          count: 1,
+          warning: '',
+        };
+      }
+      if (url.endsWith('/api/llm/providers') || url.includes('/api/llm/providers?')) {
+        return { providers: [baseProvider], count: 1 };
+      }
+      if (url.includes('/api/llm/status')) {
+        return { available: true, provider: 'openai', model: 'gpt-4-turbo-preview' };
+      }
+      if (url.includes('/api/llm/health')) {
+        return { active: { provider: 'openai', model: 'gpt-4-turbo-preview' }, candidates: [] };
+      }
+      if (url.includes('/api/llm/presets')) return { presets: [] };
+      return {};
+    };
+    const { getByText, findByText, findByRole, findByTestId } = renderV2(<Settings />, { fetch: fetcher });
+    await openProviderForm(getByText, findByText, findByRole);
+
+    // Wait for the keys card to render and the "Make active" button
+    // to appear for the `dev` row (prod is the current active one).
+    const devRow = await findByTestId('provider-key-row-dev');
+    expect(devRow).toBeTruthy();
+    // Count force=true model calls before the make-active click; we
+    // expect the count to GROW after the click.
+    const forceBefore = calls.filter((c) =>
+      c.url.includes('/api/llm/providers/openai/models')
+      && c.url.includes('force=true')).length;
+    const makeActiveBtn = Array.from(devRow.querySelectorAll('button'))
+      .find((b) => /Make active/i.test(b.textContent));
+    expect(makeActiveBtn).toBeTruthy();
+    fireEvent.click(makeActiveBtn);
+
+    await waitFor(() => {
+      const forceAfter = calls.filter((c) =>
+        c.url.includes('/api/llm/providers/openai/models')
+        && c.url.includes('force=true')).length;
+      expect(forceAfter).toBeGreaterThan(forceBefore);
+    });
+  });
+
+  it('(U3-#5) active model is selectable in datalist even when recommended list omits it', async () => {
+    // Recommended shortlist contains gpt-5.5-pro only; the runtime
+    // model is gpt-4-turbo-preview. The datalist must still include
+    // gpt-4-turbo-preview so the user can re-pick it without typing.
+    const { getByText, findByText, findByRole, findByTestId } = renderV2(<Settings />, {
+      fetch: makeCurrentProviderFetcher({
+        runtimeModel: 'gpt-4-turbo-preview',
+        recommendedModels: ['gpt-5.5-pro'],
+      }),
+    });
+    await openProviderForm(getByText, findByText, findByRole);
+
+    const dlist = await findByTestId('models-datalist-openai');
+    await waitFor(() => {
+      const values = Array.from(dlist.querySelectorAll('option')).map((o) => o.getAttribute('value'));
+      expect(values).toContain('gpt-4-turbo-preview');
+      expect(values).toContain('gpt-5.5-pro');
+    });
+  });
+
+  it('(U3-existing-gap) reconfigured.ok=false surfaces error chip, never a success chip', async () => {
+    const calls = [];
+    const { getByText, findByText, findByRole, findByTestId } = renderV2(<Settings />, {
+      fetch: makeCurrentProviderFetcher({
+        runtimeModel: 'gpt-4-turbo-preview',
+        recommendedModels: ['gpt-5.5-pro'],
+        configResponse: {
+          success: true,
+          provider: 'openai',
+          model: 'gpt-5.5-pro',
+          persisted: { ok: true, warnings: [] },
+          reconfigured: { ok: false, reason: 'invalid model' },
+        },
+        captureCalls: calls,
+      }),
+    });
+    await openProviderForm(getByText, findByText, findByRole);
+
+    const saveApply = await findByTestId('provider-save-apply-openai');
+    await waitFor(() => { expect(saveApply.disabled).toBe(false); });
+    fireEvent.click(saveApply);
+
+    // The container that holds the form should surface the error
+    // chip text "invalid model" and must NOT show the "Saved …"
+    // success label. (The freshness badge is also a `.v2-chip--live`
+    // span — filter to <div> elements only, since the success/error
+    // chips render as <div> while the freshness badge is a <span>.)
+    await waitFor(() => {
+      const errChip = document.querySelector('.v2-provider-form div.v2-chip--error');
+      expect(errChip).toBeTruthy();
+      expect(errChip.textContent).toMatch(/invalid model/);
+    });
+    const successDivs = Array.from(document.querySelectorAll('.v2-provider-form div.v2-chip--live'));
+    const sawSuccess = successDivs.some((el) => /Saved/i.test(el.textContent));
+    expect(sawSuccess).toBe(false);
+  });
+});
