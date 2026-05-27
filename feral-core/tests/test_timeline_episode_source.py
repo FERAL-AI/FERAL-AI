@@ -201,6 +201,79 @@ async def test_memory_stats_timeout_returns_degraded_payload():
     assert "stats timeout" in result["vec_index_mode"]
 
 
+# ─────────────────────────────────────────────────────────────────────
+# RC polish: type-filter contract alignment
+# ─────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("type_value", ["memories", "memory", "chat"])
+async def test_timeline_type_canonical_and_legacy_return_episodes(
+    patch_route_state, type_value,
+):
+    """Canonical ``memories``/``chat`` and the legacy ``memory`` alias
+    must all reach the episode source. Pre-fix the UI sent ``memory``
+    and the route gated on ``memories`` only — the non-"All" picks
+    returned an empty feed even when the brain had thousands of
+    episodes."""
+    now = time.time()
+    fake_episodes = [
+        {
+            "id": "ep-canonical",
+            "session_id": "sess-1",
+            "created_at": now - 120,
+            "user_message": "what did I do today",
+            "assistant_message": "You shipped RC polish.",
+            "summary": "daily recap",
+            "tags": [],
+        },
+    ]
+    memory = SimpleNamespace(
+        episode_recent=AsyncMock(return_value=fake_episodes),
+    )
+    patch_route_state(memory=memory)
+
+    result = await timeline_route.get_timeline(days=7, type=type_value)
+    memory_entries = [e for e in result["entries"] if e["type"] == "memory"]
+    assert len(memory_entries) == 1
+    assert memory_entries[0]["metadata"]["id"] == "ep-canonical"
+
+
+@pytest.mark.asyncio
+async def test_timeline_type_calendar_alias_maps_to_events(patch_route_state):
+    """``calendar`` (legacy UI vocabulary) must alias to ``events`` so
+    the calendar source still fires. Pre-fix ``type=calendar`` matched
+    no gate and returned an empty feed."""
+    now = time.time()
+    fake_events = {
+        "success": True,
+        "data": {
+            "events": [
+                {
+                    "summary": "lunch with mom",
+                    "start_epoch": now - 60,
+                    "description": "noon at the diner",
+                },
+            ],
+        },
+    }
+    calendar = SimpleNamespace(execute=AsyncMock(return_value=fake_events))
+    # Memory absent so we don't blend sources into the assertion.
+    memory = SimpleNamespace(episode_recent=AsyncMock(return_value=[]))
+    patch_route_state(memory=memory, calendar=calendar)
+
+    result = await timeline_route.get_timeline(days=7, type="calendar")
+    event_entries = [e for e in result["entries"] if e["type"] == "event"]
+    assert len(event_entries) == 1
+    assert event_entries[0]["title"] == "lunch with mom"
+    # And the canonical name reaches the same gate.
+    result_canonical = await timeline_route.get_timeline(days=7, type="events")
+    canonical_events = [
+        e for e in result_canonical["entries"] if e["type"] == "event"
+    ]
+    assert len(canonical_events) == 1
+
+
 # NOTE: The successful-path coverage for ``MemoryStore.stats()`` lives
 # in ``tests/test_integration.py`` (``stats["notes"] >= 1`` etc.) — those
 # cases also implicitly pin the additive ``ok: True`` field because they

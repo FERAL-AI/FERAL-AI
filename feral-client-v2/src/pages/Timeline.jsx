@@ -16,13 +16,17 @@ import { apiJson } from '../lib/api';
  * improvement so users can scope to "last 24h calendar events only".
  */
 
+// RC polish: send the canonical backend filter names so non-"All"
+// picks don't silently return empty. The route in
+// ``feral-core/api/routes/timeline.py`` accepts ``all``, ``memories``,
+// ``events``, ``health``, ``chat`` (with legacy aliases for
+// ``memory``/``calendar``). Labels stay operator-friendly.
 const TYPE_OPTIONS = [
   { value: '', label: 'All sources' },
   { value: 'chat', label: 'Chat' },
-  { value: 'calendar', label: 'Calendar' },
-  { value: 'screen', label: 'Screen activity' },
-  { value: 'email', label: 'Email' },
-  { value: 'memory', label: 'Memory' },
+  { value: 'events', label: 'Calendar' },
+  { value: 'health', label: 'Health' },
+  { value: 'memories', label: 'Memory' },
 ];
 
 const DAYS_OPTIONS = [

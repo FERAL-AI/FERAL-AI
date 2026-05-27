@@ -49,7 +49,12 @@ function RecentTab() {
   // instead of always claiming 0. The recent-notes list still renders
   // the bounded `/internal/memory/recent` slice — the count above is
   // the truthful number.
+  // RC polish: backend canonical key is ``knowledge_triples``; the
+  // legacy ``knowledge`` alias is still accepted for back-compat with
+  // older brains. ``statsState.ok === false`` surfaces the degraded
+  // chip instead of a misleading row of zeros.
   const [totals, setTotals] = useState({ notes: 0, episodes: 0, knowledge: 0 });
+  const [statsState, setStatsState] = useState({ ok: true, reason: '' });
 
   const refresh = useCallback(async () => {
     try {
@@ -63,11 +68,18 @@ function RecentTab() {
       }
       if (stats.status === 'fulfilled') {
         const t = stats.value?.totals || {};
+        const knowledge = t.knowledge_triples ?? t.knowledge ?? 0;
         setTotals({
           notes: Number(t.notes ?? 0),
           episodes: Number(t.episodes ?? 0),
-          knowledge: Number(t.knowledge ?? 0),
+          knowledge: Number(knowledge),
         });
+        setStatsState({
+          ok: stats.value?.ok !== false,
+          reason: stats.value?.reason || '',
+        });
+      } else {
+        setStatsState({ ok: false, reason: 'stats_unreachable' });
       }
     } finally {
       setLoading(false);
@@ -83,6 +95,15 @@ function RecentTab() {
       title={title}
       actions={<button type="button" className="v2-btn v2-btn--primary" onClick={() => setShowNew(true)}><Plus size={13} /> Save memory</button>}
     >
+      {!statsState.ok && (
+        <span
+          className="v2-chip v2-chip--warn"
+          role="status"
+          data-testid="memory-stats-degraded"
+        >
+          Memory stats unavailable ({statsState.reason || 'unknown'})
+        </span>
+      )}
       {loading && <EmptyState title="Loading…" />}
       {!loading && items.length === 0 && <EmptyState title="No notes saved yet" hint="Episodes are written automatically per chat turn; notes are explicit Save Memory items." />}
       <ul className="v2-mem-list">

@@ -11,16 +11,39 @@ from api.state import state
 router = APIRouter()
 
 
+# RC polish: the WebUI shipped a filter dropdown whose values
+# (``memory``, ``calendar``, ``chat``) didn't match the gates this
+# route checks (``memories``, ``events``, ``health``). Non-"All"
+# picks therefore returned an empty feed. The canonical filter names
+# are ``all`` / ``memories`` / ``events`` / ``health`` / ``chat``;
+# the legacy WebUI vocabulary still works through this alias map so
+# operators running mismatched client/brain versions don't see a
+# silently-empty timeline.
+_TYPE_ALIASES = {
+    "memory": "memories",
+    "calendar": "events",
+}
+
+
 @router.get("/api/timeline")
 async def get_timeline(
     days: int = Query(7, ge=1, le=90),
     type: str = Query("all"),
 ):
-    """Return a chronological feed of memories, health, screen, and events."""
+    """Return a chronological feed of memories, health, screen, and events.
+
+    Canonical ``type`` values: ``all`` | ``memories`` | ``events`` |
+    ``health`` | ``chat`` (``memory``/``calendar`` are accepted as
+    legacy aliases for ``memories``/``events``).
+    """
     entries = []
     since_ts = time.time() - (days * 86400)
+    type = _TYPE_ALIASES.get(type, type)
 
-    if type in ("all", "memories"):
+    # ``chat`` is a UI-friendly label for the episode source — the
+    # brain's chat turns are stored as episodes — so route it through
+    # the same gate as ``memories``.
+    if type in ("all", "memories", "chat"):
         # AUDIT-r14 round2 wave3-followup-001: pre-fix this called
         # ``state.memory.search("", limit=100)`` which is the legacy
         # *notes* search API. With 0 notes (the canonical case for a

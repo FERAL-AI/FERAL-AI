@@ -61,17 +61,35 @@ async def get_memory_stats():
     else:
         out["decay"] = {"enabled": False, "reason": "service_not_constructed"}
     # Lightweight episode totals straight off the store (do not gate
-    # the health probe on the decay service being up).
+    # the health probe on the decay service being up). RC polish: the
+    # store's canonical key is ``knowledge_triples`` — the pre-fix
+    # route looked up ``s["knowledge"]`` which never existed, so the
+    # WebUI's Recent tab always rendered "0 knowledge". We now read
+    # the canonical key, expose it under the same name to the UI, and
+    # keep a ``knowledge`` alias for any older client still reading
+    # the legacy field. The store also returns ``ok: false`` /
+    # ``reason: "stats_timeout"`` on a degraded path; pass those
+    # through so the dashboard can render an honest unavailable chip
+    # instead of a misleading row of zeros.
     try:
         s = await state.memory.stats()
+        knowledge_count = int(s.get("knowledge_triples", 0) or 0)
         out["totals"] = {
-            "episodes": s.get("episodes", 0),
-            "notes": s.get("notes", 0),
-            "knowledge": s.get("knowledge", 0),
+            "episodes": int(s.get("episodes", 0) or 0),
+            "notes": int(s.get("notes", 0) or 0),
+            "knowledge_triples": knowledge_count,
+            "knowledge": knowledge_count,
         }
+        if s.get("ok") is False:
+            out["ok"] = False
+            reason = s.get("reason")
+            if reason:
+                out["reason"] = reason
     except Exception as exc:
         logger.debug("memory.stats() failed in /api/memory/stats: %s", exc)
         out["totals"] = {}
+        out["ok"] = False
+        out["reason"] = "stats_error"
     return out
 
 

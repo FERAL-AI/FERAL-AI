@@ -70,6 +70,23 @@ export class FeralSocket {
     }
   }
 
+  // Same write path as ``send()`` but returns a tagged result so the
+  // caller can distinguish "socket not open yet" from "serialize blew
+  // up" and surface a targeted error to the user. ``send()`` is kept
+  // for back-compat — most call-sites only need the boolean. Added by
+  // RC polish bundle for Chat composer send-failure UX.
+  sendOrFail(obj) {
+    if (!this.ws || this.ws.readyState !== 1) {
+      return { ok: false, reason: 'ws_not_open' };
+    }
+    try {
+      this.ws.send(typeof obj === 'string' ? obj : JSON.stringify(obj));
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: 'serialize_failed', error: String(err && err.message || err) };
+    }
+  }
+
   subscribe(fn) {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);

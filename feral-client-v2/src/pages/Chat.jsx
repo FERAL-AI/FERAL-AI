@@ -77,6 +77,11 @@ export default function Chat() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const [dragOver, setDragOver] = useState(false);
+  // RC polish: when ``socket.send`` returns false the composer used to
+  // empty itself silently and the user's message vanished. We now
+  // restore the text + surface a small inline chip so the user knows
+  // to retry. Cleared on the next successful send.
+  const [sendError, setSendError] = useState('');
   const fileInputRef = useRef(null);
 
   const bottomRef = useRef(null);
@@ -382,6 +387,12 @@ export default function Chat() {
       }
     }
     const attachmentsToSend = pendingAttachments;
+    // RC polish: snapshot the composer state BEFORE clearing so we can
+    // restore it verbatim if the WS write fails. Pre-fix the user's
+    // text was wiped the moment they hit Enter, then ``socket.send``
+    // could return ``false`` silently and the message would be lost.
+    const previousInput = input;
+    const previousAttachments = pendingAttachments;
     setMessages((prev) => [
       ...prev,
       { id: newId(), role: 'user', text, attachments: attachmentsToSend },
@@ -389,13 +400,14 @@ export default function Chat() {
     setInput('');
     setPendingAttachments([]);
     setThinking(true);
+    setSendError('');
     streamBufferRef.current = '';
     pendingTraceRef.current = [];
     setStreamingText('');
     // PR 10: ship the AttachmentRef list verbatim. The brain
     // (api/server.py text_command handler) forwards `payload.attachments`
     // into the orchestrator context so the model can ground on them.
-    socket.send({
+    const envelope = {
       hop: 'client',
       type: 'text_command',
       payload: {
@@ -403,7 +415,35 @@ export default function Chat() {
         context: {},
         ...(attachmentsToSend.length > 0 ? { attachments: attachmentsToSend } : {}),
       },
-    });
+    };
+    // Prefer the tagged ``sendOrFail`` result when the socket exposes
+    // it; fall back to the boolean ``send`` for older socket stubs and
+    // any test mock that only provides ``send``. Either way ``ok`` is
+    // ``false`` only when the write definitively failed — undefined /
+    // truthy values are treated as success (back-compat).
+    let ok = true;
+    let reason = 'ws_not_open';
+    if (typeof socket.sendOrFail === 'function') {
+      const result = socket.sendOrFail(envelope);
+      ok = result?.ok !== false;
+      if (!ok) reason = result?.reason || reason;
+    } else {
+      const sent = socket.send(envelope);
+      if (sent === false) ok = false;
+    }
+    if (!ok) {
+      // Restore composer text + attachments and pull the optimistic
+      // user-row back out so the user isn't lied to about delivery.
+      setInput(previousInput);
+      setPendingAttachments(previousAttachments);
+      setMessages((prev) => prev.slice(0, -1));
+      setThinking(false);
+      setSendError(
+        reason === 'serialize_failed'
+          ? "couldn't send — message too large, try again"
+          : "couldn't send — connection issue, try again",
+      );
+    }
   };
 
   // ── PR 10: upload helpers ─────────────────────────────────────
@@ -482,6 +522,23 @@ export default function Chat() {
     if (!voice || !voice.toggle) return;
     voice.toggle();
   }, [voice]);
+
+  // RC polish: thread switches used to keep any in-flight ``thinking``
+  // / ``streamingText`` / buffered delta from the previous thread alive
+  // — the mid-stream indicator stuck on the new thread until a new
+  // ``stream_delta`` final arrived (which it never would, because the
+  // brain finalized on the prior conversation_id). Reset every
+  // streaming surface explicitly before loading the new conversation
+  // so the UI never mixes two threads' state.
+  const resetStreamingState = useCallback(() => {
+    setThinking(false);
+    setStreamingText('');
+    setStreamingReasoning('');
+    streamBufferRef.current = '';
+    streamReasoningRef.current = '';
+    pendingTraceRef.current = [];
+    setToolChip(null);
+  }, []);
 
   const respondToPermission = useCallback((requestId, granted) => {
     if (!requestId) return;
@@ -653,6 +710,15 @@ export default function Chat() {
       {uploadError && (
         <div className="v2-chat-upload-error" role="alert">{uploadError}</div>
       )}
+      {sendError && (
+        <div
+          className="v2-chat-send-error"
+          role="alert"
+          data-testid="chat-send-error"
+        >
+          {sendError}
+        </div>
+      )}
 
       <Glass
         as="form"
@@ -709,6 +775,12 @@ export default function Chat() {
         <ThreadsPane
           onClose={() => setPaneOpen(null)}
           onOpenConversation={async (conversationId) => {
+            // Drop any in-flight streaming state from the previous
+            // thread before swapping the transcript — otherwise the
+            // "thinking…" indicator or a half-streamed assistant
+            // bubble can carry over and look like the new thread is
+            // mid-reply when it isn't.
+            resetStreamingState();
             if (thread?.loadConversation) {
               const ok = await thread.loadConversation(conversationId);
               if (ok) setPaneOpen(null);
@@ -724,6 +796,7 @@ export default function Chat() {
             }
           }}
           onStartNewConversation={async () => {
+            resetStreamingState();
             if (thread?.startNewConversation) {
               await thread.startNewConversation();
               setPaneOpen(null);
@@ -741,7 +814,12 @@ export default function Chat() {
           }}
         />
       )}
-      {paneOpen === 'snapshots' && <SnapshotsPane onClose={() => setPaneOpen(null)} onRestore={(msgs) => { setMessages(msgs); setPaneOpen(null); }} />}
+      {paneOpen === 'snapshots' && (
+        <SnapshotsPane
+          onClose={() => setPaneOpen(null)}
+          onRestore={(msgs) => { resetStreamingState(); setMessages(msgs); setPaneOpen(null); }}
+        />
+      )}
     </div>
   );
 }
