@@ -14,29 +14,6 @@ import logging
 import uuid
 from typing import Optional
 
-
-def _check_shell_quotes(command: str) -> str | None:
-    """Return an error string if shell quotes are unbalanced, else None."""
-    in_single = False
-    in_double = False
-    i = 0
-    while i < len(command):
-        ch = command[i]
-        if ch == '\\' and not in_single:
-            i += 2
-            continue
-        if ch == "'" and not in_double:
-            in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-        i += 1
-    if in_single or in_double:
-        return (
-            "Shell syntax error: unbalanced quotes in command. "
-            "Tip: use computer_use__write_file to create files with "
-            "arbitrary content instead of shell echo/printf."
-        )
-    return None
 import httpx
 
 from config.loader import feral_home
@@ -256,7 +233,9 @@ class SkillExecutor:
 
         # 4. daemon:// protocol — local shell/AppleScript execution
         if endpoint.url.startswith("daemon://"):
-            return await self._execute_local_daemon(endpoint, args)
+            path = endpoint.url.replace("daemon://local/", "")
+            command = args.get("script") or args.get("command") or ""
+            return await self._execute_local_daemon(path, command)
 
         # 5. Fallback to standard HTTP generic JSON runner
         url = endpoint.url
@@ -317,56 +296,76 @@ class SkillExecutor:
             logger.error(f"Error calling {url}: {e}")
             return {"success": False, "status_code": 0, "data": None, "error": str(e)}
 
-    async def _execute_local_daemon(self, endpoint: SkillEndpoint, args: dict) -> dict:
-        """Execute daemon:// URLs as local shell or AppleScript commands."""
-        import subprocess
+    async def _execute_local_daemon(self, path: str, command: str) -> dict:
+        """Execute daemon:// URLs as local shell or AppleScript commands.
 
-        path = endpoint.url.replace("daemon://local/", "")
-        command = args.get("script") or args.get("command") or ""
+        Shell execution is gated by ``SandboxPolicy.validate_shell_command``:
+        argv[0] must be on the daemon shell allowlist, shell metacharacters
+        are rejected outright, and ``execution.allow_shell_commands`` must
+        be enabled. We always exec with ``shell=False`` on the parsed argv
+        list — no free-form string ever reaches an interpreter.
+        """
+        import subprocess
+        import shlex
+
         if not command:
             return {"success": False, "status_code": 400, "data": None, "error": "No command or script provided"}
 
-        try:
-            if path == "applescript":
+        if path == "applescript":
+            try:
                 proc = await asyncio.to_thread(
                     subprocess.run,
                     ["osascript", "-e", command],
                     capture_output=True, text=True, timeout=15,
                 )
-            elif path == "shell":
-                BLOCKED_COMMANDS = {
-                    "rm ", "rm -", "rmdir", "del ", "format ", "mkfs", "dd ",
-                    "> /dev/", "chmod 777", "sudo ", "sudo\t",
-                    "find / -delete", "find . -delete",
-                    "python -c", "python3 -c", "perl -e", "ruby -e",
-                    "curl | sh", "curl | bash", "wget | sh",
-                    ":(){ :|:& };:",
-                }
-                if any(bc in command.lower() for bc in BLOCKED_COMMANDS):
-                    return {"success": False, "error": "Command blocked by safety filter", "data": {}}
-                quote_err = _check_shell_quotes(command)
-                if quote_err:
-                    return {"success": False, "status_code": 400, "data": None, "error": quote_err}
+            except subprocess.TimeoutExpired:
+                return {"success": False, "status_code": 0, "data": None, "error": "Command timed out (15s)"}
+            except Exception as e:
+                logger.error(f"Local daemon applescript failed: {e}")
+                return {"success": False, "status_code": 0, "data": None, "error": str(e)}
+        elif path == "shell":
+            # audit-r14 / Lane 8 §A3 — replace the old substring blocklist
+            # ("rm ", "sudo ", …) + ``shell=True`` runner with the declarative
+            # policy validator. The validator enforces argv[0] allowlist and
+            # rejects shell metacharacters; we then exec the parsed argv with
+            # ``shell=False`` so no interpreter can re-expand the string.
+            from security.sandbox_policy import SandboxPolicy
+            policy = SandboxPolicy.load_default()
+            ok, reason = policy.validate_shell_command(command)
+            if not ok:
+                return {"success": False, "status_code": 403, "data": None, "error": reason}
+
+            try:
+                argv = shlex.split(command.strip(), posix=True)
+            except ValueError as e:
+                return {"success": False, "status_code": 400, "data": None, "error": f"Could not parse command: {e}"}
+
+            try:
                 proc = await asyncio.to_thread(
                     subprocess.run,
-                    command, shell=True,
+                    argv,
+                    shell=False,
                     capture_output=True, text=True, timeout=15,
                 )
-            else:
-                return {"success": False, "status_code": 400, "data": None, "error": f"Unknown daemon path: {path}"}
+            except subprocess.TimeoutExpired:
+                return {"success": False, "status_code": 0, "data": None, "error": "Command timed out (15s)"}
+            except FileNotFoundError as e:
+                return {"success": False, "status_code": 404, "data": None, "error": str(e)}
+            except PermissionError as e:
+                return {"success": False, "status_code": 403, "data": None, "error": str(e)}
+            except Exception as e:
+                logger.error(f"Local daemon shell failed: {e}")
+                return {"success": False, "status_code": 0, "data": None, "error": str(e)}
+        else:
+            return {"success": False, "status_code": 400, "data": None, "error": f"Unknown daemon path: {path}"}
 
-            output = proc.stdout.strip() or proc.stderr.strip()
-            return {
-                "success": proc.returncode == 0,
-                "status_code": 200 if proc.returncode == 0 else 500,
-                "data": {"output": output, "exit_code": proc.returncode},
-                "error": proc.stderr.strip() if proc.returncode != 0 else None,
-            }
-        except subprocess.TimeoutExpired:
-            return {"success": False, "status_code": 0, "data": None, "error": "Command timed out (15s)"}
-        except Exception as e:
-            logger.error(f"Local daemon execution failed: {e}")
-            return {"success": False, "status_code": 0, "data": None, "error": str(e)}
+        output = proc.stdout.strip() or proc.stderr.strip()
+        return {
+            "success": proc.returncode == 0,
+            "status_code": 200 if proc.returncode == 0 else 500,
+            "data": {"output": output, "exit_code": proc.returncode},
+            "error": proc.stderr.strip() if proc.returncode != 0 else None,
+        }
 
     async def _execute_via_wasm(
         self, tool_name: str, endpoint: SkillEndpoint, args: dict, skill: SkillManifest,

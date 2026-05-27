@@ -140,7 +140,8 @@ class SandboxPolicy:
                 "max_tool_calls_per_turn": 20,
                 "max_total_actions_per_session": 200,
                 "timeout_per_action_ms": 30000,
-                "allow_shell_commands": False,
+                # Desktop brain default; allowlist + metachar reject in validate_shell_command provides the safety surface.
+                "allow_shell_commands": True,
                 "allow_file_write": False,
                 "allow_network_requests": True,
             },

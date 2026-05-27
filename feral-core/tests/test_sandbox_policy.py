@@ -46,9 +46,13 @@ class TestSandboxPolicy:
         assert p.can_generate_skills() is True
         assert p.skill_requires_approval() is True
 
-    def test_shell_blocked_by_default(self):
+    def test_shell_enabled_by_default(self):
+        # audit-r14 Lane 8 §A3 — desktop brain ships with shell enabled because
+        # the safety surface is now ``validate_shell_command`` (argv allowlist +
+        # metachar reject), not a global on/off flag. Operators can still flip
+        # ``execution.allow_shell_commands`` off in their policy file.
         p = SandboxPolicy()
-        assert p.can_execute_shell() is False
+        assert p.can_execute_shell() is True
 
     def test_tool_calls_limit(self):
         p = SandboxPolicy()
