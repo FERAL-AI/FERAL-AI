@@ -233,6 +233,31 @@ def _fingerprint(vault: Any, secret: str) -> str:
     return f"{head}…{tail}({digest})"
 
 
+def mask_key(secret: str) -> str:
+    """Public ``sk-...XYZW`` display helper used by the CLI setup
+    wizard + ``feral key`` surface.
+
+    The provider/key step in the setup wizard needs to confirm "your
+    key is already stored" without ever printing the secret. Every
+    provider dashboard (OpenAI, Anthropic, Gemini, …) shows the
+    leading 3–4 characters and the trailing 4 characters of an API
+    key; we match that convention so the operator can confirm by eye
+    that the displayed entry matches what they pasted in their
+    dashboard.
+
+    Returns ``""`` for empty / blank input so callers can branch on
+    ``if mask_key(secret):`` without an extra emptiness check.
+    Secrets shorter than 8 characters mask to ``***`` so we never
+    leak more than ~half of a tiny placeholder string.
+    """
+    if not secret or not str(secret).strip():
+        return ""
+    s = str(secret).strip()
+    if len(s) < 8:
+        return "***"
+    return f"{s[:3]}…{s[-4:]}"
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────

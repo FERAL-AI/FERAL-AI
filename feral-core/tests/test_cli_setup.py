@@ -589,6 +589,254 @@ class TestAudioStep:
 # ----------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------
+# Bug 1 — non-linear back-navigation (JumpToStep)
+# Bug 2 — "key already exists" detection + keep/replace/add/remove UX
+# ----------------------------------------------------------------------
+
+
+class TestJumpToStepNavigation:
+    """The wizard must let the operator hop from any step back to a
+    specific earlier step (e.g. the provider/key step) without
+    re-walking every intermediate prompt. Operator complaint: 'going
+    back to the main setup it doesn't allow you and it goes back step
+    by step ... I wanna go all the way back to setup another provider
+    key'.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wizard_back_nav_jumps_to_earlier_step(self, tmp_path):
+        """Driving the state machine, a step that raises JumpToStep
+        with an explicit target must skip back to that step. Already-
+        entered settings persist (the jump never wipes
+        ``state.settings`` or ``state.credentials``)."""
+        from cli.setup.helpers import JumpToStep
+
+        state = WizardState.load(tmp_path / "feral")
+        state.set_setting("llm", "provider", "openai")
+        state.set_credential("OPENAI_API_KEY", "sk-old")
+
+        # Track visits to each step so we can assert the jump
+        # landed where we asked it to.
+        visits: list[str] = []
+        jumped = {"done": False}
+
+        def step_llm(s):
+            visits.append("llm")
+
+        def step_audio(s):
+            visits.append("audio")
+
+        def step_channels(s):
+            visits.append("channels")
+            if not jumped["done"]:
+                jumped["done"] = True
+                raise JumpToStep("llm")
+
+        def step_finish(s):
+            visits.append("finish")
+
+        machine = StateMachine(
+            state=state,
+            steps=[
+                ("llm", step_llm),
+                ("audio", step_audio),
+                ("channels", step_channels),
+                ("finish", step_finish),
+            ],
+        )
+        await machine.run()
+
+        # The order must show channels triggered a jump back to llm
+        # (re-walked llm + audio + channels) before reaching finish.
+        assert visits == ["llm", "audio", "channels", "llm", "audio", "channels", "finish"]
+        # Settings + credentials survive the jump — the operator can
+        # see the prior provider already picked when they re-enter
+        # the llm step.
+        assert state.get_setting("llm", "provider") == "openai"
+        assert state.credentials["OPENAI_API_KEY"] == "sk-old"
+
+
+class _FakeStatus:
+    """Minimal stand-in for ``ProviderStatus`` used by the LLM step's
+    side-by-side table rendering. The wizard reads ``configured``,
+    ``reachable``, and ``error`` off the status; we surface them as
+    plain attributes so the MagicMock-noise from ``mock.status_for()``
+    doesn't leak into the rendered table."""
+
+    configured = False
+    reachable = False
+    error = ""
+
+
+class TestProviderKeyStepExistingKey:
+    """Bug 2 — when a labeled key (or legacy default-namespace entry)
+    is already stored, the provider step must surface that fact with
+    a masked display + Keep/Replace/Add/Remove menu instead of asking
+    "needs a key" and contradictorily prompting for one."""
+
+    @pytest.mark.asyncio
+    async def test_setup_key_step_shows_existing_key_masked(
+        self, tmp_path, monkeypatch,
+    ):
+        from cli.setup.steps import llm as llm_step
+        from cli.setup.helpers import Option as _Option
+
+        state = WizardState.load(tmp_path / "feral")
+
+        # Pretend vault_keys reports an active OpenAI key.
+        from security import vault_keys as vk_mod
+
+        class _FakeEntry:
+            provider_id = "openai"
+            label = "prod"
+            is_active = True
+            fingerprint = "sk-1…abcd(deadbeef)"
+            created_at = 0.0
+            last_used_at = None
+            last_probe_at = None
+            last_probe_ok = True
+
+        monkeypatch.setattr(
+            vk_mod, "list_provider_keys", lambda pid, **kw: [_FakeEntry()],
+        )
+        monkeypatch.setattr(
+            vk_mod, "get_active_provider_key",
+            lambda pid, **kw: "sk-1234567890abcd",
+        )
+
+        # Stub the catalog so we don't hit live providers.
+        fake_catalog = MagicMock()
+        fake_desc = MagicMock()
+        fake_desc.requires_api_key = True
+        fake_desc.credential_env_var = "OPENAI_API_KEY"
+        fake_desc.display_name = "OpenAI"
+        fake_desc.default_base_url = ""
+        fake_desc.supports_local = False
+        fake_desc.provider_id = "openai"
+        fake_desc.aliases = ()
+        fake_desc.notes = ""
+        fake_catalog.get_descriptor.return_value = fake_desc
+        fake_catalog.list_providers.return_value = [fake_desc]
+
+        async def _probe(*a, **kw):
+            from providers.catalog import ProviderStatus
+
+            return ProviderStatus(
+                provider_id="openai", display_name="OpenAI",
+                supports_local=False, requires_api_key=True,
+                configured=True, reachable=True,
+            )
+
+        fake_catalog.probe = AsyncMock(side_effect=_probe)
+        fake_catalog.status_for = MagicMock(return_value=_FakeStatus())
+
+        async def _list_models(*a, **kw):
+            from providers.catalog import CachedModelList
+            return CachedModelList(models=["gpt-4o-mini"], last_refresh=0.0, source="cache")
+
+        fake_catalog.list_models = AsyncMock(side_effect=_list_models)
+        monkeypatch.setattr(llm_step, "get_shared_catalog", lambda: fake_catalog)
+        setattr(state, "_catalog", fake_catalog)
+
+        # ask_choice: first pick provider, then pick "Keep current".
+        picks = iter([
+            _Option(id="openai", label="OpenAI"),
+            _Option(id="keep", label="Keep current key"),
+        ])
+        monkeypatch.setattr(llm_step, "ask_choice", lambda *a, **kw: next(picks))
+
+        # ask_text must NEVER be called when the operator keeps the
+        # current key — that was the contradictory "enter a new key"
+        # prompt the operator hit.
+        def _no_ask_text(*a, **kw):
+            raise AssertionError(
+                f"ask_text must NOT be called when a key already exists; got {a!r} {kw!r}"
+            )
+        monkeypatch.setattr(llm_step, "ask_text", _no_ask_text)
+
+        # confirm — only used by the local-provider helpers we won't
+        # hit on this path. Trip if it fires.
+        def _no_confirm(*a, **kw):
+            raise AssertionError("confirm must NOT prompt 'use existing key?'")
+        monkeypatch.setattr(llm_step, "confirm", _no_confirm)
+
+        await llm_step.run_provider_step(state)
+
+        assert state.get_setting("llm", "provider") == "openai"
+        # The key is now in state.credentials + env so downstream
+        # steps see it without a second vault round-trip.
+        assert state.credentials.get("OPENAI_API_KEY") == "sk-1234567890abcd"
+
+    @pytest.mark.asyncio
+    async def test_setup_key_step_prompts_when_absent(
+        self, tmp_path, monkeypatch,
+    ):
+        """No key anywhere → original free-text entry path runs."""
+        from cli.setup.steps import llm as llm_step
+        from cli.setup.helpers import Option as _Option
+
+        state = WizardState.load(tmp_path / "feral")
+
+        from security import vault_keys as vk_mod
+
+        monkeypatch.setattr(vk_mod, "list_provider_keys", lambda pid, **kw: [])
+        monkeypatch.setattr(vk_mod, "get_active_provider_key", lambda pid, **kw: None)
+        monkeypatch.setattr(vk_mod, "add_provider_key", lambda *a, **kw: None)
+
+        # Ensure no env var leaks into the test.
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        fake_catalog = MagicMock()
+        fake_desc = MagicMock()
+        fake_desc.requires_api_key = True
+        fake_desc.credential_env_var = "OPENAI_API_KEY"
+        fake_desc.display_name = "OpenAI"
+        fake_desc.default_base_url = ""
+        fake_desc.supports_local = False
+        fake_desc.provider_id = "openai"
+        fake_desc.aliases = ()
+        fake_desc.notes = ""
+        fake_catalog.get_descriptor.return_value = fake_desc
+        fake_catalog.list_providers.return_value = [fake_desc]
+
+        async def _probe(*a, **kw):
+            from providers.catalog import ProviderStatus
+            return ProviderStatus(
+                provider_id="openai", display_name="OpenAI",
+                supports_local=False, requires_api_key=True,
+                configured=False, reachable=False,
+            )
+
+        fake_catalog.probe = AsyncMock(side_effect=_probe)
+        fake_catalog.status_for = MagicMock(return_value=_FakeStatus())
+
+        async def _list_models(*a, **kw):
+            from providers.catalog import CachedModelList
+            return CachedModelList(models=[], last_refresh=0.0, source="cache")
+        fake_catalog.list_models = AsyncMock(side_effect=_list_models)
+        monkeypatch.setattr(llm_step, "get_shared_catalog", lambda: fake_catalog)
+        setattr(state, "_catalog", fake_catalog)
+
+        picks = iter([_Option(id="openai", label="OpenAI")])
+        monkeypatch.setattr(llm_step, "ask_choice", lambda *a, **kw: next(picks))
+
+        prompts_seen: list[str] = []
+
+        def fake_ask_text(prompt, **kw):
+            prompts_seen.append(prompt)
+            return "sk-fresh-1234567890"
+
+        monkeypatch.setattr(llm_step, "ask_text", fake_ask_text)
+
+        await llm_step.run_provider_step(state)
+
+        # ask_text must have been called exactly once — the free-text
+        # entry for the missing key. No keep/replace menu was shown.
+        assert any("OpenAI API key" in p for p in prompts_seen)
+        assert state.credentials["OPENAI_API_KEY"] == "sk-fresh-1234567890"
+
+
 class TestEndToEndState:
     def test_after_wizard_run_all_keys_round_trip(self, tmp_path):
         """audit-r14 / lane-07 W7 — call ``mark_complete()`` to model

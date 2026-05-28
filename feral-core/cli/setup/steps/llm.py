@@ -27,6 +27,7 @@ from ..helpers import (
     ask_choice,
     ask_text,
     confirm,
+    existing_provider_key,
     get_console,
     render_provider_table,
     _RICH_AVAILABLE,
@@ -74,30 +75,24 @@ async def run_provider_step(state: WizardState) -> None:
     if desc.default_base_url and not state.get_setting("llm", "base_url"):
         state.set_setting("llm", "base_url", desc.default_base_url)
 
-    # Cloud providers: capture API key unless one is already present
-    # (either in env or in the vault-backed credentials.json we loaded).
+    # Cloud providers: detect any existing key (labeled vault entry,
+    # legacy default-namespace entry, or process env var) so we can
+    # show "key already configured — keep / replace / add another /
+    # remove" instead of the misleading "needs a key" prompt the
+    # operator hit when a labeled key was already stored. The
+    # detection consults ``security.vault_keys`` first (post-v2026.5.42
+    # source of truth) and falls back to the legacy default-namespace
+    # for installs that pre-date the labeled-key migration.
     if desc.requires_api_key:
         env_var = desc.credential_env_var
-        existing = (
-            os.environ.get(env_var, "")
-            or state.credentials.get(env_var, "")
+        await _configure_provider_key(
+            state=state,
+            catalog=catalog,
+            provider_id=chosen.id,
+            env_var=env_var,
+            display_name=desc.display_name,
+            console=console,
         )
-        if existing:
-            keep = confirm(
-                f"  Use existing {env_var} from your environment / credentials?",
-                default=True,
-            )
-            if not keep:
-                existing = ""
-        if not existing:
-            key = ask_text(
-                f"  Enter your {desc.display_name} API key",
-                allow_empty=False,
-                secret=True,
-            )
-            state.set_credential(env_var, key)
-            os.environ[env_var] = key
-            catalog.configure(chosen.id, api_key=key)
 
         # Re-probe to flip the status from needs_key → ready.
         updated = await catalog.probe(chosen.id)
@@ -256,6 +251,194 @@ async def run_model_step(state: WizardState) -> None:
 
 
 # ----------------------------------------------------------------------
+# Provider-key UX (Bug 2 — "key already exists" detection)
+# ----------------------------------------------------------------------
+
+
+async def _configure_provider_key(
+    *,
+    state: WizardState,
+    catalog,
+    provider_id: str,
+    env_var: str,
+    display_name: str,
+    console,
+) -> None:
+    """Drive the "you already have a key / enter a new one" UX.
+
+    When a key is already stored anywhere — labeled-key vault, the
+    legacy default-namespace vault entry, or the process env — we
+    show the masked value plus an action menu (Keep / Replace / Add
+    another labeled key / Remove). We only fall through to the
+    free-text "enter your API key" prompt when no key is found OR
+    the operator explicitly chose Replace / Add.
+
+    The messaging never says "needs a key" when one is present;
+    that was the contradiction the operator hit (table said "needs
+    API key", subsequent prompt asked "keep existing or add new?").
+    """
+    import os as _os
+    from security.vault_keys import mask_key as _mask_key
+
+    secret, source, labels = existing_provider_key(provider_id, env_var, state)
+
+    if not secret:
+        # No key anywhere → original free-text prompt path.
+        key = ask_text(
+            f"  Enter your {display_name} API key",
+            allow_empty=False,
+            secret=True,
+        )
+        _persist_new_key(
+            state=state, catalog=catalog,
+            provider_id=provider_id, env_var=env_var, key=key,
+        )
+        return
+
+    # We have a key. Surface the masked value + source so the
+    # operator sees what FERAL already has on file.
+    masked = _mask_key(secret)
+    if _RICH_AVAILABLE:
+        source_label = {
+            "vault_keys": "labeled key",
+            "vault_legacy": "vault (default)",
+            "env": f"env var {env_var}",
+        }.get(source, source or "stored")
+        if labels:
+            active_label = next((e.label for e in labels if e.is_active), labels[0].label)
+            console.print(
+                f"  [green]✓[/] {display_name} key already configured: "
+                f"[bold]{masked}[/]  [dim]· label: {active_label} · source: {source_label}[/]"
+            )
+        else:
+            console.print(
+                f"  [green]✓[/] {display_name} key already configured: "
+                f"[bold]{masked}[/]  [dim]· source: {source_label}[/]"
+            )
+    else:
+        console.print(
+            f"  ✓ {display_name} key already configured: {masked}  (source: {source})"
+        )
+
+    action_opts = [
+        Option(id="keep", label="Keep current key", status="ready"),
+        Option(id="replace", label="Replace with a new key"),
+        Option(id="add", label="Add another labeled key (prod/dev/…)"),
+    ]
+    if labels:
+        action_opts.append(Option(id="remove", label="Remove an existing labeled key"))
+
+    chosen_action = ask_choice(
+        "  What would you like to do?",
+        action_opts,
+        default="keep",
+    )
+
+    if chosen_action.id == "keep":
+        # Ensure env var + state.credentials are populated so downstream
+        # steps (audio, voice_preflight) can read the key without a
+        # second vault round-trip.
+        if env_var:
+            _os.environ[env_var] = secret
+            state.set_credential(env_var, secret)
+        try:
+            catalog.configure(provider_id, api_key=secret)
+        except Exception:
+            pass
+        return
+
+    if chosen_action.id == "remove":
+        await _remove_labeled_key(provider_id=provider_id, labels=labels, console=console)
+        # Recurse — show the (now-updated) menu so the operator can
+        # add a fresh key or pick a different stored label.
+        await _configure_provider_key(
+            state=state, catalog=catalog, provider_id=provider_id,
+            env_var=env_var, display_name=display_name, console=console,
+        )
+        return
+
+    # replace OR add → free-text prompt for a fresh key.
+    label = "default" if chosen_action.id == "replace" else ""
+    if chosen_action.id == "add":
+        label = ask_text(
+            "  Label for the new key (e.g. prod, dev, team-a)",
+            default="prod",
+            allow_empty=False,
+        )
+    new_key = ask_text(
+        f"  Enter your {display_name} API key",
+        allow_empty=False,
+        secret=True,
+    )
+    _persist_new_key(
+        state=state, catalog=catalog,
+        provider_id=provider_id, env_var=env_var,
+        key=new_key, label=label or "default",
+        set_active=(chosen_action.id == "replace"),
+    )
+
+
+def _persist_new_key(
+    *,
+    state: WizardState,
+    catalog,
+    provider_id: str,
+    env_var: str,
+    key: str,
+    label: str = "default",
+    set_active: bool = True,
+) -> None:
+    """Write a freshly-typed key to the labeled-key vault + legacy
+    surfaces so every code path (chat, voice, REST) can resolve it."""
+    import os as _os
+
+    try:
+        from security import vault_keys
+
+        vault_keys.add_provider_key(
+            provider_id, label, key, set_active=set_active,
+        )
+    except Exception:
+        # The labeled-key write is best-effort; the legacy default
+        # vault entry below is what unbreaks the wizard on systems
+        # where the labeled-key namespace can't be written.
+        pass
+    if env_var:
+        state.set_credential(env_var, key)
+        _os.environ[env_var] = key
+    try:
+        catalog.configure(provider_id, api_key=key)
+    except Exception:
+        pass
+
+
+async def _remove_labeled_key(*, provider_id: str, labels, console) -> None:
+    """Render a picker over the operator's labeled keys + delete the
+    chosen one. No-op when the labeled-key namespace is empty."""
+    if not labels:
+        console.print("  (no labeled keys to remove)")
+        return
+    opts = [
+        Option(
+            id=e.label,
+            label=f"{e.label}  · {e.fingerprint}" + (" (active)" if e.is_active else ""),
+        )
+        for e in labels
+    ]
+    opts.append(Option(id="__cancel__", label="(cancel)"))
+    pick = ask_choice("  Which labeled key should be removed?", opts, default=labels[0].label)
+    if pick.id == "__cancel__":
+        return
+    try:
+        from security import vault_keys
+
+        vault_keys.remove_provider_key(provider_id, pick.id)
+        console.print(f"  Removed {provider_id}:{pick.id}")
+    except Exception as exc:
+        console.print(f"  [yellow]Could not remove key:[/] {exc}")
+
+
+# ----------------------------------------------------------------------
 # Internals
 # ----------------------------------------------------------------------
 
@@ -286,6 +469,22 @@ def _build_options(
     options: list[Option] = []
     for desc in catalog.list_providers():
         status = statuses.get(desc.provider_id)
+        # Bug 2 — consult the labeled-key vault before deciding "needs
+        # API key". The pre-fix wizard only looked at the legacy
+        # default-namespace ``status.configured`` bit, so an install
+        # that stored its key via ``feral key add --label prod``
+        # showed "needs API key" in the picker table. Reading
+        # ``vault_keys.get_active_provider_key`` here mirrors what the
+        # LLM hot path resolves at call time (Cross-cut #1, v2026.5.42).
+        labeled_present = False
+        if desc.requires_api_key and not desc.supports_local:
+            try:
+                from security import vault_keys
+
+                if vault_keys.get_active_provider_key(desc.provider_id):
+                    labeled_present = True
+            except Exception:
+                labeled_present = False
         if desc.supports_local:
             if status and status.reachable:
                 ui_status = STATUS_READY
@@ -293,6 +492,8 @@ def _build_options(
                 ui_status = STATUS_UNREACHABLE
         else:
             if status and status.configured and status.reachable:
+                ui_status = STATUS_READY
+            elif labeled_present:
                 ui_status = STATUS_READY
             elif desc.requires_api_key and not (status and status.configured):
                 ui_status = STATUS_NEEDS_KEY

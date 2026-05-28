@@ -64,6 +64,30 @@ class TestBrandChrome:
 # ---------------------------------------------------------------------------
 
 
+class TestMaskKey:
+    """``security.vault_keys.mask_key`` is the shared "sk-…XYZW"
+    display helper the wizard's "key already exists" UX uses to
+    confirm the stored value without leaking it. Pin the contract."""
+
+    def test_mask_key_short_secret(self):
+        from security.vault_keys import mask_key
+
+        assert mask_key("abc") == "***"
+        assert mask_key("") == ""
+        assert mask_key("   ") == ""
+
+    def test_mask_key_normal_secret(self):
+        from security.vault_keys import mask_key
+
+        # 3-char head + 4-char tail.
+        assert mask_key("sk-test-1234567890") == "sk-…7890"
+
+    def test_mask_key_strips_whitespace(self):
+        from security.vault_keys import mask_key
+
+        assert mask_key("  sk-pasted-with-spaces-7890  ") == "sk-…7890"
+
+
 class TestSelectFallback:
     def test_numeric_index(self, monkeypatch):
         monkeypatch.setattr(ui_kit, "_INQUIRER_AVAILABLE", False)

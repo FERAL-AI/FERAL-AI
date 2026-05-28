@@ -23,11 +23,30 @@ from ..helpers import (
     SkipStep,
     Option,
     ask_choice,
+    ask_text,
     confirm,
+    existing_provider_key,
     get_console,
     _RICH_AVAILABLE,
 )
 from ..state import WizardState
+
+
+# Map each voice provider id to the upstream vendor's canonical
+# provider id (the one ``security.vault_keys`` knows) + env var. Used
+# by :func:`_maybe_reuse_provider_key` to detect "OpenAI key already
+# configured for chat — reuse for realtime voice?" so the wizard
+# doesn't re-prompt for the same key on the voice step.
+_VOICE_KEY_SOURCES = {
+    "openai_realtime": ("openai", "OPENAI_API_KEY"),
+    "openai_tts": ("openai", "OPENAI_API_KEY"),
+    "openai_whisper": ("openai", "OPENAI_API_KEY"),
+    "gemini_live": ("gemini", "GEMINI_API_KEY"),
+    "deepgram": ("deepgram", "DEEPGRAM_API_KEY"),
+    "elevenlabs": ("elevenlabs", "ELEVENLABS_API_KEY"),
+    "cartesia": ("cartesia", "CARTESIA_API_KEY"),
+    "groq_whisper": ("groq", "GROQ_API_KEY"),
+}
 
 
 async def run(state: WizardState) -> None:
@@ -103,6 +122,17 @@ async def run(state: WizardState) -> None:
         )
         if chosen.id != "__none__":
             state.set_setting("audio", "realtime_primary", chosen.id)
+            # Bug 4 — "one key, many surfaces". If the operator
+            # already configured an upstream vendor's key (e.g.
+            # OpenAI for chat) and the realtime provider belongs to
+            # the same vendor, reuse it instead of re-prompting. The
+            # vault hot-path resolver in
+            # ``security.vault_keys.get_active_key`` falls back to
+            # env + legacy default-namespace, so writing the key
+            # through ``state.credentials`` here ensures every voice
+            # surface (router, probe, realtime proxy) sees the same
+            # secret without an extra round-trip.
+            _maybe_reuse_provider_key(state, chosen.id, console, prompt_if_missing=True)
             # Lane U2 — after the operator picks a realtime provider,
             # offer the catalogue's model list (when present) so they
             # don't have to type the id by hand. Entries without a
@@ -151,6 +181,7 @@ async def run(state: WizardState) -> None:
         )
         if chosen.id != "__none__":
             state.set_setting("audio", "chained_stt_provider", chosen.id)
+            _maybe_reuse_provider_key(state, chosen.id, console, prompt_if_missing=False)
 
     # ── Pick chained TTS (optional) ──────────────────────────────────
     if tts_entries:
@@ -170,8 +201,110 @@ async def run(state: WizardState) -> None:
         )
         if chosen.id != "__none__":
             state.set_setting("audio", "chained_tts_provider", chosen.id)
+            _maybe_reuse_provider_key(state, chosen.id, console, prompt_if_missing=False)
 
     state.set_setting("audio", "configured_via_wizard", True)
+
+
+def _maybe_reuse_provider_key(
+    state: WizardState,
+    voice_provider_id: str,
+    console,
+    *,
+    prompt_if_missing: bool = False,
+) -> None:
+    """Bug 4 — share one key across chat + realtime voice + future video.
+
+    When the operator already configured a vendor's key in an earlier
+    step (chat / LLM) and now picks a voice provider from the same
+    vendor, reuse the stored key instead of re-prompting. We print a
+    one-line confirmation so the operator sees that "one key, many
+    surfaces" actually happened.
+
+    When the voice provider belongs to a DIFFERENT vendor (e.g.
+    Gemini Live picked but only OpenAI is configured), we render a
+    short inline prompt for the missing key — that way the operator
+    can finish voice setup without quitting the wizard to run
+    ``feral key add`` separately.
+
+    The key always lands in ``state.credentials`` + the process env
+    var + (best-effort) the labeled-key vault so the same value is
+    visible to ``security.probe`` and to the voice router's
+    boot-time hydration path.
+    """
+    mapping = _VOICE_KEY_SOURCES.get(voice_provider_id)
+    if not mapping:
+        return
+    vendor_id, env_var = mapping
+
+    secret, source, _labels = existing_provider_key(vendor_id, env_var, state)
+    if secret:
+        from security.vault_keys import mask_key as _mask_key
+
+        masked = _mask_key(secret)
+        if _RICH_AVAILABLE:
+            console.print(
+                f"  [green]✓[/] Reusing existing {vendor_id} key "
+                f"[bold]{masked}[/] for {voice_provider_id} "
+                f"[dim](source: {source})[/]"
+            )
+        else:
+            console.print(
+                f"  ✓ Reusing existing {vendor_id} key {masked} for {voice_provider_id}"
+            )
+        # Make sure ``credentials.json`` + env carry the value so the
+        # voice router + probe surface see it on the next boot.
+        import os as _os
+
+        if env_var:
+            state.set_credential(env_var, secret)
+            _os.environ[env_var] = secret
+        return
+
+    # No key for this vendor anywhere → realtime is the only surface
+    # that prompts inline (the chained STT/TTS paths just note the
+    # missing key so the operator can fix it with ``feral key add``
+    # later without blocking the wizard).
+    if not prompt_if_missing:
+        if _RICH_AVAILABLE:
+            console.print(
+                f"  [yellow]Note:[/] no {vendor_id} key found — "
+                f"{voice_provider_id} won't work until one is added "
+                f"(`feral key add --provider {vendor_id}`)."
+            )
+        else:
+            console.print(
+                f"  Note: no {vendor_id} key found — {voice_provider_id} won't work "
+                f"until you run `feral key add --provider {vendor_id}`."
+            )
+        return
+
+    if _RICH_AVAILABLE:
+        console.print(
+            f"  [yellow]No {vendor_id} key found yet[/] — "
+            f"voice provider {voice_provider_id} needs one to work."
+        )
+    else:
+        console.print(
+            f"  No {vendor_id} key found yet — {voice_provider_id} needs one."
+        )
+    if not confirm(f"  Enter a {vendor_id} API key now?", default=True):
+        return
+    key = ask_text(
+        f"  Enter your {vendor_id} API key",
+        allow_empty=False,
+        secret=True,
+    )
+    import os as _os
+
+    state.set_credential(env_var, key)
+    _os.environ[env_var] = key
+    try:
+        from security import vault_keys
+
+        vault_keys.add_provider_key(vendor_id, "default", key, set_active=True)
+    except Exception:
+        pass
 
 
 async def _probe_all(probe_fn, provider_ids):

@@ -147,6 +147,164 @@ def test_voice_preflight_asks_model_after_openai_realtime(
 
 
 # ----------------------------------------------------------------------
+# Bug 3 — realtime model picker (no ask_text typed prompt)
+# Bug 4 — shared key reuse between chat + realtime voice
+# ----------------------------------------------------------------------
+
+
+def test_voice_step_uses_picker_not_ask_text_for_realtime_model(
+    feral_home, stub_voice_probes, monkeypatch,
+):
+    """The realtime-model selection must always use ``ask_choice``
+    (picker) when the catalogue carries a ``models`` list — never the
+    typed ``ask_text`` fallback. Operator complaint: 'voice setup
+    asks me to type the model name.'"""
+    from cli.setup.steps import voice_preflight as vp
+    from cli.setup.helpers import Option
+
+    monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+
+    pick_seq = iter([
+        Option(id="openai_realtime", label="OpenAI Realtime"),
+        Option(id="gpt-realtime", label="gpt-realtime"),  # model picker
+        Option(id="__none__", label="(skip STT)"),
+        Option(id="__none__", label="(skip TTS)"),
+    ])
+
+    def _ask(_prompt, _opts, default=None):
+        return next(pick_seq)
+
+    monkeypatch.setattr(vp, "ask_choice", _ask)
+
+    # Loud assertion: if any voice-preflight path falls through to
+    # ask_text for a model id, fail the test.
+    def _no_ask_text(*a, **kw):
+        raise AssertionError(
+            f"ask_text must NOT be used to pick a realtime model; got {a!r} {kw!r}"
+        )
+    monkeypatch.setattr(vp, "ask_text", _no_ask_text)
+
+    from cli.setup.state import WizardState
+
+    state = WizardState.load(feral_home)
+    asyncio.run(vp.run(state))
+
+    assert state.get_setting("audio", "realtime_model") == "gpt-realtime"
+
+
+def test_voice_step_reuses_existing_openai_key(
+    feral_home, stub_voice_probes, monkeypatch,
+):
+    """Bug 4 — when ``security.vault_keys.get_active_provider_key('openai')``
+    returns a key, the voice preflight step picks up the OpenAI
+    realtime provider WITHOUT re-prompting for the key. The masked
+    "Reusing existing openai key …" hint must appear in the output.
+    """
+    from cli.setup.steps import voice_preflight as vp
+    from cli.setup.helpers import Option
+
+    monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+
+    pick_seq = iter([
+        Option(id="openai_realtime", label="OpenAI Realtime"),
+        Option(id="gpt-realtime", label="gpt-realtime"),
+        Option(id="__none__", label="(skip STT)"),
+        Option(id="__none__", label="(skip TTS)"),
+    ])
+    monkeypatch.setattr(vp, "ask_choice", lambda *a, **kw: next(pick_seq))
+
+    # Stub vault_keys so the test isn't dependent on a real vault.
+    from security import vault_keys as vk_mod
+
+    monkeypatch.setattr(vk_mod, "get_active_provider_key", lambda pid, **kw: "sk-chat-1234567890")
+    monkeypatch.setattr(vk_mod, "list_provider_keys", lambda pid, **kw: [])
+    monkeypatch.setattr(vk_mod, "add_provider_key", lambda *a, **kw: None)
+
+    def _no_ask_text(*a, **kw):
+        raise AssertionError(
+            f"ask_text must NOT prompt for the OpenAI key when one already exists"
+            f" — got {a!r} {kw!r}"
+        )
+
+    monkeypatch.setattr(vp, "ask_text", _no_ask_text)
+
+    from cli.setup.state import WizardState
+
+    state = WizardState.load(feral_home)
+    asyncio.run(vp.run(state))
+
+    assert state.get_setting("audio", "realtime_primary") == "openai_realtime"
+    # The reuse path writes the key through to ``state.credentials``
+    # so the voice router boot hydration sees it on the env var path.
+    assert state.credentials.get("OPENAI_API_KEY") == "sk-chat-1234567890"
+
+
+def test_voice_step_prompts_key_for_different_vendor(
+    feral_home, stub_voice_probes, monkeypatch,
+):
+    """Bug 4 — only OpenAI is configured but the operator picks
+    Gemini Live; the wizard must prompt for the missing
+    ``GEMINI_API_KEY`` instead of silently advancing to a broken
+    realtime session."""
+    from cli.setup.steps import voice_preflight as vp
+    from cli.setup.helpers import Option
+
+    monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+
+    pick_seq = iter([
+        Option(id="gemini_live", label="Gemini Live"),
+        # No model picker for gemini_live — the catalogue doesn't
+        # advertise a ``models[]`` list, so the wizard skips that
+        # branch and lands on STT next.
+        Option(id="__none__", label="(skip STT)"),
+        Option(id="__none__", label="(skip TTS)"),
+    ])
+    monkeypatch.setattr(vp, "ask_choice", lambda *a, **kw: next(pick_seq))
+
+    from security import vault_keys as vk_mod
+
+    # Only the OpenAI key is configured. Gemini lookups return None.
+    def _active(pid, **kw):
+        return "sk-openai-only" if pid == "openai" else None
+
+    monkeypatch.setattr(vk_mod, "get_active_provider_key", _active)
+    monkeypatch.setattr(vk_mod, "list_provider_keys", lambda pid, **kw: [])
+    added: list[tuple] = []
+    monkeypatch.setattr(
+        vk_mod, "add_provider_key",
+        lambda pid, label, key, **kw: added.append((pid, label, key)),
+    )
+
+    # Make sure no Gemini env var is set so the prompt path triggers.
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    # ask_text returns a fake Gemini key when prompted.
+    asked: list[str] = []
+
+    def fake_ask_text(prompt, **kw):
+        asked.append(prompt)
+        return "gem-fresh-9876543210"
+
+    monkeypatch.setattr(vp, "ask_text", fake_ask_text)
+
+    from cli.setup.state import WizardState
+
+    state = WizardState.load(feral_home)
+    asyncio.run(vp.run(state))
+
+    # The wizard MUST have asked for a Gemini API key.
+    assert any("gemini" in p.lower() for p in asked), (
+        f"expected a Gemini key prompt; got {asked!r}"
+    )
+    assert state.credentials.get("GEMINI_API_KEY") == "gem-fresh-9876543210"
+    # The labeled-key vault was written too so the next ``feral
+    # voice`` invocation can find the key without re-running the
+    # wizard.
+    assert ("gemini", "default", "gem-fresh-9876543210") in added
+
+
+# ----------------------------------------------------------------------
 # tcc_preflight
 # ----------------------------------------------------------------------
 

@@ -114,6 +114,7 @@ def resolve_option(text: str, options: Sequence[Option]) -> Optional[Option]:
 
 _BACK_SENTINEL = "__feral_back__"
 _QUIT_SENTINEL = "__feral_quit__"
+_MENU_SENTINEL = "__feral_menu__"
 
 
 def ask_choice(
@@ -143,6 +144,11 @@ def ask_choice(
             label = f"{opt.label}{badge}".strip()
             choices.append({"name": label, "value": opt.id})
         # Pseudo-choices for navigation parity with the legacy prompt.
+        # The "↺ jump to a previous step…" affordance lets the operator
+        # leave any step and re-enter the provider/key step (or any
+        # earlier step) without re-walking the whole wizard. The state
+        # machine catches :class:`JumpToStep` and shows the step picker.
+        choices.append({"name": "↺ jump to a previous step…", "value": _MENU_SENTINEL})
         choices.append({"name": "← back", "value": _BACK_SENTINEL})
         choices.append({"name": "✕ quit setup", "value": _QUIT_SENTINEL})
         try:
@@ -164,6 +170,8 @@ def ask_choice(
             raise BackNavigation()
         if picked == _QUIT_SENTINEL:
             raise QuitNavigation()
+        if picked == _MENU_SENTINEL:
+            raise JumpToStep()
         match = next((o for o in options if o.id == picked), None)
         if match is not None:
             return match
@@ -183,6 +191,8 @@ def ask_choice(
             raise BackNavigation()
         if raw.lower() in ("quit", "q", "exit"):
             raise QuitNavigation()
+        if raw.lower() in ("menu", "m", ":menu", ":back"):
+            raise JumpToStep()
 
         hit = resolve_option(raw, options)
         if hit is not None:
@@ -232,6 +242,8 @@ def ask_text(
             raise BackNavigation()
         if raw.lower() in ("quit", "q", "exit"):
             raise QuitNavigation()
+        if raw.lower() in ("menu", ":menu", ":back"):
+            raise JumpToStep()
         if raw == "" and not allow_empty:
             console.print("[yellow]This field can't be empty.[/]" if _RICH_AVAILABLE else "This field can't be empty.")
             continue
@@ -261,6 +273,8 @@ def confirm(prompt: str, *, default: bool = False, console=None) -> bool:
             raise BackNavigation()
         if raw.lower() in ("quit", "q", "exit"):
             raise QuitNavigation()
+        if raw.lower() in ("menu", ":menu", ":back"):
+            raise JumpToStep()
         if raw.lower() in ("y", "yes", "true", "1"):
             return True
         if raw.lower() in ("n", "no", "false", "0"):
@@ -299,6 +313,58 @@ def _option_badge(opt: Option) -> str:
 # ----------------------------------------------------------------------
 # Table rendering
 # ----------------------------------------------------------------------
+
+
+def existing_provider_key(provider_id: str, env_var: str, state) -> tuple[str, str, list]:
+    """Resolve "is a key already stored for *provider_id*?" across the
+    three credential surfaces the wizard cares about.
+
+    Returns a ``(secret, source, labels)`` tuple:
+
+    * ``secret``: the raw API key (so callers can probe / mask it).
+      Empty when no key is stored anywhere.
+    * ``source``: one of ``"vault_keys"`` (labeled-key system),
+      ``"vault_legacy"`` (default-namespace ``OPENAI_API_KEY`` style
+      entry that the wizard previously wrote), ``"env"`` (process env
+      var), or ``""`` (no key).
+    * ``labels``: list of :class:`ProviderKeyEntry` for every labeled
+      key the operator has stored under this provider (empty when the
+      labeled-key system has nothing for *provider_id*).
+
+    Used by the LLM provider step + the voice preflight step to
+    detect "OpenAI key already configured for chat — use it for
+    realtime voice too?" and to render "key already exists" instead
+    of "needs a key" when the operator opens an existing install.
+    """
+    secret = ""
+    source = ""
+    labels: list = []
+    try:
+        from security import vault_keys
+
+        labels = list(vault_keys.list_provider_keys(provider_id))
+        active = vault_keys.get_active_provider_key(provider_id)
+        if active:
+            secret = active
+            source = "vault_keys"
+    except Exception:
+        labels = []
+
+    if not secret and state is not None and env_var:
+        legacy = state.credentials.get(env_var, "") if hasattr(state, "credentials") else ""
+        if legacy:
+            secret = legacy
+            source = "vault_legacy"
+
+    if not secret and env_var:
+        import os as _os
+
+        env_val = _os.environ.get(env_var, "")
+        if env_val:
+            secret = env_val
+            source = "env"
+
+    return secret, source, labels
 
 
 def render_provider_table(
@@ -359,3 +425,25 @@ class QuitNavigation(Exception):
 
 class SkipStep(Exception):
     """A step raises this to tell the state machine to move on without persisting data."""
+
+
+class JumpToStep(Exception):
+    """Raised when the operator picks "↺ jump to a previous step…" (or
+    types ``menu`` at any prompt) to request a non-linear hop back to
+    an earlier step.
+
+    The state machine catches this, shows a step picker, and sets the
+    current step index to whatever the operator picked. Already-entered
+    settings / credentials are preserved (the state object is the
+    source of truth, never wiped on a jump); the operator can simply
+    re-walk the picked step to overwrite a single answer.
+
+    Carries an optional ``target`` so future call sites (e.g. a "jump
+    straight to the key step" hot-button) can short-circuit the
+    picker. When ``target`` is empty the state machine shows the full
+    step list.
+    """
+
+    def __init__(self, target: str = ""):
+        super().__init__(target)
+        self.target = target
