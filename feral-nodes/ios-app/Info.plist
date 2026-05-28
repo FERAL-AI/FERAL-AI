@@ -16,12 +16,36 @@
     <string>$(PRODUCT_NAME)</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!--
+        CFBundleShortVersionString tracks the FERAL CalVer source of
+        truth at feral-core/pyproject.toml [project].version.
+        scripts/sync_versions.py rewrites this literal on every
+        release bump; do not edit by hand. The matching About row
+        in SettingsView reads this key at runtime so the operator
+        sees the same version the brain advertises.
+    -->
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>2026.5.44</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
+    <key>UIBackgroundModes</key>
+    <array>
+        <!--
+            audio: keep voice capture / playback alive when the
+            screen locks during a voice turn.
+            bluetooth-central: BLEPeripheralScanner continues to
+            receive `didDiscoverPeripheral` callbacks for the
+            subset of devices iOS allows in background (filtered
+            by service UUID per Apple's BLE background rules).
+            Generic-discovery scans run only when the app is
+            foreground; this background mode keeps the connection
+            to FERAL glasses alive when the user pockets the phone.
+        -->
+        <string>audio</string>
+        <string>bluetooth-central</string>
+    </array>
     <key>UILaunchStoryboardName</key>
     <string>LaunchScreen</string>
     <key>UISupportedInterfaceOrientations</key>
@@ -39,7 +63,7 @@
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
     <string>FERAL Node shares location with the Brain for continuous context-aware assistance.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>FERAL Node connects to FERAL Glasses via Bluetooth for sensor data.</string>
+    <string>FERAL Node uses Bluetooth to connect to FERAL Glasses for sensor data and to discover nearby peripherals (AirPods, Apple Watch, heart-rate monitors, scales, etc.) so the Brain can answer "what's near me?" queries.</string>
     <key>NSHealthShareUsageDescription</key>
     <string>FERAL Node reads health data to forward to the Brain for health monitoring.</string>
     <!--

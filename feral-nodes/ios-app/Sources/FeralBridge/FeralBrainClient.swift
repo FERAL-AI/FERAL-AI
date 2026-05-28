@@ -44,8 +44,20 @@ enum BrainConnectionState: String {
     case reconnecting
 }
 
-// MARK: - Sensor Types (matching W300SensorManager)
-
+// MARK: - Sensor Types (matching W300SensorManager + HealthKit/Location bridges)
+//
+// HealthKit (heart_rate, spo2, steps, sleep, temperature) and
+// FeralLocationManager (location) used to go through a separate
+// `sendSensorData(type:String, data:)` overload that emitted the
+// payload field as ``sensor_type``. The brain's
+// `SensorTelemetryPayload` only declares ``sensor`` (with a
+// transitional `AliasChoices("sensor", "sensor_type")` Pydantic
+// alias for legacy binaries). v2026.5.45 unifies the iOS side on
+// the canonical key, which requires this enum to cover every
+// sensor name HealthKit + Location emit so callers can move off
+// the string overload entirely. See
+// ``AUDIT-r14/round3/findings/lane8-daemon-shell-and-healthkit.md``
+// §B for the migration story.
 enum FeralSensorType: String {
     case heartRate = "heart_rate"
     case spo2 = "spo2"
@@ -53,6 +65,8 @@ enum FeralSensorType: String {
     case uv = "uv"
     case steps = "steps"
     case gesture = "gesture"
+    case sleep = "sleep"
+    case location = "location"
 }
 
 // MARK: - Location Manager
@@ -149,9 +163,21 @@ class FeralBrainClient: NSObject {
     
     private let host: String
     private let port: Int
-    private let nodeId: String
+    /// Stable HUP node id this client advertises in `register`.
+    /// Adapters that emit envelopes keyed by node id (e.g.
+    /// `CameraGlassesAdapter` using the iPhone's nodeId as the
+    /// glasses_frame.device_id when no real W610 is wired) read
+    /// this rather than reconstructing the same string.
+    let nodeId: String
     private var apiKey: String = ""
     var useTLS: Bool = false
+
+    /// Test seam: when set, ``sendJSON`` invokes this closure with
+    /// the raw JSON string instead of (or in addition to) writing to
+    /// the WebSocket. Production code leaves it nil. The
+    /// FeralNodeTests target uses it to assert wire shapes without
+    /// spinning up a brain.
+    var debugMessageSink: ((String) -> Void)?
     
     private var urlSession: URLSession?
     private var webSocket: URLSessionWebSocketTask?
@@ -289,14 +315,22 @@ class FeralBrainClient: NSObject {
     }
     
     // MARK: - Generic Sensor Data (with offline queue)
-    
+    //
+    // The payload key is the canonical ``sensor`` — matches the
+    // brain's `SensorTelemetryPayload.sensor` field and the enum
+    // overload above. Before v2026.5.45 this overload emitted
+    // ``sensor_type`` and the brain's `parse_message` rejected
+    // every HealthKit / Location frame as a ValidationError.
+    // Existing brains accept the legacy key via Pydantic alias so
+    // older iOS binaries on the App Store keep working; new code
+    // here ships the canonical shape.
     func sendSensorData(type: String, data: [String: Any]) {
         let message: [String: Any] = [
             "hop": "node",
             "type": "sensor_telemetry",
             "payload": [
                 "node_id": nodeId,
-                "sensor_type": type,
+                "sensor": type,
                 "data": data,
                 "timestamp": ISO8601DateFormatter().string(from: Date())
             ]
@@ -427,8 +461,150 @@ class FeralBrainClient: NSObject {
         return Data(base64Encoded: t)
     }
     
+    // MARK: - Generic Peripheral Discovery (HUP v1.3.0 device_announce)
+    //
+    // Emitted by `BLEPeripheralScanner` when the iPhone observes any
+    // nearby Bluetooth-LE peripheral that isn't FERAL's own glasses
+    // node. The brain side already wires this to the hardware mesh
+    // (`api/server.py::_handle_device_announce` →
+    // `hardware/mesh.py::ingest_device_announce`) which upserts a
+    // knowledge-graph entity with ``category=device`` so memory
+    // queries like "what BLE devices are around my phone?" land via
+    // the standard tool path. Field semantics match
+    // `feral-core/models/protocol.py::DeviceAnnouncePayload` exactly.
+
+    /// Emit a `device_announce` HUP frame for a peripheral the iOS
+    /// scanner has observed (or re-observed). Brain dedupes by
+    /// `deviceId` and updates ``last_seen`` / ``rssi_dbm`` in place
+    /// for repeat announcements within the freshness window.
+    ///
+    /// - Parameters:
+    ///   - deviceId: Stable peripheral identifier (use
+    ///     `CBPeripheral.identifier.uuidString`). Required.
+    ///   - name: Advertised local name. Defaults to empty string
+    ///     when the peripheral suppresses its name in the
+    ///     advertisement.
+    ///   - rssi: Signal strength in dBm at the time of the
+    ///     observation, or `nil` if unknown.
+    ///   - services: Advertised CBUUID strings (lowercase, no braces).
+    ///   - manufacturerData: Parsed manufacturer block as a
+    ///     JSON-serialisable dict. Pass `nil` to omit.
+    ///   - deviceKind: One of the literal values brain side accepts
+    ///     (`bluetooth_le`, `bluetooth_classic`, `mdns`, `usb`,
+    ///     `airplay`, `homekit`, `unknown`). iOS scanner only ever
+    ///     emits `bluetooth_le`.
+    func sendDeviceAnnounce(
+        deviceId: String,
+        name: String = "",
+        rssi: Int? = nil,
+        services: [String] = [],
+        manufacturerData: [String: Any]? = nil,
+        deviceKind: String = "bluetooth_le"
+    ) {
+        var payload: [String: Any] = [
+            "scanner_node_id": nodeId,
+            "device_id": deviceId,
+            "device_kind": deviceKind,
+            "name": name,
+            "last_seen": Date().timeIntervalSince1970,
+        ]
+        if let rssi = rssi {
+            payload["rssi_dbm"] = rssi
+        }
+        if !services.isEmpty {
+            payload["advertised_services"] = services
+        }
+        var metadata: [String: Any] = [:]
+        if let manufacturerData = manufacturerData, !manufacturerData.isEmpty {
+            metadata["manufacturer_data"] = manufacturerData
+        }
+        if !metadata.isEmpty {
+            payload["metadata"] = metadata
+        }
+        let frame: [String: Any] = [
+            "hop": "node",
+            "type": "device_announce",
+            "payload": payload,
+        ]
+        sendJSON(frame)
+    }
+
+    /// Emit a marker that a previously announced peripheral has not
+    /// been observed for the configured window. The brain currently
+    /// just updates `last_seen` on the existing entity (no dedicated
+    /// `device_lost` envelope yet) — we re-send the announce with a
+    /// `lost=true` metadata flag so future brain-side handling can
+    /// distinguish freshness without protocol churn.
+    func sendDeviceLost(
+        deviceId: String,
+        name: String = "",
+        lastRssi: Int? = nil,
+        services: [String] = []
+    ) {
+        var payload: [String: Any] = [
+            "scanner_node_id": nodeId,
+            "device_id": deviceId,
+            "device_kind": "bluetooth_le",
+            "name": name,
+            "last_seen": Date().timeIntervalSince1970,
+            "metadata": ["lost": true],
+        ]
+        if let lastRssi = lastRssi {
+            payload["rssi_dbm"] = lastRssi
+        }
+        if !services.isEmpty {
+            payload["advertised_services"] = services
+        }
+        let frame: [String: Any] = [
+            "hop": "node",
+            "type": "device_announce",
+            "payload": payload,
+        ]
+        sendJSON(frame)
+    }
+
+    // MARK: - Glasses Frames (HUP v1.3.0 glasses_frame)
+    //
+    // Used by `CameraGlassesAdapter` when the iPhone back camera is
+    // serving as the canonical glasses node (W610 fallback). The
+    // brain ingests these into `state.glasses_buffer` and the
+    // orchestrator's vision-context-attach reads them on voice / chat
+    // turns. Wire shape matches `GlassesFramePayload` in
+    // `feral-core/models/protocol.py` exactly.
+
+    /// Emit a HUP `glasses_frame` envelope. JPEG is the only encoding
+    /// the brain's `GlassesBuffer` currently decodes; the 512 KiB
+    /// per-frame cap is enforced server-side (HUP error 4020) so the
+    /// adapter should keep JPEG quality ≤ 0.6 for typical scene
+    /// captures.
+    func sendGlassesFrame(
+        deviceId: String,
+        jpegBase64: String,
+        width: Int? = nil,
+        height: Int? = nil,
+        source: String = "camera_fallback",
+        sequence: Int? = nil
+    ) {
+        var payload: [String: Any] = [
+            "device_id": deviceId,
+            "timestamp": Date().timeIntervalSince1970,
+            "encoding": "jpeg",
+            "data_b64": jpegBase64,
+            "source": source,
+        ]
+        if let width = width { payload["width"] = width }
+        if let height = height { payload["height"] = height }
+        if let sequence = sequence { payload["sequence"] = sequence }
+        let frame: [String: Any] = [
+            "hop": "node",
+            "type": "glasses_frame",
+            "payload": payload,
+        ]
+        sendJSON(frame)
+    }
+
     // MARK: - Camera Frames //
-    
+
     func sendCameraFrame(base64: String, source: String = "rear") {
         let frame: [String: Any] = [
             "hop": "node",
@@ -687,6 +863,9 @@ class FeralBrainClient: NSObject {
         sendQueue.async { [weak self] in
             guard let data = try? JSONSerialization.data(withJSONObject: dict),
                   let text = String(data: data, encoding: .utf8) else { return }
+            if let sink = self?.debugMessageSink {
+                sink(text)
+            }
             self?.webSocket?.send(.string(text)) { error in
                 if let error = error {
                     print("[FERAL Bridge] Send error: \(error)")
