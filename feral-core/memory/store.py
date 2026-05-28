@@ -175,6 +175,24 @@ class MemoryStore:
             data_dir.mkdir(exist_ok=True)
             db_path = str(data_dir / "memory.db")
 
+        from pathlib import Path as _Path
+        _db_path_obj = _Path(db_path)
+        _enc_path_obj = _db_path_obj.with_name(_db_path_obj.name + ".enc")
+        if _enc_path_obj.exists():
+            try:
+                from memory.at_rest import ensure_plaintext_db
+                from security.vault import get_vault
+                ensure_plaintext_db(vault=get_vault(), db_path=_db_path_obj)
+            except Exception as exc:
+                logger.warning(
+                    "MemoryStore boot: ensure_plaintext_db failed (%s); "
+                    "proceeding with whatever %s contains. Operator may "
+                    "need to run `feral key recover` or restore the "
+                    "plaintext backup at %s.",
+                    exc, _db_path_obj,
+                    _db_path_obj.with_name(_db_path_obj.name + ".bak.plaintext"),
+                )
+
         self.db_path = db_path
         self._working: dict[str, deque[dict]] = {}
         self._working_max = 50
@@ -221,6 +239,15 @@ class MemoryStore:
         a running event loop after construction."""
         self._embed_queue.start()
         logger.info("Embed queue started")
+
+    def encryption_status(self) -> dict:
+        """Snapshot of memory-at-rest state for ``feral memory status``
+        / ``feral doctor`` consumers.
+
+        Pure file-existence probe — never touches the vault.
+        """
+        from memory.at_rest import encryption_status as _encryption_status
+        return _encryption_status(self.db_path)
 
     async def drain_background_tasks(self, timeout: float = 5.0) -> None:
         """Wait for outstanding fire-and-forget tasks (AboutMe extractor

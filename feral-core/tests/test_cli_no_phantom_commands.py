@@ -43,36 +43,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # commands) so the rest of the matrix can pin behaviour today. Each
 # entry is the literal string the docs use AFTER `feral`, lowercase.
 
-KNOWN_PHANTOM_SUBCOMMANDS: set[str] = {
-    # Documented sub-actions that have no implementation. Lane 21 will
-    # delete these rows from the docs.
-    "memory encrypt",
-    "memory wiki",
-    "memory wiki compile",
-    "memory wiki list",
-    "memory wiki read",
-    "memory sync",  # The docs misuse this — `feral sync` is the path.
-    "voice train-wakeword",  # pre-Lane-07 docs claim
-}
+KNOWN_PHANTOM_SUBCOMMANDS: set[str] = set()
 
-# Top-level phantom commands documented but not implemented. Pre-
-# Lane-07 these all flooded the audit-r14 finding 08 "documented-but-
-# missing matrix". Lane 21's docs-truth pass deletes the doc rows;
-# this allowlist is the bridge that lets the CI gate land in Lane 07
-# without forcing Lane 21's PR to ship in the same wave. Each entry
-# has a comment naming the doc file + the future of the row.
-KNOWN_PHANTOM_TOP_LEVEL: set[str] = {
-    "hardware",     # docs/mintlify/hardware/{wristband,smart-home}.mdx — should be `feral devices`
-    "backup",       # docs/mintlify/deployment.mdx — no `feral backup`; rsync ~/.feral
-    "webhooks",     # docs/mintlify/guides/webhooks.mdx — webhooks live at /api/webhooks
-    "providers",    # docs/mintlify/operations/metrics.mdx — should be `feral models list`
-    "supervisor",   # docs/mintlify/operations/metrics.mdx — internal process name, not a CLI verb
-    "upgrade",      # operations/metrics.mdx — should be `pip install -U feral-ai`
-    "vault",        # docs/mintlify/{deployment,operations/metrics,guides/channels}.mdx — should be `feral key`
-    "sends",        # docs/mintlify/channels/push.mdx — prose inside a code block, not a command
-    "uses",         # docs/mintlify/help/troubleshooting.mdx — same
-    "aggregates",   # docs/mintlify/hardware/wristband.mdx — same
-}
+# Top-level phantom commands documented but not implemented. v2026.5.43
+# Wave B scrubbed every remaining entry — see
+# ``test_phantom_allowlists_are_empty`` below for the long-term
+# contract.
+KNOWN_PHANTOM_TOP_LEVEL: set[str] = set()
 
 
 # ----------------------------------------------------------------------
@@ -263,6 +240,19 @@ def test_known_phantom_subcommands_are_actually_phantom():
             "command is now registered: "
             + ", ".join(no_longer_phantom)
         )
+
+
+def test_phantom_allowlists_are_empty():
+    """Once a phantom is scrubbed from docs or implemented, its entry MUST
+    leave the allowlist. The allowlist is a transitional bridge, not a
+    permanent fixture. Re-add an entry only if you have a hard deadline
+    forcing partial-doc-truthfulness — and remove it in the same release."""
+    assert KNOWN_PHANTOM_SUBCOMMANDS == set(), (
+        f"Subcommand phantom allowlist must be empty: {KNOWN_PHANTOM_SUBCOMMANDS}"
+    )
+    assert KNOWN_PHANTOM_TOP_LEVEL == set(), (
+        f"Top-level phantom allowlist must be empty: {KNOWN_PHANTOM_TOP_LEVEL}"
+    )
 
 
 def test_top_level_help_lists_new_lane07_commands():

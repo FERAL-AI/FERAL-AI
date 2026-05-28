@@ -84,7 +84,7 @@ docker compose logs -f brain
 Before going live:
 
 - [ ] Set `FERAL_AUTONOMY=strict` or `hybrid` (never `loose` in multi-user)
-- [ ] Store all API keys via `feral vault` or env vars — never in config files
+- [ ] Store all API keys via `feral key add` or env vars — never in config files
 - [ ] Set `FERAL_CORS_ORIGINS` to your actual domains
 - [ ] Enable HTTPS via reverse proxy (see below)
 - [ ] Set `FERAL_LOG_LEVEL=warning` to reduce log volume
@@ -218,15 +218,21 @@ Key metrics exported:
 
 ## Backup & Restore
 
+FERAL stores all per-user state under `~/.feral/` — back it up like any other directory. There is no dedicated CLI verb; standard `tar`/`rsync` is the supported path.
+
 ```bash
-# Backup memory and config
-feral backup create --output /backups/feral-$(date +%F).tar.gz
+# Backup memory and config (stop the brain first for a consistent snapshot)
+feral stop
+tar czf /backups/feral-$(date +%F).tar.gz -C ~/.feral .
+feral start
 
-# Restore
-feral backup restore /backups/feral-2025-06-15.tar.gz
+# Restore (also brain-offline)
+feral stop
+tar xzf /backups/feral-2025-06-15.tar.gz -C ~/.feral
+feral start
 
-# Automated daily backup (cron)
-0 3 * * * /opt/feral/venv/bin/feral backup create --output /backups/feral-$(date +\%F).tar.gz
+# Automated daily backup (cron) — uses --skip-checkpoint snapshots
+0 3 * * * tar czf /backups/feral-$(date +\%F).tar.gz -C ~/.feral .
 ```
 
-The backup includes `memory.db`, `settings.json`, `USER.md`, `SOUL.md`, `credentials.enc` (ChaCha20-Poly1305 encrypted vault), wiki pages, and skill manifests.
+The directory includes `memory.db` (or `memory.db.enc` if you ran `feral memory encrypt`), `settings.json`, `USER.md`, `SOUL.md`, `credentials.enc` (ChaCha20-Poly1305 encrypted vault), wiki pages, and skill manifests.

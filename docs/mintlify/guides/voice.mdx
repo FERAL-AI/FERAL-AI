@@ -73,7 +73,7 @@ voice:
     cooldown_seconds: 2    # ignore repeated triggers
 ```
 
-The default wake phrase ("hey feral") is the only one shipped today. Custom wake-word training is on the post-v1.0 roadmap and **not** currently a CLI command — earlier docs claimed a `feral voice train-wakeword` subcommand that was never implemented. To verify the built-in detector is loaded and microphones are wired, run:
+The default wake phrase ("hey feral") is the only one shipped today. Custom wake-word training is on the post-v1.0 roadmap and is not exposed as a CLI command. To verify the built-in detector is loaded and microphones are wired, run:
 
 ```bash
 feral wake-test

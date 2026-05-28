@@ -41,18 +41,16 @@ FERAL's smart glasses integration enables real-time video streaming, scene analy
   </Step>
 
   <Step title="Pair the glasses">
-    Put your glasses in pairing mode (varies by device) and scan:
+    Put your glasses in pairing mode (varies by device), then list paired devices and complete pairing through the WebUI or the device-pair API:
 
     ```bash
-    feral hardware scan --type glasses
+    feral devices
+    curl -X POST http://localhost:9090/api/devices/pair \
+      -H "Content-Type: application/json" \
+      -d '{ "name": "FERAL-Glasses-X1", "type": "glasses" }'
     ```
 
-    ```
-    Scanning for smart glasses…
-    ✓ FERAL-Glasses-X1     BLE + Wi-Fi    Battery: 72%
-    ? Pair this device? (Y/n)
-    ✓ Paired. Video stream available.
-    ```
+    The WebUI's **Settings → Devices** screen renders the same registry with a "Pair" button per advertised device.
   </Step>
 
   <Step title="Start the video stream">

@@ -35,11 +35,7 @@ Response:
 }
 ```
 
-### Via CLI
-
-```bash
-feral webhooks create --name "github-pushes" --action notify --secret "your-secret"
-```
+All webhook management goes through the HTTP API. The brain mounts the router at `/v1/webhooks`; use curl, httpie, or any HTTP client.
 
 ## Signature Verification
 
@@ -59,7 +55,7 @@ If the signature doesn't match, FERAL rejects the request with `401 Unauthorized
 
 ### GitHub
 
-1. Create a webhook in FERAL: `feral webhooks create --name github --action process`
+1. Create a webhook in FERAL by POSTing to `/v1/webhooks` (see the curl example above) with `"name": "github"` and `"action": "process"`
 2. In your GitHub repo: **Settings** → **Webhooks** → **Add webhook**
 3. Set the Payload URL to your FERAL webhook URL (use a tunnel like ngrok for remote access)
 4. Set Content type to `application/json`
@@ -104,27 +100,32 @@ Each webhook can map to an action that FERAL performs when the event arrives:
 Example: trigger a skill when a GitHub issue is opened:
 
 ```bash
-feral webhooks create \
-  --name "github-issues" \
-  --action skill \
-  --skill-name "triage_github_issue" \
-  --secret "gh-secret-123"
+curl -X POST http://localhost:9090/v1/webhooks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "github-issues",
+    "action": "skill",
+    "skill_name": "triage_github_issue",
+    "secret": "gh-secret-123"
+  }'
 ```
 
 ## Managing Webhooks
 
 ```bash
 # List all webhooks
-feral webhooks list
+curl http://localhost:9090/v1/webhooks
 
 # Get details
-feral webhooks get wh_abc123
+curl http://localhost:9090/v1/webhooks/wh_abc123
 
 # Delete
-feral webhooks delete wh_abc123
+curl -X DELETE http://localhost:9090/v1/webhooks/wh_abc123
 
 # Test (send a mock event)
-feral webhooks test wh_abc123 --payload '{"test": true}'
+curl -X POST http://localhost:9090/v1/webhooks/wh_abc123/test \
+  -H "Content-Type: application/json" \
+  -d '{"test": true}'
 ```
 
 ## Exposing to the Internet
@@ -162,6 +163,6 @@ By default, FERAL runs on localhost. To receive webhooks from external services,
     FERAL runs on localhost by default. Use ngrok or a Cloudflare Tunnel to expose it. Verify your firewall allows inbound connections.
   </Accordion>
   <Accordion title="Events received but no action taken">
-    Check the webhook's `action` setting. Run `feral webhooks get <id>` to verify the configuration. Check FERAL logs for processing errors.
+    Check the webhook's `action` setting. Run `curl http://localhost:9090/v1/webhooks/<id>` to verify the configuration. Check FERAL logs for processing errors.
   </Accordion>
 </AccordionGroup>

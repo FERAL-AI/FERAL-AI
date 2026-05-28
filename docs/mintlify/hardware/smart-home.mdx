@@ -42,7 +42,9 @@ FERAL integrates with your smart home through two paths: **Home Assistant** for 
 
   <Step title="Verify device discovery">
     ```bash
-    feral hardware list
+    feral devices
+    # …or directly against the brain:
+    curl http://localhost:9090/api/home-assistant/entities
     ```
 
     ```
@@ -162,7 +164,7 @@ With the proactive engine enabled, FERAL can act on smart-home devices automatic
     Verify the URL and token. Ensure HA is running and the API is accessible: `curl -H "Authorization: Bearer YOUR_TOKEN" http://HA_IP:8123/api/`.
   </Accordion>
   <Accordion title="Device not found">
-    Run `feral hardware list` to refresh. If using HA, make sure the device is exposed and not hidden in the HA UI.
+    Run `feral devices` (or `curl http://localhost:9090/api/home-assistant/entities`) to refresh. If using HA, make sure the device is exposed and not hidden in the HA UI.
   </Accordion>
   <Accordion title="Commands execute with delay">
     If latency exceeds 500ms, consider switching to direct HUP mesh control for supported devices.

@@ -26,13 +26,15 @@ headers = vault.inject("weather_api", {"X-API-Key": "$CREDENTIAL"})
 
 The LLM sees only a placeholder like `[CREDENTIAL:weather_api]` in tool descriptions. Even if the model tries to exfiltrate it, the raw value is never in its context window.
 
-### Vault CLI
+### Credential CLI
 
 ```bash
-feral vault set OPENAI_API_KEY sk-...
-feral vault list
-feral vault rotate OPENAI_API_KEY
+feral key add --provider openai --label default --value sk-...
+feral key list
+feral key rotate
 ```
+
+`feral key rotate` re-keys the entire vault: a new master key is generated, the on-disk `credentials.enc` is re-encrypted under it, the previous file is retained as `credentials.enc.prev` until the next successful boot, and a fresh recovery code is printed exactly once. To re-enter a single credential, run `feral key add --provider <id> --label <label> --value <new-value>` again — `add` is idempotent on `(provider, label)`.
 
 ## Permission Tiers
 

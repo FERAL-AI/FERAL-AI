@@ -72,20 +72,13 @@ voice:
     cooldown_seconds: 2    # ignore repeated triggers
 ```
 
-Custom wake words can be trained with ~50 positive samples:
+FERAL ships with a fixed set of wake words (`hey_feral`, `okay_feral`, `feral`) and a `feral wake-test` harness for tuning detector thresholds against your microphone:
 
 ```bash
-feral wake-test \
-  # NOTE: `feral voice train-wakeword` was claimed by older docs but
-  # never shipped; only `feral wake-test` is implemented today. Custom
-  # wake-word training is post-v1.0 roadmap.
-  # Original (non-functional) call shown below for archival reference:
-  # feral voice train-wakeword \
-  --name "hey jarvis" \
-  --positive-dir ./samples/positive \
-  --negative-dir ./samples/negative \
-  --output ~/.feral/wakewords/hey_jarvis.onnx
+feral wake-test --duration 30 --threshold 0.7
 ```
+
+Custom wake-word training (bringing your own model from ~50 positive samples) is post-v1.0 roadmap; until then, pick from the built-in set or open an issue with your sample corpus.
 
 The wake word detector runs in a dedicated thread with ~2% CPU overhead on modern hardware.
 

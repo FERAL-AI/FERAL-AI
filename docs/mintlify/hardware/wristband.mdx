@@ -40,28 +40,15 @@ FERAL's wristband integration provides real-time biometric streaming over Blueto
   </Step>
 
   <Step title="Scan and pair">
-    ```bash
-    feral hardware scan
-    ```
-
-    Output:
-
-    ```
-    Scanning for BLE devices…
-    ✓ FERAL-Wristband-A3F2  RSSI: -42  Services: HR, SpO2, Temp
-    ✓ FERAL-Wristband-B1C8  RSSI: -67  Services: HR, SpO2, Temp
-
-    ? Select a device to pair: FERAL-Wristband-A3F2
-    ✓ Paired successfully. Streaming to brain.
-    ```
-
-    Or pair programmatically via the API:
+    Pair via the HTTP API — the brain scans BLE advertisements and writes the device to its registry:
 
     ```bash
     curl -X POST http://localhost:9090/api/devices/pair \
       -H "Content-Type: application/json" \
       -d '{ "name": "FERAL-Wristband-A3F2" }'
     ```
+
+    To list currently advertising / paired devices, use `feral devices` (CLI) or `curl http://localhost:9090/api/devices` (HTTP).
   </Step>
 
   <Step title="Verify the data stream">
@@ -111,7 +98,7 @@ The brain aggregates wristband data into a rolling health context window. This d
 
 ## Whoop & Oura Integration
 
-FERAL aggregates wristband data with third-party wearables for a unified health view.
+The brain combines wristband data with third-party wearables for a unified health view.
 
 <CodeGroup>
 ```json Whoop

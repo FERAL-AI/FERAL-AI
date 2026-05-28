@@ -1446,6 +1446,27 @@ def cmd_doctor():
         # operator action required.
         _info("Memory database", "not created yet — will be created on first run")
 
+    # ── 6b. Memory at-rest encryption (v2026.5.43) ──
+    #
+    # Only renders a row when the operator has explicitly opted in
+    # via ``feral memory encrypt`` (i.e. memory.db.enc exists). The
+    # plaintext-only happy path stays silent — doctor never scolds an
+    # operator for not having enabled an opt-in feature.
+    mem_enc_path = mem_db.with_name(mem_db.name + ".enc")
+    if mem_enc_path.exists():
+        try:
+            from security.vault import get_vault as _gv
+            _vault_probe = _gv()
+            _vault_probe._master_key()  # raises if keychain broken
+            _pass("Memory at-rest encryption", f"enabled — {mem_enc_path}")
+        except Exception as exc:
+            _fail(
+                "Memory at-rest encryption",
+                f"{mem_enc_path} exists but vault cannot be unlocked: {exc}",
+                "Restore keychain entry or run `feral key recover` before "
+                "starting the brain",
+            )
+
     # ── 7. Port availability ──
     import socket
     port = int(brain_port())
@@ -2440,7 +2461,7 @@ def main():
         "action",
         choices=[
             "status", "switch", "list", "decay",
-            "forget", "recall", "compact", "query",
+            "forget", "recall", "compact", "query", "encrypt",
         ],
         help=(
             "status: show current backend | list: installed backends | "
@@ -2449,7 +2470,8 @@ def main():
             "forget <episode_id>: mark an episode forgotten | "
             "recall <episode_id>: reverse a forget | "
             "compact [<session_id>]: promote conversation turns to episodes | "
-            "query <text>: search memory (THESIS S1)"
+            "query <text>: search memory (THESIS S1) | "
+            "encrypt: AEAD-encrypt memory.db at rest (brain must be stopped)"
         ),
     )
     mem_p.add_argument(
@@ -2461,6 +2483,19 @@ def main():
             "(sqlite_vec / chroma / qdrant), session id for `compact`, "
             "or query text for `query` (quote multi-word queries)"
         ),
+    )
+    mem_p.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="encrypt: overwrite an existing memory.db.enc",
+    )
+    mem_p.add_argument(
+        "--no-shred",
+        dest="no_shred",
+        action="store_true",
+        default=False,
+        help="encrypt: retain memory.db.bak.plaintext after verification",
     )
 
     # feral install-service / uninstall-service
@@ -2635,7 +2670,7 @@ def main():
         cmd_sync(args.action, getattr(args, "file", ""))
     elif args.subcommand == "memory":
         from cli.memory_cmd import cmd_memory
-        cmd_memory(args.action, getattr(args, "backend_id", None))
+        cmd_memory(args.action, getattr(args, "backend_id", None), flags=args)
     elif args.subcommand == "install-service":
         from cli.daemon import install_service
         install_service()

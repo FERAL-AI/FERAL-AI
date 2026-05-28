@@ -91,7 +91,31 @@ def _http_request(method: str, path: str) -> dict:
         }
 
 
-def cmd_memory(action: str, backend_id: str | None) -> None:
+def _brain_health_ok(timeout: float = 1.0) -> bool:
+    """Probe ``http://localhost:9090/health`` to detect a running brain.
+
+    Returns True iff the endpoint returns a 200 within ``timeout``
+    seconds. Any other outcome (connection refused, timeout, non-200)
+    counts as "brain not running" — the worst case is we tell the
+    operator to stop something they've already stopped.
+    """
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    try:
+        from config.runtime import brain_port
+        port = brain_port()
+    except Exception:
+        port = 9090
+    url = f"http://localhost:{port}/health"
+    try:
+        with urlopen(Request(url, method="GET"), timeout=timeout) as resp:
+            return resp.status == 200
+    except (HTTPError, URLError, OSError, TimeoutError):
+        return False
+
+
+def cmd_memory(action: str, backend_id: str | None, *, flags=None) -> None:
     # Lane 07 W6 — `feral memory query <text>` closes THESIS_SCENARIOS
     # S1 from the CLI side. The argparse positional ``backend_id`` is
     # repurposed as the query string for ``query``; main.py forwards
@@ -194,6 +218,66 @@ def cmd_memory(action: str, backend_id: str | None) -> None:
             )
         return
 
+    if action == "encrypt":
+        if _brain_health_ok():
+            print(
+                "  Refusing to encrypt while the brain is running. "
+                "Stop the brain first (feral stop or pkill -f 'feral serve')."
+            )
+            sys.exit(1)
+
+        from config.loader import feral_data_home
+        from security.vault import get_vault
+        from memory.at_rest import encrypt_memory_db
+
+        force = bool(getattr(flags, "force", False))
+        no_shred = bool(getattr(flags, "no_shred", False))
+        db_path = feral_data_home() / "memory.db"
+
+        try:
+            vault = get_vault()
+        except Exception as exc:
+            print(f"  Vault could not be unlocked: {exc}")
+            print(
+                "  Run `feral key recover` and supply the recovery code "
+                "printed at first boot, then retry."
+            )
+            sys.exit(1)
+
+        try:
+            result = encrypt_memory_db(
+                vault=vault,
+                db_path=db_path,
+                shred_plaintext=not no_shred,
+                force=force,
+            )
+        except FileExistsError as exc:
+            print(f"  {exc}")
+            sys.exit(1)
+        except FileNotFoundError as exc:
+            print(f"  {exc}")
+            sys.exit(1)
+        except Exception as exc:
+            print(f"  Encrypt failed: {exc}")
+            sys.exit(1)
+
+        print(
+            f"  Encrypted {result['ciphertext_path']} "
+            f"({result['bytes']} bytes)"
+        )
+        if result.get("backup_path"):
+            print(
+                f"  Plaintext backup retained at {result['backup_path']} — "
+                f"delete manually when verified."
+            )
+
+        settings = _load_settings()
+        mem = settings.setdefault("memory", {})
+        mem["encrypted_at_rest"] = True
+        _save_settings(settings)
+        print("  settings.json::memory.encrypted_at_rest = true")
+        return
+
     if action == "status":
         active = _current_backend()
         module_path, install_hint = _KNOWN_BACKENDS.get(
@@ -205,6 +289,15 @@ def cmd_memory(action: str, backend_id: str | None) -> None:
         print(f"  Installed:             {'yes' if installed else 'no'}")
         if not installed:
             print(f"  Install:               {install_hint}")
+
+        from memory.at_rest import encryption_status as _enc_status
+        from config.loader import feral_data_home
+        enc = _enc_status(feral_data_home() / "memory.db")
+        print(f"  Encrypted at rest:     {'yes' if enc['encrypted_at_rest'] else 'no'}")
+        if enc["encrypted_at_rest"]:
+            print(f"  Ciphertext:            {enc['ciphertext_path']}")
+        if enc.get("backup_path"):
+            print(f"  Plaintext backup:      {enc['backup_path']}")
         return
 
     if action == "list":
