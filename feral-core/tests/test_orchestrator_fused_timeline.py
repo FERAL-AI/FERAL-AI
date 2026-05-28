@@ -7,12 +7,21 @@ parallel with the streaming prose response. These tests pin that
 behaviour by driving the helper directly with a fake ``send``
 sink — full orchestrator boot is far too heavyweight for a focused
 test, and the helper is the single integration point that matters.
+
+The second test block pins the **routing-closure** half of the S1
+gap: when the user asks a temporal-recall question, the heuristic
+``_R_MEMORY`` regex must promote ``notes_memory`` so the LLM sees
+``notes_memory__fused_timeline`` in its tool list. Phrasings the live
+v2026.5.43 brain previously slipped through ("summarize my morning",
+"what happened today", "earlier today", "recap my day") are pinned
+here. Non-temporal turns must NOT route to ``notes_memory``.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -21,6 +30,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from models.protocol import FeralMessage  # noqa: E402
+from models.skill_manifest import (  # noqa: E402
+    BrandProfile,
+    SkillEndpoint,
+    SkillManifest,
+)
 from agents.orchestrator import Orchestrator  # noqa: E402
 
 
@@ -161,3 +175,230 @@ async def test_skips_timeline_frame_when_data_shape_mismatched(fake_orch):
     )
     assert all(f.type != "timeline" for f in sink.frames)
     assert any(f.type == "tool_result" for f in sink.frames)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Routing closure — temporal-recall phrasings must promote
+# ``notes_memory`` so the LLM sees ``fused_timeline`` in its tool set.
+#
+# Background: at v2026.5.43 the live brain test showed
+# claude-opus-4-7 answering "what did I do yesterday?" / "summarize
+# my morning" directly from context — never invoking the
+# ``notes_memory__fused_timeline`` tool — because the heuristic
+# ``_R_MEMORY`` regex either missed the phrase entirely or did not
+# cover enough temporal surface for the model to be prompted with
+# the timeline tool. The broader regex fixes this; the tests below
+# pin the new coverage.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _build_routing_skill(
+    skill_id: str, triggers: list[str], categories: list[str] | None = None
+) -> SkillManifest:
+    """Minimal SkillManifest used for routing-only tests."""
+    return SkillManifest(
+        skill_id=skill_id,
+        version="1.0.0",
+        author="test",
+        brand=BrandProfile(
+            name=skill_id, primary_color="#000", logo_url="", icon_set="sf_symbols"
+        ),
+        description=f"{skill_id} skill",
+        categories=categories or [],
+        trigger_phrases=triggers,
+        endpoints=[
+            SkillEndpoint(
+                id="default",
+                method="POST",
+                url=f"https://example.test/{skill_id}",
+                description="default endpoint",
+                returns_description="result",
+                ui_hint="detail_card",
+            )
+        ],
+    )
+
+
+@pytest.fixture
+def routing_orch():
+    """Heuristic-only routing harness. Mirrors the fixture in
+    ``test_route_prompt_heuristic.py`` but trimmed to just what the
+    timeline-routing tests need."""
+    catalog = {
+        "notes_memory": _build_routing_skill(
+            "notes_memory",
+            [
+                "remember this",
+                "save a note",
+                "my notes",
+                "recall",
+                "what did i save",
+            ],
+            ["memory", "notes"],
+        ),
+        "web_search": _build_routing_skill(
+            "web_search",
+            ["search for", "google", "look up"],
+            ["search"],
+        ),
+        "code_interpreter": _build_routing_skill(
+            "code_interpreter",
+            ["run python", "execute code", "explain"],
+            ["code"],
+        ),
+        "calendar_google": _build_routing_skill(
+            "calendar_google",
+            ["what's on my calendar", "my schedule today"],
+            ["calendar"],
+        ),
+        "smart_home_hue": _build_routing_skill(
+            "smart_home_hue",
+            ["turn on the lights", "dim the lights"],
+            ["smart_home"],
+        ),
+        "spotify_music": _build_routing_skill(
+            "spotify_music",
+            ["play music", "play some music"],
+            ["music"],
+        ),
+    }
+
+    reg = MagicMock()
+    reg.skills = catalog
+
+    def _find(query: str, top_k: int = 5):
+        scored = []
+        for sk in catalog.values():
+            s = Orchestrator._trigger_score(query, sk)
+            if s > 0:
+                scored.append((s, sk))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [sk for _, sk in scored[:top_k]]
+
+    reg.find_skills_for_query = _find
+    reg.get_tools_for_skills = MagicMock(return_value=[])
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.skills = reg
+    # `_route_prompt` short-circuits when the LLM is unavailable so we
+    # exercise the heuristic exit deterministically. The routing tests
+    # below ONLY check `_heuristic_route`, which doesn't touch llm.
+    orch.llm = MagicMock()
+    orch.llm.available = False
+    # Stub the refusal-handler hop used by the action-fallback branch.
+    # The full RefusalHandler depends on the brain wiring; the routing
+    # tests only need a deterministic boolean.
+    refusal = MagicMock()
+    refusal.query_implies_action = MagicMock(return_value=False)
+    orch.refusal_handler = refusal
+    return orch
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # The original failing live-brain query.
+        "what did I do yesterday?",
+        # "what did I do" anchored on a different time qualifier.
+        "what did I do this morning",
+        # Past-tense variant.
+        "what have I done today",
+        # Work / focus variants — common conversational phrasings.
+        "what did I work on yesterday",
+        "what did I focus on today",
+    ],
+)
+def test_temporal_query_what_did_i_do_yesterday_invokes_timeline_fusion(
+    routing_orch, prompt
+):
+    """Pattern: ``what did|have I do/done/work on/focus on …`` must
+    route ``notes_memory`` so the LLM sees ``fused_timeline``."""
+    skills, reason = routing_orch._heuristic_route(prompt)
+    assert skills, f"no skill routed for {prompt!r} (reason={reason})"
+    assert skills[0].skill_id == "notes_memory", (
+        f"prompt {prompt!r}: expected notes_memory first, "
+        f"got {[s.skill_id for s in skills]} (reason={reason})"
+    )
+    assert reason.startswith("regex:"), (
+        f"expected regex shortcut for {prompt!r}, got reason={reason}"
+    )
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # The second failing live-brain query.
+        "summarize my morning",
+        # Sibling time windows that used to slip through.
+        "summarize my afternoon",
+        "summarize my evening",
+        "summarize my day",
+        "summarize my week",
+        # recap / review verbs — same intent, different verb.
+        "recap my day",
+        "review my morning",
+        # Bare time-window queries phrased as "my <window> so far".
+        "my morning so far",
+        "my day in review",
+    ],
+)
+def test_summarize_my_morning_invokes_timeline_fusion(routing_orch, prompt):
+    """Pattern: ``summarize/recap/review my <window>`` must route
+    notes_memory."""
+    skills, reason = routing_orch._heuristic_route(prompt)
+    assert skills, f"no skill routed for {prompt!r} (reason={reason})"
+    assert skills[0].skill_id == "notes_memory", (
+        f"prompt {prompt!r}: expected notes_memory first, "
+        f"got {[s.skill_id for s in skills]} (reason={reason})"
+    )
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "what happened today",
+        "what happened yesterday",
+        "what went on this morning",
+        "what was going on earlier",
+        "earlier today",
+        "earlier this morning",
+        "earlier yesterday",
+    ],
+)
+def test_what_happened_today_invokes_timeline_fusion(routing_orch, prompt):
+    """Pattern: ``what happened …`` / ``earlier …`` must route
+    notes_memory so fused_timeline is the LLM-visible tool."""
+    skills, reason = routing_orch._heuristic_route(prompt)
+    assert skills, f"no skill routed for {prompt!r} (reason={reason})"
+    assert skills[0].skill_id == "notes_memory", (
+        f"prompt {prompt!r}: expected notes_memory first, "
+        f"got {[s.skill_id for s in skills]} (reason={reason})"
+    )
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # Pure technical question — no temporal intent, must NOT take
+        # the regex:memory shortcut (which would otherwise force a
+        # fused-timeline fan-out for every chat turn).
+        "explain the TLS handshake",
+        "how does HTTPS work",
+        "what is a hash table",
+        # Calendar phrasing — must hit regex:calendar, not regex:memory.
+        "what's on my calendar today",
+        # Action verbs — different intent, different regex/trigger.
+        "play some music",
+        "turn on the lights",
+    ],
+)
+def test_non_temporal_chat_does_not_invoke_timeline_fusion(routing_orch, prompt):
+    """Negative control: non-temporal chat MUST NOT take the
+    ``regex:memory`` shortcut. The ambiguous-tier may still surface
+    notes_memory for the LLM to disambiguate, but the heuristic must
+    never force-promote it as the regex:memory winner."""
+    skills, reason = routing_orch._heuristic_route(prompt)
+    assert reason != "regex:memory", (
+        f"prompt {prompt!r}: regex:memory must NOT fire for non-"
+        f"temporal chat; got reason={reason}"
+    )

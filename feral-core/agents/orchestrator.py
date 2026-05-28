@@ -2207,16 +2207,32 @@ class Orchestrator:
         "/see": "perception_query",
     }
 
-    # Memory-recall phrasings — "what did I do yesterday", etc.
+    # Memory-recall + temporal-recall phrasings — covers both the
+    # "remember/recall the project name" intent and the fused-timeline
+    # intent ("what did I do yesterday", "summarize my morning",
+    # "what happened today", "earlier today"). Matching this regex
+    # routes ``notes_memory`` to the LLM tool set, whose
+    # ``fused_timeline`` endpoint description steers the model to call
+    # the right tool for any natural-language temporal window.
     _R_MEMORY = re.compile(
         r"\b("
-        r"what\s+did\s+i\s+(?:do|say|ask|save|note)|"
-        r"summari[sz]e\s+(?:today|yesterday|my\s+week|my\s+day)|"
-        r"what\s+(?:was|were)\s+(?:we\s+)?(?:talking|chatting)\s+about|"
+        # "what did/have I do/say/ask/save/note/work on/focus on/accomplish"
+        r"what\s+(?:did|have)\s+i\s+(?:do|done|say|said|ask|asked|save|saved|note|noted|work(?:ed)?\s+on|focus(?:ed)?\s+on|accomplish(?:ed)?)|"
+        # "summarize/recap/review <window>"
+        r"(?:summari[sz]e|recap|review)\s+(?:today|yesterday|tonight|this\s+(?:morning|afternoon|evening|week|day)|my\s+(?:morning|afternoon|evening|night|day|week|month))|"
+        # "what happened/went on/was going on" — any temporal context
+        r"what\s+(?:happened|went\s+on|was\s+going\s+on)\b|"
+        # legacy chat-recall phrasings
+        r"what\s+(?:was|were)\s+(?:we\s+)?(?:talking|chatting|discussing)\s+about|"
+        r"what\s+did\s+we\s+(?:discuss|talk\s+about)|"
+        # "earlier today/yesterday/this morning"
+        r"earlier\s+(?:today|yesterday|this\s+(?:morning|afternoon|evening))|"
+        # generic recall verbs
         r"recall(?:\s+(?:that|the))?|"
         r"do\s+you\s+remember|"
+        # "my notes …" and "my <window> so far|recap|summary|review"
         r"my\s+notes(?:\b|\s+from)|"
-        r"what\s+did\s+we\s+discuss"
+        r"my\s+(?:morning|afternoon|evening|day|week)\s+(?:so\s+far|recap|summary|review|in\s+review)"
         r")\b",
         re.I,
     )
