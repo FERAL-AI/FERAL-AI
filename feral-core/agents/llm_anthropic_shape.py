@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 
+from agents.multimodal_blocks import translate_content_for_anthropic
+
 
 _ANTHROPIC_THINKING_RESPONSE_ROOM = 1024  # mirrors AnthropicProvider.chat
 
@@ -70,6 +72,14 @@ def _convert_messages_for_anthropic(messages: list[dict]) -> tuple[str, list[dic
             blocks: list[dict] = []
             if isinstance(content, str) and content:
                 blocks.append({"type": "text", "text": content})
+            elif isinstance(content, list):
+                # Pre-translate any OpenAI-shape multimodal parts so a
+                # vision-bearing assistant replay (rare but legal) lands
+                # in Anthropic's content-block schema before we append
+                # the tool_use blocks. ``translate_content_for_anthropic``
+                # is a no-op on already-native blocks.
+                for translated_part in translate_content_for_anthropic(content):
+                    blocks.append(translated_part)
             for call in m["tool_calls"]:
                 fn = call.get("function", {}) if isinstance(call, dict) else {}
                 raw_args = fn.get("arguments", "{}")
@@ -88,7 +98,17 @@ def _convert_messages_for_anthropic(messages: list[dict]) -> tuple[str, list[dic
                 })
             out.append({"role": "assistant", "content": blocks or content})
             continue
-        out.append({"role": role, "content": content})
+        # v2026.5.44 multimodal fix: ``content`` may be a list of
+        # OpenAI-shape content blocks assembled upstream
+        # (``perception.fusion.to_llm_user_content`` and the
+        # ScreenLoop attach path emit ``image_url`` blocks). Anthropic
+        # rejects those with a 400 ("Input tag 'image_url' ... does not
+        # match any of the expected tags"). Translate to Anthropic's
+        # ``image`` / ``source`` schema at the provider boundary so
+        # call-sites can keep building the canonical OpenAI shape.
+        out.append(
+            {"role": role, "content": translate_content_for_anthropic(content)}
+        )
     return system_text, out
 
 
