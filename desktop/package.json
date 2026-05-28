@@ -1,7 +1,7 @@
 {
   "name": "feral-desktop",
   "private": true,
-"version": "2026.5.43",
+"version": "2026.5.44",
   "type": "module",
   "scripts": {
     "dev": "vite",
