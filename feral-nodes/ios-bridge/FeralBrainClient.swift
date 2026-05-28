@@ -43,7 +43,7 @@ enum BrainConnectionState: String {
     case reconnecting
 }
 
-// MARK: - Sensor Types (matching W300SensorManager + HealthKit/Location bridges)
+// MARK: - Sensor Types (matching W300SensorManager)
 
 enum FeralSensorType: String {
     case heartRate = "heart_rate"
@@ -52,8 +52,6 @@ enum FeralSensorType: String {
     case uv = "uv"
     case steps = "steps"
     case gesture = "gesture"
-    case sleep = "sleep"
-    case location = "location"
 }
 
 // MARK: - Location Manager
@@ -262,7 +260,7 @@ class FeralBrainClient: NSObject {
             "type": "sensor_telemetry",
             "payload": [
                 "node_id": nodeId,
-                "sensor": type,
+                "sensor_type": type,
                 "data": data,
                 "timestamp": ISO8601DateFormatter().string(from: Date())
             ]

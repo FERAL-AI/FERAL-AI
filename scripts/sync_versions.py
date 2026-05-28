@@ -166,27 +166,6 @@ VERSION_LOCATIONS: tuple[VersionLocation, ...] = (
         replacement='"version": "{version}"',
         description="Chrome extension manifest version",
     ),
-    # iOS companion app marketing version. Lives in the App/Info.plist
-    # CFBundleShortVersionString — SettingsView's About row reads this
-    # key at runtime so a TestFlight / App Store reviewer sees the
-    # same CalVer the brain advertises. ``scripts/release.py`` --write
-    # rewrites the literal on every bump; the version-coherence CI
-    # gate's --check confirms zero drift.
-    VersionLocation(
-        path="feral-nodes/ios-app/Info.plist",
-        pattern=_p(
-            rf"<key>CFBundleShortVersionString</key>\s*\n"
-            rf"\s*<string>{VERSION_PATTERN}</string>"
-        ),
-        replacement=(
-            "<key>CFBundleShortVersionString</key>\n"
-            "    <string>{version}</string>"
-        ),
-        description=(
-            "iOS Node companion CFBundleShortVersionString in "
-            "feral-nodes/ios-app/Info.plist (synced to brain CalVer)"
-        ),
-    ),
     VersionLocation(
         path="feral-extension/popup.html",
         pattern=_p(rf"v{VERSION_PATTERN}"),
