@@ -328,6 +328,40 @@ export default function Chat() {
           delete next[site];
           return next;
         });
+      } else if (type === 'timeline') {
+        // S1 closer (cut-list item #8): the brain emits a dedicated
+        // `timeline` frame in parallel with the streaming chat
+        // response so the TimelineCard can render before the LLM
+        // finishes narrating. Insert it as its own assistant bubble,
+        // keyed by session_id + query so a repeat of the same
+        // question replaces the prior card instead of stacking.
+        const p = msg.payload || {};
+        const sessKey = String(p.session_id || msg.session_id || '');
+        const queryKey = String(p.query || '');
+        const key = `tl_${sessKey}_${queryKey}`;
+        const card = {
+          id: key,
+          role: 'assistant',
+          text: '',
+          type: 'timeline',
+          timeline: {
+            entries: Array.isArray(p.entries) ? p.entries : [],
+            window: p.window || {},
+            summary: p.summary || '',
+            degraded_sources: Array.isArray(p.degraded_sources) ? p.degraded_sources : [],
+            sources_queried: Array.isArray(p.sources_queried) ? p.sources_queried : [],
+            query: queryKey,
+          },
+        };
+        setMessages((prev) => {
+          const existing = prev.findIndex((m) => m.id === key && m.type === 'timeline');
+          if (existing >= 0) {
+            const next = prev.slice();
+            next[existing] = card;
+            return next;
+          }
+          return [...prev, card];
+        });
       } else if (type === 'transcript') {
         const p = msg.payload || {};
         if (p.is_partial) return;
@@ -652,6 +686,8 @@ export default function Chat() {
                     {m.granted ? `Granted access to ${m.path || 'requested folder'}.`
                       : `Denied access to ${m.path || 'requested folder'}.`}
                   </div>
+                ) : m.type === 'timeline' ? (
+                  <TimelineCard timeline={m.timeline} />
                 ) : (
                   <>
                     {m.role === 'assistant' ? (

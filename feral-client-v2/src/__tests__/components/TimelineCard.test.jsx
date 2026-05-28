@@ -36,9 +36,89 @@ describe('TimelineCard (S1)', () => {
     expect(container.innerHTML).toBe('');
   });
 
-  it('degrades to a single Events section when only entries[] provided', () => {
-    render(<TimelineCard timeline={{ entries: [{ time: '08:00', text: 'one' }] }} />);
-    expect(screen.getByText('Events')).toBeInTheDocument();
+  it('groups entries[] by source when sections are missing', () => {
+    render(<TimelineCard timeline={{ entries: [{ source: 'memory', time: '08:00', text: 'one' }] }} />);
+    expect(screen.getByText('Memory')).toBeInTheDocument();
     expect(screen.getByText('one')).toBeInTheDocument();
+  });
+});
+
+describe('TimelineCard — canonical WS payload (cut-list #8 / S1)', () => {
+  const wsPayload = {
+    query: 'what did I do yesterday?',
+    window: { from: '2026-05-26T00:00:00', to: '2026-05-27T00:00:00', label: 'yesterday' },
+    summary: '',
+    entries: [
+      {
+        source: 'episode', type: 'episode',
+        timestamp: 1716700000,
+        title: 'standup',
+        content: 'said 9am works',
+        metadata: { id: 'ep-1' },
+      },
+      {
+        source: 'note', type: 'note',
+        timestamp: 1716710000,
+        title: 'pick up groceries',
+        content: 'milk, eggs',
+        metadata: { id: 'note-1' },
+      },
+      {
+        source: 'episode', type: 'episode',
+        timestamp: 1716720000,
+        title: 'afternoon recap',
+        content: 'shipped timeline closer',
+        metadata: { id: 'ep-2' },
+      },
+    ],
+    sources_queried: ['episode', 'note', 'calendar', 'health', 'screen_loop'],
+    degraded_sources: [
+      { source: 'calendar', reason: 'no_token' },
+      { source: 'screen_loop', reason: 'no_query_api' },
+    ],
+  };
+
+  it('renders entries grouped by source with chronological order within group', () => {
+    render(<TimelineCard timeline={wsPayload} />);
+    // Group titles
+    expect(screen.getByText('Chat')).toBeInTheDocument();   // episode → Chat
+    expect(screen.getByText('Notes')).toBeInTheDocument();  // note → Notes
+
+    // First group (Chat) is open by default — entries in chronological order
+    const standup = screen.getByText('standup');
+    const recap = screen.getByText('afternoon recap');
+    expect(standup.compareDocumentPosition(recap) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('shows degraded-source chip with humanized reason', () => {
+    render(<TimelineCard timeline={wsPayload} />);
+    const chips = screen.getAllByTestId('timeline-degraded-chip');
+    expect(chips.length).toBe(2);
+    expect(chips[0].textContent).toMatch(/Calendar unavailable/i);
+    expect(chips[0].textContent).toMatch(/no token configured/i);
+    expect(chips[1].textContent).toMatch(/Screen activity unavailable/i);
+  });
+
+  it('hides summary section when summary is empty', () => {
+    render(<TimelineCard timeline={wsPayload} />);
+    // No paragraph with summary text — only the topbar + chips + sections.
+    expect(screen.queryByText(/Quiet day/i)).toBeNull();
+  });
+
+  it('renders the window label as the topbar title', () => {
+    render(<TimelineCard timeline={wsPayload} />);
+    expect(screen.getByText('Yesterday')).toBeInTheDocument();
+  });
+
+  it('renders only degraded chips when entries[] is empty', () => {
+    render(<TimelineCard timeline={{
+      query: 'q',
+      window: { from: '', to: '', label: 'today' },
+      entries: [],
+      summary: '',
+      sources_queried: ['episode'],
+      degraded_sources: [{ source: 'episode', reason: 'no_memory' }],
+    }} />);
+    expect(screen.getByText(/Chat unavailable/i)).toBeInTheDocument();
   });
 });

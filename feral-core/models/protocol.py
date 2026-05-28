@@ -376,6 +376,35 @@ class ErrorPayload(BaseModel):
     recoverable: bool = True
 
 
+class TimelinePayload(BaseModel):
+    """Fused-timeline frame for S1 ("what did I do yesterday?").
+
+    Emitted by the orchestrator in parallel with the streaming chat
+    response when the LLM (or heuristic router) dispatches
+    ``notes_memory__fused_timeline``. Lets the WebUI mount a
+    TimelineCard immediately instead of waiting for the model to
+    finish narrating.
+
+    ``window`` is the parsed temporal range: ``{"from": iso,
+    "to": iso, "label": "yesterday"}``. ``entries`` is the flat,
+    chronologically sorted list of typed entries (episode | note |
+    knowledge | event | health | …); the client groups by
+    ``source`` for the collapsible-sections view. ``degraded_sources``
+    parallels the timeout-degraded pattern from
+    ``memory/store.py::stats`` — every source that the fusion tried
+    to query but failed (no token, no client, exception) lands here
+    as ``{"source": ..., "reason": ...}`` so the UI can render an
+    honest chip instead of a silently missing section.
+    """
+    session_id: str = ""
+    query: str = ""
+    window: dict = Field(default_factory=dict)
+    entries: list[dict] = Field(default_factory=list)
+    summary: str = ""
+    sources_queried: list[str] = Field(default_factory=list)
+    degraded_sources: list[dict] = Field(default_factory=list)
+
+
 # ─────────────────────────────────────────────
 # Payload Models — Brain ↔ Daemon
 # ─────────────────────────────────────────────
@@ -736,6 +765,7 @@ MESSAGE_TYPES = {
     "budget_exceeded": BudgetExceededPayload,
     "chat_response": ChatResponsePayload,
     "genui_push": GenUIPushPayload,
+    "timeline": TimelinePayload,
 
     # Brain ↔ Daemon (HUP canonical)
     "register": NodeRegisterPayload,

@@ -30,6 +30,7 @@ from fastapi import WebSocket
 from models.protocol import (
     FeralMessage,
     SDUIPayload,
+    TimelinePayload,
     ToolResultPayload,
     ToolStartPayload,
     VisionRequestPayload,
@@ -968,6 +969,61 @@ class Orchestrator:
             ))
         except Exception:
             pass
+
+        # S1 closer (cut-list item #8): the fused-timeline tool returns
+        # a structured {entries, summary, window, sources_queried,
+        # degraded_sources} payload. Emit it as a dedicated ``timeline``
+        # WS frame so the WebUI's TimelineCard can mount immediately
+        # — in parallel with whatever prose the LLM is still streaming.
+        try:
+            await self._maybe_emit_timeline_frame(session_id, tool_call, result_data)
+        except Exception:
+            logger.debug("timeline frame emit failed (non-fatal)", exc_info=True)
+
+    async def _maybe_emit_timeline_frame(
+        self,
+        session_id: str,
+        tool_call: dict,
+        result_data: dict,
+    ) -> None:
+        """Emit a ``timeline`` WS frame iff the tool call was a fused-
+        timeline dispatch and the result carries the expected shape.
+
+        Field-tolerant by design: a malformed payload falls through
+        silently rather than blocking the rest of the response loop.
+        """
+        if not isinstance(result_data, dict):
+            return
+        if not result_data.get("success"):
+            return
+        tool_name = str(tool_call.get("name") or "")
+        if not tool_name.endswith("__fused_timeline"):
+            return
+        data = result_data.get("data")
+        if not isinstance(data, dict):
+            return
+        entries = data.get("entries")
+        window = data.get("window")
+        if not isinstance(entries, list) or not isinstance(window, dict):
+            return
+        payload = TimelinePayload(
+            session_id=session_id,
+            query=str(data.get("query") or tool_call.get("args", {}).get("query") or ""),
+            window=window,
+            entries=entries,
+            summary=str(data.get("summary") or ""),
+            sources_queried=list(data.get("sources_queried") or []),
+            degraded_sources=list(data.get("degraded_sources") or []),
+        )
+        await self.send(
+            session_id,
+            FeralMessage(
+                session_id=session_id,
+                hop="brain",
+                type="timeline",
+                payload=payload.model_dump(),
+            ),
+        )
 
     # ─────────────────────────────────────────────
     # Core Command Handler
