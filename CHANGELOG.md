@@ -1,10 +1,72 @@
 # Changelog
 
-<!-- feral-version: 2026.5.42 -->
+<!-- feral-version: 2026.5.43 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.5.43] — Thesis-wiring wave: S1 fused-timeline, S4 voice fallback, S6 ScreenLoop banner, memory encrypted at rest
+
+The follow-up to v2026.5.42's UX cleanup. v2026.5.43 closes four of the six v1.0 thesis scenarios at the brain layer, lights up `feral memory encrypt` for the first time, and persists the integration-webhook ingress so signed payloads survive a restart. Five focused commits stacked on v2026.5.42 plus the version-bump marker — no live-verified-on-hardware claim, that's the next gate.
+
+### S1 — "What did I do yesterday?" now renders a fused TimelineCard inline in chat
+
+The orchestrator's tool-dispatch path recognizes temporal-recall questions ("what did I do yesterday?", "summarize my morning", "what happened last Tuesday afternoon?") and routes them to a single canonical skill that fans out across episodes, notes, knowledge-graph triples, ScreenLoop frames, calendar events, and health data — degrading gracefully per source when credentials are missing. The merged result is sorted chronologically, deduped across overlapping entries, capped at ~50 per source, and shipped to the WebUI as a typed `timeline` WS frame in parallel with the streaming LLM narration. Chat.jsx renders the result via `TimelineCard` — collapsible source sections, degraded-source chips with reasons, optional LLM summary above the entries. Latency target is <4s end-to-end; the LLM text streams independently. Tool-name reconciliation: the thesis assumed `notes_memory__search`; the worker picked the canonical name documented in the commit body.
+
+### S4 — Realtime quota error auto-morphs the session to chained Deepgram + ElevenLabs
+
+`voice/router.handle_realtime_failure` no longer stops at whisper mp3 TTS when OpenAI Realtime returns `insufficient_quota` (or any 1013-class error). With `audio.fallback_mode: "chained"` (new default in `config/loader.py`) and `DEEPGRAM_API_KEY` + `ELEVENLABS_API_KEY` in vault, the router now stops the dead Realtime session, retargets node routing to chained, calls `open_chained_session` with the new `audio.chained_fallback` defaults (`{stt_provider: deepgram, tts_provider: elevenlabs}`), and emits a `voice_status` frame with `state=degraded`, `fallback_provider="chained"` so the UI banner can announce the morph. Idempotent (double 1013 fires one morph), gemini-parity (gemini_realtime delegates the same way), and `agents/response_delivery.send_text` guards against double-TTS when the chained LLM path is active. The shipped `openai_realtime` model catalog also expanded from a single `gpt-realtime` entry to the full filter (`gpt-realtime`, `gpt-realtime-mini`, dated GA snapshots, `gpt-4o-realtime-preview` legacy variants) so the UI dropdown is operator-useful.
+
+### S6 — ScreenLoop's `cost_cap_hit` finally renders a banner
+
+`BudgetLoopGuard._emit_cap_hit` has been emitting `cost_cap_hit` events wrapped as `{type: "state_push", event: "cost_cap_hit", data: {...}}` since v2026.5.41, but no WebUI surface consumed them — only chat-path `budget_exceeded` triggered the yellow `BudgetExceededBanner`. v2026.5.43 adds a `state_push`/`event === "cost_cap_hit"` branch in `Chat.jsx`, `phone/ChatPanel.jsx`, and `Settings.jsx`'s Cost panel listener, all routed through a shared `budgetBannerFromCapHit(p)` normalizer keyed on `call_site`. `BudgetExceededBanner` accepts the new `subsystem` prop so the banner reads "ScreenLoop budget reached" instead of generic "screen_loop". S6 is now full end-to-end: chat-path cap (already shipped in v2026.5.41) + ScreenLoop-path cap (new) + Settings live spend chips both react to the same wire shapes.
+
+### S5 (partial) — `vacuum_start`, `vacuum_stop`, `vacuum_return_to_base` on the smart-home manifest
+
+`skills/manifests/smart_home.json` grew three new endpoints matching the dispatch table that landed in `skills/impl/home_assistant.py` back in v2026.5.38 — closing the manifest↔dispatch contract gap and letting the LLM call them directly via the standard skill router. Vacuum start now returns `{started: True, entity_id, service: "vacuum.start"}` from the orchestrator so chat can render "Started the Roomba in the living room" without parsing raw HA service responses. The full S5 closure still needs the iOS smart-glasses adapter wire-up (deferred).
+
+### S2 brain-side — HealthKit `sensor_type` alias
+
+`SensorTelemetryPayload` in `models/protocol.py` now declares `sensor` with `validation_alias=AliasChoices("sensor", "sensor_type")` so the deployed iOS app — which still sends the legacy `sensor_type` key from `FeralBrainClient.swift`'s string overload — keeps parsing cleanly. `api/server.py`'s sensor_telemetry handler also reads `payload_dict.get("sensor") or payload_dict.get("sensor_type", "")` as defense-in-depth. The brain-side fix unblocks HealthKit ingest immediately for every operator running v2026.5.43; the full S2 closure still needs the iOS rebuild that renames the string-overload key.
+
+### `feral memory encrypt` ships
+
+The longest-standing CLI phantom is now real. `feral memory encrypt [--force] [--no-shred]` requires the brain to be stopped (probes `localhost:9090/health`), WAL-checkpoints `~/.feral/memory.db`, encrypts the resulting blob with ChaCha20-Poly1305 AEAD (subkey via HKDF-SHA256 from the vault master, AAD `b"feral-memory-v1"`), atomic-replaces with `.enc.new` → `os.replace`, and keeps a `memory.db.bak.plaintext` chmod-0600 backup until decrypt-round-trip + `PRAGMA integrity_check` verify. Settings flag `memory.encrypted_at_rest: true` flips on success. The matching `ensure_plaintext_db()` boot hook in `memory/store.py` decrypts the `.enc` blob into a runtime `memory.db` before `_init_db()`, so the brain restart workflow is `feral stop` → `feral memory encrypt` → `feral start`. `feral doctor` adds a row that fails loud when `memory.db.enc` exists but the keychain entry no longer unlocks. Tamper detection via `MemoryTamperedError`. Rotation (`--rotate`) deferred to a future release.
+
+### Phantom CLI allowlists scrubbed empty
+
+The bridging allowlists in `tests/test_cli_no_phantom_commands.py` — which were tolerating documentation claims like `feral hardware scan`, `feral vault set`, `feral webhooks create`, `feral backup create/restore`, `feral providers status`, `feral supervisor approve`, `feral upgrade --to`, `feral memory wiki *`, `feral memory sync`, `feral voice train-wakeword` — are now both empty (`KNOWN_PHANTOM_SUBCOMMANDS == set()` and `KNOWN_PHANTOM_TOP_LEVEL == set()`). Either the command got implemented (only `memory encrypt`) or the Mintlify reference got rewritten to use the actually-shipped surface (`feral devices`, `/api/devices/pair` curl examples, `feral key add/list/rotate`, `pip install 'feral-ai==<v>'`, "Supervisor → Approvals UI", `feral wake-test`). A new `test_phantom_allowlists_are_empty()` assertion locks the contract: if a future phantom is introduced, CI fails immediately rather than accumulating an allowlist of debt.
+
+### Integration-ingress webhooks persist across restarts
+
+`integrations/webhook_store.py` grew an `integration_webhooks` table with `app_id PRIMARY KEY`, `secret`, `signature_header`, `signature_prefix`, `hash_algorithm`, `enabled`, `updated_at` — mirroring the existing `custom_webhooks` table but on the integration-ingress namespace. `WebhookReceiver._configs` is no longer a process-local dict; it's a hydrated cache populated from the store at boot via `await self.webhook_receiver.hydrate_from_store()` (wired in `api/state.py`). `set_secret` / `register_webhook` are now async and persist. `_register_defaults` becomes `_ensure_defaults` — only seeds GitHub/Stripe/Notion/Home Assistant stubs if the store has no row for them, so operator-supplied secrets survive restarts. New HTTP route `PUT /api/webhooks/{app_id}/config` accepts `{secret?, signature_header?, enabled?}` for programmatic credential rotation. The `custom_webhooks` schema is untouched.
+
+### Mintlify docs: HUP version corrected, vault KDF prose aligned with SECURITY.md
+
+`docs/mintlify/hardware/hup-spec.mdx` had been claiming HUP `1.0.0` while `models/protocol.py` ships `1.3.0` — the version-pin lie is fixed and the spec page now references the actual wire version. `docs/mintlify/getting-started/configuration.mdx`'s vault paragraph was rewritten to match `SECURITY.md:174–177` verbatim: ChaCha20-Poly1305 AEAD with a master key derived from your OS keychain via HKDF-SHA256, no on-disk master password, unlock requires the keychain entry to be present. `docs/mintlify/operations/metrics.mdx`'s runbook commands and the Mintlify channels / hardware reference pages were given a second scrub pass for any phantom CLI commands lingering after v2026.5.42.
+
+### Smaller safety / hygiene
+
+A new `tests/test_provider_env_keys_in_sync.py` enforces that `_PROVIDER_ENV_KEYS` in `security/vault_keys.py` and `_PROVIDER_REGISTRY` in `agents/llm_provider.py` stay aligned — the v2026.5.42 follow-up risk noted in the cut-list is now CI-enforced. Worker D added the assertion in this wave; future runtime-provider additions can't ship without updating both tables.
+
+### Tests
+
+| Lane | Tests added / extended | Result |
+|------|------------------------|--------|
+| Worker A — voice fallback + catalog | `tests/test_voice_realtime_quota_fallback.py` +6 cases, `tests/test_voice_router.py`, `tests/test_api_voice_providers.py` +1, parity tests | green |
+| Worker B — memory encrypt + phantom scrub | new `tests/test_memory_encrypt.py` (5 cases), `tests/test_cli_no_phantom_commands.py` + new `test_phantom_allowlists_are_empty` | green |
+| Worker C — cost banner + webhook persist + vacuum | new `tests/test_integration_webhook_persistence.py`, new `Chat.cost-cap-hit.test.jsx`, manifest+dispatch contract for vacuum | green |
+| Worker D — HealthKit alias + HUP + env sync | new `tests/test_sensor_telemetry_ingest.py`, new `tests/test_provider_env_keys_in_sync.py`, hup parity | green |
+| S1 — fused timeline | new `tests/test_skill_timeline_fusion.py`, new `tests/test_orchestrator_fused_timeline.py`, new `TimelineCard.test.jsx`, new `Chat.timeline-card.test.jsx` | green |
+
+### Not in this release (queued for v2026.5.44 / v1.0)
+
+- iOS rebuild: `FeralBrainClient.swift` string-overload key fix (S2 last-mile), generic BLE peripheral scanner emitting `device_announce` (S3), QCSDK W610 / camera glasses adapter wiring (S5 last-mile), Release-build DEBUG-gate for the debug viewer + version sync.
+- Record S1–S6 on real hardware (THESIS_SCENARIOS) — the video gate per `V1_0_RELEASE_HANDOFF.md` step 7.
+- Tag **v1.0** — only after all six scenarios PASS on video.
+- `feral memory encrypt --rotate` (key rotation only, no full re-encrypt).
+- Phone client `TimelineCard` mirror — today the fused-timeline render is desktop WebUI only.
 
 ## [2026.5.42] — Honesty + UX wave: scrubbed internal-audit leak, three picker bugs, vault-key hot-swap, daemon-shell sandbox
 
