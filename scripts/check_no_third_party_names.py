@@ -71,6 +71,12 @@ EXEMPT_FILES: frozenset[str] = frozenset(
         # Agent worktree scratchpads — never reach origin/main in
         # well-formed PRs, but belt-and-braces for the linter.
         "_PROPOSAL.md",
+        # v2026.5.43: enforcement scaffolding from the docs-leakage
+        # carve-out. Both files carry internal-doc identifiers as data
+        # (a gitignore glob and an allowlist literal) so the same
+        # carve-out this script already grants itself applies here.
+        ".gitignore",
+        "scripts/check_docs_no_internal_leakage.py",
     }
 )
 
@@ -82,6 +88,11 @@ EXEMPT_DIR_PREFIXES: tuple[str, ...] = (
     # Conductor analysis docs, handoff notes, scratch — .internal/ is
     # in .gitignore and never ships to GitHub.
     ".internal/",
+    # v2026.5.43: rolling audit dossier (findings, scoreboards, lane
+    # reports, snapshots, handoffs). The whole tree is in .gitignore
+    # and never reaches the public repo; locally-tracked walkers
+    # would otherwise trip the linter on internal artifact names.
+    "AUDIT-r14/",
 )
 
 
