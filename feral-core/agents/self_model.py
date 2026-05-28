@@ -142,7 +142,7 @@ def build_runtime_line(frame=None) -> str:
     """One-line environment summary appended near the bottom of the system prompt.
 
     Example:
-        Runtime: agent=feral version=2026.5.44 host=mbp os=Darwin model=openai/gpt-4o channels=telegram(@feral_bot) devices=wristband autonomy=hybrid capabilities=voice,vision,somatic,mdns,sdui,tool_genesis,mitosis
+        Runtime: agent=feral version=2026.5.45 host=mbp os=Darwin model=openai/gpt-4o channels=telegram(@feral_bot) devices=wristband autonomy=hybrid capabilities=voice,vision,somatic,mdns,sdui,tool_genesis,mitosis
     """
     version = _feral_version()
     host = socket.gethostname() or "localhost"

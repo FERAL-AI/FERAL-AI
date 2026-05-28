@@ -1,10 +1,41 @@
 # Changelog
 
-<!-- feral-version: 2026.5.44 -->
+<!-- feral-version: 2026.5.45 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.5.45] — `feral setup` wizard hardening: jump-back nav, honest key detection, no probe-rejected reuse, voice key sharing
+
+A live operator run of `feral setup` on v2026.5.44 surfaced a cluster of wizard-logic bugs. v2026.5.45 closes all of them across three commits — the setup wizard now navigates non-linearly, never lies about whether a key exists, never silently reuses a key the provider just rejected, and shares one vendor key across chat + realtime voice. Plus the voice router now resolves labeled vault keys so `feral key add --label`-only keys reach realtime/chained voice.
+
+### Setup wizard — navigation + key UX (`07a44cd7`)
+
+- **Jump-back navigation.** A new `JumpToStep` primitive + step picker lets the operator jump from any step back to a specific earlier step (e.g. return to the provider/key step from the Channels step) without quitting and re-running, and without wiping already-entered answers. Previously back-navigation only decremented one step at a time.
+- **Existing-key detection + keep/replace.** When a provider key already exists in the vault, the key step now shows it masked (`sk-…XXXX`, with label + source) and offers **Keep current / Replace / Add another labeled key / Remove** — instead of the contradictory pre-fix flow that said "needs a key" and then asked "keep or replace".
+- **Voice model picker.** Confirmed the realtime voice model is selected via a picker over the provider catalogue's `models[]`, never a free-text "type the model name" prompt.
+- **One key, many surfaces.** When an OpenAI key is already configured for chat, the voice step detects it and offers to reuse it for realtime voice rather than re-prompting. A different-vendor realtime provider (e.g. Gemini Live with only OpenAI configured) still prompts inline.
+
+### Voice router — labeled vault keys (`01eda5d9`)
+
+`voice/router.py` resolved provider keys via direct `os.getenv(...)` at three sites (chained-morph preflight, fallback-provider picker, `open_chained_session`), so a labeled-only key set via `feral key add --provider openai --label prod --set-active` (skipping the legacy default-namespace write) was invisible to voice. All three now route through `security.vault_keys.get_active_key(<provider>)` (which falls back to env on its own — strictly additive; env-only setups unaffected). Each call site resolves its own provider independently (deepgram / groq / openai for STT; elevenlabs / cartesia / openai for TTS) — no cross-contamination. The `FERAL_VOICE_PROVIDER` mode selector env reads were correctly left alone.
+
+### Setup wizard — logic bugs found in the live run (`c85a5143`)
+
+- **No reuse of a probe-rejected key (the headline fix).** The voice step computed a provider probe verdict (e.g. OpenAI Realtime `✘ key rejected` / `unreachable`) but `_maybe_reuse_provider_key` reused the stored key unconditionally, never consulting that verdict — and even labeled an unreachable provider's model `· ready`. Now the helper takes the probe result: on HTTP 401/403/unreachable it surfaces `⚠ The existing <vendor> key … was rejected by the provider` and offers **Replace / Keep anyway / Skip**, and the realtime-model picker derives its status from the parent provider's actual probe.
+- **Default-namespace key badge reads "ready".** The provider picker badge only consulted the labeled-key vault, so a key stored in the legacy default namespace (which `_configure_provider_key` correctly found via `existing_provider_key`) still showed "needs API key" in the picker table. `_build_options` now resolves through the same `existing_provider_key` helper (labeled vault → default-namespace vault → env → state credentials).
+- **Uniform key masking.** Pinned the contract that every key display routes through `security.vault_keys.mask_key()` → identical `sk-…XXXX` form across chat and voice steps (regression guard `test_key_masking_uniform_across_steps`).
+- **Single banner render.** `welcome.run` had no idempotency guard, so `BackNavigation` / `JumpToStep` re-entry re-rendered the ASCII banner. Now early-returns when `"welcome"` is already in `state.completed_steps`.
+
+### Tests
+
+Across the three commits: 85 + 38 + 82 focused pytest cases pass (CLI setup, UI kit, setup-wizard preflights, scripted-live wizard harness, voice router, vault hot-path, key multikey). A new `tests/test_setup_wizard_scripted_live.py` drives the real wizard step functions through the `ui_kit` seam and captures a transcript covering both the happy path (key reused silently when probe OK) and the rejected-key path (warning + Replace/Keep/Skip choice). Both doc guards (`check_docs_no_internal_leakage.py`, `check_no_third_party_names.py`) pass.
+
+### Operator notes
+
+- The OpenAI key in the operator's vault was a placeholder (`dds`), which is why every OpenAI voice probe shows `key rejected`. Set a real key via `feral key add --provider openai --label default --set-active` before voice testing.
+- `feral setup` is a full-screen TTY wizard (InquirerPy/prompt_toolkit) — it cannot be screenshotted by automation; the scripted-live harness transcript is the canonical verification artifact.
 
 ## [2026.5.44] — Critical v2026.5.43 follow-up: WebUI bundle rebuilt + orchestrator S1 routing + cost cap per-subsystem + Anthropic multimodal blocks
 
