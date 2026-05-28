@@ -1026,6 +1026,159 @@ class Orchestrator:
         )
 
     # ─────────────────────────────────────────────
+    # Live-path side-channel: proactive timeline fusion
+    # ─────────────────────────────────────────────
+    #
+    # The LLM tool-call path above (``_maybe_emit_timeline_frame``)
+    # only fires when the model actually dispatches
+    # ``*__fused_timeline``. Live testing against claude-opus-4-7
+    # showed the model answering "what did I do yesterday?" in prose
+    # without invoking the tool — so the TimelineCard never mounted.
+    # Routing-closure (regex_:memory_) only EXPOSES the tool; it
+    # cannot force the model to call it.
+    #
+    # The side-channel below closes that gap. When the heuristic
+    # detects a temporal-recall query (strict ``_R_TEMPORAL`` subset
+    # of ``_R_MEMORY``), the orchestrator dispatches
+    # ``timeline_fusion()`` directly, in parallel with the LLM
+    # stream, and pushes a ``timeline`` WS frame iff the fusion
+    # returned ≥ 1 entry. The prose stream is unaffected — both
+    # render. If the LLM ALSO picks the tool (best case), the client
+    # de-dupes by ``{session_id, query}`` so the redundant emit just
+    # replaces.
+
+    _TEMPORAL_WINDOW_ORDER = (
+        # Order matters — more specific phrases first.
+        ("this_morning", ("this morning",)),
+        ("this_afternoon", ("this afternoon",)),
+        ("this_evening", ("this evening", "tonight")),
+        ("last_week", ("last week",)),
+        ("this_week", ("this week", "past week")),
+        ("last_month", ("last month",)),
+        ("yesterday", ("yesterday",)),
+        ("today", ("today",)),
+        ("morning", ("morning",)),
+        ("afternoon", ("afternoon",)),
+        ("evening", ("evening",)),
+    )
+
+    @staticmethod
+    def _temporal_window_label_from_text(text: str) -> str:
+        """Pick a ``parse_window`` label from natural-language text.
+
+        Returns the canonical label string ``parse_window`` consumes
+        (``"yesterday"``, ``"morning"``, ``"last_tuesday"``, etc.).
+        Defaults to ``"yesterday"`` when no specific window is
+        mentioned — that's the thesis-default and matches
+        ``parse_window``'s own fallback.
+        """
+        if not text:
+            return "yesterday"
+        t = text.lower()
+        for label, keys in Orchestrator._TEMPORAL_WINDOW_ORDER:
+            for key in keys:
+                if key in t:
+                    return label
+        for d in (
+            "monday", "tuesday", "wednesday", "thursday",
+            "friday", "saturday", "sunday",
+        ):
+            if f"last {d}" in t:
+                return f"last_{d}"
+        return "yesterday"
+
+    async def _maybe_emit_temporal_timeline(
+        self, session_id: str, text: str,
+    ) -> bool:
+        """Dispatch ``timeline_fusion`` proactively on the live chat
+        path when the user asked a temporal-recall question, and emit
+        a ``timeline`` WS frame iff the fusion returned ≥ 1 entry.
+
+        Returns ``True`` when a frame was emitted, ``False`` otherwise.
+        Defensive throughout — every failure path is silent, so the
+        side-channel can never break the LLM stream.
+        """
+        try:
+            if not text or not self._R_TEMPORAL.search(text):
+                return False
+            try:
+                from skills.impl.timeline_fusion import (
+                    DEFAULT_PER_SOURCE_LIMIT,
+                    timeline_fusion,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "temporal-timeline side-channel: import failed: %s",
+                    exc,
+                )
+                return False
+
+            memory = self.memory
+            calendar = None
+            health_aggregator = None
+            try:
+                from api.state import state as _state
+                calendar = getattr(_state, "calendar", None)
+                health_aggregator = getattr(_state, "health_aggregator", None)
+                if memory is None:
+                    memory = getattr(_state, "memory", None)
+            except Exception:
+                pass
+
+            window_label = self._temporal_window_label_from_text(text)
+
+            try:
+                result = await timeline_fusion(
+                    query=text,
+                    memory=memory,
+                    calendar=calendar,
+                    health_aggregator=health_aggregator,
+                    window_label=window_label,
+                    per_source_limit=DEFAULT_PER_SOURCE_LIMIT,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "temporal-timeline side-channel: fusion failed: %s",
+                    exc,
+                )
+                return False
+
+            if not isinstance(result, dict):
+                return False
+            entries = result.get("entries")
+            window = result.get("window")
+            if not isinstance(entries, list) or not entries:
+                return False
+            if not isinstance(window, dict):
+                return False
+
+            payload = TimelinePayload(
+                session_id=session_id,
+                query=text,
+                window=window,
+                entries=entries,
+                summary=str(result.get("summary") or ""),
+                sources_queried=list(result.get("sources_queried") or []),
+                degraded_sources=list(result.get("degraded_sources") or []),
+            )
+            await self.send(
+                session_id,
+                FeralMessage(
+                    session_id=session_id,
+                    hop="brain",
+                    type="timeline",
+                    payload=payload.model_dump(),
+                ),
+            )
+            return True
+        except Exception:
+            logger.debug(
+                "temporal-timeline side-channel: unexpected error",
+                exc_info=True,
+            )
+            return False
+
+    # ─────────────────────────────────────────────
     # Core Command Handler
     # ─────────────────────────────────────────────
 
@@ -1310,6 +1463,21 @@ class Orchestrator:
             summary=text[:200],
             detail=json.dumps(context or {}),
         )
+
+        # S1 live-path closure (non-stream parity). The stream path
+        # fires the proactive timeline-fusion side-channel; mirror it
+        # here so a non-streaming client (or the streaming-disabled
+        # fallback) also surfaces a TimelineCard for temporal-recall
+        # queries. See ``_maybe_emit_temporal_timeline``.
+        try:
+            asyncio.create_task(
+                self._maybe_emit_temporal_timeline(session_id, text)
+            )
+        except Exception:
+            logger.debug(
+                "temporal-timeline side-channel: task schedule failed",
+                exc_info=True,
+            )
 
         context_data = context or {}
         vision_fast_path = context_data.get("channel") == "vision_ask"
@@ -1693,6 +1861,23 @@ class Orchestrator:
             summary=text[:200],
             detail=json.dumps(context or {}),
         )
+
+        # S1 live-path closure: fire the proactive timeline fusion
+        # side-channel concurrently with the LLM stream. The LLM may
+        # answer in prose without tool-calling ``*__fused_timeline``
+        # (claude-opus-4-7 routinely does); the side-channel emits
+        # the ``timeline`` WS frame regardless so the TimelineCard
+        # mounts. See ``_maybe_emit_temporal_timeline`` for the
+        # exact gate and contract.
+        try:
+            asyncio.create_task(
+                self._maybe_emit_temporal_timeline(session_id, text)
+            )
+        except Exception:
+            logger.debug(
+                "temporal-timeline side-channel: task schedule failed",
+                exc_info=True,
+            )
 
         # WS3 — multi-agent pre-path parity. The non-stream branch
         # hands the turn to ``MultiAgentOrchestrator`` when enabled +
@@ -2232,6 +2417,37 @@ class Orchestrator:
         r"do\s+you\s+remember|"
         # "my notes …" and "my <window> so far|recap|summary|review"
         r"my\s+notes(?:\b|\s+from)|"
+        r"my\s+(?:morning|afternoon|evening|day|week)\s+(?:so\s+far|recap|summary|review|in\s+review)"
+        r")\b",
+        re.I,
+    )
+
+    # Strict temporal-recall subset of ``_R_MEMORY`` — the queries
+    # where a fused-timeline card is the right v1 affordance. Used by
+    # ``_maybe_emit_temporal_timeline`` to decide whether the live
+    # chat-stream path should proactively dispatch ``timeline_fusion``
+    # as a side-channel (in parallel with the LLM stream). This
+    # exists separately from ``_R_MEMORY`` because the latter also
+    # matches non-temporal recall ("do you remember the project
+    # name?", "my notes from the meeting") — those should not push a
+    # TimelineCard at the user. The patterns below are exactly the
+    # clauses in ``_R_MEMORY`` that anchor on a temporal window or
+    # past-event verb.
+    _R_TEMPORAL = re.compile(
+        r"\b("
+        # "what did/have I do/done/say/work on/focus on/accomplish …"
+        r"what\s+(?:did|have)\s+i\s+(?:do|done|say|said|ask|asked|save|saved|note|noted|work(?:ed)?\s+on|focus(?:ed)?\s+on|accomplish(?:ed)?)|"
+        # "summarize/recap/review <window>"
+        r"(?:summari[sz]e|recap|review)\s+(?:today|yesterday|tonight|this\s+(?:morning|afternoon|evening|week|day)|my\s+(?:morning|afternoon|evening|night|day|week|month))|"
+        # "what happened/went on/was going on" — temporal recall
+        r"what\s+(?:happened|went\s+on|was\s+going\s+on)\b|"
+        # chat-recall ("what were we discussing") — fused timeline
+        # surfaces the actual chat-turn episodes that match.
+        r"what\s+(?:was|were)\s+(?:we\s+)?(?:talking|chatting|discussing)\s+about|"
+        r"what\s+did\s+we\s+(?:discuss|talk\s+about)|"
+        # "earlier today/yesterday/this morning"
+        r"earlier\s+(?:today|yesterday|this\s+(?:morning|afternoon|evening))|"
+        # "my <window> so far|recap|summary|review|in review"
         r"my\s+(?:morning|afternoon|evening|day|week)\s+(?:so\s+far|recap|summary|review|in\s+review)"
         r")\b",
         re.I,

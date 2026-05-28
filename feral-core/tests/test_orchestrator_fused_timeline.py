@@ -1,27 +1,47 @@
 """Pin the orchestrator-side emission of the ``timeline`` WS frame.
 
-When the LLM dispatches ``notes_memory__fused_timeline`` the
-orchestrator's ``_emit_tool_result`` path now ALSO emits a dedicated
-``timeline`` FeralMessage so the WebUI's TimelineCard can mount in
-parallel with the streaming prose response. These tests pin that
-behaviour by driving the helper directly with a fake ``send``
-sink — full orchestrator boot is far too heavyweight for a focused
-test, and the helper is the single integration point that matters.
+This file covers three layers of the S1 ``what did I do yesterday?``
+pipeline; each layer pins one specific contract and the three
+together close the live-brain gap:
 
-The second test block pins the **routing-closure** half of the S1
-gap: when the user asks a temporal-recall question, the heuristic
-``_R_MEMORY`` regex must promote ``notes_memory`` so the LLM sees
-``notes_memory__fused_timeline`` in its tool list. Phrasings the live
-v2026.5.43 brain previously slipped through ("summarize my morning",
-"what happened today", "earlier today", "recap my day") are pinned
-here. Non-temporal turns must NOT route to ``notes_memory``.
+1. **Helper-only emit shape** — when ``_emit_tool_result`` is invoked
+   with a ``*__fused_timeline`` tool call and a well-shaped result
+   payload, the orchestrator emits a ``timeline`` FeralMessage with
+   the canonical envelope. These tests drive
+   ``_maybe_emit_timeline_frame`` indirectly via ``_emit_tool_result``
+   and pin the WS-frame shape only. They do NOT pin live-path
+   behaviour; the live model often answers in prose without dispatching
+   the tool, in which case this branch never fires. The first
+   v2026.5.43 wave's green test sat exclusively at this layer and
+   gave false confidence — the live path was still broken because
+   nothing forced the LLM to call the tool.
+
+2. **Heuristic routing closure** — temporal-recall phrasings
+   ("summarize my morning", "what happened today", "earlier today",
+   "recap my day") must promote ``notes_memory`` so the LLM at least
+   *sees* ``notes_memory__fused_timeline`` in its tool list, and
+   non-temporal turns must NOT route to ``notes_memory``. Routing
+   only exposes the tool — it cannot force the model to call it.
+
+3. **Live-path side-channel emit** — when a temporal-recall query
+   reaches the live chat-stream path (``_handle_command_stream_impl``
+   or ``_handle_command_impl``), the orchestrator dispatches
+   ``timeline_fusion`` directly as a background task and emits a
+   ``timeline`` WS frame iff the fusion returned ≥ 1 entry —
+   regardless of whether the LLM tool-calls. These tests drive the
+   real stream-handler entry point with a mock LLM that streams
+   text-only (mimicking claude-opus-4-7's observed live behaviour)
+   and assert the WS sink receives a ``timeline`` frame. This is the
+   layer the v2026.5.43 wave was missing.
 """
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -88,6 +108,19 @@ _SAMPLE_FUSION_RESULT = {
     },
     "error": None,
 }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Layer 1 — helper-only emit shape.
+#
+# These four tests drive ``_emit_tool_result`` directly with a
+# hand-crafted ``tool_call`` and a perfectly-shaped result payload.
+# They pin the WS-frame envelope and the field-tolerant skip-paths.
+# They do NOT pin live behaviour — the live model may never dispatch
+# ``*__fused_timeline``, in which case this branch is dead. Layer 3
+# (below) drives the live chat-stream entry point and pins that the
+# timeline frame still emits via the proactive side-channel.
+# ─────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -178,7 +211,9 @@ async def test_skips_timeline_frame_when_data_shape_mismatched(fake_orch):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Routing closure — temporal-recall phrasings must promote
+# Layer 2 — routing closure.
+#
+# Temporal-recall phrasings must promote
 # ``notes_memory`` so the LLM sees ``fused_timeline`` in its tool set.
 #
 # Background: at v2026.5.43 the live brain test showed
@@ -402,3 +437,347 @@ def test_non_temporal_chat_does_not_invoke_timeline_fusion(routing_orch, prompt)
         f"prompt {prompt!r}: regex:memory must NOT fire for non-"
         f"temporal chat; got reason={reason}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Layer 3 — live-path timeline emission.
+#
+# The v2026.5.43 wave was missing exactly this layer. The helper-only
+# tests above (Layer 1) gave false confidence: they pinned the emit
+# shape WHEN the LLM tool-calls ``*__fused_timeline``, but the live
+# claude-opus-4-7 routinely answers temporal-recall queries in prose
+# without dispatching the tool — so the helper branch never fired and
+# the TimelineCard never mounted in the WebUI.
+#
+# These tests drive the live chat-stream entry point
+# (``_handle_command_stream_impl``) with a mock LLM that streams
+# text-only deltas (no tool_call_deltas) — exactly the live failure
+# mode. The orchestrator must STILL push a ``timeline`` WS frame for
+# temporal-recall queries via the proactive side-channel
+# (``_maybe_emit_temporal_timeline``). Non-temporal queries
+# ("explain TLS") must NOT push a timeline frame.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _live_skill(skill_id: str, triggers: list[str]) -> SkillManifest:
+    return SkillManifest(
+        skill_id=skill_id, version="1.0.0", author="test",
+        brand=BrandProfile(
+            name=skill_id, primary_color="#000", logo_url="", icon_set="sf_symbols"
+        ),
+        description=f"{skill_id} skill",
+        trigger_phrases=triggers,
+        endpoints=[
+            SkillEndpoint(
+                id="default", method="POST", url=f"https://x/{skill_id}",
+                description="x", returns_description="x", ui_hint="detail_card",
+            )
+        ],
+    )
+
+
+_LIVE_SKILLS = {
+    "notes_memory": _live_skill("notes_memory", ["my notes", "save a note"]),
+    "calendar_google": _live_skill("calendar_google", ["calendar", "my agenda"]),
+    "weather_current": _live_skill("weather_current", ["what's the weather"]),
+}
+
+
+class _RecordingMemory:
+    """Minimal MemoryStore stand-in: returns a single episode in the
+    "yesterday" window so ``timeline_fusion`` returns ``len(entries) >= 1``
+    and the side-channel emits the frame.
+
+    The real ``MemoryStore`` exposes ``episode_recent`` /
+    ``list_recent`` as async methods; we mirror the surface
+    ``_fetch_episodes`` and ``_fetch_notes`` consume.
+    """
+
+    def __init__(self, *, ts: float):
+        self._ts = ts
+        self.working_push = MagicMock()
+        self.episode_save = AsyncMock(return_value={})
+        self.log_execution = AsyncMock()
+
+    async def episode_recent(self, *, limit: int = 1000):
+        return [
+            {
+                "id": "ep-live-1",
+                "created_at": self._ts,
+                "summary": "yesterday morning standup",
+                "user_message": "did standup",
+                "assistant_message": "noted",
+                "session_id": "s-prior",
+                "tags": ["standup"],
+            }
+        ]
+
+    async def list_recent(self, *, limit: int = 500):
+        return []
+
+
+def _build_live_orchestrator() -> Orchestrator:
+    """Construct an Orchestrator wired for live chat-stream testing.
+
+    Mirrors the ``_make_orchestrator`` helper in
+    ``test_stream_nonstream_parity.py``: real ``__init__`` (so all
+    sub-modules — ``ToolRunner``, ``ContextManager``, etc. — wire
+    correctly), then mock the LLM + memory + skill registry.
+    """
+    reg = MagicMock()
+    reg.skills = _LIVE_SKILLS
+    reg.find_skills_for_query = lambda q, top_k=5: list(_LIVE_SKILLS.values())
+    reg.get_tools_for_skills = lambda skills: [
+        {
+            "type": "function",
+            "function": {
+                "name": f"{s.skill_id}__default", "description": "", "parameters": {}
+            },
+        }
+        for s in skills
+    ]
+    orch = Orchestrator(
+        skill_registry=reg, send_to_client=AsyncMock(), daemons={},
+        memory=None, vision_buffer=None, perception=None, learner=None,
+    )
+    return orch
+
+
+def _capture_live_sends(orch: Orchestrator) -> list[dict]:
+    captured: list[dict] = []
+
+    async def _send(session_id: str, msg: Any) -> None:
+        dumped = msg.model_dump() if hasattr(msg, "model_dump") else dict(msg)
+        captured.append({
+            "type": dumped.get("type") or getattr(msg, "type", None),
+            "payload": dumped.get("payload") or {},
+            "session_id": dumped.get("session_id", session_id),
+        })
+
+    orch.send = _send
+    return captured
+
+
+async def _drain_pending_tasks() -> None:
+    """Let any fire-and-forget ``asyncio.create_task`` background jobs
+    spawned during the test (the timeline side-channel is one) reach
+    completion before assertions run."""
+    pending = [
+        t for t in asyncio.all_tasks()
+        if t is not asyncio.current_task() and not t.done()
+    ]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+@pytest.fixture
+def live_orch_with_yesterday_memory(monkeypatch):
+    """Live orchestrator with a memory store that has one episode
+    timestamped at yesterday-noon (well within the "yesterday" window
+    ``parse_window`` resolves to).
+
+    Patches ``api.state.state.memory`` so the side-channel — which
+    falls back to ``api.state.state`` when ``self.memory`` is None —
+    finds the same memory regardless of which lookup path runs.
+    """
+    from datetime import datetime, time as _dtime, timedelta
+    _today_midnight = datetime.combine(datetime.now().date(), _dtime.min)
+    yesterday_noon = (_today_midnight - timedelta(hours=12)).timestamp()
+    memory = _RecordingMemory(ts=yesterday_noon)
+
+    orch = _build_live_orchestrator()
+    orch.memory = memory
+
+    from api import state as state_module
+    monkeypatch.setattr(state_module.state, "memory", memory, raising=False)
+    monkeypatch.setattr(state_module.state, "calendar", None, raising=False)
+    monkeypatch.setattr(
+        state_module.state, "health_aggregator", None, raising=False
+    )
+
+    orch.llm = MagicMock()
+    orch.llm.available = True
+    orch.llm.model_name = "test-model"
+
+    async def _stream_text_only(messages, tools=None, **kwargs):
+        # Live failure mode: model answers in prose, never tool-calls
+        # ``*__fused_timeline``. No tool_call_deltas, no tool_result.
+        for piece in [
+            "Yesterday you ", "had a standup ", "and wrote some notes.",
+        ]:
+            yield {"type": "text_delta", "content": piece}
+        yield {"type": "done"}
+
+    orch.llm.chat_stream = _stream_text_only
+    orch.llm.extract_response = MagicMock(
+        return_value=("Yesterday you had a standup and wrote some notes.", [])
+    )
+    orch.llm.chat_with_failover = AsyncMock(
+        return_value={
+            "choices": [
+                {"role": "assistant", "content": "Yesterday you had a standup."}
+            ]
+        }
+    )
+    orch._route_prompt = AsyncMock(return_value=[_LIVE_SKILLS["notes_memory"]])
+    orch._ensure_core_skills = lambda x: x
+    return orch
+
+
+@pytest.mark.asyncio
+async def test_live_chat_stream_emits_timeline_frame_for_temporal_query(
+    live_orch_with_yesterday_memory,
+):
+    """**The live-path test.**
+
+    Drive the actual ``_handle_command_stream_impl`` (via
+    ``handle_command_stream``) with a mock LLM that streams text only
+    — exactly mirroring claude-opus-4-7's observed behaviour on the
+    failing demo. Even though the LLM never tool-calls
+    ``*__fused_timeline``, the orchestrator MUST still push a
+    ``timeline`` WS frame because the heuristic detected a
+    temporal-recall query and the side-channel ran the fusion.
+
+    This test was missing from the v2026.5.43 suite — that's why the
+    flagship demo was broken on a green-tests branch.
+    """
+    orch = live_orch_with_yesterday_memory
+    sends = _capture_live_sends(orch)
+
+    await orch.handle_command_stream(
+        session_id="sess-live-1", text="what did I do yesterday?",
+    )
+    await _drain_pending_tasks()
+
+    timeline_frames = [f for f in sends if f["type"] == "timeline"]
+    stream_deltas = [f for f in sends if f["type"] == "stream_delta"]
+
+    assert timeline_frames, (
+        "Live chat-stream path did NOT emit a 'timeline' WS frame for a "
+        "temporal-recall query. The TimelineCard will never mount in the "
+        "WebUI. Outbound frame types: " + repr([f["type"] for f in sends])
+    )
+    assert stream_deltas, (
+        "Streaming prose must continue in parallel; expected stream_delta "
+        "frames alongside the timeline frame."
+    )
+
+    frame = timeline_frames[0]
+    assert frame["session_id"] == "sess-live-1"
+    p = frame["payload"]
+    # Canonical TimelinePayload envelope — match the client contract.
+    for key in (
+        "session_id", "query", "window", "entries",
+        "summary", "sources_queried", "degraded_sources",
+    ):
+        assert key in p, f"timeline payload missing canonical field {key!r}"
+    assert p["query"] == "what did I do yesterday?"
+    assert isinstance(p["entries"], list) and len(p["entries"]) >= 1
+    # The seeded yesterday episode landed in the entries.
+    ep_ids = {e.get("metadata", {}).get("id") for e in p["entries"]}
+    assert "ep-live-1" in ep_ids
+    assert isinstance(p["window"], dict) and p["window"].get("label")
+
+
+@pytest.mark.asyncio
+async def test_live_chat_stream_skips_timeline_frame_for_non_temporal_query(
+    live_orch_with_yesterday_memory,
+):
+    """Negative control on the LIVE path.
+
+    A non-temporal query (the canonical "explain TLS") must NOT push a
+    timeline WS frame, even though the memory store has yesterday-window
+    episodes loaded — the side-channel's regex gate keeps the frame
+    silent on non-temporal turns.
+    """
+    orch = live_orch_with_yesterday_memory
+    sends = _capture_live_sends(orch)
+
+    await orch.handle_command_stream(
+        session_id="sess-live-2", text="explain the TLS handshake",
+    )
+    await _drain_pending_tasks()
+
+    timeline_frames = [f for f in sends if f["type"] == "timeline"]
+    assert not timeline_frames, (
+        "Non-temporal query must not emit a 'timeline' frame; got: "
+        + repr([f["type"] for f in sends])
+    )
+
+
+@pytest.mark.asyncio
+async def test_temporal_side_channel_skips_emit_when_no_entries(monkeypatch):
+    """When ``timeline_fusion`` returns zero entries (degraded sources
+    only, or a memory store with no qualifying rows), the side-channel
+    MUST NOT push an empty timeline frame — the WebUI would render an
+    empty card. ``entries >= 1`` is the hard gate."""
+    orch = _build_live_orchestrator()
+    orch.memory = None  # no memory → no entries
+    from api import state as state_module
+    monkeypatch.setattr(state_module.state, "memory", None, raising=False)
+    monkeypatch.setattr(state_module.state, "calendar", None, raising=False)
+    monkeypatch.setattr(
+        state_module.state, "health_aggregator", None, raising=False
+    )
+
+    sink = _capture_live_sends(orch)
+    emitted = await orch._maybe_emit_temporal_timeline(
+        "sess-empty", "what did I do yesterday?",
+    )
+    assert emitted is False
+    assert not [f for f in sink if f["type"] == "timeline"]
+
+
+@pytest.mark.asyncio
+async def test_temporal_side_channel_skips_non_temporal_text(monkeypatch):
+    """Direct gate test: the side-channel must short-circuit on
+    non-temporal text BEFORE touching the memory store. This is what
+    keeps the live "explain TLS" path from spending time on a fusion
+    that would be discarded anyway."""
+    orch = _build_live_orchestrator()
+    # If the gate is wrong and we DO reach timeline_fusion, the
+    # `episode_recent` call would yield an entry — assert that doesn't
+    # happen by giving memory a probe we can assert against.
+    probe = MagicMock()
+    probe.episode_recent = AsyncMock(return_value=[])
+    probe.list_recent = AsyncMock(return_value=[])
+    orch.memory = probe
+    from api import state as state_module
+    monkeypatch.setattr(state_module.state, "memory", probe, raising=False)
+    monkeypatch.setattr(state_module.state, "calendar", None, raising=False)
+    monkeypatch.setattr(
+        state_module.state, "health_aggregator", None, raising=False
+    )
+
+    sink = _capture_live_sends(orch)
+    emitted = await orch._maybe_emit_temporal_timeline(
+        "sess-tls", "explain the TLS handshake",
+    )
+    assert emitted is False
+    assert not [f for f in sink if f["type"] == "timeline"]
+    # The regex gate must reject before touching memory.
+    probe.episode_recent.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("what did I do yesterday?", "yesterday"),
+        ("summarize my morning", "morning"),
+        ("what happened this morning", "this_morning"),
+        ("recap my evening", "evening"),
+        ("what did I work on this week", "this_week"),
+        ("review last week", "last_week"),
+        ("what did I do last tuesday", "last_tuesday"),
+        ("tell me what I did today", "today"),
+        ("recap my afternoon", "afternoon"),
+        ("", "yesterday"),
+    ],
+)
+def test_temporal_window_label_from_text(text, expected):
+    """``parse_window`` consumes labels — pin the text-to-label
+    mapping so a phrasing tweak in the side-channel doesn't silently
+    regress the window resolution."""
+    assert (
+        Orchestrator._temporal_window_label_from_text(text) == expected
+    ), f"text {text!r}: expected {expected!r}"
