@@ -2398,6 +2398,20 @@ const DEFAULT_CALL_SITES_FOR_COST = [
   'chat', 'vision', 'embedding', 'routing', 'screen_loop', 'proactive', 'learner', 'compaction',
 ];
 
+// v2026.5.44 — short operator-facing label + one-line subsystem
+// description so the Cost panel reads as "what is this knob for?"
+// instead of a wall of raw call-site identifiers.
+const COST_SITE_DESCRIPTIONS = {
+  chat: ['Chat', 'Foreground chat & explicit user-initiated LLM calls.'],
+  vision: ['Vision', 'Single-shot vision/image analysis (scene captioning, OCR).'],
+  embedding: ['Embedding', 'Memory ingest + semantic search embedding calls.'],
+  routing: ['Routing', 'Provider/model router preflight + classifier calls.'],
+  screen_loop: ['ScreenLoop', 'Vision-based screen capture loop (ambient observation).'],
+  proactive: ['Proactive', 'Proactive engine background suggestions + nudges.'],
+  learner: ['Learner', 'Self-learning episode summaries and pattern extraction.'],
+  compaction: ['Compaction', 'Session compaction → episodic memory rollups.'],
+};
+
 function CostSection({ initialCallSite }) {
   const [config, setConfig] = useState(null);
   const [editing, setEditing] = useState({});
@@ -2472,20 +2486,44 @@ function CostSection({ initialCallSite }) {
   }
 
   const costCfg = (config.cost && typeof config.cost === 'object') ? config.cost : {};
-  const perSiteCaps = (costCfg.per_call_site_caps && typeof costCfg.per_call_site_caps === 'object') ? costCfg.per_call_site_caps : {};
+  // v2026.5.44 — accept BOTH schemas the brain has historically read:
+  //   (a) flat:    cost.<site>.per_hour_usd  ← canonical, this is
+  //       what the UI now writes via ``/api/config/update``
+  //   (b) nested:  cost.per_call_site_caps.<site>.per_hour_usd ←
+  //       legacy DEFAULT_COST_SETTINGS shape; some installs still
+  //       have it from older boots, and the existing test fixtures
+  //       use it.
+  // Flat wins when both are present so an operator-typed cap is
+  // never silently overridden by a stale legacy default.
+  const legacySiteCaps = (costCfg.per_call_site_caps && typeof costCfg.per_call_site_caps === 'object') ? costCfg.per_call_site_caps : {};
   const globalDay = Number(costCfg.global_per_day_usd ?? 0);
   const globalHour = Number(costCfg.global_per_hour_usd ?? 5);
 
+  const flatSiteKeys = Object.keys(costCfg).filter((k) => {
+    if (k === 'per_call_site_caps') return false;
+    if (k === 'global_per_hour_usd' || k === 'global_per_day_usd') return false;
+    if (k === 'enabled') return false;
+    const v = costCfg[k];
+    return v && typeof v === 'object' && 'per_hour_usd' in v;
+  });
+
   const callSites = Array.from(new Set([
     ...DEFAULT_CALL_SITES_FOR_COST,
-    ...Object.keys(perSiteCaps),
+    ...Object.keys(legacySiteCaps),
+    ...flatSiteKeys,
     ...(initialCallSite ? [initialCallSite] : []),
   ]));
 
   const capForSite = (site) => {
-    const cfg = perSiteCaps[site];
-    if (!cfg) return 0;
-    return Number(cfg.per_hour_usd ?? 0);
+    const flat = costCfg[site];
+    if (flat && typeof flat === 'object' && flat.per_hour_usd != null) {
+      return Number(flat.per_hour_usd);
+    }
+    const legacy = legacySiteCaps[site];
+    if (legacy && legacy.per_hour_usd != null) {
+      return Number(legacy.per_hour_usd);
+    }
+    return 0;
   };
 
   const updateCap = async (site) => {
@@ -2499,16 +2537,21 @@ function CostSection({ initialCallSite }) {
     setErr('');
     setMsg('');
     try {
-      const nextSiteCaps = { ...perSiteCaps, [site]: { ...(perSiteCaps[site] || {}), per_hour_usd: value } };
+      // v2026.5.44 — write the FLAT shape ``cost.<site>.per_hour_usd``
+      // so the persisted ``~/.feral/settings.json`` matches what
+      // ``CostBudget._cap_for`` reads first. The brain hot-reloads
+      // the in-memory budget on the same POST (see
+      // ``api/routes/config.py`` cost branch) so the new cap takes
+      // effect without a restart.
       const r = await apiFetch('/api/config/update', {
         method: 'POST',
-        body: JSON.stringify({ section: 'cost', key: 'per_call_site_caps', value: nextSiteCaps }),
+        body: JSON.stringify({ section: 'cost', key: site, value: { per_hour_usd: value } }),
       });
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
         throw new Error(formatApiDetail(body, `failed to update ${site}`));
       }
-      setMsg(`Updated ${site} cap to $${value.toFixed(2)}/hour.`);
+      setMsg(`Saved ${site} cap at $${value.toFixed(2)}/hour.`);
       setEditing((prev) => { const n = { ...prev }; delete n[site]; return n; });
       await refresh();
     } catch (e) {
@@ -2555,7 +2598,7 @@ function CostSection({ initialCallSite }) {
       {msg && <div className="v2-chip v2-chip--live">{msg}</div>}
 
       <Glass level={0} radius="md" padding="md">
-        <div className="v2-voice-group__title">Per call-site (hourly)</div>
+        <div className="v2-voice-group__title">Per-subsystem hourly caps</div>
         {callSites.map((site) => {
           const cap = capForSite(site);
           const current = spends[site];
@@ -2564,9 +2607,13 @@ function CostSection({ initialCallSite }) {
           const resetStr = current?.reset_at ? new Date(
             typeof current.reset_at === 'string' ? Date.parse(current.reset_at) : Number(current.reset_at) * 1000,
           ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+          const [label, blurb] = COST_SITE_DESCRIPTIONS[site] || [site, ''];
           return (
             <div key={site} className="v2-cost-cap-row" data-testid={`cost-row-${site}`}>
-              <div className="v2-cost-cap-row__label">{site}{site === initialCallSite && <span className="v2-chip" style={{ marginLeft: 6 }}>from chat</span>}</div>
+              <div className="v2-cost-cap-row__label">
+                <div>{label}{site === initialCallSite && <span className="v2-chip" style={{ marginLeft: 6 }}>from chat</span>}</div>
+                {blurb && <div className="v2-p v2-p--muted v2-p--tiny" data-testid={`cost-desc-${site}`}>{blurb}</div>}
+              </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                 <span className="v2-p v2-p--muted">$</span>
                 <input

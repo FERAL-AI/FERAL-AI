@@ -202,6 +202,23 @@ class CostBudget:
             if call_site == _GLOBAL_SITE:
                 val = self._settings.get("global_per_hour_usd")
                 return float(val) if val is not None else None
+            # v2026.5.44 — schema tolerance. Operators historically
+            # ended up with two shapes for per-call-site caps in
+            # ``~/.feral/settings.json``:
+            #   (a) flat:    ``cost.<site>.per_hour_usd`` (the shape
+            #       the v2 Settings UI now writes)
+            #   (b) nested:  ``cost.per_call_site_caps.<site>.per_hour_usd``
+            #       (legacy DEFAULT_COST_SETTINGS shape, still used by
+            #       a few internal callers and existing tests)
+            # We honour either, with flat winning when both are
+            # present. Without this, an operator who typed "$20/hour"
+            # in Settings → Cost would silently see the factory
+            # default of $0.10 trip the ScreenLoop banner.
+            flat_cfg = self._settings.get(call_site)
+            if isinstance(flat_cfg, dict):
+                val = flat_cfg.get("per_hour_usd")
+                if val is not None:
+                    return float(val)
             site_cfg = (self._settings.get("per_call_site_caps") or {}).get(call_site) or {}
             val = site_cfg.get("per_hour_usd")
             return float(val) if val is not None else None
@@ -209,6 +226,47 @@ class CostBudget:
             val = self._settings.get("global_per_day_usd")
             return float(val) if val is not None else None
         return None
+
+    def reload_from_settings(
+        self, settings: dict[str, Any] | None = None
+    ) -> None:
+        """Re-read cost caps from the current ``settings`` dict (or
+        from ``config.loader.load_settings()`` when ``settings`` is
+        ``None``) and update ``self._settings`` in place.
+
+        v2026.5.44 — the brain instantiates ``CostBudget`` once at
+        boot via ``api.state.BrainState`` with the settings snapshot
+        at that moment. Without this method, an operator who raised
+        ``cost.screen_loop.per_hour_usd`` to $20 in Settings → Cost
+        would still see the in-memory cap stuck at the factory
+        default of $0.10 until the next process restart, and the
+        yellow ``cost_cap_hit`` banner would keep tripping. The
+        ``/api/config/update`` route now invokes this after persisting
+        any ``cost.*`` write so the caps take effect immediately
+        without a brain restart. Override caps set via
+        :meth:`set_cap` are preserved (they're considered authoritative
+        in-memory operator overrides).
+        """
+        if settings is None:
+            try:
+                from config.loader import load_settings as _load_settings
+
+                settings = _load_settings() or {}
+            except Exception:
+                settings = {}
+        merged = dict(DEFAULT_COST_SETTINGS["cost"])
+        cost_cfg = settings.get("cost", settings) if isinstance(settings, dict) else {}
+        if isinstance(cost_cfg, dict):
+            merged.update(cost_cfg)
+            if "per_call_site_caps" in cost_cfg and isinstance(
+                cost_cfg["per_call_site_caps"], dict
+            ):
+                site_caps = dict(merged.get("per_call_site_caps") or {})
+                site_caps.update(cost_cfg["per_call_site_caps"])
+                merged["per_call_site_caps"] = site_caps
+        self._settings = merged
+        if "enabled" in merged:
+            self.enabled = bool(merged.get("enabled", True))
 
     def _active_caps(self, call_site: str) -> list[tuple[str, str, float]]:
         caps: list[tuple[str, str, float]] = []

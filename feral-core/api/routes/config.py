@@ -166,6 +166,39 @@ async def update_config(body: dict):
         if state.orchestrator and hasattr(state.orchestrator, 'tool_runner'):
             state.orchestrator.tool_runner.set_autonomy_mode(str(value))
 
+    elif section == "cost":
+        # v2026.5.44 — operator-typed cost caps must take effect
+        # without a brain restart. ``CostBudget`` is constructed
+        # once at boot in ``BrainState`` with the settings snapshot
+        # at that moment, so without an explicit reload the freshly
+        # persisted ``cost.<site>.per_hour_usd`` value never reaches
+        # ``CostBudget._settings`` and ScreenLoop / ProactiveEngine
+        # keep tripping the yellow ``cost_cap_hit`` banner against
+        # the factory default of $0.10. Re-read settings into the
+        # in-memory budget and clear any per-subsystem
+        # ``BudgetLoopGuard`` pause windows so a raised cap recovers
+        # an actively-paused subsystem on the next loop tick.
+        budget = getattr(state, "cost_budget", None)
+        if budget is not None and hasattr(budget, "reload_from_settings"):
+            try:
+                budget.reload_from_settings()
+            except Exception as exc:
+                logger.warning("cost_budget reload after settings update failed: %s", exc)
+        for guard_attr in (
+            "screen_loop_cost_guard",
+            "proactive_cost_guard",
+            "learner_cost_guard",
+            "cron_cost_guard",
+            "email_cost_guard",
+            "mqtt_cost_guard",
+        ):
+            guard = getattr(state, guard_attr, None)
+            if guard is not None and hasattr(guard, "reset"):
+                try:
+                    guard.reset()
+                except Exception as exc:
+                    logger.debug("loop_guard reset (%s) failed: %s", guard_attr, exc)
+
     return {"ok": True, "section": section, "key": key, "value": value}
 
 
