@@ -837,6 +837,160 @@ class TestProviderKeyStepExistingKey:
         assert state.credentials["OPENAI_API_KEY"] == "sk-fresh-1234567890"
 
 
+# ----------------------------------------------------------------------
+# Bug 2 — provider picker badge respects default-namespace key
+# ----------------------------------------------------------------------
+
+
+class TestProviderBadgeWithDefaultNamespaceKey:
+    """``_build_options`` must consult EVERY credential surface the
+    wizard knows (labeled vault → legacy default-namespace vault →
+    env var) before deciding "needs API key". The operator's run
+    hit a contradiction: badge said "needs API key" but selecting
+    the row immediately printed "✓ key already configured · source:
+    vault (default)" because the key step uses
+    ``existing_provider_key`` (which DOES check the default
+    namespace). The badge MUST mirror that resolution."""
+
+    @pytest.mark.asyncio
+    async def test_provider_badge_ready_for_default_namespace_key(
+        self, tmp_path, monkeypatch,
+    ):
+        from cli.setup.steps import llm as llm_step
+
+        state = WizardState.load(tmp_path / "feral")
+        state.credentials["ANTHROPIC_API_KEY"] = "sk-ant-default-1234567890"
+
+        from security import vault_keys as vk_mod
+
+        monkeypatch.setattr(vk_mod, "list_provider_keys", lambda pid, **kw: [])
+        monkeypatch.setattr(vk_mod, "get_active_provider_key", lambda pid, **kw: None)
+        monkeypatch.setattr(vk_mod, "get_active_label", lambda pid, **kw: None)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        fake_catalog = MagicMock()
+        fake_desc = MagicMock()
+        fake_desc.requires_api_key = True
+        fake_desc.supports_local = False
+        fake_desc.provider_id = "anthropic"
+        fake_desc.display_name = "Anthropic"
+        fake_desc.credential_env_var = "ANTHROPIC_API_KEY"
+        fake_desc.aliases = ("claude",)
+        fake_desc.notes = ""
+        fake_catalog.list_providers.return_value = [fake_desc]
+
+        class _FakeStatus:
+            configured = False
+            reachable = False
+            error = ""
+
+        statuses = {"anthropic": _FakeStatus()}
+
+        opts = llm_step._build_options(fake_catalog, statuses, state)
+        anthropic_opt = next(o for o in opts if o.id == "anthropic")
+        assert anthropic_opt.status == STATUS_READY, (
+            f"default-namespace key must render as READY, got {anthropic_opt.status!r}"
+        )
+        assert anthropic_opt.status != STATUS_NEEDS_KEY
+
+    @pytest.mark.asyncio
+    async def test_provider_badge_needs_key_when_truly_absent(
+        self, tmp_path, monkeypatch,
+    ):
+        """Regression guard for Bug 2 — when NO surface has a key,
+        the badge correctly stays at NEEDS_KEY."""
+        from cli.setup.steps import llm as llm_step
+
+        state = WizardState.load(tmp_path / "feral")
+
+        from security import vault_keys as vk_mod
+
+        monkeypatch.setattr(vk_mod, "list_provider_keys", lambda pid, **kw: [])
+        monkeypatch.setattr(vk_mod, "get_active_provider_key", lambda pid, **kw: None)
+        monkeypatch.setattr(vk_mod, "get_active_label", lambda pid, **kw: None)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        fake_catalog = MagicMock()
+        fake_desc = MagicMock()
+        fake_desc.requires_api_key = True
+        fake_desc.supports_local = False
+        fake_desc.provider_id = "anthropic"
+        fake_desc.display_name = "Anthropic"
+        fake_desc.credential_env_var = "ANTHROPIC_API_KEY"
+        fake_desc.aliases = ()
+        fake_desc.notes = ""
+        fake_catalog.list_providers.return_value = [fake_desc]
+
+        class _FakeStatus:
+            configured = False
+            reachable = False
+            error = ""
+
+        statuses = {"anthropic": _FakeStatus()}
+
+        opts = llm_step._build_options(fake_catalog, statuses, state)
+        anthropic_opt = next(o for o in opts if o.id == "anthropic")
+        assert anthropic_opt.status == STATUS_NEEDS_KEY
+
+
+# ----------------------------------------------------------------------
+# Bug 4 — startup banner renders at most once per invocation
+# ----------------------------------------------------------------------
+
+
+class TestBannerRendersOnce:
+    """The FERAL ASCII banner is a one-shot first-run greeting; it
+    must not be re-emitted when the state machine re-enters the
+    welcome step (BackNavigation from step 1, or JumpToStep)."""
+
+    @pytest.mark.asyncio
+    async def test_banner_renders_once_including_after_jumpback(
+        self, tmp_path, capsys,
+    ):
+        from cli.setup.helpers import JumpToStep
+        from cli.setup.steps import welcome as welcome_step
+
+        state = WizardState.load(tmp_path / "feral")
+
+        visits: list[str] = []
+        jumped = {"done": False}
+
+        def step_llm(s):
+            visits.append("llm")
+
+        def step_channels(s):
+            visits.append("channels")
+            if not jumped["done"]:
+                jumped["done"] = True
+                raise JumpToStep("welcome")
+
+        def step_finish(s):
+            visits.append("finish")
+
+        machine = StateMachine(
+            state=state,
+            steps=[
+                ("welcome", welcome_step.run),
+                ("llm", step_llm),
+                ("channels", step_channels),
+                ("finish", step_finish),
+            ],
+        )
+        await machine.run()
+
+        out = capsys.readouterr().out
+        # The "Unleashed AI" subtitle string is part of the welcome
+        # panel's banner block and appears nowhere else in the
+        # wizard, so it's a precise per-render counter.
+        banner_marker = "Unleashed AI"
+        count = out.count(banner_marker)
+        assert count == 1, (
+            f"banner rendered {count} times across welcome → llm → channels "
+            f"→ welcome → llm → channels → finish; expected exactly 1.\n"
+            f"transcript:\n{out}"
+        )
+
+
 class TestEndToEndState:
     def test_after_wizard_run_all_keys_round_trip(self, tmp_path):
         """audit-r14 / lane-07 W7 — call ``mark_complete()`` to model

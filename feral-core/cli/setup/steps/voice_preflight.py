@@ -132,34 +132,61 @@ async def run(state: WizardState) -> None:
             # through ``state.credentials`` here ensures every voice
             # surface (router, probe, realtime proxy) sees the same
             # secret without an extra round-trip.
-            _maybe_reuse_provider_key(state, chosen.id, console, prompt_if_missing=True)
-            # Lane U2 — after the operator picks a realtime provider,
-            # offer the catalogue's model list (when present) so they
-            # don't have to type the id by hand. Entries without a
-            # ``models`` list (every realtime entry except OpenAI
-            # today) silently skip with a single console hint.
-            chosen_entry = next(
-                (e for e in realtime_entries if e["id"] == chosen.id),
-                None,
+            #
+            # Bug 1 — we MUST pass the live probe result down: a
+            # stored key the provider just rejected (HTTP 401) or
+            # could not be reached on must NOT be silently reused.
+            reuse_result = _maybe_reuse_provider_key(
+                state,
+                chosen.id,
+                console,
+                prompt_if_missing=True,
+                probe_result=probe_results.get(chosen.id),
             )
-            model_ids = list((chosen_entry or {}).get("models") or [])
-            if model_ids:
-                default_model = (
-                    state.get_setting("audio", "realtime_model")
-                    or (chosen_entry or {}).get("default_model")
-                    or model_ids[0]
-                )
-                model_opts = [
-                    Option(id=mid, label=mid, aliases=(mid,), status="ready")
-                    for mid in model_ids
-                ]
-                chosen_model = ask_choice(
-                    f"Pick the {chosen_entry.get('name', chosen.id)} model",
-                    model_opts, default=default_model,
-                )
-                state.set_setting("audio", "realtime_model", chosen_model.id)
+            if reuse_result == "skip":
+                # Operator picked "Skip voice" after seeing the
+                # rejected-key warning — clear the realtime pick
+                # so the brain doesn't try to dial a broken vendor.
+                state.set_setting("audio", "realtime_primary", "")
             else:
-                console.print("(no model picker — using default)")
+                # Lane U2 — after the operator picks a realtime
+                # provider, offer the catalogue's model list (when
+                # present) so they don't have to type the id by
+                # hand. Entries without a ``models`` list (every
+                # realtime entry except OpenAI today) silently skip
+                # with a single console hint.
+                chosen_entry = next(
+                    (e for e in realtime_entries if e["id"] == chosen.id),
+                    None,
+                )
+                model_ids = list((chosen_entry or {}).get("models") or [])
+                if model_ids:
+                    default_model = (
+                        state.get_setting("audio", "realtime_model")
+                        or (chosen_entry or {}).get("default_model")
+                        or model_ids[0]
+                    )
+                    # Bug 1 — model badge must reflect the provider's
+                    # real probe status. If the provider is
+                    # unreachable / key-rejected, every model under
+                    # it is just as broken; tagging the rows "ready"
+                    # would contradict the warning we just printed.
+                    provider_res = probe_results.get(chosen.id)
+                    model_status = _option_status(provider_res)
+                    model_opts = [
+                        Option(
+                            id=mid, label=mid, aliases=(mid,),
+                            status=model_status,
+                        )
+                        for mid in model_ids
+                    ]
+                    chosen_model = ask_choice(
+                        f"Pick the {chosen_entry.get('name', chosen.id)} model",
+                        model_opts, default=default_model,
+                    )
+                    state.set_setting("audio", "realtime_model", chosen_model.id)
+                else:
+                    console.print("(no model picker — using default)")
         else:
             state.set_setting("audio", "realtime_primary", "")
 
@@ -181,7 +208,13 @@ async def run(state: WizardState) -> None:
         )
         if chosen.id != "__none__":
             state.set_setting("audio", "chained_stt_provider", chosen.id)
-            _maybe_reuse_provider_key(state, chosen.id, console, prompt_if_missing=False)
+            stt_result = _maybe_reuse_provider_key(
+                state, chosen.id, console,
+                prompt_if_missing=False,
+                probe_result=probe_results.get(chosen.id),
+            )
+            if stt_result == "skip":
+                state.set_setting("audio", "chained_stt_provider", "")
 
     # ── Pick chained TTS (optional) ──────────────────────────────────
     if tts_entries:
@@ -201,7 +234,13 @@ async def run(state: WizardState) -> None:
         )
         if chosen.id != "__none__":
             state.set_setting("audio", "chained_tts_provider", chosen.id)
-            _maybe_reuse_provider_key(state, chosen.id, console, prompt_if_missing=False)
+            tts_result = _maybe_reuse_provider_key(
+                state, chosen.id, console,
+                prompt_if_missing=False,
+                probe_result=probe_results.get(chosen.id),
+            )
+            if tts_result == "skip":
+                state.set_setting("audio", "chained_tts_provider", "")
 
     state.set_setting("audio", "configured_via_wizard", True)
 
@@ -212,7 +251,8 @@ def _maybe_reuse_provider_key(
     console,
     *,
     prompt_if_missing: bool = False,
-) -> None:
+    probe_result=None,
+) -> str:
     """Bug 4 — share one key across chat + realtime voice + future video.
 
     When the operator already configured a vendor's key in an earlier
@@ -231,10 +271,29 @@ def _maybe_reuse_provider_key(
     var + (best-effort) the labeled-key vault so the same value is
     visible to ``security.probe`` and to the voice router's
     boot-time hydration path.
+
+    Bug 1 — when ``probe_result`` is a non-OK ``ProbeResult`` whose
+    status indicates the live provider rejected the stored secret
+    (HTTP 401/403) or is genuinely unreachable, we MUST NOT silently
+    reuse the stored key. We surface a loud warning and offer the
+    operator a three-way choice: replace it now, keep it anyway
+    (operator might know the probe is a false negative), or skip
+    this voice provider entirely. Probes that came back ``None`` or
+    show "not configured" / "no_key" reasons are treated as
+    informational (the prior happy-path silent-reuse keeps the
+    wizard quiet when the key is actually fine).
+
+    Returns one of:
+    * ``""`` — silent reuse / standard path completed.
+    * ``"skip"`` — operator picked "skip voice provider" after a
+      rejected-key warning; caller should NOT advance to the
+      model picker and should clear the relevant ``audio.*`` setting.
+    * ``"replaced"`` — operator typed a fresh key.
+    * ``"kept"`` — operator kept the bad key anyway.
     """
     mapping = _VOICE_KEY_SOURCES.get(voice_provider_id)
     if not mapping:
-        return
+        return ""
     vendor_id, env_var = mapping
 
     secret, source, _labels = existing_provider_key(vendor_id, env_var, state)
@@ -242,6 +301,22 @@ def _maybe_reuse_provider_key(
         from security.vault_keys import mask_key as _mask_key
 
         masked = _mask_key(secret)
+
+        if _probe_indicates_bad_key(probe_result):
+            # The probe just told us this exact key is broken. Don't
+            # paper over it with a green ✓ — show the operator what
+            # we saw and ask what to do.
+            return _handle_bad_existing_key(
+                state=state,
+                voice_provider_id=voice_provider_id,
+                vendor_id=vendor_id,
+                env_var=env_var,
+                console=console,
+                masked=masked,
+                source=source,
+                probe_result=probe_result,
+            )
+
         if _RICH_AVAILABLE:
             console.print(
                 f"  [green]✓[/] Reusing existing {vendor_id} key "
@@ -259,7 +334,7 @@ def _maybe_reuse_provider_key(
         if env_var:
             state.set_credential(env_var, secret)
             _os.environ[env_var] = secret
-        return
+        return ""
 
     # No key for this vendor anywhere → realtime is the only surface
     # that prompts inline (the chained STT/TTS paths just note the
@@ -277,7 +352,7 @@ def _maybe_reuse_provider_key(
                 f"  Note: no {vendor_id} key found — {voice_provider_id} won't work "
                 f"until you run `feral key add --provider {vendor_id}`."
             )
-        return
+        return ""
 
     if _RICH_AVAILABLE:
         console.print(
@@ -289,7 +364,7 @@ def _maybe_reuse_provider_key(
             f"  No {vendor_id} key found yet — {voice_provider_id} needs one."
         )
     if not confirm(f"  Enter a {vendor_id} API key now?", default=True):
-        return
+        return ""
     key = ask_text(
         f"  Enter your {vendor_id} API key",
         allow_empty=False,
@@ -305,6 +380,104 @@ def _maybe_reuse_provider_key(
         vault_keys.add_provider_key(vendor_id, "default", key, set_active=True)
     except Exception:
         pass
+    return "replaced"
+
+
+def _probe_indicates_bad_key(res) -> bool:
+    """True when ``res`` is a probe verdict the operator should see
+    before we silently reuse a stored key.
+
+    "Bad" means: probe ran, came back ``ok=False`` AND the failure
+    is something the stored key actually owns — HTTP 401/403 (key
+    rejected) or "unreachable" (we couldn't tell the key from the
+    transport, but the operator should still know before we
+    advertise the provider as configured).
+
+    A ``None`` result (probe not run / cancelled) or a reason like
+    ``"missing" / "no_key" / "not_configured"`` is NOT bad-key — it
+    just means the probe couldn't even try because nothing was
+    configured at probe time. Those paths fall back to the silent-
+    reuse happy path.
+    """
+    if res is None or getattr(res, "ok", False):
+        return False
+    reason = (getattr(res, "reason", "") or "").lower()
+    if any(s in reason for s in ("missing", "no_key", "no_token", "not_configured")):
+        return False
+    return True
+
+
+def _handle_bad_existing_key(
+    *,
+    state: WizardState,
+    voice_provider_id: str,
+    vendor_id: str,
+    env_var: str,
+    console,
+    masked: str,
+    source: str,
+    probe_result,
+) -> str:
+    """Bug 1 — render the "we found a key the provider just
+    rejected" warning + Replace / Keep anyway / Skip three-way."""
+    status_code = getattr(probe_result, "status_code", None)
+    reason = (getattr(probe_result, "reason", "") or "").lower()
+    if status_code in (401, 403):
+        verdict = f"HTTP {status_code} — key rejected"
+    elif reason:
+        verdict = reason
+    else:
+        verdict = "unreachable"
+
+    if _RICH_AVAILABLE:
+        console.print(
+            f"  [yellow]⚠ The existing {vendor_id} key "
+            f"[bold]{masked}[/] was rejected by the provider "
+            f"({verdict}).[/]  [dim]source: {source}[/]"
+        )
+    else:
+        console.print(
+            f"  ⚠ The existing {vendor_id} key {masked} was rejected "
+            f"by the provider ({verdict}).  source: {source}"
+        )
+
+    action_opts = [
+        Option(id="replace", label="Replace it now"),
+        Option(id="keep", label="Keep it anyway (probe may be a false negative)"),
+        Option(id="skip", label=f"Skip {voice_provider_id}"),
+    ]
+    chosen = ask_choice(
+        f"  How should we handle the {vendor_id} key?",
+        action_opts, default="replace",
+    )
+    if chosen.id == "skip":
+        return "skip"
+    if chosen.id == "keep":
+        # Operator overrode the warning. Make sure env + state carry
+        # the secret so downstream surfaces still see it.
+        secret_now, _src, _lbls = existing_provider_key(vendor_id, env_var, state)
+        import os as _os
+        if env_var and secret_now:
+            state.set_credential(env_var, secret_now)
+            _os.environ[env_var] = secret_now
+        return "kept"
+
+    # replace → free-text prompt for a fresh key, persist everywhere.
+    key = ask_text(
+        f"  Enter a new {vendor_id} API key",
+        allow_empty=False,
+        secret=True,
+    )
+    import os as _os
+    state.set_credential(env_var, key)
+    _os.environ[env_var] = key
+    try:
+        from security import vault_keys
+
+        vault_keys.add_provider_key(vendor_id, "default", key, set_active=True)
+    except Exception:
+        pass
+    return "replaced"
 
 
 async def _probe_all(probe_fn, provider_ids):

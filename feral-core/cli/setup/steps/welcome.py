@@ -30,7 +30,22 @@ def _version() -> str:
         return ""
 
 
-def run(state: WizardState) -> None:  # noqa: ARG001 — wizard step contract
+def run(state: WizardState) -> None:
+    # Bug 4 — render exactly once per ``feral setup`` invocation.
+    # The state machine re-enters the welcome step on BackNavigation
+    # from step 1 ("can't go back from the first step" is the very
+    # first prompt operators hit when they overshoot) and on
+    # ``JumpToStep`` from any later step. Without this guard the
+    # operator sees the big ASCII banner a second time and reads it
+    # as "the wizard just restarted from scratch" — the operator's
+    # screenshot in the audit showed the duplicated banner.
+    #
+    # ``completed_steps`` is populated by the state machine after a
+    # step returns normally, and is also restored from the resume
+    # sidecar so a resumed run also skips the second banner (the
+    # operator already saw it in the prior session).
+    if "welcome" in state.completed_steps:
+        return
     console = get_console()
     version = _version()
     if _RICH_AVAILABLE:

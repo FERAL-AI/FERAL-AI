@@ -43,7 +43,7 @@ async def run_provider_step(state: WizardState) -> None:
     # parallel under a single refresh_all but we call probe() per-id so
     # the network results can differ (Ollama reachable, OpenAI not).
     statuses = await _probe_all(catalog)
-    options = _build_options(catalog, statuses)
+    options = _build_options(catalog, statuses, state)
     extra_notes = _build_notes(catalog, statuses)
 
     # The state-machine prints the brand-coloured "Step N of M · LLM
@@ -464,27 +464,37 @@ async def _probe_all(catalog: ProviderCatalog) -> dict[str, ProviderStatus]:
 
 
 def _build_options(
-    catalog: ProviderCatalog, statuses: dict[str, ProviderStatus]
+    catalog: ProviderCatalog,
+    statuses: dict[str, ProviderStatus],
+    state: WizardState | None = None,
 ) -> list[Option]:
     options: list[Option] = []
     for desc in catalog.list_providers():
         status = statuses.get(desc.provider_id)
-        # Bug 2 — consult the labeled-key vault before deciding "needs
-        # API key". The pre-fix wizard only looked at the legacy
-        # default-namespace ``status.configured`` bit, so an install
-        # that stored its key via ``feral key add --label prod``
-        # showed "needs API key" in the picker table. Reading
-        # ``vault_keys.get_active_provider_key`` here mirrors what the
-        # LLM hot path resolves at call time (Cross-cut #1, v2026.5.42).
-        labeled_present = False
+        # Bug 2 — consult EVERY credential surface the wizard knows
+        # about before deciding "needs API key". The pre-fix wizard
+        # only checked ``vault_keys.get_active_provider_key`` (labeled
+        # keys), so an install that stored its OpenAI/Anthropic key in
+        # the legacy default-namespace vault (``source: vault
+        # (default)``) saw the contradictory pair "needs API key" in
+        # the picker badge but "✓ key already configured" the moment
+        # they selected the row (because the key step's
+        # ``_configure_provider_key`` consults the same
+        # ``existing_provider_key`` helper that also reads the legacy
+        # vault + env). The badge MUST reflect the same resolution as
+        # the next step so the operator never sees that contradiction.
+        key_present = False
         if desc.requires_api_key and not desc.supports_local:
             try:
-                from security import vault_keys
-
-                if vault_keys.get_active_provider_key(desc.provider_id):
-                    labeled_present = True
+                secret, _src, _lbls = existing_provider_key(
+                    desc.provider_id,
+                    getattr(desc, "credential_env_var", "") or "",
+                    state,
+                )
+                if secret:
+                    key_present = True
             except Exception:
-                labeled_present = False
+                key_present = False
         if desc.supports_local:
             if status and status.reachable:
                 ui_status = STATUS_READY
@@ -493,8 +503,16 @@ def _build_options(
         else:
             if status and status.configured and status.reachable:
                 ui_status = STATUS_READY
-            elif labeled_present:
-                ui_status = STATUS_READY
+            elif key_present:
+                # "configured" — refine to UNREACHABLE only if the
+                # live probe actively said the network can't be
+                # reached. Otherwise show READY so the badge never
+                # contradicts the post-select "✓ key already
+                # configured" message.
+                if status and status.configured and not status.reachable:
+                    ui_status = STATUS_UNREACHABLE
+                else:
+                    ui_status = STATUS_READY
             elif desc.requires_api_key and not (status and status.configured):
                 ui_status = STATUS_NEEDS_KEY
             else:

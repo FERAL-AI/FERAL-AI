@@ -2,29 +2,49 @@
 
 This test drives the InquirerPy mock seam the other setup tests
 already exercise to walk the operator-facing flow end-to-end and
-prove the four bug fixes hold together:
+prove the bug fixes hold together:
+
+Happy path (``test_scripted_happy_path_chat_then_voice_reuse_then_jumpback``):
 
 1. Pick OpenAI as the chat provider.
-2. Enter the chat key once.
-3. Reach voice preflight; confirm the OpenAI key is REUSED (no
+2. Confirm the OpenAI key is REUSED on the voice step (no
    re-prompt for the same vendor's key).
-4. Pick the realtime model via the picker — no typed ``ask_text``.
-5. Trigger ``JumpToStep`` from a late step; confirm the wizard hops
+3. Pick the realtime model via the picker — no typed ``ask_text``.
+4. Trigger ``JumpToStep`` from a late step; confirm the wizard hops
    back to the provider step and the masked key is displayed
    (because the labeled-key vault still has it).
-6. Continue forward to the finish step.
+5. The startup banner only renders once across the whole jump-back
+   round-trip (Bug 4).
+
+Rejected-key path (``test_scripted_voice_warns_when_existing_key_rejected``):
+
+1. Same labeled OpenAI key is present.
+2. The voice probe for ``openai_realtime`` returns a 401-rejected
+   ``ProbeResult``.
+3. The voice step must NOT silently reuse — it surfaces a warning
+   and offers Replace / Keep anyway / Skip. The operator picks
+   Replace, types a new key, and the wizard proceeds (Bug 1).
+
+Default-namespace badge path
+(``test_scripted_default_namespace_key_renders_ready_badge``):
+
+1. The labeled-key vault is empty but ``state.credentials`` carries
+   the legacy default-namespace ``OPENAI_API_KEY``.
+2. The provider picker badge must read READY (not "needs API key"),
+   matching what the operator sees one prompt later (Bug 2).
 
 A true TTY-driven test (pexpect against ``feral setup``) is not
 feasible from the sandbox because the InquirerPy + prompt_toolkit
 pair needs a real controlling terminal — the existing wizard tests
 all drive the prompt seam, not a pexpect child. The scripted
-walkthrough below proves the same invariants the operator would see
-in a manual run.
+walkthroughs below prove the same invariants the operator would
+see in a manual run.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -35,16 +55,38 @@ def feral_home(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_scripted_happy_path_chat_then_voice_reuse_then_jumpback(
-    feral_home, monkeypatch, capsys,
-):
-    """Walk the operator-visible flow as a single scripted run."""
-    transcript: list[str] = []
+def _stub_voice_probe(monkeypatch, *, openai_realtime_ok: bool = True,
+                      openai_realtime_status: int | None = 200,
+                      openai_realtime_reason: str = "ok"):
+    """Stub ``security.probe.probe`` so the scripted test doesn't
+    depend on whatever ``OPENAI_API_KEY`` happens to be in the host
+    env. ``openai_realtime_ok=False`` lets the rejected-key test
+    flip the verdict for that one provider only."""
+    from security import probe as probe_mod
 
-    # ----------------------------------------------------------------
-    # Seed an already-stored OpenAI labeled key so the provider step
-    # exercises the "key already exists → Keep" branch directly.
-    # ----------------------------------------------------------------
+    async def _fake(pid, **_kw):
+        if pid == "openai_realtime":
+            return probe_mod.ProbeResult(
+                provider=pid,
+                ok=openai_realtime_ok,
+                status_code=openai_realtime_status,
+                reason=openai_realtime_reason,
+                detail="stubbed",
+                probed_at=time.time(),
+                latency_ms=1.0,
+            )
+        return probe_mod.ProbeResult(
+            provider=pid, ok=False, status_code=None, reason="no_key",
+            detail="not configured", probed_at=time.time(), latency_ms=0.0,
+        )
+
+    monkeypatch.setattr(probe_mod, "probe", _fake)
+    probe_mod.clear_probe_cache()
+
+
+def _seed_labeled_openai_key(monkeypatch):
+    """Pretend the labeled-key vault has an active OpenAI key, with
+    no labeled keys for any other vendor."""
     from security import vault_keys as vk_mod
 
     class _FakeEntry:
@@ -58,7 +100,8 @@ def test_scripted_happy_path_chat_then_voice_reuse_then_jumpback(
         last_probe_ok = True
 
     monkeypatch.setattr(
-        vk_mod, "list_provider_keys", lambda pid, **kw: [_FakeEntry()] if pid == "openai" else [],
+        vk_mod, "list_provider_keys",
+        lambda pid, **kw: [_FakeEntry()] if pid == "openai" else [],
     )
     monkeypatch.setattr(
         vk_mod, "get_active_provider_key",
@@ -67,17 +110,12 @@ def test_scripted_happy_path_chat_then_voice_reuse_then_jumpback(
     monkeypatch.setattr(vk_mod, "add_provider_key", lambda *a, **kw: None)
     monkeypatch.setattr(vk_mod, "get_active_label", lambda pid, **kw: "default")
 
-    # ----------------------------------------------------------------
-    # 1) Provider step (chat) — pick OpenAI then "Keep current key"
-    # ----------------------------------------------------------------
+
+def _fake_catalog(monkeypatch):
+    """Stub the LLM ProviderCatalog so we don't hit any network."""
     from cli.setup.steps import llm as llm_step
-    from cli.setup.steps import voice_preflight as vp
-    from cli.setup.helpers import JumpToStep, Option
-    from cli.setup.state import WizardState
-    from cli.setup.state_machine import StateMachine
     from unittest.mock import AsyncMock, MagicMock
 
-    # Fake the ProviderCatalog so we don't hit network.
     fake_catalog = MagicMock()
     fake_desc = MagicMock()
     fake_desc.requires_api_key = True
@@ -115,27 +153,35 @@ def test_scripted_happy_path_chat_then_voice_reuse_then_jumpback(
 
     fake_catalog.list_models = AsyncMock(side_effect=_list_models)
     monkeypatch.setattr(llm_step, "get_shared_catalog", lambda: fake_catalog)
+    return fake_catalog
 
-    # Scripted ask_choice answers for the provider step + the
-    # downstream voice / jumpback steps.
+
+def test_scripted_happy_path_chat_then_voice_reuse_then_jumpback(
+    feral_home, monkeypatch, capsys,
+):
+    """Walk the operator-visible flow as a single scripted run."""
+    transcript: list[str] = []
+
+    _seed_labeled_openai_key(monkeypatch)
+    _stub_voice_probe(monkeypatch, openai_realtime_ok=True)
+    _fake_catalog(monkeypatch)
+
+    from cli.setup.steps import llm as llm_step
+    from cli.setup.steps import voice_preflight as vp
+    from cli.setup.steps import welcome as welcome_step
+    from cli.setup.helpers import JumpToStep, Option
+    from cli.setup.state import WizardState
+    from cli.setup.state_machine import StateMachine
+
     answers = iter([
-        # 1a) provider picker → OpenAI
         Option(id="openai", label="OpenAI"),
-        # 1b) key menu  → "Keep current key" (the masked-key path)
         Option(id="keep", label="Keep current key"),
-        # 2a) realtime provider → openai_realtime
         Option(id="openai_realtime", label="OpenAI Realtime"),
-        # 2b) realtime model picker → gpt-realtime
         Option(id="gpt-realtime", label="gpt-realtime"),
-        # 2c) skip STT
         Option(id="__none__", label="(skip STT)"),
-        # 2d) skip TTS
         Option(id="__none__", label="(skip TTS)"),
-        # 3a) after jump, second pass through the provider step:
-        #     re-pick OpenAI again → still shows existing key masked.
         Option(id="openai", label="OpenAI"),
         Option(id="keep", label="Keep current key"),
-        # 3b) re-walk voice path
         Option(id="openai_realtime", label="OpenAI Realtime"),
         Option(id="gpt-realtime", label="gpt-realtime"),
         Option(id="__none__", label="(skip STT)"),
@@ -149,12 +195,9 @@ def test_scripted_happy_path_chat_then_voice_reuse_then_jumpback(
     monkeypatch.setattr(llm_step, "ask_choice", fake_ask_choice)
     monkeypatch.setattr(vp, "ask_choice", fake_ask_choice)
 
-    # confirm — yes to "configure voice now?".
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
     monkeypatch.setattr(llm_step, "confirm", lambda *a, **kw: True)
 
-    # Pin ask_text to a loud failure — no Keep-path or reuse-path
-    # should ever ask for a key in this scripted run.
     def _no_ask_text(*a, **kw):
         raise AssertionError(
             f"ask_text fired unexpectedly during the scripted run: {a!r} {kw!r}"
@@ -163,9 +206,6 @@ def test_scripted_happy_path_chat_then_voice_reuse_then_jumpback(
     monkeypatch.setattr(llm_step, "ask_text", _no_ask_text)
     monkeypatch.setattr(vp, "ask_text", _no_ask_text)
 
-    # ----------------------------------------------------------------
-    # State machine — minimal step ladder.
-    # ----------------------------------------------------------------
     visits: list[str] = []
     jumped = {"done": False}
 
@@ -180,9 +220,6 @@ def test_scripted_happy_path_chat_then_voice_reuse_then_jumpback(
     def step_finish(s):
         visits.append("finish")
 
-    # A "late" step that requests a jump back to the provider step
-    # the first time it runs — simulates the operator hitting "↺
-    # jump to a previous step…" from any later prompt.
     def step_channels(s):
         visits.append("channels")
         if not jumped["done"]:
@@ -194,6 +231,7 @@ def test_scripted_happy_path_chat_then_voice_reuse_then_jumpback(
     machine = StateMachine(
         state=state,
         steps=[
+            ("welcome", welcome_step.run),
             ("llm_provider", step_llm_provider),
             ("voice_preflight", step_voice),
             ("channels", step_channels),
@@ -206,31 +244,160 @@ def test_scripted_happy_path_chat_then_voice_reuse_then_jumpback(
     transcript.append("--- captured stdout ---")
     transcript.append(captured.out)
 
-    # The wizard MUST have re-walked the provider + voice steps after
-    # the jump. Order: llm_provider → voice → channels (jump) →
-    # llm_provider → voice → channels → finish.
     assert visits == [
         "llm_provider", "voice", "channels",
         "llm_provider", "voice", "channels", "finish",
     ], f"unexpected step order: {visits}"
 
-    # The reuse path must have written the OpenAI key through to
-    # state.credentials.
     assert state.credentials.get("OPENAI_API_KEY") == "sk-chat-1234567890"
     assert state.get_setting("audio", "realtime_primary") == "openai_realtime"
     assert state.get_setting("audio", "realtime_model") == "gpt-realtime"
 
-    # The masked key (or its rich-formatted variant) must have been
-    # printed at the provider step at least once.
     assert "sk-c…1234" in captured.out or "✓ OpenAI key already configured" in captured.out, (
         f"expected masked-key display in the transcript, got:\n{captured.out}"
     )
 
-    # The "Reusing existing openai key" hint must have fired on the
-    # voice step (Bug 4 confirmation).
     assert "Reusing existing openai" in captured.out, (
         f"expected the reuse hint in the transcript, got:\n{captured.out}"
     )
 
-    # Print the transcript so the operator can eyeball it.
+    # Bug 4 — the FERAL banner must render at most once. The welcome
+    # step is invoked once in the step ladder above; the jump-back
+    # path re-enters the state machine loop but the banner guard in
+    # welcome.py keeps the ASCII art from being re-emitted. We
+    # count the "Unleashed AI" subtitle string because it appears
+    # exactly once per banner render and never in any other step.
+    banner_marker = "Unleashed AI"
+    banner_count = captured.out.count(banner_marker)
+    assert banner_count == 1, (
+        f"banner rendered {banner_count} times — expected exactly 1.\n"
+        f"transcript:\n{captured.out}"
+    )
+
     print("\n".join(transcript))
+
+
+def test_scripted_voice_warns_when_existing_key_rejected(
+    feral_home, monkeypatch, capsys,
+):
+    """Bug 1 — the voice step must NOT silently reuse a key the
+    probe just rejected. The operator must see a warning + the
+    Replace / Keep anyway / Skip menu."""
+    _seed_labeled_openai_key(monkeypatch)
+    _stub_voice_probe(
+        monkeypatch,
+        openai_realtime_ok=False,
+        openai_realtime_status=401,
+        openai_realtime_reason="unauthorized",
+    )
+    _fake_catalog(monkeypatch)
+
+    from cli.setup.steps import voice_preflight as vp
+    from cli.setup.helpers import Option
+    from cli.setup.state import WizardState
+
+    answers = iter([
+        Option(id="openai_realtime", label="OpenAI Realtime"),
+        Option(id="replace", label="Replace it now"),
+        Option(id="gpt-realtime", label="gpt-realtime"),
+        Option(id="__none__", label="(skip STT)"),
+        Option(id="__none__", label="(skip TTS)"),
+    ])
+    ask_choice_log: list[list[str]] = []
+
+    def fake_ask_choice(prompt, opts, default=None):
+        ask_choice_log.append([getattr(o, "id", None) for o in opts])
+        return next(answers)
+
+    monkeypatch.setattr(vp, "ask_choice", fake_ask_choice)
+    monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    monkeypatch.setattr(
+        vp, "ask_text", lambda *a, **kw: "sk-fresh-replacement-9876543210",
+    )
+
+    state = WizardState.load(feral_home)
+    asyncio.run(vp.run(state))
+
+    captured = capsys.readouterr().out
+    assert "key was rejected" in captured or "401" in captured, (
+        f"expected the rejected-key warning in transcript, got:\n{captured}"
+    )
+    menu_offered = any(set(opts) >= {"replace", "keep", "skip"} for opts in ask_choice_log)
+    assert menu_offered, (
+        f"expected ask_choice to offer Replace/Keep/Skip; "
+        f"call log:\n{ask_choice_log!r}\ntranscript:\n{captured}"
+    )
+
+    print("\n--- rejected-key scripted-live transcript ---")
+    print(captured)
+    print(f"--- ask_choice call log: {ask_choice_log!r} ---")
+    # Replace path → new key persisted to env + state.credentials.
+    assert state.credentials.get("OPENAI_API_KEY") == "sk-fresh-replacement-9876543210"
+    # Model picker must NOT render the provider as ready when the
+    # probe was rejected — the model rows reflect the parent
+    # provider's real status.
+    assert "ready" not in captured.lower().split("openai_realtime")[-1][:200] or "unauthorized" in captured.lower(), (
+        f"model picker should not advertise 'ready' under a "
+        f"rejected provider; transcript:\n{captured}"
+    )
+
+
+def test_scripted_default_namespace_key_renders_ready_badge(
+    feral_home, monkeypatch, capsys,
+):
+    """Bug 2 — when only the legacy default-namespace vault carries
+    the key (no labeled key), the provider picker badge must read
+    READY, never "needs API key". This matches the message the
+    operator sees one prompt later from
+    ``_configure_provider_key`` (✓ key already configured)."""
+    # Labeled-key vault: empty for every provider.
+    from security import vault_keys as vk_mod
+
+    monkeypatch.setattr(vk_mod, "list_provider_keys", lambda pid, **kw: [])
+    monkeypatch.setattr(vk_mod, "get_active_provider_key", lambda pid, **kw: None)
+    monkeypatch.setattr(vk_mod, "add_provider_key", lambda *a, **kw: None)
+    monkeypatch.setattr(vk_mod, "get_active_label", lambda pid, **kw: None)
+
+    # No env-var leakage from the host shell either.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    fake_catalog = _fake_catalog(monkeypatch)
+
+    # Force the catalog probe to say "configured but UNreachable" so
+    # we know the READY badge can only come from the wizard
+    # detecting state.credentials, not from a green probe.
+    from providers.catalog import ProviderStatus
+
+    async def _probe(*a, **kw):
+        return ProviderStatus(
+            provider_id="openai", display_name="OpenAI",
+            supports_local=False, requires_api_key=True,
+            configured=False, reachable=False,
+        )
+
+    fake_catalog.probe.side_effect = _probe
+
+    class _FakeStatusUnreach:
+        configured = False
+        reachable = False
+        error = ""
+
+    fake_catalog.status_for.return_value = _FakeStatusUnreach()
+
+    from cli.setup.helpers import STATUS_READY, STATUS_NEEDS_KEY
+    from cli.setup.state import WizardState
+    from cli.setup.steps.llm import _build_options
+
+    state = WizardState.load(feral_home)
+    state.credentials["OPENAI_API_KEY"] = "sk-from-default-namespace-vault"
+
+    statuses = {"openai": _FakeStatusUnreach()}
+    opts = _build_options(fake_catalog, statuses, state)
+    assert opts, "expected at least one option from the fake catalog"
+    openai_opt = next(o for o in opts if o.id == "openai")
+    assert openai_opt.status == STATUS_READY, (
+        f"default-namespace key must render as READY, got {openai_opt.status!r}"
+    )
+    assert openai_opt.status != STATUS_NEEDS_KEY
+
+    capsys.readouterr()  # silence unrelated output
