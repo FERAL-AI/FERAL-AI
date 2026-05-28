@@ -126,3 +126,110 @@ async def test_shutdown_delegates(router, mock_realtime, mock_gemini):
     await router.shutdown()
     mock_realtime.shutdown.assert_awaited_once()
     mock_gemini.shutdown.assert_awaited_once()
+
+
+# ── Provider-key resolution (Bug 4) ──────────────────────────────
+#
+# The voice router must resolve provider API keys via
+# ``security.vault_keys.get_active_key`` so a labeled-only key (set
+# via ``feral key add --provider openai --label prod --set-active``,
+# which does NOT also write the legacy default-namespace entry) is
+# visible to the realtime/chained voice path. The chat path already
+# honours this (``agents.llm_provider``); these tests pin that the
+# voice path now does too — strictly additive (env-only setups keep
+# working).
+
+
+@pytest.fixture
+def _vault_isolated(tmp_path, monkeypatch):
+    """In-memory keychain + isolated FERAL_HOME so labeled-key writes
+    land in this test's tmp_path. Mirrors ``fake_keychain`` from
+    ``test_llm_vault_hot_path.py`` but kept local so this test file
+    stays self-contained (the router suite has no conftest dep on the
+    LLM hot-path fixtures)."""
+    monkeypatch.setenv("FERAL_HOME", str(tmp_path))
+    monkeypatch.delenv("FERAL_VAULT_RECOVERY_CODE", raising=False)
+    for _envvar in (
+        "OPENAI_API_KEY", "DEEPGRAM_API_KEY", "ELEVENLABS_API_KEY",
+        "GROQ_API_KEY", "CARTESIA_API_KEY",
+    ):
+        monkeypatch.delenv(_envvar, raising=False)
+
+    store: dict[tuple[str, str], str] = {}
+    import security.vault as vault_mod
+    monkeypatch.setattr(
+        vault_mod, "_keyring_get_password",
+        lambda service, username: store.get((service, username)),
+    )
+    monkeypatch.setattr(
+        vault_mod, "_keyring_set_password",
+        lambda service, username, password: store.__setitem__(
+            (service, username), password,
+        ),
+    )
+    monkeypatch.setattr(
+        vault_mod, "_keyring_delete_password",
+        lambda service, username: store.pop((service, username), None),
+    )
+    vault_mod.reset_vault()
+    yield store
+    vault_mod.reset_vault()
+
+
+def test_voice_router_resolves_labeled_only_openai_key(_vault_isolated, monkeypatch):
+    """Labeled-only OpenAI key (no env var, no legacy default-namespace
+    entry) must be visible to the realtime/chained voice path.
+
+    This is the operator-mental-model gap closed by Bug 4: today
+    ``feral key add --provider openai --label prod --set-active``
+    stores the key in the labeled-vault namespace only. Pre-fix the
+    voice router read ``os.getenv("OPENAI_API_KEY")`` directly and
+    saw nothing, so chained-pipeline preflight + the whisper-fallback
+    picker both reported "no key" even though chat was happily
+    talking to OpenAI.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    from security.vault_keys import add_provider_key
+    from voice.router import _resolve_provider_key
+
+    add_provider_key("openai", "prod", "sk-labeled-prod", set_active=True)
+
+    assert _resolve_provider_key("openai", "OPENAI_API_KEY") == "sk-labeled-prod"
+
+    r = VoiceRouter(audio_pipeline=MagicMock())
+    assert r._pick_fallback_provider() == "whisper"
+
+
+def test_voice_router_falls_back_to_env_when_no_labeled_key(
+    _vault_isolated, monkeypatch,
+):
+    """Regression guard: env-only setups (no labeled key, no legacy
+    default-namespace entry) must keep working. The resolver must
+    return the env value untouched so existing operators who only
+    ever exported ``OPENAI_API_KEY`` see no behaviour change."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-only")
+    from voice.router import _resolve_provider_key
+
+    assert _resolve_provider_key("openai", "OPENAI_API_KEY") == "sk-env-only"
+
+
+def test_voice_router_deepgram_elevenlabs_keys_resolve_independently(
+    _vault_isolated, monkeypatch,
+):
+    """Labeled keys for deepgram + elevenlabs must each resolve to
+    their own provider's key — no cross-contamination through the
+    shared resolver. Pins the per-call-site provider plumbing in
+    ``_try_chained_morph`` and ``open_chained_session`` so a
+    future refactor can't accidentally map deepgram → openai or
+    vice versa."""
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    from security.vault_keys import add_provider_key
+    from voice.router import _resolve_provider_key
+
+    add_provider_key("deepgram", "default", "dg-secret", set_active=True)
+    add_provider_key("elevenlabs", "default", "el-secret", set_active=True)
+
+    assert _resolve_provider_key("deepgram", "DEEPGRAM_API_KEY") == "dg-secret"
+    assert _resolve_provider_key("elevenlabs", "ELEVENLABS_API_KEY") == "el-secret"
+    assert _resolve_provider_key("openai", "OPENAI_API_KEY") == ""

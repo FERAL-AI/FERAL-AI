@@ -17,6 +17,35 @@ logger = logging.getLogger("feral.voice.router")
 _ENV_VOICE_PROVIDER = "FERAL_VOICE_PROVIDER"
 
 
+def _resolve_provider_key(provider_id: str, env_key: str) -> str:
+    """Resolve an API key for *provider_id* for the voice hot path.
+
+    Consults :func:`security.vault_keys.get_active_key` first so a
+    labeled key stored via ``feral key add --provider <p> --label <l>
+    --set-active`` (which does NOT also write the legacy
+    default-namespace entry) reaches the realtime/chained voice path —
+    closing the "one OpenAI key works for chat AND voice AND video"
+    mental-model gap that the chat path already honours via
+    ``agents.llm_provider``.
+
+    Then falls back to ``os.getenv(env_key)`` for voice-only providers
+    that aren't registered in ``vault_keys._PROVIDER_ENV_KEYS``
+    (``deepgram``, ``elevenlabs``, ``cartesia``, ``openai_whisper``,
+    ``groq_whisper``) so env-only setups continue to work unchanged.
+    Strictly additive — never raises.
+    """
+    try:
+        from security.vault_keys import get_active_key
+        key = get_active_key(provider_id) or ""
+    except Exception:
+        key = ""
+    if key:
+        return key
+    if env_key:
+        return os.getenv(env_key, "") or ""
+    return ""
+
+
 def _settings_realtime_model() -> str:
     """Resolve the operator-configured OpenAI Realtime model.
 
@@ -602,22 +631,27 @@ class VoiceRouter:
 
         # Vault preflight — every chained TTS / STT we ship needs a
         # key, but only deepgram + elevenlabs are wired as the S4
-        # defaults. Other operator-pinned pairs (groq_whisper,
-        # cartesia, ...) need the matching env var set; missing →
-        # whisper degrade so the user still hears something.
-        env_keys = {
-            "deepgram": "DEEPGRAM_API_KEY",
-            "openai_whisper": "OPENAI_API_KEY",
-            "groq_whisper": "GROQ_API_KEY",
-            "elevenlabs": "ELEVENLABS_API_KEY",
-            "cartesia": "CARTESIA_API_KEY",
-            "openai": "OPENAI_API_KEY",
+        # defaults. Resolve each provider's key via vault_keys so a
+        # labeled-only entry (e.g. ``feral key add --provider openai
+        # --label prod --set-active``) is visible here even if the
+        # legacy default-namespace entry was never written. Env-only
+        # setups continue to work via the fallback in
+        # :func:`_resolve_provider_key`.
+        provider_env = {
+            "deepgram": ("deepgram", "DEEPGRAM_API_KEY"),
+            "openai_whisper": ("openai", "OPENAI_API_KEY"),
+            "groq_whisper": ("groq", "GROQ_API_KEY"),
+            "elevenlabs": ("elevenlabs", "ELEVENLABS_API_KEY"),
+            "cartesia": ("cartesia", "CARTESIA_API_KEY"),
+            "openai": ("openai", "OPENAI_API_KEY"),
         }
-        required = {
-            env_keys.get(stt_name, "DEEPGRAM_API_KEY"),
-            env_keys.get(tts_name, "ELEVENLABS_API_KEY"),
-        }
-        missing = [k for k in required if not os.getenv(k)]
+        stt_pid, stt_env = provider_env.get(stt_name, ("deepgram", "DEEPGRAM_API_KEY"))
+        tts_pid, tts_env = provider_env.get(tts_name, ("elevenlabs", "ELEVENLABS_API_KEY"))
+        missing: list[str] = []
+        for pid, env_var in {(stt_pid, stt_env), (tts_pid, tts_env)}:
+            if not _resolve_provider_key(pid, env_var):
+                missing.append(env_var)
+        missing = sorted(set(missing))
         if missing:
             logger.warning(
                 "Chained morph for %s aborted — missing vault keys: %s",
@@ -742,9 +776,11 @@ class VoiceRouter:
         except Exception:
             pass
         # AudioPipeline ALWAYS has the whisper /audio/speech path as
-        # long as OPENAI_API_KEY is loaded — that's the conservative
-        # default ("disable voice" never sounded right).
-        if os.getenv("OPENAI_API_KEY"):
+        # long as an OpenAI key is loaded — that's the conservative
+        # default ("disable voice" never sounded right). Resolve via
+        # vault_keys so a labeled-only OpenAI key (no env var, no
+        # legacy default-namespace entry) still unlocks this branch.
+        if _resolve_provider_key("openai", "OPENAI_API_KEY"):
             return "whisper"
         return ""
 
@@ -973,17 +1009,22 @@ class VoiceRouter:
         tts_model = opts.get("tts_model", "gpt-4o-mini-tts")
         tts_voice = opts.get("tts_voice", "alloy")
 
-        import os
+        # Resolve each provider's key via vault_keys.get_active_key
+        # (with env fallback) so a labeled-only entry like
+        # ``feral key add --provider openai --label prod --set-active``
+        # — which does NOT also touch ``os.environ`` — is visible to
+        # both the STT/TTS constructors below. Env-only setups keep
+        # working unchanged.
         stt_keys = {
-            "deepgram": os.getenv("DEEPGRAM_API_KEY", ""),
-            "openai_whisper": os.getenv("OPENAI_API_KEY", ""),
-            "groq_whisper": os.getenv("GROQ_API_KEY", ""),
+            "deepgram": _resolve_provider_key("deepgram", "DEEPGRAM_API_KEY"),
+            "openai_whisper": _resolve_provider_key("openai", "OPENAI_API_KEY"),
+            "groq_whisper": _resolve_provider_key("groq", "GROQ_API_KEY"),
         }
         tts_keys = {
-            "openai": os.getenv("OPENAI_API_KEY", ""),
-            "elevenlabs": os.getenv("ELEVENLABS_API_KEY", ""),
+            "openai": _resolve_provider_key("openai", "OPENAI_API_KEY"),
+            "elevenlabs": _resolve_provider_key("elevenlabs", "ELEVENLABS_API_KEY"),
             # Lane 05 W7: Cartesia is now a first-class TTS provider.
-            "cartesia": os.getenv("CARTESIA_API_KEY", ""),
+            "cartesia": _resolve_provider_key("cartesia", "CARTESIA_API_KEY"),
         }
 
         stt_provider = get_stt_provider(
