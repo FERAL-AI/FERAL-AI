@@ -1,10 +1,38 @@
 # Changelog
 
-<!-- feral-version: 2026.5.45 -->
+<!-- feral-version: 2026.5.46 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.5.46] — Demo-readiness wave: TimelineCard renders live, Timeline page fetches, chat survives navigation
+
+Three dress-rehearsal passes against a live brain (a launch demo for a public/investor audience) caught a cluster of presentation-layer bugs that the unit tests missed. v2026.5.46 closes all of them. The first rehearsal's "disqualifying" findings turned out to be mostly a degraded brain — a leftover `cost.chat.per_hour_usd: 0.01` test value had starved the agent; once cost caps were reset to sane values the memory recall, memory page, and synthesis all came back healthy. What remained after that were five genuine code bugs across the orchestrator and the WebUI.
+
+### Orchestrator — TimelineCard now emits on the live chat path (`12e388a3`)
+
+The S1 fused-timeline "what did I do yesterday?" answer rendered as prose but never produced the inline `TimelineCard` widget, even on a healthy brain with ample budget. Root cause: `_maybe_emit_timeline_frame` is a tool-result hook — it only fires after the LLM dispatches the `notes_memory__fused_timeline` tool. Live `claude-opus-4-7` answered temporal-recall questions from its own context window without ever calling the tool, so the emit branch was dead code on the live path. (The existing test passed because it drove `_emit_tool_result` directly with a hand-crafted tool-call, short-circuiting the "did the LLM actually pick the tool?" question — false confidence.) Fix: a strict temporal-recall heuristic (`_R_TEMPORAL`) now proactively dispatches `timeline_fusion()` via a side-channel (`_maybe_emit_temporal_timeline`) scheduled as an `asyncio.create_task` at the top of both the stream and non-stream command handlers, emitting a canonical `TimelinePayload` WS frame whenever the fusion returns ≥1 entry. Prose continues streaming in parallel; the client de-dupes by `{session_id, query}` so a best-case LLM tool-call simply replaces the side-channel card. No client changes — the frame envelope matches the existing `TimelineCard` contract exactly.
+
+### WebUI — three demo-blocking frontend bugs (`a5b9b36e`)
+
+- **Timeline page never fetched.** `/timeline` sat permanently on "Loading timeline… (0)" because no `/api/timeline` HTTP request was ever issued (the fetch effect was wrapped in a `useCallback`-keyed `useEffect` that didn't fire as expected). Rewritten as a plain effect keyed on `[days, type, reloadCounter]` with a sequence-ref guard, so the GET fires on mount + filter-change + Refresh and the loading flag always settles in `finally`.
+- **Chat wedged dead after navigating away and back (real product bug, not just demo).** Visiting `/memory` or `/timeline` and returning to `/chat` left the composer permanently disabled on "Loading conversation…", Send/Voice/Attach all dead, not even recoverable by reload. Root cause: `Shell.jsx` initialised a `ready` flag to `false` and only flipped it true at the end of an async hydration IIFE — any silent hiccup in hydration left the composer gated off forever. `ready` now initialises `true`; hydration enriches state but never gates the UI. Any operator who navigated away from chat and back was hitting this.
+- **Debug strip leaked into production.** A column of `EVENT text_response` debug rows was mounted unconditionally (via `Ambient` → `LiveOpsStream`) in the bottom-left of every shelled page. Now gated behind `import.meta.env.DEV`.
+- **Markdown inline-code was illegible.** react-markdown 9 dropped the `inline` prop, so every `<code>` was routed through the highlight.js path — bare backticked words (`badr`, `CHANGELOG.md`) rendered as washed-out dark badges, and unlabeled fenced blocks got auto-detected as code with English words painted orange. Inline code is now detected by the absence of a `language-X` class, `rehype-highlight` auto-detect is disabled, and `.v2-md-code-inline` gets an explicit legible color.
+
+### Bundle rebuilt
+
+`feral-core/webui_v2/` was rebuilt from the updated `feral-client-v2` source (new bundle `index-jJ5Apg4Q.js`) so the four frontend fixes actually reach the served UI. (The v2026.5.42/43 lesson — a stale bundle silently shipping old UI — is why the bundle rebuild is now an explicit release step whenever client source changes.)
+
+### Operator notes
+
+- Reset your cost caps if you ever set a tiny test value: a `cost.chat.per_hour_usd` below the cost of a single turn will starve the agent and make memory/timeline features appear broken. v2026.5.46 ships sane defaults; per-subsystem caps are editable in Settings → Cost.
+- `feral setup` is still a TTY wizard (no automation screenshots); the in-app surfaces are the demo medium.
+
+### Tests
+
+Backend: 67 + 42 focused pytest pass (orchestrator fused-timeline incl. a new live-path test that drives `handle_command_stream` against a text-only mock LLM and asserts the side-channel frame still emits; route-heuristic; stream/non-stream parity). Frontend: 42 vitest pass across the four new test files (`Timeline.fetch`, `Chat.nav-recovery`, `Ambient.liveops-dev-gate`, `markdown.contrast`) plus seven adjacent regression suites. Both doc guards clean.
 
 ## [2026.5.45] — `feral setup` wizard hardening: jump-back nav, honest key detection, no probe-rejected reuse, voice key sharing
 
