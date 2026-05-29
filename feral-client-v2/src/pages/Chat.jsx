@@ -431,7 +431,10 @@ export default function Chat() {
 
   useEffect(() => {
     const el = bottomRef.current;
-    if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ behavior: 'smooth' });
+    if (!el || typeof el.scrollIntoView !== 'function') return;
+    // Instant scroll while streaming — smooth-scroll animation fights the
+    // incoming token cadence and looks janky. Smooth only when settled.
+    el.scrollIntoView({ behavior: streamingText ? 'auto' : 'smooth' });
   }, [messages, thinking, streamingText]);
 
   const submit = async (e) => {
@@ -728,7 +731,15 @@ export default function Chat() {
             <div className="v2-chat-row v2-chat-row--assistant">
               <div className="v2-chat-role" aria-hidden="true"><Orb size={22} mode="speaking" /></div>
               <div className="v2-chat-body">
-                {streamingText && <MarkdownMessage text={streamingText} />}
+                {/* While streaming, render lightweight plain text — the full
+                    markdown pipeline (GFM + highlight + KaTeX) is too heavy
+                    to re-parse on every frame. The committed message row
+                    re-renders once as MarkdownMessage on is_final. */}
+                {streamingText && (
+                  <div className="v2-md v2-stream-plain" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {streamingText}
+                  </div>
+                )}
                 {streamingReasoning && !streamingText && (
                   <ReasoningSection text={streamingReasoning} defaultOpen />
                 )}

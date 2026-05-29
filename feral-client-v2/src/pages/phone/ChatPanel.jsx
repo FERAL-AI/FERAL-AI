@@ -313,7 +313,12 @@ export default function ChatPanel({ shell: shellProp }) {
         {streamingText && (
           <div className="phone-chat-row phone-chat-row--assistant">
             <div className="phone-chat-bubble">
-              <MarkdownMessage text={streamingText} className="v2-md--inline" />
+              {/* Plain text while streaming; full markdown re-renders once
+                  on commit (the heavy GFM/KaTeX pipeline is too costly to
+                  re-parse per coalesced frame). */}
+              <div className="v2-md v2-md--inline v2-stream-plain" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                {streamingText}
+              </div>
             </div>
           </div>
         )}
