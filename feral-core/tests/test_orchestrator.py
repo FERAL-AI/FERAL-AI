@@ -83,12 +83,19 @@ class TestRoutingAndContext:
     async def test_build_system_prompt_includes_identity_and_skills(
         self, orchestrator: Orchestrator
     ) -> None:
-        """System prompt contains identity text and skill branding."""
+        """System prompt contains identity text and skill branding.
+
+        The agents-prompt deepening pass renamed the legacy "How to
+        respond" section to "Tone & Companionship" and added a
+        Tool-Selection Discipline header. Assert against the new
+        sentinels — the structural contract (identity threaded in,
+        skill branding visible) is unchanged.
+        """
         frame = PerceptionFrame()
         with patch.object(orchestrator, "_load_identity", return_value="CUSTOM_IDENTITY_LINE"):
             text = await orchestrator._build_system_prompt(frame, [WEATHER_SKILL], "session-z")
         assert "CUSTOM_IDENTITY_LINE" in text
-        assert "How to respond" in text
+        assert "Tone & Companionship" in text or "Tool-Selection Discipline" in text
         assert "Weather" in text or "Relevant skills" in text
 
 

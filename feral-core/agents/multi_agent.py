@@ -319,12 +319,37 @@ class MultiAgentOrchestrator:
         from agents.workers.research_worker import RESEARCH_PROMPT, RESEARCH_SKILLS
         from agents.workers.creative_worker import CREATIVE_PROMPT, CREATIVE_SKILLS
 
+        # The "general" worker is the fallback when the router can't pin a
+        # specialist domain. Its job is NOT to answer everything from
+        # parametric memory — it's to escalate to the right tool when one
+        # exists. Same tool-selection discipline as the orchestrator's
+        # master prompt, in compact form.
+        general_prompt = (
+            "You are FERAL, a personal AI operating system. The user's request "
+            "didn't pin to a specialist domain (health/home/research/creative), "
+            "so you're handling it directly.\n"
+            "\n"
+            "Tool discipline:\n"
+            "- Personal recall ('what did I…', 'summarize my…', 'what was I "
+            "working on') → call `notes_memory__fused_timeline` BEFORE answering.\n"
+            "- Current external info ('latest…', 'today's…') → call `web_search`.\n"
+            "- Local actions (open app, write file, run command, browse, send "
+            "message) → call the matching tool. Don't describe steps the user "
+            "should perform when a tool exists.\n"
+            "- After each tool returns, ground your reply in its actual output.\n"
+            "\n"
+            "If the request is genuinely conversational (small talk, opinion, "
+            "explanation of a concept the user named), answer directly — but "
+            "stay tight, warm, and honest. Don't overclaim ('I synced…') and "
+            "don't underclaim ('I can't…') when a tool exists for the action."
+        )
+
         worker_configs = [
             ("health", "Health Specialist", HEALTH_PROMPT, HEALTH_SKILLS),
             ("home", "Home Controller", HOME_PROMPT, HOME_SKILLS),
             ("research", "Research Assistant", RESEARCH_PROMPT, RESEARCH_SKILLS),
             ("creative", "Creative & Media", CREATIVE_PROMPT, CREATIVE_SKILLS),
-            ("general", "General Assistant", "You are FERAL, a helpful AI assistant. Answer the user's question concisely.", []),
+            ("general", "General Assistant", general_prompt, []),
         ]
 
         for wid, name, prompt, skills in worker_configs:

@@ -114,11 +114,14 @@ async def test_calendar_failure_does_not_break_prompt_build():
 
     loader = IdentityLoader(memory=None, calendar=_BoomCal())
     prompt = await _build_prompt(loader)
-    # Prompt still built; just no calendar section. PR2 canonical-execution
-    # work replaced the old "ABSOLUTE RULE" header with the
-    # "## Execution Truthfulness" guidance block — assert against that.
-    assert "## Execution Truthfulness" in prompt  # opening fixed block
-    assert "## Today's Events" not in prompt
+    # Prompt still built; just no calendar section. The agents-prompt
+    # deepening pass restructured the static header — the opening
+    # fixed block is now "## Tool-Selection Discipline" (replaced the
+    # earlier "## Execution Truthfulness" header). Assert against the
+    # new sentinel; the operator-facing contract (build doesn't crash
+    # on a calendar OAuth glitch) is unchanged.
+    assert "## Tool-Selection Discipline" in prompt
+    assert "## Today's Events" not in prompt  # rendered section header absent
 
 
 def test_orchestrator_set_calendar_threads_to_identity_loader():
