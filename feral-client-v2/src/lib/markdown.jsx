@@ -38,8 +38,13 @@ import rehypeKatex from 'rehype-katex';
 // time MarkdownMessage mounts. Don't import it here.
 
 const REMARK_PLUGINS = [remarkGfm, remarkMath];
+// `detect: false` keeps highlight.js off bare ```fenced``` blocks the
+// LLM didn't tag with a language. Auto-detection was painting prose
+// deliverables (Slack standups, weekly recaps) orange/yellow by
+// classifying English keywords ("and", "on", "in") as code. Language-
+// tagged blocks (```python, ```bash, ```ts) still highlight normally.
 const REHYPE_PLUGINS = [
-  [rehypeHighlight, { ignoreMissing: true, detect: true }],
+  [rehypeHighlight, { ignoreMissing: true, detect: false }],
   rehypeKatex,
 ];
 
@@ -98,8 +103,16 @@ const COMPONENTS = {
     );
   },
   code({ inline, className, children, ...rest }) {
+    // react-markdown 9 dropped the `inline` prop. The reliable signal
+    // for a fenced (block) code element is the presence of a
+    // `language-X` class injected by remark. Anything without that
+    // class is inline — i.e. a single-backtick span like `badr`.
+    // Treating those as block was painting them with the hljs base
+    // palette (light-grey on dark-grey, no border, no padding) which
+    // looked like a broken UI badge.
     const lang = /language-(\w+)/.exec(className || '')?.[1];
-    if (inline) {
+    const isInline = inline === true || (!lang && !/(^|\s)hljs(\s|$)/.test(className || ''));
+    if (isInline) {
       return <code className="v2-md-code-inline" {...rest}>{children}</code>;
     }
     return (

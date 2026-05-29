@@ -8,12 +8,20 @@ import { useSomatic } from '../hooks/useSomatic';
  * Resting state: subtle somatic gradient + grain. No floating orb behind
  * the content — the orb belongs where the user intentionally looks at it
  * (Home hero, voice overlay, chat avatar). Live-ops is the opt-in
- * diagnostic overlay: a faint stream of Brain events.
+ * diagnostic overlay: a faint stream of Brain events — gated to dev
+ * builds only so a column of "EVENT text_response" debug rows doesn't
+ * leak into the bottom-left corner of the shipped UI.
  *
  * Expand triggers: hover bottom-third, press Cmd-Period, or dispatch the
  * custom `v2:ambient-expand` event. Collapses after 3 s idle.
  */
 const COLLAPSE_MS = 3000;
+
+// `import.meta.env.DEV` is true only under `vite dev`; in vitest and in
+// the production bundle (vite build) it is false, so the strip stays
+// hidden during demos. Kept as a module-level constant so the value is
+// captured once and the gate is cheap on every render.
+const SHOW_LIVE_OPS = Boolean(import.meta.env && import.meta.env.DEV);
 
 export default function Ambient() {
   const [expanded, setExpanded] = useState(false);
@@ -69,9 +77,11 @@ export default function Ambient() {
     >
       <div className="v2-ambient-field" />
       <div className="v2-ambient-grain" />
-      <div className="v2-ambient-ops">
-        <LiveOpsStream active={expanded} />
-      </div>
+      {SHOW_LIVE_OPS && (
+        <div className="v2-ambient-ops" data-testid="v2-ambient-ops">
+          <LiveOpsStream active={expanded} />
+        </div>
+      )}
     </div>
   );
 }

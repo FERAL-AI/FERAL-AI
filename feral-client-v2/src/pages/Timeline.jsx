@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import EmptyState from '../ui/EmptyState';
@@ -55,29 +55,52 @@ export default function Timeline() {
   const [err, setErr] = useState('');
   const [days, setDays] = useState(7);
   const [type, setType] = useState('');
+  // Bump on Refresh; the fetch effect depends on this so an operator
+  // press re-fires the HTTP GET even when days/type haven't moved.
+  const [reloadCounter, setReloadCounter] = useState(0);
+  // Used so a stale in-flight request (filter changed before the
+  // previous fetch resolved) can't clobber the latest results.
+  const requestSeqRef = useRef(0);
 
-  const load = useCallback(async () => {
+  // Page-mount + filter-change fetch. Plain useEffect — no useCallback
+  // indirection — so the HTTP GET fires unconditionally on mount and
+  // again whenever days/type/reloadCounter change. Stuck "Loading
+  // timeline… (0)" was caused by the page subscribing to a WS frame
+  // that never arrives; the canonical contract is the REST endpoint
+  // at api/routes/timeline.py.
+  useEffect(() => {
+    const seq = ++requestSeqRef.current;
+    let cancelled = false;
     setLoading(true);
     setErr('');
-    try {
-      const params = new URLSearchParams();
-      params.set('days', String(days));
-      if (type) params.set('type', type);
-      const d = await apiJson(`/api/timeline?${params.toString()}`);
-      // Backend canonical shape: {entries, count, days}. Tolerate
-      // legacy keys (`timeline` / `items`) for back-compat with older
-      // brains in case the user is running a mismatched version.
-      const rows = d.entries || d.timeline || d.items || [];
-      setItems(Array.isArray(rows) ? rows : []);
-    } catch (e) {
-      setItems([]);
-      setErr(e?.message || 'failed to load timeline');
-    } finally {
-      setLoading(false);
-    }
-  }, [days, type]);
+    (async () => {
+      try {
+        const params = new URLSearchParams();
+        params.set('days', String(days));
+        if (type) params.set('type', type);
+        const d = await apiJson(`/api/timeline?${params.toString()}`);
+        if (cancelled || requestSeqRef.current !== seq) return;
+        // Backend canonical shape: {entries, count, days}. Tolerate
+        // legacy keys (`timeline` / `items`) for back-compat with older
+        // brains in case the user is running a mismatched version.
+        const rows = d.entries || d.timeline || d.items || [];
+        setItems(Array.isArray(rows) ? rows : []);
+      } catch (e) {
+        if (cancelled || requestSeqRef.current !== seq) return;
+        setItems([]);
+        setErr(e?.message || 'failed to load timeline');
+      } finally {
+        if (!cancelled && requestSeqRef.current === seq) {
+          setLoading(false);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [days, type, reloadCounter]);
 
-  useEffect(() => { load(); }, [load]);
+  const refresh = useCallback(() => {
+    setReloadCounter((n) => n + 1);
+  }, []);
 
   return (
     <div className="v2-page v2-page--stack" data-testid="v2-marker">
@@ -91,7 +114,7 @@ export default function Timeline() {
             <select className="v2-select" value={type} onChange={(e) => setType(e.target.value)} aria-label="Type">
               {TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
-            <button type="button" className="v2-btn v2-btn--ghost" onClick={load}>Refresh</button>
+            <button type="button" className="v2-btn v2-btn--ghost" onClick={refresh}>Refresh</button>
           </>
         )}
       >

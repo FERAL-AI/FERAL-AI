@@ -41,7 +41,13 @@
 .v2-md strong { font-weight: 600; }
 .v2-md em { font-style: italic; }
 
-/* Inline code */
+/* Inline code — single backticks (`badr`, `CHANGELOG.md`). The
+ * dark-mode hljs github-dark.css stylesheet was previously bleeding
+ * into inline spans because react-markdown 9 stopped passing the
+ * `inline` prop and every <code> was being treated as a code block.
+ * Now we explicitly set color + background here so the badge is
+ * legible against both light and dark page backgrounds, with no
+ * dependency on the highlight.js palette. */
 .v2-md-code-inline {
   font-family: var(--v2-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 0.88em;
@@ -49,6 +55,7 @@
   border-radius: 5px;
   background: var(--v2-surface-0);
   border: 1px solid var(--v2-hairline);
+  color: var(--v2-text-primary);
 }
 
 /* Fenced code blocks */

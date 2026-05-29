@@ -128,7 +128,16 @@ function ShellFrame() {
   const voice = useVoice();
   const [messages, setMessagesState] = useState(() => cloneGreeting());
   const [conversationId, setConversationIdState] = useState('');
-  const [ready, setReady] = useState(false);
+  // Initialise ready=true so the chat composer is never wedged on the
+  // initial hydration round-trip. Hydration enriches state but doesn't
+  // gate the UI. We previously left ready=false until the conversation
+  // fetch chain finished, which meant any silent failure (or a slow
+  // remount race after navigating away/back) left the chat composer
+  // stuck on "Loading conversation…" with no recovery path short of
+  // closing the tab. Submission still calls thread.ensureConversation()
+  // before sending, so a not-yet-created conversation is materialised
+  // on the first user message.
+  const [ready, setReady] = useState(true);
   const hydratedRef = useRef(false);
 
   const setMessages = useCallback((next) => {
@@ -254,7 +263,9 @@ function ShellFrame() {
       if (!hydratedFromConversations) {
         await startNewConversation();
       }
-      if (!cancelled) setReady(true);
+      // ready is always true (see useState init); no-op here so the
+      // composer is interactive even when one of the hydration calls
+      // silently hangs or returns an error envelope.
     })();
 
     return () => { cancelled = true; };
