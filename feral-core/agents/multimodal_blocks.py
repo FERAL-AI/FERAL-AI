@@ -308,8 +308,115 @@ def to_gemini_parts(blocks: list[Any]) -> list[Any]:
     return out
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Per-provider tool_choice translator
+# ─────────────────────────────────────────────────────────────────────
+#
+# FERAL's orchestrator decides at turn-classification time whether the
+# LLM MUST call a specific tool this turn (e.g. ``notes_memory__fused_timeline``
+# on a temporal-recall query — the grounded-memory closure described in
+# the v2026.5.47 follow-up). The chat-completions wire field that carries
+# that intent is ``tool_choice``, and every provider names it slightly
+# differently. Centralising the translation here keeps the per-call-site
+# branches in ``agents.llm_provider`` thin (set one value, pass it to the
+# translator at body-build time) and pins the mapping in unit tests.
+#
+# Providers that natively support naming a single tool to force:
+#   * OpenAI + every OpenAI-compatible adapter we ship today
+#     (openrouter, deepseek, groq, kimi, qwen, lmstudio, ollama)
+#     →  {"type": "function", "function": {"name": <tool>}}
+#   * Anthropic Messages API
+#     →  {"type": "tool", "name": <tool>}
+#
+# Providers that DO NOT support naming a single tool on the wire shape
+# FERAL actually targets:
+#   * Gemini's OpenAI-compatibility endpoint
+#     (``/v1beta/openai/chat/completions``) accepts ``tool_choice`` but
+#     only as ``"auto"`` / ``"none"`` / ``"required"`` — the native
+#     ``:generateContent`` ``function_calling_config.mode = "ANY"`` with
+#     ``allowed_function_names = [<tool>]`` lives on a different
+#     endpoint we don't currently drive. Degrade to ``"required"`` so
+#     the model still must call SOME tool, and let the orchestrator's
+#     side-channel fall back to its deterministic emit for the
+#     widget-mount safety net.
+#
+# Unknown providers (catalog-only descriptors that don't ship a runtime
+# adapter, user-typed provider strings) return ``None`` so callers fall
+# back to the default ``"auto"`` they would have used pre-fix — never
+# raise; the prompt + side-channel remain the path.
+_OPENAI_COMPAT_FORCE_PROVIDERS: frozenset[str] = frozenset({
+    "openai",
+    "openrouter",
+    "deepseek",
+    "groq",
+    "kimi",
+    "qwen",
+    "lmstudio",
+    "ollama",
+})
+
+# Providers that support the broader ``"required"`` /  ``"any"`` shape
+# (force-call SOME tool, not a specific one) but not named forcing on
+# the wire we drive. Kept as a separate set so the truthful degrade
+# is documented next to the data.
+_REQUIRED_ONLY_FORCE_PROVIDERS: frozenset[str] = frozenset({
+    "gemini",
+})
+
+
+def to_provider_tool_choice(provider: str, force_tool: str) -> Any:
+    """Translate ``force_tool`` to the right wire-shape for *provider*.
+
+    * Anthropic →  ``{"type": "tool", "name": force_tool}``
+    * OpenAI / OpenRouter / DeepSeek / Groq / Kimi / Qwen / LM Studio /
+      Ollama →  ``{"type": "function", "function": {"name": force_tool}}``
+    * Gemini (OpenAI-compat endpoint) →  ``"required"`` (degrade — the
+      OpenAI-compat layer can't name a single tool; prompt + side-channel
+      remain the path for the named-tool grounding).
+    * Unknown / unsupported provider → ``None`` so the caller falls
+      back to its default ``"auto"`` instead of erroring on a typo.
+
+    Returns ``None`` when ``force_tool`` is empty/falsy so callers can
+    use the result directly as a truthiness gate.
+    """
+    if not force_tool:
+        return None
+    p = (provider or "").lower()
+    if p == "anthropic":
+        return {"type": "tool", "name": force_tool}
+    if p in _OPENAI_COMPAT_FORCE_PROVIDERS:
+        return {"type": "function", "function": {"name": force_tool}}
+    if p in _REQUIRED_ONLY_FORCE_PROVIDERS:
+        return "required"
+    return None
+
+
+def tool_list_contains(tools: Any, tool_name: str) -> bool:
+    """True iff ``tool_name`` appears in an OpenAI-shape tools list.
+
+    Accepts the canonical ``[{"type": "function", "function": {"name": ...}}]``
+    shape FERAL uses on the wire and the flat ``{"name": ...}`` shape
+    some upstream callers assemble. Returns ``False`` on any malformed
+    input — the caller treats absence as "don't force this tool" so a
+    typo or empty list silently degrades to auto instead of raising.
+    """
+    if not tool_name or not isinstance(tools, list):
+        return False
+    for t in tools:
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function")
+        if isinstance(fn, dict) and fn.get("name") == tool_name:
+            return True
+        if t.get("name") == tool_name:
+            return True
+    return False
+
+
 __all__ = [
     "to_anthropic_blocks",
     "to_gemini_parts",
     "translate_content_for_anthropic",
+    "to_provider_tool_choice",
+    "tool_list_contains",
 ]

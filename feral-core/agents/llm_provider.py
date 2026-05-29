@@ -60,6 +60,10 @@ from agents.llm_anthropic_shape import (
     _convert_messages_for_anthropic,
     _enforce_anthropic_thinking_max_tokens,
 )
+from agents.multimodal_blocks import (
+    to_provider_tool_choice,
+    tool_list_contains,
+)
 
 # Cost-budget surface (Wave 1 Lane 04). The runtime gate lives on the
 # public chat entry points — see ``_budget_check`` /
@@ -76,6 +80,36 @@ logger = logging.getLogger("feral.llm")
 def _gemini_api_key() -> str | None:
     """Return Gemini API key. Prefers GEMINI_API_KEY; falls back to GOOGLE_API_KEY."""
     return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+
+def _resolve_tool_choice(
+    provider: str,
+    tools: Optional[list[dict]],
+    force_tool: Optional[str],
+) -> Any:
+    """Return the ``tool_choice`` wire value for a chat-completions body.
+
+    Centralises the v2026.5.48 grounded-memory closure: when the
+    orchestrator classifies a temporal-recall turn it asks the LLM
+    layer to FORCE the model to call ``notes_memory__fused_timeline``
+    (so the prose answer is grounded in the retrieved tool result
+    rather than narrated from working-memory context). The per-provider
+    wire shape lives in :mod:`agents.multimodal_blocks`.
+
+    Guards against forcing a tool the model wasn't given — when
+    ``force_tool`` is not present in ``tools`` (typo, routing skipped
+    the right skill, the tool was filtered out by the 128-tool cap),
+    silently degrade to ``"auto"`` so the call still succeeds.
+
+    Returns ``"auto"`` for the default (legacy) path so callers can
+    do a single unconditional ``body["tool_choice"] = <result>`` at
+    every site without branching.
+    """
+    if force_tool and tool_list_contains(tools, force_tool):
+        translated = to_provider_tool_choice(provider, force_tool)
+        if translated is not None:
+            return translated
+    return "auto"
 
 
 def _resolve_api_key(provider: str) -> str:
@@ -580,6 +614,7 @@ class LLMProvider:
         max_tokens: int = 1024,
         *,
         call_site: str = "chat",
+        force_tool: Optional[str] = None,
     ) -> dict:
         """Send a chat completion request and return the full response dict.
 
@@ -645,6 +680,7 @@ class LLMProvider:
             if classify_endpoint(self.provider, self.model) == "responses":
                 result = await self._responses_chat(
                     messages, tools, temperature, max_tokens,
+                    force_tool=force_tool,
                 )
                 if result and not result.get("error"):
                     await self._budget_record(call_site, self.model, result)
@@ -672,6 +708,7 @@ class LLMProvider:
                     messages, tools,
                     temperature=temperature, max_tokens=max_tokens,
                     call_site=call_site,
+                    force_tool=force_tool,
                 )
             except BudgetExceeded as exc:
                 return self._budget_exceeded_response(exc)
@@ -712,7 +749,10 @@ class LLMProvider:
                 return await self._chat_local(messages, tools, temperature, max_tokens)
 
         if self.provider == "anthropic":
-            return await self._chat_anthropic(messages, tools, temperature, max_tokens)
+            return await self._chat_anthropic(
+                messages, tools, temperature, max_tokens,
+                force_tool=force_tool,
+            )
 
         # NOTE: a previous "runtime model-class guard" lived here as a
         # belt-and-suspenders defense against the dated-transcribe-id
@@ -753,7 +793,9 @@ class LLMProvider:
                 )
                 clean_tools = clean_tools[:128]
             body["tools"] = clean_tools
-            body["tool_choice"] = "auto"
+            body["tool_choice"] = _resolve_tool_choice(
+                self.provider, clean_tools, force_tool,
+            )
 
         # Reasoning-family param fork: ``/v1/chat/completions`` rejects
         # ``max_tokens`` + free-form ``temperature`` on gpt-5* / o1 /
@@ -911,6 +953,8 @@ class LLMProvider:
     async def _chat_anthropic(
         self, messages: list[dict], tools: Optional[list[dict]],
         temperature: float, max_tokens: int,
+        *,
+        force_tool: Optional[str] = None,
     ) -> dict:
         """Anthropic Messages API → normalized to OpenAI format."""
         # A5: route OpenAI-shape transcripts through the conversion
@@ -940,6 +984,12 @@ class LLMProvider:
                     })
             if anthropic_tools:
                 body["tools"] = anthropic_tools
+                if force_tool and any(
+                    t.get("name") == force_tool for t in anthropic_tools
+                ):
+                    translated = to_provider_tool_choice("anthropic", force_tool)
+                    if translated is not None:
+                        body["tool_choice"] = translated
 
         # Reasoning-family fork for Claude thinking-capable models.
         apply_reasoning_fork("anthropic", self.model, body)
@@ -1430,6 +1480,7 @@ class LLMProvider:
         max_tokens: int,
         *,
         stream: bool,
+        force_tool: Optional[str] = None,
     ) -> dict:
         from agents.llm_reasoning import apply_responses_param_fork
 
@@ -1446,7 +1497,16 @@ class LLMProvider:
         clean_tools = self._chat_tools_to_responses_tools(tools)
         if clean_tools:
             body["tools"] = clean_tools
-            body["tool_choice"] = "auto"
+            # Responses-API tool_choice uses the flat ``{"type":"function","name":<n>}``
+            # shape (no nested ``function`` wrapper, unlike chat/completions).
+            # Other providers don't reach this builder, so handle it inline.
+            if force_tool and any(
+                isinstance(t, dict) and t.get("name") == force_tool
+                for t in clean_tools
+            ):
+                body["tool_choice"] = {"type": "function", "name": force_tool}
+            else:
+                body["tool_choice"] = "auto"
         apply_responses_param_fork(self.model, body)
         return body
 
@@ -1456,6 +1516,8 @@ class LLMProvider:
         tools: Optional[list[dict]],
         temperature: float,
         max_tokens: int,
+        *,
+        force_tool: Optional[str] = None,
     ) -> dict:
         """Non-streaming POST to ``/v1/responses``. Returns a dict
         normalised to the chat-completions shape callers consume
@@ -1465,6 +1527,7 @@ class LLMProvider:
         from observability.metrics import increment, measure
         body = self._build_responses_body(
             messages, tools, temperature, max_tokens, stream=False,
+            force_tool=force_tool,
         )
         increment("feral.llm.calls_total", attributes={
             "provider": self.provider, "model": self.model, "endpoint": "responses",
@@ -1614,6 +1677,8 @@ class LLMProvider:
         tools: Optional[list[dict]],
         temperature: float,
         max_tokens: int,
+        *,
+        force_tool: Optional[str] = None,
     ) -> AsyncGenerator[dict, None]:
         """Stream from ``/v1/responses`` using SSE. Yields the same
         event vocabulary the chat-completions stream yields
@@ -1623,6 +1688,7 @@ class LLMProvider:
         from observability.metrics import increment
         body = self._build_responses_body(
             messages, tools, temperature, max_tokens, stream=True,
+            force_tool=force_tool,
         )
         increment("feral.llm.calls_total", attributes={
             "provider": self.provider, "model": self.model, "endpoint": "responses_stream",
@@ -1821,6 +1887,7 @@ class LLMProvider:
         max_tokens: int,
         *,
         primary_error: Exception,
+        force_tool: Optional[str] = None,
     ) -> Optional[list[dict]]:
         """Fallback path for streaming failures.
 
@@ -1860,6 +1927,7 @@ class LLMProvider:
                 tools,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                force_tool=force_tool,
             )
         except Exception as exc:
             primary_detail = _describe_error(primary_error)
@@ -1901,6 +1969,7 @@ class LLMProvider:
         max_tokens: int = 1024,
         *,
         call_site: str = "chat",
+        force_tool: Optional[str] = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Stream a chat completion. Yields delta dicts:
@@ -1952,6 +2021,7 @@ class LLMProvider:
                 streamed_anything = False
                 async for event in self._responses_stream(
                     messages, tools, temperature, max_tokens,
+                    force_tool=force_tool,
                 ):
                     if event.get("type") in ("text_delta", "tool_call_delta"):
                         streamed_anything = True
@@ -2000,7 +2070,10 @@ class LLMProvider:
         # this branch returned ``error`` events with no failover at
         # all — see findings/13-llm-core.md fix #1 + #5.
         if self.provider == "anthropic":
-            async for delta in self._chat_stream_anthropic(messages, tools, temperature, max_tokens):
+            async for delta in self._chat_stream_anthropic(
+                messages, tools, temperature, max_tokens,
+                force_tool=force_tool,
+            ):
                 yield delta
             return
 
@@ -2023,7 +2096,9 @@ class LLMProvider:
                 )
                 clean_tools = clean_tools[:128]
             body["tools"] = clean_tools
-            body["tool_choice"] = "auto"
+            body["tool_choice"] = _resolve_tool_choice(
+                self.provider, clean_tools, force_tool,
+            )
 
         apply_reasoning_fork(self.provider, self.model, body)
 
@@ -2127,6 +2202,7 @@ class LLMProvider:
                     temperature,
                     max_tokens,
                     primary_error=e,
+                    force_tool=force_tool,
                 )
                 if failover_events:
                     for event in failover_events:
@@ -2143,6 +2219,7 @@ class LLMProvider:
                     temperature,
                     max_tokens,
                     primary_error=e,
+                    force_tool=force_tool,
                 )
                 if failover_events:
                     for event in failover_events:
@@ -2162,6 +2239,8 @@ class LLMProvider:
         tools: Optional[list[dict]] = None,
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        *,
+        force_tool: Optional[str] = None,
     ) -> AsyncGenerator[dict, None]:
         """Native Anthropic Messages API streaming via SSE.
 
@@ -2218,7 +2297,7 @@ class LLMProvider:
         apply_reasoning_fork("anthropic", self.model, body)
         _enforce_anthropic_thinking_max_tokens(body)
         if tools:
-            body["tools"] = [
+            anth_tools = [
                 {
                     "name": t.get("function", {}).get("name", t.get("name", "")),
                     "description": t.get("function", {}).get("description", ""),
@@ -2226,6 +2305,11 @@ class LLMProvider:
                 }
                 for t in tools if t.get("type") == "function" or "function" in t
             ]
+            body["tools"] = anth_tools
+            if force_tool and any(t.get("name") == force_tool for t in anth_tools):
+                translated = to_provider_tool_choice("anthropic", force_tool)
+                if translated is not None:
+                    body["tool_choice"] = translated
 
         accumulated_tool_calls: dict[str, dict] = {}
         streamed_text = False
@@ -2329,6 +2413,7 @@ class LLMProvider:
                 temperature,
                 max_tokens,
                 primary_error=primary_error,
+                force_tool=force_tool,
             )
             if failover_events:
                 for event in failover_events:
@@ -3288,6 +3373,8 @@ class LLMProvider:
     def _build_anthropic_body(
         model: str, messages: list[dict], tools: Optional[list[dict]],
         temperature: float, max_tokens: int,
+        *,
+        force_tool: Optional[str] = None,
     ) -> dict:
         """Build Anthropic Messages API request body."""
         system_text, conv = _convert_messages_for_anthropic(messages)
@@ -3311,6 +3398,12 @@ class LLMProvider:
                     })
             if anthropic_tools:
                 body["tools"] = anthropic_tools
+                if force_tool and any(
+                    t.get("name") == force_tool for t in anthropic_tools
+                ):
+                    translated = to_provider_tool_choice("anthropic", force_tool)
+                    if translated is not None:
+                        body["tool_choice"] = translated
         apply_reasoning_fork("anthropic", model, body)
         _enforce_anthropic_thinking_max_tokens(body)
         return body
@@ -3333,6 +3426,7 @@ class LLMProvider:
         """
         retry_max = kwargs.pop("_retry_max", None)
         retry_delays = kwargs.pop("_retry_delays", None)
+        force_tool = kwargs.pop("force_tool", None)
         # Refuse up front for provider ids that have no runtime
         # adapter. Previously the fallback path built an httpx client
         # against whatever default ``_get_provider_config`` handed
@@ -3357,6 +3451,7 @@ class LLMProvider:
             if provider_name == "anthropic":
                 body = self._build_anthropic_body(
                     self.model, messages, tools, temperature, max_tokens,
+                    force_tool=force_tool,
                 )
 
                 async def _do_primary_anthropic():
@@ -3388,7 +3483,9 @@ class LLMProvider:
                     )
                     clean_tools = clean_tools[:128]
                 body["tools"] = clean_tools
-                body["tool_choice"] = "auto"
+                body["tool_choice"] = _resolve_tool_choice(
+                    self.provider, clean_tools, force_tool,
+                )
 
             apply_reasoning_fork(self.provider, self.model, body)
 
@@ -3421,6 +3518,7 @@ class LLMProvider:
             if provider_name == "anthropic":
                 body = self._build_anthropic_body(
                     model, messages, tools, temperature, max_tokens,
+                    force_tool=force_tool,
                 )
 
                 async def _do_fb_anthropic():
@@ -3452,7 +3550,9 @@ class LLMProvider:
                     )
                     clean_tools = clean_tools[:128]
                 body["tools"] = clean_tools
-                body["tool_choice"] = "auto"
+                body["tool_choice"] = _resolve_tool_choice(
+                    provider_name, clean_tools, force_tool,
+                )
 
             apply_reasoning_fork(provider_name, model, body)
 
@@ -3489,6 +3589,16 @@ class LLMProvider:
         "fallback active" chip / banner without parsing log lines.
         ``last_failover`` is omitted entirely when the primary
         succeeded on its first attempt.
+
+        ``force_tool`` (kw-only, forwarded via ``**kwargs``) — when set
+        to a tool name, EVERY candidate provider this call hops to
+        will receive a per-provider ``tool_choice`` that forces the
+        model to call that tool. Used by the orchestrator's grounded-
+        memory closure to require ``notes_memory__fused_timeline`` on
+        temporal-recall turns. Silently degrades to ``"auto"`` on a
+        candidate that doesn't have the tool in its allowed set, or
+        on providers (Gemini) that can't name a single tool on the
+        wire shape we drive.
         """
         if self._messages_contain_vision(messages):
             ok, reason = self._vision_support_status()

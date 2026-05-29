@@ -1087,6 +1087,65 @@ class Orchestrator:
                 return f"last_{d}"
         return "yesterday"
 
+    # ─────────────────────────────────────────────
+    # Grounded-memory closure (v2026.5.48 follow-up)
+    # ─────────────────────────────────────────────
+    #
+    # The forced-tool name the orchestrator asks the LLM layer to
+    # require on temporal-recall turns. Kept as a class constant so
+    # tests can introspect (and the orchestrator's guards can confirm
+    # the right tool name is in the tool list before forcing).
+    _FORCED_TIMELINE_TOOL_NAME = "notes_memory__fused_timeline"
+
+    @classmethod
+    def _force_tool_for_query(
+        cls, text: str, tools: Optional[list[dict]],
+    ) -> Optional[str]:
+        """Return the tool name to force the LLM to call this turn, or
+        ``None`` for the default (auto) tool-selection behaviour.
+
+        Live testing on v2026.5.46/47 showed claude-opus-4-7 answering
+        temporal-recall queries (``what did I do yesterday?``) in prose
+        without dispatching ``notes_memory__fused_timeline`` — so the
+        prose stayed un-grounded in the actual stored episodes. The
+        v2026.5.46 side-channel rendered the TimelineCard widget
+        regardless, but the LLM's narration kept narrating from
+        working-memory context instead of the retrieved tool result.
+        v2026.5.47 deepened the prompts to nudge the call; this gate
+        makes it deterministic at the wire by passing the tool name
+        through to per-provider ``tool_choice`` forcing.
+
+        Guards:
+          * ``text`` must match the strict ``_R_TEMPORAL`` regex
+            (same gate the side-channel uses; non-temporal turns get
+            free tool selection so we never block ``play music``).
+          * ``tools`` must actually contain the forced tool name —
+            never force a tool the model wasn't given (a typo or a
+            routing skip would make the wire request invalid).
+
+        Returns the tool name when both gates pass, ``None`` otherwise.
+        The orchestrator uses ``None`` as the signal to leave the
+        side-channel timeline-fusion task scheduled (the prose stays
+        un-grounded but the widget still mounts).
+        """
+        if not text or not isinstance(tools, list) or not tools:
+            return None
+        try:
+            if not cls._R_TEMPORAL.search(text):
+                return None
+        except Exception:
+            return None
+        target = cls._FORCED_TIMELINE_TOOL_NAME
+        for t in tools:
+            if not isinstance(t, dict):
+                continue
+            fn = t.get("function")
+            if isinstance(fn, dict) and fn.get("name") == target:
+                return target
+            if t.get("name") == target:
+                return target
+        return None
+
     async def _maybe_emit_temporal_timeline(
         self, session_id: str, text: str,
     ) -> bool:
@@ -1280,6 +1339,7 @@ class Orchestrator:
         messages: list[dict],
         tools: Optional[list[dict]],
         call_site: str = "chat",
+        force_tool: Optional[str] = None,
     ) -> dict:
         """Wrapper around ``LLMProvider.chat_with_failover`` that
         propagates the ``call_site`` label so the budget gate bills
@@ -1287,20 +1347,42 @@ class Orchestrator:
         the ``budget_exceeded`` short-circuit shape from Lane 09 / 04
         — so the caller can react.
 
+        ``force_tool`` — optional tool name the orchestrator wants the
+        model to call this turn (grounded-memory closure: temporal-recall
+        queries pass ``"notes_memory__fused_timeline"`` so the LLM's
+        prose answer is grounded in the tool's retrieved data instead
+        of narrated from working-memory context). Forwarded into
+        ``chat_with_failover`` which translates per provider via
+        :mod:`agents.multimodal_blocks`.
+
         Falls through to the legacy positional signature for adapters
-        in tests that don't accept ``call_site`` kw.
+        in tests that don't accept ``call_site`` / ``force_tool`` kw.
         """
+        kw: dict[str, Any] = {"call_site": call_site}
+        if force_tool:
+            kw["force_tool"] = force_tool
         try:
             return await self.llm.chat_with_failover(
                 messages=messages,
                 tools=tools,
-                call_site=call_site,
+                **kw,
             )
         except TypeError:
-            return await self.llm.chat_with_failover(
-                messages=messages,
-                tools=tools,
-            )
+            # Older test adapters: shed ``force_tool`` first (newer addition),
+            # then ``call_site`` if still unhappy. The forced-tool intent
+            # degrades to the prompt + side-channel path in that case.
+            kw.pop("force_tool", None)
+            try:
+                return await self.llm.chat_with_failover(
+                    messages=messages,
+                    tools=tools,
+                    **kw,
+                )
+            except TypeError:
+                return await self.llm.chat_with_failover(
+                    messages=messages,
+                    tools=tools,
+                )
 
     async def _emit_budget_exceeded(
         self,
@@ -1464,21 +1546,23 @@ class Orchestrator:
             detail=json.dumps(context or {}),
         )
 
-        # S1 live-path closure (non-stream parity). The stream path
-        # fires the proactive timeline-fusion side-channel; mirror it
-        # here so a non-streaming client (or the streaming-disabled
-        # fallback) also surfaces a TimelineCard for temporal-recall
-        # queries. See ``_maybe_emit_temporal_timeline``.
-        try:
-            asyncio.create_task(
-                self._maybe_emit_temporal_timeline(session_id, text)
-            )
-        except Exception:
-            logger.debug(
-                "temporal-timeline side-channel: task schedule failed",
-                exc_info=True,
-            )
-
+        # S1 live-path closure (non-stream parity). The forced-tool
+        # path (v2026.5.48 grounded-memory closure) is the primary —
+        # when the LLM is required to call ``notes_memory__fused_timeline``
+        # the natural ``_emit_tool_result`` → ``_maybe_emit_timeline_frame``
+        # branch already mounts the widget AND the prose answer is
+        # grounded in the retrieved tool result. The side-channel
+        # below is the SAFETY NET for the providers / cases where the
+        # forced-tool path is unavailable (Gemini OpenAI-compat layer
+        # can't name a single tool; tests using bare ``llm.chat`` with
+        # no failover wrapper; tool not in the routed skill set). We
+        # therefore defer scheduling the side-channel until after tool
+        # routing, and skip it entirely when the forced-tool path is
+        # going to fire — running ``timeline_fusion`` twice would
+        # double-bill memory I/O and the client de-dupes the second
+        # widget anyway.
+        #
+        # See ``_force_tool_for_query`` below for the gate.
         context_data = context or {}
         vision_fast_path = context_data.get("channel") == "vision_ask"
 
@@ -1539,6 +1623,27 @@ class Orchestrator:
             mcp_tools = self._mcp_client.to_llm_tool_definitions()
             if mcp_tools:
                 tools = (tools or []) + mcp_tools
+
+        # v2026.5.48 grounded-memory closure (non-stream path). See the
+        # docstring on ``_force_tool_for_query``. ``forced_tool`` is
+        # ``None`` when the query isn't temporal or the timeline tool
+        # didn't make it into the routed tool set — in which case the
+        # side-channel below STAYS scheduled as the safety net. When
+        # forced, the natural ``_emit_tool_result`` → ``_maybe_emit_timeline_frame``
+        # branch will mount the widget once the LLM dispatches the
+        # tool, so we skip the side-channel to avoid a double
+        # ``timeline_fusion()`` run.
+        forced_tool = self._force_tool_for_query(text, tools)
+        if not forced_tool:
+            try:
+                asyncio.create_task(
+                    self._maybe_emit_temporal_timeline(session_id, text)
+                )
+            except Exception:
+                logger.debug(
+                    "temporal-timeline side-channel: task schedule failed",
+                    exc_info=True,
+                )
 
         perception_frame = self.perception.get_frame(session_id)
         # When a specialist is routing this turn, thread its memory_filter
@@ -1613,7 +1718,14 @@ class Orchestrator:
                     messages=messages,
                     tools=tools if tools else None,
                     call_site="chat",
+                    force_tool=forced_tool,
                 )
+                # Force the tool ONLY on the first iteration. Once the
+                # model has dispatched ``notes_memory__fused_timeline``
+                # we want it free to synthesise the grounded prose from
+                # the tool result on the next pass; re-forcing would
+                # spin a tool-call loop.
+                forced_tool = None
 
                 # WS8 — BudgetExceeded surfaces as a structured WS
                 # frame (NOT a stack trace) for Lane 12 to render as
@@ -1862,22 +1974,13 @@ class Orchestrator:
             detail=json.dumps(context or {}),
         )
 
-        # S1 live-path closure: fire the proactive timeline fusion
-        # side-channel concurrently with the LLM stream. The LLM may
-        # answer in prose without tool-calling ``*__fused_timeline``
-        # (claude-opus-4-7 routinely does); the side-channel emits
-        # the ``timeline`` WS frame regardless so the TimelineCard
-        # mounts. See ``_maybe_emit_temporal_timeline`` for the
-        # exact gate and contract.
-        try:
-            asyncio.create_task(
-                self._maybe_emit_temporal_timeline(session_id, text)
-            )
-        except Exception:
-            logger.debug(
-                "temporal-timeline side-channel: task schedule failed",
-                exc_info=True,
-            )
+        # S1 live-path closure: the timeline side-channel scheduling
+        # was previously fired unconditionally HERE, before tool
+        # routing. v2026.5.48 grounded-memory closure moves that
+        # scheduling AFTER tool routing — see the parallel block in
+        # ``_handle_command_impl`` for the rationale. We can't make
+        # the forced-tool decision before we know which tools are
+        # routed, so the side-channel decision waits too.
 
         # WS3 — multi-agent pre-path parity. The non-stream branch
         # hands the turn to ``MultiAgentOrchestrator`` when enabled +
@@ -1937,6 +2040,23 @@ class Orchestrator:
             mcp_tools = self._mcp_client.to_llm_tool_definitions()
             if mcp_tools:
                 tools = (tools or []) + mcp_tools
+
+        # v2026.5.48 grounded-memory closure (stream path). Mirrors the
+        # non-stream branch — decide whether to force the LLM to call
+        # ``notes_memory__fused_timeline`` this turn, and skip the
+        # proactive side-channel when we do (the natural tool-result
+        # branch will mount the widget AND ground the prose).
+        forced_tool = self._force_tool_for_query(text, tools)
+        if not forced_tool:
+            try:
+                asyncio.create_task(
+                    self._maybe_emit_temporal_timeline(session_id, text)
+                )
+            except Exception:
+                logger.debug(
+                    "temporal-timeline side-channel: task schedule failed",
+                    exc_info=True,
+                )
 
         perception_frame = self.perception.get_frame(session_id)
         # When a specialist is routing this turn, thread its memory_filter
@@ -2004,17 +2124,33 @@ class Orchestrator:
             try:
                 stream_model = getattr(self.llm, 'model_name', 'llm')
                 await self._emit_brain_event(session_id, "llm_call", {"model": stream_model})
+                stream_kw: dict[str, Any] = {"call_site": "chat"}
+                if forced_tool:
+                    stream_kw["force_tool"] = forced_tool
+                # Force the tool ONLY on the first iteration — see the
+                # paired comment in ``_handle_command_impl`` for why.
+                forced_tool = None
                 try:
                     stream_iter = self.llm.chat_stream(
                         messages=messages,
                         tools=tools if tools else None,
-                        call_site="chat",
+                        **stream_kw,
                     )
                 except TypeError:
-                    stream_iter = self.llm.chat_stream(
-                        messages=messages,
-                        tools=tools if tools else None,
-                    )
+                    # Test adapters that only accept (messages, tools).
+                    # Try shedding ``force_tool`` first, then ``call_site``.
+                    stream_kw.pop("force_tool", None)
+                    try:
+                        stream_iter = self.llm.chat_stream(
+                            messages=messages,
+                            tools=tools if tools else None,
+                            **stream_kw,
+                        )
+                    except TypeError:
+                        stream_iter = self.llm.chat_stream(
+                            messages=messages,
+                            tools=tools if tools else None,
+                        )
                 async for delta in stream_iter:
                     if delta["type"] == "text_delta":
                         piece = delta.get("content", "")
