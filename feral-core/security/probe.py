@@ -123,6 +123,53 @@ def _resolve_env_or_vault(
     return None
 
 
+def _resolve_labeled_or_env(
+    vault: Any,
+    provider_id: str,
+    *,
+    env_keys: tuple[str, ...] = (),
+) -> Optional[str]:
+    """Resolve a provider's API key for the probe path.
+
+    Resolution order, mirroring the chat / voice-router contract
+    documented on :func:`security.vault_keys.get_active_key`:
+
+      1. The provider's ACTIVE labeled secret + default-namespace
+         vault entry + matching env var, all wrapped by
+         ``vault_keys.get_active_key`` (it tries them in that order
+         internally).
+      2. Any additional legacy env-var aliases the provider supports
+         (e.g. ``GOOGLE_API_KEY`` for Gemini) via
+         :func:`_resolve_env_or_vault`.
+
+    Probes have to use this — not bare ``os.getenv`` or
+    ``_resolve_env_or_vault`` alone — otherwise a freshly added
+    labeled key probes as ``unauthorized`` until the operator
+    restarts the brain (and even then only because
+    ``api/state._load_stored_credentials`` hydrates the labeled key
+    into env at boot). Probing pre-restart is the operator's first
+    "did I add this right?" sanity check; it has to work without one.
+
+    Returns ``None`` when nothing resolves so the existing
+    ``no_key`` short-circuit in :func:`_http_probe` keeps reporting
+    "credential not configured" verbatim.
+    """
+    try:
+        from security.vault_keys import get_active_key
+
+        secret = get_active_key(provider_id, vault=vault)
+        if secret:
+            return secret.strip()
+    except Exception as exc:
+        logger.debug(
+            "probe._resolve_labeled_or_env(%s): labeled lookup failed (%s)",
+            provider_id, exc,
+        )
+    if env_keys:
+        return _resolve_env_or_vault(vault, env_keys)
+    return None
+
+
 def _resolve_oauth_access_token(
     vault: Any,
     provider_id: str,
@@ -234,7 +281,7 @@ async def _http_probe(
 
 @register_probe("openai")
 async def _probe_openai(*, vault=None, **_kwargs: Any) -> ProbeResult:
-    api_key = _resolve_env_or_vault(vault, ("OPENAI_API_KEY",))
+    api_key = _resolve_labeled_or_env(vault, "openai", env_keys=("OPENAI_API_KEY",))
     return await _http_probe(
         "openai",
         method="GET",
@@ -246,7 +293,9 @@ async def _probe_openai(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 @register_probe("anthropic")
 async def _probe_anthropic(*, vault=None, **_kwargs: Any) -> ProbeResult:
-    api_key = _resolve_env_or_vault(vault, ("ANTHROPIC_API_KEY",))
+    api_key = _resolve_labeled_or_env(
+        vault, "anthropic", env_keys=("ANTHROPIC_API_KEY",),
+    )
     headers = None
     if api_key:
         headers = {
@@ -264,7 +313,9 @@ async def _probe_anthropic(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 @register_probe("gemini")
 async def _probe_gemini(*, vault=None, **_kwargs: Any) -> ProbeResult:
-    api_key = _resolve_env_or_vault(vault, ("GEMINI_API_KEY", "GOOGLE_API_KEY"))
+    api_key = _resolve_labeled_or_env(
+        vault, "gemini", env_keys=("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    )
     return await _http_probe(
         "gemini",
         method="GET",
@@ -276,7 +327,9 @@ async def _probe_gemini(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 @register_probe("openrouter")
 async def _probe_openrouter(*, vault=None, **_kwargs: Any) -> ProbeResult:
-    api_key = _resolve_env_or_vault(vault, ("OPENROUTER_API_KEY",))
+    api_key = _resolve_labeled_or_env(
+        vault, "openrouter", env_keys=("OPENROUTER_API_KEY",),
+    )
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     return await _http_probe(
         "openrouter",
@@ -289,7 +342,9 @@ async def _probe_openrouter(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 @register_probe("deepseek")
 async def _probe_deepseek(*, vault=None, **_kwargs: Any) -> ProbeResult:
-    api_key = _resolve_env_or_vault(vault, ("DEEPSEEK_API_KEY",))
+    api_key = _resolve_labeled_or_env(
+        vault, "deepseek", env_keys=("DEEPSEEK_API_KEY",),
+    )
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     return await _http_probe(
         "deepseek",
@@ -302,7 +357,7 @@ async def _probe_deepseek(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 @register_probe("groq")
 async def _probe_groq(*, vault=None, **_kwargs: Any) -> ProbeResult:
-    api_key = _resolve_env_or_vault(vault, ("GROQ_API_KEY",))
+    api_key = _resolve_labeled_or_env(vault, "groq", env_keys=("GROQ_API_KEY",))
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     return await _http_probe(
         "groq",
@@ -660,7 +715,7 @@ async def _probe_openai_whisper(*, vault=None, **_kwargs: Any) -> ProbeResult:
     """Whisper STT shares the OpenAI key with chat / TTS but probes
     against ``/v1/models`` because there's no dedicated 'list whisper
     models' endpoint."""
-    api_key = _resolve_env_or_vault(vault, ("OPENAI_API_KEY",))
+    api_key = _resolve_labeled_or_env(vault, "openai", env_keys=("OPENAI_API_KEY",))
     return await _http_probe(
         "openai_whisper",
         method="GET",
@@ -672,7 +727,7 @@ async def _probe_openai_whisper(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 @register_probe("groq_whisper")
 async def _probe_groq_whisper(*, vault=None, **_kwargs: Any) -> ProbeResult:
-    api_key = _resolve_env_or_vault(vault, ("GROQ_API_KEY",))
+    api_key = _resolve_labeled_or_env(vault, "groq", env_keys=("GROQ_API_KEY",))
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     return await _http_probe(
         "groq_whisper",
@@ -688,7 +743,7 @@ async def _probe_openai_tts(*, vault=None, **_kwargs: Any) -> ProbeResult:
     """OpenAI TTS shares the OpenAI key with chat. Same probe URL —
     the distinction matters for the /api/voice/providers surface
     where each TTS slot is its own selectable provider."""
-    api_key = _resolve_env_or_vault(vault, ("OPENAI_API_KEY",))
+    api_key = _resolve_labeled_or_env(vault, "openai", env_keys=("OPENAI_API_KEY",))
     return await _http_probe(
         "openai_tts",
         method="GET",
@@ -702,7 +757,7 @@ async def _probe_openai_tts(*, vault=None, **_kwargs: Any) -> ProbeResult:
 async def _probe_openai_realtime(*, vault=None, **_kwargs: Any) -> ProbeResult:
     """Realtime API uses the same OPENAI_API_KEY but is a separately
     selectable voice provider in Settings."""
-    api_key = _resolve_env_or_vault(vault, ("OPENAI_API_KEY",))
+    api_key = _resolve_labeled_or_env(vault, "openai", env_keys=("OPENAI_API_KEY",))
     return await _http_probe(
         "openai_realtime",
         method="GET",
@@ -716,7 +771,9 @@ async def _probe_openai_realtime(*, vault=None, **_kwargs: Any) -> ProbeResult:
 async def _probe_gemini_live(*, vault=None, **_kwargs: Any) -> ProbeResult:
     """Gemini Live shares the Gemini key but is its own selectable
     realtime voice provider."""
-    api_key = _resolve_env_or_vault(vault, ("GEMINI_API_KEY", "GOOGLE_API_KEY"))
+    api_key = _resolve_labeled_or_env(
+        vault, "gemini", env_keys=("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    )
     return await _http_probe(
         "gemini_live",
         method="GET",

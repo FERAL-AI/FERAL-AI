@@ -2221,13 +2221,42 @@ class BrainState:
     def _load_stored_credentials():
         """Load legacy SDK credential keys into process environment.
 
-        If ``credentials.json`` is missing OR corrupt we fall back to
-        reading every known env var out of the BlindVault directly.
-        The vault is the authoritative store written by
-        ``/api/llm/providers/{id}/configure`` and ``/api/config/credentials``;
-        ``credentials.json`` is the plaintext mirror used for boot-time
-        convenience. Keeping both loadable means a single-file corruption
-        never locks a user out of their provider keys.
+        Resolution precedence (highest → lowest) for every env var the
+        runtime cares about:
+
+          1. ``os.environ`` value that was *already* set when this
+             function entered (explicit deploy-time / shell / CI
+             override — we never clobber it).
+          2. The provider's ACTIVE labeled key in the ``provider_keys``
+             vault namespace (``security.vault_keys.get_active_provider_key``).
+             This is the credential the operator most recently picked
+             via ``feral key add --provider <p> --label <l> --set-active``
+             and it is the source of truth on every other hot path
+             (chat, voice router, realtime). Hydrating it into env at
+             boot means every legacy ``os.getenv("OPENAI_API_KEY")``
+             reader — probe, realtime proxy, whisper/TTS surfaces, any
+             third-party SDK we call — sees the same key the chat
+             router resolves at request time.
+          3. ``credentials.json`` plaintext mirror (legacy convenience
+             written by the pre-W24b setup wizard; many installs still
+             rely on it).
+          4. The default-namespace ``BlindVault`` entry keyed by the
+             env-var name (``vault.retrieve("OPENAI_API_KEY")``). This
+             is what ``/api/config/credentials`` and the original
+             ``/api/llm/providers/{id}/configure`` write.
+
+        If ``credentials.json`` is missing OR corrupt we still fall
+        through to the labeled-keys overlay + default-namespace vault
+        so a single-file corruption never locks the user out of their
+        provider keys.
+
+        v2026.5.46 fix (one-key-everywhere): the labeled-key step (2)
+        was previously absent. A ``feral key add --set-active`` flow
+        that did NOT also touch the default namespace stranded the key
+        in ``provider_keys`` and every env-reading surface (voice
+        probe, realtime proxy, whisper/TTS) reported ``unauthorized``
+        even though chat worked. With this step in place, the operator's
+        single labeled-active key reaches every surface.
         """
         env_keys = [
             "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
@@ -2240,6 +2269,13 @@ class BrainState:
             "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
         ]
         loaded: list[str] = []
+
+        # Read credentials.json INTO MEMORY before constructing any
+        # BlindVault. ``BlindVault()`` migrates the plaintext mirror
+        # into the encrypted ``.enc`` artefact on first construction
+        # and deletes the json file — if we let the labeled-key block
+        # below build a vault first the migration would consume
+        # credentials.json before we've copied its values into env.
         creds: dict = {}
         creds_path = feral_home() / "credentials.json"
         if creds_path.exists():
@@ -2250,6 +2286,47 @@ class BrainState:
                 logger.warning(
                     "credentials.json is corrupt (%s) — falling back to vault", exc,
                 )
+
+        # Step 2 — labeled-active overlay. Runs AFTER reading the
+        # plaintext mirror into ``creds`` but BEFORE applying ``creds``
+        # to env, so the operator's most recent
+        # ``feral key add --set-active`` choice wins over the older
+        # default-namespace plaintext / vault sources. The skip-if-set
+        # gate below preserves step 1 (explicit env wins).
+        #
+        # The vault is constructed as a FRESH ``BlindVault()`` instance
+        # (mirroring the legacy default-namespace fallback below) instead
+        # of going through ``security.vault.get_vault`` — the latter is a
+        # process-wide singleton that, when first touched at module-import
+        # time, pins itself to whatever ``FERAL_HOME`` happens to be in
+        # the environment at that moment (often the user's real
+        # ``~/.feral`` because the test suite's ``isolate_feral_home``
+        # fixture only runs per-test). Using a fresh instance keeps the
+        # singleton untouched so test isolation continues to work.
+        try:
+            from security.vault import BlindVault
+            from security.vault_keys import (
+                _PROVIDER_ENV_KEYS, get_active_provider_key,
+            )
+            label_vault = BlindVault()
+            for pid, env_var in _PROVIDER_ENV_KEYS.items():
+                if env_var not in env_keys:
+                    continue
+                if os.environ.get(env_var):
+                    continue  # step 1 wins
+                try:
+                    labeled = get_active_provider_key(pid, vault=label_vault)
+                except Exception as exc:
+                    logger.debug(
+                        "labeled key lookup for %s failed during boot: %s",
+                        pid, exc,
+                    )
+                    continue
+                if labeled:
+                    os.environ[env_var] = labeled
+                    loaded.append(f"{env_var}(labeled:{pid})")
+        except Exception as exc:
+            logger.debug("labeled-key hydration during boot failed: %s", exc)
 
         for key in env_keys:
             if creds.get(key) and not os.environ.get(key):

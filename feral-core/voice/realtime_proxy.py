@@ -41,6 +41,34 @@ SAMPLE_RATE = 24000
 AUDIO_FORMAT = "pcm16"
 
 
+def _resolve_openai_key() -> str:
+    """Resolve the OpenAI API key for the realtime proxy.
+
+    Routes through :func:`security.vault_keys.get_active_key` so a
+    labeled-only key (``feral key add --provider openai --label <l>
+    --set-active`` without also writing the legacy default-namespace
+    entry) reaches the realtime WS handshake. ``get_active_key``
+    internally cascades labeled-active → default-namespace vault →
+    env, then degrades to ``""`` so the existing ``not self._api_key``
+    guard in :meth:`RealtimeSession.connect` still triggers the
+    ``openai_realtime_no_key`` fallback path when nothing is
+    configured.
+
+    Voice router parity: ``voice/router.py`` already routes its
+    OpenAI key reads through ``get_active_key`` (commit ``01eda5d9``).
+    The proxy was the missing surface — pre-fix, a labeled-only key
+    failed at ``RealtimeProxy.__init__`` time (where the os.getenv
+    read snapshotted ``""``) and every voice session started with no
+    auth header even though chat worked.
+    """
+    try:
+        from security.vault_keys import get_active_key
+
+        return get_active_key("openai") or ""
+    except Exception:
+        return os.getenv("OPENAI_API_KEY", "") or ""
+
+
 class RealtimeSession:
     """
     Manages a single OpenAI Realtime WebSocket session on behalf of a
@@ -72,7 +100,7 @@ class RealtimeSession:
     ):
         self.session_id = session_id
         self.node_id = node_id
-        self._api_key = api_key or os.getenv("OPENAI_API_KEY", "")
+        self._api_key = api_key or _resolve_openai_key()
         self._model = model
         self._voice = voice
         self._input_sample_rate = int(input_sample_rate or SAMPLE_RATE)
@@ -537,7 +565,7 @@ class RealtimeProxy:
         # Holding the orchestrator lets the proxy re-use the *same*
         # emit helpers so voice and chat now produce identical traces.
         self._orchestrator = orchestrator
-        self._api_key = os.getenv("OPENAI_API_KEY", "")
+        self._api_key = _resolve_openai_key()
         self._voice = voice
 
         # Fallback coordination — populated by VoiceRouter at construction
