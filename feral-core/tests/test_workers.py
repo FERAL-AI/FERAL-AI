@@ -7,7 +7,13 @@ class TestHomeWorker:
 
         assert isinstance(HOME_SKILLS, list)
         assert len(HOME_SKILLS) > 0
-        assert "home_assistant" in HOME_SKILLS
+        # smart_home_hue is the only registered home skill (manifest:
+        # skills/manifests/smart_home.json). The previous list named
+        # phantom ids (home_assistant / hue_lights / smart_thermostat /
+        # door_lock) that have no manifest — guard that they don't return.
+        assert "smart_home_hue" in HOME_SKILLS
+        for phantom in ("hue_lights", "smart_thermostat", "door_lock", "home_assistant"):
+            assert phantom not in HOME_SKILLS, f"{phantom} is not a registered skill"
 
     def test_prompt_content(self):
         from agents.workers.home_worker import HOME_PROMPT

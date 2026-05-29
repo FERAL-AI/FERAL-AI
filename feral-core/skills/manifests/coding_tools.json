@@ -79,25 +79,29 @@
             "id": "grep_search",
             "method": "PYTHON",
             "url": "",
-            "description": "Search for a regex pattern in files. Like ripgrep — finds matching lines in a directory.",
+            "description": "Search for a regex pattern in files (ripgrep-backed). Defaults to returning matching FILE NAMES (output_mode='files_with_matches') — cheap and best for narrowing; ask for output_mode='content' only after you know which files matter. Paths are relative to the workspace root.",
             "params": [
                 {"name": "pattern", "type": "string", "required": true, "description": "Regex pattern to search for"},
                 {"name": "path", "type": "string", "required": false, "description": "Directory or file to search in (default: current directory)"},
-                {"name": "include", "type": "string", "required": false, "description": "File glob pattern to include (e.g. '*.py')"}
+                {"name": "include", "type": "string", "required": false, "description": "File glob pattern to include (e.g. '*.py')"},
+                {"name": "output_mode", "type": "string", "required": false, "description": "'files_with_matches' (default — file names), 'content' (lines with line numbers), or 'count' (per-file counts). Prefer files_with_matches first to save context."},
+                {"name": "head_limit", "type": "integer", "required": false, "description": "Max results (default 250; 0 = unlimited). Truncated responses include pagination.next_offset."},
+                {"name": "offset", "type": "integer", "required": false, "description": "Skip first N results before head_limit (paging large result sets)."}
             ],
-            "returns_description": "Matching lines with file paths and line numbers",
+            "returns_description": "files_with_matches: {mode, files[], total_files}; content: {mode, matches[{file,line,text}], total}; count: {mode, counts[]}. Truncated results include {truncated, pagination}.",
             "ui_hint": "list"
         },
         {
             "id": "glob_search",
             "method": "PYTHON",
             "url": "",
-            "description": "Find files matching a glob pattern. Useful for discovering project structure.",
+            "description": "Find files matching a glob pattern (ripgrep-backed, respects .gitignore, most-recently-modified first). Useful for discovering project structure. Paths are relative to the workspace root.",
             "params": [
                 {"name": "pattern", "type": "string", "required": true, "description": "Glob pattern (e.g. '**/*.py', 'src/**/*.ts')"},
-                {"name": "path", "type": "string", "required": false, "description": "Root directory to search from (default: current directory)"}
+                {"name": "path", "type": "string", "required": false, "description": "Root directory to search from (default: current directory)"},
+                {"name": "head_limit", "type": "integer", "required": false, "description": "Max files to return (default 100; 0 = unlimited). Truncated responses set {truncated: true}."}
             ],
-            "returns_description": "List of matching file paths",
+            "returns_description": "{files[], total, truncated?} — files relative to workspace root, newest first",
             "ui_hint": "list"
         },
         {

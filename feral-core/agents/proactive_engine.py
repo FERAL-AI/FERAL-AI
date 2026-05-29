@@ -668,15 +668,27 @@ class ProactiveEngine:
                 scene = payload.get("scene", "calming")
                 impl = get_implementation("smart_home_hue")
                 if impl:
-                    await impl.execute("set_scene", {"scene": scene}, {})
+                    # `set_scene` is not a smart_home_hue endpoint — it
+                    # silently no-op'd. Home Assistant activates scenes via
+                    # the real `call_service` endpoint (scene.turn_on on the
+                    # `scene.<name>` entity), which IS in the manifest.
+                    await impl.execute(
+                        "call_service",
+                        {"domain": "scene", "service": "turn_on", "entity_id": f"scene.{scene}"},
+                        {},
+                    )
                 result_summary = f"set_scene={scene}"
-                logger.info("Automation executed: set_scene=%s (trigger=%s)", scene, msg.trigger_id)
+                logger.info("Automation executed: scene.turn_on scene.%s (trigger=%s)", scene, msg.trigger_id)
 
             elif action_type == "breathing_exercise":
                 duration = payload.get("duration_minutes", 3)
                 impl = get_implementation("smart_home_hue")
                 if impl:
-                    await impl.execute("set_scene", {"scene": "breathing"}, {})
+                    await impl.execute(
+                        "call_service",
+                        {"domain": "scene", "service": "turn_on", "entity_id": "scene.breathing"},
+                        {},
+                    )
                 result_summary = f"breathing_exercise={duration}min"
                 logger.info("Automation executed: breathing exercise %dmin (trigger=%s)", duration, msg.trigger_id)
 

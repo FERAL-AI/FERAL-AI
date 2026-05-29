@@ -23,10 +23,43 @@ from skills.impl import register_skill
 
 MAX_OUTPUT = 50_000
 BASH_TIMEOUT = 30
+# Reference-codebase ergonomics (AUDIT-r14 round3 engine spec #4):
+# default grep to file names, paginate, relativize paths to keep tool
+# output compact for the LLM context window.
+GREP_DEFAULT_HEAD_LIMIT = 250
+GLOB_DEFAULT_HEAD_LIMIT = 100
 DANGEROUS_COMMANDS = re.compile(
     r"\b(rm\s+-rf\s+/|mkfs|dd\s+if=|:(){ :|fork\s*bomb|shutdown|reboot|halt|poweroff)\b",
     re.IGNORECASE,
 )
+
+
+def _workspace_root() -> Path:
+    """Workspace root for relativizing tool output paths."""
+    return Path(os.environ.get("FERAL_WORKSPACE", "") or Path.cwd()).expanduser()
+
+
+def _relativize(p: "str | Path") -> str:
+    """Render a path relative to the workspace root when it's inside it,
+    otherwise return it unchanged. Mirrors the reference tool output
+    (`toRelativePath`) so the model sees `skills/foo.py` not a 90-char
+    absolute path."""
+    try:
+        ap = Path(p).expanduser().resolve()
+        return str(ap.relative_to(_workspace_root().resolve()))
+    except (ValueError, OSError):
+        return str(p)
+
+
+def _paginate(lines: "list[str]", head_limit: int, offset: int) -> "tuple[list[str], bool]":
+    """Apply offset + head_limit (0 = unlimited). Returns (window, truncated)."""
+    total = len(lines)
+    if head_limit == 0:
+        window = lines[offset:]
+    else:
+        window = lines[offset: offset + head_limit]
+    truncated = head_limit != 0 and (offset + len(window)) < total
+    return window, truncated
 
 
 def _check_shell_quotes(command: str) -> str | None:
@@ -322,6 +355,17 @@ class CodingToolsSkill(BaseSkill):
         pattern = args.get("pattern", "")
         search_path = args.get("path", ".")
         include = args.get("include", "")
+        # Default to file names (cheap, narrows fast); the model asks for
+        # `content` only after it knows which files matter.
+        output_mode = (args.get("output_mode") or "files_with_matches").lower()
+        try:
+            head_limit = int(args.get("head_limit", GREP_DEFAULT_HEAD_LIMIT))
+        except (TypeError, ValueError):
+            head_limit = GREP_DEFAULT_HEAD_LIMIT
+        try:
+            offset = int(args.get("offset", 0))
+        except (TypeError, ValueError):
+            offset = 0
 
         if not pattern:
             return {"success": False, "status_code": 400, "data": None, "error": "No search pattern"}
@@ -329,7 +373,14 @@ class CodingToolsSkill(BaseSkill):
         if denied:
             return denied
 
-        cmd = ["rg", "--line-number", "--no-heading", "--color=never", "-m", "50"]
+        cmd = ["rg", "--color=never"]
+        if output_mode == "files_with_matches":
+            cmd += ["--files-with-matches"]
+        elif output_mode == "count":
+            cmd += ["--count"]
+        else:  # content
+            output_mode = "content"
+            cmd += ["--line-number", "--no-heading"]
         if include:
             cmd += ["--glob", include]
         cmd += ["--", pattern, search_path]
@@ -340,60 +391,108 @@ class CodingToolsSkill(BaseSkill):
             )
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=15)
         except FileNotFoundError:
-            return await self._grep_fallback(pattern, search_path, include)
+            return await self._grep_fallback(pattern, search_path, include, output_mode, head_limit, offset)
         except asyncio.TimeoutError:
             return {"success": False, "status_code": 408, "data": None, "error": "Search timed out"}
 
         stdout = stdout_b.decode(errors="replace")[:MAX_OUTPUT]
+        raw_lines = stdout.strip().splitlines() if stdout.strip() else []
+        total = len(raw_lines)
+        window, truncated = _paginate(raw_lines, head_limit, offset)
 
-        matches = []
-        for line in stdout.strip().splitlines()[:200]:
-            parts = line.split(":", 2)
-            if len(parts) >= 3:
-                matches.append({"file": parts[0], "line": parts[1], "text": parts[2]})
-            else:
-                matches.append({"text": line})
+        if output_mode == "files_with_matches":
+            data: Dict[str, Any] = {
+                "mode": "files_with_matches",
+                "files": [_relativize(line) for line in window],
+                "total_files": total,
+            }
+        elif output_mode == "count":
+            counts = []
+            for line in window:
+                f, sep, c = line.rpartition(":")
+                counts.append({"file": _relativize(f) if sep else line, "count": c})
+            data = {"mode": "count", "counts": counts, "total_files": total}
+        else:
+            matches = []
+            for line in window:
+                parts = line.split(":", 2)
+                if len(parts) >= 3:
+                    matches.append({"file": _relativize(parts[0]), "line": parts[1], "text": parts[2]})
+                else:
+                    matches.append({"text": line})
+            data = {"mode": "content", "matches": matches, "total": total}
 
-        return {
-            "success": True,
-            "status_code": 200,
-            "data": {"matches": matches, "total": len(matches)},
-            "error": None,
-        }
+        if truncated:
+            data["truncated"] = True
+            data["pagination"] = {"limit": head_limit, "offset": offset, "next_offset": offset + len(window)}
 
-    async def _grep_fallback(self, pattern: str, search_path: str, include: str) -> dict:
-        """Pure-Python fallback when ripgrep is not installed."""
+        return {"success": True, "status_code": 200, "data": data, "error": None}
+
+    async def _grep_fallback(
+        self,
+        pattern: str,
+        search_path: str,
+        include: str,
+        output_mode: str = "files_with_matches",
+        head_limit: int = GREP_DEFAULT_HEAD_LIMIT,
+        offset: int = 0,
+    ) -> dict:
+        """Pure-Python fallback when ripgrep is not installed. Honors the
+        same output_mode + pagination contract as the rg path."""
         regex = re.compile(pattern)
         root = Path(search_path).expanduser()
         glob_pat = include or "**/*"
-        matches = []
+        content_rows: list[dict] = []
+        files_with: list[str] = []
+        # Generous scan cap so pagination has something to page over.
+        scan_cap = (offset + head_limit) * 4 if head_limit else 5000
 
         for fp in root.glob(glob_pat):
             if not fp.is_file() or fp.stat().st_size > 1_000_000:
                 continue
             try:
+                hit_in_file = False
                 for i, line in enumerate(fp.read_text(errors="replace").splitlines(), 1):
                     if regex.search(line):
-                        matches.append({"file": str(fp), "line": str(i), "text": line.strip()})
-                        if len(matches) >= 200:
+                        hit_in_file = True
+                        content_rows.append({"file": _relativize(fp), "line": str(i), "text": line.strip()})
+                        if len(content_rows) >= scan_cap:
                             break
+                if hit_in_file:
+                    files_with.append(_relativize(fp))
             except (PermissionError, OSError):
                 continue
-            if len(matches) >= 200:
+            if len(content_rows) >= scan_cap:
                 break
 
-        return {
-            "success": True,
-            "status_code": 200,
-            "data": {"matches": matches, "total": len(matches)},
-            "error": None,
-        }
+        if output_mode == "files_with_matches":
+            window, truncated = _paginate(files_with, head_limit, offset)
+            data: Dict[str, Any] = {"mode": "files_with_matches", "files": window, "total_files": len(files_with)}
+        elif output_mode == "count":
+            window, truncated = _paginate(files_with, head_limit, offset)
+            per = {}
+            for r in content_rows:
+                per[r["file"]] = per.get(r["file"], 0) + 1
+            data = {"mode": "count", "counts": [{"file": f, "count": str(per.get(f, 0))} for f in window], "total_files": len(files_with)}
+        else:
+            window, truncated = _paginate(content_rows, head_limit, offset)
+            data = {"mode": "content", "matches": window, "total": len(content_rows)}
+
+        if truncated:
+            data["truncated"] = True
+            data["pagination"] = {"limit": head_limit, "offset": offset, "next_offset": offset + len(window)}
+
+        return {"success": True, "status_code": 200, "data": data, "error": None}
 
     # ── glob_search ───────────────────────────────────────────────
 
     async def _glob_search(self, args: dict) -> dict:
         pattern = args.get("pattern", "")
         root = Path(args.get("path", ".")).expanduser()
+        try:
+            head_limit = int(args.get("head_limit", GLOB_DEFAULT_HEAD_LIMIT))
+        except (TypeError, ValueError):
+            head_limit = GLOB_DEFAULT_HEAD_LIMIT
 
         if not pattern:
             return {"success": False, "status_code": 400, "data": None, "error": "No glob pattern"}
@@ -401,18 +500,38 @@ class CodingToolsSkill(BaseSkill):
         if denied:
             return denied
 
-        files = []
-        for fp in root.glob(pattern):
-            files.append(str(fp))
-            if len(files) >= 500:
-                break
+        # Prefer ripgrep: respects .gitignore, sorts by mtime (most
+        # relevant first), much faster than Path.glob on large trees.
+        cmd = ["rg", "--files", "--color=never", "--sort=modified", "--glob", pattern, str(root)]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_b, _stderr_b = await asyncio.wait_for(proc.communicate(), timeout=15)
+        except FileNotFoundError:
+            # Pure-Python fallback when ripgrep is absent.
+            files = []
+            for fp in root.glob(pattern):
+                files.append(_relativize(fp))
+                if head_limit and len(files) >= head_limit:
+                    break
+            data: Dict[str, Any] = {"files": files, "total": len(files)}
+            if head_limit and len(files) >= head_limit:
+                data["truncated"] = True
+            return {"success": True, "status_code": 200, "data": data, "error": None}
+        except asyncio.TimeoutError:
+            return {"success": False, "status_code": 408, "data": None, "error": "Glob timed out"}
 
-        return {
-            "success": True,
-            "status_code": 200,
-            "data": {"files": files, "total": len(files)},
-            "error": None,
-        }
+        all_files = stdout_b.decode(errors="replace").strip().splitlines()
+        all_files = [f for f in all_files if f]
+        total = len(all_files)
+        window = all_files if head_limit == 0 else all_files[:head_limit]
+        data = {"files": [_relativize(f) for f in window], "total": total}
+        if head_limit and total > head_limit:
+            data["truncated"] = True
+            data["pagination"] = {"limit": head_limit, "shown": len(window)}
+
+        return {"success": True, "status_code": 200, "data": data, "error": None}
 
     # ── web_fetch ─────────────────────────────────────────────────
 
