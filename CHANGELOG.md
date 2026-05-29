@@ -1,10 +1,45 @@
 # Changelog
 
-<!-- feral-version: 2026.5.48 -->
+<!-- feral-version: 2026.5.49 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.5.49] — Reference-codebase polish: stream batching, grep/glob ergonomics, demo-correctness, phone-pairing hand-off
+
+A focused pass applying the highest-ROI learnings from the competitive/reference review (AUDIT-r14 round3 surface + engine specs), plus two confirmed demo-correctness bugs and the first-run phone-pairing gap.
+
+### Chat feels instant: server-side stream batching + client plain-text render (`18569d40`, `464bab96`)
+
+The chat stream emitted one WebSocket frame per token, and the client re-parsed the full markdown pipeline (GFM + syntax highlight + KaTeX) on every tick — the jankiest part of the UI. Two coordinated fixes:
+- **Server (orchestrator):** `_handle_command_stream_impl` now coalesces incremental text into ~100ms windows and emits a single `stream_delta` per window (arrival-driven; no background timer in the hot loop). Force-flushes on `done`/`is_final`, `budget_exceeded`, `error`, and loop-exit so nothing is delayed or lost. ~10–50× fewer frames. Client-transparent (it still appends `delta`). `FERAL_STREAM_BATCH_MS=0` restores per-token frames for debugging.
+- **Client (`Chat.jsx` + phone `ChatPanel.jsx`):** render lightweight plain text while streaming, swapping to the full `MarkdownMessage` once on `is_final`; chat scroll is instant (`auto`) during streaming and smooth only when settled (smooth-scroll was fighting the token cadence). Bundle rebuilt.
+
+### Demo-correctness: phantom home skills + silently-dead proactive scenes (`83789eee`)
+
+- **Home worker** referenced phantom skill ids (`hue_lights` / `smart_thermostat` / `door_lock` / `home_assistant`) with no manifest — the LLM could try to invoke tools that don't exist. Now references only the real `smart_home_hue` skill and its actual endpoints; prompt rewritten to match.
+- **Proactive `set_scene`** (scheduled scenes + breathing exercise) called a non-existent `smart_home_hue` endpoint and silently no-op'd. Remapped to the real `call_service` endpoint (Home Assistant `scene.turn_on` on the `scene.<name>` entity), so scheduled scenes actually fire.
+
+### Grep/glob tool ergonomics (`83789eee`)
+
+Adopted the reference GrepTool/GlobTool defaults in `skills/impl/coding_tools.py`: `grep_search` now defaults to `output_mode="files_with_matches"` (file names, cheap, narrows fast) with `head_limit` (250) / `offset` pagination and workspace-relativized paths; `content`/`count` modes available; the pure-Python fallback honors the same contract. `glob_search` uses `rg --files --glob P --sort=modified` (gitignore-aware, newest-first) with `head_limit` (100) + truncation flag + relativized paths, falling back to `Path.glob` when ripgrep is absent. Manifest updated so the model prefers `files_with_matches` first.
+
+### Cost budget reaches the chat path (`c9de49ae`)
+
+The boot `CostBudget` was only handed to the background `BudgetLoopGuard`s; nothing called `set_cost_budget` on the shared chat-path `LLMProvider`, so an operator-set **chat** cap was silently ignored on interactive chat. Now wired right after `orchestrator.set_llm`, so chat/chat_stream preflight `check_and_reserve`. Budgets remain open-by-default — this is enforcement-when-configured, not a spend trap.
+
+### First-run phone-pairing hand-off (`0c198ff3`)
+
+The pairing mechanism (token + SDK pending-code + phone-bearer + optional PIN) was already complete and driven from the WebUI Devices page, but the modular setup wizard never told a first-run operator how to connect their phone — `finish` pointed at `http://localhost:9090`, which a separate phone can't reach. New `cli/setup/steps/pairing.py` runs before `finish` and hands over the URL the phone can actually reach (LAN IP / Tailscale URL, with a clear warning + remediation when bound to localhost) plus the exact path: Settings → Devices → Pair device → scan with the iOS app. It does not mint a token or poll for a claim (the Brain isn't running during `feral setup`) — an honest hand-off, not a faked loop.
+
+### PWA icons
+
+The web app manifest + icons + service worker were already wired, but the three icon PNGs were solid 1-color placeholder tiles, so install-to-homescreen looked broken. Replaced with a real branded FERAL app icon (192 + 512 `any` + 512 maskable with safe-zone padding).
+
+### Tests
+
+24 new focused pytest (grep/glob ergonomics 4 + workers + stream batching 2 + pairing 6 + budget + manifest-dispatch contract 161) plus adjacent stream/non-stream parity, fused-timeline, and forced-tool suites green; both doc-leakage / third-party-name guards clean. Known pre-existing unrelated failures (`test_setup_state.py::test_save_writes...vault` — asserts `save()` sets `meta.setup_complete`, which contradicts the documented W7 design; `test_llm_provider_defaults.py`) confirmed present on `main` independent of these changes.
 
 ## [2026.5.48] — Bulletproof grounded memory recall + memory-stats contention fix
 
