@@ -214,6 +214,25 @@ class MemoryStore:
         self._pool: Optional["asyncio.Queue[aiosqlite.Connection]"] = None
         self._pool_lock: Optional[asyncio.Lock] = None
 
+        # ── stats() short-TTL cache + dedicated read connection ──
+        # The dashboard polls /api/memory/stats continuously (~1Hz) via
+        # /api/dashboard. With ~5k episodes + background services
+        # (sync_scheduler / decay sweeper / proactive engine / etc.)
+        # holding pool connections, the COUNT(*) round-trip used to
+        # queue behind writers and trip the 2.5s safety budget every
+        # poll, which surfaced as a flood of degraded-payload warnings
+        # and a permanently-degraded dashboard. The cache below lets
+        # rapid polls share a single COUNT round; the dedicated
+        # read-only aiosqlite connection (opened lazily, separate from
+        # the writer pool) ensures that round runs on a connection
+        # WAL readers never have to wait on. Together they take the
+        # steady-state stats path off the writer-contention surface.
+        self._stats_cache: Optional[dict] = None
+        self._stats_cache_at: float = 0.0
+        self._stats_cache_lock: Optional[asyncio.Lock] = None
+        self._stats_read_conn: Optional[aiosqlite.Connection] = None
+        self._stats_read_lock: Optional[asyncio.Lock] = None
+
         self._init_db()
 
         if vec_index is None:
@@ -428,6 +447,50 @@ class MemoryStore:
             except Exception:
                 pass
 
+    async def _get_stats_read_conn(self) -> aiosqlite.Connection:
+        """Lazy-open a dedicated read-only aiosqlite connection used
+        only by :meth:`stats` COUNT queries.
+
+        The writer pool can be fully claimed by the brain's background
+        services (sync scheduler, decay sweeper, proactive engine,
+        learner, cron, screen loop) — each of those holds a pool
+        connection across a multi-statement transaction. The dashboard
+        polls ``/api/memory/stats`` ~1Hz, and queueing the COUNTs
+        behind those writers is what drove the 2.5s-budget flood. WAL
+        mode lets readers run concurrently with a writer; opening this
+        connection ``mode=ro`` keeps it permanently outside the writer
+        pool so the COUNTs never have to wait on a busy/reserved lock.
+
+        The connection is held for the lifetime of the store so we
+        don't pay open-cost on every poll; :meth:`aclose` drops it.
+        """
+        if self._stats_read_conn is not None:
+            return self._stats_read_conn
+        if self._stats_read_lock is None:
+            self._stats_read_lock = asyncio.Lock()
+        async with self._stats_read_lock:
+            if self._stats_read_conn is not None:
+                return self._stats_read_conn
+            uri = f"file:{self.db_path}?mode=ro"
+            c = await aiosqlite.connect(uri, uri=True)
+            try:
+                c._thread.daemon = True  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            c.row_factory = aiosqlite.Row
+            try:
+                # ``query_only=ON`` is belt-and-braces: even if some
+                # future caller mistakenly passes a write statement on
+                # this connection, SQLite refuses it instead of
+                # silently acquiring a write lock and breaking the
+                # "stats never blocks" contract.
+                await c.execute("PRAGMA query_only=ON")
+                await c.execute("PRAGMA busy_timeout=2000")
+            except Exception:
+                pass
+            self._stats_read_conn = c
+            return c
+
     # ─────────────────────────────────────────────
     # Schema
     # ─────────────────────────────────────────────
@@ -475,6 +538,16 @@ class MemoryStore:
             self._embed_queue.stop()
         except Exception:
             pass
+        # Drop the dedicated stats read connection if we opened one.
+        # It lives outside the pool, so the pool drain below never
+        # touches it.
+        stats_conn = self._stats_read_conn
+        self._stats_read_conn = None
+        if stats_conn is not None:
+            try:
+                await stats_conn.close()
+            except Exception:
+                pass
         pool = self._pool
         if pool is None:
             return
@@ -546,9 +619,29 @@ class MemoryStore:
 
     def _init_db(self):
         """Create / migrate the schema. Sync sqlite3 because this runs
-        once at construction time, before the event loop is even up."""
+        once at construction time, before the event loop is even up.
+
+        WAL mode is set here, eagerly, so the database is in WAL the
+        moment any reader (the dedicated stats read connection in
+        particular) opens it. Setting it lazily on the first pool
+        connection used to leave a brief window where a read-only
+        connection could open against a delete-mode journal and queue
+        behind a writer; setting it during boot DDL closes that race.
+        ``synchronous=NORMAL`` is the WAL-recommended pairing for
+        local-first workloads — durable across crashes, half the fsync
+        traffic of FULL.
+        """
         conn = sqlite3.connect(self.db_path)
         try:
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+            except sqlite3.DatabaseError as exc:
+                # An encrypted or freshly-restored DB can occasionally
+                # refuse the pragma until a transaction warms it up.
+                # Don't fail boot — the per-connection pragma in
+                # ``_conn`` will still flip it once the pool warms.
+                logger.debug("_init_db: pragma journal_mode=WAL deferred (%s)", exc)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS notes (
                     id TEXT PRIMARY KEY,
@@ -2160,24 +2253,145 @@ class MemoryStore:
     async def count(self) -> int:
         return await count_notes(self)
 
-    # Per-stats() pool-acquire + total-budget timeouts. AUDIT-r14
-    # round2 wave3-followup-001: live brain on v2026.5.40 hung
-    # /api/memory/stats for 85s+ under runtime contention because
-    # background services (sync_scheduler, decay sweeper, screen_loop
-    # episode writes) hold long-running transactions on the shared
-    # aiosqlite pool. The dashboard then renders 0/0/0 until the
-    # request finally returns. Defaulting to a 2.5s budget keeps the
-    # health probe + Memory page Recent tile responsive at the cost
-    # of an occasional ``{"ok": false, "reason": "stats_timeout"}``
-    # row — the UI handles that case honestly.
+    # Stats path budgets + cache TTL.
+    #
+    # The 2.5s safety budget stays as the *last-resort* timeout: if
+    # something pathological happens (the dedicated read connection
+    # can't open AND the writer pool is fully wedged), the dashboard
+    # still gets a degraded payload instead of hanging. In steady
+    # state it must never trip — the cache + read-only connection
+    # together keep the COUNT round off the writer-contention surface.
+    #
+    # ``_STATS_CACHE_TTL_S`` controls the short-TTL cache. Episode /
+    # note / knowledge counts don't change second-to-second
+    # meaningfully, so a 15s window collapses ~15 dashboard polls
+    # into a single COUNT round-trip and kills the steady-state
+    # SQL load from /api/dashboard.
     _STATS_TOTAL_BUDGET_S = 2.5
     _STATS_CONN_BUDGET_S = 1.0
+    _STATS_CACHE_TTL_S = 15.0
+
+    def _live_stats_overlay(self) -> dict:
+        """Cheap in-RAM signals layered onto a cached payload.
+
+        ``active_working_sessions`` and ``embed_queue_pending`` are
+        zero-cost to read (no SQLite round-trip), and they're the
+        stats fields most likely to drift second-to-second. Pulling
+        them fresh on every cache hit keeps the dashboard's "things
+        the brain is doing right now" tiles honest without paying
+        for the COUNT(*) sweep.
+        """
+        return {
+            "active_working_sessions": len(self._working),
+            "embed_queue_pending": getattr(self._embed_queue, "pending", 0),
+        }
+
+    def _degraded_stats_payload(self) -> dict:
+        return {
+            "ok": False,
+            "reason": "stats_timeout",
+            "notes": 0,
+            "episodes": 0,
+            "knowledge_triples": 0,
+            "execution_logs": 0,
+            "wiki_pages": 0,
+            "session_snapshots": 0,
+            "active_working_sessions": len(self._working),
+            "embedded_chunks": 0,
+            "vec_index_count": 0,
+            "vec_index_mode": self._backend_id + " (degraded — stats timeout)",
+            "embedding_provider": self._embedder.provider_name,
+            "embed_queue_pending": getattr(self._embed_queue, "pending", 0),
+            "knowledge_graph": {"entities": 0, "relations": 0},
+        }
+
+    async def _acquire_stats_conn(self):
+        """Acquire a connection for stats COUNT queries.
+
+        Prefers the dedicated read-only connection so stats never
+        queues behind the writer pool. Falls back to the pool only
+        when the read-only connection can't be opened (e.g. a test
+        fixture that doesn't expose ``_get_stats_read_conn``, or an
+        aiosqlite build without URI support).
+
+        Returns ``(conn, release)`` where ``release`` is an async
+        callable. For the read-only connection ``release`` is a
+        no-op — the connection is held for the lifetime of the
+        store.
+        """
+        get_read = getattr(self, "_get_stats_read_conn", None)
+        if get_read is not None:
+            try:
+                conn = await asyncio.wait_for(
+                    get_read(), timeout=self._STATS_CONN_BUDGET_S,
+                )
+            except asyncio.TimeoutError:
+                raise
+            except Exception as exc:
+                logger.debug(
+                    "memory.stats: read-only connection unavailable "
+                    "(%s); falling back to writer pool", exc,
+                )
+            else:
+                async def _noop_release() -> None:
+                    return None
+                return conn, _noop_release
+
+        conn = await asyncio.wait_for(
+            self._conn(), timeout=self._STATS_CONN_BUDGET_S,
+        )
+
+        async def _release_pool() -> None:
+            await self._release(conn)
+
+        return conn, _release_pool
 
     async def stats(self) -> dict:
+        # ── Cache path ──
+        # Episode / note / knowledge counts don't change at the
+        # dashboard's poll cadence (~1Hz). Serving rapid polls from a
+        # short-TTL cache collapses N polls into one COUNT round and
+        # is the structural fix for the v2026.5.41 stats-timeout
+        # flood: in steady state the SQL path runs at most once per
+        # ``_STATS_CACHE_TTL_S``, so background services holding the
+        # writer pool can't starve it any more.
+        ttl = self._STATS_CACHE_TTL_S
+        now = time.time()
+        cached = getattr(self, "_stats_cache", None)
+        cached_at = getattr(self, "_stats_cache_at", 0.0)
+        if cached is not None and (now - cached_at) < ttl:
+            return {
+                **cached,
+                **self._live_stats_overlay(),
+                "from_cache": True,
+                "cache_age_s": round(now - cached_at, 3),
+            }
+
+        # Coalesce concurrent stats() calls so a thundering herd of
+        # dashboard requests still triggers exactly one COUNT round.
+        lock = getattr(self, "_stats_cache_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            try:
+                self._stats_cache_lock = lock
+            except Exception:
+                pass
+        async with lock:
+            now = time.time()
+            cached = getattr(self, "_stats_cache", None)
+            cached_at = getattr(self, "_stats_cache_at", 0.0)
+            if cached is not None and (now - cached_at) < ttl:
+                return {
+                    **cached,
+                    **self._live_stats_overlay(),
+                    "from_cache": True,
+                    "cache_age_s": round(now - cached_at, 3),
+                }
+            return await self._compute_and_cache_stats()
+
+    async def _compute_and_cache_stats(self) -> dict:
         async def _read_counts() -> dict:
-            conn = await asyncio.wait_for(
-                self._conn(), timeout=self._STATS_CONN_BUDGET_S,
-            )
+            conn, release = await self._acquire_stats_conn()
             try:
                 async with conn.execute("SELECT COUNT(*) FROM notes") as cur:
                     notes_count = (await cur.fetchone())[0]
@@ -2204,7 +2418,7 @@ class MemoryStore:
                 except Exception:
                     chunk_count = 0
             finally:
-                await self._release(conn)
+                await release()
             return {
                 "notes": notes_count,
                 "episodes": episodes_count,
@@ -2222,28 +2436,12 @@ class MemoryStore:
         except asyncio.TimeoutError:
             logger.warning(
                 "memory.stats: aiosqlite COUNT queries exceeded the "
-                "%.1fs budget — likely background services holding the "
-                "pool. Returning a degraded payload so the dashboard "
-                "stays responsive instead of hanging.",
+                "%.1fs safety budget — even the dedicated read-only "
+                "connection couldn't complete in time. Returning a "
+                "degraded payload so the dashboard stays responsive.",
                 self._STATS_TOTAL_BUDGET_S,
             )
-            return {
-                "ok": False,
-                "reason": "stats_timeout",
-                "notes": 0,
-                "episodes": 0,
-                "knowledge_triples": 0,
-                "execution_logs": 0,
-                "wiki_pages": 0,
-                "session_snapshots": 0,
-                "active_working_sessions": len(self._working),
-                "embedded_chunks": 0,
-                "vec_index_count": 0,
-                "vec_index_mode": self._backend_id + " (degraded — stats timeout)",
-                "embedding_provider": self._embedder.provider_name,
-                "embed_queue_pending": self._embed_queue.pending,
-                "knowledge_graph": {"entities": 0, "relations": 0},
-            }
+            return self._degraded_stats_payload()
 
         working_sessions = len(self._working)
         kg_stats = self._kg.stats() if self._kg else {"entities": 0, "relations": 0}
@@ -2258,7 +2456,7 @@ class MemoryStore:
         except Exception as exc:
             logger.debug("vec_index.count() failed: %s", exc)
 
-        return {
+        payload = {
             "ok": True,
             "notes": counts["notes"],
             "episodes": counts["episodes"],
@@ -2271,6 +2469,17 @@ class MemoryStore:
             "vec_index_count": vec_count,
             "vec_index_mode": self._backend_id + (" (indexed)" if self._vec_index.indexed else " (degraded)"),
             "embedding_provider": self._embedder.provider_name,
-            "embed_queue_pending": self._embed_queue.pending,
+            "embed_queue_pending": getattr(self._embed_queue, "pending", 0),
             "knowledge_graph": kg_stats,
         }
+
+        # Only cache the healthy payload. Degraded payloads must
+        # NOT poison the cache — the next caller should retry the
+        # COUNTs immediately so a transient pool stall doesn't lock
+        # the dashboard into "0 episodes" for a full TTL window.
+        try:
+            self._stats_cache = dict(payload)
+            self._stats_cache_at = time.time()
+        except Exception:
+            pass
+        return payload

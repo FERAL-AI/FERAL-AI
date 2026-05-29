@@ -177,6 +177,7 @@ async def test_memory_stats_timeout_returns_degraded_payload():
     fake = SimpleNamespace()
     fake._STATS_TOTAL_BUDGET_S = MemoryStore._STATS_TOTAL_BUDGET_S
     fake._STATS_CONN_BUDGET_S = 0.1  # tighten so the test runs fast
+    fake._STATS_CACHE_TTL_S = MemoryStore._STATS_CACHE_TTL_S
     fake._working = {}
     fake._kg = None
     fake._embedder = SimpleNamespace(provider_name="test-embedder")
@@ -184,11 +185,34 @@ async def test_memory_stats_timeout_returns_degraded_payload():
     fake._vec_index = SimpleNamespace(indexed=False, count=AsyncMock(return_value=0))
     fake._backend_id = "sqlite_vec"
     fake._kg_unified_enabled = lambda: False
+    # New attrs introduced by the cache + dedicated read-conn fix.
+    # The real ``MemoryStore.__init__`` initialises these; the fake
+    # only needs them present so ``stats()`` can read the cache and
+    # acquire its connection without an AttributeError.
+    fake._stats_cache = None
+    fake._stats_cache_at = 0.0
+    fake._stats_cache_lock = None
 
     async def _hang_forever() -> None:
         await asyncio.sleep(60)
 
+    # Both the dedicated read-conn path and the writer-pool fallback
+    # must hang for the safety budget to actually trip — otherwise a
+    # working dedicated read conn would short-circuit to a real read.
     fake._conn = _hang_forever
+    fake._get_stats_read_conn = _hang_forever
+    # Re-bind the pool/cache helpers so they call the right attrs on
+    # the fake instead of the unbound ``MemoryStore`` versions.
+    fake._live_stats_overlay = (
+        lambda: MemoryStore._live_stats_overlay(fake)
+    )
+    fake._degraded_stats_payload = (
+        lambda: MemoryStore._degraded_stats_payload(fake)
+    )
+    fake._acquire_stats_conn = lambda: MemoryStore._acquire_stats_conn(fake)
+    fake._compute_and_cache_stats = (
+        lambda: MemoryStore._compute_and_cache_stats(fake)
+    )
 
     result = await MemoryStore.stats(fake)
     assert result["ok"] is False
