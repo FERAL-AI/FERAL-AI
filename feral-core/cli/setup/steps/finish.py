@@ -39,6 +39,8 @@ def run(state: WizardState) -> None:
         "  `feral start`        launches the brain + chat.",
         "  `feral setup`        re-run this wizard anytime.",
         "  http://localhost:9090/settings  web-based settings.",
+        "  Pair your phone:     Settings → Devices → Pair device "
+        "(open the WebUI from your phone — see the pairing step above).",
     ]
     for line in summary_lines:
         console.print(line)

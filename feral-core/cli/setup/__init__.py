@@ -35,6 +35,7 @@ from .steps import (
     home_assistant,
     identity,
     llm,
+    pairing,
     welcome,
 )
 from .steps import network as network_step
@@ -82,6 +83,7 @@ async def _run_async(*, from_step: str = "") -> None:
             ("network", network_step.run),
             ("home_assistant", home_assistant.run),
             ("channels", channels.run),
+            ("pairing", pairing.run),
             ("tcc_preflight", tcc_preflight.run),
             ("finish", finish.run),
         ],
