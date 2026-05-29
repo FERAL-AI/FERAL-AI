@@ -1,10 +1,32 @@
 # Changelog
 
-<!-- feral-version: 2026.5.47 -->
+<!-- feral-version: 2026.5.48 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.5.48] — Bulletproof grounded memory recall + memory-stats contention fix
+
+### Memory recall now ALWAYS grounds in retrieved episodes (`bd9b025c`)
+
+v2026.5.46's side-channel guaranteed the TimelineCard *widget* rendered, and v2026.5.47's deeper prompts nudged the LLM toward the timeline tool — but the model (claude-opus-4-7) could still narrate "what did I do yesterday?" from its own context without calling `notes_memory__fused_timeline`, leaving the prose un-grounded. This release forces the call. When the orchestrator's temporal-recall regex (`_R_TEMPORAL`) matches AND the timeline tool is in the routed tool set, the LLM call now carries a per-provider `tool_choice` that forces `notes_memory__fused_timeline`:
+- Anthropic → `{"type":"tool","name":"notes_memory__fused_timeline"}`
+- OpenAI-compatible (openai/openrouter/deepseek/groq/kimi/qwen/lmstudio/ollama) → `{"type":"function","function":{"name":...}}`
+- Gemini (OpenAI-compat endpoint) → degrades to `"required"` (the wire shape can't name a single tool; prompt + side-channel cover it)
+- Unknown providers → falls back to `"auto"` (never errors)
+
+Forcing the tool revives the natural `_emit_tool_result` → `_maybe_emit_timeline_frame` path (dead before, because the LLM never called the tool), so the widget mounts AND the prose grounds through one path. The v2026.5.46 deterministic side-channel is now demoted to a **fallback** — used only when the provider can't force a named tool (Gemini) or the tool isn't routed — and is deduped on the forced path so `timeline_fusion` runs once, not twice. `forced_tool` clears after the first LLM-loop iteration so the model returns grounded prose rather than spinning on tool-calls. 31 new tests pin the per-provider translation + dedupe + degrade paths.
+
+**Honest gap:** Gemini named-tool forcing requires the native `:generateContent` endpoint (`function_calling_config.mode="ANY"`), which FERAL's failover path doesn't drive yet; on Gemini turns the force degrades to `"required"` + prompt + side-channel. The translator slot is defined for when `gemini_provider.py` lands on the runtime path.
+
+### Memory stats no longer floods the log under background load (`dfb772bb`)
+
+The `memory.stats: aiosqlite COUNT queries exceeded the 2.5s budget` warning was firing every 1-2s. Root cause was **connection-pool lock-wait, not query cost** — `stats()` grabbed a connection from the 4-slot writer pool shared with every background writer (sync scheduler, decay sweeper, proactive engine, etc.), and the dashboard polls `/api/memory/stats` ~1Hz; the `COUNT(*)` itself over ~4,800 rows is sub-millisecond. Fix: a 15s short-TTL stats cache with lock-coalesced refresh (at most one COUNT round per 15s regardless of poll rate), a dedicated read-only aiosqlite connection (`mode=ro`, `query_only=ON`) held outside the writer pool so stats physically can't queue behind writers, and eager `journal_mode=WAL` + `synchronous=NORMAL` in `_init_db()`. Degraded payloads are not cached (so a one-off stall can't lock the dashboard into 0/0/0). The 2.5s budget stays as a last-resort safety net that should essentially never trip now. Live in-RAM fields (active sessions, embed-queue depth) are re-overlaid on every cache hit so they stay fresh.
+
+### Tests
+
+79 combined focused pytest (forced-tool-choice 31 + stats-contention 3 + fused-timeline) + adjacent llm-router / prompt-pinning / orchestrator-deep suites green; both doc guards clean. (Pre-existing unrelated failures in `test_llm_provider_defaults.py` confirmed present on `main` independent of these changes.)
 
 ## [2026.5.47] — Open-by-default budget, one-key-everywhere, deeper agent prompts
 
