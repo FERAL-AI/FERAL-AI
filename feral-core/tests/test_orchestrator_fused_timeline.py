@@ -781,3 +781,65 @@ def test_temporal_window_label_from_text(text, expected):
     assert (
         Orchestrator._temporal_window_label_from_text(text) == expected
     ), f"text {text!r}: expected {expected!r}"
+
+
+# ─────────────────────────────────────────────────────────────────
+# Stream batching (AUDIT-r14 round3 surface spec #1)
+# The orchestrator coalesces per-token text_delta frames into ~100ms
+# windows: far fewer WS frames, same reconstructed text, is_final still
+# emitted. FERAL_STREAM_BATCH_MS=0 restores per-token frames.
+# ─────────────────────────────────────────────────────────────────
+
+_BATCH_PIECES = [f"tok{i} " for i in range(40)]
+
+
+def _attach_long_stream(orch):
+    async def _stream_many(messages, tools=None, **kwargs):
+        for piece in _BATCH_PIECES:
+            yield {"type": "text_delta", "content": piece}
+        yield {"type": "done"}
+    orch.llm.chat_stream = _stream_many
+
+
+@pytest.mark.asyncio
+async def test_stream_batching_coalesces_frames(live_orch_with_yesterday_memory, monkeypatch):
+    monkeypatch.setenv("FERAL_STREAM_BATCH_MS", "100")
+    orch = live_orch_with_yesterday_memory
+    _attach_long_stream(orch)
+    sends = _capture_live_sends(orch)
+
+    # Non-temporal query → no timeline side-channel noise, just prose.
+    await orch.handle_command_stream(session_id="sess-batch-1", text="tell me a short joke")
+    await _drain_pending_tasks()
+
+    deltas = [f for f in sends if f["type"] == "stream_delta"]
+    non_final = [f for f in deltas if not f["payload"].get("is_final")]
+    finals = [f for f in deltas if f["payload"].get("is_final")]
+
+    # 40 tokens, all arriving well within one 100ms window → coalesced
+    # into far fewer non-final frames (typically 1).
+    assert 0 < len(non_final) < len(_BATCH_PIECES)
+    assert len(non_final) <= 3, f"expected heavy coalescing, got {len(non_final)} frames"
+    # No text lost: concatenated deltas reconstruct the full stream.
+    merged = "".join(f["payload"].get("delta", "") for f in non_final)
+    assert merged == "".join(_BATCH_PIECES)
+    # Terminal frame still emitted exactly once.
+    assert len(finals) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_batch_ms_zero_is_per_token(live_orch_with_yesterday_memory, monkeypatch):
+    monkeypatch.setenv("FERAL_STREAM_BATCH_MS", "0")
+    orch = live_orch_with_yesterday_memory
+    _attach_long_stream(orch)
+    sends = _capture_live_sends(orch)
+
+    await orch.handle_command_stream(session_id="sess-batch-2", text="tell me a short joke")
+    await _drain_pending_tasks()
+
+    non_final = [
+        f for f in sends
+        if f["type"] == "stream_delta" and not f["payload"].get("is_final")
+    ]
+    # Debug escape hatch: one frame per token.
+    assert len(non_final) == len(_BATCH_PIECES)

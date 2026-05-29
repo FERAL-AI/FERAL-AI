@@ -2121,6 +2121,34 @@ class Orchestrator:
             streamed_text = False
             tool_calls_received = []
 
+            # Stream coalescer (AUDIT-r14 round3 surface spec #1): instead of
+            # one WS frame per token, batch incremental pieces into ~100ms
+            # windows and emit a single stream_delta per window. Cuts frame
+            # rate ~10-50x → far smoother chat. Client-transparent: it still
+            # appends `delta`, just fewer/larger ones. Arrival-driven (no
+            # background timer to manage in the hot loop); is_final / tool /
+            # error boundaries force-flush. Set FERAL_STREAM_BATCH_MS=0 to
+            # restore per-token frames for debugging.
+            try:
+                _stream_batch_ms = int(os.environ.get("FERAL_STREAM_BATCH_MS", "100"))
+            except (TypeError, ValueError):
+                _stream_batch_ms = 100
+            _stream_buf: list[str] = []
+            _stream_last_flush = time.monotonic()
+
+            async def _flush_stream_prose() -> None:
+                nonlocal _stream_buf, _stream_last_flush
+                if _stream_buf:
+                    merged = "".join(_stream_buf)
+                    _stream_buf = []
+                    await self.send(session_id, FeralMessage(
+                        session_id=session_id, hop="brain", type="stream_delta",
+                        payload=StreamDeltaPayload(
+                            delta=merged, stream_id=stream_id, is_final=False,
+                        ).model_dump(),
+                    ))
+                _stream_last_flush = time.monotonic()
+
             try:
                 stream_model = getattr(self.llm, 'model_name', 'llm')
                 await self._emit_brain_event(session_id, "llm_call", {"model": stream_model})
@@ -2158,17 +2186,25 @@ class Orchestrator:
                             continue
                         streamed_text = True
                         accumulated_text += piece
-                        await self.send(session_id, FeralMessage(
-                            session_id=session_id, hop="brain", type="stream_delta",
-                            payload=StreamDeltaPayload(
-                                delta=piece, stream_id=stream_id, is_final=False,
-                            ).model_dump(),
-                        ))
+                        if _stream_batch_ms <= 0:
+                            # Legacy per-token path (debug).
+                            await self.send(session_id, FeralMessage(
+                                session_id=session_id, hop="brain", type="stream_delta",
+                                payload=StreamDeltaPayload(
+                                    delta=piece, stream_id=stream_id, is_final=False,
+                                ).model_dump(),
+                            ))
+                        else:
+                            _stream_buf.append(piece)
+                            if (time.monotonic() - _stream_last_flush) * 1000.0 >= _stream_batch_ms:
+                                await _flush_stream_prose()
                     elif delta["type"] == "tool_call_delta":
                         tc = delta.get("tool_call") or {}
                         if tc:
                             tool_calls_received.append(tc)
                     elif delta["type"] == "done":
+                        # Flush any buffered prose before the terminal frame.
+                        await _flush_stream_prose()
                         if streamed_text:
                             await self.send(session_id, FeralMessage(
                                 session_id=session_id, hop="brain", type="stream_delta",
@@ -2179,14 +2215,19 @@ class Orchestrator:
                     elif delta["type"] == "budget_exceeded":
                         # WS8 — surface as a structured frame, not a
                         # stack trace. Lane 12 renders the banner.
+                        await _flush_stream_prose()
                         await self._emit_budget_exceeded(
                             session_id=session_id,
                             budget=delta.get("payload") or {},
                         )
                         return
                     elif delta["type"] == "error":
+                        await _flush_stream_prose()
                         await self._send_text(session_id, f"Stream error: {delta.get('content', 'unknown')}")
                         return
+                # Safety net: flush any tail prose if the stream ended
+                # without an explicit `done` event.
+                await _flush_stream_prose()
             except Exception as e:
                 logger.error(f"Streaming failed, falling back: {e}")
                 # The stream path already appended this turn's user
