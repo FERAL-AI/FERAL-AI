@@ -1,10 +1,36 @@
 # Changelog
 
-<!-- feral-version: 2026.5.46 -->
+<!-- feral-version: 2026.5.47 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.5.47] — Open-by-default budget, one-key-everywhere, deeper agent prompts
+
+Three operator-driven improvements landed together, validated against a brain running with real provider keys.
+
+### Budget is now unlimited by default (`d87284f9`)
+
+The cost guard shipped hardcoded factory caps (`screen_loop $0.10/hr`, `chat $5/hr`, `global $5/hr`) and enforced them always — which produced "budget reached" banners nobody asked for. Now there is **no cap until the operator sets one**: `DEFAULT_COST_SETTINGS` carries no dollar values, `_cap_for()` returns `None` (unlimited) for every subsystem and both globals on a fresh install, and `BudgetLoopGuard.allow()` always permits + emits zero `cost_cap_hit` frames when no cap is configured. Set a number per-subsystem or globally in Settings → Cost (empty input = "No limit"); clearing it returns to unlimited. The whole cap machinery (banners, `cost_cap_hit`, `budget_exceeded`) is intact — it only fires for configured caps.
+
+### One key reaches every surface (`c8b92e09`)
+
+`feral key add --provider openai --label X --set-active` stored a key the LLM chat path used (v2026.5.42 Cross-cut #1) and, after `01eda5d9`, the voice router — but the `/api/voice/providers` probe, the realtime WS proxy, and any `os.environ`-reading SDK were still blind to a labeled-only key (they read env / the default namespace). So a freshly-added, valid OpenAI key showed `unauthorized` on the voice probes. Root fix: boot hydration (`api/state._load_stored_credentials`) now resolves each provider's active labeled key via `vault_keys.get_active_provider_key` and sets `os.environ[env_var]`, and `security/probe.py` + `voice/realtime_proxy.py` resolve labeled keys directly. Precedence: **explicit env > active labeled key > credentials.json mirror > default-namespace vault**. One key now genuinely works across chat, probe, realtime, and STT/TTS.
+
+### Deeper orchestrator + agent prompts (`2d1ba735`)
+
+Live testing showed the LLM answering "what did I do yesterday?" from its own context without calling the `notes_memory__fused_timeline` tool — so prose answers weren't grounded in retrieved memory (the v2026.5.46 side-channel still rendered the TimelineCard widget, so the user-visible card was correct, but the narration was un-grounded). The master orchestrator prompt (`agents/identity_loader.py`) was restructured so the strongest disciplines land first (authority-at-top) and echo last (last-instruction): a new **Tool-Selection Discipline** section names `notes_memory__fused_timeline` with verbatim trigger phrases, **Grounded Memory Synthesis** forbids "I don't have access" when the data is present and requires citing specifics, and **Agentic Planning** bans plan-only answers. The five multi-agent worker prompts (health/home/research/creative/general) each gained explicit "tool discipline — do not violate" rules. 11 new pinning tests guard the load-bearing strings.
+
+**Known follow-up (deliberately not yet landed):** the bullet-proof version of grounded recall is `tool_choice="required"` plumbed at the LLM call site gated on the temporal-recall regex — forcing the tool call rather than relying on the model honoring the prompt. The deepened prompts + the deterministic side-channel cover the surface today; the forced-tool-call is a v2026.5.48 candidate if live eval shows the model still skipping the tool.
+
+### Tests
+
+71 combined focused pytest across the three areas (cost guard, labeled-key hydration, prompt pinning, fused-timeline) + 102 prompt-adjacent + 6 vitest (Settings cost). `test_a13_env_isolation` verified clean (11/11 targeted, 47/47 run alongside cost tests — an earlier cross-worker flake did not reproduce on the committed HEAD). Bundle rebuilt (`index-DRu-oBaS.js`) for the cost UI change. Both doc guards clean.
+
+### Operator note
+
+Provider keys provided for local testing are stored in the OS keychain vault, never in git. If you ever shared keys in a chat/log, rotate them.
 
 ## [2026.5.46] — Demo-readiness wave: TimelineCard renders live, Timeline page fetches, chat survives navigation
 
