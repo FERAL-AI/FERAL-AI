@@ -1,16 +1,20 @@
-"""v2026.5.44 — operator-typed cost caps must take effect without a
-brain restart, and the flat ``cost.<site>.per_hour_usd`` schema the
-Settings UI now writes must be honoured by ``CostBudget``.
+"""v2026.5.44 / v2026.5.47 — operator-typed cost caps must take effect
+without a brain restart, the flat ``cost.<site>.per_hour_usd`` schema
+the Settings UI writes must be honoured by ``CostBudget``, AND when
+no operator value exists the call_site is UNLIMITED (the v2026.5.47
+"open by default" product change).
 
 These tests pin three regressions:
 
 1. ``cost.screen_loop.per_hour_usd: 20.0`` in settings (flat schema)
-   raises the in-memory cap from the factory $0.10 to $20 — without
-   this, the live operator who set "$20/hour" in Settings → Cost
-   kept tripping the yellow ScreenLoop banner against the default
-   cap.
-2. The factory default of $0.10 still applies when the operator has
-   set nothing — we do not regress the base contract.
+   raises the in-memory cap to $20 — without this, the live operator
+   who set "$20/hour" in Settings → Cost kept tripping the yellow
+   ScreenLoop banner against an unintended cap.
+2. When the operator has set nothing, every per-call-site cap is
+   ``None`` (unlimited). v2026.5.47 removed the hardcoded factory
+   dollar defaults (``screen_loop: $0.10/hr``, ``chat: $5/hr``,
+   ``global_per_hour_usd: $5``) that were starving subsystems even
+   when the operator never asked for a limit.
 3. ``CostBudget.reload_from_settings()`` re-reads the settings file
    in place so a POST to ``/api/config/update`` raises caps without
    a restart.
@@ -31,12 +35,26 @@ def _write_settings(home: Path, payload: dict) -> None:
     (home / "settings.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_default_caps_apply_when_no_override(tmp_path, monkeypatch):
-    """No operator override → factory default $0.10 for screen_loop."""
+def test_unset_caps_are_unlimited(tmp_path, monkeypatch):
+    """v2026.5.47 — no operator override ⇒ every cap is ``None``
+    (unlimited). Prior to v2026.5.47 the factory shipped
+    ``screen_loop: $0.10/hr``, ``chat: $5/hr``,
+    ``global_per_hour_usd: $5`` so the loop guard would trip the
+    yellow banner against a cap the operator never set. The product
+    change: the budget is open by default and the operator opts in
+    to a number."""
     monkeypatch.setenv("FERAL_HOME", str(tmp_path))
     bud = CostBudget(db_path=tmp_path / "cost.db")
-    assert bud._cap_for("screen_loop", "hour") == pytest.approx(0.10)
-    assert bud._cap_for("proactive", "hour") == pytest.approx(0.20)
+    for site in (
+        "screen_loop", "proactive", "routing", "chat",
+        "vision", "embedding", "learner", "compaction",
+    ):
+        assert bud._cap_for(site, "hour") is None, (
+            f"{site} has a factory cap; expected unlimited"
+        )
+    # Globals are likewise unset by default.
+    assert bud._cap_for("__global__", "hour") is None
+    assert bud._cap_for("__global__", "day") is None
 
 
 def test_screen_loop_cap_honors_flat_settings_override(tmp_path, monkeypatch):

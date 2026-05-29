@@ -2495,9 +2495,18 @@ function CostSection({ initialCallSite }) {
   //       use it.
   // Flat wins when both are present so an operator-typed cap is
   // never silently overridden by a stale legacy default.
+  //
+  // v2026.5.47 — caps are now UNLIMITED by default. An unset cap
+  // is the steady state, rendered as an empty input with the
+  // placeholder "No limit". Clearing an input + Save persists
+  // ``value: null`` which the brain stores as
+  // ``cost.<site> = null`` and ``CostBudget._cap_for`` reads as
+  // "no cap configured".
   const legacySiteCaps = (costCfg.per_call_site_caps && typeof costCfg.per_call_site_caps === 'object') ? costCfg.per_call_site_caps : {};
-  const globalDay = Number(costCfg.global_per_day_usd ?? 0);
-  const globalHour = Number(costCfg.global_per_hour_usd ?? 5);
+  const globalDayRaw = costCfg.global_per_day_usd;
+  const globalHourRaw = costCfg.global_per_hour_usd;
+  const globalDay = (globalDayRaw == null || globalDayRaw === '') ? null : Number(globalDayRaw);
+  const globalHour = (globalHourRaw == null || globalHourRaw === '') ? null : Number(globalHourRaw);
 
   const flatSiteKeys = Object.keys(costCfg).filter((k) => {
     if (k === 'per_call_site_caps') return false;
@@ -2514,6 +2523,10 @@ function CostSection({ initialCallSite }) {
     ...(initialCallSite ? [initialCallSite] : []),
   ]));
 
+  // Returns the numeric cap if one is configured, or ``null`` when
+  // unset (= unlimited). Never falls back to a hardcoded dollar
+  // default — that would silently re-introduce the very behaviour
+  // the v2026.5.47 fix removed.
   const capForSite = (site) => {
     const flat = costCfg[site];
     if (flat && typeof flat === 'object' && flat.per_hour_usd != null) {
@@ -2523,15 +2536,27 @@ function CostSection({ initialCallSite }) {
     if (legacy && legacy.per_hour_usd != null) {
       return Number(legacy.per_hour_usd);
     }
-    return 0;
+    return null;
   };
 
   const updateCap = async (site) => {
     const raw = editing[site];
-    const value = Number(raw);
-    if (!Number.isFinite(value) || value < 0) {
-      setErr(`Cap for ${site} must be a non-negative number.`);
-      return;
+    const trimmed = (raw == null ? '' : String(raw)).trim();
+    // Empty input means "no cap" — POST ``value: null`` so the
+    // brain clears ``cost.<site>`` and the in-memory
+    // ``CostBudget`` falls back to unlimited on the next
+    // ``reload_from_settings`` (fired by the same POST handler).
+    const clearing = trimmed === '';
+    let payload;
+    if (clearing) {
+      payload = { section: 'cost', key: site, value: null };
+    } else {
+      const value = Number(trimmed);
+      if (!Number.isFinite(value) || value < 0) {
+        setErr(`Cap for ${site} must be a non-negative number, or empty for no cap.`);
+        return;
+      }
+      payload = { section: 'cost', key: site, value: { per_hour_usd: value } };
     }
     setBusy(`cap:${site}`);
     setErr('');
@@ -2545,13 +2570,18 @@ function CostSection({ initialCallSite }) {
       // effect without a restart.
       const r = await apiFetch('/api/config/update', {
         method: 'POST',
-        body: JSON.stringify({ section: 'cost', key: site, value: { per_hour_usd: value } }),
+        body: JSON.stringify(payload),
       });
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
         throw new Error(formatApiDetail(body, `failed to update ${site}`));
       }
-      setMsg(`Saved ${site} cap at $${value.toFixed(2)}/hour.`);
+      if (clearing) {
+        setMsg(`Cleared ${site} cap — now unlimited.`);
+      } else {
+        const value = Number(trimmed);
+        setMsg(`Saved ${site} cap at $${value.toFixed(2)}/hour.`);
+      }
       setEditing((prev) => { const n = { ...prev }; delete n[site]; return n; });
       await refresh();
     } catch (e) {
@@ -2562,10 +2592,15 @@ function CostSection({ initialCallSite }) {
   };
 
   const updateGlobal = async (key, raw) => {
-    const value = Number(raw);
-    if (!Number.isFinite(value) || value < 0) {
-      setErr(`Global cap must be non-negative.`);
-      return;
+    const trimmed = (raw == null ? '' : String(raw)).trim();
+    const clearing = trimmed === '';
+    let value = null;
+    if (!clearing) {
+      value = Number(trimmed);
+      if (!Number.isFinite(value) || value < 0) {
+        setErr('Global cap must be a non-negative number, or empty for no cap.');
+        return;
+      }
     }
     setBusy(`global:${key}`);
     setErr('');
@@ -2579,7 +2614,11 @@ function CostSection({ initialCallSite }) {
         const body = await r.json().catch(() => ({}));
         throw new Error(formatApiDetail(body, `failed to update ${key}`));
       }
-      setMsg(`Updated ${key} to $${value.toFixed(2)}.`);
+      if (clearing) {
+        setMsg(`Cleared ${key} — now unlimited.`);
+      } else {
+        setMsg(`Updated ${key} to $${value.toFixed(2)}.`);
+      }
       await refresh();
     } catch (e) {
       setErr(e?.message || `update ${key} failed`);
@@ -2591,8 +2630,9 @@ function CostSection({ initialCallSite }) {
   return (
     <div className="v2-setting-stack" data-testid="cost-section">
       <p className="v2-p v2-p--muted v2-p--tiny">
-        Per-call-site hourly caps in USD. When a cap is exceeded the chat receives a yellow inline banner
-        (the same one rendered in Chat → S6). 0 disables the cap for that site.
+        Per-call-site hourly caps in USD. Leave a field empty for no cap (unlimited) —
+        the budget stays open until you type a number. Once a cap is set and exceeded,
+        the chat receives a yellow inline banner (the same one rendered in Chat → S6).
       </p>
       {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
       {msg && <div className="v2-chip v2-chip--live">{msg}</div>}
@@ -2603,7 +2643,8 @@ function CostSection({ initialCallSite }) {
           const cap = capForSite(site);
           const current = spends[site];
           const editingValue = editing[site];
-          const inputValue = editingValue != null ? editingValue : String(cap);
+          // ``cap == null`` ⇒ unlimited ⇒ empty input + placeholder.
+          const inputValue = editingValue != null ? editingValue : (cap == null ? '' : String(cap));
           const resetStr = current?.reset_at ? new Date(
             typeof current.reset_at === 'string' ? Date.parse(current.reset_at) : Number(current.reset_at) * 1000,
           ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
@@ -2623,6 +2664,7 @@ function CostSection({ initialCallSite }) {
                   className="v2-input"
                   style={{ width: 90, textAlign: 'right' }}
                   value={inputValue}
+                  placeholder="No limit"
                   onChange={(e) => setEditing((p) => ({ ...p, [site]: e.target.value }))}
                   data-testid={`cost-cap-${site}`}
                 />
@@ -2650,27 +2692,39 @@ function CostSection({ initialCallSite }) {
 
       <Glass level={0} radius="md" padding="md">
         <div className="v2-voice-group__title">Global limits</div>
-        <Row label="Global per hour (USD)" hint="Stops every call-site once the combined hourly spend reaches this number.">
+        <Row label="Global per hour (USD)" hint="Empty = no global hourly cap. Stops every call-site once the combined hourly spend reaches this number.">
           <input
             type="number"
             step="0.10"
             min="0"
             className="v2-input"
             style={{ width: 100, textAlign: 'right' }}
-            defaultValue={globalHour}
-            onBlur={(e) => { if (Number(e.target.value) !== globalHour) updateGlobal('global_per_hour_usd', e.target.value); }}
+            defaultValue={globalHour == null ? '' : globalHour}
+            placeholder="No limit"
+            onBlur={(e) => {
+              const raw = e.target.value;
+              const trimmed = (raw == null ? '' : String(raw)).trim();
+              const next = trimmed === '' ? null : Number(trimmed);
+              if (next !== globalHour) updateGlobal('global_per_hour_usd', raw);
+            }}
             data-testid="cost-global-hour"
           />
         </Row>
-        <Row label="Global per day (USD)" hint="0 = disabled. Resets at midnight local time.">
+        <Row label="Global per day (USD)" hint="Empty = no global daily cap. Resets at midnight local time.">
           <input
             type="number"
             step="0.50"
             min="0"
             className="v2-input"
             style={{ width: 100, textAlign: 'right' }}
-            defaultValue={globalDay}
-            onBlur={(e) => { if (Number(e.target.value) !== globalDay) updateGlobal('global_per_day_usd', e.target.value); }}
+            defaultValue={globalDay == null ? '' : globalDay}
+            placeholder="No limit"
+            onBlur={(e) => {
+              const raw = e.target.value;
+              const trimmed = (raw == null ? '' : String(raw)).trim();
+              const next = trimmed === '' ? null : Number(trimmed);
+              if (next !== globalDay) updateGlobal('global_per_day_usd', raw);
+            }}
             data-testid="cost-global-day"
           />
         </Row>

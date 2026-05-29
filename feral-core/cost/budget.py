@@ -41,18 +41,37 @@ class BudgetExceeded(Exception):
 DEFAULT_COST_SETTINGS: dict[str, Any] = {
     "cost": {
         "enabled": True,
+        # v2026.5.47 — the cost budget ships UNLIMITED by default.
+        # The operator opts in to a cap by typing a number into
+        # Settings → Cost (persisted as
+        # ``cost.<subsystem>.per_hour_usd``) or by setting a global
+        # via ``cost.global_per_hour_usd`` / ``cost.global_per_day_usd``.
+        # Until they do, ``_cap_for`` returns ``None`` for every
+        # call_site/window and ``BudgetLoopGuard.allow()`` always
+        # passes — no ``cost_cap_hit`` frame, no ``BudgetExceeded``,
+        # no yellow banner. Previously this file shipped hardcoded
+        # dollar caps (``screen_loop: $0.10/hr``, ``chat: $5/hr``,
+        # ``global_per_hour_usd: $5``) that starved background
+        # subsystems even when the operator never asked for a limit.
+        #
+        # ``per_call_site_caps`` is kept as a registry of known
+        # subsystems so introspection surfaces (the CLI doctor probe,
+        # the Settings UI) can list every wired call-site without
+        # each subsystem having to register itself. An empty
+        # per-site dict here means "no cap configured → unlimited";
+        # a configured cap is written by the Settings UI as the flat
+        # ``cost.<subsystem>.per_hour_usd`` key, which
+        # :meth:`_cap_for` prefers over the legacy nested shape.
         "per_call_site_caps": {
-            "screen_loop": {"per_hour_usd": 0.10},
-            "proactive": {"per_hour_usd": 0.20},
-            "routing": {"per_hour_usd": 0.50},
-            "chat": {"per_hour_usd": 5.00},
-            "vision": {"per_hour_usd": 0.10},
-            "embedding": {"per_hour_usd": 0.50},
-            "learner": {"per_hour_usd": 0.50},
-            "compaction": {"per_hour_usd": 0.50},
+            "screen_loop": {},
+            "proactive": {},
+            "routing": {},
+            "chat": {},
+            "vision": {},
+            "embedding": {},
+            "learner": {},
+            "compaction": {},
         },
-        "global_per_day_usd": 20.00,
-        "global_per_hour_usd": 5.00,
     }
 }
 

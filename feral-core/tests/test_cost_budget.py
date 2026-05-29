@@ -177,12 +177,26 @@ class TestCostBudget:
 
 class TestDefaults:
     def test_default_cost_settings_schema(self):
+        """v2026.5.47 — the factory defaults ship UNLIMITED. The
+        per-call-site registry is still populated so introspection
+        surfaces (the CLI doctor probe + the Settings UI) can list
+        every wired subsystem, but each entry has NO ``per_hour_usd``
+        — that's the contract for "no cap configured". Globals are
+        omitted entirely."""
         cost = DEFAULT_COST_SETTINGS["cost"]
         assert cost["enabled"] is True
-        assert cost["global_per_day_usd"] == pytest.approx(20.0)
-        assert cost["global_per_hour_usd"] == pytest.approx(5.0)
-        assert "screen_loop" in cost["per_call_site_caps"]
-        assert cost["per_call_site_caps"]["chat"]["per_hour_usd"] == pytest.approx(5.0)
+        assert "global_per_day_usd" not in cost
+        assert "global_per_hour_usd" not in cost
+        for site in (
+            "screen_loop", "proactive", "routing", "chat",
+            "vision", "embedding", "learner", "compaction",
+        ):
+            assert site in cost["per_call_site_caps"], (
+                f"{site} missing from the known-subsystem registry"
+            )
+            assert "per_hour_usd" not in cost["per_call_site_caps"][site], (
+                f"{site} ships a factory cap; expected unlimited"
+            )
 
 
 class TestLiveCapTrip:

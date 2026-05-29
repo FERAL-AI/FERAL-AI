@@ -142,6 +142,69 @@ describe('Settings → Cost', () => {
     expect(proactiveInput.value).toBe('0.5');
   });
 
+  it('shows an empty input with "No limit" placeholder when no cap is configured', async () => {
+    // v2026.5.47 — the cost budget is unlimited by default. The UI
+    // must reflect that: an unset per-subsystem cap renders as an
+    // empty field with the placeholder "No limit", NOT as "0" or
+    // a pre-filled factory default.
+    const captured = [];
+    const { findByTestId } = renderV2(
+      <Settings />,
+      {
+        route: '/settings?section=Cost',
+        fetch: makeFetcher({
+          configBody: { cost: {} },
+          capturePosts: captured,
+        }),
+      },
+    );
+    await openCostTab(findByTestId);
+
+    const input = await findByTestId('cost-cap-screen_loop');
+    expect(input.value).toBe('');
+    expect(input.getAttribute('placeholder')).toBe('No limit');
+
+    const globalHour = await findByTestId('cost-global-hour');
+    expect(globalHour.value).toBe('');
+    expect(globalHour.getAttribute('placeholder')).toBe('No limit');
+  });
+
+  it('clearing a configured cap persists value:null to remove it', async () => {
+    // The operator had a cap set; they empty the input and click
+    // Save → the UI POSTs ``value: null`` so the brain clears
+    // ``cost.screen_loop`` and CostBudget falls back to unlimited
+    // on the next ``reload_from_settings``.
+    const captured = [];
+    const { findByTestId } = renderV2(
+      <Settings />,
+      {
+        route: '/settings?section=Cost',
+        fetch: makeFetcher({
+          configBody: { cost: { screen_loop: { per_hour_usd: 20 } } },
+          capturePosts: captured,
+        }),
+      },
+    );
+    await openCostTab(findByTestId);
+
+    const input = await findByTestId('cost-cap-screen_loop');
+    expect(input.value).toBe('20');
+    fireEvent.change(input, { target: { value: '' } });
+
+    const saveBtn = await findByTestId('cost-save-screen_loop');
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      const post = captured.find((c) => c.url.includes('/api/config/update'));
+      expect(post).toBeTruthy();
+      expect(post.body).toMatchObject({
+        section: 'cost',
+        key: 'screen_loop',
+        value: null,
+      });
+    });
+  });
+
   it('falls back to legacy per_call_site_caps when flat shape is absent', async () => {
     // Some installs still have the v2026.5.43 nested shape on disk;
     // the UI must read it so the operator sees their existing value

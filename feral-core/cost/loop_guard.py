@@ -117,9 +117,21 @@ class BudgetLoopGuard:
     def allow(self, *, model: str, estimated_max_tokens: int) -> bool:
         """Return ``True`` if the subsystem should issue the LLM call.
 
+        v2026.5.47 — the cost budget is UNLIMITED by default. When
+        no operator-configured cap exists for ``call_site`` (and no
+        global per-hour / per-day cap is set), ``CostBudget``
+        publishes an empty ``_active_caps()`` and
+        ``check_and_reserve`` returns ``True`` without recording
+        anything. This guard therefore always allows the call, never
+        enters a pause window, and never broadcasts a
+        ``cost_cap_hit`` frame. Numeric caps — once typed into
+        Settings → Cost or set via ``cost.global_per_hour_usd`` —
+        are enforced exactly as before.
+
         Returns ``False`` when either:
           * the guard is in a pause window from a prior cap hit, OR
-          * the projected cost would exceed an active cap.
+          * the projected cost would exceed an active (operator-set)
+            cap.
         On rejection the guard logs + (best-effort) broadcasts a
         ``cost_cap_hit`` frame so the UI banner appears.
         """
