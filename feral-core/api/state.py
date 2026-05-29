@@ -1045,6 +1045,16 @@ class BrainState:
                 approval_manager=self.approval_manager,
             )
             self.orchestrator.set_llm(_shared_llm)
+            # Wire the boot CostBudget into the interactive chat-path LLM so
+            # an operator-set chat cap actually preflights check_and_reserve
+            # on chat / chat_stream (background loops already get it via
+            # their BudgetLoopGuards above). Budgets are open-by-default, so
+            # this is enforcement-when-configured, not a spend trap.
+            if getattr(self, "cost_budget", None) is not None:
+                try:
+                    _shared_llm.set_cost_budget(self.cost_budget)
+                except Exception as exc:
+                    logger.warning("Chat-path cost budget wiring failed: %s", exc)
             # v2026.5.26 — apply persisted autonomy mode from
             # `~/.feral/settings.json::security.autonomy_mode`.
             # Pre-fix the boot path always reverted to "hybrid" (or
