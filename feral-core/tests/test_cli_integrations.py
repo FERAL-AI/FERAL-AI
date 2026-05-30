@@ -1,4 +1,4 @@
-"""audit-r14 / lane-07 (W5) — `feral integrations` connect / list /
+"""audit-r14 / lane-07 () — `feral integrations` connect / list /
 disconnect.
 
 Covers the three connect flows mandated by parent ack:

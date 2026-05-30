@@ -1486,7 +1486,7 @@
 }
 .v2-code--copyable:hover { background: var(--v2-surface-1); color: var(--v2-text-primary); }
 
-/* ── Devices / Modal stacking-context overrides (W4) ───────── */
+/* ── Devices / Modal stacking-context overrides ───────── */
 /*
  * The legacy .v2-modal-backdrop rule in ui.css uses a numeric literal
  * (z-index: 100). Re-declare it here so it (a) wins the cascade —

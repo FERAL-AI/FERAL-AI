@@ -4,10 +4,10 @@ Two layers live here:
 
 1. **Legacy in-process layer** (``increment``/``observe``/``measure``/
    ``in_memory_snapshot``). Optional OpenTelemetry meter; falls back to
-   a process-local counter dict. Predates W13 — kept verbatim so the
+   a process-local counter dict. Predates  — kept verbatim so the
    dozens of call sites scattered across the codebase keep working.
 
-2. **W13 Prometheus REGISTRY + ``emit()``** (added in PR #36, roadmap
+2. ** Prometheus REGISTRY + ``emit()``** (added in PR #36, roadmap
    §3.1 #4). A single :class:`prometheus_client.CollectorRegistry`
    singleton holds every metric the default Grafana dashboard
    (``ops/grafana/feral-overview.json``) and Prometheus alert rules
@@ -16,10 +16,10 @@ Two layers live here:
    explicitly turned off, so individual call sites can land without
    gating logic of their own.
 
-The W13 charter intentionally only wires ONE call site
+The  charter intentionally only wires ONE call site
 (``api/server.py``'s rate-limit middleware, for
 ``feral_http_requests_total``). The rest — sync, MCP, LLM provider,
-supervisor, sandbox, vault — are tracked as W13.1 follow-ups so each
+supervisor, sandbox, vault — are tracked as  follow-ups so each
 owning workstream adds its own ``emit()`` calls inside its own PR.
 The metric definitions below document which workstream owns the
 eventual call site.
@@ -36,7 +36,7 @@ from typing import Mapping
 logger = logging.getLogger("feral.observability")
 
 # ───────────────────────────────────────────────────────────────────
-# Legacy in-process metrics (unchanged from pre-W13)
+# Legacy in-process metrics (unchanged from )
 # ───────────────────────────────────────────────────────────────────
 
 _OTEL_ENABLED = False
@@ -125,10 +125,10 @@ def _reset_inmem():
 
 
 # ───────────────────────────────────────────────────────────────────
-# W13 — Prometheus registry + emit() helper
+#  — Prometheus registry + emit() helper
 # ───────────────────────────────────────────────────────────────────
 #
-# Owned by W13 (roadmap §3.1 #4). REGISTRY is a dedicated
+# Owned by  (roadmap §3.1 #4). REGISTRY is a dedicated
 # CollectorRegistry instance so we never collide with the
 # prometheus_client default registry the multiprocess collector or
 # third-party libs may scribble into. Every metric the default
@@ -147,7 +147,7 @@ from prometheus_client import (
 REGISTRY: CollectorRegistry = CollectorRegistry(auto_describe=True)
 
 # HTTP — emitted by feral-core/api/server.py's RateLimitMiddleware.
-# Owned by W13.
+# Owned by .
 HTTP_REQUESTS_TOTAL = Counter(
     "feral_http_requests_total",
     "Total HTTP requests served by the FERAL Brain, labelled by method, route template, and status class.",
@@ -163,7 +163,7 @@ HTTP_REQUEST_DURATION_SECONDS = Histogram(
 )
 
 # LLM — to be emitted by feral-core/agents/llm_provider.py.
-# W13.1 follow-up owner: W19 (LLM provider hardening).
+#  follow-up owner:  (LLM provider hardening).
 LLM_429_TOTAL = Counter(
     "feral_llm_429_total",
     "Provider rate-limit (HTTP 429) responses returned by upstream LLM APIs, labelled by provider id.",
@@ -177,7 +177,7 @@ LLM_FAILOVER_CHAIN_EXHAUSTED_TOTAL = Counter(
 )
 
 # Federated sync — to be emitted by feral-core/memory/sync.py.
-# W13.1 follow-up owner: W11 (federated sync chaos).
+#  follow-up owner:  (federated sync chaos).
 SYNC_ACTIVE_PEERS = Gauge(
     "feral_sync_active_peers",
     "Current number of federated-sync peers the Brain has an open transport to.",
@@ -196,7 +196,7 @@ SYNC_WAS_ACTIVE_RECENT = Gauge(
 )
 
 # Supervisor — to be emitted by feral-core/agents/supervisor.py.
-# W13.1 follow-up owner: W17 (supervisor / approval queue).
+#  follow-up owner:  (supervisor / approval queue).
 SUPERVISOR_APPROVAL_QUEUE = Gauge(
     "feral_supervisor_approval_queue",
     "Current depth of the supervisor's pending-approval queue.",
@@ -204,7 +204,7 @@ SUPERVISOR_APPROVAL_QUEUE = Gauge(
 )
 
 # Tool denials / sandbox — to be emitted by feral-core/security/sandbox_policy.py
-# and the sandbox runner. W13.1 follow-up owner: W4 (sandbox / security policy).
+# and the sandbox runner.  follow-up owner:  (sandbox / security policy).
 TOOL_DENIALS_TOTAL = Counter(
     "feral_tool_denials_total",
     "Tool calls denied by policy before reaching the executor, labelled by tool id.",
@@ -219,7 +219,7 @@ SANDBOX_KILLS_TOTAL = Counter(
 )
 
 # Vault — to be emitted by feral-core/security/vault.py.
-# W13.1 follow-up owner: W9 (vault encryption-at-rest).
+#  follow-up owner:  (vault encryption-at-rest).
 VAULT_DECRYPT_ERRORS_TOTAL = Counter(
     "feral_vault_decrypt_errors_total",
     "Vault entries that failed AEAD decrypt — typically wrong key, tampered ciphertext, or schema drift.",
@@ -228,7 +228,7 @@ VAULT_DECRYPT_ERRORS_TOTAL = Counter(
 
 # WebSocket — to be emitted by feral-core/api/server.py's main client
 # WS endpoint and the daemon endpoint. Single gauge, value =
-# len(state.sessions). W13.1 follow-up owner: W17 / W13 sweep.
+# len(state.sessions).  follow-up owner:  /  sweep.
 WS_ACTIVE_SESSIONS = Gauge(
     "feral_ws_active_sessions",
     "Current number of authenticated WebSocket sessions held open by the Brain.",
@@ -296,7 +296,7 @@ MEMORY_EPISODES_HARD_DELETED_TOTAL = Counter(
 # v2026.5.34 (PR 2) D12 — federated sync scheduler / engine.
 # Owned by memory/sync.py:SyncEngine + memory/sync_scheduler.py.
 # feral_sync_active_peers + feral_sync_failures_total + feral_sync_was_active_recent
-# were defined above for W13.1; the labels below extend the surface.
+# were defined above for ; the labels below extend the surface.
 SYNC_ATTEMPTS_TOTAL = Counter(
     "feral_sync_attempts_total",
     "Sync attempts initiated by the scheduler, labelled by peer node id and final status.",
@@ -382,7 +382,7 @@ def registered_metric_names() -> set[str]:
 def _metrics_endpoint_enabled() -> bool:
     """Whether the /metrics endpoint and emit() writes are active.
 
-    Default-on as of W13: the kill switch must be EXPLICITLY set to a
+    Default-on as of : the kill switch must be EXPLICITLY set to a
     falsy value to silence the metrics surface. This matches the
     behaviour the dashboard + alert rules assume (a fresh install
     serves /metrics on loopback by default).

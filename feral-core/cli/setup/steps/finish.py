@@ -1,6 +1,6 @@
 """Summary + 'what's next' banner.
 
-audit-r14 / lane-07 W7 — this is the ONLY step that calls
+audit-r14 / lane-07  — this is the ONLY step that calls
 :meth:`WizardState.mark_complete`, which sets
 ``settings.meta.setup_complete = True`` and removes the resume
 sidecar. Quit / Ctrl+C / crash before this step runs leaves
@@ -45,7 +45,7 @@ def run(state: WizardState) -> None:
     for line in summary_lines:
         console.print(line)
 
-    # ── Lane 07 W7 ────────────────────────────────────────────────────
+    # ── Lane 07  ────────────────────────────────────────────────────
     # Mark setup as complete + remove the resume sidecar. Reaching this
     # step is the contract for "the wizard finished cleanly"; any
     # earlier exit (quit / Ctrl+C / crash) leaves ``setup_complete``

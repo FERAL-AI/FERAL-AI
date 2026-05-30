@@ -1,4 +1,4 @@
-"""PR 7: REST surface for listing / cancelling / steering W17 subsessions
+"""PR 7: REST surface for listing / cancelling / steering  subsessions
 plus the combined `/api/agents/active` snapshot.
 
 Locks in:
@@ -45,7 +45,7 @@ def _run_in_loop(coro):
 
 @pytest.fixture(autouse=True)
 def _reset_registry(tmp_path, monkeypatch):
-    """W17 spawner is process-global; reset between tests."""
+    """ spawner is process-global; reset between tests."""
     monkeypatch.setenv("FERAL_HOME", str(tmp_path))
     from agents import subagent_policy
     from agents.subagent_spawner import get_registry, register_runner, register_supervisor

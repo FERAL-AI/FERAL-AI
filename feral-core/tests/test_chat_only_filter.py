@@ -6,7 +6,7 @@ text-embedding-3-large, gpt-realtime-1.5, gpt-4o-mini-tts, etc.), the
 v2 picker rendered them, the user picked one that wasn't chat, and
 ``/v1/chat/completions`` returned 400.
 
-After W24a, ``BaseProvider.list_models(model_class="chat")`` filters
+After , ``BaseProvider.list_models(model_class="chat")`` filters
 through :mod:`providers.model_classes`; the raw list is still
 available with the legacy no-arg call so feral-voice (audio), feral-
 memory (embedding), etc. can still discover the right models. This

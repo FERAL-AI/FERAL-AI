@@ -76,7 +76,7 @@ def cached_probe_result(provider_id: str) -> Optional["ProbeResult"]:
     triggering a new round-trip. Returns ``None`` when the cache is
     cold or stale — callers MUST treat ``None`` as "no probe-derived
     information available" and fall back to whatever heuristic they
-    used pre-W2 (env var presence) so a fresh process never lies
+    used  (env var presence) so a fresh process never lies
     about availability before the first probe lands.
     """
     cached = _PROBE_CACHE.get(provider_id.lower().strip())
@@ -651,11 +651,11 @@ async def _probe_discord(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Voice provider probes (Lane 05 W7 — THESIS_SCENARIOS S4)
+# Voice provider probes (Lane 05  — THESIS_SCENARIOS S4)
 # ─────────────────────────────────────────────────────────────────
 #
 # Each STT / TTS provider gets a dedicated probe so the
-# /api/voice/providers REST surface (Lane 05 W8) and the Settings
+# /api/voice/providers REST surface (Lane 05 ) and the Settings
 # voice picker (Lane 12) can show real probe_status rather than
 # relying on env-var presence alone. Probe URLs are cheap "list
 # models" or "list voices" calls — they hit the provider's auth
@@ -784,7 +784,7 @@ async def _probe_gemini_live(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 
 # Voice provider catalogue used by the /api/voice/providers REST
-# surface (Lane 05 W8). Each entry maps a provider id to its kind
+# surface (Lane 05 ). Each entry maps a provider id to its kind
 # (realtime|stt|tts) and human-readable name. Keys MUST match the
 # probe ids registered above so the catalogue handler can look up
 # probe_status without a separate mapping table.

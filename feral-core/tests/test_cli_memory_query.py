@@ -1,4 +1,4 @@
-"""audit-r14 / lane-07 (W6) — `feral memory query <text>` closes
+"""audit-r14 / lane-07 () — `feral memory query <text>` closes
 THESIS_SCENARIOS S1 from the CLI side.
 
 S1 ("What did I do yesterday?") fans out through the brain's

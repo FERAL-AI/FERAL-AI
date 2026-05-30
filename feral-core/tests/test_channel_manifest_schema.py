@@ -1,4 +1,4 @@
-"""W21 — schema validation contract for channel manifests.
+""" — schema validation contract for channel manifests.
 
 Each invalid case asserts on the *type* of error AND the JSON path
 the loader pointed at. The path is part of the contract because IDE

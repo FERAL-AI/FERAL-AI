@@ -1,4 +1,4 @@
-"""audit-r14 / lane-07 (W8) — every `feral <cmd>` documented in
+"""audit-r14 / lane-07 () — every `feral <cmd>` documented in
 `docs/mintlify/**/*.mdx` MUST exist in the live argparse parser.
 
 Closes finding 08's "documented-but-missing matrix": pre-Lane-07 the

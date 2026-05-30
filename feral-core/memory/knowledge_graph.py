@@ -72,7 +72,7 @@ class KnowledgeGraph:
         # KG directly), writes skip sync logging — the relations and
         # entities still land, they just don't replicate.
         self._store = None
-        # Lane 05 W4 (AUDIT-r14 finding 14, S3): is the sqlite-vec
+        # Lane 05  (AUDIT-r14 finding 14, S3): is the sqlite-vec
         # entity index available? Set by :meth:`_init_schema` based
         # on extension load + CREATE VIRTUAL TABLE outcome.
         self._vec_entities_available: bool = False
@@ -81,7 +81,7 @@ class KnowledgeGraph:
     async def _conn(self) -> aiosqlite.Connection:
         """Acquire an aiosqlite connection.
 
-        Lane 05 W4 (AUDIT-r14 finding 14): when a ``MemoryStore`` is
+        Lane 05  (AUDIT-r14 finding 14): when a ``MemoryStore`` is
         attached (the production path), reuse its pooled connection
         so KG writes / reads share the same N=4 connection budget as
         the rest of the memory subsystem instead of opening a fresh
@@ -187,7 +187,7 @@ class KnowledgeGraph:
                 conn.execute("ALTER TABLE entities ADD COLUMN hlc_string TEXT DEFAULT ''")
             conn.commit()
 
-            # Lane 05 W4 (AUDIT-r14 finding 14, S3): create a vec0
+            # Lane 05  (AUDIT-r14 finding 14, S3): create a vec0
             # virtual table for entity embeddings so search_entities
             # and _link_entity can do indexed nearest-neighbour
             # lookups instead of the previous full-table embedding
@@ -303,7 +303,7 @@ class KnowledgeGraph:
         meta_json = json.dumps(metadata or {})
 
         # Async-offload the WAL log so the KG write doesn't block
-        # the event loop on the sync sqlite3 fsync (Lane 05 W3
+        # the event loop on the sync sqlite3 fsync (Lane 05 
         # offloaded MemoryStore.episode_save the same way).
         hlc = ""
         if self._store is not None:
@@ -494,7 +494,7 @@ class KnowledgeGraph:
         """Use the vec0 entity index (when available) to fetch the top-K
         nearest entities. Returns ``{entity_id: cosine_similarity}``.
 
-        Lane 05 W4 fix for AUDIT-r14 finding 14: replaces the previous
+        Lane 05  fix for AUDIT-r14 finding 14: replaces the previous
         "load every entity row + cosine in Python" path that scaled
         linearly with the entity table size and dominated KG query
         latency once the table grew past a few thousand rows.
@@ -581,7 +581,7 @@ class KnowledgeGraph:
     async def search_entities(self, query: str, limit: int = 10) -> list[dict]:
         """Hybrid FTS + embedding search for entities.
 
-        Lane 05 W4 (AUDIT-r14 finding 14): the embedding leg now
+        Lane 05  (AUDIT-r14 finding 14): the embedding leg now
         prefers the indexed vec0 nearest-neighbour search and only
         falls back to the full-table numpy scan when sqlite-vec is
         unavailable. Indexed path is sub-linear in entity count.
@@ -922,7 +922,7 @@ class KnowledgeGraph:
     async def _link_entity(self, name: str) -> Optional[dict]:
         """Find an existing entity with similar embedding (entity linking).
 
-        Lane 05 W4: prefer the indexed vec0 nearest-neighbour search
+        Lane 05 : prefer the indexed vec0 nearest-neighbour search
         when sqlite-vec is loaded — only the top-K candidates are
         re-scored. Falls back to the legacy full-table numpy scan
         when the index is unavailable so behaviour is identical on
@@ -995,7 +995,7 @@ class KnowledgeGraph:
     ) -> list[dict]:
         """Lookup entities by metadata category and/or entity_type.
 
-        Lane 05 W4 (THESIS_SCENARIOS S3): the orchestrator needs to
+        Lane 05  (THESIS_SCENARIOS S3): the orchestrator needs to
         answer "what BLE devices are around my phone right now?"
         without doing a full-text search over the KG. Devices land
         in the entities table with ``metadata.category == 'device'``

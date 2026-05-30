@@ -6,20 +6,20 @@ name: Provider Research
 # Gemini, Groq, DeepSeek, xAI, Together, OpenRouter) without a human
 # having to track release blogs.
 #
-# 2026-04-24 (W1, Roadmap §3.5 P0): the daily cron was OFF since
+# 2026-04-24 (Roadmap §3.5 P0): the daily cron was OFF since
 # 2026.4.18-dev because most adapters were still stubs. The user-visible
 # fallout was the "Settings → Providers shows GPT-4o-mini, no GPT-5.5"
 # bug from Appendix A.1. With the catalog pruned of stale literals and
-# the in-Brain ProviderCatalog.refresh_async() landing in the same PR,
+# the in-Brain ProviderCatalog.refresh_async landing in the same PR,
 # the daily schedule is the right complement: GitHub Actions handles
 # the bundled fallback list (so a fresh clone has current models even
 # offline), while the in-process refresher keeps every running Brain
 # instance current without waiting for the next pull.
 on:
   schedule:
-    # 09:00 UTC daily. Picks up new model launches within ~24h of
-    # provider announcement; the create-pull-request action is no-op
-    # when the catalog file is byte-identical so off-days cost nothing.
+ # 09:00 UTC daily. Picks up new model launches within ~24h of
+ # provider announcement; the create-pull-request action is no-op
+ # when the catalog file is byte-identical so off-days cost nothing.
     - cron: "0 9 * * *"
   workflow_dispatch:
 

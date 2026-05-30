@@ -32,7 +32,7 @@ class TogetherProvider(BaseProvider):
         "mistralai/Mixtral-8x22B-Instruct-v0.1",
     ]
     # Together is catalog-only at runtime; pricing lives in
-    # model_catalog.json. Pre-W2 these adapter literals were marked
+    # model_catalog.json.  these adapter literals were marked
     # "indicative" and never reconciled with together.ai/pricing.
     _pricing: dict[str, dict[str, float]] = {}
     _capabilities = {"tool_calling", "streaming"}

@@ -1,4 +1,4 @@
-"""audit-r14 / lane-07 (W3) — `feral key add/list/remove/rotate
+"""audit-r14 / lane-07 () — `feral key add/list/remove/rotate
 --provider --label` wrap Wave 2 Lane 09's ``security.vault_keys``
 overlay and run a probe immediately so the operator sees green/red
 before the prompt returns.

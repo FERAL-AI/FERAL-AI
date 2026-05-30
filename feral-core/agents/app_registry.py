@@ -867,7 +867,7 @@ def _vault_lookup_key(vault: Any, key_id: str) -> Optional[str]:
 
     Tries the new namespaced API first (``vault.get_namespace``) and
     falls back to the flat ``retrieve`` shape so this helper works
-    against both the W8 additive interface and any earlier vault
+    against both the  additive interface and any earlier vault
     fixture used in tests.
     """
     try:

@@ -1,4 +1,4 @@
-"""W22 — Twin executor approval-bypass: a registered TwinExecutor is
+""" — Twin executor approval-bypass: a registered TwinExecutor is
 unreachable without an approval that flowed through TwinPolicyEngine.
 
 Bypass attempts simulated:

@@ -278,7 +278,7 @@ def test_save_all_never_writes_plaintext_credentials_json(wizard_home, mock_cons
 def test_save_all_does_not_clobber_legacy_plaintext_until_vault_migrates(
     wizard_home, mock_console
 ):
-    """Returning users with a pre-W9 ``credentials.json`` must have
+    """Returning users with a  ``credentials.json`` must have
     their keys preserved via the BlindVault auto-migration. After
     ``_save_all`` the plaintext file is gone (moved to
     ``credentials.json.bak.legacy``) and the encrypted vault is the

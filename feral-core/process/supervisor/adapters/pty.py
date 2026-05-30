@@ -1,4 +1,4 @@
-"""W18: PTY adapter — spawns commands inside a real controlling TTY.
+"""PTY adapter — spawns commands inside a real controlling TTY.
 
 FERAL uses the stdlib ``pty`` + raw ``os.fork`` + ``os.execvpe`` because
 (a) we want zero non-stdlib dependencies for the supervisor, (b) the
@@ -9,7 +9,7 @@ module hands us exactly the mechanism we need on POSIX.
 Windows is explicitly unsupported — we raise ``NotImplementedError``
 at adapter creation time. ConPTY would be the right Windows answer
 later but it requires ``pywin32`` + a non-trivial implementation; out
-of scope for W18.
+of scope for .
 
 The child runs under a **login shell** (``/bin/zsh -l`` on macOS,
 ``/bin/bash -l`` on Linux) so the child sees the operator's normal

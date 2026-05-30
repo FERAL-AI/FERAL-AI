@@ -86,7 +86,7 @@ from api.routes.apps import router as apps_router
 from api.routes.uploads import router as uploads_router  # PR 10
 from api.routes.supervisor import router as supervisor_router
 from api.routes.twin import router as twin_router
-from api.routes.sessions import router as sessions_router  # W17
+from api.routes.sessions import router as sessions_router  # 
 from api.routes.capabilities import router as capabilities_router  # Phase 5
 from api.routes.system_permissions import router as system_permissions_router  # Phase 11
 from api.routes.discovery import router as discovery_router  # Phase 13
@@ -228,10 +228,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 
 def _emit_http_metrics(request, response, started_at: float) -> None:
-    """W13 proof-of-concept: emit feral_http_requests_total + duration.
+    """ proof-of-concept: emit feral_http_requests_total + duration.
 
     This is the ONLY emit() call site this PR ships — every other
-    module's emit() wiring is deferred to W13.1 so each owning
+    module's emit() wiring is deferred to  so each owning
     workstream lands its own changes inside its own owned-paths set.
     """
     from observability.metrics import emit  # local import — keeps the
@@ -662,7 +662,7 @@ app.include_router(apps_router)
 app.include_router(uploads_router)  # PR 10
 app.include_router(supervisor_router)
 app.include_router(twin_router)
-app.include_router(sessions_router)  # W17
+app.include_router(sessions_router)  # 
 app.include_router(capabilities_router)  # Phase 5 — capability registry
 app.include_router(system_permissions_router)  # Phase 11 — macOS TCC state
 app.include_router(discovery_router)  # Phase 13 — brain identity discovery
@@ -708,7 +708,7 @@ async def install_phone_bridge_script():
 
 # /metrics ownership notes
 # ─────────────────────────
-# W13 (roadmap §3.1 #4) flipped this endpoint from default-OFF to
+#  (roadmap §3.1 #4) flipped this endpoint from default-OFF to
 # default-ON-on-loopback. Two switches gate it:
 #
 #   FERAL_METRICS_ENDPOINT  — kill switch. Set to "0"/"false" to silence
@@ -720,12 +720,12 @@ async def install_phone_bridge_script():
 #
 # Off-loopback default is 404 (NOT 401/403) so the response is
 # indistinguishable from "endpoint not mounted" — preserving the
-# pre-W13 public-internet behaviour for unconfigured installs.
+#  public-internet behaviour for unconfigured installs.
 #
-# The body concatenates the W13 prometheus_client REGISTRY (Grafana /
+# The body concatenates the  prometheus_client REGISTRY (Grafana /
 # alert-rule surface) with the legacy in-memory snapshot lines so
-# pre-W13 ``increment()``/``observe()`` call sites stay scrapeable
-# during the cross-module emit() rollout (W13.1 follow-up).
+#  ``increment()``/``observe()`` call sites stay scrapeable
+# during the cross-module emit() rollout ( follow-up).
 
 _METRICS_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
 
@@ -751,8 +751,8 @@ async def metrics_endpoint(request: Request):
     from starlette.responses import PlainTextResponse
     body, content_type = _render_prometheus()
 
-    # Append legacy in-memory snapshot lines so pre-W13 increment()/observe()
-    # callers remain scrapeable until W13.1 migrates them to emit().
+    # Append legacy in-memory snapshot lines so  increment()/observe()
+    # callers remain scrapeable until  migrates them to emit().
     snap = _metrics_snapshot()
     legacy_lines: list[str] = []
     for name, v in snap["counters"].items():
@@ -885,7 +885,7 @@ async def startup():
     async def _provider_catalog_refresher():
         """Refresh the ProviderCatalog every 6h while the Brain is up.
 
-        Owned by W1 (Roadmap §3.5 P0 / Appendix A.1): the daily
+        Owned by  (Roadmap §3.5 P0 / Appendix A.1): the daily
         provider-research.yml cron keeps the bundled `model_catalog.json`
         current for fresh clones, but a brain that's been running for
         days would otherwise serve a 24h+ stale model list to the v2

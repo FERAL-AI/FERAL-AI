@@ -1,4 +1,4 @@
-"""W18: overall (wall-clock) timeout kills the child within budget.
+"""overall (wall-clock) timeout kills the child within budget.
 
 Contract: "enforces overall timeout". Spec: ``sleep 10`` with
 overall_timeout=1 must die within
@@ -38,7 +38,7 @@ async def test_overall_timeout_kills_within_budget() -> None:
     assert handle.kill_reason == "overall_timeout"
     # asyncio reports signal-terminated children as a negative
     # returncode (``-SIGTERM`` == -15, ``-SIGKILL`` == -9). Either is
-    # acceptable per the W18 spec.
+    # acceptable per the spec.
     assert record.exit_code is not None
     assert record.exit_code < 0, (
         f"expected signal exit (negative rc); got exit_code={record.exit_code}"

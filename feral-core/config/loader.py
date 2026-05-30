@@ -413,7 +413,7 @@ class ConfigLoader:
         Environment variables override vault values only when explicitly
         set in the process environment (ops / CI convenience). Legacy
         plaintext ``credentials.json`` is never read here — opening the
-        vault triggers W9 migration into ``credentials.enc`` when needed.
+        vault triggers  migration into ``credentials.enc`` when needed.
         """
         self._credentials = {}
         cred_path = self.user_home / "credentials.json"
@@ -608,9 +608,9 @@ class ConfigLoader:
         logger.info(f"User settings saved to {path}")
 
     def save_credentials(self, credentials: dict):
-        """Persist credentials to the W9 encrypted BlindVault.
+        """Persist credentials to the  encrypted BlindVault.
 
-        W24b (v2026.5.0): the pre-W9 implementation wrote the plaintext
+         (v2026.5.0): the  implementation wrote the plaintext
         ``~/.feral/credentials.json`` alongside the encrypted vault,
         leaking every API key to disk as a P0 security regression. The
         legacy file is no longer written under any condition — the

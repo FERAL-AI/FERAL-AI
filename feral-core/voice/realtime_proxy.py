@@ -632,7 +632,7 @@ class RealtimeProxy:
         await rs.connect()
         if not getattr(rs, 'connected', False) and not getattr(rs, '_ws', None):
             logger.warning("Voice session failed to connect for %s", session_id)
-            # Lane 05 W9 (AUDIT-r14 finding 15 fix #2): pre-fix the
+            # Lane 05  (AUDIT-r14 finding 15 fix #2): pre-fix the
             # connect-time failure path returned None silently and the
             # phone never saw a ``voice_status`` frame — the user got
             # dead air with no banner. Now we route the failure through

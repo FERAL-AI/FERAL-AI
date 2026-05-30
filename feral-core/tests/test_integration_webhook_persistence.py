@@ -1,5 +1,5 @@
 """
-W19 (finding-19 cross-cut) — integration ingress webhook configs
+ (finding-19 cross-cut) — integration ingress webhook configs
 survive a brain restart.
 
 Pre-v2026.5.43 ``WebhookReceiver._configs`` was a process-local dict

@@ -1,4 +1,4 @@
-"""macOS TCC preflight (audit-r14 / lane-07 W7 — R-PROD-004).
+"""macOS TCC preflight (audit-r14 / lane-07  — R-PROD-004).
 
 Reads the read-only TCC probes from ``security.macos_permissions`` and
 shows the operator the status of Calendar / Reminders / Contacts /

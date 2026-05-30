@@ -1,5 +1,5 @@
 """
-``feral key`` — vault key lifecycle CLI (W9).
+``feral key`` — vault key lifecycle CLI ().
 
 Subcommands:
   - ``feral key status``  — show vault status (encrypted? master key
@@ -17,13 +17,13 @@ which is invoked from ``cli/main.py``. Doing the registration in this
 file keeps the CLI surface for the security path testable without
 importing the whole brain.
 
-audit-r14 / lane-06 (v2026.5.38) — the W16 ``feral key list / migrate
+audit-r14 / lane-06 (v2026.5.38) — the  ``feral key list / migrate
 / rotate --provider --agent --key`` commands and the per-agent
 ``AuthProfileFileStore`` they wrote to were removed. The audit
 finding documented zero runtime consumers outside this file and the
-W16 unit tests, and Lane 03's Wave 1 work made BlindVault the single
+ unit tests, and Lane 03's Wave 1 work made BlindVault the single
 credential authority that every provider, skill, and integration
-resolves through. Keeping W16's plaintext-JSON shadow store alive
+resolves through. Keeping  plaintext-JSON shadow store alive
 forced operators to maintain two truths for the same key; deleting it
 finishes the audit-r12 #2 fix.
 """
@@ -90,7 +90,7 @@ def register_key_subparser(sub: "argparse._SubParsersAction") -> None:
     """Register ``feral key {status,rotate,recover,add,list,remove}``
     under the main ``feral`` argparse subparsers group.
 
-    audit-r14 / lane-07 W3 — the per-provider multi-key surface
+    audit-r14 / lane-07  — the per-provider multi-key surface
     (``add``/``list``/``remove`` and the label-aware ``rotate``)
     wraps Wave 2 Lane 09's ``security.vault_keys`` overlay. The
     legacy master-key ``rotate`` (no ``--provider``) is preserved
@@ -157,7 +157,7 @@ def register_key_subparser(sub: "argparse._SubParsersAction") -> None:
              "leaves the secret in your shell history).",
     )
 
-    # ── audit-r14 / lane-07 W3 — multi-key per-provider commands ──
+    # ── audit-r14 / lane-07  — multi-key per-provider commands ──
 
     add_p = key_sub.add_parser(
         "add",
@@ -408,7 +408,7 @@ def cmd_key_recover(*, code: str = "") -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Per-provider multi-key (audit-r14 / lane-07 W3)
+# Per-provider multi-key (audit-r14 / lane-07 )
 # ─────────────────────────────────────────────────────────────────────
 #
 # These commands wrap ``security.vault_keys`` (Wave 2 Lane 09's

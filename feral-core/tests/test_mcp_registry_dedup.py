@@ -1,4 +1,4 @@
-"""Lane 05 W10 — MCP registry fixes + tool dedup.
+"""Lane 05  — MCP registry fixes + tool dedup.
 
 Closes AUDIT-r14 finding 16 fix #5:
   * ``MCPServerRegistry.list_known`` now reads ``_servers`` (the

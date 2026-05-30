@@ -135,10 +135,10 @@ class TestCredentials:
         assert safe["has_llm_key"] is True
 
     def test_save_credentials_never_writes_plaintext(self, temp_dirs, monkeypatch):
-        """W24b: ``save_credentials`` must never touch plaintext
+        """``save_credentials`` must never touch plaintext
         ``credentials.json``. The encrypted vault is the sole on-disk
         store; the in-memory ``_credentials`` dict stays hot for env
-        export. Replaces the pre-W9 ``_sets_permissions`` test which
+        export. Replaces the  ``_sets_permissions`` test which
         encoded the v2026.5.0 plaintext-leak regression as correct."""
         _, user_home, _ = temp_dirs
         monkeypatch.setenv("FERAL_HOME", str(user_home))

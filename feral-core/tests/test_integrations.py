@@ -156,7 +156,7 @@ class TestHealthPlatforms:
 
     @pytest.mark.asyncio
     async def test_aggregator_summary_empty(self):
-        """Lane 05 W5: HealthAggregator.execute now wraps the bare
+        """Lane 05 : HealthAggregator.execute now wraps the bare
         snapshot dict in the canonical {success, status_code, data,
         error} envelope used by every other skill backend, so the
         snapshot fields live under result['data'] instead of at the

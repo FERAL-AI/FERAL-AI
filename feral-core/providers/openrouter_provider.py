@@ -56,7 +56,7 @@ class OpenRouterProvider(BaseProvider):
     # Vision is in the superset because OpenRouter routes vision
     # requests to vision-capable downstreams. Per-model narrowing runs
     # through :meth:`_capabilities_for_model` which consults the live
-    # router snapshot. See the W24a proposal §4 for the full rationale.
+    # router snapshot. See the  proposal §4 for the full rationale.
     _capabilities = {"tool_calling", "streaming", "vision", "thinking", "json_mode"}
 
     def __init__(

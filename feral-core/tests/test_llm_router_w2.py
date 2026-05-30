@@ -137,7 +137,7 @@ def test_anthropic_stream_invokes_failover_on_pre_token_error():
 
 def test_reconfigure_threads_base_url_into_switch_provider():
     """``reconfigure(base_url=...)`` MUST pass the kwarg through to
-    ``switch_provider`` — the pre-W2 implementation set the env var
+    ``switch_provider`` — the  implementation set the env var
     only, leaving the running adapter pointed at the old URL."""
     from agents.llm_provider import LLMProvider
 
@@ -514,7 +514,7 @@ def test_chat_with_failover_returns_budget_exceeded_block():
 def test_extract_usage_picks_up_reasoning_tokens():
     """Reasoning tokens land in ``completion_tokens_details.reasoning_tokens``
     on OpenAI Responses-style outputs and are billed at the output rate
-    (Wave 1 Lane 04 + W2 fix #5)."""
+    (Wave 1 Lane 04 +  fix #5)."""
     from agents.llm_provider import LLMProvider
 
     result = {

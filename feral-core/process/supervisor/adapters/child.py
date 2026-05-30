@@ -1,4 +1,4 @@
-"""W18: child-process adapter built on ``asyncio.create_subprocess_exec``.
+"""child-process adapter built on ``asyncio.create_subprocess_exec``.
 
 FERAL ships the POSIX-first, asyncio-native cut: asyncio gives us the
 TERM/KILL/wait primitives natively, so the adapter stays small.

@@ -1,11 +1,11 @@
 /**
- * W10 (V1.0 cut-list #8 → S6 thesis full) — the yellow inline
+ * V1.0 cut-list #8 → S6 thesis full — the yellow inline
  * BudgetExceededBanner now also lights up when the brain emits the
  * background-subsystem cap-hit signal.
  *
  * The brain wraps every cross-subsystem broadcast (BudgetLoopGuard,
  * proactive engine, cron, email, mqtt, screen_loop) as
- *   { type: 'state_push', event: <name>, data: <payload> }
+ * { type: 'state_push', event: <name>, data: <payload> }
  * via BrainState.broadcast_event. Pre-v2026.5.43 the Chat handler
  * only branched on top-level ``msg.type === 'budget_exceeded'`` (the
  * orchestrator's session-scoped frame) and silently dropped the
@@ -15,12 +15,12 @@
  * These tests pin the contract:
  *
  * 1. ``state_push`` with ``event === 'cost_cap_hit'`` renders the
- *    same yellow banner, keyed by ``call_site``.
+ * same yellow banner, keyed by ``call_site``.
  * 2. The legacy ``budget_exceeded`` frame still works (backwards
- *    compat — chat-path orchestrator emit unchanged).
+ * compat — chat-path orchestrator emit unchanged).
  * 3. The banner copy prefers the ``subsystem`` field when present
- *    (e.g. ``"ScreenLoop budget reached"`` instead of
- *    ``"Screen_loop budget reached"``).
+ * (e.g. ``"ScreenLoop budget reached"`` instead of
+ * ``"Screen_loop budget reached"``).
  */
 
 import React from 'react';
@@ -84,9 +84,9 @@ describe('Chat — cost_cap_hit banner (S6 ScreenLoop closer)', () => {
 
     const banner = screen.getByTestId('budget-exceeded-banner');
     expect(banner).toBeInTheDocument();
-    // Subsystem-driven copy — explicit "ScreenLoop" wins over the
-    // humanized call_site ("Screen loop"). Pinning this catches a
-    // regression where someone forgets to thread the prop through.
+ // Subsystem-driven copy — explicit "ScreenLoop" wins over the
+ // humanized call_site ("Screen loop"). Pinning this catches a
+ // regression where someone forgets to thread the prop through.
     expect(banner.textContent).toMatch(/ScreenLoop budget reached/);
     expect(banner.textContent).toMatch(/\$0\.10/);
   });

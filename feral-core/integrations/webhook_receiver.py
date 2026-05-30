@@ -143,7 +143,7 @@ class WebhookReceiver:
     Verifies HMAC signatures when configured, normalizes events,
     and publishes them to the EventBus.
 
-    W19 (finding-19 cross-cut): per-app configs now live in the
+     (finding-19 cross-cut): per-app configs now live in the
     process-local cache ``self._configs`` **backed by** an optional
     :class:`integrations.webhook_store.WebhookStore`. When a store is
     wired and :meth:`hydrate_from_store` is awaited at boot:

@@ -191,7 +191,7 @@ async def set_audio_config(req: AudioConfigRequest):
 
 
 # ----------------------------------------------------------------------
-# Lane 05 W8: voice provider sovereignty (THESIS_SCENARIOS S4)
+# Lane 05 : voice provider sovereignty (THESIS_SCENARIOS S4)
 # ----------------------------------------------------------------------
 #
 # /api/voice/providers — flat list of every realtime / STT / TTS
@@ -214,7 +214,7 @@ async def list_voice_providers():
     latency_ms?: float}``.
 
     The list is populated from
-    ``security.probe.voice_provider_catalogue()`` (Lane 05 W7); the
+    ``security.probe.voice_provider_catalogue()`` (Lane 05 ); the
     probe status is read from the cached probe registry — call
     ``POST /api/voice/providers/probe`` to force a refresh.
     """

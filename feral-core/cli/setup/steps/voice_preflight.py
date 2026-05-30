@@ -1,4 +1,4 @@
-"""Voice provider preflight (audit-r14 / lane-07 W7).
+"""Voice provider preflight (audit-r14 / lane-07 ).
 
 After the operator picks an LLM provider + model, this step runs the
 Wave 2 Lane 05 voice catalogue through ``security.probe.probe`` and

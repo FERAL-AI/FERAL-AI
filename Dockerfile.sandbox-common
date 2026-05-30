@@ -1,26 +1,26 @@
 # syntax=docker/dockerfile:1.7
 #
-# FERAL sandbox common base image (W22).
+# FERAL sandbox common base image.
 # =====================================
 # Used as the FROM target by both:
-#   - Dockerfile.sandbox          (tool-genesis + W17 worker code)
-#   - Dockerfile.sandbox-browser  (Chromium-backed AppSurface iframe)
+# - Dockerfile.sandbox (tool-genesis + subagent worker code)
+# - Dockerfile.sandbox-browser (Chromium-backed AppSurface iframe)
 #
 # Provides:
-#   - python:3.12-slim base (pinned by digest is left to the build helper
-#     in feral-core/security/sandbox_image.py so a single content-hash
-#     bump there flows to the image tag).
-#   - non-root `feral` user (uid/gid 1000); a brain build that doesn't
-#     pass --user feral to docker run is a misconfiguration the launcher
-#     in feral-core/security/docker_sandbox.py refuses.
-#   - The minimum apt deps needed by the watchdog and by tool-genesis-
-#     generated Python / Node / shell snippets.
+# - python:3.12-slim base (pinned by digest is left to the build helper
+# in feral-core/security/sandbox_image.py so a single content-hash
+# bump there flows to the image tag).
+# - non-root `feral` user (uid/gid 1000); a brain build that doesn't
+# pass --user feral to docker run is a misconfiguration the launcher
+# in feral-core/security/docker_sandbox.py refuses.
+# - The minimum apt deps needed by the watchdog and by tool-genesis-
+# generated Python / Node / shell snippets.
 #
 # Run-time invariants the launcher always passes (NOT enforced in this
 # Dockerfile because they're runtime flags):
-#   --read-only --network=none --cap-drop=ALL --pids-limit=64
-#   --memory 256m --cpus 1 --tmpfs /tmp:rw,nosuid,size=128m
-#   --user feral
+# --read-only --network=none --cap-drop=ALL --pids-limit=64
+# --memory 256m --cpus 1 --tmpfs /tmp:rw,nosuid,size=128m
+# --user feral
 #
 # This image is a base; running it directly does nothing useful.
 
@@ -50,6 +50,6 @@ WORKDIR /home/feral
 USER feral
 
 LABEL org.feral-ai.image.kind="sandbox-common" \
-      org.feral-ai.image.role="base for Dockerfile.sandbox and Dockerfile.sandbox-browser"
+ org.feral-ai.image.role="base for Dockerfile.sandbox and Dockerfile.sandbox-browser"
 
 CMD ["python3", "-c", "import sys; sys.stderr.write('feral-sandbox-common is a base image; FROM it from Dockerfile.sandbox or Dockerfile.sandbox-browser.\\n'); sys.exit(64)"]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-W12 — standalone channel soak harness.
+ — standalone channel soak harness.
 
 Same env-gated harness the pytest suite runs, but exposed as a script
 ops can fire from a runbook. One message every N seconds for the

@@ -78,7 +78,7 @@ class Provider(Protocol):
     # NOTE: ``list_models`` is intentionally kept zero-arg on the
     # Protocol to preserve structural compatibility with legacy adapters
     # (community-installed providers written against the v1 surface).
-    # The chat-only filter in W24a lives on :class:`BaseProvider` as an
+    # The chat-only filter in  lives on :class:`BaseProvider` as an
     # optional extension: ``BaseProvider.list_models(model_class="chat")``
     # filters via :mod:`providers.model_classes`. The ``ProviderCatalog``
     # detects the capability via ``inspect.signature`` so mixed fleets

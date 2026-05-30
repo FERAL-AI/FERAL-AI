@@ -1,5 +1,5 @@
 """
-W11 (V1.0 cut-list #11 → S5 thesis) — vacuum_* round-trip is exposed
+ (V1.0 cut-list #11 → S5 thesis) — vacuum_* round-trip is exposed
 via the smart_home manifest AND wired into the HomeAssistant dispatch
 table.
 

@@ -139,7 +139,7 @@ async def update_webhook_config(app_id: str, body: dict):
     for an integration ingress webhook (GitHub, Stripe, Home
     Assistant, Notion, …).
 
-    W19 (finding-19): pre-v2026.5.43 there was no production HTTP
+     (finding-19): pre-v2026.5.43 there was no production HTTP
     surface for setting these secrets — operators had to monkey-patch
     ``_configs`` in a Python shell and the value vanished on restart.
     The receiver now writes through to the WebhookStore so the secret

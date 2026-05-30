@@ -1,4 +1,4 @@
-"""W17: subagent lifecycle — spawn → run → reap, and parent-cancel propagation.
+"""subagent lifecycle — spawn → run → reap, and parent-cancel propagation.
 
 Part of the canonical lifecycle test set: allowlist / cron-note /
 lifecycle / model / scope.
@@ -81,7 +81,7 @@ async def test_parent_cancel_propagates_within_200ms():
 
 @pytest.mark.asyncio
 async def test_orchestrator_session_lock_teardown_cancels_subsessions(monkeypatch):
-    """The additive try/finally in handle_command must call the W17 cancel hook."""
+    """The additive try/finally in handle_command must call the  cancel hook."""
     register_runner(_hold_until_cancel_runner)
     from agents.orchestrator import Orchestrator
 

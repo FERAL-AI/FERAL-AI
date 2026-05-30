@@ -7,7 +7,7 @@ data flows into the brain through this skill).
 The manifest declares three endpoints (health_summary, sleep_trend,
 recovery_trend) which match the HealthAggregator.execute dispatch.
 The aggregator's execute() signature was also missing the third
-``vault`` arg the skill executor passes — fixed in W5 so dispatch
+``vault`` arg the skill executor passes — fixed in  so dispatch
 no longer raises TypeError on the very first call.
 """
 

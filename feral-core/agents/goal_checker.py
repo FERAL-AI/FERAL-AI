@@ -1,5 +1,5 @@
 """PR 7: GoalChecker — deterministic done/blocked/continue verdict for
-long-horizon work (W17 subsessions, TaskFlows, IntentCompiler plans).
+long-horizon work ( subsessions, TaskFlows, IntentCompiler plans).
 
 Design
 ------

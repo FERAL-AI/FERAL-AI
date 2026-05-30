@@ -1,6 +1,6 @@
 """Classifier tests for ``providers.model_classes.classify``.
 
-Coverage contract (per W24a proposal §8):
+Coverage contract (per  proposal §8):
 
 * ≥3 cases per provider × every known class.
 * Each class listed in ``list_classes()`` has at least one test that

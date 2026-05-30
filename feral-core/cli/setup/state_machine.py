@@ -1,6 +1,6 @@
 """Tiny state machine that drives the linear wizard flow with back/quit.
 
-audit-r14 / lane-07 W7 — adds resume support. After every successful
+audit-r14 / lane-07  — adds resume support. After every successful
 step the machine calls :meth:`WizardState.write_setup_state` so a
 crash / quit mid-flow leaves a sidecar at
 ``~/.feral/setup_state.json``. The next ``feral setup`` invocation
@@ -97,7 +97,7 @@ class StateMachine:
                 )
                 return
         else:
-            # Lane 07 W7 — resume support. If a sidecar exists from a
+            # Lane 07  — resume support. If a sidecar exists from a
             # previous interrupted run, offer to skip ahead to the next
             # un-completed step instead of forcing the user to re-walk
             # the provider / model / audio prompts.

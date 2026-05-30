@@ -1,4 +1,4 @@
-"""W21 — bundled-manifest discovery + capability registry."""
+""" — bundled-manifest discovery + capability registry."""
 
 from __future__ import annotations
 

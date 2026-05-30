@@ -1,6 +1,6 @@
-"""W18: scope_cancel kills every matching child within 200ms.
+"""scope_cancel kills every matching child within 200ms.
 
-Contract: scope-cancel composes with W17's scope_key concept. Spec:
+Contract: scope-cancel composes with  scope_key concept. Spec:
 spawn 5 children with scope_key="batch-A",
 1 child with scope_key="batch-B"; call scope_cancel("batch-A");
 assert all 5 dead within 200ms; assert the survivor still running.

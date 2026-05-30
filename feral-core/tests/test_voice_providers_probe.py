@@ -9,7 +9,7 @@ gated on vault key + probe":
   * Cartesia TTS module is importable, registers itself with the
     chained pipeline registry, builds a valid Sonic-2 payload.
   * voice_provider_catalogue() returns the structured list the
-    /api/voice/providers REST surface (Lane 05 W8) consumes.
+    /api/voice/providers REST surface (Lane 05 ) consumes.
 """
 
 from __future__ import annotations
@@ -185,7 +185,7 @@ async def test_cartesia_rest_payload_shape(monkeypatch):
     assert payload["language"] == "en"
 
 
-# ── Voice catalogue surface (W8 hook) ─────────────────────────────
+# ── Voice catalogue surface ( hook) ─────────────────────────────
 
 
 def test_voice_provider_catalogue_lists_all_eight():

@@ -1,4 +1,4 @@
-"""Regression guard for BrainState orchestrator wiring order (W3-A10)."""
+"""Regression guard for BrainState orchestrator wiring order (-A10)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def test_orchestrator_boot_block_has_no_preengine_wiring_calls() -> None:
     assert tool_genesis_marker in post_orchestrator
     pre_tool_genesis = post_orchestrator.split(tool_genesis_marker, 1)[0]
 
-    # W3-A10: the orchestrator boot block should not try to wire engines
+    # -A10: the orchestrator boot block should not try to wire engines
     # before those engines are constructed.
     assert "set_tool_genesis(" not in pre_tool_genesis
     assert "set_mitosis_engine(" not in pre_tool_genesis

@@ -1,4 +1,4 @@
-"""W18: registry finalize stamps finished_at + exit_code; clears active.
+"""registry finalize stamps finished_at + exit_code; clears active.
 
 Contract: "finalize sets exited state". Spec: spawn → wait →
 finalize; assert RunRecord has
@@ -37,7 +37,7 @@ async def test_spawn_wait_finalize_populates_record() -> None:
 
     record = await handle.wait()
 
-    # Post-finalize: every field the W18 spec names is populated.
+    # Post-finalize: every field the spec names is populated.
     assert record.finished_at is not None
     assert record.finished_at >= record.started_at
     assert record.exit_code == 0

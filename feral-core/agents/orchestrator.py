@@ -411,7 +411,7 @@ class Orchestrator:
         scope_key: str,
         model_override: Optional[str] = None,
     ) -> str:
-        """Spawn a child subsession of *parent_session_id* (W17).
+        """Spawn a child subsession of *parent_session_id* ().
 
         Delegates to :func:`agents.subagent_spawner.spawn_subsession`.
         Raises :class:`agents.subagent_spawner.SubagentNotAllowed` when
@@ -431,7 +431,7 @@ class Orchestrator:
         )
 
     def _w17_cancel_subsessions_nowait(self, parent_session_id: str) -> None:
-        """Sync hook called from the session-lock teardown path (W17).
+        """Sync hook called from the session-lock teardown path ().
 
         All-children-tied by default — every subagent registered under
         *parent_session_id* is cancelled. Call sites that need to keep
@@ -1492,7 +1492,7 @@ class Orchestrator:
             async with self._get_session_lock(session_id):
                 return await self._handle_command_impl(session_id, text, context)
         finally:
-            # W17: tear down subagents tied to this parent session.
+            # : tear down subagents tied to this parent session.
             # Lock release stays synchronous; cancellation is fire-and-forget.
             self._w17_cancel_subsessions_nowait(session_id)
 
@@ -1945,7 +1945,7 @@ class Orchestrator:
             async with self._get_session_lock(session_id):
                 return await self._handle_command_stream_impl(session_id, text, context)
         finally:
-            # W17: tear down subagents tied to this parent session.
+            # : tear down subagents tied to this parent session.
             self._w17_cancel_subsessions_nowait(session_id)
 
     async def _handle_command_stream_impl(self, session_id: str, text: str, context: Optional[dict] = None):

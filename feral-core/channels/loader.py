@@ -1,14 +1,14 @@
-"""W21 Phase 1 — bundled-manifest discovery + capability registry.
+""" Phase 1 — bundled-manifest discovery + capability registry.
 
 Phase 1 only walks the in-tree bundle path
 (``feral-core/channels/<id>/feral-channel.manifest.json``). 3rd-party
 discovery (entry points, plugin directories, marketplace) is deferred
-to W21.4 — see ``docs/contributing-channels.md`` for the roadmap.
+to  — see ``docs/contributing-channels.md`` for the roadmap.
 
 The capability registry is the read-only index the rest of FERAL
 consults instead of importing channel implementations directly. Today
 that's `messaging_providers()` etc.; the same shape will hold once the
-voice/file/webhook channels migrate (W21.2).
+voice/file/webhook channels migrate ().
 """
 
 from __future__ import annotations
@@ -214,7 +214,7 @@ def load_with_verification(
       envelope and any manifest whose signature does not verify.
     * ``allow_unsigned=True`` accepts unsigned manifests but STILL
       rejects a present-but-invalid signature — a tampered envelope is
-      always an error, no matter the policy. This matches the W8
+      always an error, no matter the policy. This matches the 
       pattern where ``--allow-unsigned`` is a developer convenience,
       not a vulnerability.
     * ``public_key_provider`` is forwarded to

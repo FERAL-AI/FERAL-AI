@@ -2,13 +2,13 @@
  * AppSurface — sandbox + CSP regression tests.
  *
  * Roadmap §3.3 #2 demands the surface render inside an iframe with:
- *   - sandbox="allow-scripts" and explicitly NOT "allow-same-origin"
- *   - referrerpolicy="no-referrer"
- *   - a <meta http-equiv="Content-Security-Policy"> in the srcdoc
- *     whose connect-src/img-src/script-src directives are derived from
- *     manifest.permissions.network.
+ * - sandbox="allow-scripts" and explicitly NOT "allow-same-origin"
+ * - referrerpolicy="no-referrer"
+ * - a <meta http-equiv="Content-Security-Policy"> in the srcdoc
+ * whose connect-src/img-src/script-src directives are derived from
+ * manifest.permissions.network.
  *
- * The W8 spec text mentioned `feral-core/tests/test_genui_csp.py` but
+ * The spec text mentioned `feral-core/tests/test_genui_csp.py` but
  * AppSurface itself is a React component, so this lives as a vitest in
  * feral-client-v2/.
  */
@@ -98,18 +98,18 @@ describe('AppSurface sandbox + CSP', () => {
     expect(csp).toContain("frame-ancestors 'self'");
     expect(csp).toContain("base-uri 'none'");
     expect(csp).toContain("form-action 'none'");
-    // No wildcard outbound network ever.
+ // No wildcard outbound network ever.
     expect(csp).not.toMatch(/connect-src[^;]*\*/);
   });
 
   it('derives connect-src directives from manifest.permissions.network', async () => {
     const { findByTestId } = renderWithFixture({
-      network: ['https://api.example.com', 'https://cdn.example.com'],
+ network: ['https://api.example.com', 'https://cdn.example.com'],
     });
     const iframe = await findByTestId('v2-appsurface-iframe');
     const csp = extractCspContent(iframe.getAttribute('srcdoc') || '');
     expect(csp).not.toBeNull();
-    expect(csp).toContain('connect-src https://api.example.com https://cdn.example.com');
+ expect(csp).toContain('connect-src https://api.example.com https://cdn.example.com');
     expect(csp).not.toMatch(/connect-src[^;]*\*/);
   });
 });

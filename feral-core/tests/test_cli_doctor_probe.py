@@ -1,4 +1,4 @@
-"""audit-r14 / lane-07 (W2) — `feral doctor` uses probe() for validity,
+"""audit-r14 / lane-07 () — `feral doctor` uses probe() for validity,
 not env-var presence; exit-code reflects severity.
 
 Closes finding 07 D-D (operator-facing "`feral doctor` reports ✔ LLM
@@ -211,7 +211,7 @@ def test_doctor_renders_cost_budget_section(monkeypatch, capsys):
 
 
 # ----------------------------------------------------------------------
-# Section: macOS TCC deeplink (Lane 07 W2 — R-PROD-004)
+# Section: macOS TCC deeplink (Lane 07  — R-PROD-004)
 # ----------------------------------------------------------------------
 
 

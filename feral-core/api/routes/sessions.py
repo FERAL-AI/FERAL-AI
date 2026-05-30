@@ -1,4 +1,4 @@
-"""W17: Sessions REST surface.
+"""Sessions REST surface.
 
 Currently exposes a single endpoint::
 
@@ -250,7 +250,7 @@ async def post_spawn_subsession(session_id: str, body: dict | None = None):
 
 
 # ────────────────────────────────────────────────────────────────────
-# PR 7: List / cancel / steer for live W17 subsessions
+# PR 7: List / cancel / steer for live  subsessions
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -299,7 +299,7 @@ def _serialize_child(child: dict) -> dict:
 
 @router.get("/api/sessions/{session_id}/subsessions")
 async def list_subsessions(session_id: str):
-    """List active W17 child subsessions for *session_id*.
+    """List active  child subsessions for *session_id*.
 
     Returns ``{"subsessions": [{...}, ...]}``. Unknown parents return
     an empty list rather than 404 — the absence of children is a
@@ -422,7 +422,7 @@ async def get_active_agents():
 
     Returns three buckets:
 
-    * ``subsessions``: live W17 children across every registered parent.
+    * ``subsessions``: live  children across every registered parent.
     * ``taskflows``: open/running/waiting taskflow rows.
     * ``intent_plans``: active IntentCompiler plans.
 

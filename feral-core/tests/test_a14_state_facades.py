@@ -1,4 +1,4 @@
-"""W3-A14 regression tests for narrow state facades.
+"""-A14 regression tests for narrow state facades.
 
 Verifies the ``SandboxPort`` facade is honored by the high-impact skill
 execution paths (``SkillExecutor`` and ``WorkspaceScriptsSkill``) and that
@@ -252,7 +252,7 @@ async def test_workspace_scripts_set_sandbox_port_overrides_default(
 def test_default_port_lazy_imports_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default port re-reads ``api.state.state`` on every call.
 
-    Guards the contract relied on by W3-A12 regression tests that swap the
+    Guards the contract relied on by -A12 regression tests that swap the
     state module attribute at runtime.
     """
 
@@ -286,7 +286,7 @@ def test_executor_sandbox_path_does_not_import_api_state_directly(
 ) -> None:
     """``_sandbox_requirement_status`` must not re-import ``api.state``.
 
-    Catches accidental regressions of the W3-A14 facade indirection.
+    Catches accidental regressions of the -A14 facade indirection.
     """
 
     executor = SkillExecutor(

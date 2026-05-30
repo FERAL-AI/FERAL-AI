@@ -12,7 +12,7 @@
       }
     ]
   },
-  "description": "Default FERAL Brain overview dashboard — request rate, error rate, p95 latency, LLM provider failover signals, federated sync health, supervisor backlog, sandbox / tool denials, vault decrypt errors, and active WebSocket sessions. Owned by W13 (roadmap §3.1 #4). Metric definitions live in feral-core/observability/metrics.py; alert rules in ops/prometheus/alerts.yml.",
+  "description": "Default FERAL Brain overview dashboard — request rate, error rate, p95 latency, LLM provider failover signals, federated sync health, supervisor backlog, sandbox / tool denials, vault decrypt errors, and active WebSocket sessions. Metric definitions live in feral-core/observability/metrics.py; alert rules in ops/prometheus/alerts.yml.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -213,10 +213,10 @@
     },
     {
       "id": 9,
-      "title": "Vault decrypt errors (W9 placeholder)",
+      "title": "Vault decrypt errors (placeholder)",
       "type": "stat",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "Will activate when W19 (or whichever workstream owns the call site) wires emit() inside feral-core/security/vault.py. Until then this counter stays at 0 and the VaultDecryptFailed alert is dormant.",
+      "description": "Will activate when the vault call site wires emit() inside feral-core/security/vault.py. Until then this counter stays at 0 and the VaultDecryptFailed alert is dormant.",
       "targets": [
         {
           "expr": "increase(feral_vault_decrypt_errors_total[1h])",

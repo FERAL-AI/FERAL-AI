@@ -3184,11 +3184,11 @@ function TwinSection() {
   // right now — a stored policy whose executor is still bound, or any
   // discovery entry in `available`. Disconnected entries are stale and
   // do NOT count, which is what removes the kill-switch theatre on a
-  // brand-new install (Roadmap §A.5 / W2).
+  // brand-new install (Roadmap §A.5).
   const hasConfiguredExecutor = policies.length > 0 || available.length > 0;
 
   // Workaround: TwinSection cannot edit Settings.jsx lines outside its
-  // own range (W2 contract), so it cannot take a real `setSection`
+  // own range (Settings contract), so it cannot take a real `setSection`
   // prop yet. The Connect button on each "Available executors" row
   // therefore clicks the matching settings nav button via the DOM.
   const navigateToSettingsSection = (target) => {

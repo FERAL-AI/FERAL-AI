@@ -1,9 +1,9 @@
-"""W24b regression — v2 Settings "Save & switch" must NOT leak a
+""" regression — v2 Settings "Save & switch" must NOT leak a
 plaintext ``credentials.json`` to disk.
 
 v2026.5.0 shipped a P0 where every credential save (triggered by the v2
 Settings page's "Save & switch" button, wired to ``POST
-/api/config/credentials``) produced *two* on-disk artefacts: the W9
+/api/config/credentials``) produced *two* on-disk artefacts: the 
 encrypted ``~/.feral/credentials.enc`` AND a plaintext
 ``~/.feral/credentials.json`` written by ``ConfigLoader.save_credentials``.
 The maintainer's live log proved it:
@@ -11,7 +11,7 @@ The maintainer's live log proved it:
     [feral.vault] Credential stored: credentials.OPENAI_API_KEY
     [feral.config] Credentials saved to /Users/…/.feral/credentials.json
 
-W24b rewires ``ConfigLoader.save_credentials`` to route through the
+ rewires ``ConfigLoader.save_credentials`` to route through the
 BlindVault and never touch the plaintext file. This test boots the real
 FastAPI app with a real ``ConfigLoader`` + real ``BlindVault`` inside an
 isolated ``FERAL_HOME`` (no mocks on the write path), posts a credential,
@@ -21,7 +21,7 @@ and asserts:
     2. ``~/.feral/credentials.enc`` DOES exist.
     3. The route returns ``persisted_to_vault`` containing the key and
        ``persisted_to_credentials_json == True`` (the flag is a legacy
-       name — post-W24b it means "routed to vault via ConfigLoader",
+       name —  it means "routed to vault via ConfigLoader",
        which is exactly what we want: no disk-plaintext, success=True).
 """
 

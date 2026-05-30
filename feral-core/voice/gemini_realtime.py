@@ -316,7 +316,7 @@ class GeminiRealtimeProxy:
         # emits, otherwise the v2 chat trace cannot render them.
         self._orchestrator = orchestrator
         self._api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY", "")
-        # Lane 05 W9 (AUDIT-r14 finding 15 fix #3): fallback parity with
+        # Lane 05  (AUDIT-r14 finding 15 fix #3): fallback parity with
         # OpenAI Realtime. Without an attached VoiceRouter the
         # ``_handle_error`` path just logs and dies silent — the phone
         # never sees a ``voice_status`` frame, the user gets dead air.
@@ -375,7 +375,7 @@ class GeminiRealtimeProxy:
         await gs.connect()
         if not getattr(gs, 'connected', False) and not getattr(gs, '_ws', None):
             logger.warning("Gemini voice session failed to connect for %s", session_id)
-            # Lane 05 W9: same connect-failure fan-out OpenAI got in
+            # Lane 05 : same connect-failure fan-out OpenAI got in
             # workstream 9 — emit a structured ``voice_status:
             # degraded`` so the phone can render a fallback banner
             # instead of dead air.
@@ -627,7 +627,7 @@ class GeminiRealtimeProxy:
         """Classify a Gemini Live error and trigger fallback parity
         with OpenAI Realtime.
 
-        Lane 05 W9 (AUDIT-r14 finding 15 fix #3): pre-fix this method
+        Lane 05  (AUDIT-r14 finding 15 fix #3): pre-fix this method
         only ``logger.error``-ed and the session died silent. With
         ``_fallback_router`` attached at boot we now emit a structured
         ``voice_status: degraded`` frame + delegate to the chained

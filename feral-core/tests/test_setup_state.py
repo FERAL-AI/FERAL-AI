@@ -1,9 +1,9 @@
 """A7 — tests for ``cli.setup.state.WizardState``.
 
 Focuses on the credential persistence contract: every save MUST route
-credentials through the W9 encrypted ``BlindVault`` and MUST NOT leave
+credentials through the  encrypted ``BlindVault`` and MUST NOT leave
 a plaintext ``credentials.json`` on disk, even when the wizard is run
-repeatedly or when a legacy pre-W9 plaintext file is present.
+repeatedly or when a legacy  plaintext file is present.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def test_save_writes_settings_and_routes_credentials_to_vault(wizard_home):
 
     settings = json.loads((wizard_home / "settings.json").read_text())
     assert settings["llm"]["provider"] == "openai"
-    # W7 (lane-07): save() persists settings + credentials but must NOT
+    #  (lane-07): save() persists settings + credentials but must NOT
     # mark setup complete — only the finish step's mark_complete() does
     # (closes finding 09's "quit-marks-complete" defect). This test used
     # to assert the opposite, contradicting that intentional design.
@@ -109,7 +109,7 @@ def test_save_idempotent_no_plaintext_leak_across_runs(wizard_home):
 
 
 def test_load_migrates_legacy_plaintext_credentials(wizard_home):
-    """A pre-W9 install has ``credentials.json`` on disk. load() must
+    """A  install has ``credentials.json`` on disk. load() must
     surface those keys AND the subsequent save() must have removed the
     plaintext file (migrated to the encrypted vault + backup)."""
     legacy = wizard_home / "credentials.json"

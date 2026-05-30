@@ -1,4 +1,4 @@
-"""audit-r14 / lane-07 (W7) — wizard resume + setup_complete gating.
+"""audit-r14 / lane-07 () — wizard resume + setup_complete gating.
 
 Closes finding 09 D-D items:
   * "quit doesn't set setup_complete=True" — pre-fix, ``state.save()``

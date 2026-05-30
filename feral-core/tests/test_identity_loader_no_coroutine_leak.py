@@ -1,6 +1,6 @@
 """v2026.5.33 — identity_loader is now fully async.
 
-Pre-W24d ``_build_memory_context`` called ``asyncio.run`` on
+ ``_build_memory_context`` called ``asyncio.run`` on
 ``memory.build_context_for_llm_async`` which leaked coroutines when run
 inside a running event loop. v2026.5.33 removes the sync/async bridge
 entirely: ``_build_memory_context`` and ``build_system_prompt`` are

@@ -66,7 +66,7 @@ ALLOWED_FAIL_LABELS: set[str] = {
     "Config directory",
     # No LLM key in vault, no key in env, and no local Ollama.
     "LLM credentials",
-    # Lane 07 (W2) — probe-driven catch-all. When EVERY LLM probe
+    # Lane 07 () — probe-driven catch-all. When EVERY LLM probe
     # returns red or unconfigured, doctor fires this single
     # ``_fail`` so the operator sees one actionable line instead of
     # a wall of yellow rows. The per-provider rows themselves are
@@ -294,7 +294,7 @@ def doctor_clean_env(monkeypatch, tmp_path):
 
     monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
 
-    # Lane 07 (W2) — doctor now drives everything off
+    # Lane 07 () — doctor now drives everything off
     # ``security.probe.probe()``; the fresh-install behaviour test
     # therefore needs deterministic probe results. We model the
     # cleanest possible "user just ran `feral setup` with Ollama" by:

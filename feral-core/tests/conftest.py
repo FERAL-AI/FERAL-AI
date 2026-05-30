@@ -10,7 +10,7 @@ import os
 os.environ.setdefault("FERAL_RATE_LIMIT_RPM", "10000")
 
 
-# W12: soak tests are gated behind
+# : soak tests are gated behind
 # `--runsoak`. Without the flag every test marked `@pytest.mark.soak` is
 # skipped so the regular CI run stays fast and deterministic.
 def pytest_addoption(parser):
@@ -90,7 +90,7 @@ def isolate_feral_home(request, tmp_path, monkeypatch):
 def isolate_os_keychain(monkeypatch):
     """Replace the OS keychain with a per-test in-memory dict.
 
-    W9 made the OS keychain a hard dependency of the security path
+     made the OS keychain a hard dependency of the security path
     (BlindVault stores its master key there). Without this fixture the
     test suite would write `feral-ai/vault-master` into every developer's
     real macOS Keychain / Linux Secret Service / Windows Credential

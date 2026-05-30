@@ -1,6 +1,6 @@
 """LLM failover support: retry, error classification, cooldown tracking.
 
-Extracted from ``agents.llm_provider`` (W3-A15) to keep the orchestrator
+Extracted from ``agents.llm_provider`` (-A15) to keep the orchestrator
 facade focused on dispatch. No behaviour changes — every public symbol
 here was previously a module-level name in ``agents.llm_provider`` and
 is re-exported from there for import compatibility.

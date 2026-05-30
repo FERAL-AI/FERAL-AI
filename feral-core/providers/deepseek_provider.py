@@ -152,7 +152,7 @@ class DeepSeekProvider(BaseProvider):
         self._api_key = api_key
         # DeepSeek's OpenAI-compat surface lives at ``/v1`` under the
         # unversioned ``api.deepseek.com`` root. The ``/beta`` variant
-        # unlocks FIM + prefix completion (W25 will wire those).
+        # unlocks FIM + prefix completion ( will wire those).
         self._base_url = (base_url or "https://api.deepseek.com/v1").rstrip("/")
 
     async def chat(

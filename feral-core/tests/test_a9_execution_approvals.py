@@ -1,4 +1,4 @@
-"""Regression tests for W3-A9 execution approval wiring."""
+"""Regression tests for -A9 execution approval wiring."""
 
 from __future__ import annotations
 

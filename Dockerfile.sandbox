@@ -1,21 +1,21 @@
 # syntax=docker/dockerfile:1.7
 #
-# FERAL minimal sandbox image (W22).
+# FERAL minimal sandbox image.
 # ==================================
 # Used by:
-#   - tool-genesis-generated code (W8 GenUI app code that runs in the
-#     "code interpreter" execution slot)
-#   - W17 subagent-spawned worker code (kind=tool_runner / research / …)
+# - tool-genesis-generated code (GenUI app code that runs in the
+# "code interpreter" execution slot)
+# - subagent-spawned worker code (kind=tool_runner / research / …)
 #
 # Mount points (passed at `docker run` time by the launcher in
 # feral-core/security/docker_sandbox.py):
-#   /work        ro     — script the brain wants to execute
-#   /tmp         tmpfs  — scratch (rw, nosuid, size=128m)
+# /work ro — script the brain wants to execute
+# /tmp tmpfs — scratch (rw, nosuid, size=128m)
 #
 # Environment the launcher sets:
-#   FERAL_SANDBOX_ENTRY     path inside /work to execute (default /work/script.py)
-#   FERAL_SANDBOX_LANG      python | node | bash
-#   FERAL_SANDBOX_TIMEOUT_S integer wall-clock limit (default 30s)
+# FERAL_SANDBOX_ENTRY path inside /work to execute (default /work/script.py)
+# FERAL_SANDBOX_LANG python | node | bash
+# FERAL_SANDBOX_TIMEOUT_S integer wall-clock limit (default 30s)
 #
 # ENTRYPOINT runs the entry script under a Python watchdog that enforces
 # FERAL_SANDBOX_TIMEOUT_S via SIGALRM and forwards SIGTERM to the child
@@ -37,7 +37,7 @@ RUN apt-get update \
 
 COPY --chmod=0755 <<'WATCHDOG_EOF' /usr/local/bin/feral-sandbox-watchdog
 #!/usr/bin/env python3
-"""Inline watchdog baked into Dockerfile.sandbox at build time (W22).
+"""Inline watchdog baked into Dockerfile.sandbox at build time.
 
 Reads FERAL_SANDBOX_LANG / FERAL_SANDBOX_ENTRY / FERAL_SANDBOX_TIMEOUT_S
 from the environment, runs the entry script, and kills it with exit
@@ -97,7 +97,7 @@ USER feral
 WORKDIR /home/feral
 
 LABEL org.feral-ai.image.kind="sandbox" \
-      org.feral-ai.image.role="tool-genesis + W17 subagent worker code"
+      org.feral-ai.image.role="tool-genesis + subagent worker code"
 
 ENTRYPOINT ["/usr/local/bin/feral-sandbox-watchdog"]
 CMD []

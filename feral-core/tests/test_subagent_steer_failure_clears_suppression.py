@@ -1,8 +1,8 @@
-"""W17: steer-failure clears the suppression flag.
+"""steer-failure clears the suppression flag.
 
 If the supervisor's ``steer`` decision raises mid-spawn, the parent's
 announce-suppression flag MUST be cleared before the exception
-propagates. Silent swallowing is forbidden by W17 doctrine.
+propagates. Silent swallowing is forbidden by  doctrine.
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ async def test_steer_failure_clears_suppression_and_propagates():
 
 @pytest.mark.asyncio
 async def test_successful_steer_leaves_suppression_set():
-    """A successful steer keeps the suppression on (W17 contract)."""
+    """A successful steer keeps the suppression on ( contract)."""
     parent_id = "parent-2"
     child_id = await spawn_subsession(parent_id, "tool_runner", scope_key="alpha")
 

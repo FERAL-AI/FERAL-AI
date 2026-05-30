@@ -1,4 +1,4 @@
-"""W3-A12 regression tests for sandbox boundary enforcement."""
+"""-A12 regression tests for sandbox boundary enforcement."""
 
 from __future__ import annotations
 

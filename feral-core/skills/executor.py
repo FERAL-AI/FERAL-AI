@@ -22,7 +22,7 @@ from skills.sandbox_ports import SandboxPort, default_sandbox_port
 
 logger = logging.getLogger("feral.executor")
 
-# W3-A12: dangerous runners must not silently fall back to host execution.
+# -A12: dangerous runners must not silently fall back to host execution.
 # Keep a hardcoded fallback set so legacy manifests still get protected even
 # before they add explicit `requires_sandbox: true`.
 SANDBOX_REQUIRED_SKILL_IDS = {"workspace_scripts", "code_interpreter"}
@@ -54,7 +54,7 @@ class SkillExecutor:
         self._blind_vault = None
         self._pending_results: dict[str, asyncio.Future] = {}
         self._wasm_sandbox = None
-        # W3-A14: prefer narrow facade over a direct ``api.state`` import so
+        # -A14: prefer narrow facade over a direct ``api.state`` import so
         # tests can inject and so global-state coupling shrinks.
         self._sandbox_port: SandboxPort = sandbox_port or default_sandbox_port()
 
@@ -99,7 +99,7 @@ class SkillExecutor:
         if runtime == "wasm":
             wasm = self._wasm_sandbox
             if wasm is None:
-                # W3-A14: support the narrow facade for WASM too so callers that
+                # -A14: support the narrow facade for WASM too so callers that
                 # inject ``SandboxPort`` can fully avoid global state.
                 try:
                     wasm = self._sandbox_port.get_wasm_sandbox()
@@ -191,7 +191,7 @@ class SkillExecutor:
         impl = get_implementation(skill.skill_id)
         if impl:
             logger.info(f"Executing via Python backing class: {impl.__class__.__name__}")
-            # W3-A14: keep backing implementations on the same sandbox facade
+            # -A14: keep backing implementations on the same sandbox facade
             # as the executor (avoids split-brain in tests/embedding).
             if hasattr(impl, "set_sandbox_port"):
                 try:

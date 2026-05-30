@@ -4,7 +4,7 @@ Each step reads + mutates three plain dicts (``settings``,
 ``credentials``, ``identity``) so a step can be invoked in isolation
 under tests without the full wizard running.
 
-audit-r14 / lane-07 W7 — wizard contract changes
+audit-r14 / lane-07  — wizard contract changes
 -----------------------------------------------
 
 Pre-Lane-07 the wizard had two tightly-coupled bugs:
@@ -34,7 +34,7 @@ The fix:
 
 Credentials persistence (A7)
 ----------------------------
-Credentials are written to the W9 encrypted ``BlindVault`` — NEVER to
+Credentials are written to the  encrypted ``BlindVault`` — NEVER to
 a plaintext ``credentials.json``. The vault maps ``credentials.json``
 → ``credentials.enc`` internally, so anchoring it at the wizard's
 ``home / credentials.json`` path keeps the encrypted payload inside
@@ -91,7 +91,7 @@ class WizardState:
     def save(self) -> None:
         """Persist settings / credentials / identity to disk.
 
-        audit-r14 / lane-07 W7 — this method NO LONGER sets
+        audit-r14 / lane-07  — this method NO LONGER sets
         ``setup_complete``. Use :meth:`mark_complete` from the
         wizard's finish step. Mid-flow quits and Ctrl+C save partial
         settings + credentials but leave ``setup_complete`` alone, so
@@ -128,7 +128,7 @@ class WizardState:
             pass
 
     # ------------------------------------------------------------------
-    # Resume sidecar (~/.feral/setup_state.json) — Lane 07 W7
+    # Resume sidecar (~/.feral/setup_state.json) — Lane 07 
     # ------------------------------------------------------------------
 
     def write_setup_state(self, *, last_step: str, completed_steps: list[str]) -> None:
@@ -208,7 +208,7 @@ def _read_credentials(home: Path) -> dict:
 
     Priority order:
 
-    1. Encrypted vault (``credentials.enc``) — authoritative post-W9.
+    1. Encrypted vault (``credentials.enc``) — authoritative .
     2. Legacy plaintext ``credentials.json`` — only present on machines
        that have not yet booted the brain since the vault migration.
        The plaintext file will be rewritten as encrypted and removed

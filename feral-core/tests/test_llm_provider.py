@@ -334,7 +334,7 @@ class TestSupportedRuntimeProviders:
     provider ids can actually run a chat call. Catalog-only ids
     (``bedrock``, ``together``, ``fireworks``) expose no wire here
     and must be reported honestly instead of silently masquerading
-    as OpenAI — which is exactly what the pre-W1-A3 code did via
+    as OpenAI — which is exactly what the -A3 code did via
     every ``dict.get(key, OPENAI_DEFAULT)`` fallback in this module.
     """
 

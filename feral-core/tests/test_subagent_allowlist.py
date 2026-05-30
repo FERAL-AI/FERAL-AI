@@ -1,4 +1,4 @@
-"""W17: subagent policy allowlist + supervisor audit on deny.
+"""subagent policy allowlist + supervisor audit on deny.
 
 Contract: default-deny, explicit allow, supervisor row recorded with
 ``decision="denied"``. Part of the canonical lifecycle test set:

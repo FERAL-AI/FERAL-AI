@@ -1,4 +1,4 @@
-"""W22: Sandbox image build helper, version pinning, and tag computation.
+"""Sandbox image build helper, version pinning, and tag computation.
 
 Cooperates with :mod:`feral-core.security.docker_sandbox` — that module
 owns the *runtime* invocation (container flags, mount layout, watchdog
@@ -10,8 +10,8 @@ There are two image kinds:
 
   - ``"minimal"`` → ``ghcr.io/feral-ai/sandbox:<version>`` (or local
     ``feral-sandbox:<version>``). Built from ``Dockerfile.sandbox``.
-    Used for tool-genesis code (W8 GenUI app code execution slot) and
-    W17 subagent worker code.
+    Used for tool-genesis code ( GenUI app code execution slot) and
+     subagent worker code.
 
   - ``"browser"`` → ``ghcr.io/feral-ai/sandbox-browser:<version>``
     (or local ``feral-sandbox-browser:<version>``). Built from

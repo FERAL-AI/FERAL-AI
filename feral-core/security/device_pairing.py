@@ -6,7 +6,7 @@ SQLite-backed registry of paired edge-node devices.
 Each paired device gets a unique token that replaces the old
 single ``NODE_API_KEY`` for authenticating ``/v1/node`` connections.
 
-W9 — hashing + TTL
+ — hashing + TTL
 ------------------
 Tokens are no longer stored in plaintext. The on-disk schema keeps:
 
@@ -26,7 +26,7 @@ recover it; that is the security property we want.
 
 Migration
 ---------
-Pre-W9 rows had a plaintext ``token`` column. On first boot under W9:
+ rows had a plaintext ``token`` column. On first boot under :
   1. The schema gains the new columns.
   2. A sibling table ``needs_rotation_log`` is created.
   3. Every legacy row (rows where ``token`` is non-null AND
@@ -70,11 +70,11 @@ ARGON2_HASH_LEN = 32
 ARGON2_SALT_LEN = 16
 
 # bcrypt fallback cost — only used when argon2-cffi import genuinely
-# fails (per the W9 charter). Logged at WARNING so operators see the
+# fails (per the  charter). Logged at WARNING so operators see the
 # downgrade.
 BCRYPT_COST = 12
 
-# Default TTL for issued pair tokens. 24h is the W9 default; callers
+# Default TTL for issued pair tokens. 24h is the  default; callers
 # may override per-pair via ``pair_device(ttl_seconds=...)``.
 DEFAULT_TTL_SECONDS = 86_400
 
@@ -258,7 +258,7 @@ class DevicePairingStore:
                 self._add_column_if_missing(conn, "paired_devices", "platform", "TEXT")
                 self._add_column_if_missing(conn, "paired_devices", "capabilities", "TEXT")
 
-                # W9 columns.
+                #  columns.
                 self._add_column_if_missing(
                     conn, "paired_devices", "token_lookup", "TEXT",
                 )
@@ -356,7 +356,7 @@ class DevicePairingStore:
                 )
                 conn.commit()
 
-                # Migrate any pre-W9 rows: copy to needs_rotation_log,
+                # Migrate any  rows: copy to needs_rotation_log,
                 # null out the plaintext token, drop the column.
                 self._migrate_legacy_plaintext_rows(conn)
 
@@ -390,7 +390,7 @@ class DevicePairingStore:
         table-rebuild pattern.
 
         SQLite's ``ALTER TABLE … DROP COLUMN`` (3.35+) refuses to drop
-        columns that participate in a UNIQUE constraint (legacy pre-W9
+        columns that participate in a UNIQUE constraint (legacy 
         schemas commonly declared ``token TEXT UNIQUE NOT NULL``). In
         that case we rebuild the table in a single transaction:
 
@@ -517,7 +517,7 @@ class DevicePairingStore:
         # Try to DROP COLUMN token (SQLite >= 3.35.0). SQLite refuses
         # DROP COLUMN on columns that carry a UNIQUE constraint even on
         # 3.35+, so the first attempt can raise; in that case we fall
-        # back to the table-rebuild pattern (A10 / W24d). Only if *that*
+        # back to the table-rebuild pattern (A10 / ). Only if *that*
         # also fails do we resort to NULL-in-place. Doing the drop FIRST
         # avoids the NOT NULL constraint that the legacy schema enforced
         # on the `token` column.
@@ -1259,7 +1259,7 @@ class DevicePairingStore:
                 up the moment I clicked Pair" entries that the v2
                 Devices page used to render before claim.
 
-        Note: post-W9, ``token`` is NEVER included — the plaintext
+        Note: , ``token`` is NEVER included — the plaintext
         cannot be recovered from storage. Callers that need to identify
         a row should use ``device_id`` (from the ``pair_device`` return
         value) or ``token_lookup`` (deterministic SHA-256 of the

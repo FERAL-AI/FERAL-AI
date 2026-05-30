@@ -4,7 +4,7 @@ Each provider's reasoning models accept a different param contract on
 ``/v1/chat/completions`` (and the Anthropic Messages API). These helpers
 mutate the outbound body in-place so the dispatcher in
 ``agents.llm_provider`` stays provider-agnostic. Extracted from
-``agents.llm_provider`` (W3-A15); re-exported from there for import
+``agents.llm_provider`` (-A15); re-exported from there for import
 compatibility.
 """
 

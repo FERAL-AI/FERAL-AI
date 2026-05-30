@@ -63,7 +63,7 @@ FORBIDDEN_PATHS = [
     "docs/critique.md",
 ]
 
-# Regex for conductor workstream IDs in prose: W1 .. W99 (with optional .N).
+# Regex for conductor workstream IDs in prose:  ..  (with optional .N).
 # We tolerate these specific tokens that happen to match the pattern but are
 # real product / spec references rather than internal workstream IDs.
 WORKSTREAM_REGEX = re.compile(r"\bW\d{1,2}(?:\.\d+)?\b")

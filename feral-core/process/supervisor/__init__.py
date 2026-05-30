@@ -1,4 +1,4 @@
-"""W18: process supervisor (overall + no-output timeouts, scope-cancel).
+"""process supervisor (overall + no-output timeouts, scope-cancel).
 
 The supervisor is FERAL's canonical POSIX-subprocess lifecycle manager:
 a run has an overall wall-clock timeout, a no-output inactivity timeout,
@@ -16,7 +16,7 @@ Public surface::
     )
     record = await handle.wait()
 
-The abstraction ships READY for W23/voice/Codex CLI/Claude Code CLI
+The abstraction ships READY for /voice/Codex CLI/Claude Code CLI
 integrations but is intentionally NOT wired into ``agents/orchestrator``
 in this PR (no callers yet).
 """

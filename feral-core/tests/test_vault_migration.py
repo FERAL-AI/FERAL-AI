@@ -1,4 +1,4 @@
-"""W9 — vault legacy → encrypted migration tests.
+""" — vault legacy → encrypted migration tests.
 
 Covers the migration triggered when ``~/.feral/credentials.json``
 exists but ``credentials.enc`` does not:

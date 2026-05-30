@@ -16,7 +16,7 @@ Threat Model:
     OS keychain (or holding the one-time recovery code printed at first
     boot).
 
-Architecture (W9 — vault encryption-at-rest):
+Architecture ( — vault encryption-at-rest):
 
   ┌──────────────────────────┐         ┌──────────────────────────┐
   │  OS Keychain             │         │  ~/.feral/credentials.enc│
@@ -348,7 +348,7 @@ class BlindVault:
         flat credentials map (e.g. publisher_keys, oauth_*).
 
       - ``set_credential(key, value)`` / ``get_credential(key)``
-        — thin wrappers used by the new W9 smoke surface.
+        — thin wrappers used by the new  smoke surface.
 
       - ``rotate_master_key()`` returns a freshly-printed recovery
         code; the previous master key is wiped from the keychain and
@@ -668,7 +668,7 @@ class BlindVault:
     def _normalise_namespaces(decoded: dict) -> dict[str, dict]:
         """Coerce the on-disk dict into ``{namespace: {key: value}}``.
 
-        Older payloads (pre-W9) could legitimately have non-dict values
+        Older payloads () could legitimately have non-dict values
         at the top level (the BlindVault used to be a flat map). After
         migration we only ever write namespaced dicts, but we still
         defensively accept either shape on read so a hand-edited file
@@ -688,7 +688,7 @@ class BlindVault:
         out.setdefault(BlindVault.DEFAULT_NAMESPACE, {})
         return out
 
-    # ── Namespaced API (primary surface for new W9 callers) ────────
+    # ── Namespaced API (primary surface for new  callers) ────────
 
     def put(self, namespace: str, key: str, value: str, *, stored_by: str = "user") -> None:
         """Store ``value`` under ``namespace.key`` and persist."""
@@ -728,7 +728,7 @@ class BlindVault:
     def _cache(self) -> dict:
         """Backward-compat alias for the default-namespace contents.
 
-        Pre-W9 BlindVault was a flat ``{key: value}`` map and one
+         BlindVault was a flat ``{key: value}`` map and one
         existing test (``test_blind_vault_survives_corrupt_json`` in
         ``tests/test_key_persistence.py``) asserts directly on
         ``vault._cache``. Returning the default namespace keeps that
@@ -783,7 +783,7 @@ class BlindVault:
             for name in self.list_keys()
         }
 
-    # ── set_credential / get_credential aliases (W9 smoke-test surface)
+    # ── set_credential / get_credential aliases ( smoke-test surface)
 
     def set_credential(self, key_name: str, value: str) -> None:
         self.store(key_name, value, stored_by="set_credential")
@@ -982,7 +982,7 @@ _vault: Optional[BlindVault] = None
 
 def get_vault(vault_path: Optional[str] = None) -> BlindVault:
     """Lazy-initialised process-wide vault. The CLI smoke test in the
-    W9 charter uses this entrypoint:
+     charter uses this entrypoint:
 
         from feral_core.security.vault import get_vault
         v = get_vault()
@@ -1002,11 +1002,11 @@ def reset_vault() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Permission tiers + execution sandbox (unchanged behaviour from pre-W9)
+# Permission tiers + execution sandbox (unchanged behaviour from )
 # ─────────────────────────────────────────────────────────────────────
 
     # ------------------------------------------------------------------
-    # Namespaced put/get (W8 addition; W9 should adopt as the canonical
+    # Namespaced put/get ( addition;  should adopt as the canonical
     # interface, then we can deprecate the flat store/retrieve helpers).
     # The namespace is encoded as a single key prefix so on-disk layout
     # stays a flat dict (one JSON file). Reserved separator: "::".

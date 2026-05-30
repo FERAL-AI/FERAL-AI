@@ -1,4 +1,4 @@
-"""W22 — Pairing approval-bypass: the post-W9 hash check cannot be
+""" — Pairing approval-bypass: the  hash check cannot be
 tricked by a forged plaintext token, and every failed verify lands
 in the supervisor audit log as decision="denied".
 

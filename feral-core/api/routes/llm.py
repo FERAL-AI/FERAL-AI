@@ -318,7 +318,7 @@ async def configure_llm_provider(provider_id: str, req: ConfigureRequest):
 
     The API key is:
       1. written to the BlindVault (primary, encrypted-at-rest store).
-      2. routed through ``ConfigLoader.save_credentials`` which, post-W24b,
+      2. routed through ``ConfigLoader.save_credentials`` which, ,
          also writes to the BlindVault (and NEVER to plaintext
          ``credentials.json``) — this second call keeps the in-memory
          ``ConfigLoader._credentials`` dict in sync for boot-time env
@@ -434,7 +434,7 @@ async def llm_health():
     green/amber/red dots per candidate so the user can see exactly why
     the agent fell over to a different provider this minute.
 
-    The W2 expansion (Lane 09) adds:
+    The  expansion (Lane 09) adds:
 
     * ``last_failover`` — ``{from, to, reason, candidates_tried}`` for
       the most recent ``chat_with_failover`` hop, or ``None`` when the
@@ -470,7 +470,7 @@ async def llm_health():
 
 
 # ----------------------------------------------------------------------
-# Multi-key per provider (W2 Lane 09)
+# Multi-key per provider ( Lane 09)
 # ----------------------------------------------------------------------
 #
 # Operators can stash multiple labeled API keys per provider (a prod

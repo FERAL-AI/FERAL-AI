@@ -1,4 +1,4 @@
-"""W18: no-output (silent-hang) timeout kills the child within budget.
+"""no-output (silent-hang) timeout kills the child within budget.
 
 Contract: "no-output timeout". Spec: ``sleep 10``
 emits nothing on stdout/stderr; with no_output_timeout=1, must die

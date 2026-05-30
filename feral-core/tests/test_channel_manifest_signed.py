@@ -1,4 +1,4 @@
-"""W21 — signed-manifest verification path through W8's Ed25519 signer.
+""" — signed-manifest verification path through  Ed25519 signer.
 
 The contract here is the dial: ``allow_unsigned`` is the developer
 convenience knob; a present-but-tampered signature is ALWAYS fatal,
@@ -133,7 +133,7 @@ class TestSigningRoundTrip:
         ok, reason = verify_signature(m, public_key_provider=lambda kid: pub_b64)
         assert ok, reason
 
-        # Wrong pin → key_mismatch (W8's wire-contract reason).
+        # Wrong pin → key_mismatch ( wire-contract reason).
         wrong_b64 = base64.b64encode(b"\x00" * 32).decode("ascii")
         ok, reason = verify_signature(m, public_key_provider=lambda kid: wrong_b64)
         assert ok is False

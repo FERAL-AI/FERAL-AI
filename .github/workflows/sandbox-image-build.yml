@@ -1,6 +1,6 @@
-name: Sandbox Image Build (W22)
+name: Sandbox Image Build
 
-# CI smoke build for the W22 sandbox images. The two sandbox surfaces
+# CI smoke build for the sandbox images. The two sandbox surfaces
 # (Dockerfile.sandbox + Dockerfile.sandbox-browser) MUST build cleanly
 # at all times; if they don't, a future operator can't ship the
 # sandbox and feral-core/security/docker_sandbox.py has no image to
@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: sandbox-image-build-w22-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  group: sandbox-image-build-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -39,15 +39,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # We use plain `docker build` instead of `docker buildx`. With
-      # buildx + `--load` the first image lands in the daemon's
-      # registry, but the *next* buildx invocation runs inside an
-      # isolated builder context that does NOT see the daemon's local
-      # images — so `FROM feral-sandbox-common:latest` in
-      # Dockerfile.sandbox triggers a registry pull against an image
-      # that exists only locally, which fails with "pull access
-      # denied". Plain `docker build` reuses the daemon image cache
-      # for the whole job, so the dependent FROM resolves locally.
+ # We use plain `docker build` instead of `docker buildx`. With
+ # buildx + `--load` the first image lands in the daemon's
+ # registry, but the *next* buildx invocation runs inside an
+ # isolated builder context that does NOT see the daemon's local
+ # images — so `FROM feral-sandbox-common:latest` in
+ # Dockerfile.sandbox triggers a registry pull against an image
+ # that exists only locally, which fails with "pull access
+ # denied". Plain `docker build` reuses the daemon image cache
+ # for the whole job, so the dependent FROM resolves locally.
 
       - name: Build feral-sandbox-common (base)
         run: docker build --file Dockerfile.sandbox-common --tag feral-sandbox-common:latest .

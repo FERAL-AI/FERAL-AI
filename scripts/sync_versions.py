@@ -19,7 +19,7 @@ Two modes:
         # Read VERSION; rewrite every declared location to match.
         # Used by scripts/release.py during a real bump.
 
-This file is the W7 successor to scripts/bump_version.py. The legacy
+This file is the  successor to scripts/bump_version.py. The legacy
 script still works (``test_version_consistency.py`` imports it), but
 new release tooling and the ``version-coherence`` CI gate call THIS
 script. Locations live below in ``VERSION_LOCATIONS`` — each entry
@@ -35,8 +35,8 @@ Source-of-truth resolution order (first hit wins):
      ``brain-tests`` job; the ``version-coherence`` job runs without
      installing anything).
 
-Owned-paths note (workstream W7):
-the SCRIPT is owned by W7 and may sync to any path it knows about.
+Owned-paths note ():
+the SCRIPT is owned by  and may sync to any path it knows about.
 Editing the literal in unowned paths during a *release* (driven by
 this script) is the explicit purpose of the script. The PR that
 introduces THIS script does not bump the version, so no unowned-path
@@ -82,7 +82,7 @@ def _p(raw: str, flags: int = 0) -> re.Pattern:
 # Each location's regex MUST contain a named ``version`` capture group.
 # ---------------------------------------------------------------------------
 VERSION_LOCATIONS: tuple[VersionLocation, ...] = (
-    # ---- Single source of truth (W7-owned) ---------------------------------
+    # ---- Single source of truth (-owned) ---------------------------------
     VersionLocation(
         path="feral-core/pyproject.toml",
         pattern=_p(rf'(?m)^version = "{VERSION_PATTERN}"'),
@@ -90,7 +90,7 @@ VERSION_LOCATIONS: tuple[VersionLocation, ...] = (
         description="[project] version in feral-core/pyproject.toml — the upstream",
         owned_by_w7=True,
     ),
-    # ---- Other W7-owned literals -------------------------------------------
+    # ---- Other -owned literals -------------------------------------------
     VersionLocation(
         path="desktop/src-tauri/tauri.conf.json",
         pattern=_p(rf'(?m)^\s*"version":\s*"{VERSION_PATTERN}"'),
@@ -113,13 +113,13 @@ VERSION_LOCATIONS: tuple[VersionLocation, ...] = (
         owned_by_w7=True,
     ),
     # NOTE: feral-core/services/mdns.py used to carry a literal version
-    # string here. After the W7 refactor it imports VERSION from
+    # string here. After the  refactor it imports VERSION from
     # ``feral_core.version`` at module load and embeds the result in the
     # mDNS ServiceInfo properties dict. There is no version literal to
     # sync there anymore; the regression test in test_version_singlesrc.py
     # asserts the literal stays gone.
 
-    # ---- W7-owned docs (read-only context — this script's
+    # ---- -owned docs (read-only context — this script's
     # ----  patcher will only touch the badge marker block; the rest of
     # ----  the README is left alone).
     VersionLocation(
@@ -148,9 +148,9 @@ VERSION_LOCATIONS: tuple[VersionLocation, ...] = (
         description="CHANGELOG current-version comment marker",
         owned_by_w7=True,
     ),
-    # ---- Outside W7 ownership but synced by the same release flow.
+    # ---- Outside  ownership but synced by the same release flow.
     # ---- These are the places the legacy scripts/bump_version.py
-    # ---- already syncs, so this script subsumes them. The W7 PR does
+    # ---- already syncs, so this script subsumes them. The  PR does
     # ---- not bump the version, so no literal here changes in this
     # ---- commit; CI's --check just confirms drift = 0 against the
     # ---- canonical pyproject value (currently 2026.4.32).
@@ -196,7 +196,7 @@ VERSION_LOCATIONS: tuple[VersionLocation, ...] = (
         replacement="version={version}",
         description="Runtime: line example in build_runtime_line docstring",
     ),
-    # ---- v1 web client fallback strings (not in W7 ownership but
+    # ---- v1 web client fallback strings (not in  ownership but
     # ----  carry a bare CalVer literal that drifts on every bump).
     # ----  Folded in here to retire the legacy
     # ----  ``scripts/bump_version.py`` mirror list — the CI gate

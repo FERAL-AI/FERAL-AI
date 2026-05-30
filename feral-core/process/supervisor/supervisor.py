@@ -1,4 +1,4 @@
-"""W18: ProcessSupervisor — the top-level run() / scope_cancel() surface.
+"""ProcessSupervisor — the top-level run() / scope_cancel() surface.
 
 Two kinds of timeout ride the supervisor; each kills the child and
 records a distinct ``kill_reason`` on the :class:`RunRecord`:
@@ -8,17 +8,17 @@ records a distinct ``kill_reason`` on the :class:`RunRecord`:
 * ``no_output_timeout_sec`` — fires when stdout *and* stderr go silent
   for that many seconds (``kill_reason="no-output-timeout"``).
 
-The ``scope_key`` argument composes with W17's
+The ``scope_key`` argument composes with 
 ``agents/subagent_spawner.py`` scope semantics — same string shape
 (arbitrary caller-chosen key), same "kill the whole family with one
 call" guarantee. Cancellation propagates within ~few-ms of
-``scope_cancel`` for processes that respect SIGTERM (the W18
+``scope_cancel`` for processes that respect SIGTERM (the 
 acceptance budget is 200ms).
 
-This PR ships the abstraction READY for downstream wiring (W23 voice
+This PR ships the abstraction READY for downstream wiring (voice
 service-restart, future Codex CLI / Claude Code CLI integrations,
 ffmpeg pipelines). It is **not wired** into ``agents/orchestrator``
-or any service in this PR — the W18 spec is explicit that no callers
+or any service in this PR — the spec is explicit that no callers
 are added here.
 """
 

@@ -1,4 +1,4 @@
-"""W17: model_override is honoured on the spawned child's first LLM call.
+"""model_override is honoured on the spawned child's first LLM call.
 
 Part of the canonical lifecycle test set: allowlist / cron-note /
 lifecycle / model / scope.

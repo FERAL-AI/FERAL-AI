@@ -116,7 +116,7 @@ def _brain_health_ok(timeout: float = 1.0) -> bool:
 
 
 def cmd_memory(action: str, backend_id: str | None, *, flags=None) -> None:
-    # Lane 07 W6 — `feral memory query <text>` closes THESIS_SCENARIOS
+    # Lane 07  — `feral memory query <text>` closes THESIS_SCENARIOS
     # S1 from the CLI side. The argparse positional ``backend_id`` is
     # repurposed as the query string for ``query``; main.py forwards
     # everything after ``feral memory query`` as ``args.backend_id``.

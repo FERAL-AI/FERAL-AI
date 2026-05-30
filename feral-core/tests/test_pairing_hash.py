@@ -1,4 +1,4 @@
-"""W9 — pairing-token hashing + TTL tests.
+""" — pairing-token hashing + TTL tests.
 
 Covers:
   * register a pairing → row stored with token_hash, NEVER plaintext;

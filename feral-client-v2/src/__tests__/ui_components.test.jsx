@@ -49,12 +49,12 @@ describe('Modal', () => {
   });
 
   it('accepts size prop without crashing', () => {
-    // Modal mounts via React Portal onto document.body to escape the
-    // .v2-shell-main stacking context (W4 fix; see styles/_z.css and
-    // ui/Modal.jsx). Therefore `container.firstChild` is null even
-    // when the modal is open — the rendered nodes live on body. We
-    // assert against the role-named dialog instead, which Testing
-    // Library queries from baseElement (= document.body by default).
+ // Modal mounts via React Portal onto document.body to escape the
+    // .v2-shell-main stacking context (see styles/_z.css and
+ // ui/Modal.jsx). Therefore `container.firstChild` is null even
+ // when the modal is open — the rendered nodes live on body. We
+ // assert against the role-named dialog instead, which Testing
+ // Library queries from baseElement (= document.body by default).
     const { getByRole } = render(
       <Modal open onClose={() => {}} title="T" size="lg">x</Modal>,
     );
@@ -82,8 +82,8 @@ describe('CodeEditor', () => {
   it('readOnly prevents input changes reaching onChange', () => {
     const onChange = vi.fn();
     const { getByRole } = render(<CodeEditor value="x" onChange={onChange} readOnly />);
-    // Even with readOnly, React's fireEvent.change will call the handler
-    // if attached, but the component still renders the read-only flag.
+ // Even with readOnly, React's fireEvent.change will call the handler
+ // if attached, but the component still renders the read-only flag.
     const textarea = getByRole('textbox');
     expect(textarea).toHaveAttribute('readOnly');
   });
@@ -116,7 +116,7 @@ describe('DeviceQRCode', () => {
       json: () => Promise.resolve({}),
       text: () => Promise.resolve(''),
     })));
-    // jsdom lacks URL.createObjectURL by default.
+ // jsdom lacks URL.createObjectURL by default.
     if (!global.URL.createObjectURL) {
       global.URL.createObjectURL = vi.fn(() => 'blob:mock');
       global.URL.revokeObjectURL = vi.fn();
@@ -124,7 +124,7 @@ describe('DeviceQRCode', () => {
   });
 
   it('renders a text-link view when a value prop is passed', () => {
-    const { getByText } = render(<DeviceQRCode value="http://brain.local/pair?t=abc" />);
+ const { getByText } = render(<DeviceQRCode value="http://brain.local/pair?t=abc" />);
     expect(getByText(/http:\/\/brain\.local\/pair\?t=abc/)).toBeInTheDocument();
   });
 
@@ -165,7 +165,7 @@ describe('DeviceQRCode', () => {
 describe('LiveOpsStream', () => {
   it('renders nothing when no events have arrived', () => {
     const { container } = render(<LiveOpsStream active={false} />);
-    // Empty list; component always renders a ul.
+ // Empty list; component always renders a ul.
     const ul = container.querySelector('ul');
     expect(ul).toBeTruthy();
     expect(ul.children.length).toBe(0);

@@ -1,4 +1,4 @@
-"""W17: Subagent spawner — gated, scoped, cancellable child sessions.
+"""Subagent spawner — gated, scoped, cancellable child sessions.
 
 The spawn contract runs three gates in order: allowlist first,
 registry second, asyncio cancellation third.
@@ -13,7 +13,7 @@ Public surface::
 
 The spawner is asyncio-native. Cancellation propagates within ~5ms in
 practice (we set a sentinel ``asyncio.Event`` *and* call
-``task.cancel()``); the 200ms acceptance budget in W17 is a generous
+``task.cancel()``); the 200ms acceptance budget in  is a generous
 upper bound that includes the orchestrator's session-lock teardown.
 
 This module owns:
@@ -283,7 +283,7 @@ class SubagentRegistry:
         duration of the steer call so that mid-flight chatter does not
         race the steer outcome. If the steer hook RAISES, the
         suppression flag is cleared before re-raising — silent
-        swallowing is forbidden by W17 doctrine.
+        swallowing is forbidden by  doctrine.
         """
         record = self._find(parent_id, child_id)
         if record is None:

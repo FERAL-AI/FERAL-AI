@@ -1,4 +1,4 @@
-"""Lane 05 W8 — /api/voice/providers REST surface (THESIS_SCENARIOS S4).
+"""Lane 05  — /api/voice/providers REST surface (THESIS_SCENARIOS S4).
 
 Pins the contract Lane 11 (iOS Settings → Voice picker) and Lane 12
 (WebUI Settings → Voice panel) consume:

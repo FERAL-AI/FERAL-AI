@@ -1,4 +1,4 @@
-"""LLMProvider default-model regression tests — Roadmap §3.5 P0 (W1).
+"""LLMProvider default-model regression tests — Roadmap §3.5 P0 ().
 
 The roadmap bans hardcoded model literals in ``agents/llm_provider.py``
 because they drifted (gpt-4o-mini, claude-sonnet-4-20250514,

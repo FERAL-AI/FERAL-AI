@@ -1,18 +1,18 @@
-"""W21 Phase 1 — channel manifest loader, validator, and signature glue.
+""" Phase 1 — channel manifest loader, validator, and signature glue.
 
 Why this module exists
 ----------------------
 A declarative per-extension manifest is the architectural rule that
-makes a large extension surface sustainable. W21 brings that rule to
+makes a large extension surface sustainable.  brings that rule to
 FERAL **channels**: a single declarative
 ``feral-channel.manifest.json`` per channel describing the providers it
 speaks to, the env vars its auth needs, and the capabilities it
 advertises (messaging / voice / file / webhook / ...).
 
-This Phase-1 file ships only the **schema validator + loader + W8 sign
+This Phase-1 file ships only the **schema validator + loader +  sign
 verification glue**. The bundled Telegram manifest beside the existing
-adapter is the worked example. Migrating the other channels is W21.2;
-the full extension SDK + 3rd-party discovery is W21.3 / W21.4.
+adapter is the worked example. Migrating the other channels is ;
+the full extension SDK + 3rd-party discovery is  / .
 
 Library notes
 -------------
@@ -24,7 +24,7 @@ Library notes
   still draft-07 so 3rd-party tooling (IDE, CI lint) can use any
   off-the-shelf validator.
 * Signature verification is a thin adapter over
-  ``feral_core.genui.manifest_signing`` (W8). We deliberately do NOT
+  ``feral_core.genui.manifest_signing`` (). We deliberately do NOT
   reimplement Ed25519 here — same primitive, same canonical_json
   encoding, same `(ok, reason)` contract. The only differences are
   field names (``publicKeyId``/``signedAt``/``algo`` to match the
@@ -58,8 +58,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-# Reuse W8's ed25519 helpers verbatim — same library, same canonical
-# JSON encoding, same key sizes. The W8 audit covered the primitive.
+# Reuse  ed25519 helpers verbatim — same library, same canonical
+# JSON encoding, same key sizes. The  audit covered the primitive.
 from genui.manifest_signing import (  # type: ignore[import-not-found]
     canonical_json,
     sign as _genui_sign,
@@ -476,7 +476,7 @@ def load_manifest(path: Path | str) -> ChannelManifest:
 
 
 # ----------------------------------------------------------------------
-# Signature glue (reuses W8's PyNaCl helpers)
+# Signature glue (reuses  PyNaCl helpers)
 # ----------------------------------------------------------------------
 
 
@@ -502,9 +502,9 @@ def sign_manifest(
     """Embed a signature envelope into ``manifest_dict``.
 
     Returns a NEW dict — the input is not mutated. The signature is
-    produced by W8's ``genui.manifest_signing.sign`` over the
+    produced by  ``genui.manifest_signing.sign`` over the
     canonical JSON of the manifest with ``signature`` removed; we then
-    reshape the W8 ``SignedManifest`` envelope into the
+    reshape the  ``SignedManifest`` envelope into the
     manifest-schema field names (``algo``/``publicKeyId``/``signedAt``)
     so it round-trips through :func:`verify_signature` without any
     publisher-side glue.
@@ -536,7 +536,7 @@ def verify_signature(
     *,
     public_key_provider: Optional[Any] = None,
 ) -> tuple[bool, Optional[str]]:
-    """Verify ``manifest`` against W8's Ed25519 verifier.
+    """Verify ``manifest`` against  Ed25519 verifier.
 
     * ``public_key_provider`` is either ``None`` (trust the embedded
       public key, which is appropriate for the bundled-manifest
@@ -548,7 +548,7 @@ def verify_signature(
     Returns ``(ok, reason)`` mirroring ``genui.manifest_signing.verify``.
     Reasons start with ``"format_error:"`` for malformed envelopes and
     ``"signature_mismatch"`` / ``"key_mismatch"`` for the cryptographic
-    failures — the same wire contract as W8.
+    failures — the same wire contract as .
     """
     if manifest.signature is None:
         return False, "unsigned"

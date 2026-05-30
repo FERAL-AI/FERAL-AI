@@ -1,5 +1,5 @@
 /**
- * W4 — Pair-a-device modal regression spec.
+ * Pair-a-device modal regression spec.
  *
  * User report:
  *   "clicking 'Pair a device' adds a row to the historical list but
@@ -24,8 +24,8 @@
  *   - The historical "Paired" pane does NOT increment while the modal
  *     is open and unclaimed (no "phantom row" effect).
  *
- * The spec stubs `/api/*` so it does not need a live brain. W14 owns
- * the broader e2e program that runs against a real backend.
+ * The spec stubs `/api/*` so it does not need a live brain. The broader
+ * e2e program runs against a real backend.
  */
 import { test, expect, Route } from '@playwright/test';
 

@@ -16,7 +16,7 @@ Pins the resolver wired in
 These tests intentionally do NOT exercise the network — the runtime
 probe in ``switch_provider`` is monkey-patched to "ok" so the
 hot-swap path can be observed deterministically. Real upstream
-auth is covered by ``test_api_llm_providers.py`` and the W9 probe
+auth is covered by ``test_api_llm_providers.py`` and the  probe
 suite.
 """
 

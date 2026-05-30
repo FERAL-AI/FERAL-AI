@@ -7,7 +7,7 @@ different shape: tool results live in a ``user`` message with a
 an ``assistant`` message with ``tool_use`` blocks. These helpers
 convert the OpenAI shape to the Anthropic shape at the build site so
 the rest of the dispatcher stays provider-agnostic. Extracted from
-``agents.llm_provider`` (W3-A15); re-exported from there for import
+``agents.llm_provider`` (-A15); re-exported from there for import
 compatibility.
 """
 

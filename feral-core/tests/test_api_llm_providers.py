@@ -459,7 +459,7 @@ def test_503_when_catalog_missing():
 
 
 # ----------------------------------------------------------------------
-# Unsupported / unknown provider handling (W1 A3)
+# Unsupported / unknown provider handling ( A3)
 # ----------------------------------------------------------------------
 
 

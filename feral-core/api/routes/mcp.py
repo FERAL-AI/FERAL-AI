@@ -84,7 +84,7 @@ async def mcp_registry():
 
 @router.get("/api/mcp/servers")
 async def mcp_servers():
-    """Lane 05 W10 — canonical MCP server catalogue for Settings UIs.
+    """Lane 05  — canonical MCP server catalogue for Settings UIs.
 
     Returns the same shape as ``/api/mcp/registry``: a flat list of
     ``{id, name, description, category, command, args, env,

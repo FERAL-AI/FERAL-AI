@@ -1,6 +1,6 @@
 """mDNS service advertisement + discovery for FERAL on the LAN.
 
-A8 / W24d — `zeroconf.Zeroconf.register_service` performs blocking socket
+A8 /  — `zeroconf.Zeroconf.register_service` performs blocking socket
 negotiation. When `advertise_brain` is called from async startup code the
 blocking call holds the event loop long enough to trip watchdog detectors
 (`EventLoopBlocked`). We fix this two ways:
@@ -137,7 +137,7 @@ def advertise_brain(port: int = 9090, name: str = "FERAL Brain") -> bool:
     If an asyncio event loop is currently running on this thread, the
     blocking zeroconf registration is deferred to a background thread so
     the caller's event loop is never stalled. If no loop is running we
-    keep the pre-W24d straight-sync behaviour.
+    keep the  straight-sync behaviour.
     """
     global _registration
     try:

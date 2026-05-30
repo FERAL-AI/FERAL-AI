@@ -1,6 +1,6 @@
-"""A8 / W24d — mDNS advertise must not stall the asyncio event loop.
+"""A8 /  — mDNS advertise must not stall the asyncio event loop.
 
-Pre-W24d ``advertise_brain`` called blocking ``zeroconf.Zeroconf.register_service``
+ ``advertise_brain`` called blocking ``zeroconf.Zeroconf.register_service``
 directly from whatever context invoked it, including async startup hooks.
 That triggered ``EventLoopBlocked`` watchdogs during boot.
 

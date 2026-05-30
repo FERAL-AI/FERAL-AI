@@ -1,5 +1,5 @@
 """
-Chaos tests for federated memory sync (W11 / roadmap §3.3 #1).
+Chaos tests for federated memory sync ( / roadmap §3.3 #1).
 
 Covers four failure modes the sync layer must survive without taking
 the brain down with it:

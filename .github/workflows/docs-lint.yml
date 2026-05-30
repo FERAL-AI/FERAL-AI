@@ -1,4 +1,4 @@
-name: docs-no-internal-leakage
+name: Docs lint
 
 on:
   pull_request:
@@ -17,16 +17,16 @@ on:
       - 'CONTRIBUTING.md'
 
 concurrency:
-  group: docs-no-internal-leakage-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  group: docs-lint-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint:
-    name: forbid internal audit artifacts in shipped docs
+    name: lint shipped docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run internal-leakage linter
+      - name: Run docs lint
         run: python3 scripts/check_docs_no_internal_leakage.py
         shell: bash
         continue-on-error: false

@@ -1,14 +1,14 @@
 /**
- * Minimal Playwright config used by W4's pair-device regression spec.
+ * Minimal Playwright config used by the pair-device regression spec.
  *
- * NOT the full v2 e2e setup — W14 owns that bigger surface
+ * NOT the full v2 e2e setup — the full program owns that bigger surface
  * (`.github/workflows/v2-e2e.yml`, multi-browser matrix, full webServer
  * wiring against the brain). We deliberately keep this tight so it
  * can stand on its own when run as `npx playwright test pair_device`
  * without dragging the rest of the e2e program in.
  *
  * Behavior:
- *   - Chromium only (W4 just needs to repro the modal-stacking bug).
+ *   - Chromium only (just needs to repro the modal-stacking bug).
  *   - baseURL reads from FERAL_E2E_URL so devs can point at any
  *     running instance (`pnpm dev` or `vite preview`).
  *   - When FERAL_E2E_URL is unset, vite preview is started on 5173

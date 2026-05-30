@@ -1,4 +1,4 @@
-"""W9 — pairing-token schema migration tests.
+""" — pairing-token schema migration tests.
 
 Covers the legacy → hashed migration:
 
@@ -30,7 +30,7 @@ from security.device_pairing import DevicePairingStore
 def _seed_legacy_db(path: Path, rows: list[tuple[str, str]]) -> None:
     """Write a SQLite file in the *old* schema (no hash, plaintext token).
 
-    Mirrors the pre-W9 schema as tightly as possible: a ``token`` TEXT
+    Mirrors the  schema as tightly as possible: a ``token`` TEXT
     NOT NULL column, no ``token_hash``, no ``ttl_seconds``,
     no ``expires_at``.
     """

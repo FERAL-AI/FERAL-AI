@@ -1,10 +1,10 @@
-"""W22 — Executor approval-bypass: the supervisor gate cannot be
-bypassed via the W17 ``spawn_subsession`` escape hatch, and a paused
+""" — Executor approval-bypass: the supervisor gate cannot be
+bypassed via the  ``spawn_subsession`` escape hatch, and a paused
 supervisor blocks every wrapped orchestrator entry point regardless of
 forged "admin" context flags.
 
 Bypass attempts simulated:
-  1. Spawn a child kind that is NOT in the W17 default allowlist;
+  1. Spawn a child kind that is NOT in the  default allowlist;
      the runner must NEVER be invoked, the supervisor must record a
      subagent_spawn denial.
   2. Wrap a fake orchestrator + pause the supervisor + invoke

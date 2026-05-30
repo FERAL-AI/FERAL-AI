@@ -1,6 +1,6 @@
 name: Soak — nightly
 
-# W12 — voice + channel soak. The voice soak runs against
+# voice + channel soak. The voice soak runs against
 # in-process fake WS peers and is fully self-contained. The channel soak
 # tests skip cleanly when their FERAL_SOAK_*_TOKEN env vars are absent —
 # wire them in via repo secrets to flip them on for a real provider.

@@ -63,7 +63,7 @@ async def test_code_interpreter_strict_mode_refuses_unsandboxed_fallback(
     assert "Sandbox required" in (out.get("error") or "")
 
 
-# ── Lane 05 W6: layered sandbox + WASM fallback ───────────────────
+# ── Lane 05 : layered sandbox + WASM fallback ───────────────────
 
 
 @pytest.mark.asyncio
@@ -72,7 +72,7 @@ async def test_run_python_returns_sandbox_label(
 ) -> None:
     """Result data carries an authoritative ``sandbox`` tier label.
 
-    Acceptance: Lane 05 W6 — code_interpreter works without Docker
+    Acceptance: Lane 05  — code_interpreter works without Docker
     (live ``print('hello')``). The host-rlimit tier is what runs on
     CI; Docker / WASM tiers light up when their prereqs are present.
     """
@@ -101,7 +101,7 @@ async def test_run_python_stdlib_arithmetic_through_host_fallback(
 ) -> None:
     """stdlib arithmetic round-trips through the host-rlimit fallback.
 
-    Pins the host-fallback half of Lane 05 W6: when Docker AND WASM are
+    Pins the host-fallback half of Lane 05 : when Docker AND WASM are
     unavailable, the soft-sandbox host tier still runs simple stdlib code.
 
     Why stdlib (not numpy): host-fallback intentionally uses a minimal

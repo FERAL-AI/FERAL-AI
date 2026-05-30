@@ -1116,7 +1116,7 @@ def _open_browser(port: int):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Doctor — probe-driven helpers (Lane 07 W2)
+# Doctor — probe-driven helpers (Lane 07 )
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -1638,7 +1638,7 @@ def cmd_doctor():
     if platform.system() == "Darwin":
         console.print()
         console.print("[bold]macOS GUI Permissions[/bold]")
-        # Lane 07 W2 — surface the canonical macOS Settings deeplink
+        # Lane 07  — surface the canonical macOS Settings deeplink
         # alongside the human remediation text. Lane 06's TCC_CATALOG
         # holds the ``x-apple.systempreferences:`` URL per permission;
         # rendering it makes the doctor row "click-to-fix" once the
@@ -1842,7 +1842,7 @@ def cmd_doctor():
             "Ensure $FERAL_HOME is writable.",
         )
 
-    # ── Cost budget (Lane 04 / Lane 07 W2) ─────────────────────────
+    # ── Cost budget (Lane 04 / Lane 07 ) ─────────────────────────
     #
     # Surfaces per-call-site caps + current spend + reset times. The
     # data is read straight off Lane 04's CostBudget rollups; if the
@@ -1923,7 +1923,7 @@ def cmd_doctor():
             console.print(f"  {i}. {fix}")
         console.print()
 
-    # ── Lane 07 W2 — exit code reflects severity ──
+    # ── Lane 07  — exit code reflects severity ──
     #
     # Pre-Lane-07 doctor always returned 0; finding 07 #1 calls out
     # the operator-facing acceptance "exit 0 if all green or only-
@@ -2455,7 +2455,7 @@ def main():
     )
 
     # feral memory — backend selector + v2026.5.34 decay/forget/recall/compact
-    # + Lane 07 W6 `query` (closes THESIS_SCENARIOS S1 from the CLI).
+    # + Lane 07  `query` (closes THESIS_SCENARIOS S1 from the CLI).
     mem_p = sub.add_parser("memory", help="Memory backend + decay + query management")
     mem_p.add_argument(
         "action",
@@ -2576,18 +2576,18 @@ def main():
     except Exception:
         pass
 
-    # feral key — vault key lifecycle (W9 + Lane 07 W3 multi-key)
+    # feral key — vault key lifecycle ( + Lane 07  multi-key)
     from cli.key_commands import register_key_subparser
     register_key_subparser(sub)
 
-    # ── Lane 07 W4 — voice + models pure-local subcommands ──
+    # ── Lane 07  — voice + models pure-local subcommands ──
     from cli.voice_commands import register_voice_subparser
     register_voice_subparser(sub)
 
     from cli.model_commands import register_models_subparser
     register_models_subparser(sub)
 
-    # ── Lane 07 W5 — integrations connect (Gmail / OAuth / HA) ──
+    # ── Lane 07  — integrations connect (Gmail / OAuth / HA) ──
     from cli.integration_commands import register_integrations_subparser
     register_integrations_subparser(sub)
 

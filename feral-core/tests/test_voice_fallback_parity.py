@@ -1,4 +1,4 @@
-"""Lane 05 W9 — Gemini + Realtime fallback parity (THESIS_SCENARIOS S4).
+"""Lane 05  — Gemini + Realtime fallback parity (THESIS_SCENARIOS S4).
 
 Closes AUDIT-r14 finding 15 fixes #2 + #3:
 

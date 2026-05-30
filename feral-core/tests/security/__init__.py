@@ -1,4 +1,4 @@
-"""W22 security boundary tests.
+""" security boundary tests.
 
 Each module in this package demonstrates a single approval / auth /
 sandbox boundary by attempting an explicit bypass and asserting:

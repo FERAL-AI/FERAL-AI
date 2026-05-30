@@ -18,7 +18,7 @@ default — replace via ``model_id``). Cartesia requires a date-
 pinned ``Cartesia-Version`` header on every request; we send the
 2024-11-13 stable version.
 
-Closes Lane 05 W7 acceptance: "add Cartesia TTS module
+Closes Lane 05  acceptance: "add Cartesia TTS module
 (`cartesia.py` — REST `/audio` endpoint, websocket variant for
 streaming); each: probe via vault key; structured error on
 failure; live test trace in PR".

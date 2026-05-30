@@ -234,7 +234,7 @@ class WebhookStore:
             await db.commit()
 
     # ──────────────────────────────────────────────────────────────
-    # W19 — integration ingress webhook config (GitHub/Stripe/HA/Notion)
+    #  — integration ingress webhook config (GitHub/Stripe/HA/Notion)
     #
     # These methods own the ``integration_webhooks`` table. The
     # ``custom_webhooks`` API above is intentionally untouched — the

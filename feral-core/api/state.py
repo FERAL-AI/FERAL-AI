@@ -83,7 +83,7 @@ logger = logging.getLogger("feral.brain")
 
 VISION_MAX_FRAME_KB = int(os.environ.get("FERAL_VISION_MAX_FRAME_KB", "512"))
 
-# W3-A13: avoid exporting channel/webhook secrets into process-global env
+# -A13: avoid exporting channel/webhook secrets into process-global env
 # when applying ConfigLoader/export_as_env at boot. These credentials are
 # passed explicitly via config objects / channel configs instead.
 _SENSITIVE_ENV_EXPORT_KEYS = frozenset({
@@ -356,9 +356,9 @@ class BrainState:
         self.push_channel = None
         self.event_bus: Optional[EventBus] = None
         self.webhook_receiver: Optional[WebhookReceiver] = None
-        # W19 (finding-19): integration ingress webhook config now
+        #  (finding-19): integration ingress webhook config now
         # persists via this store (same sqlite DB as custom-webhooks,
-        # separate table). Pre-W19 it was lazily created by the
+        # separate table).  it was lazily created by the
         # custom-webhooks route on first hit; ``init()`` now
         # eagerly constructs it so the receiver can hydrate at boot.
         self.webhook_store = None
@@ -882,7 +882,7 @@ class BrainState:
             set_twin(self.digital_twin)
             _register_twin("digital_twin", DigitalTwinSkillBridge())
         self.event_bus = EventBus()
-        # W19 (finding-19): integration ingress webhook secrets now
+        #  (finding-19): integration ingress webhook secrets now
         # persist to the same sqlite DB as custom webhooks
         # (``~/.feral/webhooks.db``, table ``integration_webhooks``).
         # The receiver still answers HMAC verification from a hot
@@ -1229,7 +1229,7 @@ class BrainState:
             )
             if self.voice_router:
                 self.voice_router.set_gemini_proxy(self.gemini_proxy)
-            # Lane 05 W9 (AUDIT-r14 finding 15 fix #3): mirror the
+            # Lane 05  (AUDIT-r14 finding 15 fix #3): mirror the
             # OpenAI Realtime fallback wiring so Gemini Live errors
             # also emit ``voice_status: degraded`` + flip to whisper
             # TTS (or chained pipeline). Without this, an invalid
@@ -1238,7 +1238,7 @@ class BrainState:
                 self.gemini_proxy.attach_fallback_router(self.voice_router)
 
         with boot_subsystem(self._boot_report, "ChainedVoicePipeline"):
-            # Lane 05 W8 (AUDIT-r14 finding 15 fix #1, THESIS_SCENARIOS
+            # Lane 05  (AUDIT-r14 finding 15 fix #1, THESIS_SCENARIOS
             # S4): chained STT→LLM→TTS pipeline boot wiring. Pre-fix
             # the pipeline class existed but ``api/state.py`` never
             # called ``set_chained_pipeline``, so phone clients that
@@ -1256,7 +1256,7 @@ class BrainState:
             import voice.stt_providers.groq_whisper  # noqa: F401
             import voice.tts_providers.openai_tts  # noqa: F401
             import voice.tts_providers.elevenlabs  # noqa: F401
-            import voice.tts_providers.cartesia  # noqa: F401  Lane 05 W7
+            import voice.tts_providers.cartesia  # noqa: F401  Lane 05 
             self.chained_voice_pipeline = ChainedVoicePipeline()
             if self.voice_router:
                 self.voice_router.set_chained_pipeline(self.chained_voice_pipeline)
@@ -1938,7 +1938,7 @@ class BrainState:
         def _cred(key: str) -> str:
             """Resolve a channel credential without mutating ``os.environ``.
 
-            W3-A13 — channel tokens are read in priority order:
+            -A13 — channel tokens are read in priority order:
             1. ``self.config._credentials`` (the in-process source of
                truth, populated from the encrypted vault and from
                ``credentials.json`` at boot).
@@ -2248,7 +2248,7 @@ class BrainState:
              third-party SDK we call — sees the same key the chat
              router resolves at request time.
           3. ``credentials.json`` plaintext mirror (legacy convenience
-             written by the pre-W24b setup wizard; many installs still
+             written by the  setup wizard; many installs still
              rely on it).
           4. The default-namespace ``BlindVault`` entry keyed by the
              env-var name (``vault.retrieve("OPENAI_API_KEY")``). This
@@ -2348,7 +2348,7 @@ class BrainState:
 
         # Vault fallback — always hydrate keys still missing from env,
         # regardless of whether a partial credentials.json already
-        # populated some others. A pre-W24b install can legitimately
+        # populated some others. A  install can legitimately
         # have a subset of keys in the plaintext mirror while the
         # encrypted vault holds the rest (e.g. the user configured
         # OpenAI in v1 and added Anthropic after the /configure route

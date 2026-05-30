@@ -1,4 +1,4 @@
-"""W17: Per-parent subagent allowlist policy.
+"""Per-parent subagent allowlist policy.
 
 Conservative, default-deny. The orchestrator may spawn the small set of
 child kinds enumerated in ``_DEFAULT_ALLOWLIST`` unless the operator

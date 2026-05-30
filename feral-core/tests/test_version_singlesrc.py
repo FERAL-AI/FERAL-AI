@@ -1,6 +1,6 @@
-"""W7 regression: pin the single-source-of-truth version contract.
+""" regression: pin the single-source-of-truth version contract.
 
-These tests fail loudly the moment any of the W7 invariants slips:
+These tests fail loudly the moment any of the  invariants slips:
 
   * mDNS no longer carries a literal version string — it must import
     ``VERSION`` from ``feral_core.version`` (currently re-exported as
@@ -37,7 +37,7 @@ ASOS_ROOT = Path(__file__).resolve().parents[2]
 # mDNS — no literal, runtime-equal-to-VERSION
 # ---------------------------------------------------------------------------
 def test_mdns_does_not_carry_a_literal_version_string():
-    """The W7 refactor removed the hardcoded ``"2026.4.32"`` from
+    """The  refactor removed the hardcoded ``"2026.4.32"`` from
     ``services/mdns.py``. Reintroducing one undoes the single-source
     fix. We allow the calver to appear in a comment, but never as a
     real Python string literal."""

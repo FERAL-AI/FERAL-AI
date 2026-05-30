@@ -91,7 +91,7 @@ class ToolRunner:
         # success. Resolved from ``ui_handlers.handle_daemon_result``.
         self._pending_daemon_acks: dict[str, asyncio.Future] = {}
         self._pending_approvals: dict[str, dict] = {}
-        # W3-A9: approval state must be shared across BrainState/API +
+        # -A9: approval state must be shared across BrainState/API +
         # ToolRunner. If no manager is injected (legacy/tests), fall back
         # to local construction.
         self._approval_mgr = approval_manager or ApprovalManager()

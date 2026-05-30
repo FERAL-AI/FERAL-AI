@@ -202,7 +202,7 @@ async def update_config(body: dict):
     return {"ok": True, "section": section, "key": key, "value": value}
 
 
-# W3-A13 — Reduce global env mutation blast radius. Only legacy SDKs that
+# -A13 — Reduce global env mutation blast radius. Only legacy SDKs that
 # read API keys directly from ``os.environ`` (openai, anthropic, boto3, …)
 # need their credentials exported. Everything else (channel bot tokens,
 # webhook secrets, FERAL_KEY_<skill>) flows through the in-process
@@ -322,7 +322,7 @@ async def save_credentials(body: dict):
         if not isinstance(value, str) or not value:
             continue
         creds[key] = value
-        # W3-A13 — only mutate the global env for keys legacy SDKs
+        # -A13 — only mutate the global env for keys legacy SDKs
         # actually read from ``os.environ``. Channel tokens, webhook
         # secrets, etc. are passed explicitly to their consumers below
         # (channel_manager.start_channel) instead of relying on a

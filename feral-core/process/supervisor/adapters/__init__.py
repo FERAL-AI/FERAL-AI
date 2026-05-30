@@ -1,4 +1,4 @@
-"""W18: spawn-adapter implementations for the process supervisor.
+"""spawn-adapter implementations for the process supervisor.
 
 Two adapters, picked per-run via the ``adapter`` argument to
 :meth:`ProcessSupervisor.run`:

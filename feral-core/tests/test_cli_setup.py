@@ -92,7 +92,7 @@ class TestWizardState:
         assert state.credentials["OPENAI_API_KEY"] == "sk-old"
 
     def test_save_writes_both_files_but_does_not_mark_complete(self, tmp_path):
-        """audit-r14 / lane-07 W7 — ``state.save()`` no longer flips
+        """audit-r14 / lane-07  — ``state.save()`` no longer flips
         ``setup_complete`` (the wizard's finish step does, via
         :meth:`WizardState.mark_complete`). Quit / Ctrl+C / crash that
         ends in the finally block calling ``state.save()`` MUST NOT
@@ -993,7 +993,7 @@ class TestBannerRendersOnce:
 
 class TestEndToEndState:
     def test_after_wizard_run_all_keys_round_trip(self, tmp_path):
-        """audit-r14 / lane-07 W7 — call ``mark_complete()`` to model
+        """audit-r14 / lane-07  — call ``mark_complete()`` to model
         the finish step running. Without it ``state.save()`` alone
         leaves ``setup_complete`` unset (the new contract)."""
         state = WizardState.load(tmp_path / "feral")

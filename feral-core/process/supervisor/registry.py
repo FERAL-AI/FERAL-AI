@@ -1,8 +1,8 @@
-"""W18: in-memory RunRegistry + RunRecord dataclass.
+"""in-memory RunRegistry + RunRecord dataclass.
 
 The registry is owned by per-process integrations; records die with the
 process, so we do NOT bound the exited-record cache. We expose the four
-methods named in the W18 spec (register / finalize / list_active /
+methods named in the spec (register / finalize / list_active /
 list_by_scope) plus ``wait_for_finish`` so callers can block on a
 specific run id.
 
@@ -25,7 +25,7 @@ KillReason = str  # "overall_timeout" | "no_output_timeout" | "manual_cancel" | 
 class RunRecord:
     """Snapshot of one supervised process.
 
-    Field names follow the W18 spec verbatim: run_id, pid, scope_key,
+    Field names follow the spec verbatim: run_id, pid, scope_key,
     started_at, finished_at, exit_code, kill_reason. ``started_at`` and
     ``finished_at`` are ``time.monotonic()`` values (not wall-clock) —
     the supervisor uses them only for relative timing / timeout math.
@@ -44,7 +44,7 @@ class RunRecord:
 class RunRegistry:
     """Async-safe in-memory registry of RunRecords keyed by run_id.
 
-    The four methods named in the W18 spec are :meth:`register`,
+    The four methods named in the spec are :meth:`register`,
     :meth:`finalize`, :meth:`list_active`, :meth:`list_by_scope`. We
     additionally expose :meth:`wait_for_finish` (used by tests and by
     higher-level callers that need to block on a specific run) and

@@ -256,7 +256,7 @@ BUILT_IN_DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         # The Bedrock adapter (BedrockProvider.chat /
         # BedrockProvider.stream_chat) is live as of audit-r12 D8 — it
         # speaks bedrock-runtime.converse via boto3 and returns the
-        # canonical ChatResponse shape. Pre-W2 this descriptor still
+        # canonical ChatResponse shape.  this descriptor still
         # advertised ``chat_ready=False``, which made the UI render a
         # "Bedrock not chat-ready" chip even though the adapter ran a
         # real chat turn. ``_resolve_chat_readiness`` lets the adapter
@@ -889,7 +889,7 @@ class ProviderCatalog:
     def _is_configured(self, descriptor: ProviderDescriptor) -> bool:
         """Decide whether *descriptor* is "configured" for the picker.
 
-        Pre-W2 this returned ``True`` whenever the descriptor's
+         this returned ``True`` whenever the descriptor's
         credential env var was set, regardless of whether the value
         actually authenticated upstream. Wave 1's
         :mod:`security.probe` helper runs cheap HTTP probes on a 60s

@@ -1,4 +1,4 @@
-"""W17: scope_key cancellation semantics.
+"""scope_key cancellation semantics.
 
 Scope contract (part of the canonical lifecycle test set:
 allowlist / cron-note / lifecycle / model / scope):

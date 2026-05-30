@@ -1,4 +1,4 @@
-"""W9 — vault encryption-at-rest tests.
+""" — vault encryption-at-rest tests.
 
 Covers:
   * write/read round-trip with a temp keyring (dict-backed fake patched

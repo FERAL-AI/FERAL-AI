@@ -33,7 +33,7 @@ logger = logging.getLogger("feral.cli.setup_wizard")
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Credential persistence — routed through the W9 encrypted BlindVault.
+# Credential persistence — routed through the  encrypted BlindVault.
 #
 # A7 cleanup (2026-04-26): these two helpers replaced the direct
 # plaintext ``credentials.json`` writers that used to live in
@@ -42,7 +42,7 @@ logger = logging.getLogger("feral.cli.setup_wizard")
 # internally, so anchoring it at the wizard home keeps the on-disk
 # artefact inside ``~/.feral/`` without leaving a cleartext file.
 #
-# Returning users with a pre-W9 plaintext ``credentials.json`` still
+# Returning users with a  plaintext ``credentials.json`` still
 # get their keys preserved: instantiating ``BlindVault`` triggers the
 # built-in auto-migration (``credentials.json`` → ``credentials.enc``
 # with the original moved to ``credentials.json.bak.legacy``).
@@ -643,8 +643,8 @@ class OnboardWizard:
     def _load_existing_creds(self):
         """Load previously-saved credentials.
 
-        Priority: encrypted vault (post-W9) → legacy plaintext
-        ``credentials.json`` (pre-W9 installs that have not yet booted
+        Priority: encrypted vault () → legacy plaintext
+        ``credentials.json`` ( installs that have not yet booted
         the brain since migration). The vault auto-migrates the
         plaintext file on first instantiation, so once the wizard has
         ``save``d at least once there is nothing plaintext left on

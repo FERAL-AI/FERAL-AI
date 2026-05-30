@@ -64,7 +64,7 @@ def run_setup(*, from_step: str = "") -> None:
 async def _run_async(*, from_step: str = "") -> None:
     state = WizardState.load(feral_home())
 
-    # Lane 07 W7 — voice + TCC preflight steps. Voice preflight runs
+    # Lane 07  — voice + TCC preflight steps. Voice preflight runs
     # AFTER llm_model so the LLM choice is locked in first; TCC
     # preflight runs LAST before finish so the operator's most
     # recent action is granting permissions and re-probing.
@@ -91,7 +91,7 @@ async def _run_async(*, from_step: str = "") -> None:
     try:
         await machine.run()
     finally:
-        # Lane 07 W7 — finally block no longer marks setup_complete.
+        # Lane 07  — finally block no longer marks setup_complete.
         # ``state.save()`` persists settings/credentials/identity but
         # the meta.setup_complete flag stays untouched unless the
         # finish step ran (which calls ``state.mark_complete()``

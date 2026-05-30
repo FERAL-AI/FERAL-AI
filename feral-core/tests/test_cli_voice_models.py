@@ -1,4 +1,4 @@
-"""audit-r14 / lane-07 (W4) — `feral voice` + `feral models` commands.
+"""audit-r14 / lane-07 () — `feral voice` + `feral models` commands.
 
 `feral voice providers` reads the Wave 2 Lane 05 catalogue + cached
 probe state. `feral models list/test/set` wraps Lane 09's
@@ -63,7 +63,7 @@ def test_voice_providers_lists_full_catalogue_with_probe_status(
     out = capsys.readouterr().out
 
     assert rc == 0
-    # All eight catalogue entries must appear (Lane 05 W7 contract).
+    # All eight catalogue entries must appear (Lane 05  contract).
     for name in (
         "OpenAI Realtime", "Gemini Live", "Deepgram",
         "Groq Whisper", "OpenAI Whisper",

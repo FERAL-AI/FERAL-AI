@@ -285,7 +285,7 @@ class TestSharedSingleton:
 
 
 # ----------------------------------------------------------------------
-# Bundled model_catalog.json freshness — Roadmap §3.5 P0 (W1)
+# Bundled model_catalog.json freshness — Roadmap §3.5 P0 ()
 # ----------------------------------------------------------------------
 #
 # These assertions pin the verified-current frontier model IDs as of
@@ -327,7 +327,7 @@ _DEPRECATED_ANTHROPIC_IDS = {
 }
 # Only 2.0 and older count as "deprecated" for the recommended
 # shortlist. 2.5 remains the stable cost-effective tier alongside 3.x
-# / 3.1 flagship — the W24a recommended list keeps 2.5-pro,
+# / 3.1 flagship — the  recommended list keeps 2.5-pro,
 # 2.5-flash, 2.5-flash-lite for users who want the cheaper models.
 _DEPRECATED_GEMINI_IDS = {
     "gemini-2.0-flash",
@@ -361,7 +361,7 @@ class TestBundledCatalogFreshness:
         """As of 2026-04-26 Anthropic publishes /v1/models (the live
         refresh script fetches it), so the bundled entry's endpoint is
         no longer null. Previous 2026-04-24 assumption was that
-        Anthropic had no public /v1/models — the W24a live refresh on
+        Anthropic had no public /v1/models — the  live refresh on
         2026-04-26 confirmed 9 models returned and the endpoint is real.
         """
         raw = _bundled_catalog()
@@ -414,7 +414,7 @@ class TestBundledCatalogFreshness:
         )
 
     def test_openai_recommended_filter_drops_known_deprecated_ids(self):
-        """Post-W24a the bundled catalog is the RAW live /v1/models
+        """ the bundled catalog is the RAW live /v1/models
         response (so legacy ids like ``gpt-4o-mini`` still appear in
         the catalog). The UX guarantee lives at the filter layer:
         ``recommended_for()`` must drop the deprecated set that drove
@@ -474,7 +474,7 @@ class TestBundledCatalogFreshness:
 
 
 # ----------------------------------------------------------------------
-# Lazy default_model_for — Roadmap §3.5 P0 (W1)
+# Lazy default_model_for — Roadmap §3.5 P0 ()
 # ----------------------------------------------------------------------
 
 
@@ -542,7 +542,7 @@ class TestChatReadinessSignal:
             )
 
     def test_bedrock_flagged_as_chat_ready(self, catalog):
-        # W2 Lane 09: the Bedrock adapter (BedrockProvider.chat /
+        #  Lane 09: the Bedrock adapter (BedrockProvider.chat /
         # stream_chat) is live — speaks bedrock-runtime.converse via
         # boto3 and returns the canonical ChatResponse shape. The
         # descriptor was previously pinned to chat_ready=False which
@@ -563,7 +563,7 @@ class TestChatReadinessSignal:
         # serialise the status. Both new fields must ride along so the
         # v2 picker can render the chip without a second round-trip.
         payload = catalog.status_for("bedrock").to_dict()
-        assert payload["chat_ready"] is True  # W2 Lane 09 alignment
+        assert payload["chat_ready"] is True  #  Lane 09 alignment
         assert payload["stub_reason"] == ""
         ready_payload = catalog.status_for("openai").to_dict()
         assert ready_payload["chat_ready"] is True
@@ -611,8 +611,8 @@ class TestChatReadinessSignal:
         # the class attr shouldn't paper over a known stub. (Only
         # adapter-level ``False`` wins.)
         #
-        # Pre-W2 this test used Bedrock as the canonical "stubbed"
-        # descriptor. After W2 Lane 09 aligned Bedrock with its live
+        #  this test used Bedrock as the canonical "stubbed"
+        # descriptor. After  Lane 09 aligned Bedrock with its live
         # adapter, we validate the contract using a synthetic
         # descriptor — the same precedence rule still applies and
         # any future stubbed-by-default provider will rely on it.

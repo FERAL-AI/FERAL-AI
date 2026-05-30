@@ -1,6 +1,6 @@
 ---
 # FERAL Brain default Prometheus alert rules.
-# Owned by W13 (roadmap §3.1 #4). Metric definitions live in
+# Owned by observability (roadmap §3.1 #4). Metric definitions live in
 # feral-core/observability/metrics.py; the matching dashboard is
 # ops/grafana/feral-overview.json. Tests in
 # feral-core/tests/test_metrics_registry.py enforce parity.
@@ -18,7 +18,6 @@ groups:
         for: 10m
         labels:
           severity: critical
-          workstream: W13
         annotations:
           summary: >-
             FERAL Brain 5xx error rate above 5%
@@ -32,7 +31,6 @@ groups:
         for: 5m
         labels:
           severity: critical
-          workstream: W19
         annotations:
           summary: >-
             Every configured LLM provider failed for at least one request
@@ -48,7 +46,6 @@ groups:
         for: 15m
         labels:
           severity: warning
-          workstream: W11
         annotations:
           summary: >-
             Federated sync has zero active peers
@@ -64,7 +61,6 @@ groups:
         for: 30m
         labels:
           severity: warning
-          workstream: W17
         annotations:
           summary: >-
             Supervisor approval queue is backed up
@@ -79,7 +75,6 @@ groups:
         for: 0m
         labels:
           severity: critical
-          workstream: W9
         annotations:
           summary: >-
             Vault decrypt error observed
@@ -101,7 +96,6 @@ groups:
         for: 2h
         labels:
           severity: warning
-          workstream: PR2-D11
         annotations:
           summary: >-
             Memory decay sweeper has not run for 2h
@@ -121,7 +115,6 @@ groups:
         for: 15m
         labels:
           severity: warning
-          workstream: PR2-D11
         annotations:
           summary: >-
             Decay sweep p99 exceeds 30s
@@ -137,7 +130,6 @@ groups:
         for: 1h
         labels:
           severity: warning
-          workstream: PR2-D11
         annotations:
           summary: >-
             Active episode count exceeds 1M
@@ -157,7 +149,6 @@ groups:
         for: 24h
         labels:
           severity: warning
-          workstream: PR2-D11
         annotations:
           summary: >-
             Forgotten episodes piling up — hard delete inactive
@@ -177,7 +168,6 @@ groups:
         for: 10m
         labels:
           severity: critical
-          workstream: PR2-D12
         annotations:
           summary: >-
             Sync attempts failing more often than they succeed
@@ -193,7 +183,6 @@ groups:
         for: 10m
         labels:
           severity: warning
-          workstream: PR2-D12
         annotations:
           summary: >-
             At least one peer is >10m behind
@@ -209,7 +198,6 @@ groups:
         for: 30m
         labels:
           severity: warning
-          workstream: PR2-D12
         annotations:
           summary: >-
             sync_wal.db has exceeded 1GiB
@@ -225,7 +213,6 @@ groups:
         for: 10m
         labels:
           severity: warning
-          workstream: PR2-D12
         annotations:
           summary: >-
             Sync heartbeats are missing frequently
@@ -246,7 +233,6 @@ groups:
         for: 1h
         labels:
           severity: info
-          workstream: PR2-D12
         annotations:
           summary: >-
             Active peers but no sync traffic in 1h

@@ -532,7 +532,7 @@ class HealthAggregator:
     ) -> dict[str, Any]:
         """Skill executor interface — called by SkillExecutor.
 
-        Lane 05 W5: signature gained the third ``vault`` arg so the
+        Lane 05 : signature gained the third ``vault`` arg so the
         skill executor's standard ``await impl.execute(endpoint_id,
         args, self._vault)`` call site works against this aggregator.
         Pre-fix the signature only accepted two positional args and

@@ -823,7 +823,7 @@ class MCPClientManager:
         return self._servers.get(name)
 
     # ─────────────────────────────────────────────────────────────
-    # Lane 05 W10 (AUDIT-r14 finding 16 fix #5): tool dedup against
+    # Lane 05  (AUDIT-r14 finding 16 fix #5): tool dedup against
     # the canonical FERAL skill set.
     #
     # The MCP filesystem reference server exposes 14 file primitives

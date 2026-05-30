@@ -3,7 +3,7 @@
 This module is the **single source of truth** for $/1k token rates. All
 provider adapters read pricing through :func:`get_shared_pricing` (or
 the convenience :func:`pricing_per_1k`) — there are no adapter-local
-``_pricing = {...}`` backstops. Pre-W2 every adapter shipped its own
+``_pricing = {...}`` backstops.  every adapter shipped its own
 literal, which drifted out of sync with the catalog the moment a
 provider published a new rate (the OpenAI ``gpt-5.5`` divergence
 documented in findings/13-llm-core.md was caused by exactly that).
@@ -12,7 +12,7 @@ Catalog reconciliation is part of the build: each entry in
 ``model_catalog.json`` either carries a verified rate or is marked
 ``__needs_verification__`` so a follow-up PR can either confirm or
 flag the divergence. See findings/13-llm-core.md fix #4 + the
-"pricing reconciliation" table in the W2 LLM router PR body.
+"pricing reconciliation" table in the  LLM router PR body.
 """
 
 from __future__ import annotations
@@ -125,7 +125,7 @@ def compute_token_cost(
     Reasoning tokens are billed at the **output** rate per OpenAI's
     Responses API documentation: thinking tokens count toward
     ``completion_tokens_details.reasoning_tokens`` AND are charged at
-    the same per-1k rate as visible output tokens. Pre-W2 the budget
+    the same per-1k rate as visible output tokens.  the budget
     estimator never read this field — see findings/13-llm-core.md
     fix #5 + audit-r13 05-token-billing-leakage.
     """

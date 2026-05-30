@@ -1,4 +1,4 @@
-name: no-third-party-names-lint
+name: Naming lint
 
 on:
   pull_request:
@@ -14,16 +14,16 @@ on:
       - '**/*.mdx'
 
 concurrency:
-  group: no-third-party-names-lint-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  group: naming-lint-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint:
-    name: forbid third-party project names in shipped artifacts
+    name: lint repository naming
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run forbidden-name linter
+      - name: Run naming linter
         run: python3 scripts/check_no_third_party_names.py
         shell: bash
         continue-on-error: false

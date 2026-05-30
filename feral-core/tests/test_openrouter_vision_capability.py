@@ -4,7 +4,7 @@ The v2026.5.0 terminal log showed the log line
 ``Provider 'openrouter' does not support vision input`` firing 10+ times
 per session. Root cause: ``OpenRouterProvider._capabilities`` omitted
 ``"vision"`` even though OpenRouter is a router whose underlying model
-can be vision-capable. These tests pin the W24a fix:
+can be vision-capable. These tests pin the  fix:
 
 * The adapter's superset capability advertises vision (router default).
 * ``_capabilities_for_model(model_id)`` narrows per-route using the
@@ -140,10 +140,10 @@ def _make_llm_provider(model: str):
 def test_dispatcher_does_not_early_return_vision_for_openrouter() -> None:
     """When no per-model snapshot exists, vision is allowed to pass.
 
-    Before W24a the dispatcher's ``_vision_support_status`` returned
+    Before  the dispatcher's ``_vision_support_status`` returned
     ``(False, "Provider 'openrouter' does not support vision input.")``
     on every openrouter call; that blocked legitimate image requests.
-    After W24a the default is ``(True, "")``.
+    After  the default is ``(True, "")``.
     """
     provider = _make_llm_provider("anthropic/claude-opus-4-7")
     ok, reason = provider._vision_support_status()

@@ -1,4 +1,4 @@
-"""W3-A13 regression tests — env-mutation blast-radius reduction.
+"""-A13 regression tests — env-mutation blast-radius reduction.
 
 These tests prove that:
 

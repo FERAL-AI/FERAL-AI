@@ -19,7 +19,7 @@ from config.loader import feral_data_home
 from config.runtime import ollama_base_url, ollama_openai_base_url
 from agents.chat_sanitizer import sanitize_assistant_display_text
 
-# W3-A15: failover/retry, reasoning request-body shaping, and Anthropic
+# -A15: failover/retry, reasoning request-body shaping, and Anthropic
 # transcript shaping live in focused sibling modules. They are imported
 # (and re-exported below) so the public API of ``agents.llm_provider``
 # is unchanged for existing callers and tests.
@@ -219,7 +219,7 @@ _PROVIDER_REGISTRY: dict[str, tuple[str, str]] = {
     "anthropic": ("https://api.anthropic.com/v1", "ANTHROPIC_API_KEY"),
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY"),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
-    # DeepSeek's documented OpenAI-compat base URL is ``/v1``. Pre-W2
+    # DeepSeek's documented OpenAI-compat base URL is ``/v1``. 
     # this entry was missing the ``/v1`` suffix while the adapter and
     # ``__init__`` defaulted to ``/v1`` — the divergence meant
     # failover candidates resolved through ``_get_provider_config``
@@ -450,7 +450,7 @@ class LLMProvider:
         elif self.provider == "openai":
             # Default path. Previously this case rode the else branch
             # that also served as the silent fallback for unknown
-            # provider ids — that's the conflation W1 A3 is untangling.
+            # provider ids — that's the conflation  A3 is untangling.
             # Splitting ``openai`` into its own branch lets the else
             # below report unknown provider ids truthfully.
             self.base_url = self.base_url or "https://api.openai.com/v1"
@@ -1977,7 +1977,7 @@ class LLMProvider:
           {"type": "tool_call_delta", "tool_call": {...}}
           {"type": "done"}
           {"type": "error", "content": "..."}
-          {"type": "budget_exceeded", "payload": {...}}  # W2 Lane 09
+          {"type": "budget_exceeded", "payload": {...}}  #  Lane 09
 
         ``call_site`` defaults to ``"chat"``; background loops opt
         into their own caps by passing ``call_site="screen_loop"``,
@@ -2066,7 +2066,7 @@ class LLMProvider:
         # The Anthropic branch tracks first-token state internally and,
         # on a pre-token failure, hands off to
         # ``_stream_via_nonstream_failover`` so cross-provider failover
-        # has the same parity as the OpenAI-compat path below. Pre-W2
+        # has the same parity as the OpenAI-compat path below. 
         # this branch returned ``error`` events with no failover at
         # all — see findings/13-llm-core.md fix #1 + #5.
         if self.provider == "anthropic":
@@ -2244,7 +2244,7 @@ class LLMProvider:
     ) -> AsyncGenerator[dict, None]:
         """Native Anthropic Messages API streaming via SSE.
 
-        Two structural changes vs. the pre-W2 implementation:
+        Two structural changes vs. the  implementation:
 
         1. **base_url propagation.** The POST URL is now derived from
            ``self.base_url`` (which is in turn driven by the
@@ -2258,7 +2258,7 @@ class LLMProvider:
         2. **Pre-token failover parity with OpenAI.** When the request
            fails before any text/tool-call delta has been emitted, we
            hand off to ``_stream_via_nonstream_failover`` (the same
-           helper the OpenAI-compat branch uses ~line 1984). Pre-W2
+           helper the OpenAI-compat branch uses ~line 1984). 
            this branch yielded a single ``error`` event and returned —
            there was no cross-provider failover for Anthropic streams
            at all, even when ``fallback_providers`` had viable
@@ -2439,10 +2439,10 @@ class LLMProvider:
         OpenAI-compatible gateway) without shipping that literal in
         the adapter's defaults. Unknown provider ids without an
         explicit ``base_url`` no longer silently alias to OpenAI —
-        W1 A3 removed that fallback because it was a recurring
+         A3 removed that fallback because it was a recurring
         footgun (see the ``unknown`` branch below).
 
-        NOTE: the ``base_url`` kwarg itself was added after W1 in
+        NOTE: the ``base_url`` kwarg itself was added after  in
         response to the shipped v2026.5.0 crash
         (``api/routes/config.py::update_config`` was already passing
         ``base_url=`` but ``switch_provider`` did not accept it ->
@@ -2494,7 +2494,7 @@ class LLMProvider:
             # Runtime-registered provider. Resolve the default base URL
             # + credential env var from the single registry source so
             # openrouter / deepseek / kimi / qwen stay reachable
-            # (before W1 A3 these were missing from the local
+            # (before  A3 these were missing from the local
             # PROVIDER_BASES dict and silently fell through to OpenAI).
             base, env_key = _PROVIDER_REGISTRY[provider]
             self.base_url = _base_url_override or base
@@ -2623,7 +2623,7 @@ class LLMProvider:
         try:
             # ``base_url`` is now threaded through to ``switch_provider``
             # so local providers (LM Studio, custom Ollama port,
-            # OpenAI-compat gateway) actually land. Pre-W2 the kwarg
+            # OpenAI-compat gateway) actually land.  the kwarg
             # was set on ``os.environ`` but never passed to
             # ``switch_provider``, so the override only took effect
             # at the next ``__init__`` boot — see findings/13-llm-core.md
@@ -2674,7 +2674,7 @@ class LLMProvider:
             "reason": reason,
         }
 
-    # ── Per-call-site tier picker (W2 Lane 09) ────────────────────
+    # ── Per-call-site tier picker ( Lane 09) ────────────────────
     #
     # Wave 3 Lane 08 (orchestrator) builds against this contract.
     # ``route_call(call_site, prompt)`` returns a :class:`ProviderRef`
@@ -2829,7 +2829,7 @@ class LLMProvider:
                 )
 
             Lane 08 owns the orchestrator wiring; this contract MUST
-            stay stable across W2 → W3.
+            stay stable across  → .
 
         Raises:
             ValueError: when ``call_site`` is not one of
@@ -3287,7 +3287,7 @@ class LLMProvider:
         # For local providers we honour the operator-configured base
         # URL (``self.base_url`` when the primary IS the local
         # provider, otherwise ``FERAL_LLM_BASE_URL`` /
-        # ``FERAL_LMSTUDIO_BASE_URL`` env overrides). Pre-W2 these
+        # ``FERAL_LMSTUDIO_BASE_URL`` env overrides).  these
         # branches hard-coded ``http://localhost:1234/v1`` /
         # ``ollama_openai_base_url()`` even when the primary was
         # already pointed at a non-default port — the failover loop
@@ -3864,7 +3864,7 @@ class LLMProvider:
             # this directly — see findings/13-llm-core.md fix #5.
             "last_failover": getattr(self, "_last_failover", None),
             # Total ready-to-serve = supported AND has key AND not in cooldown.
-            # Unsupported candidates were counted as "available" before W1 A3
+            # Unsupported candidates were counted as "available" before  A3
             # whenever a lookalike env var happened to be set, inflating the
             # fallbacks card with providers the runtime could never actually
             # call.

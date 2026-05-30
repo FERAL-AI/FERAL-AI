@@ -1,4 +1,4 @@
-"""audit-r14 / lane-07 (W7) — wizard voice + TCC preflight steps.
+"""audit-r14 / lane-07 () — wizard voice + TCC preflight steps.
 
 Voice preflight reads the Wave 2 Lane 05 catalogue and lets the
 operator pick a primary realtime + chained STT/TTS. TCC preflight is

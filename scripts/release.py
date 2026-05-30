@@ -29,7 +29,7 @@ Examples::
     python3 scripts/release.py minor --dry-run
     python3 scripts/release.py 2026.5.0   # explicit override
 
-Owned-paths note (W7): this script is created under W7 ownership.
+Owned-paths note (): this script is created under  ownership.
 It calls into sync_versions.py which knows about every declared
 location; that's the explicit purpose of the release flow. No
 unowned-path literal is altered until a maintainer actually runs

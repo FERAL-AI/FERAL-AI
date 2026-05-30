@@ -79,7 +79,7 @@ class OpenAIProvider(BaseProvider):
         "text-embedding-3-large",
     ]
     # Pricing lives in providers/model_catalog.json (single source of
-    # truth). Pre-W2 this adapter shipped its own divergent literals
+    # truth).  this adapter shipped its own divergent literals
     # — gpt-5.5 was 0.006/0.018 here vs 0.005/0.030 in the catalog,
     # which broke budget routing whenever the catalog won. See
     # findings/13-llm-core.md fix #4.

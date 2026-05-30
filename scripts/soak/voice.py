@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-W12 — standalone voice soak harness.
+ — standalone voice soak harness.
 
 Same protocol-shape soak loop the pytest suite runs, but exposed as a
 plain script so ops can fire it from a runbook without touching pytest.

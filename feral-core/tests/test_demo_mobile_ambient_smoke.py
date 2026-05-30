@@ -73,7 +73,7 @@ def test_demo_step_2_token_is_unclaimed_until_complete(brain):
     """Until BrowserNode.js calls /api/devices/pair/complete the token
     should be issued-but-unclaimed so the Paired UI can display that.
 
-    Post-W9: the plaintext token is no longer recoverable from
+    : the plaintext token is no longer recoverable from
     ``list_devices()`` — only the deterministic ``token_lookup`` (a
     SHA-256 over the plaintext) is exposed. We verify the lookup
     matches the issued token instead of comparing plaintext.
@@ -94,7 +94,7 @@ def test_demo_step_3_complete_marks_claimed(brain):
     register succeeds. That flips claimed_at so the UI shows the device
     as live.
 
-    Post-W9: identify the row by the device_id returned from
+    : identify the row by the device_id returned from
     ``/api/devices/pair/complete`` (or by the deterministic
     ``token_lookup``) — the plaintext token is no longer stored.
     """

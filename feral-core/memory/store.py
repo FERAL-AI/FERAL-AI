@@ -201,7 +201,7 @@ class MemoryStore:
         self._about_me_store = None
         self._embedder = EmbeddingProvider()
         self._kg = None
-        # Lane 05 W3 (AUDIT-r14 finding 14): track fire-and-forget
+        # Lane 05  (AUDIT-r14 finding 14): track fire-and-forget
         # extractor tasks so we can drain them on shutdown and so
         # asyncio's "Task was destroyed but it is pending" warning
         # doesn't fire when an event loop closes mid-extraction.

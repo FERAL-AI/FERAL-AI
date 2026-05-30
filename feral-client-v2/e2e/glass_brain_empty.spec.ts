@@ -5,7 +5,7 @@
  *   On /glass-brain when the consciousness graph is empty, a coloured
  *   ball overlapped the centred empty-state prompt.
  *
- * Fix (W5, Option A): hide the legend dots in the Pane `actions`
+ * Fix (Option A): hide the legend dots in the Pane `actions`
  * slot when there are no in-flight entities. See
  *   feral-client-v2/src/pages/GlassBrain.jsx (kindRows / actions)
  *   feral-client-v2/src/__tests__/pages/GlassBrain.empty-state.test.jsx
@@ -19,12 +19,11 @@
  *      empty-state bounding box.
  *
  * Dependency note (PR body): this file ships in advance of a
- * `playwright.config.ts` for feral-client-v2. W14 owns the e2e
- * harness; W4 may also be staging a config in parallel for the pair
- * device spec. Until one of those configs lands, this spec runs
- * locally only with `npx playwright test e2e/glass_brain_empty.spec.ts
+ * `playwright.config.ts` for feral-client-v2. The e2e harness and
+ * pair-device config may land in parallel. Until one of those configs
+ * lands, this spec runs locally only with `npx playwright test e2e/glass_brain_empty.spec.ts
  * --config=…` against an explicit config; in CI it is collected by
- * W14's `feral-client-v2/playwright.config.ts` once that file lands.
+ * `feral-client-v2/playwright.config.ts` once that file lands.
  */
 import { test, expect } from '@playwright/test';
 

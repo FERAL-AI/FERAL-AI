@@ -1,9 +1,9 @@
-"""W13: smoke test that the proof-of-concept emit() call inside the
+"""smoke test that the proof-of-concept emit() call inside the
 HTTP middleware produces a scrapeable feral_http_requests_total
 sample on /metrics.
 
 Cross-module emit() wiring (sync, MCP, LLM, supervisor, sandbox,
-vault) is deferred to W13.1, so this test only covers the single
+vault) is deferred to , so this test only covers the single
 emit() site this PR ships. See ops/grafana/feral-overview.json for
 the panels these samples drive.
 """
@@ -36,7 +36,7 @@ async def _get_off_loopback(app, path: str) -> httpx.Response:
 def metrics_client(monkeypatch):
     """TestClient with the metrics surface explicitly enabled.
 
-    FERAL_METRICS_ENDPOINT defaults to "1" post-W13, but we set it
+    FERAL_METRICS_ENDPOINT defaults to "1" , but we set it
     explicitly so the test isn't accidentally green just because the
     default flips again later. FERAL_LOCAL_BYPASS lets the API-key
     middleware see the request as loopback so we don't need to mint a

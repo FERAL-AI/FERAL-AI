@@ -84,7 +84,7 @@ class Channel(ABC):
         self._bot_username: Optional[str] = None
         # Populated to True once the channel has successfully talked to its API
         self._connected: bool = False
-        # W3-A11 runtime containment: repeated loop failures trip a fuse so
+        # -A11 runtime containment: repeated loop failures trip a fuse so
         # a broken channel instance disables itself cleanly instead of
         # wedging forever and spamming logs.
         try:

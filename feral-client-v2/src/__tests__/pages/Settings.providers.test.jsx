@@ -1,16 +1,16 @@
 /**
- * Settings → Providers regression tests for W1 (Roadmap §3.5 P0).
+ * Settings → Providers regression tests (Roadmap §3.5 P0).
  *
  * Pins three contracts:
- *  (a) On initial mount, when the catalog row is older than 24h OR
- *      empty, the picker MUST issue a force=true refresh — without
- *      this the v2 picker silently served pre-2026 model lists for
- *      as long as the brain had been up (Appendix A.1).
- *  (b) The Live / Cached / Stale freshness badge renders next to the
- *      model dropdown, sourced from CachedModelList.last_refresh.
- *  (c) When the backend reports a 401 (warning chip text), the
- *      picker renders that warning so the user knows the dropdown
- *      is a fallback list, not live data.
+ * (a) On initial mount, when the catalog row is older than 24h OR
+ * empty, the picker MUST issue a force=true refresh — without
+ * this the v2 picker silently served pre-2026 model lists for
+ * as long as the brain had been up (Appendix A.1).
+ * (b) The Live / Cached / Stale freshness badge renders next to the
+ * model dropdown, sourced from CachedModelList.last_refresh.
+ * (c) When the backend reports a 401 (warning chip text), the
+ * picker renders that warning so the user knows the dropdown
+ * is a fallback list, not live data.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -25,7 +25,7 @@ const baseProvider = {
   requires_api_key: true,
   configured: true,
   reachable: true,
-  default_base_url: 'https://api.openai.com/v1',
+ default_base_url: 'https://api.openai.com/v1',
   default_model: '',
   credential_env_var: 'OPENAI_API_KEY',
   aliases: ['open ai'],
@@ -55,13 +55,13 @@ function makeFetcher({ modelsResponse, captureUrls }) {
 
 async function openProviderForm(getByText, findByText, findByRole) {
   fireEvent.click(getByText(/^Providers$/));
-  // Wait for the provider grid to render.
+ // Wait for the provider grid to render.
   await findByText(/Current provider/i);
-  // Click the "Reconfigure" / "Use this provider" button on the
-  // OpenAI card. We mock status so OpenAI is the current provider →
-  // the button reads "Reconfigure"; either label opens ProviderForm.
-  // Use getByRole to disambiguate the button from the helper text
-  // ("Live inference backend — reconfigure via any card below").
+ // Click the "Reconfigure" / "Use this provider" button on the
+ // OpenAI card. We mock status so OpenAI is the current provider →
+ // the button reads "Reconfigure"; either label opens ProviderForm.
+ // Use getByRole to disambiguate the button from the helper text
+ // ("Live inference backend — reconfigure via any card below").
   const openButton = await findByRole('button', { name: /^(Reconfigure|Use this provider)$/i });
   fireEvent.click(openButton);
 }
@@ -69,7 +69,7 @@ async function openProviderForm(getByText, findByText, findByRole) {
 describe('Settings → Providers freshness (W1)', () => {
   it('(a) issues a force=true refresh on initial mount when cache is >24h stale', async () => {
     const captured = [];
-    // First call returns a 25h-old cache (Unix seconds).
+ // First call returns a 25h-old cache (Unix seconds).
     const STALE_TS = (Date.now() / 1000) - (25 * 3600);
     let callIndex = 0;
     const modelsResponse = () => {
@@ -84,7 +84,7 @@ describe('Settings → Providers freshness (W1)', () => {
           warning: '',
         };
       }
-      // Force refresh returns the fresh list.
+ // Force refresh returns the fresh list.
       return {
         provider_id: 'openai',
         models: ['gpt-5.5', 'gpt-5.4'],
@@ -100,8 +100,8 @@ describe('Settings → Providers freshness (W1)', () => {
     });
     await openProviderForm(getByText, findByText, findByRole);
 
-    // Wait until BOTH calls have happened — the cached one and the
-    // automatic force=true that follows because last_refresh > 24h.
+ // Wait until BOTH calls have happened — the cached one and the
+ // automatic force=true that follows because last_refresh > 24h.
     await waitFor(() => {
       const forceCalls = captured.filter((u) =>
         u.includes('/api/llm/providers/openai/models')
@@ -109,7 +109,7 @@ describe('Settings → Providers freshness (W1)', () => {
       expect(forceCalls.length).toBeGreaterThanOrEqual(1);
     });
 
-    // The badge should now read "Live" (or at least a non-stale tone).
+ // The badge should now read "Live" (or at least a non-stale tone).
     const badge = await findByTestId('model-age-openai');
     expect(badge.getAttribute('data-age-tone')).not.toBe('stale');
   });
@@ -153,7 +153,7 @@ describe('Settings → Providers freshness (W1)', () => {
   });
 
   it('(b) renders the freshness badge as Live when last_refresh is recent', async () => {
-    const FRESH_TS = (Date.now() / 1000) - 60; // 1 minute ago
+ const FRESH_TS = (Date.now / 1000) - 60; // 1 minute ago
     const modelsResponse = () => ({
       provider_id: 'openai',
       models: ['gpt-5.5'],
@@ -174,7 +174,7 @@ describe('Settings → Providers freshness (W1)', () => {
   });
 
   it('(b) renders the freshness badge as Cached when last_refresh is between 2h and 24h', async () => {
-    const CACHED_TS = (Date.now() / 1000) - (5 * 3600); // 5 hours ago
+ const CACHED_TS = (Date.now / 1000) - (5 * 3600); // 5 hours ago
     const modelsResponse = () => ({
       provider_id: 'openai',
       models: ['gpt-5.5'],
@@ -190,16 +190,16 @@ describe('Settings → Providers freshness (W1)', () => {
     await openProviderForm(getByText, findByText, findByRole);
 
     const badge = await findByTestId('model-age-openai');
-    // Badge tone is one of: live | cached | stale. 5h-old → cached.
+ // Badge tone is one of: live | cached | stale. 5h-old → cached.
     expect(['cached', 'stale']).toContain(badge.getAttribute('data-age-tone'));
     expect(badge.textContent).toMatch(/Cached|Stale/);
   });
 
   it('requests the recommended chat-class subset by default', async () => {
-    // The v2 picker defaults to the conductor-curated chat shortlist
-    // (recommended=true, model_class=chat) so the dropdown never
-    // surfaces embeddings / whisper-* / dall-e etc — those are 400s
-    // on /chat/completions and were the root cause of the drift bug.
+ // The v2 picker defaults to the conductor-curated chat shortlist
+ // (recommended=true, model_class=chat) so the dropdown never
+ // surfaces embeddings / whisper-* / dall-e etc — those are 400s
+ // on /chat/completions and were the root cause of the drift bug.
     const captured = [];
     const modelsResponse = () => ({
       provider_id: 'openai',
@@ -257,9 +257,9 @@ describe('Settings → Providers freshness (W1)', () => {
  * remains the explicit path for users who do want to flip right now.
  */
 describe('Settings → Providers credential saving (A2)', () => {
-  // anthropic catalog row as a SECOND provider, while status reports
-  // openai as the active one. This is exactly the "adding a second
-  // key" scenario that the A2 churn bug manifested under.
+ // anthropic catalog row as a SECOND provider, while status reports
+ // openai as the active one. This is exactly the "adding a second
+ // key" scenario that the A2 churn bug manifested under.
   const anthropicProvider = {
     id: 'anthropic',
     display_name: 'Anthropic',
@@ -267,7 +267,7 @@ describe('Settings → Providers credential saving (A2)', () => {
     requires_api_key: true,
     configured: false,
     reachable: null,
-    default_base_url: 'https://api.anthropic.com',
+ default_base_url: 'https://api.anthropic.com',
     default_model: '',
     credential_env_var: 'ANTHROPIC_API_KEY',
     aliases: [],
@@ -331,11 +331,11 @@ describe('Settings → Providers credential saving (A2)', () => {
   async function openAnthropicForm({ getByText, findByText, findAllByRole }) {
     fireEvent.click(getByText(/^Providers$/));
     await findByText(/Current provider/i);
-    // Two provider cards render; anthropic is non-current, so its
-    // opening button reads "Use this provider". There are two such
-    // buttons when neither card is open yet (openai shows
-    // "Reconfigure" because it is current), so filter for the
-    // non-current one.
+ // Two provider cards render; anthropic is non-current, so its
+ // opening button reads "Use this provider". There are two such
+ // buttons when neither card is open yet (openai shows
+ // "Reconfigure" because it is current), so filter for the
+ // non-current one.
     const buttons = await findAllByRole('button', {
       name: /^(Use this provider|Reconfigure)$/i,
     });
@@ -350,13 +350,13 @@ describe('Settings → Providers credential saving (A2)', () => {
     });
     await openAnthropicForm({ getByText, findByText, findAllByRole });
 
-    // Find the "Save key" button exposed by the non-current branch.
+ // Find the "Save key" button exposed by the non-current branch.
     const saveKey = await findByTestId('provider-save-key-anthropic');
     expect(saveKey).toBeTruthy();
 
     fireEvent.click(saveKey);
 
-    // Wait for the configure POST to land.
+ // Wait for the configure POST to land.
     await waitFor(() => {
       const postsToConfigure = calls.filter((c) =>
         c.method === 'POST'
@@ -364,8 +364,8 @@ describe('Settings → Providers credential saving (A2)', () => {
       expect(postsToConfigure.length).toBeGreaterThanOrEqual(1);
     });
 
-    // The active-provider switch endpoint must NOT have been hit —
-    // the user only pasted a key, they did not ask to switch.
+ // The active-provider switch endpoint must NOT have been hit —
+ // the user only pasted a key, they did not ask to switch.
     const postsToConfig = calls.filter((c) =>
       c.method === 'POST' && c.url.match(/\/api\/llm\/config(\?|$)/));
     expect(postsToConfig.length).toBe(0);
@@ -378,7 +378,7 @@ describe('Settings → Providers credential saving (A2)', () => {
     });
     await openAnthropicForm({ getByText, findByText, findAllByRole });
 
-    // Wait for models to populate so the switch button isn't disabled.
+ // Wait for models to populate so the switch button isn't disabled.
     await waitFor(() => {
       const modelCalls = calls.filter((c) => c.url.includes('/api/llm/providers/anthropic/models'));
       expect(modelCalls.length).toBeGreaterThanOrEqual(1);
@@ -396,7 +396,7 @@ describe('Settings → Providers credential saving (A2)', () => {
   });
 
   it('current provider: primary action calls /api/llm/config (save + apply)', async () => {
-    // Use the original single-provider fetcher where openai IS current.
+ // Use the original single-provider fetcher where openai IS current.
     const calls = [];
     const modelsResponse = () => ({
       provider_id: 'openai',
@@ -426,9 +426,9 @@ describe('Settings → Providers credential saving (A2)', () => {
     });
     await openProviderForm(getByText, findByText, findByRole);
 
-    // Current provider only shows the combined "Save & apply" button
-    // — the non-current "Save key" / "Save & switch" pair must NOT
-    // render here.
+ // Current provider only shows the combined "Save & apply" button
+ // — the non-current "Save key" / "Save & switch" pair must NOT
+ // render here.
     const saveApply = await findByTestId('provider-save-apply-openai');
     await waitFor(() => { expect(saveApply.disabled).toBe(false); });
     fireEvent.click(saveApply);
@@ -441,17 +441,17 @@ describe('Settings → Providers credential saving (A2)', () => {
   });
 
   it('non-current provider: Save-key triggers a force=true model refresh when a key is pasted', async () => {
-    // Contract (5): model list must still refresh after a key save,
-    // even on the non-switching path — otherwise the dropdown keeps
-    // showing the pre-key list until the user navigates away.
+ // Contract (5): model list must still refresh after a key save,
+ // even on the non-switching path — otherwise the dropdown keeps
+ // showing the pre-key list until the user navigates away.
     const calls = [];
     const { getByText, findByText, findAllByRole, findByTestId } = renderV2(<Settings />, {
       fetch: makeMultiProviderFetcher({ captureCalls: calls }),
     });
     await openAnthropicForm({ getByText, findByText, findAllByRole });
 
-    // Type a key so the saveCredentialsOnly path triggers a
-    // post-save force refresh.
+ // Type a key so the saveCredentialsOnly path triggers a
+ // post-save force refresh.
     const keyInput = await waitFor(() => {
       const inputs = document.querySelectorAll('.v2-provider-form input[type="password"]');
       if (inputs.length === 0) throw new Error('no password input yet');
@@ -476,27 +476,27 @@ describe('Settings → Providers credential saving (A2)', () => {
  * for Lane 3 U3 (v2026.5.42 wave).
  *
  * Defects covered:
- *   (U3-#1) Reconfigure seeded `selectedModel` from
- *     `provider.default_model` (== "" for cloud descriptors), so the
- *     auto-pick fell back to `list[0]` of the recommended catalog and
- *     Save & apply silently swapped the brain model on key rotation.
- *   (U3-#2) The current-provider card had no Save-key button; the
- *     only action was Save & apply which always POSTed `model:`.
- *   (U3-#3) Freshness badge could read "Live · 5m ago" while a yellow
- *     warning chip reported HTTP 401 — same row, contradictory signal.
- *   (U3-#4) Switching the active labeled key did not refresh an open
- *     ProviderForm; the dropdown stayed pinned to the previous key's
- *     view of /models.
- *   (U3-#5) The recommended chat-class filter hid valid active /
- *     custom models from the datalist suggestions.
- *   (U3-existing-gap) `reconfigured.ok === false` had no regression
- *     test — the false-success bug could silently come back.
+ * (U3-#1) Reconfigure seeded `selectedModel` from
+ * `provider.default_model` (== "" for cloud descriptors), so the
+ * auto-pick fell back to `list[0]` of the recommended catalog and
+ * Save & apply silently swapped the brain model on key rotation.
+ * (U3-#2) The current-provider card had no Save-key button; the
+ * only action was Save & apply which always POSTed `model:`.
+ * (U3-#3) Freshness badge could read "Live · 5m ago" while a yellow
+ * warning chip reported HTTP 401 — same row, contradictory signal.
+ * (U3-#4) Switching the active labeled key did not refresh an open
+ * ProviderForm; the dropdown stayed pinned to the previous key's
+ * view of /models.
+ * (U3-#5) The recommended chat-class filter hid valid active /
+ * custom models from the datalist suggestions.
+ * (U3-existing-gap) `reconfigured.ok === false` had no regression
+ * test — the false-success bug could silently come back.
  */
 describe('Settings → Providers Reconfigure (Lane 3 U3)', () => {
-  // OpenAI is current, runtime model is gpt-4-turbo-preview (a chat
-  // model that is NOT in the conductor's 2026 recommended shortlist),
-  // and the recommended /models response is the new gpt-5.5-pro.
-  // Pre-fix, Reconfigure showed gpt-5.5-pro in the input box.
+ // OpenAI is current, runtime model is gpt-4-turbo-preview (a chat
+ // model that is NOT in the conductor's 2026 recommended shortlist),
+ // and the recommended /models response is the new gpt-5.5-pro.
+ // Pre-fix, Reconfigure showed gpt-5.5-pro in the input box.
   function makeCurrentProviderFetcher({
     runtimeModel = 'gpt-4-turbo-preview',
     recommendedModels = ['gpt-5.5-pro'],
@@ -552,8 +552,8 @@ describe('Settings → Providers Reconfigure (Lane 3 U3)', () => {
   }
 
   it('(U3-#1) seeds the model input from runtime status.model, not list[0]', async () => {
-    // status.model = the actually running model; recommended list
-    // omits it. Pre-fix the picker showed gpt-5.5-pro on Reconfigure.
+ // status.model = the actually running model; recommended list
+ // omits it. Pre-fix the picker showed gpt-5.5-pro on Reconfigure.
     const { getByText, findByText, findByRole } = renderV2(<Settings />, {
       fetch: makeCurrentProviderFetcher({
         runtimeModel: 'gpt-4-turbo-preview',
@@ -562,8 +562,8 @@ describe('Settings → Providers Reconfigure (Lane 3 U3)', () => {
     });
     await openProviderForm(getByText, findByText, findByRole);
 
-    // After both the cached + auto-force model fetches settle, the
-    // input bound to `selectedModel` must read the runtime model.
+ // After both the cached + auto-force model fetches settle, the
+ // input bound to `selectedModel` must read the runtime model.
     await waitFor(() => {
       const modelInputs = document.querySelectorAll(
         '.v2-provider-model-row input.v2-input',
@@ -608,7 +608,7 @@ describe('Settings → Providers Reconfigure (Lane 3 U3)', () => {
     });
     await openProviderForm(getByText, findByText, findByRole);
 
-    // Wait for the form to settle so the model state stabilises.
+ // Wait for the form to settle so the model state stabilises.
     await waitFor(() => {
       const inputs = document.querySelectorAll('.v2-provider-form input[type="password"]');
       expect(inputs.length).toBeGreaterThanOrEqual(1);
@@ -618,14 +618,14 @@ describe('Settings → Providers Reconfigure (Lane 3 U3)', () => {
     )[0];
     fireEvent.change(keyInput, { target: { value: 'sk-rotated' } });
 
-    // The new button must be present on the current-provider branch.
+ // The new button must be present on the current-provider branch.
     const saveKey = await findByTestId('provider-save-key-openai');
     expect(saveKey).toBeTruthy();
     fireEvent.click(saveKey);
 
-    // After the click settles, /configure must have been POSTed and
-    // /api/llm/config must NOT have been called (so the runtime model
-    // is not touched by a key-rotation).
+ // After the click settles, /configure must have been POSTed and
+ // /api/llm/config must NOT have been called (so the runtime model
+ // is not touched by a key-rotation).
     await waitFor(() => {
       const cfgurePosts = calls.filter((c) =>
         c.method === 'POST'
@@ -638,8 +638,8 @@ describe('Settings → Providers Reconfigure (Lane 3 U3)', () => {
   });
 
   it('(U3-#3) freshness badge shows error tone when backend reports a warning, regardless of last_refresh', async () => {
-    // 1-minute-old cache row with a 401 warning. Pre-fix, badge said
-    // "Live · 1m ago" alongside the warning chip — a direct lie.
+ // 1-minute-old cache row with a 401 warning. Pre-fix, badge said
+ // "Live · 1m ago" alongside the warning chip — a direct lie.
     const fetcher = (url) => {
       if (url.includes('/api/llm/providers/openai/models')) {
         return {
@@ -667,9 +667,9 @@ describe('Settings → Providers Reconfigure (Lane 3 U3)', () => {
     await openProviderForm(getByText, findByText, findByRole);
 
     const badge = await findByTestId('model-age-openai');
-    // The tone must NOT read "live" — either error (warning present)
-    // or stale (non-live source) is acceptable; never the cheery
-    // green chip while a HTTP 401 is sitting right next to it.
+ // The tone must NOT read "live" — either error (warning present)
+ // or stale (non-live source) is acceptable; never the cheery
+ // green chip while a HTTP 401 is sitting right next to it.
     await waitFor(() => {
       const tone = badge.getAttribute('data-age-tone');
       expect(['error', 'stale']).toContain(tone);
@@ -678,9 +678,9 @@ describe('Settings → Providers Reconfigure (Lane 3 U3)', () => {
   });
 
   it('(U3-#4) switching the active labeled key triggers a force=true model re-fetch', async () => {
-    // Render with one labeled key, then post a Make-active for a
-    // second label. Pre-fix, the open ProviderForm kept showing the
-    // models the previous key could see.
+ // Render with one labeled key, then post a Make-active for a
+ // second label. Pre-fix, the open ProviderForm kept showing the
+ // models the previous key could see.
     const calls = [];
     const keysSnapshots = [
       { keys: [
@@ -728,12 +728,12 @@ describe('Settings → Providers Reconfigure (Lane 3 U3)', () => {
     const { getByText, findByText, findByRole, findByTestId } = renderV2(<Settings />, { fetch: fetcher });
     await openProviderForm(getByText, findByText, findByRole);
 
-    // Wait for the keys card to render and the "Make active" button
-    // to appear for the `dev` row (prod is the current active one).
+ // Wait for the keys card to render and the "Make active" button
+ // to appear for the `dev` row (prod is the current active one).
     const devRow = await findByTestId('provider-key-row-dev');
     expect(devRow).toBeTruthy();
-    // Count force=true model calls before the make-active click; we
-    // expect the count to GROW after the click.
+ // Count force=true model calls before the make-active click; we
+ // expect the count to GROW after the click.
     const forceBefore = calls.filter((c) =>
       c.url.includes('/api/llm/providers/openai/models')
       && c.url.includes('force=true')).length;
@@ -751,9 +751,9 @@ describe('Settings → Providers Reconfigure (Lane 3 U3)', () => {
   });
 
   it('(U3-#5) active model is selectable in datalist even when recommended list omits it', async () => {
-    // Recommended shortlist contains gpt-5.5-pro only; the runtime
-    // model is gpt-4-turbo-preview. The datalist must still include
-    // gpt-4-turbo-preview so the user can re-pick it without typing.
+ // Recommended shortlist contains gpt-5.5-pro only; the runtime
+ // model is gpt-4-turbo-preview. The datalist must still include
+ // gpt-4-turbo-preview so the user can re-pick it without typing.
     const { getByText, findByText, findByRole, findByTestId } = renderV2(<Settings />, {
       fetch: makeCurrentProviderFetcher({
         runtimeModel: 'gpt-4-turbo-preview',
@@ -792,11 +792,11 @@ describe('Settings → Providers Reconfigure (Lane 3 U3)', () => {
     await waitFor(() => { expect(saveApply.disabled).toBe(false); });
     fireEvent.click(saveApply);
 
-    // The container that holds the form should surface the error
-    // chip text "invalid model" and must NOT show the "Saved …"
-    // success label. (The freshness badge is also a `.v2-chip--live`
-    // span — filter to <div> elements only, since the success/error
-    // chips render as <div> while the freshness badge is a <span>.)
+ // The container that holds the form should surface the error
+ // chip text "invalid model" and must NOT show the "Saved …"
+ // success label. (The freshness badge is also a `.v2-chip--live`
+ // span — filter to <div> elements only, since the success/error
+ // chips render as <div> while the freshness badge is a <span>.)
     await waitFor(() => {
       const errChip = document.querySelector('.v2-provider-form div.v2-chip--error');
       expect(errChip).toBeTruthy();

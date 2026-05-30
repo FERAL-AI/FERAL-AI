@@ -1,12 +1,12 @@
-"""A10 / W24d — W9 pairing migration must handle UNIQUE-constrained token.
+"""A10 /  —  pairing migration must handle UNIQUE-constrained token.
 
-Pre-W9 schemas commonly declared ``token TEXT UNIQUE NOT NULL``. SQLite's
+ schemas commonly declared ``token TEXT UNIQUE NOT NULL``. SQLite's
 ``ALTER TABLE paired_devices DROP COLUMN token`` refuses to drop columns
 that carry a UNIQUE constraint even on 3.35+, so the old migration fell
 back to "leave the column in place (set to empty string)" and left the
 legacy column permanently stranded.
 
-W24d replaces the fallback with the canonical SQLite table-rebuild pattern
+ replaces the fallback with the canonical SQLite table-rebuild pattern
 (create-new, copy, drop, rename, recreate indexes). These tests pin that
 behaviour: after migrating a UNIQUE-legacy DB the final schema has no
 `token` column at all, and the regular pair / verify API still works.
@@ -25,7 +25,7 @@ from security.device_pairing import DevicePairingStore
 
 
 def _seed_legacy_unique_db(path: Path, rows: list[tuple[str, str]]) -> None:
-    """Pre-W9 schema with a UNIQUE plaintext ``token`` column.
+    """ schema with a UNIQUE plaintext ``token`` column.
 
     Mirrors the failure case that produced the maintainer's terminal
     log entry: UNIQUE + NOT NULL on ``token`` causes the subsequent

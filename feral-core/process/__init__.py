@@ -1,4 +1,4 @@
-"""W18: feral-core OS-process subsystem.
+"""feral-core OS-process subsystem.
 
 This package owns supervised subprocess management — the runtime
 abstraction future external-CLI integrations (Codex CLI, Claude Code

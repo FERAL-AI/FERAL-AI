@@ -1,4 +1,4 @@
-"""W13: enforce that the prometheus_client REGISTRY is in lockstep with
+"""enforce that the prometheus_client REGISTRY is in lockstep with
 the default Grafana dashboard and Prometheus alert rules.
 
 If a panel or alert references a metric we never registered, the
@@ -28,7 +28,7 @@ ALERTS_PATH = REPO_ROOT / "ops" / "prometheus" / "alerts.yml"
 # Identifier shape for a Prometheus metric name. We anchor on the
 # ``feral_`` prefix so dashboard expressions like ``rate(...)`` or
 # ``histogram_quantile(...)`` don't pollute the set with the function
-# names themselves. Every W13 metric MUST start with ``feral_``.
+# names themselves. Every  metric MUST start with ``feral_``.
 _METRIC_RE = re.compile(r"\bferal_[a-zA-Z_][a-zA-Z0-9_]*\b")
 
 # Histograms expose three derived series at scrape time

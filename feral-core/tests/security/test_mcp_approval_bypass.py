@@ -1,4 +1,4 @@
-"""W22 — MCP tool approval-bypass: a high-risk MCP tool cannot run
+""" — MCP tool approval-bypass: a high-risk MCP tool cannot run
 without a per-tool consent record in ``security.exec_approvals``.
 
 The MCP server (`feral-core/mcp/server.py`) does not carry the

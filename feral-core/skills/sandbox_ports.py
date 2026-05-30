@@ -1,4 +1,4 @@
-"""W3-A14: narrow sandbox facade.
+"""-A14: narrow sandbox facade.
 
 This module defines a tiny port (protocol + default adapter) so code paths
 that previously reached into the global ``BrainState`` to fetch

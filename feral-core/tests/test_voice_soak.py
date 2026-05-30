@@ -1,9 +1,9 @@
 """
-W12 — voice soak harness.
+ — voice soak harness.
 
 Long-duration smoke test for the OpenAI Realtime and Gemini Live voice
 WebSocket protocols. The point is not to exercise the real provider
-clients (those are read-only for W12) but to exercise the *protocol
+clients (those are read-only for ) but to exercise the *protocol
 shapes* against an in-process fake peer for hours at a time and prove
 that:
 

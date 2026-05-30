@@ -1,5 +1,5 @@
 """
-Recovery test for federated memory sync (W11 / roadmap §3.3 #1).
+Recovery test for federated memory sync ( / roadmap §3.3 #1).
 
 Models the "kill brain mid-apply" failure: peer A produces 100 episodes
 worth of operations, peer B starts ingesting them, gets killed at the

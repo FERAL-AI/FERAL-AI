@@ -1,4 +1,4 @@
-"""W18: PTY adapter spawns the child under a real login shell.
+"""PTY adapter spawns the child under a real login shell.
 
 Contract verified: "command runs under an interactive login shell". Spec:
 
@@ -57,7 +57,7 @@ async def test_pty_adapter_uses_login_shell() -> None:
     * ``$0`` may carry a leading ``-`` (the canonical Unix login-shell
       indicator)
 
-    Either is acceptable per the W18 spec wording (``"-l" or
+    Either is acceptable per the spec wording (``"-l" or
     login-shell indicator in output``).
     """
     supervisor = create_process_supervisor()

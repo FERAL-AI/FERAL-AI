@@ -1,4 +1,4 @@
-"""W3-A11 regression tests for MCP runtime failure containment."""
+"""-A11 regression tests for MCP runtime failure containment."""
 
 from __future__ import annotations
 

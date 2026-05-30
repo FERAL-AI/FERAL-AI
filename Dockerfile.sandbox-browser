@@ -1,34 +1,34 @@
 # syntax=docker/dockerfile:1.7
 #
-# FERAL browser sandbox image (W22).
+# FERAL browser sandbox image.
 # ==================================
 # Used by:
-#   - W8 GenUI AppSurface iframe rendering, when the operator opts into
-#     a Chromium-backed appsurface for an installed app. The brain hands
-#     the app's signed manifest + bundle to this container; Chromium
-#     renders the iframe on a virtual display and the brain talks to it
-#     over the DevTools protocol on :9222.
+# - GenUI AppSurface iframe rendering, when the operator opts into
+# a Chromium-backed appsurface for an installed app. The brain hands
+# the app's signed manifest + bundle to this container; Chromium
+# renders the iframe on a virtual display and the brain talks to it
+# over the DevTools protocol on :9222.
 #
 # Mount points (passed at `docker run` time by docker_sandbox.py):
-#   /work        ro     — bundle to render (index.html + assets)
-#   /tmp         tmpfs  — Chromium scratch (rw, nosuid, size=256m)
+# /work ro — bundle to render (index.html + assets)
+# /tmp tmpfs — Chromium scratch (rw, nosuid, size=256m)
 #
 # Permission keep-list — the iframe MAY:
-#   - render its own HTML/CSS/JS bundle from /work
-#   - call window.postMessage to the parent (brain) frame
-#   - read clipboard contents the operator pasted INTO the iframe
-#   - issue fetch() to the brain's loopback HTTP API (the launcher
-#     publishes a host-gateway alias inside the container's hosts file)
+# - render its own HTML/CSS/JS bundle from /work
+# - call window.postMessage to the parent (brain) frame
+# - read clipboard contents the operator pasted INTO the iframe
+# - issue fetch to the brain's loopback HTTP API (the launcher
+# publishes a host-gateway alias inside the container's hosts file)
 #
 # Permission deny-list — the iframe MUST NOT:
-#   - access camera / microphone / geolocation / notifications / MIDI /
-#     USB / Bluetooth / serial / HID. These are all rejected by Chromium
-#     command-line flags below; if a future bundle requires one, it must
-#     route through a brain-side MCP tool that goes through the W22
-#     approval gate, not through a direct browser permission.
-#   - reach the host network (the launcher passes --network=none; this
-#     container has no resolver and no default route).
-#   - fork a child process outside Chromium's renderer/sandbox tree.
+# - access camera / microphone / geolocation / notifications / MIDI /
+# USB / Bluetooth / serial / HID. These are all rejected by Chromium
+# command-line flags below; if a future bundle requires one, it must
+# route through a brain-side MCP tool that goes through the
+# approval gate, not through a direct browser permission.
+# - reach the host network (the launcher passes --network=none; this
+# container has no resolver and no default route).
+# - fork a child process outside Chromium's renderer/sandbox tree.
 #
 # Chromium is pinned to whatever Debian 12 ships in stable. The build
 # helper in feral-core/security/sandbox_image.py records the resolved
@@ -69,7 +69,7 @@ WORKDIR /home/feral
 EXPOSE 9222
 
 LABEL org.feral-ai.image.kind="sandbox-browser" \
-      org.feral-ai.image.role="W8 GenUI AppSurface iframe renderer"
+      org.feral-ai.image.role="GenUI AppSurface iframe renderer"
 
 # The brain wraps this in `chromium $CHROMIUM_FLAGS file:///work/index.html`
 # at run time (see docker_sandbox.py); we keep CMD as the bare binary so

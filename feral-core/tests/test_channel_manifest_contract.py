@@ -1,16 +1,16 @@
-"""W21 — generic send/receive contract test.
+""" — generic send/receive contract test.
 
 Purpose: any in-tree adapter that ships a ``feral-channel.manifest.json``
 must satisfy the **manifest-declared capability surface** end-to-end
 (stubbed network). Today only Telegram is migrated, so the contract
-runs against Telegram. As W21.2 lands additional manifests, each one
+runs against Telegram. As  lands additional manifests, each one
 gets parametrised in here automatically — no per-channel test rewrites.
 
 Key idea: the test does NOT import ``TelegramChannel`` by name. It
 walks ``loader.discover_bundled()``, looks up the channel's
 implementation through a small in-test bridge, and exercises the
 abstract-base-class surface from ``channels/base.py``. That bridge is
-the seam that W21.3's full SDK will formalise; here it's a 5-line
+the seam that  full SDK will formalise; here it's a 5-line
 mapping so we can keep this PR scoped to Phase 1.
 """
 
@@ -32,7 +32,7 @@ from channels.loader import discover_bundled
 
 
 # Phase-1 bridge: channel id (manifest.id) → adapter class. Phase 3
-# (W21.3) replaces this with an entry-point / SDK barrel so 3rd-party
+# () replaces this with an entry-point / SDK barrel so 3rd-party
 # channels register themselves without touching this file.
 _ADAPTER_BY_MANIFEST_ID: dict[str, type[Channel]] = {
     "telegram": TelegramChannel,
@@ -149,7 +149,7 @@ class TestBundledRegistryShape:
     def test_channel_manager_recognises_manifest_provider(self) -> None:
         # The ChannelManager's CHANNEL_TYPES map and the manifest's
         # `id` must agree. This is the seam that lets ChannelManager
-        # consume manifest discovery once W21.2 lands.
+        # consume manifest discovery once  lands.
         manifests = discover_bundled()
         for m in manifests:
             for provider in m.providers:

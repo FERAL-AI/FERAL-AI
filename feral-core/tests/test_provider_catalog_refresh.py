@@ -1,4 +1,4 @@
-"""ProviderCatalog.refresh_async — Roadmap §3.5 P0 (W1).
+"""ProviderCatalog.refresh_async — Roadmap §3.5 P0 ().
 
 The runtime refresher keeps an already-running brain's model catalog
 current without waiting for the next ``provider-research.yml`` cron PR.
@@ -68,7 +68,7 @@ def _make_descriptor(
 
 @pytest.fixture
 def in_memory_cache(tmp_path) -> Path:
-    """In-memory-ish cache path under tmp_path (per the W1 spec)."""
+    """In-memory-ish cache path under tmp_path (per the spec)."""
     return tmp_path / "model_catalog.json"
 
 

@@ -63,7 +63,7 @@ _EXT_MAP = {"python": ".py", "bash": ".sh", "node": ".js"}
 class WorkspaceScriptsSkill(BaseSkill):
     def __init__(self, sandbox_port: Optional[SandboxPort] = None):
         super().__init__("workspace_scripts")
-        # W3-A14: depend on a narrow facade instead of pulling from the
+        # -A14: depend on a narrow facade instead of pulling from the
         # global ``api.state`` import on every script execution.
         self._sandbox_port: SandboxPort = sandbox_port or default_sandbox_port()
 

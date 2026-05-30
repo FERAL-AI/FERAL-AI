@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sync chaos CLI (W11 / roadmap §3.3 #1)
+Sync chaos CLI ( / roadmap §3.3 #1)
 ======================================
 Spin two FERAL brains as subprocesses with the sync engine wired up,
 SIGKILL one at random points for N iterations, then assert the WAL
