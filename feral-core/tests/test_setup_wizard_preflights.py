@@ -542,7 +542,7 @@ def test_key_masking_uniform_across_steps(
 
     # --- chat surface (drive _configure_provider_key directly) ---
     from cli.setup.steps import llm as llm_step
-    from unittest.mock import AsyncMock, MagicMock
+    from unittest.mock import AsyncMock
 
     fake_catalog = MagicMock()
     fake_catalog.configure = MagicMock()

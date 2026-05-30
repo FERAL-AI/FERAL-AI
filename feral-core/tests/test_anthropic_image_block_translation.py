@@ -29,7 +29,6 @@ shape conversion lands in the Anthropic request body that
 
 from __future__ import annotations
 
-import json
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 

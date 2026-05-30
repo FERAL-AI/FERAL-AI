@@ -585,7 +585,6 @@ async def _handle_ollama_unreachable(console) -> None:
 
 
 async def _handle_ollama_no_models(catalog, console) -> None:
-    from ..helpers import ask_text, confirm
     from ..local_providers import STARTER_OLLAMA_MODELS, ollama_pull_model
 
     console.print("  Ollama is running but no models are installed yet.")

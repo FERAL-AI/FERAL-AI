@@ -42,7 +42,11 @@ def test_save_writes_settings_and_routes_credentials_to_vault(wizard_home):
 
     settings = json.loads((wizard_home / "settings.json").read_text())
     assert settings["llm"]["provider"] == "openai"
-    assert settings["meta"]["setup_complete"] is True
+    # W7 (lane-07): save() persists settings + credentials but must NOT
+    # mark setup complete — only the finish step's mark_complete() does
+    # (closes finding 09's "quit-marks-complete" defect). This test used
+    # to assert the opposite, contradicting that intentional design.
+    assert settings.get("meta", {}).get("setup_complete") is not True
 
     assert not (wizard_home / "credentials.json").exists(), (
         "A7 regression: WizardState.save wrote a plaintext credentials.json"

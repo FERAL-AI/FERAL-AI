@@ -109,6 +109,8 @@ async def test_stats_cache_refreshes_after_ttl(store, monkeypatch):
 
     first = await store.stats()
     assert call_count["n"] == 1
+    # The first call is a fresh compute, not a cache hit.
+    assert first.get("from_cache") is not True
 
     # Inside the TTL: cached.
     second = await store.stats()
