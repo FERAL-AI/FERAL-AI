@@ -142,6 +142,15 @@ CI runs the same commands plus an architecture-boundary check, version-coherence
 - JavaScript / React: existing JSX patterns, Tailwind for styling.
 - Don't add comments that just narrate what the code does. Comments should capture intent, trade-offs, or constraints the code itself cannot convey.
 
+## Commit messages & naming
+
+Public commit messages, PR titles, code comments, and test names are part of the project's permanent record. Keep them professional and self-describing:
+
+- Describe what the change **does** in neutral terms. Avoid framing that implies prior work was fake — no "remove placeholder", "kill the theatre", "no more invented X", "zero fakes", "real product". State the behavior directly (e.g. "report unwired sensors honestly" rather than "kill the fake sensor").
+- Don't name third-party / reference projects in shipped artifacts (commit messages, code, docs, tests). Describe what FERAL does on its own terms.
+- Don't reference internal-only docs or internal workstream numbering in shipped code comments — they're dangling pointers for anyone outside the team. Capture the intent inline instead.
+- Conventional-commit prefixes (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`) are encouraged.
+
 ## Pull requests
 
 - One focused change per PR.

@@ -96,3 +96,6 @@ docs/AGENT_PROMPTS*.md
 docs/AGENT_PROMPTS_FOLLOWUPS*.md
 docs/critique.md
 docs/WAVE5_HARDENING_PROMPT.md
+
+# Local editor / agent config — not part of the shipped product.
+.cursor/
