@@ -1,8 +1,6 @@
 """W22 — MCP tool approval-bypass: a high-risk MCP tool cannot run
 without a per-tool consent record in ``security.exec_approvals``.
 
-Cites docs/OPENCLAW_LESSONS.md §6 + §10 W22.
-
 The MCP server (`feral-core/mcp/server.py`) does not carry the
 approval check itself; that's the gateway-side contract documented
 in :mod:`security.dangerous_tools` (`requires_approval`,

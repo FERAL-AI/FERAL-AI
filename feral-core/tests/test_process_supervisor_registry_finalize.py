@@ -4,8 +4,6 @@ Contract: "finalize sets exited state". Spec: spawn → wait →
 finalize; assert RunRecord has
 finished_at + exit_code populated; assert list_active is empty after
 finalize.
-
-Cites docs/OPENCLAW_LESSONS.md §2 + §10 W18.
 """
 
 from __future__ import annotations

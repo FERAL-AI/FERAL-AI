@@ -5,8 +5,6 @@ overall_timeout=1 must die within
 1.2s, the exit_code must show SIGTERM/SIGKILL (negative returncode
 under asyncio convention), and the registry's kill_reason must be
 ``overall_timeout``.
-
-Cites docs/OPENCLAW_LESSONS.md §2 + §10 W18.
 """
 
 from __future__ import annotations

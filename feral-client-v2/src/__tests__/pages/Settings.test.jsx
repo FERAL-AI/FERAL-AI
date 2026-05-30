@@ -299,9 +299,8 @@ describe('Settings', () => {
     const fetcher = (url) => {
       if (url.includes('/api/twin/policies')) {
         // Mirrors the integrations/twin/status `{ configured: [] }`
-        // contract spec'd in docs/AGENT_PROMPTS.md §D.W2: when the
-        // backend has no wired executors at all, both `policies`
-        // and `available` come back empty.
+        // contract: when the backend has no wired executors at all,
+        // both `policies` and `available` come back empty.
         return { policies: [], disconnected: [], available: [] };
       }
       if (url.includes('/api/twin/approvals')) return { approvals: [] };

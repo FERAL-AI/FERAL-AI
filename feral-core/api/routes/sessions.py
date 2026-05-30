@@ -12,7 +12,7 @@ audited and rejected before the spawner runs. This keeps the human-in-
 the-loop "big red pause button" semantics intact for any future
 session-management endpoints we add here.
 
-See docs/OPENCLAW_LESSONS.md §2 (no-bypass doctrine) and §10 W17.
+Implements the no-bypass doctrine.
 """
 
 from __future__ import annotations

@@ -9,8 +9,6 @@ specific run id.
 Async-safe via ``asyncio.Lock``. Not thread-safe — the supervisor is
 asyncio-native and all writes must flow through the event loop that
 owns the registry.
-
-Cites docs/OPENCLAW_LESSONS.md §2 + §10 W18.
 """
 
 from __future__ import annotations

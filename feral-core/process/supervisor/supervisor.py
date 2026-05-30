@@ -20,8 +20,6 @@ service-restart, future Codex CLI / Claude Code CLI integrations,
 ffmpeg pipelines). It is **not wired** into ``agents/orchestrator``
 or any service in this PR — the W18 spec is explicit that no callers
 are added here.
-
-Cites docs/OPENCLAW_LESSONS.md §2 + §10 W18.
 """
 
 from __future__ import annotations

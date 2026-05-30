@@ -3,8 +3,6 @@
 Contract: "no-output timeout". Spec: ``sleep 10``
 emits nothing on stdout/stderr; with no_output_timeout=1, must die
 within 1.2s with kill_reason=``no_output_timeout``.
-
-Cites docs/OPENCLAW_LESSONS.md §2 + §10 W18.
 """
 
 from __future__ import annotations

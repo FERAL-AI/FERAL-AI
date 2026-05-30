@@ -17,8 +17,6 @@ Contract (consumed by ``supervisor.RunHandle``):
 * ``kill(grace_sec=5.0)`` sends ``SIGTERM`` immediately and schedules
   a ``SIGKILL`` after ``grace_sec`` if the child has not exited yet.
   ``grace_sec=0`` skips ``SIGTERM`` and goes straight to ``SIGKILL``.
-
-Cites docs/OPENCLAW_LESSONS.md §2 + §10 W18.
 """
 
 from __future__ import annotations

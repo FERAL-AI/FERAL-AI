@@ -19,8 +19,6 @@ Public surface::
 The abstraction ships READY for W23/voice/Codex CLI/Claude Code CLI
 integrations but is intentionally NOT wired into ``agents/orchestrator``
 in this PR (no callers yet).
-
-Cites docs/OPENCLAW_LESSONS.md §2 + §10 W18.
 """
 
 from .registry import RunRecord, RunRegistry

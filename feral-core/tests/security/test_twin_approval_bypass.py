@@ -1,8 +1,6 @@
 """W22 — Twin executor approval-bypass: a registered TwinExecutor is
 unreachable without an approval that flowed through TwinPolicyEngine.
 
-Cites docs/OPENCLAW_LESSONS.md §6 + §10 W22.
-
 Bypass attempts simulated:
   1. Forge an "approval" field inside the executor context dict
      (mode=draft_only must still queue, executor must not run).

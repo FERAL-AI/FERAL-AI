@@ -57,7 +57,7 @@ def test_mdns_does_not_carry_a_literal_version_string():
     assert not matches, (
         "feral-core/services/mdns.py contains a literal version string "
         f"({matches!r}). W7 mandates importing VERSION from "
-        "feral_core.version instead. See docs/AGENT_PROMPTS.md §D.W7."
+        "feral_core.version instead."
     )
 
 

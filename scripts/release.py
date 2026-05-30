@@ -313,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "FERAL release driver: bump version, sync every literal, "
             "stub a CHANGELOG entry, run tests, build artifacts, open "
-            "a release PR. See docs/AGENT_PROMPTS.md §D.W7."
+            "a release PR."
         ),
     )
     parser.add_argument(

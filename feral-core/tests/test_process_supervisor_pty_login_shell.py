@@ -8,8 +8,6 @@ Contract verified: "command runs under an interactive login shell". Spec:
   login-shell indicator in output (proves the shell received ``-l``).
 * skip the whole module on Windows (PTY adapter is POSIX-only by
   design — see adapters/pty.py).
-
-Cites docs/OPENCLAW_LESSONS.md §2 + §10 W18.
 """
 
 from __future__ import annotations

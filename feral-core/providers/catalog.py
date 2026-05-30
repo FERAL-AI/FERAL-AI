@@ -148,8 +148,7 @@ class ProviderStatus:
 # in their descriptor. The catalog resolves the default lazily through
 # :meth:`ProviderCatalog.default_model_for` so the dropdown follows the
 # provider's live model list rather than a literal that drifts every
-# few months. (Roadmap §3.5 P0; see ``docs/AGENT_PROMPTS.md`` §D.W1 for
-# the historical names this replaced.)
+# few months. (Roadmap §3.5 P0.)
 #
 # Local-runtime providers (ollama, lmstudio) keep an empty default too —
 # the live ``/api/tags`` (Ollama) or ``/v1/models`` (LM Studio) call is

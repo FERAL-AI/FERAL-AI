@@ -3,9 +3,6 @@ bypassed via the W17 ``spawn_subsession`` escape hatch, and a paused
 supervisor blocks every wrapped orchestrator entry point regardless of
 forged "admin" context flags.
 
-Cites docs/OPENCLAW_LESSONS.md §6 + §10 W22 (and §10 W17 for the
-subagent allowlist + cancellation contract this test protects).
-
 Bypass attempts simulated:
   1. Spawn a child kind that is NOT in the W17 default allowlist;
      the runner must NEVER be invoked, the supervisor must record a

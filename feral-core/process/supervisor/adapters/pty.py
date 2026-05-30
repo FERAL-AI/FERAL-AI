@@ -16,8 +16,6 @@ The child runs under a **login shell** (``/bin/zsh -l`` on macOS,
 ``PATH`` / ``rc`` files — Codex CLI / Claude Code CLI need this to
 find homebrew-installed binaries the way the operator runs them
 interactively.
-
-Cites docs/OPENCLAW_LESSONS.md §2 + §10 W18.
 """
 
 from __future__ import annotations

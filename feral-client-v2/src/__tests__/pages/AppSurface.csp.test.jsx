@@ -10,7 +10,7 @@
  *
  * The W8 spec text mentioned `feral-core/tests/test_genui_csp.py` but
  * AppSurface itself is a React component, so this lives as a vitest in
- * feral-client-v2/. See docs/AGENT_PROMPTS_FOLLOWUPS.md for the note.
+ * feral-client-v2/.
  */
 
 import { describe, it, expect } from 'vitest';

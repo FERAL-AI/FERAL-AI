@@ -297,8 +297,7 @@ class TestSharedSingleton:
 
 
 # Verified current as of 2026-04-24. Source: openai.com,
-# platform.claude.com, ai.google.dev (cited in
-# docs/AGENT_PROMPTS.md §A and §D.W1).
+# platform.claude.com, ai.google.dev.
 _VERIFIED_OPENAI_IDS = {
     "gpt-5.5",
     "gpt-5.5-pro",

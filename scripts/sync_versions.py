@@ -35,7 +35,7 @@ Source-of-truth resolution order (first hit wins):
      ``brain-tests`` job; the ``version-coherence`` job runs without
      installing anything).
 
-Owned-paths note (workstream W7, see docs/AGENT_PROMPTS.md §C.2):
+Owned-paths note (workstream W7):
 the SCRIPT is owned by W7 and may sync to any path it knows about.
 Editing the literal in unowned paths during a *release* (driven by
 this script) is the explicit purpose of the script. The PR that
@@ -119,7 +119,7 @@ VERSION_LOCATIONS: tuple[VersionLocation, ...] = (
     # sync there anymore; the regression test in test_version_singlesrc.py
     # asserts the literal stays gone.
 
-    # ---- W7-owned docs (read-only context per §C.2 — this script's
+    # ---- W7-owned docs (read-only context — this script's
     # ----  patcher will only touch the badge marker block; the rest of
     # ----  the README is left alone).
     VersionLocation(

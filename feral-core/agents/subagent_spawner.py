@@ -1,8 +1,7 @@
 """W17: Subagent spawner — gated, scoped, cancellable child sessions.
 
-Cites docs/OPENCLAW_LESSONS.md §2 and §10 W17 (internal comparative
-analysis). The spawn contract runs three gates in order: allowlist
-first, registry second, asyncio cancellation third.
+The spawn contract runs three gates in order: allowlist first,
+registry second, asyncio cancellation third.
 
 Public surface::
 
@@ -284,8 +283,7 @@ class SubagentRegistry:
         duration of the steer call so that mid-flight chatter does not
         race the steer outcome. If the steer hook RAISES, the
         suppression flag is cleared before re-raising — silent
-        swallowing is forbidden by W17 doctrine (see
-        docs/OPENCLAW_LESSONS.md §2).
+        swallowing is forbidden by W17 doctrine.
         """
         record = self._find(parent_id, child_id)
         if record is None:

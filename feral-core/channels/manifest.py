@@ -3,9 +3,8 @@
 Why this module exists
 ----------------------
 A declarative per-extension manifest is the architectural rule that
-makes a large extension surface sustainable (see
-`docs/OPENCLAW_LESSONS.md` §5 for the internal comparative analysis).
-W21 brings that rule to FERAL **channels**: a single declarative
+makes a large extension surface sustainable. W21 brings that rule to
+FERAL **channels**: a single declarative
 ``feral-channel.manifest.json`` per channel describing the providers it
 speaks to, the env vars its auth needs, and the capabilities it
 advertises (messaging / voice / file / webhook / ...).

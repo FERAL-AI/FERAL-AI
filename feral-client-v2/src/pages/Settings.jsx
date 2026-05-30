@@ -3191,7 +3191,6 @@ function TwinSection() {
   // own range (W2 contract), so it cannot take a real `setSection`
   // prop yet. The Connect button on each "Available executors" row
   // therefore clicks the matching settings nav button via the DOM.
-  // Tracked in docs/AGENT_PROMPTS_FOLLOWUPS.md for lifting into props.
   const navigateToSettingsSection = (target) => {
     if (typeof document === 'undefined') return;
     const buttons = document.querySelectorAll('.v2-settings-btn');

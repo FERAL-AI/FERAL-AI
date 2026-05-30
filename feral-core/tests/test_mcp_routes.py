@@ -4,7 +4,7 @@ These tests guard the wiring between ``feral-core/api/routes/mcp.py`` and
 ``mcp.server.FeralMCPServer``. They complement ``test_mcp_full.py`` which
 covers the JSON-RPC protocol logic and ``FeralMCPServer.get_http_routes``.
 
-Required tests (per docs/AGENT_PROMPTS.md §D.W3):
+Required tests:
 
 * ``test_mcp_routes_listed_in_openapi`` — every route registered under
   ``/mcp*`` appears in the OpenAPI schema served at ``/openapi.json``.

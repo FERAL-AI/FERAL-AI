@@ -397,10 +397,10 @@ class Orchestrator:
         }
 
     # ─────────────────────────────────────────────
-    # W17 — Subagent spawn (additive)
-    # See docs/OPENCLAW_LESSONS.md §10 W17. Single additive method;
-    # behaviour of every existing handler is unchanged. Spawning is
-    # gated by ``agents.subagent_policy`` and audited via the supervisor.
+    # Subagent spawn (additive)
+    # Single additive method; behaviour of every existing handler is
+    # unchanged. Spawning is gated by ``agents.subagent_policy`` and
+    # audited via the supervisor.
     # ─────────────────────────────────────────────
 
     async def spawn_subsession(

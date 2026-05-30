@@ -10,6 +10,4 @@ Two adapters, picked per-run via the ``adapter`` argument to
   ``os.fork`` + ``os.execvp`` so the child sees a real controlling
   terminal. Required for Codex CLI / Claude Code CLI / any tool that
   refuses to render TUI output without ``isatty(stdout) == True``.
-
-Cites docs/OPENCLAW_LESSONS.md §2 + §10 W18.
 """

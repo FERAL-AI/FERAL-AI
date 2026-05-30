@@ -2,8 +2,6 @@
 tricked by a forged plaintext token, and every failed verify lands
 in the supervisor audit log as decision="denied".
 
-Cites docs/OPENCLAW_LESSONS.md §6 (sandboxing + security) and §10 W22.
-
 Bypass attempts simulated:
   1. Random 256-bit token never issued by this brain.
   2. Real, currently-valid token modified by one byte (lookup-hash
