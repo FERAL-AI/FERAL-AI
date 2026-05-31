@@ -26,7 +26,43 @@ from typing import Any
 
 logger = logging.getLogger("feral.cost.pricing")
 
-_CATALOG_PATH = Path(__file__).resolve().parents[1] / "providers" / "model_catalog.json"
+
+def _resolve_catalog_path() -> Path:
+    """Locate ``providers/model_catalog.json`` in a way that works in
+    BOTH layouts the wheel ends up in:
+
+    * editable / source checkout — ``providers/`` is a sibling of
+      ``cost/`` so ``Path(__file__).parents[1] / providers`` resolves.
+    * pip-installed wheel — ``providers`` is a top-level package in
+      ``site-packages`` and ``importlib.resources.files`` reaches the
+      bundled data file regardless of where the package lives on disk
+      (lone-file installs, zip-imported eggs, namespace packages).
+
+    Tries ``importlib.resources`` first so an unusual install layout
+    (zipapp, frozen bundle) still finds the catalog; falls back to the
+    historical filesystem path so existing tests / dev workflows are
+    unchanged.
+    """
+    try:
+        from importlib.resources import files
+
+        candidate = files("providers").joinpath("model_catalog.json")
+        # ``Traversable.is_file`` is available on Python 3.11+ and
+        # returns False inside zip-imports without raising — the path
+        # below uses ``str()`` so a zipimporter-backed Traversable can
+        # still surface a usable filesystem path via ``as_file`` (we
+        # don't need a real FS file because ``ModelPricing.reload``
+        # reads the bytes through ``Path.read_text`` only when the
+        # path is_file()).
+        as_path = Path(str(candidate))
+        if as_path.is_file():
+            return as_path
+    except Exception:
+        pass
+    return Path(__file__).resolve().parents[1] / "providers" / "model_catalog.json"
+
+
+_CATALOG_PATH = _resolve_catalog_path()
 _FALLBACK_PER_1K = {"input": 0.005, "output": 0.025}
 
 
