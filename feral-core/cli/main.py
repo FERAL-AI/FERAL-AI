@@ -1233,6 +1233,99 @@ def _render_probe_row(pid: str, result, _pass, _info, _warn, _fail):
     _warn(label, f"{reason or 'error'}: {result.detail}")
 
 
+def _ollama_pulled_models_sync(base_url: str, timeout: float = 3.0) -> list[str] | None:
+    """Return the list of model names pulled on the local Ollama server.
+
+    Returns ``None`` when Ollama is unreachable so callers can
+    distinguish "definitely not pulled" from "couldn't check" — the
+    former is a real configuration error (doctor fails), the latter
+    is informational (doctor warns once, doesn't block).
+
+    Uses ``urllib`` instead of httpx so the helper has no async / event
+    loop coupling — doctor runs sync and we want the lookup to behave
+    the same in tests that don't spin up an event loop.
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+            f"{base_url.rstrip('/')}/api/tags", timeout=timeout,
+        ) as resp:
+            if resp.status != 200:
+                return None
+            payload = json.loads(resp.read().decode("utf-8") or "{}")
+    except Exception:
+        return None
+    models = payload.get("models") or []
+    out: list[str] = []
+    for entry in models:
+        name = (entry.get("name") or "").strip()
+        if name:
+            out.append(name)
+    return out
+
+
+def _ollama_pulled_aliases(pulled: list[str]) -> set[str]:
+    """Expand pulled model names into the set of strings that should
+    match a configured model id. Ollama tags look like ``llama3.1:8b``;
+    operators routinely configure the model as just ``llama3.1``. Both
+    must be considered "pulled"."""
+    out: set[str] = set()
+    for name in pulled:
+        out.add(name)
+        if ":" in name:
+            out.add(name.split(":", 1)[0])
+    return out
+
+
+def _check_configured_ollama_model(_pass, _info, _warn, _fail) -> None:
+    """Verify the currently-configured Ollama model is actually pulled.
+
+    Reads ``llm.provider`` + ``llm.model`` from the merged settings
+    snapshot. Only runs the check when the configured provider is
+    ``ollama`` — for cloud providers the LLM probe row above already
+    covers credential validity. When Ollama is unreachable the local
+    server probe will already have flagged it, so this helper stays
+    quiet to avoid two warnings for the same root cause.
+    """
+    try:
+        from config.loader import load_settings
+        from config.runtime import ollama_base_url
+    except Exception:
+        return
+    try:
+        settings = load_settings() or {}
+    except Exception:
+        return
+    llm = settings.get("llm") or {}
+    provider = str(llm.get("provider") or "").strip().lower()
+    model = str(llm.get("model") or "").strip()
+    if provider != "ollama" or not model:
+        return
+    pulled = _ollama_pulled_models_sync(ollama_base_url())
+    if pulled is None:
+        # Server unreachable — the LLM probe row above is the right
+        # place to surface that, so we stay quiet here.
+        return
+    aliases = _ollama_pulled_aliases(pulled)
+    if not pulled:
+        _fail(
+            f"Ollama model {model!r}",
+            "no models pulled on the local Ollama server",
+            f"Run: ollama pull {model}  (or pick an installed model in Settings → Providers → Ollama)",
+        )
+        return
+    base_name = model.split(":", 1)[0]
+    if model in aliases or base_name in aliases:
+        _pass(f"Ollama model {model!r}", "pulled and ready")
+        return
+    installed = ", ".join(sorted({n.split(":", 1)[0] for n in pulled})[:6]) or "(none)"
+    _fail(
+        f"Ollama model {model!r}",
+        f"configured but not pulled — installed: {installed}",
+        f"Run: ollama pull {model}  (or pick an installed model in Settings → Providers → Ollama)",
+    )
+
+
 def cmd_doctor():
     """Run comprehensive diagnostics and report what's working."""
     try:
@@ -1411,6 +1504,21 @@ def cmd_doctor():
         if result is None:
             continue
         _render_probe_row(pid, result, _pass, _info, _warn, _fail)
+
+    # ── 4b. Local model availability (Ollama) ──
+    #
+    # The Ollama LLM probe above only checks that the local server is
+    # reachable (HTTP 200 on /api/tags). It does NOT check that the
+    # *currently configured* chat model actually exists in the pulled
+    # set. Reachable + missing-model produced the operator report
+    # "Switched LLM to ollama/<name> (available=True)" immediately
+    # followed by a 404 on /v1/chat/completions, with doctor reporting
+    # everything as green.
+    #
+    # We do that lookup here, after the generic LLM probe rows so the
+    # context is obvious to the operator, and only when the active
+    # provider is Ollama (cloud providers don't need this check).
+    _check_configured_ollama_model(_pass, _info, _warn, _fail)
 
     # ── 5. Identity files — USER.md ──
     user_md = home / "USER.md"
