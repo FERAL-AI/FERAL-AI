@@ -266,6 +266,12 @@ exclude = ["tests*"]
 [tool.setuptools.package-data]
 "skills.manifests" = ["*.json"]
 "config" = ["*.yaml", "*.yml"]
+# The `providers` package ships its .py modules, but the model catalog
+# data file (`providers/model_catalog.json`) was never globbed into the
+# wheel — so pip-installed users hit "model catalog missing ... using
+# fallback pricing" on every request and the provider/model lists fell
+# back to a static set. Ship the JSON data with the package.
+"providers" = ["*.json"]
 # audit-r9 brief #08: ship the first-party persona + workflow-pack
 # JSON manifests in the wheel. Without these entries, `pip install
 # feral-ai` produced an installation where `default_personas_dir()`
