@@ -60,7 +60,15 @@ async def test_provider_list_models(provider_id, factory):
     p = factory()
     models = p.list_models()
     assert isinstance(models, list)
-    assert len(models) > 0, f"{provider_id} ships an empty default model list"
+    # Local-runtime providers (ollama, lmstudio) ship NO static model
+    # list because the live ``/api/tags`` / ``/v1/models`` lookup is
+    # the only honest source of truth — a hardcoded fallback would
+    # advertise names the operator has not pulled. Cloud providers
+    # still ship the curated catalog inventory.
+    if provider_id == "ollama":
+        assert models == [], f"{provider_id} must NOT ship a static fallback list"
+    else:
+        assert len(models) > 0, f"{provider_id} ships an empty default model list"
 
 
 @pytest.mark.parametrize("provider_id,factory", ALL_ADAPTERS)

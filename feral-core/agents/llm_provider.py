@@ -2883,18 +2883,73 @@ class LLMProvider:
         preset = LLM_PRESETS.get(preset_id)
         if not preset:
             return {"ok": False, "error": f"Unknown preset: {preset_id}"}
+        requested_model = preset.get("model", "") or ""
+        # Ollama presets that hardcode a model name (``ollama_vision`` ->
+        # ``llava``) are a guaranteed 404 on the first chat turn when
+        # that model isn't pulled locally. Probe ``/api/tags`` and fall
+        # through to switch_provider's auto-detect path when the request
+        # doesn't match an installed model — the caller still gets an
+        # ``ok=True`` response but with a ``warning`` describing the
+        # substitution so the UI can prompt the operator to pull the
+        # preferred model. When Ollama itself is unreachable we leave
+        # the request unchanged: the running brain's own probe ladder
+        # will surface that failure.
+        fallback_warning = ""
+        if preset.get("provider") == "ollama" and requested_model:
+            pulled = await self._ollama_pulled_models()
+            if pulled is not None:
+                base = requested_model.split(":", 1)[0]
+                if requested_model not in pulled and base not in pulled:
+                    fallback_warning = (
+                        f"Ollama model {requested_model!r} is not pulled; "
+                        "auto-detecting an installed model instead. "
+                        f"Run `ollama pull {requested_model}` to use this "
+                        "preset directly."
+                    )
+                    requested_model = ""
         await self.switch_provider(
             provider=preset["provider"],
-            model=preset.get("model", ""),
+            model=requested_model,
             api_key="",
         )
-        return {
+        payload: dict = {
             "ok": True,
             "preset": preset_id,
             "provider": self.provider,
             "model": self.model,
             "vision_supported": bool(preset.get("vision_supported", False)),
         }
+        if fallback_warning:
+            payload["warning"] = fallback_warning
+        return payload
+
+    @staticmethod
+    async def _ollama_pulled_models() -> Optional[set[str]]:
+        """Return the set of model names + base ids pulled on the local
+        Ollama server, or ``None`` when the server is unreachable.
+
+        Used by ``apply_preset`` to avoid handing switch_provider a
+        guaranteed-404 model literal. The return shape includes both
+        the full ``name:tag`` form and the bare ``name`` so callers can
+        match either style of configured id.
+        """
+        try:
+            base = ollama_base_url().rstrip("/")
+            async with httpx.AsyncClient(timeout=3.0) as c:
+                r = await c.get(f"{base}/api/tags")
+                r.raise_for_status()
+            payload = r.json() or {}
+        except Exception:
+            return None
+        models = payload.get("models") or []
+        out: set[str] = set()
+        for entry in models:
+            name = (entry.get("name") or "").strip()
+            if not name:
+                continue
+            out.add(name)
+            out.add(name.split(":", 1)[0])
+        return out
 
     # ── Failover ───────────────────────────────────────────
 

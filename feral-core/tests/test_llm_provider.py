@@ -322,7 +322,18 @@ class TestVisionAndPresets:
         presets = llm.list_presets()
         assert any(p["id"] == "ollama_vision" for p in presets)
 
-        result = await llm.apply_preset("ollama_vision")
+        # ``apply_preset`` now consults ``/api/tags`` for ollama
+        # presets so it can fall through to auto-detect when the
+        # requested model isn't pulled. The original assertion is
+        # that the preset's literal (``llava``) lands on
+        # ``llm.model``; we pin the pulled-model lookup so the test
+        # exercises that "model exists" branch regardless of what
+        # the developer's local Ollama happens to have installed.
+        with patch.object(
+            LLMProvider, "_ollama_pulled_models",
+            new=AsyncMock(return_value={"llava", "llava:7b"}),
+        ):
+            result = await llm.apply_preset("ollama_vision")
         assert result["ok"] is True
         assert llm.provider == "ollama"
         assert llm.model == "llava"
