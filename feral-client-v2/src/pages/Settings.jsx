@@ -791,7 +791,31 @@ function TierRouteCard() {
 }
 
 function FallbacksCard({ health, onChange }) {
-  const fallbacks = health.fallback_providers || [];
+  // The fallback list lives in *local* state so every click updates the
+  // UI immediately (optimistic). Pre-fix, every button delegated to the
+  // parent which awaited a config POST + a /api/llm/health refresh;
+  // the snapshot reads the in-memory ``LLMProvider._config`` which
+  // ``/api/config/update`` does not mutate, so the refresh returned
+  // the same list and the row appeared unchanged — i.e. the buttons
+  // looked dead even though they fired (Bug #3). The prop is still the
+  // source of truth on first render and after any external refresh.
+  const serverFallbacks = health.fallback_providers || [];
+  const [fallbacks, setFallbacks] = useState(serverFallbacks);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  // Track the last-seen server snapshot so a fresh refresh after the
+  // user clicked elsewhere still hydrates our local state, but we
+  // don't clobber an in-flight optimistic edit on every re-render.
+  const lastServerRef = useRef(serverFallbacks.join('|'));
+  useEffect(() => {
+    const key = serverFallbacks.join('|');
+    if (key !== lastServerRef.current) {
+      lastServerRef.current = key;
+      setFallbacks(serverFallbacks);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverFallbacks.join('|')]);
+
   const candidates = health.candidates || [];
   const active = health.active?.provider || '';
   // Candidate list excluding the active one — these are what can be
@@ -801,20 +825,36 @@ function FallbacksCard({ health, onChange }) {
     .map((c) => c.provider)
     .filter((p) => p !== active && !fallbacks.includes(p));
 
-  const setList = (next) => {
+  const commit = async (next) => {
     const deduped = [];
     for (const p of next) if (p && !deduped.includes(p)) deduped.push(p);
-    onChange(deduped);
+    const previous = fallbacks;
+    // Optimistic: paint the new order immediately so the buttons feel
+    // responsive even if the network round-trip is slow.
+    setFallbacks(deduped);
+    setBusy(true);
+    setErr('');
+    try {
+      await onChange(deduped);
+    } catch (e) {
+      // Roll back the optimistic edit so the user can see something
+      // really did go wrong instead of staring at a "successful" list
+      // that the backend never accepted.
+      setFallbacks(previous);
+      setErr(e?.message || 'failed to update fallbacks');
+    } finally {
+      setBusy(false);
+    }
   };
   const move = (idx, delta) => {
     const next = [...fallbacks];
     const target = idx + delta;
     if (target < 0 || target >= next.length) return;
     [next[idx], next[target]] = [next[target], next[idx]];
-    setList(next);
+    commit(next);
   };
-  const remove = (p) => setList(fallbacks.filter((x) => x !== p));
-  const add = (p) => setList([...fallbacks, p]);
+  const remove = (p) => commit(fallbacks.filter((x) => x !== p));
+  const add = (p) => commit([...fallbacks, p]);
 
   return (
     <Glass level={1} radius="md" padding="sm" className="v2-providers-fallbacks">
@@ -832,7 +872,9 @@ function FallbacksCard({ health, onChange }) {
         </span>
       </div>
 
-      <ul className="v2-fallback-list">
+      {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
+
+      <ul className="v2-fallback-list" data-testid="fallback-list">
         {fallbacks.length === 0 && (
           <li className="v2-p v2-p--muted v2-p--tiny">No fallbacks set.</li>
         )}
@@ -842,7 +884,7 @@ function FallbacksCard({ health, onChange }) {
             : cand.has_key ? 'live'
             : 'off';
           return (
-            <li key={p} className="v2-fallback-row">
+            <li key={p} className="v2-fallback-row" data-testid={`fallback-row-${p}`}>
               <StatusDot tone={tone} />
               <code>{p}</code>
               <span className="v2-p v2-p--tiny v2-p--muted" style={{ flex: 1 }}>
@@ -850,9 +892,28 @@ function FallbacksCard({ health, onChange }) {
                   ? `cooling down ${Math.ceil(cand.cooldown_remaining || 0)}s`
                   : (cand.has_key ? 'ready' : 'no key')}
               </span>
-              <button type="button" className="v2-btn v2-btn--ghost" onClick={() => move(idx, -1)} disabled={idx === 0}>↑</button>
-              <button type="button" className="v2-btn v2-btn--ghost" onClick={() => move(idx, 1)} disabled={idx === fallbacks.length - 1}>↓</button>
-              <button type="button" className="v2-btn v2-btn--ghost" onClick={() => remove(p)} aria-label="Remove">×</button>
+              <button
+                type="button"
+                className="v2-btn v2-btn--ghost"
+                onClick={() => move(idx, -1)}
+                disabled={busy || idx === 0}
+                aria-label={`Move ${p} up`}
+              >↑</button>
+              <button
+                type="button"
+                className="v2-btn v2-btn--ghost"
+                onClick={() => move(idx, 1)}
+                disabled={busy || idx === fallbacks.length - 1}
+                aria-label={`Move ${p} down`}
+              >↓</button>
+              <button
+                type="button"
+                className="v2-btn v2-btn--ghost"
+                onClick={() => remove(p)}
+                disabled={busy}
+                aria-label={`Remove ${p}`}
+                data-testid={`fallback-remove-${p}`}
+              >×</button>
             </li>
           );
         })}
@@ -862,7 +923,14 @@ function FallbacksCard({ health, onChange }) {
         <div className="v2-fallback-add">
           <span className="v2-p v2-p--tiny v2-p--muted">Add:</span>
           {pool.slice(0, 8).map((p) => (
-            <button key={p} type="button" className="v2-btn v2-btn--ghost" onClick={() => add(p)}>
+            <button
+              key={p}
+              type="button"
+              className="v2-btn v2-btn--ghost"
+              onClick={() => add(p)}
+              disabled={busy}
+              data-testid={`fallback-add-${p}`}
+            >
               + {p}
             </button>
           ))}
@@ -892,8 +960,18 @@ function ProviderCard({ provider, isCurrent, activeModel, keysRefreshToken, isEd
       : requiresKey ? 'needs key'
       : 'unconfigured';
 
+  const cardClass = [
+    'v2-provider-card',
+    isCurrent ? 'is-current' : '',
+    // When the reconfigure form is open, promote the card to span the
+    // full providers grid width. Otherwise the form is squeezed into a
+    // ~260px column (the auto-fit minmax track width) and the inputs +
+    // model row + action buttons wrap so aggressively the panel appears
+    // to "collapse to nothing" — see Bug #1.
+    isEditing ? 'is-editing' : '',
+  ].filter(Boolean).join(' ');
   return (
-    <Glass level={0} radius="md" padding="sm" className={`v2-provider-card${isCurrent ? ' is-current' : ''}`}>
+    <Glass level={0} radius="md" padding="sm" className={cardClass}>
       <div className="v2-provider-head">
         <div>
           <div className="v2-provider-name">{provider.display_name || provider.provider_id}</div>
@@ -967,14 +1045,21 @@ function ProviderForm({ provider, isCurrent, activeModel, keysRefreshToken, onCa
     setLoadingModels(true);
     setModelError(null);
     try {
-      // Default to the conductor-curated chat-ready shortlist
-      // (recommended=true, model_class=chat) so the Settings picker
-      // surfaces the handful of 2026-era chat models users actually
-      // care about instead of the full /v1/models dump. Filter is
-      // projection-only on the catalog side — the raw cache still
-      // has every id the provider advertised.
+      // For cloud providers, default to the conductor-curated chat-ready
+      // shortlist (recommended=true, model_class=chat) so the Settings
+      // picker surfaces the handful of modern chat models users actually
+      // care about instead of the full /v1/models dump.
+      //
+      // For local providers (Ollama, LM Studio — ``supports_local: true``)
+      // we MUST NOT apply that filter: the curated shortlist is a cloud
+      // catalog, so it would hide the model the operator just pulled
+      // locally (e.g. ``llama3:latest`` from ``ollama pull``) and only
+      // show cloud chat ids — Bug #2. Render exactly what the local
+      // server advertises via /api/tags.
       const base = force ? 'live=true&force=true' : 'live=true';
-      const qs = `${base}&recommended=true&model_class=chat`;
+      const qs = provider.supports_local
+        ? base
+        : `${base}&recommended=true&model_class=chat`;
       const d = await apiJson(`/api/llm/providers/${encodeURIComponent(provider.provider_id)}/models?${qs}`);
       const list = d.models || d || [];
       setModels(list);
@@ -1006,7 +1091,7 @@ function ProviderForm({ provider, isCurrent, activeModel, keysRefreshToken, onCa
     } finally {
       setLoadingModels(false);
     }
-  }, [provider.provider_id, activeModel]);
+  }, [provider.provider_id, activeModel, provider.supports_local]);
 
   useEffect(() => {
     // Initial mount: do the cheap cached fetch first, then force a
@@ -1071,7 +1156,12 @@ function ProviderForm({ provider, isCurrent, activeModel, keysRefreshToken, onCa
       } else {
         setMsg('Saved ✓');
       }
-      if (apiKey) {
+      // Refresh the model list whenever the credential basis OR the
+      // base URL changed — for local providers (Ollama / LM Studio)
+      // the base URL is the only credential, so without this the
+      // picker keeps showing the previous endpoint's /api/tags output
+      // after the operator points at a fresh server (Bug #2).
+      if (apiKey || baseUrl) {
         try { await loadModels({ force: true }); } catch (_) { /* swallow */ }
       }
       setTimeout(() => onSaved(), 600);
@@ -1125,10 +1215,13 @@ function ProviderForm({ provider, isCurrent, activeModel, keysRefreshToken, onCa
       } else {
         setMsg('Saved and switched ✓');
       }
-      // If the user pasted a new key, immediately re-fetch the model
-      // list with force=true so the picker reflects what the new key
-      // can actually see (the whole point of "settings honesty").
-      if (apiKey) {
+      // If the user pasted a new key OR pointed at a new local base URL,
+      // immediately re-fetch the model list with force=true so the
+      // picker reflects what the new credential basis can actually see
+      // (the whole point of "settings honesty"). Local providers
+      // (Ollama / LM Studio) carry their endpoint through ``baseUrl``
+      // instead of ``apiKey`` — both must trigger the refresh.
+      if (apiKey || baseUrl) {
         try { await loadModels({ force: true }); } catch (_) { /* swallow */ }
       }
       setTimeout(() => onSaved(), 600);
