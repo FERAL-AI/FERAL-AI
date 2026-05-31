@@ -1,10 +1,36 @@
 # Changelog
 
-<!-- feral-version: 2026.5.49 -->
+<!-- feral-version: 2026.6.1 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.1] — Local-provider fixes (Ollama), Settings reconfigure UX, packaging fix, repo hygiene
+
+Fixes driven by a real first-run report on a local (Ollama) setup, plus a public-repo hygiene pass.
+
+### Ollama / local providers actually work end-to-end
+
+- **Model catalog now ships in the wheel (`ef939677`).** The `providers` package shipped its code but not `providers/model_catalog.json`, so every pip-installed request logged "model catalog missing … using fallback pricing" and provider/model lists fell back to a static set. The data file is now in `package-data`, and the loader resolves it via `importlib.resources` so it works across editable, wheel, and zip installs (`97e17e89`).
+- **`feral doctor` no longer lies about Ollama (`fcb14d6b`).** It previously reported green whenever the Ollama server was reachable — even if the *configured* model wasn't pulled (so a config like `ollama/gemma4` passed doctor but 404'd at chat time). Doctor now checks the configured model against the pulled set (`/api/tags`) and fails with the installed-model list + a `ollama pull <model>` hint.
+- **Picker + presets reflect the locally-pulled models (`aab12965`).** The Ollama provider no longer carries a hardcoded fallback model list, so the Settings picker shows exactly what `ollama pull` has installed. Preset application validates the requested Ollama model against the pulled set and falls through to auto-detect (with a warning) instead of writing a guaranteed-404 model name.
+
+### Settings → Providers reconfigure UX
+
+- **Reconfigure panel renders properly (`8aeae6046`).** It was clamped to a ~260px grid column and collapsed to an unusable strip; the editing card now spans the full pane width.
+- **Local-provider picker shows pulled models**, not the curated cloud shortlist, and refetches when the base URL changes.
+- **Fallback (failover) buttons respond** — the reorder/add/remove controls now update optimistically with rollback-on-error instead of appearing frozen.
+
+### Repo hygiene (public-launch readiness)
+
+- Stopped shipping local agent config (`.cursor/` is now gitignored) and added commit/naming conventions to `CONTRIBUTING.md` (`12da1c3a`).
+- Neutralized internal-doc / reference-project citations and internal workstream numbering in shipped source comments, and gave the CI workflows neutral names (`80072f40`, `ba32183e`).
+- Cleared the ruff lint debt that was gating the pytest lane + fixed a stale setup-state test assertion (`c94dfa16`).
+
+### Notes
+
+The companion iOS app build was also made to succeed without the proprietary hardware SDKs (gated behind `#if canImport`, open-source deps bundled) — that work lives in the separate companion repo, not this package.
 
 ## [2026.5.49] — Reference-codebase polish: stream batching, grep/glob ergonomics, demo-correctness, phone-pairing hand-off
 
