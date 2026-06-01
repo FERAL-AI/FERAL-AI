@@ -1,10 +1,14 @@
 # Changelog
 
-<!-- feral-version: 2026.6.1 -->
+<!-- feral-version: 2026.6.2 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.2] — Fix: `feral serve` completes the phone WebSocket handshake
+
+Patch release. `feral serve` accepted connections before the brain finished booting — it skipped the health-wait and runtime-env hydration that `feral start` runs. A phone could pair over HTTP and open the node WebSocket while `state.init()` was still coming up, so the handshake never sent `node_ack` within the client's 3-second window and the companion app showed "Paired with the brain, but the WebSocket didn't reach a node_ack." `feral serve` now shares the same boot path as `feral start` (hydrate runtime env → wait for `/health` → only then accept traffic), so the node WebSocket handshake completes either way. (`8f84319f`)
 
 ## [2026.6.1] — Local-provider fixes (Ollama), Settings reconfigure UX, packaging fix, repo hygiene
 
