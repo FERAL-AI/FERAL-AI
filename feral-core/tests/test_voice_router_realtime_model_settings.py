@@ -67,6 +67,25 @@ async def test_router_falls_back_to_proxy_default_when_setting_blank(feral_home)
     assert kwargs["model"] == "gpt-realtime"
 
 
+async def test_router_remaps_retired_preview_model_to_ga(feral_home):
+    """A stale settings.json pinning a retired OpenAI preview snapshot
+    (e.g. gpt-4o-realtime-preview-2025-06-03, which OpenAI rejects with
+    4004 model_not_found) must be auto-corrected to the GA rolling alias
+    `gpt-realtime` — so voice works without the operator hand-editing
+    settings."""
+    _write_settings(feral_home, realtime_model="gpt-4o-realtime-preview-2025-06-03")
+
+    mock_realtime = MagicMock()
+    mock_realtime.available = True
+    mock_realtime.start_session = AsyncMock(return_value=MagicMock(connected=True))
+
+    router = VoiceRouter(realtime_proxy=mock_realtime)
+    await router.open_session("sess-dep", "openai_realtime", provider_opts={})
+
+    kwargs = mock_realtime.start_session.await_args.kwargs
+    assert kwargs["model"] == "gpt-realtime"
+
+
 async def test_handle_audio_from_client_uses_settings_model(feral_home):
     """The web-client audio path (``handle_audio_from_client``) used
     to omit ``model`` entirely → ``RealtimeProxy`` invented its own

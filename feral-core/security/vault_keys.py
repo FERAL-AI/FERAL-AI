@@ -512,7 +512,13 @@ def get_active_key(provider_id: str, *, vault: Any = None) -> str:
 
     if v is not None:
         try:
-            labeled = get_active_provider_key(pid, vault=v, record_use=True)
+            # record_use=False: this resolver runs on every LLM failover
+            # candidate build, dashboard heartbeat (~10s), and background
+            # loop. Recording use here wrote provider_keys_meta + logged
+            # "Credential stored" on every read — churning the vault and
+            # flooding the log. Usage timestamps, if needed, should be
+            # recorded once on a successful upstream call, not on resolve.
+            labeled = get_active_provider_key(pid, vault=v, record_use=False)
         except Exception as exc:
             logger.debug("get_active_key(%s): labeled lookup failed (%s)", pid, exc)
             labeled = None

@@ -49,6 +49,28 @@ def test_classify_429_is_rate_limit():
     assert classify_error(exc) == FailoverReason.RATE_LIMIT
 
 
+def test_classify_anthropic_credit_balance_400_is_billing():
+    """A provider billing 400 (e.g. Anthropic "credit balance too low")
+    carries the signal in the JSON BODY, not in str(error). classify_error
+    must fold the response body in and classify it as BILLING (1h cooldown)
+    instead of UNKNOWN (10s) — otherwise the dead provider is re-tried every
+    turn and floods the log."""
+    from agents.llm_provider import classify_error, FailoverReason
+
+    resp = type("R", (), {
+        "status_code": 400,
+        "text": (
+            "Your credit balance is too low to access the Anthropic API. "
+            "Please go to Plans & Billing to upgrade or purchase credits."
+        ),
+    })()
+    # str(error) is only the bare status line — the body must still classify.
+    exc = type("E", (Exception,), {"response": resp})(
+        "Client error '400 Bad Request' for url 'https://api.anthropic.com/v1/messages'"
+    )
+    assert classify_error(exc) == FailoverReason.BILLING
+
+
 # ── chat() auto-delegates to failover ---------------------------
 
 

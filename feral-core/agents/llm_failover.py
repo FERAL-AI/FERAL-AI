@@ -178,6 +178,18 @@ def classify_error(error: Exception) -> FailoverReason:
     status = getattr(error, "status_code", 0) or 0
     if hasattr(error, "response"):
         status = getattr(error.response, "status_code", status) or status
+        # httpx.HTTPStatusError's str() carries only the status line, not the
+        # JSON body — so a provider's "your credit balance is too low" message
+        # (e.g. Anthropic billing 400) never reached the patterns below and
+        # fell through to UNKNOWN (10s cooldown → re-tried every turn). Fold
+        # the response body into the matched text so billing/auth signals in
+        # the body are classified.
+        try:
+            body = getattr(error.response, "text", "") or ""
+            if body:
+                err_str = f"{err_str} {body.lower()}"
+        except Exception:
+            pass
 
     if status == 429 or "rate" in err_str or "quota" in err_str:
         return FailoverReason.RATE_LIMIT
@@ -195,7 +207,14 @@ def classify_error(error: Exception) -> FailoverReason:
         return FailoverReason.AUTH_PERMANENT
     if status in (401, 403) or "unauthorized" in err_str or "invalid api key" in err_str:
         return FailoverReason.AUTH
-    if "billing" in err_str or "payment" in err_str or "insufficient" in err_str:
+    if (
+        "billing" in err_str
+        or "payment" in err_str
+        or "insufficient" in err_str
+        or "credit balance" in err_str
+        or "purchase credits" in err_str
+        or "too low to access" in err_str
+    ):
         return FailoverReason.BILLING
     if status == 404 or ("model" in err_str and "not found" in err_str):
         return FailoverReason.MODEL_NOT_FOUND

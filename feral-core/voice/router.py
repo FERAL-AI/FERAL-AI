@@ -55,18 +55,34 @@ def _settings_realtime_model() -> str:
     blank, fall back to :data:`voice.realtime_proxy.DEFAULT_MODEL` so
     the proxy still opens a session with a valid GA model id (Lane U2).
     """
+    model = ""
     try:
         from config.loader import load_settings
         value = (load_settings().get("audio", {}) or {}).get("realtime_model")
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            model = value.strip()
     except Exception:
         logger.debug("settings.audio.realtime_model lookup failed", exc_info=True)
-    try:
-        from voice.realtime_proxy import DEFAULT_MODEL
-        return DEFAULT_MODEL
-    except Exception:
+    if not model:
+        try:
+            from voice.realtime_proxy import DEFAULT_MODEL
+            model = DEFAULT_MODEL
+        except Exception:
+            model = "gpt-realtime"
+    # Auto-correct retired / account-gated OpenAI preview snapshots that a
+    # stale settings.json may still pin (e.g. gpt-4o-realtime-preview-2025-06-03),
+    # which OpenAI rejects with `4004 model_not_found`. Map the whole legacy
+    # preview family to the GA rolling alias so voice works without the
+    # operator having to hand-edit settings.
+    if model.startswith("gpt-4o-realtime"):
+        logger.warning(
+            "audio.realtime_model=%r is a retired OpenAI preview model; "
+            "using 'gpt-realtime' instead. Clear it in Settings → Voice to "
+            "silence this.",
+            model,
+        )
         return "gpt-realtime"
+    return model
 
 
 class VoiceRouter:
@@ -647,11 +663,30 @@ class VoiceRouter:
         }
         stt_pid, stt_env = provider_env.get(stt_name, ("deepgram", "DEEPGRAM_API_KEY"))
         tts_pid, tts_env = provider_env.get(tts_name, ("elevenlabs", "ELEVENLABS_API_KEY"))
-        missing: list[str] = []
-        for pid, env_var in {(stt_pid, stt_env), (tts_pid, tts_env)}:
-            if not _resolve_provider_key(pid, env_var):
-                missing.append(env_var)
-        missing = sorted(set(missing))
+
+        def _missing_keys(pairs: list[tuple[str, str]]) -> list[str]:
+            m: list[str] = []
+            for pid, env_var in pairs:
+                if not _resolve_provider_key(pid, env_var):
+                    m.append(env_var)
+            return sorted(set(m))
+
+        missing = _missing_keys([(stt_pid, stt_env), (tts_pid, tts_env)])
+        # Auto-fallback: if the configured chained providers (default
+        # deepgram + elevenlabs) have no keys but an OpenAI key IS present,
+        # use OpenAI Whisper STT + OpenAI TTS so a chat-key-only operator
+        # still gets a working full-duplex chained pipeline instead of
+        # degrading to a dead half-duplex (TTS-only) session.
+        if missing and _resolve_provider_key("openai", "OPENAI_API_KEY"):
+            logger.info(
+                "Chained morph for %s: %s unavailable — falling back to OpenAI "
+                "Whisper STT + OpenAI TTS.",
+                session_id[:8], ",".join(missing),
+            )
+            stt_name, tts_name = "openai_whisper", "openai"
+            stt_pid, stt_env = provider_env["openai_whisper"]
+            tts_pid, tts_env = provider_env["openai"]
+            missing = _missing_keys([(stt_pid, stt_env), (tts_pid, tts_env)])
         if missing:
             logger.warning(
                 "Chained morph for %s aborted — missing vault keys: %s",
