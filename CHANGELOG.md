@@ -1,10 +1,21 @@
 # Changelog
 
-<!-- feral-version: 2026.6.2 -->
+<!-- feral-version: 2026.6.3 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.3] — Voice realtime auto-correct + OpenAI-only voice fallback, billing classification, vault log churn
+
+Patch release. Fixes from a live multi-issue session:
+
+- **Realtime voice** auto-corrects a stale `audio.realtime_model` that pins a retired OpenAI preview snapshot (e.g. `gpt-4o-realtime-preview-2025-06-03`, which OpenAI rejects with `4004 model_not_found`) to the GA rolling alias `gpt-realtime` — so voice works without the operator hand-editing settings. (`64ca3485`)
+- **Chained voice fallback** now uses OpenAI Whisper STT + OpenAI TTS when the configured Deepgram/ElevenLabs providers have no keys but an OpenAI key is present, instead of degrading to a dead half-duplex (TTS-only) session. A chat-key-only operator gets a working full-duplex pipeline.
+- **Provider billing 400s** (e.g. Anthropic "credit balance too low") are now classified as `BILLING` (1-hour cooldown) by folding the HTTP response body into error classification, instead of `UNKNOWN` (10-second cooldown). A provider with no credit no longer gets re-tried every turn or floods the log.
+- **Vault log/write churn:** `get_active_key` no longer records key use on every read — it had written `provider_keys_meta` and logged "Credential stored" on every failover-candidate build, dashboard heartbeat (~10s), and background loop.
+
+Companion app (separate `feral-companion-ios` repo): the Context tab and Devices → Brain Network 401s are fixed there — those polls now send the phone bearer (`/api/context/live`, `/api/capabilities`). Rebuild the iOS app to pick it up.
 
 ## [2026.6.2] — Fix: `feral serve` completes the phone WebSocket handshake
 
