@@ -81,8 +81,14 @@ def catalog_with_known_defaults(tmp_path, clean_env):
 
     cat.default_model_for = _fake_default  # type: ignore[assignment]
 
+    # Local-runtime autodetect (Ollama / LM Studio) runs when the chosen
+    # cloud provider has no API key and replaces ``self.model`` entirely.
+    # These tests pin catalog default resolution — isolate that path so
+    # a dev machine with LM Studio running cannot mask a catalog bypass.
     with patch("providers.catalog._SHARED", cat), patch(
         "providers.catalog.get_shared_catalog", lambda: cat
+    ), patch.object(LLMProvider, "_detect_ollama", return_value=None), patch.object(
+        LLMProvider, "_detect_lmstudio", return_value=None
     ):
         yield cat
     reset_shared_catalog()
