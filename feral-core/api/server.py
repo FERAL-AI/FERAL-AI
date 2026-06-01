@@ -3282,10 +3282,24 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
             bpm = frame_payload.get("value")
         if bpm is not None:
             sensors["ppg_heart_rate"] = bpm
+            # Forward freshness + source so fusion lights the live "fresh"
+            # dot (dashboard.py gates on heart_rate_sample_ts) and doesn't
+            # report stale vitals as current. Wearable adapters emit these;
+            # fall back to arrival time when the device didn't stamp one.
+            _src = frame_payload.get("heart_rate_source") or frame_payload.get("source")
+            if _src:
+                sensors["heart_rate_source"] = _src
+            _ts = frame_payload.get("heart_rate_sample_ts") or frame_payload.get("sample_ts")
+            sensors["heart_rate_sample_ts"] = float(_ts) if isinstance(_ts, (int, float)) and _ts > 0 else time.time()
     elif event_type == "spo2":
         val = frame_payload.get("current") or frame_payload.get("spo2") or frame_payload.get("value")
         if val is not None:
             sensors["spo2_pct"] = val
+            _src = frame_payload.get("spo2_source") or frame_payload.get("source")
+            if _src:
+                sensors["spo2_source"] = _src
+            _ts = frame_payload.get("spo2_sample_ts") or frame_payload.get("sample_ts")
+            sensors["spo2_sample_ts"] = float(_ts) if isinstance(_ts, (int, float)) and _ts > 0 else time.time()
     elif event_type == "skin_temperature":
         val = frame_payload.get("celsius") or frame_payload.get("value")
         if val is not None:
