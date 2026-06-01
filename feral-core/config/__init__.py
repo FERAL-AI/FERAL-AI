@@ -1,6 +1,7 @@
 from config.loader import ConfigLoader, feral_home, feral_data_home
 from config.runtime import (
     brain_bind_host,
+    hydrate_brain_runtime_env,
     brain_port,
     brain_public_base_url,
     brain_public_host,

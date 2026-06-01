@@ -24,6 +24,28 @@ def _int_env(*keys: str, default: int) -> int:
     return default
 
 
+def hydrate_brain_runtime_env() -> None:
+    """Mirror persisted network settings into ``os.environ`` at CLI boot.
+
+    The setup wizard's ``apply_lan()`` / ``apply_localhost()`` paths set
+    ``FERAL_BIND_HOST`` in-process, and launchd forwards ``FERAL_*`` from
+    the operator's shell when installing the service. A fresh terminal
+    running ``feral serve`` only consulted ``settings.json`` at bind time
+    via :func:`brain_bind_host`, while subsystems that read
+    ``os.environ`` directly (mDNS advertisement, sync engine port
+    defaults, pairing URL builders that fall back to env) could boot with
+    stale or missing values. ``feral start --foreground`` and
+    ``feral serve`` both call this once before spawning uvicorn so the
+    two entrypoints share the same runtime contract.
+    """
+    bind = brain_bind_host()
+    if bind:
+        os.environ.setdefault("FERAL_BIND_HOST", bind)
+    os.environ.setdefault("FERAL_PORT", str(brain_port()))
+    if brain_tls_enabled():
+        os.environ.setdefault("FERAL_TLS", "1")
+
+
 def brain_bind_host() -> str:
     """Resolve the host the brain binds to.
 

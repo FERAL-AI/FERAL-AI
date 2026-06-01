@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -120,6 +121,33 @@ def test_brain_tls_enabled_default_false(monkeypatch, tmp_path):
     home.mkdir()
     runtime = _fresh_runtime(monkeypatch, home)
     assert runtime.brain_tls_enabled() is False
+
+
+def test_hydrate_brain_runtime_env_from_settings(monkeypatch, tmp_path):
+    home = tmp_path / ".feral"
+    _write_settings(
+        home,
+        {"network": {"bind_host": "0.0.0.0", "port": 8123, "tls": True}},
+    )
+    runtime = _fresh_runtime(monkeypatch, home)
+    monkeypatch.delenv("FERAL_BIND_HOST", raising=False)
+    monkeypatch.delenv("FERAL_PORT", raising=False)
+    monkeypatch.delenv("FERAL_TLS", raising=False)
+    runtime.hydrate_brain_runtime_env()
+    assert os.environ.get("FERAL_BIND_HOST") == "0.0.0.0"
+    assert os.environ.get("FERAL_PORT") == "8123"
+    assert os.environ.get("FERAL_TLS") == "1"
+
+
+def test_hydrate_brain_runtime_env_does_not_override_explicit_env(monkeypatch, tmp_path):
+    home = tmp_path / ".feral"
+    _write_settings(home, {"network": {"bind_host": "0.0.0.0", "port": 8123}})
+    runtime = _fresh_runtime(monkeypatch, home)
+    monkeypatch.setenv("FERAL_BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("FERAL_PORT", "9090")
+    runtime.hydrate_brain_runtime_env()
+    assert os.environ.get("FERAL_BIND_HOST") == "127.0.0.1"
+    assert os.environ.get("FERAL_PORT") == "9090"
 
 
 # ---------------------------------------------------------------------------

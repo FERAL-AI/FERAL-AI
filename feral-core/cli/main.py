@@ -72,6 +72,7 @@ from config.runtime import (
     brain_public_port,
     brain_public_scheme,
     brain_tls_enabled,
+    hydrate_brain_runtime_env,
 )
 
 
@@ -637,21 +638,8 @@ def _ensure_tls_certs():
         return None, None
 
 
-def cmd_serve(host: str | None = None, port: int | None = None, tls: bool = False):
-    """Start the FERAL Brain server."""
-    try:
-        import uvicorn
-    except ImportError:
-        print("uvicorn not installed. Run: pip install 'feral-ai[all]'")
-        sys.exit(1)
-
-    core_root = str(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if core_root not in sys.path:
-        sys.path.insert(0, core_root)
-
-    host = host or brain_bind_host()
-    port = int(port or brain_port())
-
+def _brain_ssl_kwargs(*, tls: bool) -> dict:
+    """Build uvicorn TLS kwargs when CLI ``--tls`` or settings enable TLS."""
     ssl_kwargs: dict = {}
     if tls or brain_tls_enabled():
         cert, key = _ensure_tls_certs()
@@ -660,18 +648,179 @@ def cmd_serve(host: str | None = None, port: int | None = None, tls: bool = Fals
             ssl_kwargs["ssl_keyfile"] = key
         else:
             print("TLS requested but no certificates available")
-            return
+            return {}
+    return ssl_kwargs
 
-    scheme = "https" if ssl_kwargs else "http"
-    public_base = os.getenv("FERAL_PUBLIC_BASE_URL", f"{scheme}://localhost:{port}")
 
-    # Use the same brand chrome as `feral start` so the launchd
-    # foreground entrypoint renders consistently in `feral logs`.
+def _spawn_brain_server(
+    host: str,
+    port: int,
+    ssl_kwargs: dict,
+) -> tuple[threading.Thread, threading.Event, dict]:
+    """Start uvicorn in a non-daemon thread (shared by ``serve`` + ``start``)."""
+    server_ready = threading.Event()
+    server_holder: dict = {"server": None, "exc": None}
+
+    def _run_server():
+        import uvicorn as _uvicorn
+        try:
+            config = _uvicorn.Config(
+                "api.server:app",
+                host=host,
+                port=port,
+                log_level="warning",
+                access_log=False,
+                **ssl_kwargs,
+            )
+            server = _uvicorn.Server(config)
+            server_holder["server"] = server
+            server_ready.set()
+            server.run()
+        except Exception as exc:
+            server_holder["exc"] = exc
+            server_ready.set()
+
+    server_thread = threading.Thread(
+        target=_run_server, daemon=False, name="feral-brain",
+    )
+    server_thread.start()
+    return server_thread, server_ready, server_holder
+
+
+def _wait_for_brain_health(
+    port: int,
+    ssl_kwargs: dict,
+    *,
+    console,
+    timeout_s: int | None = None,
+) -> bool:
+    """Poll ``/health`` until the brain finishes ``state.init()``."""
+    import time
+
+    _scheme = "https" if ssl_kwargs else "http"
+    health_url = os.getenv(
+        "FERAL_HEALTH_URL", f"{_scheme}://127.0.0.1:{port}/health",
+    )
+    boot_report_url = f"{_scheme}://127.0.0.1:{port}/api/boot-report"
+    timeout_s = int(timeout_s or os.getenv("FERAL_BOOT_TIMEOUT", "90"))
+
+    try:
+        from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+        _RICH_PROGRESS = True
+    except Exception:
+        _RICH_PROGRESS = False
+
+    if _RICH_PROGRESS:
+        with Progress(
+            SpinnerColumn(style="cyan"),
+            TextColumn("[bold]Starting brain[/bold] · {task.description}"),
+            TimeElapsedColumn(),
+            transient=False,
+            console=console,
+        ) as progress:
+            task = progress.add_task("warming up...", start=True)
+            last_subsystem: str | None = None
+            for _i in range(timeout_s):
+                time.sleep(1)
+                try:
+                    if httpx:
+                        r = httpx.get(health_url, timeout=2, verify=False)
+                        if r.status_code == 200:
+                            return True
+                    else:
+                        import urllib.request
+                        urllib.request.urlopen(health_url, timeout=2)
+                        return True
+                except Exception:
+                    pass
+
+                subsystem = None
+                try:
+                    if httpx:
+                        rr = httpx.get(boot_report_url, timeout=1.5, verify=False)
+                        if rr.status_code == 200:
+                            body = rr.json() or {}
+                            subsystem = body.get("current") or (body.get("last") or {}).get("name")
+                except Exception:
+                    subsystem = None
+
+                if subsystem and subsystem != last_subsystem:
+                    progress.update(task, description=f"{subsystem}...")
+                    last_subsystem = subsystem
+        return False
+
+    sys.stdout.write("  Starting brain...")
+    sys.stdout.flush()
+    last_subsystem = None
+    for i in range(timeout_s):
+        time.sleep(1)
+        try:
+            if httpx:
+                r = httpx.get(health_url, timeout=2, verify=False)
+                if r.status_code == 200:
+                    sys.stdout.write("\n")
+                    return True
+            else:
+                import urllib.request
+                urllib.request.urlopen(health_url, timeout=2)
+                sys.stdout.write("\n")
+                return True
+        except Exception:
+            pass
+        subsystem = None
+        try:
+            if httpx:
+                rr = httpx.get(boot_report_url, timeout=1.5, verify=False)
+                if rr.status_code == 200:
+                    body = rr.json() or {}
+                    subsystem = body.get("current") or (body.get("last") or {}).get("name")
+        except Exception:
+            subsystem = None
+        if subsystem and subsystem != last_subsystem:
+            sys.stdout.write(f"\n    [{i + 1}s] {subsystem}...")
+            last_subsystem = subsystem
+        else:
+            sys.stdout.write(".")
+        sys.stdout.flush()
+    sys.stdout.write("\n")
+    return False
+
+
+def _stop_brain_server(server_thread: threading.Thread, server_holder: dict, *, join_timeout: float = 15) -> None:
+    srv = server_holder.get("server")
+    if srv is not None:
+        srv.should_exit = True
+    server_thread.join(timeout=join_timeout)
+
+
+def cmd_serve(host: str | None = None, port: int | None = None, tls: bool = False):
+    """Start the FERAL Brain server."""
+    try:
+        import uvicorn  # noqa: F401
+    except ImportError:
+        print("uvicorn not installed. Run: pip install 'feral-ai[all]'")
+        sys.exit(1)
+
+    core_root = str(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if core_root not in sys.path:
+        sys.path.insert(0, core_root)
+
+    hydrate_brain_runtime_env()
+
+    host = host or brain_bind_host()
+    port = int(port or brain_port())
+
+    ssl_kwargs = _brain_ssl_kwargs(tls=tls)
+    if (tls or brain_tls_enabled()) and not ssl_kwargs:
+        return
+
     from cli.ui_kit import (
         get_console as _get_console,
         print_start_banner as _print_start_banner,
+        print_ready_panel as _print_ready_panel,
         banner_line as _banner_line,
     )
+
     _console = _get_console()
     _print_start_banner(
         port=port,
@@ -679,10 +828,57 @@ def cmd_serve(host: str | None = None, port: int | None = None, tls: bool = Fals
         bind_host=host,
         console=_console,
     )
+
+    server_thread, server_ready, server_holder = _spawn_brain_server(host, port, ssl_kwargs)
+    server_ready.wait(timeout=30)
+    if server_holder.get("exc"):
+        _banner_line(f"Brain failed to start: {server_holder['exc']}", style="red", console=_console)
+        sys.exit(1)
+
+    if not _wait_for_brain_health(port, ssl_kwargs, console=_console):
+        _banner_line(
+            f"Failed to start after {os.getenv('FERAL_BOOT_TIMEOUT', '90')}s. Check logs or run: feral doctor",
+            style="red",
+            console=_console,
+        )
+        _banner_line(
+            "Tip: FERAL_BOOT_TIMEOUT=180 feral serve   # for slow first runs",
+            style="dim",
+            console=_console,
+        )
+        _stop_brain_server(server_thread, server_holder, join_timeout=5)
+        sys.exit(1)
+
+    data = _http_get("/api/dashboard")
+    _print_ready_panel(
+        port=port,
+        llm_ok=bool(data.get("llm_available")),
+        skills_count=data.get("skills_count", "?"),
+        memory_notes=(data.get("memory") or {}).get("notes", 0),
+        public_url=os.getenv("FERAL_PUBLIC_BASE_URL"),
+        tls=bool(ssl_kwargs),
+        console=_console,
+    )
+
+    scheme = "https" if ssl_kwargs else "http"
+    public_base = os.getenv("FERAL_PUBLIC_BASE_URL", f"{scheme}://localhost:{port}")
     _banner_line(f"Dashboard: {public_base}", console=_console)
     _banner_line(f"API docs:  {public_base}/docs", style="dim", console=_console)
 
-    uvicorn.run("api.server:app", host=host, port=port, reload=False, log_level="info", **ssl_kwargs)
+    def _on_sigterm(_signum, _frame):  # pragma: no cover
+        _stop_brain_server(server_thread, server_holder)
+
+    try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except (ValueError, OSError):
+        pass
+
+    try:
+        server_thread.join()
+    except KeyboardInterrupt:
+        _banner_line("Shutting down brain...", console=_console)
+        _stop_brain_server(server_thread, server_holder)
+        _banner_line("Goodbye!", console=_console)
 
 
 def _is_first_run() -> bool:
@@ -830,17 +1026,13 @@ def cmd_start(
             )
             return
 
+    hydrate_brain_runtime_env()
+
     port = int(port or brain_port())
 
-    ssl_kwargs: dict = {}
-    if tls or brain_tls_enabled():
-        cert, key = _ensure_tls_certs()
-        if cert and key:
-            ssl_kwargs["ssl_certfile"] = cert
-            ssl_kwargs["ssl_keyfile"] = key
-        else:
-            print("TLS requested but no certificates available")
-            return
+    ssl_kwargs = _brain_ssl_kwargs(tls=tls)
+    if (tls or brain_tls_enabled()) and not ssl_kwargs:
+        return
 
     # First run detection — auto-launch setup
     if _is_first_run():
@@ -883,134 +1075,23 @@ def cmd_start(
         console=_console,
     )
 
-    # Start server in a NON-daemon background thread so the brain can
-    # outlive any REPL crash or clean exit. We keep a handle to the
-    # uvicorn.Server in server_holder so the main thread can flip
-    # ``should_exit`` for graceful shutdown.
-    server_ready = threading.Event()
-    server_holder: dict = {"server": None, "exc": None}
-
-    def _run_server():
-        import uvicorn as _uvicorn
-        try:
-            config = _uvicorn.Config(
-                "api.server:app", host=brain_bind_host(), port=port,
-                log_level="warning", access_log=False,
-                **ssl_kwargs,
-            )
-            server = _uvicorn.Server(config)
-            server_holder["server"] = server
-            server_ready.set()
-            server.run()
-        except Exception as exc:
-            server_holder["exc"] = exc
-            server_ready.set()
-
-    server_thread = threading.Thread(target=_run_server, daemon=False, name="feral-brain")
-    server_thread.start()
-
-    # Wait for server to be healthy.
-    #
-    # Cold-boot can easily take 30–60s on first run: LLM probe, embeddings
-    # model download, mDNS discovery, channel start, Docker sandbox init...
-    # FERAL_BOOT_TIMEOUT overrides for slow machines / CI.
-    #
-    # Health-probe scheme tracks the actual server: when TLS is enabled
-    # we MUST use https:// against the self-signed cert or every probe
-    # 400s and the user sees a spurious "failed to start" message even
-    # though the brain is up. Pre-v2026.5.28 this line hardcoded http://
-    # which broke `feral start --tls` cold-boot detection.
-    _scheme = "https" if ssl_kwargs else "http"
-    health_url = os.getenv("FERAL_HEALTH_URL", f"{_scheme}://127.0.0.1:{port}/health")
-    boot_report_url = f"{_scheme}://127.0.0.1:{port}/api/boot-report"
-    timeout_s = int(os.getenv("FERAL_BOOT_TIMEOUT", "90"))
-    healthy = False
-
-    try:
-        from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
-        _RICH_PROGRESS = True
-    except Exception:
-        _RICH_PROGRESS = False
-
-    if _RICH_PROGRESS:
-        with Progress(
-            SpinnerColumn(style="cyan"),
-            TextColumn("[bold]Starting brain[/bold] · {task.description}"),
-            TimeElapsedColumn(),
-            transient=False,
+    server_thread, server_ready, server_holder = _spawn_brain_server(
+        brain_bind_host(), port, ssl_kwargs,
+    )
+    server_ready.wait(timeout=30)
+    if server_holder.get("exc"):
+        _banner_line(
+            f"Brain failed to start: {server_holder['exc']}",
+            style="red",
             console=_console,
-        ) as progress:
-            task = progress.add_task("warming up...", start=True)
-            last_subsystem: str | None = None
-            for i in range(timeout_s):
-                time.sleep(1)
-                try:
-                    if httpx:
-                        r = httpx.get(health_url, timeout=2, verify=False)
-                        if r.status_code == 200:
-                            healthy = True
-                            break
-                    else:
-                        import urllib.request
-                        urllib.request.urlopen(health_url, timeout=2)
-                        healthy = True
-                        break
-                except Exception:
-                    pass
+        )
+        sys.exit(1)
 
-                subsystem = None
-                try:
-                    if httpx:
-                        rr = httpx.get(boot_report_url, timeout=1.5, verify=False)
-                        if rr.status_code == 200:
-                            body = rr.json() or {}
-                            subsystem = body.get("current") or (body.get("last") or {}).get("name")
-                except Exception:
-                    subsystem = None
-
-                if subsystem and subsystem != last_subsystem:
-                    progress.update(task, description=f"{subsystem}...")
-                    last_subsystem = subsystem
-    else:
-        # Plain stdout fallback when Rich isn't importable.
-        sys.stdout.write("  Starting brain...")
-        sys.stdout.flush()
-        last_subsystem = None
-        for i in range(timeout_s):
-            time.sleep(1)
-            try:
-                if httpx:
-                    r = httpx.get(health_url, timeout=2, verify=False)
-                    if r.status_code == 200:
-                        healthy = True
-                        break
-                else:
-                    import urllib.request
-                    urllib.request.urlopen(health_url, timeout=2)
-                    healthy = True
-                    break
-            except Exception:
-                pass
-            subsystem = None
-            try:
-                if httpx:
-                    rr = httpx.get(boot_report_url, timeout=1.5, verify=False)
-                    if rr.status_code == 200:
-                        body = rr.json() or {}
-                        subsystem = body.get("current") or (body.get("last") or {}).get("name")
-            except Exception:
-                subsystem = None
-            if subsystem and subsystem != last_subsystem:
-                sys.stdout.write(f"\n    [{i+1}s] {subsystem}...")
-                last_subsystem = subsystem
-            else:
-                sys.stdout.write(".")
-            sys.stdout.flush()
-        sys.stdout.write("\n")
+    healthy = _wait_for_brain_health(port, ssl_kwargs, console=_console)
 
     if not healthy:
         _banner_line(
-            f"Failed to start after {timeout_s}s. Check logs or run: feral doctor",
+            f"Failed to start after {os.getenv('FERAL_BOOT_TIMEOUT', '90')}s. Check logs or run: feral doctor",
             style="red",
             console=_console,
         )
@@ -1021,10 +1102,7 @@ def cmd_start(
         )
         # Try to stop the brain we spawned, then exit with non-zero so
         # the user sees the failure.
-        srv = server_holder.get("server")
-        if srv is not None:
-            srv.should_exit = True
-        server_thread.join(timeout=5)
+        _stop_brain_server(server_thread, server_holder, join_timeout=5)
         sys.exit(1)
 
     # Render the post-boot panel using the same chrome as the wizard's
@@ -2465,7 +2543,7 @@ def main():
 
     # feral serve (headless server only)
     serve_p = sub.add_parser("serve", help="Start the brain server (headless, no chat)")
-    serve_p.add_argument("--bind", default=brain_bind_host(), help=f"Bind address (default {brain_bind_host()})")
+    serve_p.add_argument("--bind", default=None, help=f"Bind address (default {brain_bind_host()})")
     serve_p.add_argument("--serve-port", default=str(brain_port()), help=f"Port (default {brain_port()})")
     serve_p.add_argument("--tls", action="store_true", help="Enable TLS (auto-generates self-signed cert if needed)")
 
