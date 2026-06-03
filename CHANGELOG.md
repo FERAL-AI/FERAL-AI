@@ -1,10 +1,16 @@
 # Changelog
 
-<!-- feral-version: 2026.6.3 -->
+<!-- feral-version: 2026.6.4 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.4] — Wearable vitals render live (biometric freshness)
+
+Patch release. `_handle_biometric_device_event` built its sensor payload with only the HR/SpO2 *value*, dropping the `source` + `sample_ts` fields the wearable adapters (Theora W300 glasses, Veepoo wristband) emit. `perception.fusion.update_sensors` already reads those, and the Context "fresh" indicator gates on `heart_rate_sample_ts` / `spo2_sample_ts` — so device vitals showed but always rendered as **stale**. The handler now forwards `source` + `sample_ts` (falling back to arrival time when the device didn't stamp one), so glasses/wristband heart-rate and blood-oxygen show as live. (`ec8be84`)
+
+(The iOS side — W300 glasses HR/SpO2 polling and the Veepoo wristband adapter — lives in the separate `feral-companion-ios` repo; rebuild that app to capture the device vitals.)
 
 ## [2026.6.3] — Voice realtime auto-correct + OpenAI-only voice fallback, billing classification, vault log churn
 
