@@ -45,7 +45,12 @@ class TestCreativeWorker:
 
         assert isinstance(CREATIVE_SKILLS, list)
         assert len(CREATIVE_SKILLS) > 0
-        assert "spotify" in CREATIVE_SKILLS
+        # Real, registered skill ids — the previous list used phantom ids
+        # (spotify / calendar / reminders / media_control) with no manifest.
+        assert "spotify_music" in CREATIVE_SKILLS
+        assert "web_search" in CREATIVE_SKILLS  # the YouTube/URL playback path
+        for phantom in ("spotify", "calendar", "reminders", "media_control"):
+            assert phantom not in CREATIVE_SKILLS, f"{phantom} is not a registered skill"
 
     def test_prompt_content(self):
         from agents.workers.creative_worker import CREATIVE_PROMPT
