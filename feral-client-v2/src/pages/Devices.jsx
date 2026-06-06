@@ -7,6 +7,7 @@ import StatusDot from '../ui/StatusDot';
 import EmptyState from '../ui/EmptyState';
 import PairDeviceModal from '../components/PairDeviceModal';
 import PerceptionShare from '../components/PerceptionShare';
+import DeviceTopology from '../components/DeviceTopology';
 import { apiJson, apiFetch } from '../lib/api';
 import { useFeralSocket } from '../hooks/useFeralSocket';
 
@@ -68,6 +69,11 @@ export default function Devices() {
   const [connected, setConnected] = useState([]);
   const [paired, setPaired] = useState([]);
   const [mesh, setMesh] = useState([]);
+  // 2026-06-05 demo prep — Topology view also wants the live HR/SpO2
+  // numbers off /api/dashboard.latest_health so the brain card can
+  // surface a green chip for fresh wearable readings. We poll it on
+  // the same cadence as the device lists and hide stale samples.
+  const [latestHealth, setLatestHealth] = useState(null);
   const [loading, setLoading] = useState(true);
   const [showPair, setShowPair] = useState(false);
   const [selected, setSelected] = useState(null);
@@ -90,14 +96,18 @@ export default function Devices() {
 
   const refresh = useCallback(async () => {
     try {
-      const [c, p, m] = await Promise.allSettled([
+      const [c, p, m, d] = await Promise.allSettled([
         apiJson('/api/devices/connected'),
         apiJson('/api/devices/paired'),
         apiJson('/api/hardware/mesh'),
+        apiJson('/api/dashboard'),
       ]);
       if (c.status === 'fulfilled') setConnected(c.value?.devices || []);
       if (p.status === 'fulfilled') setPaired(p.value?.devices || []);
       if (m.status === 'fulfilled') setMesh(m.value?.nodes || []);
+      if (d.status === 'fulfilled') {
+        setLatestHealth(d.value?.latest_health || null);
+      }
       setError(null);
     } catch (e) {
       setError(e.message);
@@ -260,6 +270,10 @@ export default function Devices() {
       </Pane>
 
       <PerceptionShare />
+
+      {!loading && (
+        <DeviceTopology connected={connected} latestHealth={latestHealth} />
+      )}
 
       {connected.length > 0 && (
         <Pane title={`Live (${connected.length})`}>

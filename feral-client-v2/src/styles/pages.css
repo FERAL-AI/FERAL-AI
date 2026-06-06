@@ -811,6 +811,100 @@
 .v2-device-card { cursor: pointer; transition: transform var(--v2-dur-fast) var(--v2-ease-out); display: flex; flex-direction: column; gap: 6px; }
 .v2-device-card:hover { transform: translateY(-2px); border-color: var(--v2-hairline-strong); }
 
+/* ── Topology view (DeviceTopology.jsx) ─────────────────────── */
+/* Demo prep 2026-06-05 — visualises the brain ↔ phone ↔ glasses /
+   wristband / browser hierarchy at the top of the Devices page so
+   the operator can see the live mesh at a glance during the demo. */
+.v2-topology { display: flex; flex-direction: column; gap: 14px; }
+.v2-topology-body {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) 1fr;
+  gap: 24px;
+  align-items: center;
+  padding: 12px 4px;
+}
+@media (max-width: 720px) {
+  .v2-topology-body { grid-template-columns: 1fr; gap: 16px; }
+}
+.v2-topology-center { display: flex; justify-content: center; }
+.v2-topology-brain {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 18px 16px !important;
+  text-align: center;
+  background: linear-gradient(160deg, var(--v2-accent-soft), var(--v2-surface-1)) !important;
+  border-color: var(--v2-accent-ring) !important;
+  color: var(--v2-text-primary);
+  box-shadow: 0 0 0 1px var(--v2-accent-ring) inset, var(--v2-shadow-glass);
+  min-width: 160px;
+}
+.v2-topology-brain-label { font-size: var(--v2-size-md); font-weight: 600; }
+.v2-topology-brain-sub {
+  font-family: var(--v2-font-mono);
+  font-size: 10px;
+  color: var(--v2-text-tertiary);
+}
+.v2-topology-orbit {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: relative;
+}
+.v2-topology-branch { position: relative; padding-left: 28px; }
+.v2-topology-branch .v2-topology-link {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 24px;
+  height: 1px;
+  background: linear-gradient(90deg, var(--v2-accent-ring), var(--v2-hairline));
+  transform: translateY(-0.5px);
+}
+.v2-topology-node {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.v2-topology-subs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  padding-left: 16px;
+  position: relative;
+}
+.v2-topology-subs::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 0;
+  bottom: 4px;
+  width: 1px;
+  background: var(--v2-hairline);
+}
+.v2-topology-sub { display: inline-flex; align-items: center; }
+.v2-topology-sub-link {
+  display: inline-block;
+  width: 10px;
+  height: 1px;
+  background: var(--v2-hairline);
+  margin-right: 6px;
+}
+.v2-chip--accent {
+  background: var(--v2-accent-soft);
+  color: var(--v2-accent);
+  border-color: var(--v2-accent-ring);
+}
+.v2-topology-empty {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 8px 12px;
+  color: var(--v2-text-tertiary);
+}
+
 /* ── Pair modal ────────────────────────────────────────────── */
 .v2-pair-body { margin-top: 16px; display: flex; flex-direction: column; gap: 14px; min-height: 220px; }
 .v2-pair-qr { display: flex; flex-direction: column; align-items: center; gap: 14px; }
