@@ -1,10 +1,20 @@
 # Changelog
 
-<!-- feral-version: 2026.6.4 -->
+<!-- feral-version: 2026.6.5 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.5] — LLM cooldown self-heal, biometric freshness, device topology
+
+Patch release. Three coordinated fixes/feature spanning the failover layer, the biometric pipeline, and the Devices web UI:
+
+- **fix(llm): self-heal stuck failover cooldowns on boot + extend the fallback chain to every keyed provider.** A long-lived cooldown (e.g. a `BILLING` 1-hour penalty, see v2026.6.3) could outlive the boot it was set in — the LLM router would replay it from the vault on the next start and report "All LLM providers exhausted" even though every provider was actually usable. The router now sweeps stale cooldowns on boot and rebuilds the fallback chain to include *every* provider that has a key in the vault, instead of only the configured primary + the static shortlist. New operator escape hatches if the chain is ever wedged in flight: `feral key reset-cooldowns` CLI and `POST /api/llm/cooldowns/reset` endpoint (auth-gated). (`cd9681992`)
+- **fix(biometric): prefer fresh live wearable HR/SpO2 over stale Apple HealthKit samples.** `latest_health` was preferring whichever sample arrived most recently into the fusion bus, which let stale HealthKit samples (HK only flushes on app foreground / `HKObserverQuery` waking) overwrite live wearable readings from the Theora W300 glasses and the Veepoo wristband. The dashboard endpoint `/api/dashboard.latest_health` now reports the freshest *live* device reading (using the `source` + `sample_ts` fields plumbed through in v2026.6.4) and only falls back to HealthKit when no fresh wearable sample is present — so the Context tab + dashboard heart-rate / blood-oxygen tracks the wrist/glasses in real time when they're worn. (`83ac2ea85`)
+- **feat(webui-devices): device topology view on the Devices page.** New `DeviceTopology` component renders the brain at center with orbiting HUP (Hardware Unit Profile) nodes — phone, desktop, wearables — and live/stale sub-device chips per node. HR and SpO2 badges render directly on the relevant wearable nodes and update on every dashboard heartbeat, so an operator can see at a glance which sensors are connected, which are stale, and what they're reading without opening the Context tab. (`51b95d843`)
+
+(The iOS-side biometric work — W300 glasses HR/SpO2 polling, Veepoo wristband adapter and peripheral labeling — lives in the separate `feral-companion-ios` repo; rebuild that app to pick up the matching device-side fix.)
 
 ## [2026.6.4] — Wearable vitals render live (biometric freshness)
 
