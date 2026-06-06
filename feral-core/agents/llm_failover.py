@@ -421,6 +421,36 @@ class ProviderCooldownTracker:
         self._last_probe.pop(provider, None)
         self._persist_state()
 
+    def clear(self, provider: Optional[str] = None) -> list[str]:
+        """Forget cooldowns. Returns the providers that were cleared.
+
+        Pass ``provider=None`` to clear every cooldown — used at boot
+        when the operator has just rotated keys / topped up a billing
+        account; otherwise an hour-long ``BILLING`` cooldown persisted
+        across restarts will keep a now-healthy provider out of
+        rotation. Pass a specific provider id to clear only that one
+        (used by ``feral key reset-cooldowns --provider X``).
+        """
+        if provider is None:
+            cleared = sorted(self._cooldowns.keys())
+            self._cooldowns.clear()
+            self._last_probe.clear()
+        else:
+            cleared = [provider] if provider in self._cooldowns else []
+            self._cooldowns.pop(provider, None)
+            self._last_probe.pop(provider, None)
+        self._persist_state()
+        return cleared
+
+    def cooldown_state(self) -> dict[str, float]:
+        """Return a snapshot of current cooldown deadlines (debug / CLI)."""
+        now = time.time()
+        return {
+            provider: max(0.0, until - now)
+            for provider, until in self._cooldowns.items()
+            if until > now
+        }
+
 
 __all__ = [
     "MAX_RETRIES",

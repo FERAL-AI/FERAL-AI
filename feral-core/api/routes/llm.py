@@ -469,6 +469,33 @@ async def llm_health():
     return snapshot
 
 
+@router.post("/api/llm/cooldowns/reset")
+async def reset_llm_cooldowns(body: dict | None = None):
+    """Drop the in-memory + on-disk LLM provider cooldown state.
+
+    Demo prep 2026-06-05: when an operator tops up a billing account
+    or rotates a provider key, the failover loop's cooldown ledger
+    still parks that provider for the rest of the BILLING / AUTH
+    window (1 h / 5 m respectively). This endpoint forces an
+    immediate retry on the next chat turn — the failover loop will
+    re-park the provider on its own if the upstream is still broken,
+    so it's safe to call freely.
+
+    Body: ``{"provider": "<id>"}`` to clear one provider, omit or
+    pass an empty string to clear every parked provider.
+    """
+    if not state.orchestrator or not state.orchestrator.llm:
+        raise HTTPException(status_code=503, detail="LLM not initialised")
+    tracker = getattr(state.orchestrator.llm, "_cooldown", None)
+    if tracker is None or not hasattr(tracker, "clear"):
+        raise HTTPException(status_code=503, detail="cooldown tracker unavailable")
+    target = ""
+    if isinstance(body, dict):
+        target = (body.get("provider") or "").strip().lower()
+    cleared = tracker.clear(provider=target or None)
+    return {"ok": True, "cleared": cleared}
+
+
 # ----------------------------------------------------------------------
 # Multi-key per provider ( Lane 09)
 # ----------------------------------------------------------------------

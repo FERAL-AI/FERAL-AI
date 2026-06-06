@@ -208,6 +208,21 @@ def register_key_subparser(sub: "argparse._SubParsersAction") -> None:
         help="Skip the interactive confirmation prompt.",
     )
 
+    # ── 2026-06-05 demo prep — manual cooldown reset ──
+    reset_p = key_sub.add_parser(
+        "reset-cooldowns",
+        help=(
+            "Drop persisted LLM provider cooldowns. Use after topping up "
+            "a billing account / rotating a key, when the brain is still "
+            "refusing to call a provider because the previous failure "
+            "parked it in cooldown."
+        ),
+    )
+    reset_p.add_argument(
+        "--provider", default="",
+        help="Provider id to reset (e.g. anthropic). Empty = reset all.",
+    )
+
 
 def dispatch_key_subcommand(args) -> int:
     action = getattr(args, "action", None) or "status"
@@ -240,6 +255,10 @@ def dispatch_key_subcommand(args) -> int:
             provider_id=getattr(args, "provider", "") or "",
             label=(getattr(args, "label", "") or "").strip(),
             skip_confirm=getattr(args, "key_confirm", False),
+        )
+    if action == "reset-cooldowns":
+        return cmd_key_reset_cooldowns(
+            provider_id=(getattr(args, "provider", "") or "").strip(),
         )
     print(
         f"Unknown action: {action}. "
@@ -798,6 +817,79 @@ def _print_recovery_code(code: str, *, occasion: str) -> None:
     print("  It is the ONLY way to recover credentials if the OS keychain")
     print("  entry is lost. FERAL has no escrow copy.")
     print(bar)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Cooldown reset (demo prep, 2026-06-05)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def cmd_key_reset_cooldowns(provider_id: str = "") -> int:
+    """Drop the persisted ``ProviderCooldownTracker`` state.
+
+    The tracker writes to ``llm_provider_cooldowns.json`` under the
+    FERAL data home and survives restarts. After the operator tops up
+    a billing account, rotates a key, or otherwise fixes the underlying
+    failure mode that put a provider into cooldown, this command tells
+    the brain to forget those parks so the very next chat turn re-tries
+    the provider end-to-end (the failover loop will re-park it on its
+    own if the upstream is still broken).
+
+    Implementation note: we both rewrite the on-disk JSON AND best-
+    effort POST to the running brain so the in-memory tracker is also
+    cleared. If the brain is offline, only the disk write is needed —
+    the next ``feral serve`` reads the cleared file on boot.
+    """
+    try:
+        from agents.llm_failover import ProviderCooldownTracker
+        from agents.llm_provider import _cooldown_state_path
+    except Exception as exc:
+        print(f"  Failed to import cooldown tracker: {exc}")
+        return 1
+
+    path = _cooldown_state_path()
+    target = (provider_id or "").strip().lower() or None
+    tracker = ProviderCooldownTracker(storage_path=path)
+    state_before = tracker.cooldown_state()
+    cleared = tracker.clear(provider=target)
+    if not cleared and not state_before:
+        print("  No cooldowns to clear. The failover tracker was already empty.")
+    elif not cleared:
+        print(
+            f"  No cooldown found for provider={target!r}. "
+            f"Current cooldowns: {sorted(state_before.keys()) or 'none'}."
+        )
+    else:
+        print("  ✓ Cleared cooldowns for: " + ", ".join(cleared))
+        if state_before:
+            print("  (was parked: " + ", ".join(
+                f"{p} ({int(s)}s remaining)" for p, s in state_before.items()
+            ) + ")")
+        print(f"  State file: {path}")
+
+    # Best-effort live nudge to the running brain so the in-memory
+    # tracker matches disk without a restart.
+    try:
+        from config.runtime import brain_port
+        import urllib.error
+        import urllib.request
+        import json as _json
+        url = f"http://127.0.0.1:{brain_port()}/api/llm/cooldowns/reset"
+        body = _json.dumps({"provider": target or ""}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            if 200 <= resp.status < 300:
+                print("  ✓ Live brain notified — cooldowns cleared in-memory too.")
+            else:
+                print(f"  (brain returned HTTP {resp.status} — restart will pick up the change)")
+    except urllib.error.URLError:
+        print("  (brain not running — next `feral serve` will read the cleared state)")
+    except Exception as exc:
+        print(f"  (live brain notify skipped: {exc})")
+    return 0
 
 
 # ─────────────────────────────────────────────────────────────────────

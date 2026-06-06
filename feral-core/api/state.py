@@ -762,6 +762,86 @@ class BrainState:
             except Exception as exc:
                 # Self-heal must NEVER block boot; degrade gracefully.
                 logger.warning("self_heal_llm_model: skipped (%s)", exc)
+
+            # ─────────────────────────────────────────────
+            # Boot-time cooldown + fallback self-heal (BUG 1 fix,
+            # 2026-06-05 demo prep). The persisted cooldown ledger
+            # (``llm_provider_cooldowns.json``) survives restarts so
+            # an Anthropic ``BILLING`` 1h cooldown OR an OpenRouter
+            # ``AUTH`` 5m cooldown — recorded the LAST time the brain
+            # ran — still parks both providers when this brain comes
+            # back up, even if the operator has since topped up the
+            # account / rotated the key. With only 2 providers in the
+            # configured ``llm.fallback_providers`` chain, that
+            # collision serves "All LLM providers exhausted" on every
+            # chat turn until the cooldowns naturally expire.
+            #
+            # Self-heals at boot:
+            #   1. Drop any cooldowns that survived the restart. The
+            #      brain has no way to know whether the underlying
+            #      condition was fixed; the safe move is to give every
+            #      provider a fresh probe attempt and let the failover
+            #      classifier re-park anything that's still broken.
+            #   2. Extend ``fallback_providers`` to include EVERY
+            #      runtime-supported provider that has a labeled key
+            #      (or env var) configured. Demo-day truth: with
+            #      anthropic + openai + openrouter + deepseek + gemini
+            #      keys all valid, the chat path should never declare
+            #      "exhausted" because of one upstream having a bad
+            #      day.
+            try:
+                from agents.llm_failover import ProviderCooldownTracker
+                from agents.llm_provider import (
+                    SUPPORTED_RUNTIME_PROVIDERS,
+                    is_supported_runtime_provider,
+                    _resolve_api_key,
+                )
+                tracker = getattr(_shared_llm, "_cooldown", None)
+                if isinstance(tracker, ProviderCooldownTracker):
+                    cleared = tracker.clear()
+                    if cleared:
+                        logger.info(
+                            "llm_failover: cleared persisted cooldowns at boot for %s — "
+                            "every provider gets a fresh probe on the next chat turn.",
+                            cleared,
+                        )
+
+                # Auto-extend fallback chain. Order: keep operator's
+                # configured chain first (intent), then append any
+                # other supported providers that have a key. Skip the
+                # active provider (it's the primary) and ``ollama`` /
+                # ``lmstudio`` unless reachable (avoids parking the
+                # failover loop on a local server that isn't running).
+                cfg_fallbacks: list[str] = []
+                try:
+                    cfg_fallbacks = list(_shared_llm._config.get("fallback_providers", []) or [])
+                except Exception:
+                    cfg_fallbacks = []
+                seen = {_shared_llm.provider, *cfg_fallbacks}
+                extended = list(cfg_fallbacks)
+                for pid in sorted(SUPPORTED_RUNTIME_PROVIDERS):
+                    if pid in seen:
+                        continue
+                    if not is_supported_runtime_provider(pid):
+                        continue
+                    if pid in ("ollama", "lmstudio", "local", "hybrid"):
+                        # Local engines aren't proven reachable here;
+                        # leave them off the auto-chain so a missing
+                        # ollama doesn't add latency to every failover.
+                        continue
+                    if _resolve_api_key(pid):
+                        extended.append(pid)
+                        seen.add(pid)
+                if extended != cfg_fallbacks:
+                    _shared_llm._config = {**_shared_llm._config, "fallback_providers": extended}
+                    logger.info(
+                        "llm_failover: extended fallback chain at boot from %s to %s "
+                        "(every supported provider with a configured key).",
+                        cfg_fallbacks, extended,
+                    )
+            except Exception as exc:
+                logger.warning("llm_failover boot self-heal skipped: %s", exc)
+
         # audit-r14 / S6 — initialise the CostBudget + per-subsystem
         # BudgetLoopGuard instances early so the constructors below
         # (Learner, ScreenLoop, ProactiveEngine) can be wired in
