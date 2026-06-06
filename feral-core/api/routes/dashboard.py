@@ -294,13 +294,40 @@ async def _get_dashboard_data() -> dict:
                 "paired_at": row.get("paired_at"),
                 "last_seen": row.get("last_seen"),
             })
+    # Same freshness gate the iOS Context tab applies (operator
+    # report 2026-06-05): a stale HealthKit reading must NOT flow
+    # to the WebUI as ``latest_health.heart_rate`` because the home
+    # page renders it as "live · NN bpm" without re-checking.
+    # ``heart_rate_fresh`` is forwarded so the client can downgrade
+    # the dot to grey when the underlying sample is older than the
+    # 120s context window even though we still surface the value
+    # for diagnostic display.
+    _now = time.time()
     for sid in state.sessions:
         frame = state.perception.get_frame(sid)
         if frame:
-            if frame.heart_rate:
+            hr_ts = float(getattr(frame, "heart_rate_sample_ts", 0.0) or 0.0)
+            hr_fresh = bool(frame.heart_rate) and hr_ts > 0 and (_now - hr_ts) <= 120
+            if frame.heart_rate and hr_fresh:
                 latest_health["heart_rate"] = frame.heart_rate
-            if frame.spo2_pct:
+                latest_health["heart_rate_source"] = frame.heart_rate_source or ""
+                latest_health["heart_rate_fresh"] = True
+            elif frame.heart_rate:
+                # Surface the value but mark it stale so the client
+                # doesn't paint it as "live now".
+                latest_health["heart_rate_stale"] = frame.heart_rate
+                latest_health["heart_rate_source"] = frame.heart_rate_source or ""
+                latest_health["heart_rate_fresh"] = False
+            spo2_ts = float(getattr(frame, "spo2_sample_ts", 0.0) or 0.0)
+            spo2_fresh = bool(frame.spo2_pct) and spo2_ts > 0 and (_now - spo2_ts) <= 120
+            if frame.spo2_pct and spo2_fresh:
                 latest_health["spo2"] = frame.spo2_pct
+                latest_health["spo2_source"] = frame.spo2_source or ""
+                latest_health["spo2_fresh"] = True
+            elif frame.spo2_pct:
+                latest_health["spo2_stale"] = frame.spo2_pct
+                latest_health["spo2_source"] = frame.spo2_source or ""
+                latest_health["spo2_fresh"] = False
             if frame.skin_temperature_c:
                 latest_health["temperature"] = frame.skin_temperature_c
     boot_data = state._boot_report.to_dict() if hasattr(state, '_boot_report') else {}

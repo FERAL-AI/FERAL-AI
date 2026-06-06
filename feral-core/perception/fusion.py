@@ -35,6 +35,48 @@ logger = logging.getLogger("feral.perception")
 _CONTEXT_FRESH_S = 120.0
 
 
+# Live-wearable sources are preferred over Apple HealthKit when both
+# are emitting samples. Operator report 2026-06-05 demo prep: the
+# iOS Context tab was reading HR=115 from ``apple_healthkit`` even
+# though the W300 glasses + Veepoo wristband were also streaming.
+# HealthKit's pipeline returns "resting HR" / "last measured" reads
+# that can be hours stale and overwrites the live wearable value
+# whenever its push lands second. Anything classified as a live
+# wearable here wins the "current HR" slot whenever its sample is
+# fresh, even if the HealthKit emit arrived microseconds later.
+_LIVE_WEARABLE_SOURCES: frozenset[str] = frozenset({
+    "jw_health_glasses",   # Theora W300 glasses (BLE PPG)
+    "veepoo_wristband",    # Veepoo wristband (BLE PPG)
+    "theora_w300",         # Legacy alias
+    "w610_glasses",        # Future Theora W610
+    "polar",               # Generic BLE chest strap
+    "wahoo",               # Generic BLE chest strap
+    "garmin_ble",          # Direct BLE Garmin
+})
+
+# Sources we know are NOT real-time. Even if the sample_ts says
+# "0 seconds ago" (= the bridge resampled it now), the underlying
+# reading might be hours old. Treated as "second-class" current —
+# wins only when no live wearable is reporting, and gets tagged
+# stale aggressively in ``to_system_context``.
+_LAGGING_SOURCES: frozenset[str] = frozenset({
+    "apple_healthkit",
+    "healthkit",
+    "google_fit",
+    "fitbit_cloud",
+    "whoop_cloud",
+    "oura_cloud",
+})
+
+
+def _is_live_wearable(source: str) -> bool:
+    return (source or "").strip().lower() in _LIVE_WEARABLE_SOURCES
+
+
+def _is_lagging_source(source: str) -> bool:
+    return (source or "").strip().lower() in _LAGGING_SOURCES
+
+
 @dataclass
 class PerceptionFrame:
     """
@@ -239,7 +281,6 @@ class PerceptionEngine:
         # Vitals — support both structured and flat
         _hr = _fv(vitals.get("ppg_heart_rate"), sensors.get("ppg_heart_rate"), sensors.get("heart_rate_bpm"))
         if _hr is not None:
-            frame.heart_rate = _hr
             # Freshness contract (operator report 2026-05-09 round 2):
             # senders MUST supply an explicit ``*_sample_ts``. iOS
             # HealthKitAdapter forwards ``HKQuantitySample.endDate``;
@@ -250,34 +291,89 @@ class PerceptionEngine:
             # engine treat the sample as STALE — old-build clients
             # CANNOT smuggle a fake-fresh reading by silently leaning
             # on a brain-side ``time.time()`` default.
-            _hr_ts = _fv(
+            _hr_ts_raw = _fv(
                 vitals.get("ppg_heart_rate_sample_ts"),
                 sensors.get("ppg_heart_rate_sample_ts"),
                 sensors.get("heart_rate_sample_ts"),
             )
-            frame.heart_rate_sample_ts = float(_hr_ts) if _hr_ts is not None else 0.0
+            new_hr_ts = float(_hr_ts_raw) if _hr_ts_raw is not None else 0.0
             _hr_src = _fv(
                 vitals.get("ppg_heart_rate_source"),
                 sensors.get("source"),
                 sensors.get("heart_rate_source"),
             )
-            if _hr_src is not None:
-                frame.heart_rate_source = str(_hr_src)
+            new_hr_source = str(_hr_src) if _hr_src is not None else ""
+
+            # 2026-06-05 demo prep — Source priority. The per-update
+            # path used to unconditionally overwrite ``frame.heart_rate``,
+            # which let an Apple HealthKit emit (cached "resting HR" from
+            # hours ago) clobber a live W300 / Veepoo BPM that landed
+            # microseconds earlier. Now: a live wearable's fresh sample
+            # wins over any HealthKit / cloud-mirror value, regardless
+            # of arrival order. HealthKit can still update the slot when
+            # no live wearable has reported, but it cannot demote a
+            # currently-live wearable reading.
+            now = time.time()
+            new_is_live_wearable = _is_live_wearable(new_hr_source)
+            new_is_lagging = _is_lagging_source(new_hr_source)
+            new_is_fresh = new_hr_ts > 0 and (now - new_hr_ts) <= _CONTEXT_FRESH_S
+            cur_source = (frame.heart_rate_source or "").strip().lower()
+            cur_ts = float(getattr(frame, "heart_rate_sample_ts", 0.0) or 0.0)
+            cur_is_live_wearable = _is_live_wearable(cur_source)
+            cur_is_fresh = cur_ts > 0 and (now - cur_ts) <= _CONTEXT_FRESH_S
+
+            should_update = True
+            if frame.heart_rate and cur_is_live_wearable and cur_is_fresh:
+                # Currently displaying a fresh wearable HR. A lagging
+                # source (HealthKit / cloud mirror) MUST NOT demote it,
+                # even if its arrival timestamp is technically newer.
+                if new_is_lagging or (not new_is_live_wearable and not new_is_fresh):
+                    should_update = False
+                # Wearable→wearable: keep the freshest sample.
+                elif new_is_live_wearable and new_hr_ts < cur_ts:
+                    should_update = False
+
+            if should_update:
+                frame.heart_rate = _hr
+                frame.heart_rate_sample_ts = new_hr_ts
+                if new_hr_source:
+                    frame.heart_rate_source = new_hr_source
         _spo2 = _fv(vitals.get("spo2_pct"), sensors.get("spo2_pct"))
         if _spo2 is not None:
-            frame.spo2_pct = _spo2
-            _spo2_ts = _fv(
+            _spo2_ts_raw = _fv(
                 vitals.get("spo2_sample_ts"),
                 sensors.get("spo2_sample_ts"),
             )
-            frame.spo2_sample_ts = float(_spo2_ts) if _spo2_ts is not None else 0.0
+            new_spo2_ts = float(_spo2_ts_raw) if _spo2_ts_raw is not None else 0.0
             _spo2_src = _fv(
                 vitals.get("spo2_source"),
                 sensors.get("source"),
                 sensors.get("spo2_source"),
             )
-            if _spo2_src is not None:
-                frame.spo2_source = str(_spo2_src)
+            new_spo2_source = str(_spo2_src) if _spo2_src is not None else ""
+
+            # Same source-priority rule as heart rate (see above).
+            now2 = time.time()
+            new_spo2_is_live = _is_live_wearable(new_spo2_source)
+            new_spo2_is_lagging = _is_lagging_source(new_spo2_source)
+            new_spo2_is_fresh = new_spo2_ts > 0 and (now2 - new_spo2_ts) <= _CONTEXT_FRESH_S
+            cur_spo2_source = (frame.spo2_source or "").strip().lower()
+            cur_spo2_ts = float(getattr(frame, "spo2_sample_ts", 0.0) or 0.0)
+            cur_spo2_is_live = _is_live_wearable(cur_spo2_source)
+            cur_spo2_is_fresh = cur_spo2_ts > 0 and (now2 - cur_spo2_ts) <= _CONTEXT_FRESH_S
+
+            should_update_spo2 = True
+            if frame.spo2_pct and cur_spo2_is_live and cur_spo2_is_fresh:
+                if new_spo2_is_lagging or (not new_spo2_is_live and not new_spo2_is_fresh):
+                    should_update_spo2 = False
+                elif new_spo2_is_live and new_spo2_ts < cur_spo2_ts:
+                    should_update_spo2 = False
+
+            if should_update_spo2:
+                frame.spo2_pct = _spo2
+                frame.spo2_sample_ts = new_spo2_ts
+                if new_spo2_source:
+                    frame.spo2_source = new_spo2_source
         _temp = vitals.get("skin_temperature_c")
         if _temp is not None:
             frame.skin_temperature_c = _temp
