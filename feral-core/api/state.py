@@ -527,6 +527,84 @@ class BrainState:
     def skill_executor(self):
         return self.orchestrator.executor if self.orchestrator else None
 
+    def _latest_live_wearable_snapshot(self) -> Optional[dict]:
+        """Return the freshest live-wearable HR/SpO2 reading the
+        perception engine has, or ``None`` when no fresh sample exists.
+
+        Called by :class:`HealthAggregator` from the chat ``health_summary``
+        tool path so the LLM has access to the same live wearable data
+        the WebUI's ``/api/dashboard.latest_health`` already surfaces.
+
+        Implementation mirrors the freshness gate in
+        ``api/routes/dashboard.py:_get_dashboard_data`` — walk every
+        active session's perception frame, keep the freshest sample
+        per metric within the 120 s context window, and only consider
+        sources tagged as live wearables (Theora W300 glasses, Veepoo
+        wristband, etc.). HealthKit / cloud-mirror sources are
+        intentionally NOT surfaced as ``current_*`` because they're
+        already reflected in the resting/recovery slots from the
+        Whoop / Oura branches above and the perception fusion layer
+        already classifies them as "lagging".
+        """
+        from perception.fusion import _is_live_wearable
+
+        # Same 120 s freshness window every other consumer uses
+        # (perception.fusion._CONTEXT_FRESH_S, dashboard latest_health,
+        # iOS Context tab). Hardcoded here to avoid importing a
+        # private constant — when the canonical window changes we
+        # update each gate explicitly so the policy stays auditable.
+        fresh_window_s = 120.0
+        now = time.time()
+        best_hr: Optional[tuple[float, int, str]] = None  # (sample_ts, bpm, source)
+        best_spo2: Optional[tuple[float, int, str]] = None
+        skin_temp_c: Optional[float] = None
+        for sid in list(self.sessions):
+            try:
+                frame = self.perception.get_frame(sid)
+            except Exception:
+                continue
+            if frame is None:
+                continue
+            hr_ts = float(getattr(frame, "heart_rate_sample_ts", 0.0) or 0.0)
+            hr_src = (getattr(frame, "heart_rate_source", "") or "").strip()
+            if (
+                frame.heart_rate
+                and hr_ts > 0
+                and (now - hr_ts) <= fresh_window_s
+                and _is_live_wearable(hr_src)
+            ):
+                if best_hr is None or hr_ts > best_hr[0]:
+                    best_hr = (hr_ts, int(frame.heart_rate), hr_src)
+            spo2_ts = float(getattr(frame, "spo2_sample_ts", 0.0) or 0.0)
+            spo2_src = (getattr(frame, "spo2_source", "") or "").strip()
+            if (
+                frame.spo2_pct
+                and spo2_ts > 0
+                and (now - spo2_ts) <= fresh_window_s
+                and _is_live_wearable(spo2_src)
+            ):
+                if best_spo2 is None or spo2_ts > best_spo2[0]:
+                    best_spo2 = (spo2_ts, int(frame.spo2_pct), spo2_src)
+            # Skin temperature is informational only; pick whatever
+            # the most recent frame carried (no source-priority gate
+            # because the temperature payload doesn't currently carry
+            # a per-source classifier).
+            if frame.skin_temperature_c:
+                skin_temp_c = float(frame.skin_temperature_c)
+
+        if best_hr is None and best_spo2 is None and skin_temp_c is None:
+            return None
+        snap: dict = {}
+        if best_hr is not None:
+            snap["heart_rate"] = best_hr[1]
+            snap["heart_rate_source"] = best_hr[2]
+        if best_spo2 is not None:
+            snap["spo2"] = best_spo2[1]
+            snap["spo2_source"] = best_spo2[2]
+        if skin_temp_c is not None:
+            snap["skin_temperature_c"] = skin_temp_c
+        return snap
+
     async def init(self):
         _boot_start = time.time()
         with boot_subsystem(self._boot_report, "SkillRegistry", optional=False):
@@ -945,7 +1023,20 @@ class BrainState:
         with boot_subsystem(self._boot_report, "HealthAggregator"):
             whoop = WhoopClient(oauth_manager=self.oauth)
             oura = OuraClient()
-            self.health_aggregator = HealthAggregator(whoop=whoop, oura=oura)
+            # Operator report 2026-06-07: chat ran the health_summary
+            # tool and answered "no current data" while the W300
+            # glasses were streaming HR into the perception frame.
+            # Whoop and Oura were both disconnected, so the previous
+            # aggregator returned an empty snapshot. Inject a closure
+            # over ``state.perception`` so the aggregator can surface
+            # the freshest live-wearable reading whenever it's
+            # available — same freshness window the dashboard's
+            # ``latest_health`` route uses, so chat and WebUI agree.
+            self.health_aggregator = HealthAggregator(
+                whoop=whoop,
+                oura=oura,
+                live_wearable_provider=self._latest_live_wearable_snapshot,
+            )
         with boot_subsystem(self._boot_report, "LocationEngine"):
             from perception.location import LocationEngine
             self.location_engine = LocationEngine()

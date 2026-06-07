@@ -81,19 +81,35 @@ function MetricsTab() {
       {loading && <EmptyState title="Loading…" />}
       {!loading && metrics.length === 0 && <EmptyState title="No metrics yet" hint="Pair a wristband or phone to start populating baselines." />}
       <div className="v2-skills-grid">
-        {metrics.map((m, i) => (
-          <Glass key={m.metric || i} level={0} radius="md" padding="md">
-            <header className="v2-skill-card-head">
-              <h3 className="v2-skill-card-name">{m.metric || m.name}</h3>
-              {m.unit && <code className="v2-skill-card-id">{m.unit}</code>}
-            </header>
-            <div className="v2-stat-value">{typeof m.value === 'number' ? m.value.toFixed(1) : m.value}</div>
-            <div className="v2-skill-card-meta">
-              {m.trend && <span className="v2-chip"><TrendingUp size={10} /> {m.trend}</span>}
-              {m.samples && <span className="v2-chip">{m.samples} samples</span>}
-            </div>
-          </Glass>
-        ))}
+        {metrics.map((m, i) => {
+          // Backend (`/api/baseline/metrics`) returns BaselineMetric rows:
+          // { metric_id, category, values: [...], mean, std_dev }. The
+          // legacy field names (metric/value/unit/samples) never existed,
+          // which is why the cards rendered blank. Read the real fields,
+          // keeping the old names as fallbacks for any shimmed payload.
+          const name = m.metric_id || m.metric || m.name || 'metric';
+          const mean = typeof m.mean === 'number' ? m.mean : m.value;
+          const sampleCount = Array.isArray(m.values) ? m.values.length : m.samples;
+          return (
+            <Glass key={name + i} level={0} radius="md" padding="md">
+              <header className="v2-skill-card-head">
+                <h3 className="v2-skill-card-name">{name}</h3>
+                {(m.category || m.unit) && (
+                  <code className="v2-skill-card-id">{m.category || m.unit}</code>
+                )}
+              </header>
+              <div className="v2-stat-value">
+                {typeof mean === 'number' ? mean.toFixed(1) : (mean ?? '—')}
+              </div>
+              <div className="v2-skill-card-meta">
+                {typeof m.std_dev === 'number' && m.std_dev > 0 && (
+                  <span className="v2-chip"><TrendingUp size={10} /> σ {m.std_dev.toFixed(1)}</span>
+                )}
+                {sampleCount ? <span className="v2-chip">{sampleCount} samples</span> : null}
+              </div>
+            </Glass>
+          );
+        })}
       </div>
     </Pane>
   );

@@ -489,6 +489,14 @@ del _p
 _PHONE_BEARER_POST = _PathAllowlist("_PHONE_BEARER_POST")
 _PHONE_BEARER_POST.add_literal("/api/system/permissions/open")  # Phase 13 — open Settings pane
 _PHONE_BEARER_POST.add_literal("/api/system/permissions/request")  # Lane 11 R-PROD-004b — trigger native prompt
+# v2026.6.7 — operator report 2026-06-07: the iOS HealthKit adapter
+# was POSTing to ``/api/health/ingest`` (declared by the iOS SDK's
+# ``BrainHTTP.IngestKind.healthKit``) and getting HTTP 401 because
+# the route wasn't on the phone-bearer POST allowlist. The route
+# itself is implemented in ``api/routes/dashboard.py`` and bridges
+# Apple HealthKit samples into the memory store; allowlist it here
+# so the phone bearer is accepted.
+_PHONE_BEARER_POST.add_literal("/api/health/ingest")
 # Operator approval surface. Path-parameterised on `request_id`; the
 # matcher uses Starlette's `compile_path`, the same function FastAPI's
 # router uses to dispatch the request — so a match here is by
@@ -3343,11 +3351,53 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
     _record_biometrics_to_baseline(sensors)
 
 
+# Vitals that must clear the live-wearable + freshness gate before they
+# train a baseline, mapped to the (source_key, sample_ts_key) carried
+# alongside them in the sensor payload. Activity totals (steps/calories)
+# are intentionally absent — they're cumulative daily counters, not
+# point-in-time vitals, so a stale push doesn't distort their baseline.
+_GATED_BASELINE_VITALS = {
+    "heart_rate": ("heart_rate_source", "heart_rate_sample_ts"),
+    "ppg_heart_rate": ("heart_rate_source", "heart_rate_sample_ts"),
+    "spo2": ("spo2_source", "spo2_sample_ts"),
+    "spo2_pct": ("spo2_source", "spo2_sample_ts"),
+}
+
+# Same 120 s window perception.fusion / the dashboard "current" slot use.
+# Hardcoded (not imported) so each gate stays independently auditable;
+# see proactive_engine._FRESH_WINDOW_S for the canonical rationale.
+_BASELINE_FRESH_WINDOW_S = 120.0
+
+
 def _record_biometrics_to_baseline(data: dict) -> None:
-    """Extract known biometric keys from a sensor payload and record them."""
+    """Extract known biometric keys from a sensor payload and record them.
+
+    Freshness + source gate (operator report 2026-06-07): the baseline
+    previously recorded EVERY numeric biometric — including stale
+    ``apple_healthkit`` "resting"/"last-measured" reads (e.g. HR=115 from
+    a workout hours earlier) — straight into ``hr_resting``. That polluted
+    the learned mean to a non-physiological ~100 bpm (real wearable
+    samples were 51-56), so every fresh wristband read tripped a 2σ
+    anomaly and the proactive layer fanned out duplicate "resting HR 51 /
+    baseline 100" cards.
+
+    Vitals now only train the baseline when BOTH:
+      * the sample is fresh (``<= _BASELINE_FRESH_WINDOW_S``), and
+      * the source is NOT a known lagging/cloud source.
+
+    We exclude (not allow-list) because lagging sources like HealthKit
+    resample ``sample_ts`` to "now" even when the underlying read is hours
+    old — freshness alone can't catch them, which is the whole reason
+    ``perception.fusion._LAGGING_SOURCES`` exists. Real wearables (Theora
+    W300 / Veepoo / BLE PPG), including unlabeled local BLE daemons, still
+    train the baseline; only cloud/HealthKit reads are kept out.
+    """
     if not state.baseline_engine or not data:
         return
     try:
+        from perception.fusion import _is_lagging_source
+
+        now = time.time()
         flat: dict[str, float] = {}
         for key, val in data.items():
             if isinstance(val, dict):
@@ -3359,9 +3409,24 @@ def _record_biometrics_to_baseline(data: dict) -> None:
 
         for raw_key, value in flat.items():
             mapping = _BIOMETRIC_KEY_MAP.get(raw_key)
-            if mapping:
-                metric_id, category = mapping
-                state.baseline_engine.record(metric_id, value, category=category)
+            if not mapping:
+                continue
+            gate = _GATED_BASELINE_VITALS.get(raw_key)
+            if gate:
+                src_key, ts_key = gate
+                src = str(data.get(src_key, "") or "")
+                ts_raw = data.get(ts_key, 0.0)
+                ts = float(ts_raw) if isinstance(ts_raw, (int, float)) else 0.0
+                fresh = ts > 0 and (now - ts) <= _BASELINE_FRESH_WINDOW_S
+                if _is_lagging_source(src) or not fresh:
+                    logger.debug(
+                        "Skipping baseline record for %s=%.1f — source=%r fresh=%s "
+                        "(lagging/cloud or stale vitals do not train the baseline)",
+                        raw_key, value, src, fresh,
+                    )
+                    continue
+            metric_id, category = mapping
+            state.baseline_engine.record(metric_id, value, category=category)
     except Exception as exc:
         logger.debug("Baseline biometric recording error: %s", exc)
 

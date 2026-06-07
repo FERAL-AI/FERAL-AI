@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 
@@ -367,10 +367,28 @@ class OuraClient:
 class HealthAggregator:
     """Unified health interface that merges data from all connected platforms."""
 
-    def __init__(self, whoop: Optional[WhoopClient] = None,
-                 oura: Optional[OuraClient] = None):
+    def __init__(
+        self,
+        whoop: Optional[WhoopClient] = None,
+        oura: Optional[OuraClient] = None,
+        live_wearable_provider: Optional[Callable[[], Optional[dict[str, Any]]]] = None,
+    ):
         self._whoop = whoop
         self._oura = oura
+        # Pluggable accessor for the brain's perception state. When
+        # set, ``get_health_summary`` consults it for the most recent
+        # FRESH live-wearable HR/SpO2 sample (Theora W300 glasses,
+        # Veepoo wristband, etc.) so the chat path matches what the
+        # WebUI's ``/api/dashboard.latest_health`` already surfaces.
+        # Operator report 2026-06-07: the iOS chat assistant answered
+        # "no current data coming in from your health sources right
+        # now" when asked about heart rate even though the W300 was
+        # streaming bpm into the perception frame — the previous
+        # implementation only looked at Whoop/Oura, which were both
+        # disconnected. The provider is a callable so the hot-path
+        # never imports ``api.state`` (would be a circular import) and
+        # tests can inject a stub.
+        self._live_wearable_provider = live_wearable_provider
 
     @property
     def sources(self) -> list[str]:
@@ -380,6 +398,33 @@ class HealthAggregator:
         if self._oura and self._oura.connected:
             s.append("oura")
         return s
+
+    def _live_wearable_snapshot(self) -> Optional[dict[str, Any]]:
+        """Pull the freshest live-wearable HR/SpO2 reading from the
+        perception state, if any. Returns ``None`` when the provider
+        is missing, raises, or has no fresh sample.
+
+        Shape (all fields optional except ``source`` when present):
+        ``{
+            "heart_rate": int|None,
+            "heart_rate_source": str|None,
+            "spo2": int|None,
+            "spo2_source": str|None,
+            "skin_temperature_c": float|None,
+        }``
+        """
+        if self._live_wearable_provider is None:
+            return None
+        try:
+            snap = self._live_wearable_provider()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "HealthAggregator live_wearable_provider raised: %s", exc,
+            )
+            return None
+        if not isinstance(snap, dict) or not snap:
+            return None
+        return snap
 
     async def get_health_summary(self) -> dict[str, Any]:
         """Merge data from all connected platforms into a unified dict."""
@@ -392,7 +437,11 @@ class HealthAggregator:
             "readiness": None,
             "activity_score": None,
             "strain": None,
-            "sources": self.sources,
+            "current_hr": None,
+            "current_hr_source": None,
+            "current_spo2": None,
+            "current_spo2_source": None,
+            "sources": list(self.sources),
         }
 
         # Whoop data
@@ -461,6 +510,39 @@ class HealthAggregator:
                         summary["activity_score"] = latest.get("activity_score")
             except Exception as e:
                 logger.warning("Oura activity aggregation error: %s", e)
+
+        # Live wearable fan-in (Theora W300 glasses, Veepoo wristband,
+        # any BLE PPG source flowing into perception). Operator report
+        # 2026-06-07: the chat tool used to answer "no current data"
+        # when neither Whoop nor Oura was connected even though the
+        # W300 was actively streaming HR. Surfacing the perception
+        # frame's fresh wearable reading here closes the gap so chat
+        # and WebUI agree on what "current heart rate" means.
+        snap = self._live_wearable_snapshot()
+        if snap:
+            hr = snap.get("heart_rate")
+            hr_source = snap.get("heart_rate_source")
+            if hr:
+                summary["current_hr"] = int(hr)
+                if hr_source:
+                    summary["current_hr_source"] = str(hr_source)
+                # Treat the fresh wearable HR as the authoritative
+                # "resting"-slot fallback when Whoop/Oura haven't
+                # contributed one. The UI label for ``resting_hr``
+                # is "current resting estimate" — a fresh PPG sample
+                # is a better answer than "null" for that slot.
+                if summary["resting_hr"] is None:
+                    summary["resting_hr"] = int(hr)
+                if hr_source and str(hr_source) not in summary["sources"]:
+                    summary["sources"].append(str(hr_source))
+            spo2 = snap.get("spo2")
+            spo2_source = snap.get("spo2_source")
+            if spo2:
+                summary["current_spo2"] = int(spo2)
+                if spo2_source:
+                    summary["current_spo2_source"] = str(spo2_source)
+                if spo2_source and str(spo2_source) not in summary["sources"]:
+                    summary["sources"].append(str(spo2_source))
 
         return summary
 

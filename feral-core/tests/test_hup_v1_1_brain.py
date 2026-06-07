@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import importlib
+import time
 
 import pytest
 
@@ -239,6 +240,54 @@ def test_heart_rate_device_event_hits_perception_and_baseline(server_module):
     assert any(s[1].get("ppg_heart_rate") == 82 for s in sensor_updates)
     # server._BIOMETRIC_KEY_MAP routes "ppg_heart_rate" → "hr_resting".
     assert any(mid == "hr_resting" for mid, *_ in baseline_records)
+
+
+def test_lagging_source_hr_does_not_train_baseline(server_module):
+    """Stale cloud/HealthKit reads must not pollute the resting baseline.
+
+    Operator report 2026-06-07: ``apple_healthkit`` HR=115 (a workout read
+    hours old, resampled to "now") was being averaged into ``hr_resting``,
+    dragging the learned mean to ~100 bpm. Lagging sources are now excluded
+    from baseline training even when their sample_ts looks fresh.
+    """
+    server, _pushed, _ingested, _sensor_updates, baseline_records = server_module
+    payload = {
+        "node_id": "feral-band-test",
+        "event_type": "heart_rate",
+        "bpm": 115,
+        "source": "apple_healthkit",
+        "heart_rate_sample_ts": time.time(),
+    }
+    server._handle_biometric_device_event("feral-band-test", "heart_rate", payload)
+    assert not any(mid == "hr_resting" for mid, *_ in baseline_records)
+
+
+def test_live_wearable_hr_trains_baseline(server_module):
+    """A fresh wearable read (with source) still trains the baseline."""
+    server, _pushed, _ingested, _sensor_updates, baseline_records = server_module
+    payload = {
+        "node_id": "feral-band-test",
+        "event_type": "heart_rate",
+        "bpm": 51,
+        "source": "veepoo_wristband",
+        "heart_rate_sample_ts": time.time(),
+    }
+    server._handle_biometric_device_event("feral-band-test", "heart_rate", payload)
+    assert any(mid == "hr_resting" and val == 51 for mid, val, *_ in baseline_records)
+
+
+def test_stale_wearable_hr_does_not_train_baseline(server_module):
+    """Even a wearable sample that is old (sample_ts hours ago) is skipped."""
+    server, _pushed, _ingested, _sensor_updates, baseline_records = server_module
+    payload = {
+        "node_id": "feral-band-test",
+        "event_type": "heart_rate",
+        "bpm": 60,
+        "source": "veepoo_wristband",
+        "heart_rate_sample_ts": time.time() - 3600,
+    }
+    server._handle_biometric_device_event("feral-band-test", "heart_rate", payload)
+    assert not any(mid == "hr_resting" for mid, *_ in baseline_records)
 
 
 def test_spo2_device_event_records_to_sensors(server_module):

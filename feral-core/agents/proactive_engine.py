@@ -378,26 +378,38 @@ class ProactiveEngine:
         # --- Baseline Anomaly Detection ---
         if self._baseline:
             try:
-                for frame in frames:
-                    # Freshness gate (operator report 2026-05-09 round 3):
-                    # `baseline_hr` was firing "Heart Rate Anomaly:
-                    # hr_resting is 54.0 below baseline 110.6" while
-                    # the W300 was disconnected — same root cause as
-                    # `hr_elevated`: the trigger read `frame.heart_rate`
-                    # without checking when the sample was taken. Gate
-                    # on the same FRESH_WINDOW_S as elsewhere in
-                    # _evaluate; reuse the same `now` (declared at top
-                    # of method).
-                    hr_age_baseline = (
-                        (now - getattr(frame, "heart_rate_sample_ts", 0.0))
-                        if getattr(frame, "heart_rate_sample_ts", 0.0) > 0
-                        else float("inf")
-                    )
-                    if frame.heart_rate > 0 and hr_age_baseline <= FRESH_WINDOW_S:
-                        alert = self._baseline.check_anomaly(
-                            "hr_resting", frame.heart_rate
+                # Cooldown gate moved BEFORE the call (operator report
+                # 2026-06-07): `check_anomaly` / `check_trend` are
+                # *mutating* — each call persists a baseline_alert row
+                # AND fans out to the IdeasEngine via the on_alert
+                # listener. The old code called check_anomaly once per
+                # perception frame on every 15s tick and only checked
+                # `_can_fire` afterwards, so a sustained anomaly stacked
+                # up 78 duplicate alerts + 20 identical "For you today"
+                # cards. Gating the call itself (and evaluating only the
+                # single freshest frame per tick) keeps anomaly creation
+                # on the same nag cooldown as message delivery.
+                if self._can_fire("baseline_hr"):
+                    fresh_hr_frame = None
+                    for frame in frames:
+                        # Freshness gate (operator report 2026-05-09
+                        # round 3): `baseline_hr` was firing while the
+                        # W300 was disconnected because the trigger read
+                        # `frame.heart_rate` without checking the sample
+                        # age. Reuse the same FRESH_WINDOW_S / `now`.
+                        hr_age_baseline = (
+                            (now - getattr(frame, "heart_rate_sample_ts", 0.0))
+                            if getattr(frame, "heart_rate_sample_ts", 0.0) > 0
+                            else float("inf")
                         )
-                        if alert and self._can_fire("baseline_hr"):
+                        if frame.heart_rate > 0 and hr_age_baseline <= FRESH_WINDOW_S:
+                            fresh_hr_frame = frame
+                            break
+                    if fresh_hr_frame is not None:
+                        alert = self._baseline.check_anomaly(
+                            "hr_resting", fresh_hr_frame.heart_rate
+                        )
+                        if alert:
                             messages.append(ProactiveMessage(
                                 trigger_id="baseline_hr",
                                 priority=Priority.IMPORTANT,
@@ -406,8 +418,10 @@ class ProactiveEngine:
                                 voice_text=alert.message,
                             ))
                 for mid in ("sleep_hours", "hrv_ms"):
+                    if not self._can_fire(f"baseline_trend_{mid}"):
+                        continue
                     trend_alert = self._baseline.check_trend(mid)
-                    if trend_alert and self._can_fire(f"baseline_trend_{mid}"):
+                    if trend_alert:
                         messages.append(ProactiveMessage(
                             trigger_id=f"baseline_trend_{mid}",
                             priority=Priority.SUGGESTION,

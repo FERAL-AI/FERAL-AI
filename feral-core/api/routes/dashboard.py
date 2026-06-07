@@ -1,9 +1,11 @@
 """Dashboard, system info, health, and activity endpoints."""
 
+import json
 import logging
 import os
 import time
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from version import VERSION as __version__
 from api.state import state
@@ -440,3 +442,127 @@ async def dashboard_data():
 async def get_activity():
     """Recent brain activity log."""
     return {"entries": list(state.activity_log)}
+
+
+# ── HealthKit ingest (iOS companion) ─────────────────────────────
+#
+# Operator report 2026-06-07: the iOS companion's HealthKitAdapter
+# was POSTing samples to ``/api/health/ingest`` — a route that
+# didn't exist. The phone-bearer middleware short-circuited the
+# request with HTTP 401 ("Unauthorized — provide Authorization:
+# Bearer <key>") because the path was not on the
+# ``_PHONE_BEARER_POST`` allowlist; the iOS DebugLog filled with
+# repeated ``healthkit ingest failed: ingest failed HTTP 401``
+# warnings on every poll cycle and HealthKit data never reached
+# the brain's long-lived memory store.
+#
+# This route closes the gap. It is a phone-bearer-authenticated
+# write that turns each sample into a normal memory record so the
+# memory tool surface ("What was my heart rate this morning?") can
+# answer from the same store as the rest of the brain. Realtime HR
+# / SpO2 still flows over the WebSocket as ``device_event`` frames
+# — that path is unchanged; the ingest route is purely additive.
+@router.post("/api/health/ingest")
+async def ingest_health_samples(request: Request):
+    """Accept a batch of HealthKit (or compatible) samples from the
+    iOS companion and persist each one as a memory record.
+
+    Body shape mirrors ``BrainHTTP.ingest`` in the iOS SDK::
+
+        {
+          "source": "ios.healthkit",
+          "ingested_at": "<ISO-8601>",
+          "samples": [
+            {
+              "event_type": "heart_rate",
+              "bpm": 72,
+              "source": "apple_healthkit",
+              "pipeline": "Apple Health",
+              "sample_source": "Apple Watch",
+              "sampled_at_ms": 1717800000000.0
+            },
+            ...
+          ]
+        }
+
+    Auth: gated by the phone-bearer middleware allowlist. Returns
+    ``{"persisted": N, "skipped": M}`` so the iOS Devices tab can
+    render "Synced N / M samples" without a follow-up query.
+    """
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        return JSONResponse(
+            {"error": f"Invalid JSON body: {exc}"}, status_code=400,
+        )
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"error": "Body must be a JSON object"}, status_code=400,
+        )
+    samples = body.get("samples")
+    if not isinstance(samples, list):
+        return JSONResponse(
+            {"error": "Body must contain a `samples` array"}, status_code=400,
+        )
+    bridge_source = str(body.get("source") or "ios.healthkit")
+
+    memory = getattr(state, "memory", None)
+    if memory is None or not hasattr(memory, "save"):
+        return JSONResponse(
+            {"error": "Memory store unavailable"}, status_code=503,
+        )
+
+    persisted = 0
+    skipped = 0
+    for raw in samples:
+        if not isinstance(raw, dict):
+            skipped += 1
+            continue
+        event_type = str(raw.get("event_type") or "").strip().lower()
+        if not event_type:
+            skipped += 1
+            continue
+        # Build a compact human-readable content line per sample so
+        # the memory recall path renders the right thing without a
+        # custom serializer. Fall back to the raw dict as a JSON tail
+        # so nothing is lost.
+        value = (
+            raw.get("bpm")
+            or raw.get("current")
+            or raw.get("value")
+            or raw.get("count")
+            or raw.get("celsius")
+        )
+        unit_hint = {
+            "heart_rate": "bpm",
+            "spo2": "%",
+            "steps": "steps",
+            "temperature": "°C",
+            "hrv": "ms",
+        }.get(event_type, "")
+        sample_source = str(
+            raw.get("sample_source")
+            or raw.get("pipeline")
+            or raw.get("source")
+            or "Apple Health"
+        )
+        if value is not None:
+            content_line = f"{event_type} {value}{unit_hint} ({sample_source})".strip()
+        else:
+            content_line = f"{event_type} sample ({sample_source})"
+        try:
+            await memory.save(
+                content=content_line,
+                tags=["health", "ingest", event_type, bridge_source],
+                importance="normal",
+                source=f"ingest:{bridge_source}:{event_type}",
+            )
+            persisted += 1
+        except Exception as exc:
+            logger.warning(
+                "health/ingest: memory.save failed for event_type=%s: %s",
+                event_type, exc,
+            )
+            skipped += 1
+
+    return {"persisted": persisted, "skipped": skipped}

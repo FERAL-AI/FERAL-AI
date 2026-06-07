@@ -267,18 +267,66 @@ class TestIdeasEngine:
         assert not called  # polish should NOT fire by default
 
         engine.set_llm_polish(True, polish)
+        # Use a DIFFERENT signal (sleep_hours, not hrv) so the per-signal
+        # dedup guard doesn't suppress this second card — the first hrv
+        # idea above is still active. This test asserts polish opt-in, not
+        # dedup behaviour.
         idea2 = engine.handle_baseline_alert(
             SimpleNamespace(
-                metric_id="hrv",
+                metric_id="sleep_hours",
                 alert_type="anomaly",
                 severity="warning",
                 deviation_sigma=2.0,
-                baseline_mean=50.0,
-                current_value=35.0,
+                baseline_mean=8.0,
+                current_value=5.0,
             )
         )
         assert idea2 is not None
         assert called  # fired exactly on the opt-in path
+
+    def test_repeated_same_signal_alert_deduped(self, store):
+        """A sustained anomaly must not stack identical cards.
+
+        Operator report 2026-06-07: 20 byte-identical "resting HR 51 /
+        baseline 100" cards because the proactive loop fired one idea per
+        tick. The store-level dedup keeps a single active card per signal.
+        """
+        engine = IdeasEngine(store=store)
+        alert = SimpleNamespace(
+            metric_id="hr_resting",
+            alert_type="anomaly",
+            severity="warning",
+            deviation_sigma=2.0,
+            baseline_mean=100.0,
+            current_value=51.0,
+        )
+        first = engine.handle_baseline_alert(alert)
+        second = engine.handle_baseline_alert(alert)
+        third = engine.handle_baseline_alert(alert)
+        assert first is not None
+        assert second is None  # deduped — first is still active
+        assert third is None
+        active = [i for i in store.list_today() if i.kind == "health"]
+        assert len(active) == 1
+
+    def test_dedup_releases_after_dismiss(self, store):
+        """Once the user clears the card, a fresh anomaly can surface again."""
+        engine = IdeasEngine(store=store)
+        alert = SimpleNamespace(
+            metric_id="hr_resting",
+            alert_type="anomaly",
+            severity="warning",
+            deviation_sigma=2.0,
+            baseline_mean=100.0,
+            current_value=51.0,
+        )
+        first = engine.handle_baseline_alert(alert)
+        assert first is not None
+        store.record_dismiss(first.id)
+        # Dismiss weight is 1 (< 3 suppression threshold) so the signal is
+        # eligible again, and no active card blocks it.
+        again = engine.handle_baseline_alert(alert)
+        assert again is not None
 
     def test_polish_failure_is_swallowed(self, store):
         engine = IdeasEngine(

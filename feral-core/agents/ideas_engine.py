@@ -197,6 +197,30 @@ class IdeasStore:
             self._conn.execute("SELECT * FROM ideas WHERE id = ?", (idea_id,)).fetchone()
         )
 
+    def has_active_signal(self, signal_key: str, now: float | None = None) -> bool:
+        """True if a live (un-accepted, un-dismissed, un-expired) idea
+        already exists for *signal_key*.
+
+        Dedup guard (operator report 2026-06-07): a sustained baseline
+        anomaly fanned out one idea per proactive tick, stacking ~20
+        byte-identical "resting HR 51 / baseline 100" cards on the Home
+        pane. Each idea has a unique uuid so INSERT OR REPLACE never
+        collapsed them; we instead refuse to compose a second card while
+        the first is still showing. Matches on the JSON-encoded signal
+        token so we don't depend on per-row JSON parsing.
+        """
+        _now = now if now is not None else time.time()
+        row = self._conn.execute(
+            """SELECT 1 FROM ideas
+                WHERE accepted_at IS NULL
+                  AND dismissed_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > ?)
+                  AND source_signals LIKE ?
+                LIMIT 1""",
+            (_now, f'%"{signal_key}"%'),
+        ).fetchone()
+        return row is not None
+
     def dismiss_weight(self, signal_key: str) -> int:
         row = self._conn.execute(
             "SELECT dismiss_count FROM idea_dismiss_weights WHERE signal_key = ?",
@@ -503,6 +527,16 @@ class IdeasEngine:
                     "Idea suppressed — signal %s dismissed %dx before",
                     sig,
                     weight,
+                )
+                return None
+        # Dedup: don't stack a second active card for a signal that
+        # already has a live one (root cause of the 20 identical HR
+        # cards). The user dismisses/accepts to clear it; until then one
+        # card per signal is enough.
+        for sig in idea.source_signals:
+            if self._store.has_active_signal(sig):
+                logger.debug(
+                    "Idea suppressed — active card already exists for signal %s", sig
                 )
                 return None
         idea = self._maybe_polish(idea)

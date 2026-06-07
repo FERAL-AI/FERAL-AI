@@ -1,10 +1,21 @@
 # Changelog
 
-<!-- feral-version: 2026.6.7 -->
+<!-- feral-version: 2026.6.8 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.8] — 2026-06-07 — Health-data correctness fixes
+
+Patch release. A batch of health-data correctness fixes so resting-heart-rate baselines stop being polluted by stale reads, the chat and WebUI agree on live vitals, and proactive cards stop duplicating.
+
+- **fix(biometric): keep stale/lagging HealthKit reads out of resting-HR baseline training.** The biometric event handler now excludes lagging/stale sources (Apple HealthKit / cloud) and requires a fresh sample before it trains the resting-HR baseline, so a stale HealthKit flush can no longer drag the learned baseline. Live wearable BPM is also used as the resting-HR fallback.
+- **feat(health-summary): surface live wearable HR/SpO2 so chat and WebUI agree.** `HealthAggregator.get_health_summary` now accepts a live wearable provider and surfaces `current_hr` / `current_spo2` (plus their sources). `api/state.py` adds `_latest_live_wearable_snapshot`, which walks active sessions' perception frames (freshness-gated) and wires the snapshot into the aggregator, so the chat health summary and the WebUI Health page read the same live vitals.
+- **feat(api): `POST /api/health/ingest`.** New dashboard route to ingest health samples; added to the phone-bearer POST allowlist.
+- **fix(proactive): dedupe anomaly cards to one active card per signal.** The ideas/proactive engines now keep a single active proactive card per signal and gate the anomaly check behind a cooldown so it runs once per tick, instead of stacking duplicate cards.
+- **fix(webui-health): correct Health Metrics field-name mismatch.** The WebUI Health page Metrics cards now read `metric_id` / `mean` / `values` / `std_dev` correctly so the cards render the real values.
+- **test: scoped coverage.** New `tests/test_health_summary_live_wearable.py` and `tests/test_health_ingest_route.py`, plus updated `tests/test_ideas_engine.py`.
 
 ## [2026.6.7] — 2026-06-06 — Hybrid + semantic memory retrieval
 
