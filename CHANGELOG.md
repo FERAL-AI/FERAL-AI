@@ -1,10 +1,19 @@
 # Changelog
 
-<!-- feral-version: 2026.6.6 -->
+<!-- feral-version: 2026.6.7 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.7] — 2026-06-06 — Hybrid + semantic memory retrieval
+
+Patch release. Memory recall is now semantic-aware across both notes search and the multi-tier `MemoryRetriever`, with a graceful fallback to lexical search when no embedding model is configured.
+
+- **feat(memory-notes): hybrid full-text + semantic vector search.** Notes lookup now blends SQLite FTS5 lexical hits (weight 0.3) with cosine similarity over note embeddings (weight 0.7), mirroring the existing episode hybrid pattern. The path degrades to FTS / `LIKE` when no real embedder is available or the vector index is empty, so operators without a local model see no change in behavior.
+- **feat(memory-retriever): semantic-aware multi-tier retrieval.** `MemoryRetriever.retrieve` now combines embedding cosine similarity (weight 0.7) with the existing lexical Jaccard signal (weight 0.3) across every memory tier (recent → mid-term → long-term → consolidated). When no semantic embedder is configured, retrieval falls back to the previous lexical-only ranking.
+- **feat(memory-embeddings): synchronous embedding helper.** New additive `EmbeddingProvider.embed_sync` returns a real vector for the local sentence-transformers provider (used by the hybrid and retriever paths above) and returns `None` for stub / remote providers, so existing async embedding flows are untouched.
+- **test: scoped coverage for hybrid notes and semantic retrieval.** New `tests/test_notes_hybrid.py` and extended `tests/test_memory_retriever.py` add 25 focused tests covering the hybrid blend, the lexical-only fallback, and the new sync embedder helper. All pass.
 
 ## [2026.6.6] — Adaptive intelligent LLM model routing
 

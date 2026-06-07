@@ -679,6 +679,56 @@ class EmbeddingProvider:
                 del self._cache[k]
         return vec
 
+    def embed_sync(self, text: str) -> Optional[np.ndarray]:
+        """Best-effort synchronous embedding for sync callers.
+
+        Returns a real semantic vector when one can be produced
+        without blocking the asyncio event loop on a network call —
+        i.e. when the active provider is the local ``sentence_transformers``
+        model. Returns ``None`` in every other case so the caller knows
+        to degrade to its lexical / FTS path:
+
+        * primary provider is OpenAI — the embed path is HTTP, which
+          we refuse to drive synchronously (would block the event loop
+          if the caller happens to be on one). The async :meth:`embed`
+          remains the supported entry point for OpenAI users.
+        * primary provider is the deterministic ``hash`` fallback or
+          ``none`` — there is no real semantic signal, so blending
+          this into a hybrid score would only add noise.
+        * the provider is currently in a degraded cooldown — same
+          rationale as ``hash``: the queue is routing through the
+          fallback right now, so a real vector isn't available.
+
+        Cached the same way :meth:`embed` caches: an md5 hit short-
+        circuits the model call entirely.
+        """
+        if not text:
+            return None
+        if self.degraded:
+            return None
+        if self._provider != "sentence_transformers":
+            return None
+
+        cache_key = hashlib.md5(text.encode()).hexdigest()
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if self._model is None:
+            # Loader race — the constructor reported the provider as
+            # sentence_transformers but the model object never
+            # materialised. Return None so the caller falls back to
+            # lexical-only rather than crashing.
+            return None
+        try:
+            vec = self._local_embed(text)
+        except Exception:
+            return None
+        self._cache[cache_key] = vec
+        if len(self._cache) > 5000:
+            for k in list(self._cache.keys())[:1000]:
+                del self._cache[k]
+        return vec
+
     async def embed_batch(self, texts: list[str]) -> list[np.ndarray]:
         results: list[Optional[np.ndarray]] = [None] * len(texts)
         uncached: list[str] = []

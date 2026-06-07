@@ -51,10 +51,20 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
+import numpy as np
+
 logger = logging.getLogger("feral.memory.retriever")
 
 
 _WORD_RE = re.compile(r"[\w']+")
+
+# Hybrid weighting matches :meth:`MemoryStore.episode_search_hybrid` so
+# the cross-tier retriever speaks the same blend the episode tier does
+# when both legs are available. When the embedding leg degrades to no
+# signal (no embedder, hash provider, OpenAI/async-only, or per-call
+# failure) the lexical leg owns the score 1:1 — pre-PR behaviour.
+_TEXT_WEIGHT = 0.3
+_VECTOR_WEIGHT = 0.7
 
 
 def _tokenize(text: str) -> set[str]:
@@ -69,6 +79,18 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     inter = len(a & b)
     union = len(a | b)
     return inter / union if union else 0.0
+
+
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity guarded against zero-norm vectors. Local copy
+    to keep the retriever import-light (avoids pulling the rest of
+    ``memory.embeddings`` for callers that don't need it).
+    """
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
 
 
 @dataclass
@@ -132,6 +154,12 @@ class MemoryRetriever:
             return result
 
         query_tokens = _tokenize(query)
+        # Best-effort sync embedding for the semantic leg. ``None``
+        # means "no semantic signal available" and every collector
+        # falls through to lexical-only — preserves pre-embedding
+        # behaviour 1:1 when the embedder is hash-only / absent /
+        # OpenAI-only / degraded.
+        query_vec = self._query_embedding(query)
         candidates: list[MemoryRecord] = []
 
         for tier_fn in (
@@ -142,7 +170,7 @@ class MemoryRetriever:
             self._collect_about_me,
         ):
             try:
-                candidates.extend(tier_fn(query, query_tokens))
+                candidates.extend(tier_fn(query, query_tokens, query_vec))
             except Exception as exc:
                 logger.warning("retriever tier %s skipped: %s", tier_fn.__name__, exc)
                 result.skipped_tiers[tier_fn.__name__.replace("_collect_", "")] = str(exc)
@@ -165,12 +193,17 @@ class MemoryRetriever:
 
     # ── Tier collectors ───────────────────────────────────────────
 
-    def _collect_notes(self, query: str, query_tokens: set[str]) -> list[MemoryRecord]:
+    def _collect_notes(
+        self,
+        query: str,
+        query_tokens: set[str],
+        query_vec: Optional[np.ndarray],
+    ) -> list[MemoryRecord]:
         rows = self._safe_call(self._memory, "search", query, self._per_tier_limit) or []
         out: list[MemoryRecord] = []
         for row in rows:
             content = row.get("content") or row.get("text") or ""
-            score = self._lexical_score(query_tokens, content)
+            score = self._blend_score(query_tokens, query_vec, content)
             out.append(MemoryRecord(
                 tier="notes",
                 record_id=str(row.get("id") or row.get("note_id") or content[:32]),
@@ -181,7 +214,12 @@ class MemoryRetriever:
             ))
         return out
 
-    def _collect_episodes(self, query: str, query_tokens: set[str]) -> list[MemoryRecord]:
+    def _collect_episodes(
+        self,
+        query: str,
+        query_tokens: set[str],
+        query_vec: Optional[np.ndarray],
+    ) -> list[MemoryRecord]:
         rows = self._safe_call(self._memory, "episode_recent", self._per_tier_limit * 2) or []
         out: list[MemoryRecord] = []
         for row in rows:
@@ -192,7 +230,7 @@ class MemoryRetriever:
                 or row.get("content")
                 or ""
             )
-            score = self._lexical_score(query_tokens, content)
+            score = self._blend_score(query_tokens, query_vec, content)
             if score == 0.0:
                 continue
             out.append(MemoryRecord(
@@ -205,7 +243,12 @@ class MemoryRetriever:
             ))
         return out[: self._per_tier_limit]
 
-    def _collect_knowledge(self, query: str, query_tokens: set[str]) -> list[MemoryRecord]:
+    def _collect_knowledge(
+        self,
+        query: str,
+        query_tokens: set[str],
+        query_vec: Optional[np.ndarray],
+    ) -> list[MemoryRecord]:
         out: list[MemoryRecord] = []
         for token in sorted(query_tokens, key=len, reverse=True)[:4]:
             rows = self._safe_call(
@@ -216,7 +259,7 @@ class MemoryRetriever:
                     f"{row.get('subject', '')} {row.get('predicate', '')} "
                     f"{row.get('object', '')}".strip()
                 )
-                score = self._lexical_score(query_tokens, content)
+                score = self._blend_score(query_tokens, query_vec, content)
                 if score == 0.0:
                     continue
                 out.append(MemoryRecord(
@@ -229,7 +272,12 @@ class MemoryRetriever:
                 ))
         return out
 
-    def _collect_execution_log(self, query: str, query_tokens: set[str]) -> list[MemoryRecord]:
+    def _collect_execution_log(
+        self,
+        query: str,
+        query_tokens: set[str],
+        query_vec: Optional[np.ndarray],
+    ) -> list[MemoryRecord]:
         rows = self._safe_call(self._memory, "log_recent", "", self._per_tier_limit * 2) or []
         out: list[MemoryRecord] = []
         for row in rows:
@@ -238,7 +286,7 @@ class MemoryRetriever:
                 or row.get("summary")
                 or f"{row.get('skill_id','')}/{row.get('endpoint_id','')}"
             )
-            score = self._lexical_score(query_tokens, content)
+            score = self._blend_score(query_tokens, query_vec, content)
             if score == 0.0:
                 continue
             out.append(MemoryRecord(
@@ -251,7 +299,12 @@ class MemoryRetriever:
             ))
         return out[: self._per_tier_limit]
 
-    def _collect_about_me(self, query: str, query_tokens: set[str]) -> list[MemoryRecord]:
+    def _collect_about_me(
+        self,
+        query: str,
+        query_tokens: set[str],
+        query_vec: Optional[np.ndarray],
+    ) -> list[MemoryRecord]:
         text = ""
         for src in (self._about_me, self._identity_loader):
             if src is None:
@@ -272,7 +325,7 @@ class MemoryRetriever:
                 break
         if not text:
             return []
-        score = self._lexical_score(query_tokens, text)
+        score = self._blend_score(query_tokens, query_vec, text)
         if score == 0.0:
             return []
         return [MemoryRecord(
@@ -326,6 +379,102 @@ class MemoryRetriever:
         if not query_tokens or not content:
             return 0.0
         return _jaccard(query_tokens, _tokenize(content))
+
+    def _query_embedding(self, query: str) -> Optional[np.ndarray]:
+        """Return a real semantic embedding for ``query`` or ``None``.
+
+        ``None`` means "no embedding leg this turn — every collector
+        must score with the lexical leg only". This is the single
+        graceful-degradation gate for the whole semantic path:
+
+        * memory has no ``embedder`` (test stubs / non-MemoryStore
+          callers) → ``None``
+        * embedder doesn't expose ``embed_sync`` (older provider) →
+          ``None``
+        * ``embed_sync`` returns ``None`` (hash provider, OpenAI-only,
+          provider degraded) → ``None``
+        * any unexpected exception → ``None``
+        """
+        embedder = self._get_embedder()
+        if embedder is None:
+            return None
+        embed_sync = getattr(embedder, "embed_sync", None)
+        if embed_sync is None:
+            return None
+        try:
+            vec = embed_sync(query)
+        except Exception:
+            return None
+        if vec is None:
+            return None
+        try:
+            return np.asarray(vec, dtype=np.float32)
+        except Exception:
+            return None
+
+    def _content_embedding(self, content: str) -> Optional[np.ndarray]:
+        """Per-candidate embedding for the semantic leg. Same gates as
+        :meth:`_query_embedding` so a transient failure on a single
+        document drops that document's semantic score to 0 rather than
+        breaking the whole retrieve call."""
+        if not content:
+            return None
+        embedder = self._get_embedder()
+        if embedder is None:
+            return None
+        embed_sync = getattr(embedder, "embed_sync", None)
+        if embed_sync is None:
+            return None
+        try:
+            vec = embed_sync(content[:2000])
+        except Exception:
+            return None
+        if vec is None:
+            return None
+        try:
+            return np.asarray(vec, dtype=np.float32)
+        except Exception:
+            return None
+
+    def _get_embedder(self) -> Any:
+        """Resolve the embedder attached to the underlying memory.
+
+        Looks for the public ``embedder`` property first (the
+        documented :class:`MemoryStore` surface) and falls back to the
+        private ``_embedder`` attribute so tests / older stores still
+        work."""
+        embedder = getattr(self._memory, "embedder", None)
+        if embedder is not None:
+            return embedder
+        return getattr(self._memory, "_embedder", None)
+
+    def _blend_score(
+        self,
+        query_tokens: set[str],
+        query_vec: Optional[np.ndarray],
+        content: str,
+    ) -> float:
+        """Combined lexical + semantic score in ``[0, 1]``.
+
+        When ``query_vec`` is ``None`` the function returns the
+        lexical score 1:1 — so callers that previously compared
+        scores against ``0.0`` to filter "no overlap" still see the
+        same boundary. When the embedder is present and produces a
+        real vector, the score is the same convex combination
+        :meth:`MemoryStore.episode_search_hybrid` uses (0.3 lex +
+        0.7 vec).
+        """
+        lex = self._lexical_score(query_tokens, content)
+        if query_vec is None:
+            return lex
+        cvec = self._content_embedding(content)
+        if cvec is None or cvec.shape != query_vec.shape:
+            # No semantic signal for this candidate — fall back to
+            # lexical so we don't penalise it for the embedder
+            # transiently failing on this row.
+            return lex
+        sem = max(0.0, _cosine(query_vec, cvec))
+        return _TEXT_WEIGHT * lex + _VECTOR_WEIGHT * sem
 
     @staticmethod
     def _safe_call(target: Any, method: str, *args, **kwargs):
