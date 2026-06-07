@@ -169,7 +169,7 @@ What it is not yet:
 
 ## Stable Today
 
-<!-- sync-versions:test-counts pytest=4701 vitest=403 -->
+<!-- sync-versions:test-counts pytest=4723 vitest=403 -->
 Current CI snapshot: **3722 backend + 312 frontend tests**.
 <!-- /sync-versions:test-counts -->
 
