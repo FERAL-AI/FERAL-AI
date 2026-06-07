@@ -1,10 +1,20 @@
 # Changelog
 
-<!-- feral-version: 2026.6.5 -->
+<!-- feral-version: 2026.6.6 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.6] — Adaptive intelligent LLM model routing
+
+Patch release. New intelligence layer on top of the existing error-based LLM failover: each chat turn is classified by difficulty, routed to an appropriate model tier, and escalated on weak answers. Cost-aware downshifts respect remaining budget. Operators with a single configured provider keep the same model behavior by default — cross-provider tier routing is opt-in.
+
+- **feat(llm-router): per-turn difficulty classifier with tier escalation and cost-aware downshift.** New `agents/llm_router.py` introduces a heuristic classifier that sorts each turn into `cheap` / `balanced` / `premium` tiers, plus a verifier-gated tier cascade for empty, refused, or plan-only responses, and a budget-headroom downshift that drops the chosen tier when remaining spend is tight.
+- **feat(llm-provider): per-call model override + route-first failover + adaptive routing mode.** `_call_provider` now honors a per-call model override on the primary provider (previously hardcoded to `self.model`). `chat_with_failover` accepts a `route=` `ProviderRef` and uses it as the first failover candidate via the new `_candidates_for_route` helper. `route_call` gained an `adaptive=True` mode that combines cost downshift with local-first preference. Tier resolution downshifts **only within the operator's configured provider** by default — it never silently switches to a provider with no key — and cross-provider tier maps are opt-in via `settings.llm.tier_map`.
+- **feat(orchestrator): chat path uses adaptive routing and emits the route decision on the brain event bus.** Each turn is classified, routed to a tier, and re-tried at a higher tier on empty / refusal / plan-only answers (verifier-gated cascade). The chosen route is published on the `llm_call` brain event so the web UI, iOS companion, and voice surfaces all see which model handled the turn.
+- **feat(config): adaptive routing settings.** `DEFAULT_SETTINGS.llm` gains `adaptive_routing` (default `true`), `tier_map`, `call_site_tiers`, `local_first`, and `local_model`, so operators can shape per-tier model selection, mark call sites that always need a specific tier, and prefer local models when available.
+- **test: adaptive routing test suite.** New `tests/test_adaptive_routing.py` exercises the classifier, the tier cascade, and the cost-downshift / local-first paths (42 routing tests passing); existing orchestrator suites continue to pass.
 
 ## [2026.6.5] — LLM cooldown self-heal, biometric freshness, device topology
 

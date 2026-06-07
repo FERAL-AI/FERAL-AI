@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "feral-ai"
-version = "2026.6.5"
+version = "2026.6.6"
 description = "FERAL — Open-source AI agent with computer use, GenUI, voice, hardware control, and persistent memory."
 readme = "README.md"
 license = {text = "Apache-2.0"}

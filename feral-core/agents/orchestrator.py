@@ -39,6 +39,7 @@ from models.skill_manifest import SkillManifest
 from skills.registry import SkillRegistry
 from skills.executor import SkillExecutor
 from agents.llm_provider import LLMProvider
+from agents import llm_router
 from agents.genui_generator import GenUIGenerator
 from perception.fusion import PerceptionEngine, PerceptionFrame
 
@@ -1340,6 +1341,7 @@ class Orchestrator:
         tools: Optional[list[dict]],
         call_site: str = "chat",
         force_tool: Optional[str] = None,
+        route: Optional[dict] = None,
     ) -> dict:
         """Wrapper around ``LLMProvider.chat_with_failover`` that
         propagates the ``call_site`` label so the budget gate bills
@@ -1361,6 +1363,8 @@ class Orchestrator:
         kw: dict[str, Any] = {"call_site": call_site}
         if force_tool:
             kw["force_tool"] = force_tool
+        if route:
+            kw["route"] = route
         try:
             return await self.llm.chat_with_failover(
                 messages=messages,
@@ -1368,10 +1372,11 @@ class Orchestrator:
                 **kw,
             )
         except TypeError:
-            # Older test adapters: shed ``force_tool`` first (newer addition),
-            # then ``call_site`` if still unhappy. The forced-tool intent
-            # degrades to the prompt + side-channel path in that case.
-            kw.pop("force_tool", None)
+            # Older test adapters: shed the newest kwargs first —
+            # ``route`` → ``force_tool`` → ``call_site`` — so the call
+            # still lands. The adaptive route / forced-tool / budget
+            # intents degrade to the legacy path in that case.
+            kw.pop("route", None)
             try:
                 return await self.llm.chat_with_failover(
                     messages=messages,
@@ -1379,10 +1384,47 @@ class Orchestrator:
                     **kw,
                 )
             except TypeError:
-                return await self.llm.chat_with_failover(
-                    messages=messages,
-                    tools=tools,
-                )
+                kw.pop("force_tool", None)
+                try:
+                    return await self.llm.chat_with_failover(
+                        messages=messages,
+                        tools=tools,
+                        **kw,
+                    )
+                except TypeError:
+                    return await self.llm.chat_with_failover(
+                        messages=messages,
+                        tools=tools,
+                    )
+
+    def _adaptive_routing_on(self) -> bool:
+        """Whether adaptive per-turn model routing is enabled.
+
+        Reads ``settings.llm.adaptive_routing`` off the live provider
+        config (default ON). Lets an operator pin a single model by
+        setting it ``false`` without touching code.
+        """
+        cfg = getattr(self.llm, "_config", None)
+        if isinstance(cfg, dict):
+            return bool(cfg.get("adaptive_routing", True))
+        return True
+
+    def _route_for_tier(self, tier: str) -> Optional[dict]:
+        """Resolve a chat-call ``ProviderRef`` for *tier* via the provider's
+        adaptive router, or ``None`` when routing is off / unavailable.
+
+        Tolerant of provider stand-ins in tests that lack ``route_call``.
+        """
+        if not self._adaptive_routing_on():
+            return None
+        route_call = getattr(self.llm, "route_call", None)
+        if not callable(route_call):
+            return None
+        try:
+            return route_call("chat", tier=tier, adaptive=True)
+        except Exception:
+            logger.debug("route_call failed for tier=%s", tier, exc_info=True)
+            return None
 
     async def _emit_budget_exceeded(
         self,
@@ -1698,6 +1740,35 @@ class Orchestrator:
         # instruction into the very first call (before the model replies).
         if self.refusal_handler.is_ack_execution(text):
             pending_retry_addition = self.refusal_handler.ACK_EXECUTION_FAST_PATH_INSTRUCTION
+
+        # Adaptive routing — estimate this turn's difficulty once and pick
+        # a model tier. ``current_tier`` is escalated on a bad/empty answer
+        # (the verifier-gated cascade) so a wrong cheap reply is recovered
+        # by a stronger model rather than shipped. ``route_ref`` is re-
+        # resolved on each escalation. All surfaces (WebUI / iOS / voice)
+        # share this because they all drive ``handle_command``.
+        has_vision_turn = isinstance(user_content, list) and any(
+            isinstance(p, dict)
+            and str(p.get("type", "")).startswith(("image", "input_image"))
+            for p in user_content
+        )
+        context_chars = 0
+        if hasattr(self.llm, "_message_char_count"):
+            try:
+                context_chars = self.llm._message_char_count(history)
+            except Exception:
+                context_chars = 0
+        try:
+            current_tier = llm_router.classify_difficulty(
+                text,
+                has_tools=bool(tools),
+                has_vision=has_vision_turn,
+                context_chars=context_chars,
+            )
+        except Exception:
+            current_tier = llm_router.BALANCED
+        route_ref = self._route_for_tier(current_tier)
+
         sent_response = False
         for _ in range(max_iterations):
             effective_system_prompt = system_prompt
@@ -1713,12 +1784,21 @@ class Orchestrator:
 
             try:
                 model_name = getattr(self.llm, 'model_name', 'llm')
-                await self._emit_brain_event(session_id, "llm_call", {"model": model_name})
+                llm_call_event: dict[str, Any] = {"model": model_name}
+                if route_ref:
+                    llm_call_event["route"] = {
+                        "tier": route_ref.get("tier"),
+                        "provider": route_ref.get("provider"),
+                        "model": route_ref.get("model"),
+                        "source": route_ref.get("source"),
+                    }
+                await self._emit_brain_event(session_id, "llm_call", llm_call_event)
                 response = await self._call_llm_chat(
                     messages=messages,
                     tools=tools if tools else None,
                     call_site="chat",
                     force_tool=forced_tool,
+                    route=route_ref,
                 )
                 # Force the tool ONLY on the first iteration. Once the
                 # model has dispatched ``notes_memory__fused_timeline``
@@ -1745,6 +1825,8 @@ class Orchestrator:
                     empty_retry_used = True
                     logger.warning("[%s] Empty response; prompt-addition retry", session_id[:8])
                     pending_retry_addition = self.refusal_handler.EMPTY_RESPONSE_RETRY_INSTRUCTION
+                    current_tier = llm_router.escalate(current_tier)
+                    route_ref = self._route_for_tier(current_tier)
                     continue
 
                 # Reasoning-only: provider returned reasoning trace but no visible output.
@@ -1755,6 +1837,8 @@ class Orchestrator:
                         session_id[:8], reasoning_retry_count,
                     )
                     pending_retry_addition = self.refusal_handler.REASONING_ONLY_RETRY_INSTRUCTION
+                    current_tier = llm_router.escalate(current_tier)
+                    route_ref = self._route_for_tier(current_tier)
                     continue
 
                 plan_only_trigger = (
@@ -1774,6 +1858,8 @@ class Orchestrator:
                             "Plan-only" if plan_only_trigger else "Refusal",
                         )
                         pending_retry_addition = self.refusal_handler.planning_only_retry_instruction(text)
+                        current_tier = llm_router.escalate(current_tier)
+                        route_ref = self._route_for_tier(current_tier)
                         continue
                     logger.warning(
                         "[%s] Refusal/plan-only persisted after retry; falling back to direct execution",

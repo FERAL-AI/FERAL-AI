@@ -2755,9 +2755,67 @@ class LLMProvider:
             return tier
         return self._DEFAULT_TIER_PER_CALL_SITE.get(call_site, "balanced")
 
+    # Cheaper-but-same-provider sibling for the auto (non-override) cheap
+    # tier. Keyed by runtime provider id; the value is a fast/cheap model
+    # the same vendor exposes. This is what keeps adaptive routing SAFE to
+    # enable by default — the cheap tier never leaves the provider the
+    # operator already has a key for; it only swaps to a cheaper model.
+    # Operators wanting cross-provider tiers set ``settings.llm.tier_map``.
+    _CHEAP_SIBLING: dict[str, str] = {
+        "openai": "gpt-4o-mini",
+        "anthropic": "claude-haiku-4-5",
+        "google": "gemini-2.5-flash",
+        "gemini": "gemini-2.5-flash",
+        "deepseek": "deepseek-v4-flash",
+        "openrouter": "openai/gpt-4o-mini",
+        "groq": "llama-3.1-8b-instant",
+        "together": "meta-llama/Llama-3.1-8B-Instruct-Turbo",
+        "fireworks": "accounts/fireworks/models/llama-v3p1-8b-instruct",
+        "mistral": "mistral-small-latest",
+        "xai": "grok-3-mini",
+    }
+
+    def _cheap_sibling_model(self, provider: str, current_model: str) -> Optional[str]:
+        """Return a cheaper same-provider model, or ``None`` when there
+        isn't a known one (or the operator is already on it)."""
+        sibling = self._CHEAP_SIBLING.get(provider)
+        if not sibling:
+            return None
+        if current_model and current_model.strip() == sibling:
+            return None
+        return sibling
+
+    def _local_first_target(self, call_site: str) -> Optional[dict[str, str]]:
+        """When ``settings.llm.local_first`` is on, resolve the cheap tier
+        to a local model (privacy + zero-cost), or ``None`` to fall through.
+
+        Honoured only for the cheap tier on ``chat`` / ``routing`` /
+        ``vision``. Uses an explicit ``settings.llm.local_model`` target
+        when configured; otherwise, if the primary itself is already a
+        local engine, keeps it. Never invents an unsupported provider.
+        """
+        cfg = self._config if isinstance(self._config, dict) else {}
+        if not cfg.get("local_first"):
+            return None
+        if call_site not in ("chat", "routing", "vision"):
+            return None
+        lm = cfg.get("local_model")
+        if isinstance(lm, dict):
+            provider = str(lm.get("provider") or "").strip()
+            model = str(lm.get("model") or "").strip()
+            if provider and is_supported_runtime_provider(provider):
+                return {"provider": provider, "model": model or _default_model_for(provider)}
+        if self.provider in ("ollama", "lmstudio", "local", "hybrid"):
+            return {"provider": self.provider, "model": self.model}
+        return None
+
     def _resolve_tier_target(self, call_site: str, tier: str) -> dict[str, str]:
-        """Resolve ``(call_site, tier)`` to a ``{provider, model}`` dict
-        consulting operator overrides first, then bundled defaults."""
+        """Resolve ``(call_site, tier)`` to a ``{provider, model}`` dict.
+
+        Order: operator ``tier_map`` override → same-provider tiering for
+        chat/routing (so the auto path never switches providers) →
+        bundled purpose-built target for vision/embedding → primary.
+        """
         cfg = self._config if isinstance(self._config, dict) else {}
         overrides = cfg.get("tier_map") if isinstance(cfg.get("tier_map"), dict) else {}
         site_overrides = overrides.get(call_site) if isinstance(overrides, dict) else {}
@@ -2771,6 +2829,16 @@ class LLMProvider:
                         "provider": provider,
                         "model": model or _default_model_for(provider),
                     }
+        # Auto path: keep tiering WITHIN the operator's configured provider
+        # for the interactive/routing call sites. Only the model changes
+        # (cheap → cheaper sibling); balanced/premium stay on the model the
+        # operator chose, which is their quality ceiling unless they opt
+        # into a cross-provider ``tier_map``.
+        if call_site in ("chat", "routing"):
+            if tier == "cheap":
+                sibling = self._cheap_sibling_model(self.provider, self.model)
+                return {"provider": self.provider, "model": sibling or self.model}
+            return {"provider": self.provider, "model": self.model}
         bundled = self._DEFAULT_TIER_MAP.get(call_site, {}).get(tier)
         if bundled:
             return dict(bundled)
@@ -2783,6 +2851,7 @@ class LLMProvider:
         prompt: Any = None,
         *,
         tier: Optional[str] = None,
+        adaptive: bool = False,
     ) -> dict[str, Any]:
         """Pick a (provider, model) for *call_site* via the tier picker.
 
@@ -2855,7 +2924,28 @@ class LLMProvider:
                 )
             resolved_tier = tier
             source = "explicit"
+        # Adaptive callers (the interactive chat path) let budget pressure
+        # downshift the tier and let local-first policy claim the cheap
+        # tier. Non-adaptive callers (API preview, tests, explicit picks)
+        # get a pure (call_site, tier) → target lookup with no surprises.
+        if adaptive:
+            from agents import llm_router
+
+            snap = self._budget_snapshot()
+            downshifted = llm_router.apply_cost_downshift(
+                resolved_tier,
+                headroom_ratio=float(snap.get("headroom_ratio", 1.0)),
+                tight_ratio=float(snap.get("tight_ratio", 0.25)),
+            )
+            if downshifted != resolved_tier:
+                resolved_tier = downshifted
+                source = "budget_downshift"
         target = self._resolve_tier_target(call_site, resolved_tier)
+        if adaptive and resolved_tier == "cheap":
+            local_target = self._local_first_target(call_site)
+            if local_target:
+                target = local_target
+                source = "local_first"
         provider = target["provider"]
         model = target["model"]
         supported = is_supported_runtime_provider(provider) or provider in ("local", "hybrid")
@@ -3424,6 +3514,48 @@ class LLMProvider:
                 candidates.append((fb, self._get_provider_config(fb)))
         return candidates
 
+    def _candidates_for_route(
+        self, route_provider: str, route_model: str,
+    ) -> list[tuple[str, dict]]:
+        """Candidate chain that puts the adaptive router's (provider,
+        model) first, then preserves the operator's primary and the
+        configured fallback chain (deduped).
+
+        When the route stays on the primary provider (the common case —
+        a cheaper same-provider model) this is just the primary candidate
+        with the model swapped, so the persistent client is reused. When
+        the route hops providers, the primary is kept as the first
+        fallback so a missing key on the routed provider degrades cleanly
+        back to the operator's model instead of failing the turn.
+        """
+        candidates: list[tuple[str, dict]] = []
+        seen: set[str] = set()
+        if route_provider == self.provider:
+            candidates.append((self.provider, {
+                "base_url": self.base_url,
+                "api_key": self.api_key,
+                "model": route_model,
+                "supported": is_supported_runtime_provider(self.provider),
+            }))
+        else:
+            cfg = dict(self._get_provider_config(route_provider))
+            cfg["model"] = route_model
+            candidates.append((route_provider, cfg))
+        seen.add(route_provider)
+        if self.provider not in seen:
+            candidates.append((self.provider, {
+                "base_url": self.base_url,
+                "api_key": self.api_key,
+                "model": self.model,
+                "supported": is_supported_runtime_provider(self.provider),
+            }))
+            seen.add(self.provider)
+        for fb in self._config.get("fallback_providers", []):
+            if fb not in seen:
+                candidates.append((fb, self._get_provider_config(fb)))
+                seen.add(fb)
+        return candidates
+
     @staticmethod
     def _build_anthropic_body(
         model: str, messages: list[dict], tools: Optional[list[dict]],
@@ -3494,7 +3626,15 @@ class LLMProvider:
                 f"Provider {provider_name!r} has no runtime adapter — "
                 f"supported: {sorted(SUPPORTED_RUNTIME_PROVIDERS)}"
             )
-        selected_model = self.model if provider_name == self.provider else str(config.get("model", "") or "")
+        # On the primary provider, honour a per-call model override carried
+        # in ``config["model"]`` (the adaptive router's tier pick) — falling
+        # back to ``self.model`` when the candidate didn't specify one. This
+        # is what lets the chat path downshift to a cheaper same-provider
+        # model without mutating the shared provider's global ``self.model``.
+        if provider_name == self.provider:
+            selected_model = str(config.get("model") or self.model)
+        else:
+            selected_model = str(config.get("model", "") or "")
         model_guard_error = _chat_completions_model_guard(provider_name, selected_model)
         if model_guard_error:
             raise RuntimeError(model_guard_error)
@@ -3505,7 +3645,7 @@ class LLMProvider:
         if provider_name == self.provider:
             if provider_name == "anthropic":
                 body = self._build_anthropic_body(
-                    self.model, messages, tools, temperature, max_tokens,
+                    selected_model, messages, tools, temperature, max_tokens,
                     force_tool=force_tool,
                 )
 
@@ -3522,7 +3662,7 @@ class LLMProvider:
                 return self._normalize_anthropic_response(data)
 
             body = {
-                "model": self.model,
+                "model": selected_model,
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
@@ -3542,7 +3682,7 @@ class LLMProvider:
                     self.provider, clean_tools, force_tool,
                 )
 
-            apply_reasoning_fork(self.provider, self.model, body)
+            apply_reasoning_fork(self.provider, selected_model, body)
 
             async def _do_primary():
                 resp = await self.client.post("/chat/completions", json=body)
@@ -3655,6 +3795,17 @@ class LLMProvider:
         on providers (Gemini) that can't name a single tool on the
         wire shape we drive.
         """
+        # Adaptive route (kw-only ``route`` = a ``route_call`` ProviderRef).
+        # Popped FIRST so it never leaks into ``self.chat(**kwargs)`` on the
+        # local-engine short-circuit below. When present and concrete it
+        # makes the routed (provider, model) the first failover candidate.
+        route = kwargs.pop("route", None)
+        route_provider = ""
+        route_model = ""
+        if isinstance(route, dict):
+            route_provider = str(route.get("provider") or "").strip()
+            route_model = str(route.get("model") or "").strip()
+
         if self._messages_contain_vision(messages):
             ok, reason = self._vision_support_status()
             if not ok:
@@ -3671,13 +3822,17 @@ class LLMProvider:
         # kwarg does the safe thing.
         call_site = str(kwargs.pop("call_site", "chat") or "chat")
         max_tokens_kw = int(kwargs.get("max_tokens", 1024) or 1024)
-        budget_block = await self._budget_check(call_site, self.model, max_tokens_kw)
+        budget_model = route_model or self.model
+        budget_block = await self._budget_check(call_site, budget_model, max_tokens_kw)
         if budget_block is not None:
             return budget_block
 
         from observability.metrics import increment, measure
 
-        candidates = self._build_candidate_list()
+        if route_provider and route_model:
+            candidates = self._candidates_for_route(route_provider, route_model)
+        else:
+            candidates = self._build_candidate_list()
         candidates, budget_ctx = self._route_candidates_with_budget(
             candidates,
             messages,

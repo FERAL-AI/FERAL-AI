@@ -50,6 +50,30 @@ DEFAULT_SETTINGS = {
         "daily_budget_usd": 0.0,
         "daily_spend_usd": 0.0,
         "budget_tight_ratio": 0.25,
+        # Adaptive per-turn model routing (agents/llm_router.py). When on
+        # (default), each chat turn is graded for difficulty and routed to
+        # a tier: trivial turns drop to a cheaper SAME-provider model,
+        # substantive/agentic turns use the configured model, and a bad/
+        # empty answer escalates one tier and retries. Set false to pin a
+        # single model. The auto path never switches providers — that's
+        # opt-in via ``tier_map``.
+        "adaptive_routing": True,
+        # Operator overrides for tier targets, keyed by call_site → tier →
+        # {provider, model}. The escape hatch for cross-provider tiering
+        # (e.g. route cheap chat to a local Ollama model or a budget
+        # provider). Empty = use the safe same-provider defaults.
+        "tier_map": {},
+        # Optional pin of the default tier per call_site
+        # ({"chat": "premium", "routing": "cheap", ...}). Empty = built-in
+        # conservative defaults; the chat path overrides this per-turn via
+        # the difficulty classifier.
+        "call_site_tiers": {},
+        # Local-first routing: when true, the cheap tier on chat/routing/
+        # vision prefers a local model (privacy + zero marginal cost).
+        # ``local_model`` names the target; when empty and the primary is
+        # already a local engine, that engine is kept.
+        "local_first": False,
+        "local_model": {},
     },
     "audio": {
         "stt_provider": "openai",
