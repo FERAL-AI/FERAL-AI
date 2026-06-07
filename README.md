@@ -2,19 +2,21 @@
   <img src="feral-banner.png" width="640" alt="FERAL" />
 </p>
 
-<h3 align="center">One local brain for apps, devices, and memory.</h3>
-<p align="center"><em>Install FERAL on your machine. It connects software and hardware, keeps long-lived memory, learns your baseline, and executes with explicit control.</em></p>
+<h3 align="center">One local brain for your apps, devices, and memory.</h3>
+<p align="center"><em>FERAL runs on your machine. It connects software and hardware, keeps long-lived memory, learns your baseline, and executes with explicit control.</em></p>
 
 <p align="center">
-  <strong>🚧 Public beta — macOS &amp; Linux supported. We are looking for contributors:</strong>
-  <a href="CONTRIBUTING.md">CONTRIBUTING.md</a> · <a href="https://github.com/FERAL-AI/FERAL-AI/issues">file an issue</a> · <a href="https://x.com/FeralAi67724">@FeralAi67724</a>
+  <strong>Public beta — macOS &amp; Linux.</strong>
+  <a href="CONTRIBUTING.md">Contribute</a> ·
+  <a href="https://github.com/FERAL-AI/FERAL-AI/issues">File an issue</a> ·
+  <a href="https://x.com/FeralAi67724">@FeralAi67724</a>
 </p>
 
 <p align="center">
-  <a href="#quickstart-pypi-first">Quickstart</a> &nbsp;·&nbsp;
-  <a href="#pair-your-phone-lan-vs-anywhere">Pairing</a> &nbsp;·&nbsp;
-  <a href="#what-gen-ui-actually-does">Gen-UI</a> &nbsp;·&nbsp;
-  <a href="#stable-today">Stability</a> &nbsp;·&nbsp;
+  <a href="#quick-start">Quick Start</a> &nbsp;·&nbsp;
+  <a href="#pair-your-phone">Pairing</a> &nbsp;·&nbsp;
+  <a href="#what-works-today">What Works</a> &nbsp;·&nbsp;
+  <a href="#architecture">Architecture</a> &nbsp;·&nbsp;
   <a href="#develop-from-source">Develop</a> &nbsp;·&nbsp;
   <a href="#contribute">Contribute</a>
 </p>
@@ -33,28 +35,31 @@
 
 ## What FERAL Is
 
-FERAL is a local-first brain that sits in the middle of your software and physical devices. You run it on your own machine and connect apps, channels, and hardware through one runtime.
+FERAL is a local-first runtime that sits between your software and your physical devices. You run it on your own machine and reach it from a browser, a phone, the CLI, or your own integrations.
 
-Core model:
+What's inside:
 
-- 4-layer memory: working context, episodic events, semantic/graph retrieval, and execution history.
-- Baseline learning: rolling metrics and anomaly/trend detection for what "normal" looks like for you.
-- Digital twin actions: policy-gated autonomy with approval, time-window, and daily-cap controls.
-- Publisher model: developers ship headless API/CLI contracts and app manifests; FERAL renders structured Gen-UI surfaces locally.
-- Registry review gate: submissions are not user-installable until approved by FERAL org reviewers.
+- **4-layer memory** — working context, episodic events, semantic / graph retrieval, and execution history.
+- **Baseline learning** — rolling metrics and anomaly / trend detection for what "normal" looks like for you.
+- **Policy-gated execution** — approvals, time windows, and daily caps gate every action that touches the outside world.
+- **Server-driven UI (Gen-UI)** — the brain emits structured UI payloads; clients render them. Third-party apps ship contracts, not freeform frontends.
+- **Reviewed extension registry** — community skills and apps go through reviewer approval before they're installable.
 
-Today this ships as `feral-core` (brain runtime), `feral-client-v2` (web control surface), and `feral-nodes` (device/node bridges).
+It ships as `feral-core` (the brain runtime), `feral-client-v2` (web control surface), and `feral-nodes` (device and hardware bridges).
 
-## Status
+## Quick Start
 
-- Package: [`feral-ai`](https://pypi.org/project/feral-ai/) on PyPI. Current CalVer is shown in the version badge above and tracks `feral-core/pyproject.toml`.
-- Maturity: **Public beta**. Single-user local deployment is the primary target. Multi-user / HA scenarios are not in scope yet.
-- Supported hosts: **macOS 13+** and **modern Linux** (Ubuntu 22.04+, Fedora 40+, Arch). Windows is not supported yet — use WSL2.
-- Default startup mode: "This Mac only" pairing until you opt into LAN or Anywhere.
+> **Requires Python 3.11+** on macOS 13+ or modern Linux (Ubuntu 22.04+, Fedora 40+, Arch). Windows is not supported as a host yet — use WSL2.
 
-## Quickstart (PyPI first)
+### Recommended: one-line install
 
-Requires Python 3.11+.
+```bash
+curl -sSL https://raw.githubusercontent.com/FERAL-AI/FERAL-AI/main/scripts/install.sh | bash
+```
+
+This creates a virtualenv at `~/.feral-env`, installs `feral-ai` with all extras, runs the first-run setup wizard, and starts the brain. When it's done, open <http://localhost:9090>.
+
+### Alternative: install from PyPI
 
 ```bash
 pip install "feral-ai[all]"
@@ -62,24 +67,20 @@ feral setup
 feral start
 ```
 
-`feral setup` is an arrow-key driven wizard (space to mark, enter to confirm). It walks you through:
+### What `feral setup` walks you through
 
-1. **LLM provider** (OpenAI, Anthropic, Ollama, LM Studio, Together, OpenRouter, Fireworks, Bedrock, …) with masked API key paste.
-2. **Model** (type to filter through hundreds of model ids).
-3. **Speech in / out** (cloud or fully local).
-4. **Identity** (so the agent knows who it is talking to).
-5. **Network access** — `localhost` (default), `LAN` (`0.0.0.0` so phones on the same Wi-Fi can pair), or `Tailscale Funnel` (free public DNS for cross-internet pairing).
-6. **Optional**: Home Assistant, messaging channels.
+`feral setup` is an arrow-key wizard (space to mark, enter to confirm):
 
-Then open `http://localhost:9090`.
+1. **LLM provider** — OpenAI, Anthropic, Ollama, LM Studio, Together, OpenRouter, Fireworks, Bedrock, and more — with masked API key paste.
+2. **Model** — type to filter through hundreds of model ids.
+3. **Speech in / out** — cloud or fully local.
+4. **Identity** — so the agent knows who it's talking to.
+5. **Network access** — `localhost` (default), `LAN` so phones on the same Wi-Fi can pair, or `Tailscale Funnel` for free public DNS pairing from anywhere.
+6. **Optional integrations** — Home Assistant, messaging channels.
 
-What this gives you:
+You get a local brain on port `9090`, the bundled web UI, and a local config under `~/.feral/` (settings + an encrypted vault for keys).
 
-- A local brain server on port `9090`.
-- Bundled Web UI v2 served by the brain.
-- Local config under `~/.feral/` (settings + encrypted vault for keys).
-
-Useful commands:
+### Useful CLI commands
 
 ```bash
 feral serve            # headless brain only (no chat / no client)
@@ -87,139 +88,86 @@ feral status           # runtime status
 feral doctor           # diagnostics — what's reachable, what needs setup
 feral access status    # current pairing / network mode
 feral key paste        # add or rotate a credential without re-running setup
-feral memory status    # backend, KG entity/relation counts, decay schedule
-feral sync status      # federated peers + per-peer lag + last-sync HLC
+feral memory status    # backend, knowledge graph counts, decay schedule
+feral sync status      # federated peers + per-peer lag + last-sync clock
 ```
 
-If you prefer the installer script:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/FERAL-AI/FERAL-AI/main/scripts/install.sh | bash
-source ~/.feral-env/bin/activate
-feral start
-```
-
-## Pair Your Phone: LAN vs Anywhere
+## Pair Your Phone
 
 FERAL exposes three pairing modes:
 
 | Mode | UI label | Best for | Requirement |
 |---|---|---|---|
-| `local` | Same WiFi | Phone and brain on same network | Brain must be reachable on LAN |
-| `remote` | Anywhere | Pair/use from outside your LAN | Tailscale installed and Funnel enabled |
-| `localhost` | This Mac only | No phone pairing yet | No extra setup |
+| `localhost` | This Mac only | No phone pairing yet | None |
+| `local` | Same WiFi | Phone and brain on the same network | Brain reachable on LAN |
+| `remote` | Anywhere | Pair from outside your LAN | Tailscale installed, Funnel enabled |
 
-### LAN (Same WiFi)
+### Same WiFi
 
 1. In setup, choose **Same WiFi**.
-2. Open `Devices` -> `Pair new device` -> `Web phone`.
+2. Open `Devices` → `Pair new device` → `Web phone`.
 3. Click **Generate one-time link** and scan the QR from your phone.
 4. If PIN is enabled, enter the 4-digit PIN shown on the Mac.
 
-If the generated LAN URL is unreachable from your phone, restart the brain on all interfaces:
+If the LAN URL is unreachable from your phone, restart the brain on all interfaces:
 
 ```bash
 FERAL_HOST=0.0.0.0 feral start
 ```
 
-### Anywhere (Remote via Tailscale)
+### Anywhere (Tailscale)
 
-Setup now attempts this automatically when you choose **Anywhere**.
-You can also manage it later in `Settings` -> `Access`.
+Setup attempts this automatically when you choose **Anywhere**. You can also manage it later in `Settings` → `Access`.
 
 1. In setup, choose **Anywhere**.
 2. If setup reports a tunnel error, run:
-
-```bash
-feral access remote-up
-```
-
-3. Complete any Tailscale prompts (`tailscale up`, Funnel enable URL) if requested.
+   ```bash
+   feral access remote-up
+   ```
+3. Complete any Tailscale prompts (`tailscale up`, Funnel enable URL).
 4. Generate a new pairing link from `Devices` and scan it from anywhere.
 
-Check status any time:
-
-```bash
-feral access status
-```
-
-Disable remote mode:
-
-```bash
-feral access remote-down
-```
+Check status any time: `feral access status`. Disable with `feral access remote-down`.
 
 ### This Mac only
 
-Use this if you want local dashboard/chat without phone pairing yet.
+Use this if you just want the local dashboard and chat, no phone yet.
 
-## What Gen-UI Actually Does
+## What Works Today
 
-Gen-UI in FERAL is server-driven UI (SDUI), not freeform frontend generation.
+FERAL is in **public beta**. Single-user local deployment is the primary target — multi-user / HA is not in scope yet. Here's what an operator can rely on, in plain language:
 
-- The brain emits structured UI payloads; the client renders known component types.
-- Payload updates can be streamed as `sdui_patch` deltas.
-- Third-party app surfaces run in a sandboxed model with explicit contracts.
-- The `/canvas` view is a live inspector/debug surface for SDUI frames.
+- **Chat, memory, and orchestration** — the core agent loop, the 4-layer memory store, and federated sync between brains are stable for day-to-day use.
+- **Setup and CLI control** — the wizard, `feral start`, `feral doctor`, `feral memory`, `feral sync`, and `feral access` reflect real runtime state, not aspirational claims.
+- **Web UI v2 core flows** — chat, devices, pairing, settings, and the SDUI inspector are stable.
+- **Pairing lifecycle** — token issue, claim, expiry, and prune are stable.
+- **Voice, channels, integrations** — usable, but their availability depends on the provider and runtime you've configured (some need keys, some need a local model, some need OAuth).
+- **Gen-UI app platform** — the core renderer is stable; the third-party contract surface is still evolving.
 
-What it is not yet:
+For longer-tail integrations: try them, run `feral doctor`, and verify before depending on one in production.
 
-- Not a native iOS/Android SDUI renderer parity story.
-- Not a fully signed marketplace trust model end-to-end.
+Detailed history of every shipped change is in [`CHANGELOG.md`](CHANGELOG.md).
 
-## Stable Today
+## Gen-UI in One Paragraph
 
-<!-- sync-versions:test-counts pytest=4740 vitest=403 -->
-Current CI snapshot: **3722 backend + 312 frontend tests**.
-<!-- /sync-versions:test-counts -->
+Gen-UI in FERAL is **server-driven UI** (SDUI), not freeform frontend generation. The brain emits structured UI payloads; the client renders known component types. Payload updates stream as `sdui_patch` deltas. Third-party app surfaces run in a sandboxed model with explicit contracts. The `/canvas` view is a live inspector for SDUI frames. What it is *not* yet: native iOS / Android SDUI renderer parity, or a signed-marketplace trust model end to end.
 
-| Area | Current state |
-|---|---|
-| Chat and LLM orchestration | Stable |
-| Memory core (episodic/semantic/graph) | Stable |
-| Setup + CLI runtime control | Stable |
-| Web UI v2 core flows | Stable |
-| Pairing lifecycle (token, claim, prune) | Stable |
-| Voice, channels, and integrations | Stable with provider/runtime dependencies |
-| Gen-UI advanced app-platform features | Mixed (stable core renderer, evolving platform contracts) |
-| Long-tail ecosystem claims | Vary by integration; verify before production commitments |
-
-## Recent Release Focus
-
-For the full per-release breakdown see [`CHANGELOG.md`](CHANGELOG.md). Highlights from the last few releases:
-
-- **`v2026.5.36`** — `feral doctor` honesty + first-run pairing dependency closure. A clean install used to produce ~5 yellow warnings and 1 red failure from `feral doctor` for things that are *expected* to be absent on a fresh machine (Chrome CDP not running, Local STT/TTS not installed, no voice key, no workspace grants, PyObjC ApplicationServices missing). v2026.5.36 introduces a fourth `_info` severity tier for "not configured yet" / "opt-in" probes, demotes the six false-positive warnings into it, and closes two real packaging gaps: PyObjC ApplicationServices + Quartz are now base dependencies on Darwin (so TCC probes return real `granted`/`denied`), and `qrcode[pil]` moves from the `[discovery]`/`[all]` extras into base deps so the first-run "pair a device" path doesn't 500 on bare installs.
-- **`v2026.5.35`** — F1 unified knowledge graph. `MemoryStore.knowledge_store/query/search/about` route through the entity-relation `KnowledgeGraph` when `settings.memory.kg.unified` is true (default). The flat `knowledge` table is migrated on boot and renamed to `knowledge__deprecated`; HLC LWW sync is extended to the `entities` and `relations` tables so KG-native writes replicate across federated brains. `Learner.extract_knowledge` delegates to `KnowledgeGraph.extract_and_store` — one extraction surface, one prompt, entity types preserved.
-- **`v2026.5.34`** — Memory v2 truth. Ebbinghaus decay (D11) runs an hourly background sweep that recomputes `decay_factor` per episode with an SM-2 access boost and marks rows below the forget threshold as forgotten; HLC last-write-wins federated sync (D12) lets multiple brains reconcile via a deterministic per-row id without coordination; real session compaction (F2) promotes summarisable turns into episode rows with structured `participants` / `time_range` / `key_entities` / `source_turn_ids` metadata, triggered end-of-session or every `turns_threshold` turns. `feral memory` and `feral sync` subcommands surface all of it.
-- **`v2026.5.33`** — Async-native `MemoryStore` (Option C) on `aiosqlite` with a pre-warmed connection pool in WAL mode. Pure refactor, zero behaviour change. Per-call p50 search latency drops 42% and aggregate wall-clock under K=32 concurrent searches drops 53% versus the legacy `sqlite3.connect`-per-call path. Reference numbers and acceptance benchmark in `feral-core/tests/perf/test_memory_latency.py`.
-- **`v2026.5.32`** — Audit-r12 systemic remediation: phone-bearer allowlist coherence (D1), HUP wire-version coherence with a static-AST guard (D3), real `settings.memory.backend` selector with sqlite-vec / Chroma / Qdrant adapters (D4), MCP HTTP transport implementation against spec rev `2025-06-18` (D6), canonical `MCPServerConfig` + `MCPClientManager.connect_server` API (D7), Bedrock Converse `chat()` and streaming path (D8), and Whoop / Oura OAuth registration with a static-AST coherence guard (D9).
-- **`v2026.5.23`** — fixes a P0 in `feral setup` where the InquirerPy arrow-key picker silently fell back to a typed numeric prompt because the wizard ran inside `asyncio.run()`. Adds the raccoon ASCII logo banner, "── Step N of M ──" indicators, and the space-to-mark + enter-to-confirm picker pattern.
-
-## Architecture in 60 Seconds
+## Architecture
 
 ```mermaid
-flowchart TB
-    subgraph brain [FERAL Brain - feral-core]
-        ORCH["Orchestrator + Supervisor"]
-        MEM["Memory + Retrieval"]
-        GEN["Gen-UI / SDUI"]
-        DEV["Device + Pairing APIs"]
-        CH["Channels + Integrations"]
-    end
-
-    subgraph clients [Clients]
-        WEB["Web UI v2"]
-        CLI["CLI"]
-        PHN["Phone pair page / bridges"]
-    end
-
-    subgraph nodes [Nodes]
-        HUP["HUP daemons and hardware bridges"]
-    end
-
-    clients <--> brain
-    nodes <--> brain
+flowchart LR
+    USER([You]) --> CLIENT[Web UI · CLI · Phone]
+    CLIENT <--> BRAIN[FERAL Brain<br/>orchestrator · memory · Gen-UI · policy]
+    BRAIN <--> NODES[Devices · sensors · daemons]
+    BRAIN <--> EXT[LLMs · channels · integrations]
 ```
+
+- **Brain (`feral-core`)** — Python runtime: orchestrator, 4-layer memory, Gen-UI generator, pairing and policy, channel adapters, LLM router.
+- **Clients (`feral-client-v2`, CLI, phone bridges)** — render the brain's SDUI surfaces and stream input back.
+- **Nodes (`feral-nodes`)** — hardware daemons over a JSON WebSocket protocol (BLE / MQTT / serial / ROS bridges register their capabilities at connect time).
+- **External** — LLM providers, messaging channels, OAuth integrations. All policy-gated.
+
+Deeper reading: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/orchestration.md`](docs/orchestration.md).
 
 ## Develop From Source
 
@@ -236,7 +184,7 @@ cd feral-client-v2
 npm run dev
 ```
 
-Run the test suite locally:
+Run the tests locally:
 
 ```bash
 cd feral-core && python -m pytest tests/ --no-cov -q
@@ -245,43 +193,57 @@ cd ../feral-client-v2 && npm test
 
 ## Docs
 
-- User docs: `docs/mintlify/` (also published at <https://docs.feral.sh>)
+- User docs: `docs/mintlify/` (published at <https://docs.feral.sh>)
 - Architecture deep dive: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/orchestration.md`](docs/orchestration.md)
 - Capability status: <https://docs.feral.sh/reference/capability-status>
 - Roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md)
 - Contribution guide: [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - Security policy: [`SECURITY.md`](SECURITY.md)
+- Release history: [`CHANGELOG.md`](CHANGELOG.md)
 
 ## Contribute
 
-FERAL is **public beta** and we are actively looking for contributors across every layer:
+FERAL is **public beta** and welcomes contributors at every layer:
 
-- **Runtime / orchestrator** — agent loop, LLM routing, multi-agent dispatch, security enforcement.
+- **Runtime / orchestrator** — agent loop, LLM routing, multi-agent dispatch, policy enforcement.
 - **Memory / knowledge** — 4-tier memory store, ingest pipelines, knowledge graph.
-- **GenUI / provider surfaces** — SDUI engine, third-party app contracts, client renderer.
+- **Gen-UI / provider surfaces** — SDUI engine, third-party app contracts, client renderer.
 - **Hardware / daemons** — Node WebSocket protocol, BLE / MQTT / serial / ROS bridges.
 - **Voice / perception** — realtime voice proxy, wake word, vision pipeline.
-- **Channels / providers** — Telegram, Slack, Discord, Matrix, Signal, Feishu, Zalo + LLM provider adapters.
+- **Channels / providers** — Telegram, Slack, Discord, Matrix, Signal, Feishu, Zalo, plus LLM provider adapters.
 - **Frontend / shell** — web UI, Tauri desktop wrapper, mobile bridges.
-- **Packaging / release** — wheel build, version coherence, NixOS flake, HA add-on.
+- **Packaging / release** — wheel build, version coherence, NixOS flake, Home Assistant add-on.
 
 How to start:
 
-1. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) — picks the lane that matches your interest and lists the canonical entry files.
-2. Browse [open issues](https://github.com/FERAL-AI/FERAL-AI/issues) or open a new one with `feral doctor` output + repro.
+1. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) — it picks the lane that matches your interest and lists canonical entry files.
+2. Browse [open issues](https://github.com/FERAL-AI/FERAL-AI/issues) or open a new one with `feral doctor` output and a repro.
 3. Join the conversation on [GitHub Discussions](https://github.com/FERAL-AI/FERAL-AI/discussions).
-4. Follow [@FeralAi67724](https://x.com/FeralAi67724) on X for release drops.
+4. Follow [@FeralAi67724](https://x.com/FeralAi67724) on X for release notes.
 
-The website ([feral.sh](https://feral.sh), source: [FERAL-AI/Feral-web](https://github.com/FERAL-AI/Feral-web)) is also open and welcomes design + copy + accessibility PRs.
+The website ([feral.sh](https://feral.sh), source: [FERAL-AI/Feral-web](https://github.com/FERAL-AI/Feral-web)) is also open and welcomes design, copy, and accessibility PRs.
 
 ## What FERAL Is Not
 
 - Not a managed cloud service.
-- Not a guaranteed multi-tenant/high-availability platform today.
-- Not a claim that every listed integration is equal maturity in every environment.
+- Not a multi-tenant / high-availability platform today.
+- Not a claim that every listed integration is equally mature in every environment.
 
-## Created By
+## Maintainers
 
-**[Mahmoud Omar](https://github.com/mahmoudomar)** and **[Alpay Kasal](https://github.com/alpaykasal)**
+- **[Mahmoud Omar](https://github.com/mahmoudomarus)** — founder and primary maintainer.
+- **[Alpay Kasal](https://github.com/alpaykasal)** — co-founder, commercial and partnerships.
 
-Contact: [info@feral.sh](mailto:info@feral.sh) | Website: [feral.sh](https://feral.sh) | GitHub: [FERAL-AI](https://github.com/FERAL-AI)
+Contact: [info@feral.sh](mailto:info@feral.sh) · Website: [feral.sh](https://feral.sh) · GitHub: [FERAL-AI](https://github.com/FERAL-AI).
+
+## License
+
+Apache License 2.0 — see [`LICENSE`](LICENSE). Attribution requirements live in [`NOTICE`](NOTICE).
+
+<!--
+  Internal sync marker used by .github/workflows/version-coherence.yml to
+  reconcile live pytest / vitest counts. Not for human eyes — please leave
+  it in place and do not edit by hand.
+-->
+<!-- sync-versions:test-counts pytest=4740 vitest=403 -->
+<!-- /sync-versions:test-counts -->
