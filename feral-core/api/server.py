@@ -2946,6 +2946,24 @@ _BIOMETRIC_KEY_MAP = {
     "calories": ("calories_daily", "activity"),
 }
 
+# Vitals that participate in per-source baseline namespacing
+# (Fix #5). With BOTH the W300 glasses and the Veepoo wristband
+# streaming, the prior bare ``hr_resting`` row averaged samples
+# from two physically different sensors (chest-strap-equivalent
+# vs wrist PPG) into the same series — the resulting baseline was
+# biased toward whichever device pushed more samples and either
+# device's "anomaly" check was running against a polluted mean.
+# Now: a known live-wearable source trains a per-source row
+# (``hr_resting:jw_health_glasses``) AND we keep writing the bare
+# ``hr_resting`` so legacy queries and the existing test fixtures
+# keep working back-compat. Lagging / unknown sources only train
+# the bare row (per-source rows are reserved for the canonical
+# wearable taxonomy listed below).
+_BASELINE_PER_SOURCE_VITALS: frozenset[str] = frozenset({
+    "hr_resting",
+    "spo2_pct",
+})
+
 
 AUDIO_FRAME_MAX_BYTES = 64 * 1024  # HUP_SPEC.md §5.4.1 cap
 VIDEO_FRAME_MAX_BYTES = 512 * 1024  # HUP_SPEC.md §5.4.2 cap (matches existing VISION_MAX_FRAME_KB)
@@ -3268,6 +3286,106 @@ async def _handle_subdevice_status(
         )
 
 
+# Map a connected node's advertised capability ids
+# (from the HUP `node_register.capabilities` list) to the canonical
+# wearable source string the brain pipeline keys off of. Used by
+# `_infer_wearable_source_from_node` when a daemon emits a
+# `heart_rate` / `spo2` `device_event` without setting an explicit
+# `heart_rate_source` / `spo2_source` — without this inference,
+# the source ends up "" and the freshness/priority logic demotes
+# the (genuinely live) BLE PPG read to second-class.
+_CAPABILITY_TO_WEARABLE_SOURCE = {
+    "veepoo_wristband": "veepoo_wristband",
+    "jw_health_glasses": "jw_health_glasses",
+    "theora_w300": "jw_health_glasses",  # legacy alias → canonical
+    "w610_glasses": "w610_glasses",
+}
+
+
+def _infer_wearable_source_from_node(node_id: str) -> str:
+    """Return the canonical wearable source string for ``node_id``,
+    or "" if no inference is possible.
+
+    The brain stashes each connected daemon's HUP-declared
+    ``capabilities`` list on the WebSocket as ``_feral_capabilities``
+    at ``node_register`` time. Daemons like the iOS FeralSensorBridge
+    and the local wristband_daemon emit `heart_rate` device_events
+    without setting `heart_rate_source` (the iOS adapter only sets
+    it for HealthKit-mirrored reads). When that happens the brain
+    must NOT leave the source as "" — it lets a HealthKit emit demote
+    a fresh BLE read in `perception.fusion._is_live_wearable("")` →
+    False. So we look up the node's advertised caps and pick the
+    matching canonical source string.
+
+    First match wins, in the order `_CAPABILITY_TO_WEARABLE_SOURCE`
+    iterates — Veepoo before glasses is fine because each node only
+    advertises one PPG capability. Phase 12+ multi-wearable nodes
+    would need a richer hint.
+    """
+    if not node_id:
+        return ""
+    daemons = getattr(state, "daemons", None) or {}
+    ws = daemons.get(node_id)
+    if ws is None:
+        return ""
+    caps = getattr(ws, "_feral_capabilities", None) or []
+    for cap in caps:
+        cap_norm = (cap or "").strip().lower()
+        if cap_norm in _CAPABILITY_TO_WEARABLE_SOURCE:
+            return _CAPABILITY_TO_WEARABLE_SOURCE[cap_norm]
+    return ""
+
+
+def _resolve_sample_ts(
+    payload: dict,
+    *,
+    source: str,
+    ts_keys: tuple[str, ...],
+) -> float:
+    """Return the canonical sample timestamp for a vitals reading.
+
+    The bug being fixed (operator report 2026-06-08): HealthKit /
+    cloud bridges that omit a timestamp were getting arrival-stamped
+    with `time.time()`, then the freshness gate happily treated the
+    stale reading as live and the proactive engine fired
+    `hr_elevated` → `scene.calming` automation on a workout-from-
+    hours-ago heart rate.
+
+    Resolution order:
+
+    1. Walk ``ts_keys`` in priority order — the canonical
+       ``heart_rate_sample_ts`` / ``spo2_sample_ts`` first, then
+       generic ``sample_ts``, then the canonical HUP envelope ``ts``,
+       then the legacy iOS HealthKit ``timestamp``. Using the
+       provided value (if any) preserves the real sample time even
+       for lagging sources.
+
+    2. If no timestamp was provided AND the source is a known
+       lagging/cloud source (``apple_healthkit`` etc.) → return
+       ``0.0``. The downstream freshness gates treat 0.0 as
+       "never seen", which keeps a stale HealthKit reading from
+       tripping a real-time alert.
+
+    3. Otherwise (no timestamp AND the source is a live BLE
+       wearable, or unknown / empty) → arrival-stamp with
+       ``time.time()``. A genuinely live BLE wearable push (the
+       wristband_daemon and iOS FeralSensorBridge both legitimately
+       omit ts) is reaching the brain right now, so arrival time
+       IS a valid sample time. Unknown / empty source defaults to
+       arrival-stamp too — backward-compatible with legacy daemons
+       that pre-date the source field, since `_is_lagging_source` is
+       the only blocking predicate that matters.
+    """
+    for key in ts_keys:
+        raw = payload.get(key)
+        if isinstance(raw, (int, float)) and raw > 0:
+            return float(raw)
+    from perception.fusion import _is_lagging_source as _lag
+    if _lag(source):
+        return 0.0
+    return time.time()
+
+
 def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict) -> None:
     """Dispatch ``device_event`` payloads with biometric / sensor event types.
 
@@ -3290,28 +3408,73 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
             bpm = frame_payload.get("value")
         if bpm is not None:
             sensors["ppg_heart_rate"] = bpm
-            # Forward freshness + source so fusion lights the live "fresh"
-            # dot (dashboard.py gates on heart_rate_sample_ts) and doesn't
-            # report stale vitals as current. Wearable adapters emit these;
-            # fall back to arrival time when the device didn't stamp one.
+            # Source resolution (Fix #3): prefer the explicit source
+            # the daemon set; if absent, infer it from the emitting
+            # node's advertised HUP capabilities (so a wristband_daemon
+            # / iOS FeralSensorBridge that omitted the field still
+            # carries `veepoo_wristband` / `jw_health_glasses` and
+            # clears the live-wearable predicate downstream).
             _src = frame_payload.get("heart_rate_source") or frame_payload.get("source")
+            if not _src:
+                _src = _infer_wearable_source_from_node(effective_node)
             if _src:
                 sensors["heart_rate_source"] = _src
-            _ts = frame_payload.get("heart_rate_sample_ts") or frame_payload.get("sample_ts")
-            sensors["heart_rate_sample_ts"] = float(_ts) if isinstance(_ts, (int, float)) and _ts > 0 else time.time()
+            # Sample timestamp (Fix #1): use the device-supplied ts when
+            # present, fall back to 0.0 for lagging/cloud sources that
+            # forgot to stamp (so the freshness gate blocks them), and
+            # arrival-stamp only for live wearables / unknown senders.
+            sensors["heart_rate_sample_ts"] = _resolve_sample_ts(
+                frame_payload,
+                source=str(_src or ""),
+                ts_keys=(
+                    "heart_rate_sample_ts",
+                    "sample_ts",
+                    "ts",
+                    "timestamp",
+                ),
+            )
     elif event_type == "spo2":
         val = frame_payload.get("current") or frame_payload.get("spo2") or frame_payload.get("value")
         if val is not None:
             sensors["spo2_pct"] = val
             _src = frame_payload.get("spo2_source") or frame_payload.get("source")
+            if not _src:
+                _src = _infer_wearable_source_from_node(effective_node)
             if _src:
                 sensors["spo2_source"] = _src
-            _ts = frame_payload.get("spo2_sample_ts") or frame_payload.get("sample_ts")
-            sensors["spo2_sample_ts"] = float(_ts) if isinstance(_ts, (int, float)) and _ts > 0 else time.time()
+            sensors["spo2_sample_ts"] = _resolve_sample_ts(
+                frame_payload,
+                source=str(_src or ""),
+                ts_keys=(
+                    "spo2_sample_ts",
+                    "sample_ts",
+                    "ts",
+                    "timestamp",
+                ),
+            )
     elif event_type == "skin_temperature":
         val = frame_payload.get("celsius") or frame_payload.get("value")
         if val is not None:
             sensors["skin_temperature_c"] = val
+            # Skin temperature carries the same envelope ts in HUP v1.1;
+            # propagate it so downstream consumers can age-check the
+            # reading the same way HR/SpO2 are aged. No baseline gate
+            # for skin_temp_c so source inference is informational only.
+            _src = (
+                frame_payload.get("skin_temperature_source")
+                or frame_payload.get("source")
+                or _infer_wearable_source_from_node(effective_node)
+            )
+            sensors["skin_temperature_sample_ts"] = _resolve_sample_ts(
+                frame_payload,
+                source=str(_src or ""),
+                ts_keys=(
+                    "skin_temperature_sample_ts",
+                    "sample_ts",
+                    "ts",
+                    "timestamp",
+                ),
+            )
     elif event_type == "steps":
         val = frame_payload.get("count") or frame_payload.get("value")
         if val is not None:
@@ -3395,7 +3558,7 @@ def _record_biometrics_to_baseline(data: dict) -> None:
     if not state.baseline_engine or not data:
         return
     try:
-        from perception.fusion import _is_lagging_source
+        from perception.fusion import _is_lagging_source, _is_live_wearable
 
         now = time.time()
         flat: dict[str, float] = {}
@@ -3411,6 +3574,7 @@ def _record_biometrics_to_baseline(data: dict) -> None:
             mapping = _BIOMETRIC_KEY_MAP.get(raw_key)
             if not mapping:
                 continue
+            src = ""
             gate = _GATED_BASELINE_VITALS.get(raw_key)
             if gate:
                 src_key, ts_key = gate
@@ -3426,7 +3590,25 @@ def _record_biometrics_to_baseline(data: dict) -> None:
                     )
                     continue
             metric_id, category = mapping
+            # Always write the bare metric row so legacy queries
+            # (`check_anomaly("hr_resting", v)`) keep working
+            # untouched — back-compat with old baselines on disk
+            # and with the Whoop / Oura aggregator paths that don't
+            # carry a wearable source.
             state.baseline_engine.record(metric_id, value, category=category)
+            # Fix #5: per-source namespaced row. Only known live
+            # wearable sources get their own series so unknown /
+            # untagged daemons don't fragment the baseline space.
+            if (
+                metric_id in _BASELINE_PER_SOURCE_VITALS
+                and _is_live_wearable(src)
+            ):
+                src_norm = src.strip().lower()
+                state.baseline_engine.record(
+                    f"{metric_id}:{src_norm}",
+                    value,
+                    category=category,
+                )
     except Exception as exc:
         logger.debug("Baseline biometric recording error: %s", exc)
 

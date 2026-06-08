@@ -105,11 +105,15 @@ class TestEvaluateHealthTriggers:
         # alerts now require the sample to be within 120s of "now",
         # otherwise stale Apple HealthKit reads fire phantom alerts.
         # Tests must mirror what live senders would set.
+        # Lagging-source guard (operator report 2026-06-08, fix #2):
+        # alerts also require a live wearable source — HealthKit
+        # relabels stale reads as fresh, so freshness alone is not
+        # enough. Use a live wearable here so the trigger fires.
         frame.heart_rate_sample_ts = time.time() - 5.0
-        frame.heart_rate_source = "apple_healthkit"
+        frame.heart_rate_source = "jw_health_glasses"
         frame.spo2_pct = 98
         frame.spo2_sample_ts = time.time() - 5.0
-        frame.spo2_source = "apple_healthkit"
+        frame.spo2_source = "jw_health_glasses"
         frame.activity_state = "working"
         frame.scene_description = ""
         engine._perception._frames = {"s1": frame}
@@ -132,10 +136,12 @@ class TestEvaluateHealthTriggers:
         frame = MagicMock()
         frame.heart_rate = 70
         frame.heart_rate_sample_ts = time.time() - 5.0
-        frame.heart_rate_source = "apple_healthkit"
+        # Same lagging-source guard as `hr_elevated` — use a live
+        # wearable so the trigger fires.
+        frame.heart_rate_source = "jw_health_glasses"
         frame.spo2_pct = 90
         frame.spo2_sample_ts = time.time() - 5.0
-        frame.spo2_source = "apple_healthkit"
+        frame.spo2_source = "jw_health_glasses"
         frame.activity_state = "resting"
         frame.scene_description = ""
         engine._perception._frames = {"s1": frame}

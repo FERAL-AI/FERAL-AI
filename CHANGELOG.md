@@ -1,10 +1,29 @@
 # Changelog
 
-<!-- feral-version: 2026.6.8 -->
+<!-- feral-version: 2026.6.9 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.9] — 2026-06-08 — HR pipeline correctness + iOS flapping/glasses-audio fixes
+
+Patch release. Follow-up to v2026.6.8 that finishes the dual-wearable health pipeline so HR/SpO2 are correctly sourced, freshness-gated, and consistent across every surface — plus the matching iOS companion fixes for tab-switch disconnects and glasses-audio routing.
+
+### Brain (feral-core)
+
+- **fix(biometric): real sample timestamps + deterministic source inference.** `/api/biometric/event` and the in-process biometric path now stamp each sample with the actual wearable sample time instead of an arrival proxy, and infer `source` from the connected node caps (W300 glasses, Veepoo wristband) when the device payload omits it. Stale HealthKit reads can no longer masquerade as live wearable samples.
+- **fix(proactive): lagging-source guard on `hr_elevated` / `spo2_low` / `baseline_hr`.** The proactive anomaly checks now refuse to fire on lagging sources (Apple HealthKit / cloud) or on stale samples. Combined with the freshness gate from v2026.6.8, a delayed HealthKit flush can no longer trip an `hr_elevated` card or pollute the resting-HR baseline.
+- **fix(baseline): per-source baseline namespacing.** Resting-HR and related baselines are now namespaced per `source` (W300 vs Veepoo vs HealthKit) so a sample from one wearable cannot contaminate another wearable's baseline; `baseline_hr` queries route to the matching namespace.
+- **fix(perception-fusion): deterministic dual-wearable priority W300 > Veepoo > HealthKit.** Fixed the wearable priority order so when both the Theora W300 glasses and the Veepoo wristband are reporting, the W300 wins consistently (matching the spec) instead of whichever sample landed last.
+- **fix(dashboard): canonical `latest_health` snapshot.** `/api/dashboard/latest_health` now exposes a single canonical snapshot shared by the dashboard, Health page, and `current_hr` consumers — they no longer drift apart between heartbeats.
+- **feat(webui-home): HR source label.** Home renders `"via {source}"` next to the live HR/SpO2 readout so the operator can see which wearable is currently driving the value (W300 / Veepoo / HealthKit). WebUI v2 bundle rebuilt.
+- **test: scoped coverage.** New `tests/test_hr_pipeline_demo_fixes.py` (23 tests covering the timestamp + source-inference + namespacing + priority paths), plus updates to `tests/test_proactive_freshness_gate.py` and `tests/test_proactive_engine.py`. Scoped run: all related tests passing (195).
+
+### iOS companion (feral-companion-ios)
+
+- **fix(app): stop flapping on tab switch / background.** `FeralCompanionApp` no longer calls `disconnect()` when the scene phase transitions to `.background` — the brain socket stays up across tab switches and brief backgrounding instead of bouncing on every app-switch. `BrainClient.disconnect(reason:)` gained a `reason` parameter and `ConnectionStore` forwards it for proper telemetry.
+- **fix(audio): glasses audio routes through the W300 instead of the iPhone speaker.** `W300AudioBridge` now only forces the speaker route when there is no Bluetooth audio output present, and broadens the route-change filter so a transient route change (call, Siri, etc.) no longer permanently flips audio to the phone speaker after a glasses session.
 
 ## [2026.6.8] — 2026-06-07 — Health-data correctness fixes
 

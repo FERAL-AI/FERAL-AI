@@ -352,6 +352,13 @@ export default function Home() {
   const deviceCount = onlineCount;
   const skillCount = dashboard?.skills_count ?? skills.length;
   const hr = Math.round(dashboard?.health?.heart_rate || somatic.heartRate || 0);
+  // Surface the wearable source under the bpm so the demo viewer can
+  // tell at a glance whether the live tile is reading from the W300
+  // glasses, the Veepoo wristband, or a HealthKit mirror. Brain
+  // ships `heart_rate_source` next to `heart_rate` in the canonical
+  // `_latest_live_wearable_snapshot` payload (Fix #6), so this
+  // label only appears when there's a fresh live reading.
+  const hrSource = (dashboard?.health?.heart_rate_source || '').trim();
   const cog = Math.round(((dashboard?.health?.cognitive_load ?? somatic.cognitiveLoad) || 0) * 100);
   const sessionCount = dashboard?.session_count ?? 0;
   // Read from the live mirror first (real-time WS deltas) and fall
@@ -549,6 +556,14 @@ export default function Home() {
             )}
             <Glass level={0} radius="md" padding="sm"><div className="v2-stat-label">Heart rate</div>
               <div className="v2-stat-value">{hr > 0 ? `${hr}` : '—'}</div>
+              {hr > 0 && hrSource ? (
+                <div
+                  className="v2-stat-sub"
+                  style={{ fontSize: '0.7em', opacity: 0.6, marginTop: '0.15em' }}
+                >
+                  via {hrSource}
+                </div>
+              ) : null}
             </Glass>
             <Glass level={0} radius="md" padding="sm"><div className="v2-stat-label">Load</div>
               <div className="v2-stat-value">{cog}%</div>

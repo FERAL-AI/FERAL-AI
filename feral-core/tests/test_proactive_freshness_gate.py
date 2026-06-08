@@ -55,22 +55,57 @@ def _engine_with_frame(frame: PerceptionFrame) -> tuple[ProactiveEngine, list]:
 
 @pytest.mark.asyncio
 async def test_fresh_elevated_hr_does_fire() -> None:
-    """A real elevated reading taken just now must still fire."""
+    """A real elevated reading taken just now from a LIVE wearable
+    must still fire.
+
+    The source matters (operator report 2026-06-08 demo prep, fix
+    #2): cloud-mirror sources like ``apple_healthkit`` resample
+    ``sample_ts`` to "now" even when the underlying read is hours
+    old, so freshness alone can't tell live from stale. The proactive
+    engine therefore now requires a non-lagging source AND a fresh
+    sample. The W300 glasses (``jw_health_glasses``) is the
+    canonical demo source for elevated HR alerts.
+    """
     frame = PerceptionFrame(
         heart_rate=115,
         heart_rate_sample_ts=time.time() - 5.0,  # 5s old, fresh
-        heart_rate_source="apple_healthkit",
+        heart_rate_source="jw_health_glasses",
         activity_state="resting",
     )
     eng, captured = _engine_with_frame(frame)
     await eng._evaluate()
     fired = [m for m in captured if m.trigger_id == "hr_elevated"]
     assert fired, (
-        "fresh elevated HR (115 bpm, 5s old) must fire the elevated alert"
+        "fresh elevated HR (115 bpm, 5s old) from a live wearable "
+        "must fire the elevated alert"
     )
     body = fired[0].body
     assert "115" in body
-    assert "apple_healthkit" in body, "source must surface in body"
+    assert "jw_health_glasses" in body, "source must surface in body"
+
+
+@pytest.mark.asyncio
+async def test_fresh_elevated_hr_from_lagging_source_does_not_fire() -> None:
+    """Operator report 2026-06-08 — even a "fresh" HealthKit reading
+    (HealthKit relabels ``sample_ts`` to "now" for cached resting
+    HR pulled from a workout hours earlier) MUST NOT trip
+    ``hr_elevated`` → ``scene.calming``.  The lagging-source guard
+    is the only thing that catches this; the freshness window can't.
+    """
+    frame = PerceptionFrame(
+        heart_rate=115,
+        heart_rate_sample_ts=time.time() - 5.0,  # looks fresh
+        heart_rate_source="apple_healthkit",
+        activity_state="resting",
+    )
+    eng, captured = _engine_with_frame(frame)
+    await eng._evaluate()
+    fired = [m for m in captured if m.trigger_id == "hr_elevated"]
+    assert not fired, (
+        "fresh-looking apple_healthkit elevated HR must NOT fire — "
+        "the proactive engine's lagging-source guard (fix #2) was "
+        "introduced precisely to block this stale-relabel pattern."
+    )
 
 
 @pytest.mark.asyncio
@@ -185,11 +220,17 @@ async def test_stale_low_spo2_does_not_fire() -> None:
 
 @pytest.mark.asyncio
 async def test_freshness_window_boundary_120s() -> None:
-    """Boundary check: 119s ago fires, 121s ago does not."""
+    """Boundary check: 119s ago fires, 121s ago does not.
+
+    Uses a live wearable source — ``apple_healthkit`` is now blocked
+    by the lagging-source guard (fix #2) regardless of the freshness
+    window, so the boundary test must use a non-lagging source to
+    exercise the freshness gate cleanly.
+    """
     frame_just_inside = PerceptionFrame(
         heart_rate=115,
         heart_rate_sample_ts=time.time() - 119.0,
-        heart_rate_source="apple_healthkit",
+        heart_rate_source="jw_health_glasses",
     )
     eng_inside, captured_inside = _engine_with_frame(frame_just_inside)
     await eng_inside._evaluate()
@@ -199,7 +240,7 @@ async def test_freshness_window_boundary_120s() -> None:
     frame_just_outside = PerceptionFrame(
         heart_rate=115,
         heart_rate_sample_ts=time.time() - 121.0,
-        heart_rate_source="apple_healthkit",
+        heart_rate_source="jw_health_glasses",
     )
     eng_outside, captured_outside = _engine_with_frame(frame_just_outside)
     await eng_outside._evaluate()

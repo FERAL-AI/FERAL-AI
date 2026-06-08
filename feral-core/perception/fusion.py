@@ -44,15 +44,67 @@ _CONTEXT_FRESH_S = 120.0
 # whenever its push lands second. Anything classified as a live
 # wearable here wins the "current HR" slot whenever its sample is
 # fresh, even if the HealthKit emit arrived microseconds later.
-_LIVE_WEARABLE_SOURCES: frozenset[str] = frozenset({
-    "jw_health_glasses",   # Theora W300 glasses (BLE PPG)
+#
+# Operator report 2026-06-08 demo prep — wearable-vs-wearable
+# priority. With the W300 glasses AND Veepoo wristband both streaming
+# at ~1Hz, the prior pure freshness tiebreak ("freshest sample wins")
+# made the HR slot thrash on every tick (whichever push landed last
+# microsecond). The displayed bpm flickered between two physically
+# different readings (chest-strap-equivalent W300 vs wrist Veepoo),
+# the source label flipped accordingly, and every pair of consecutive
+# updates trained DIFFERENT samples into the same bare `hr_resting`
+# baseline. Encoding an explicit priority order here, with a
+# ``_wearable_priority`` lookup, makes the higher-priority device
+# the canonical "current HR" within the fresh window. Lower indices
+# = higher priority. Sources not in this tuple inherit the lowest
+# priority bucket and behave like the legacy "freshest wins" path.
+_WEARABLE_PRIORITY_ORDER: tuple[str, ...] = (
+    "theora_w300",         # Highest — Theora W300 glasses (alias)
+    "jw_health_glasses",   # Highest — Theora W300 glasses (canonical)
     "veepoo_wristband",    # Veepoo wristband (BLE PPG)
-    "theora_w300",         # Legacy alias
-    "w610_glasses",        # Future Theora W610
     "polar",               # Generic BLE chest strap
     "wahoo",               # Generic BLE chest strap
     "garmin_ble",          # Direct BLE Garmin
-})
+    "w610_glasses",        # Future Theora W610
+)
+
+# Tier the canonical glasses + its legacy alias together so the
+# alias never artificially loses to the canonical name when both
+# happen to fire on the same boot (no-one ships both, but the
+# priority must be order-stable regardless).
+_WEARABLE_PRIORITY: dict[str, int] = {
+    "theora_w300": 0,
+    "jw_health_glasses": 0,
+    "veepoo_wristband": 1,
+    "polar": 2,
+    "wahoo": 2,
+    "garmin_ble": 3,
+    "w610_glasses": 4,
+}
+
+# Frozen set kept for the existing `_is_live_wearable` predicate;
+# membership only matters here, ordering is in `_WEARABLE_PRIORITY`.
+_LIVE_WEARABLE_SOURCES: frozenset[str] = frozenset(_WEARABLE_PRIORITY.keys())
+
+
+# Lower number = higher priority. Sources not in `_WEARABLE_PRIORITY`
+# fall to the lowest tier (``_LOWEST_PRIORITY``); a known live
+# wearable always outranks an unknown one within the fresh window.
+_LOWEST_PRIORITY = 99
+
+
+def _wearable_priority(source: str) -> int:
+    """Return the priority rank for a live-wearable source string.
+
+    Lower is better. Used by ``update_sensors`` as the PRIMARY
+    tiebreak when two live wearables are both emitting fresh
+    samples (Fix #4). Unknown / blank sources get the lowest
+    priority bucket so a known live wearable always wins.
+    """
+    return _WEARABLE_PRIORITY.get(
+        (source or "").strip().lower(),
+        _LOWEST_PRIORITY,
+    )
 
 # Sources we know are NOT real-time. Even if the sample_ts says
 # "0 seconds ago" (= the bridge resampled it now), the underlying
@@ -313,6 +365,17 @@ class PerceptionEngine:
             # of arrival order. HealthKit can still update the slot when
             # no live wearable has reported, but it cannot demote a
             # currently-live wearable reading.
+            #
+            # 2026-06-08 demo prep (Fix #4) — wearable-vs-wearable
+            # tiebreak. With BOTH W300 glasses AND Veepoo wristband
+            # streaming, the prior "freshest wearable wins" rule
+            # caused the slot to thrash on every tick (whichever push
+            # arrived last microsecond). Now PRIORITY is the primary
+            # tiebreak (W300 > Veepoo > polar/wahoo > garmin > w610);
+            # freshness is the secondary. A higher-priority source is
+            # NOT demoted by a slightly-fresher lower-priority one
+            # within the fresh window — a lower-priority source only
+            # wins if the higher-priority one is stale.
             now = time.time()
             new_is_live_wearable = _is_live_wearable(new_hr_source)
             new_is_lagging = _is_lagging_source(new_hr_source)
@@ -329,9 +392,23 @@ class PerceptionEngine:
                 # even if its arrival timestamp is technically newer.
                 if new_is_lagging or (not new_is_live_wearable and not new_is_fresh):
                     should_update = False
-                # Wearable→wearable: keep the freshest sample.
-                elif new_is_live_wearable and new_hr_ts < cur_ts:
-                    should_update = False
+                elif new_is_live_wearable:
+                    # Wearable→wearable: priority first, freshness second.
+                    new_prio = _wearable_priority(new_hr_source)
+                    cur_prio = _wearable_priority(cur_source)
+                    if new_prio > cur_prio:
+                        # New source is LOWER priority. Only allow it
+                        # to take over when the current high-priority
+                        # reading has actually gone stale.
+                        should_update = False
+                    elif new_prio == cur_prio and new_hr_ts < cur_ts:
+                        # Same source / same priority tier — keep the
+                        # freshest. Within a tier we still want the
+                        # most recent BLE notification.
+                        should_update = False
+                    # else: new_prio < cur_prio (higher priority) → take
+                    # over even if the current sample is technically
+                    # fresher; or new is freshest within the same tier.
 
             if should_update:
                 frame.heart_rate = _hr
@@ -352,7 +429,9 @@ class PerceptionEngine:
             )
             new_spo2_source = str(_spo2_src) if _spo2_src is not None else ""
 
-            # Same source-priority rule as heart rate (see above).
+            # Same source-priority rule as heart rate (see above),
+            # extended with the same wearable-vs-wearable priority
+            # tiebreak so two SpO2 sources don't thrash either.
             now2 = time.time()
             new_spo2_is_live = _is_live_wearable(new_spo2_source)
             new_spo2_is_lagging = _is_lagging_source(new_spo2_source)
@@ -366,8 +445,13 @@ class PerceptionEngine:
             if frame.spo2_pct and cur_spo2_is_live and cur_spo2_is_fresh:
                 if new_spo2_is_lagging or (not new_spo2_is_live and not new_spo2_is_fresh):
                     should_update_spo2 = False
-                elif new_spo2_is_live and new_spo2_ts < cur_spo2_ts:
-                    should_update_spo2 = False
+                elif new_spo2_is_live:
+                    new_spo2_prio = _wearable_priority(new_spo2_source)
+                    cur_spo2_prio = _wearable_priority(cur_spo2_source)
+                    if new_spo2_prio > cur_spo2_prio:
+                        should_update_spo2 = False
+                    elif new_spo2_prio == cur_spo2_prio and new_spo2_ts < cur_spo2_ts:
+                        should_update_spo2 = False
 
             if should_update_spo2:
                 frame.spo2_pct = _spo2

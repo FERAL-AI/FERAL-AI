@@ -304,34 +304,59 @@ async def _get_dashboard_data() -> dict:
     # the dot to grey when the underlying sample is older than the
     # 120s context window even though we still surface the value
     # for diagnostic display.
-    _now = time.time()
-    for sid in state.sessions:
-        frame = state.perception.get_frame(sid)
-        if frame:
-            hr_ts = float(getattr(frame, "heart_rate_sample_ts", 0.0) or 0.0)
-            hr_fresh = bool(frame.heart_rate) and hr_ts > 0 and (_now - hr_ts) <= 120
-            if frame.heart_rate and hr_fresh:
-                latest_health["heart_rate"] = frame.heart_rate
-                latest_health["heart_rate_source"] = frame.heart_rate_source or ""
-                latest_health["heart_rate_fresh"] = True
-            elif frame.heart_rate:
-                # Surface the value but mark it stale so the client
-                # doesn't paint it as "live now".
+    #
+    # Fix #6 (operator report 2026-06-08): the per-session loop
+    # below USED to be "iterate sessions, last iterated wins" with
+    # no live-wearable filter, so a HealthKit-mirrored frame in
+    # one session could clobber a fresh W300 reading in another
+    # session AND `/api/dashboard.latest_health.heart_rate` could
+    # disagree with `/api/health/summary.current_hr` (which already
+    # called BrainState._latest_live_wearable_snapshot). Now both
+    # endpoints share the same canonical snapshot so the home tile
+    # and the chat tool see exactly the same bpm + source.
+    snap = None
+    try:
+        snap = state._latest_live_wearable_snapshot()
+    except Exception as exc:
+        logger.debug("latest_live_wearable_snapshot failed: %s", exc)
+        snap = None
+    if snap and snap.get("heart_rate"):
+        latest_health["heart_rate"] = snap["heart_rate"]
+        latest_health["heart_rate_source"] = snap.get("heart_rate_source", "") or ""
+        latest_health["heart_rate_fresh"] = True
+    if snap and snap.get("spo2"):
+        latest_health["spo2"] = snap["spo2"]
+        latest_health["spo2_source"] = snap.get("spo2_source", "") or ""
+        latest_health["spo2_fresh"] = True
+    if snap and snap.get("skin_temperature_c"):
+        latest_health["temperature"] = snap["skin_temperature_c"]
+    # Stale fallback: when the canonical snapshot is empty (no fresh
+    # live wearable), still surface a non-zero perception value so
+    # the diagnostic banner can render "(stale)" rather than "—".
+    # Lagging sources land here too, so the client must read
+    # `*_fresh` before painting the live dot.
+    if "heart_rate" not in latest_health:
+        for sid in state.sessions:
+            frame = state.perception.get_frame(sid)
+            if frame and frame.heart_rate:
                 latest_health["heart_rate_stale"] = frame.heart_rate
                 latest_health["heart_rate_source"] = frame.heart_rate_source or ""
                 latest_health["heart_rate_fresh"] = False
-            spo2_ts = float(getattr(frame, "spo2_sample_ts", 0.0) or 0.0)
-            spo2_fresh = bool(frame.spo2_pct) and spo2_ts > 0 and (_now - spo2_ts) <= 120
-            if frame.spo2_pct and spo2_fresh:
-                latest_health["spo2"] = frame.spo2_pct
-                latest_health["spo2_source"] = frame.spo2_source or ""
-                latest_health["spo2_fresh"] = True
-            elif frame.spo2_pct:
+                break
+    if "spo2" not in latest_health:
+        for sid in state.sessions:
+            frame = state.perception.get_frame(sid)
+            if frame and frame.spo2_pct:
                 latest_health["spo2_stale"] = frame.spo2_pct
                 latest_health["spo2_source"] = frame.spo2_source or ""
                 latest_health["spo2_fresh"] = False
-            if frame.skin_temperature_c:
+                break
+    if "temperature" not in latest_health:
+        for sid in state.sessions:
+            frame = state.perception.get_frame(sid)
+            if frame and frame.skin_temperature_c:
                 latest_health["temperature"] = frame.skin_temperature_c
+                break
     boot_data = state._boot_report.to_dict() if hasattr(state, '_boot_report') else {}
 
     is_demo = getattr(state, "_demo", None) is not None or os.environ.get("FERAL_DEV_DEMO", "").lower() in ("1", "true", "yes")

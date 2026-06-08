@@ -241,15 +241,42 @@ class ProactiveEngine:
         # (`baseline_hr`) — operator report round 3 caught that
         # trigger firing on stale data without a freshness gate.
         FRESH_WINDOW_S = _FRESH_WINDOW_S
+        # Operator report 2026-06-08 demo prep: a fresh-looking
+        # `apple_healthkit` HR=115 read (HealthKit was relabelling the
+        # underlying workout sample's `endDate` to "now") cleared the
+        # FRESH_WINDOW_S gate and fired `hr_elevated` →
+        # `scene.calming` while the W300 + Veepoo were both showing a
+        # resting 60s. Reuse the canonical lagging-source predicate
+        # from `perception.fusion` (single source of truth) so any
+        # cloud-mirror source automatically inherits the block —
+        # adding a new lagging source there propagates here without
+        # further edits.
+        from perception.fusion import _is_lagging_source
         for frame in frames:
             hr_age = (now - getattr(frame, "heart_rate_sample_ts", 0.0)) if getattr(frame, "heart_rate_sample_ts", 0.0) > 0 else float("inf")
             spo2_age = (now - getattr(frame, "spo2_sample_ts", 0.0)) if getattr(frame, "spo2_sample_ts", 0.0) > 0 else float("inf")
-            hr_src = getattr(frame, "heart_rate_source", "") or "unknown source"
-            spo2_src = getattr(frame, "spo2_source", "") or "unknown source"
+            hr_src_raw = getattr(frame, "heart_rate_source", "") or ""
+            spo2_src_raw = getattr(frame, "spo2_source", "") or ""
+            hr_src = hr_src_raw or "unknown source"
+            spo2_src = spo2_src_raw or "unknown source"
+            hr_src_is_lagging = _is_lagging_source(hr_src_raw)
+            spo2_src_is_lagging = _is_lagging_source(spo2_src_raw)
 
-            if frame.heart_rate > 0 and hr_age <= FRESH_WINDOW_S:
-                # Elevated HR
+            if (
+                frame.heart_rate > 0
+                and hr_age <= FRESH_WINDOW_S
+                and not hr_src_is_lagging
+            ):
+                # Elevated HR — only on live wearables (or unlabelled
+                # fresh sources). Cloud-mirror reads are surfaced in
+                # `health_summary` / `latest_health` but never drive
+                # a real-time push; their fresh-looking timestamps
+                # cannot be trusted.
                 if frame.heart_rate > 100 and self._can_fire("hr_elevated"):
+                    logger.info(
+                        "proactive.hr_elevated firing: bpm=%d source=%s age=%ds",
+                        frame.heart_rate, hr_src, int(hr_age),
+                    )
                     messages.append(ProactiveMessage(
                         trigger_id="hr_elevated",
                         priority=Priority.IMPORTANT,
@@ -265,9 +292,17 @@ class ProactiveEngine:
                         action_payload={"smart_home": "set_scene", "scene": "calming"},
                     ))
 
-            if 0 < frame.spo2_pct < 94 and spo2_age <= FRESH_WINDOW_S:
-                # Low SpO2
+            if (
+                0 < frame.spo2_pct < 94
+                and spo2_age <= FRESH_WINDOW_S
+                and not spo2_src_is_lagging
+            ):
+                # Low SpO2 — same lagging-source guard as HR.
                 if self._can_fire("spo2_low"):
+                    logger.info(
+                        "proactive.spo2_low firing: spo2=%d source=%s age=%ds",
+                        frame.spo2_pct, spo2_src, int(spo2_age),
+                    )
                     messages.append(ProactiveMessage(
                         trigger_id="spo2_low",
                         priority=Priority.CRITICAL,
@@ -397,19 +432,66 @@ class ProactiveEngine:
                         # W300 was disconnected because the trigger read
                         # `frame.heart_rate` without checking the sample
                         # age. Reuse the same FRESH_WINDOW_S / `now`.
+                        # Lagging-source guard (Fix #2): never anomaly-
+                        # check a stale-relabeled HealthKit reading.
                         hr_age_baseline = (
                             (now - getattr(frame, "heart_rate_sample_ts", 0.0))
                             if getattr(frame, "heart_rate_sample_ts", 0.0) > 0
                             else float("inf")
                         )
-                        if frame.heart_rate > 0 and hr_age_baseline <= FRESH_WINDOW_S:
+                        hr_src_baseline = (
+                            getattr(frame, "heart_rate_source", "") or ""
+                        )
+                        if (
+                            frame.heart_rate > 0
+                            and hr_age_baseline <= FRESH_WINDOW_S
+                            and not _is_lagging_source(hr_src_baseline)
+                        ):
                             fresh_hr_frame = frame
                             break
                     if fresh_hr_frame is not None:
-                        alert = self._baseline.check_anomaly(
-                            "hr_resting", fresh_hr_frame.heart_rate
+                        # Fix #5: query the active source's namespaced
+                        # baseline first (`hr_resting:jw_health_glasses`)
+                        # so the W300 vs Veepoo means stay independent.
+                        # Fall back to bare `hr_resting` for legacy /
+                        # unknown sources where the per-source row
+                        # doesn't exist.
+                        hr_src_norm = (
+                            (
+                                getattr(fresh_hr_frame, "heart_rate_source", "")
+                                or ""
+                            )
+                            .strip()
+                            .lower()
                         )
+                        candidate_metric_ids = []
+                        if hr_src_norm:
+                            candidate_metric_ids.append(
+                                f"hr_resting:{hr_src_norm}"
+                            )
+                        candidate_metric_ids.append("hr_resting")
+                        alert = None
+                        chosen_metric_id = None
+                        for metric_id in candidate_metric_ids:
+                            try:
+                                metric = self._baseline.get_baseline(metric_id)
+                            except Exception:
+                                metric = None
+                            if metric and len(getattr(metric, "values", []) or []) >= 3:
+                                alert = self._baseline.check_anomaly(
+                                    metric_id, fresh_hr_frame.heart_rate
+                                )
+                                chosen_metric_id = metric_id
+                                break
                         if alert:
+                            hr_age_log = int(now - fresh_hr_frame.heart_rate_sample_ts) if fresh_hr_frame.heart_rate_sample_ts else -1
+                            logger.info(
+                                "proactive.baseline_hr firing: bpm=%d source=%s metric=%s age=%ds",
+                                fresh_hr_frame.heart_rate,
+                                hr_src_norm or "unknown",
+                                chosen_metric_id,
+                                hr_age_log,
+                            )
                             messages.append(ProactiveMessage(
                                 trigger_id="baseline_hr",
                                 priority=Priority.IMPORTANT,
