@@ -119,7 +119,7 @@ async def test_impl_halt_attempts_even_when_unplugged():
     skill = CuteBotSkill()
     skill.set_device_registry(registry)
 
-    result = await skill.execute("halt", {}, {})
+    await skill.execute("halt", {}, {})
     assert len(registry.calls) == 1
     assert registry.calls[0].capability_id == "halt"
 
