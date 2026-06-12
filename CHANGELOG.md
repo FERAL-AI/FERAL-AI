@@ -1,10 +1,31 @@
 # Changelog
 
-<!-- feral-version: 2026.6.9 -->
+<!-- feral-version: 2026.6.10 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.10] — 2026-06-12 — CuteBot robot integration + multi-agent chat fixes
+
+Patch release. First brain-local robot on the HUP stack — the Elecfreaks Smart CuteBot (micro:bit V2) driven over USB serial — plus fixes for truncated phone chat replies and multi-agent misrouting.
+
+### Brain (feral-core)
+
+- **feat(hardware): CuteBot brain-local robot integration.** New `hardware/adapters/cutebot.py` adapter (drive / halt / LEDs / line-follow / sonar / telemetry over USB serial @ 115200), `hardware/discovery.py` brain-local device discovery (imports `cuteferalbot` via a sys.path fallback — deliberately not a pip dependency), and `hardware/orchestrator.py` façade over the registry + `CommandLedger`. `api/state.py` gains a `BrainLocalDevices` boot block that discovers, registers, connects, and starts per-adapter telemetry loops. New `pyserial>=3.5` runtime dependency.
+- **feat(skills): `cutebot` skill.** `skills/manifests/cutebot.json` + `skills/impl/cutebot_skill.py` expose `cutebot__drive` / `halt` / `led` / `line_follow` / `read_sonar` / `telemetry` to the LLM.
+- **feat(perception): robot telemetry in the LLM context.** `perception/fusion.py` adds robot fields to `PerceptionFrame` with a 15 s freshness window and a "Robot (CuteBot): mode/state/sonar/battery" context line; `api/server.py` fans daemon `robot_telemetry` / `robot_event` frames into `perception.update_sensors`.
+- **feat(security): CuteBot safety rails.** `security/safety_resolver.py` denies `cutebot__drive` wheel speeds above |80| before manifest metadata is consulted; `telemetry` added to the sandbox sensor allowlist; the hardware execute route now only gates `read_*` capabilities on the sensor allowlist (actuators are governed by the device registry's permission tiers).
+- **fix(hardware): adapter return normalization.** `DeviceRegistry.execute_action` now accepts `HUPResult` returns (filling missing action/device ids), wraps dicts as success results, and converts anything else into a typed failure instead of mislabeling it a success.
+- **fix(chat): phone `chat_response` carries the full reply.** `Orchestrator.handle_command` (and the stream variant) returned `None` on the multi-agent path, so the phone's `chat_response` fell back to a working-memory stub truncated at 300 chars. The orchestrator now returns the final assistant text and working memory stores the full reply (prompt size unaffected — `working_context_string` slices to 200 chars itself).
+- **fix(multi-agent): routing + response quality.** Keyword routing now matches on word boundaries ("ac" in "exact" no longer routes to home); a `GENERAL_OVERRIDE_RE` hard guard sends coding/file/desktop requests to the general worker (the only one with the `computer_use` tool set); workers pass `max_tokens=4096` instead of the 1024 provider default; an empty model reply gets one plain-text nudge and exhausted tool loops get a final synthesis pass instead of "No response generated."
+- **docs:** `docs/CUTEBOT_HARDWARE_PLAN.md` — CuteBot & external-hardware architecture plan.
+- **test: scoped coverage.** New `tests/test_cutebot_adapter.py`, `tests/test_hardware_orchestrator.py`, `tests/test_cutebot_skill.py`, `tests/test_robot_perception.py`, `tests/test_chat_response_full_text.py`, plus extended `tests/test_multi_agent.py` — 99 tests in the scoped run, all passing; wearable regression suites (`test_hr_pipeline_demo_fixes.py`, `test_proactive_engine.py`) re-run green (47 passing).
+
+### iOS companion (feral-companion-ios)
+
+- **feat(chat): text selection + copy.** Chat bubbles support text selection and a copy context menu.
+- **feat(chat): image attachments.** `ChatImageEncoder` in `ChatStore`, `BrainClient.sendChat` carries `imageJPEG` via `vision_ask`, and chat history persists the image field.
 
 ## [2026.6.9] — 2026-06-08 — HR pipeline correctness + iOS flapping/glasses-audio fixes
 
