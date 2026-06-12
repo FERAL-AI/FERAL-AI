@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import Optional, Any, Callable, Awaitable
 from uuid import uuid4
@@ -147,10 +148,19 @@ class AgentWorker:
 
         tool_calls_made = []
         tool_results = []
+        nudged_for_text = False
 
-        for iteration in range(3):
+        for iteration in range(4):
             try:
-                response = await self._llm.chat(messages=messages, tools=tools if tools else None)
+                # Explicit max_tokens: the provider default is 1024, which
+                # hard-truncates long answers mid-sentence on every surface
+                # that rides the multi-agent path (iOS chat, voice). 4096
+                # matches the single-agent orchestrator's chat budget.
+                response = await self._llm.chat(
+                    messages=messages,
+                    tools=tools if tools else None,
+                    max_tokens=4096,
+                )
                 text_content, tool_calls = self._llm.extract_response(response)
 
                 if tool_calls and self._executor:
@@ -189,13 +199,55 @@ class AgentWorker:
                         tool_calls_made=tool_calls_made,
                         tool_results=tool_results,
                     )
+
+                # Empty body with no tool calls (reasoning-only / refusal
+                # artifacts). Nudge once for a plain-text answer instead of
+                # surfacing "No response generated." to the user.
+                if not nudged_for_text:
+                    nudged_for_text = True
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "(Your previous reply was empty. Respond now with "
+                            "your final answer as plain text.)"
+                        ),
+                    })
+                    continue
                 break
 
             except Exception as e:
                 logger.error(f"Worker {self.worker_id} error: {e}")
                 return WorkerResult(worker_id=self.worker_id, error=str(e))
 
-        return WorkerResult(worker_id=self.worker_id, text="No response generated.", tool_calls_made=tool_calls_made)
+        # Loop exhausted. If tools actually ran, synthesize a grounded
+        # summary from their results rather than dropping the work on the
+        # floor — this is the "did 3 tool rounds, never produced prose" case.
+        if tool_results:
+            try:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "(Summarize the outcome of the actions you just "
+                        "performed for the user, in plain text.)"
+                    ),
+                })
+                response = await self._llm.chat(messages=messages, tools=None, max_tokens=2048)
+                text_content, _ = self._llm.extract_response(response)
+                if text_content:
+                    return WorkerResult(
+                        worker_id=self.worker_id,
+                        text=text_content,
+                        tool_calls_made=tool_calls_made,
+                        tool_results=tool_results,
+                    )
+            except Exception as e:
+                logger.error(f"Worker {self.worker_id} synthesis error: {e}")
+
+        return WorkerResult(
+            worker_id=self.worker_id,
+            text="Something went wrong and I couldn't generate a reply — please try that again.",
+            tool_calls_made=tool_calls_made,
+        )
 
 
 class AgentRouter:
@@ -211,6 +263,18 @@ class AgentRouter:
         "creative": {"keywords": ["play", "music", "song", "spotify", "playlist", "album", "artist", "pause", "skip", "volume", "queue", "podcast", "radio", "calendar", "schedule", "meeting", "event", "reminder"]},
     }
 
+    # Coding / filesystem / desktop-action requests must go to the
+    # `general` worker — it's the ONLY worker whose tool set includes
+    # `computer_use__*` (write_file, bash, open app, browser). The
+    # specialist keyword lists otherwise misfire on these ("build it on
+    # my desktop as an html" → home), and the specialists then refuse
+    # with "my tools only let me control smart home devices".
+    GENERAL_OVERRIDE_RE = re.compile(
+        r"\b(html|css|javascript|python|json|code|coding|script|program|"
+        r"file|files|folder|directory|desktop|terminal|command|shell)\b",
+        re.IGNORECASE,
+    )
+
     def __init__(self, llm=None):
         self._llm = llm
 
@@ -218,6 +282,12 @@ class AgentRouter:
         """
         Returns: {"workers": ["health", "home", ...], "strategy": "single"|"parallel"|"sequential"}
         """
+        # Hard guard BEFORE any classifier: coding/file/desktop work can
+        # only be served by the general worker (full tool set). Routing it
+        # to a specialist guarantees a refusal.
+        if self.GENERAL_OVERRIDE_RE.search(text):
+            return {"workers": ["general"], "strategy": "single"}
+
         if self._llm and self._llm.available:
             try:
                 return await self._route_with_llm(text)
@@ -230,7 +300,13 @@ class AgentRouter:
         text_lower = text.lower()
         scores = {}
         for category, info in self.CATEGORIES.items():
-            score = sum(1 for kw in info["keywords"] if kw in text_lower)
+            # Word-boundary matching — bare substring containment misfired
+            # constantly ("ac" in "exact", "play" in "display", "fan" in
+            # "fantastic") and dragged unrelated requests to specialists.
+            score = sum(
+                1 for kw in info["keywords"]
+                if re.search(rf"\b{re.escape(kw)}\b", text_lower)
+            )
             if score > 0:
                 scores[category] = score
 
@@ -246,8 +322,17 @@ class AgentRouter:
 
     async def _route_with_llm(self, text: str) -> dict:
         prompt = (
-            "Classify the user's intent into one or more categories: health, home, research, creative, general.\n"
-            "If the request spans multiple domains, list all relevant ones.\n"
+            "Route the user's request to the worker(s) whose TOOLS can serve it:\n"
+            "- health: biometrics only (heart rate, SpO2, sleep, fitness, wellness).\n"
+            "- home: smart-home DEVICES only (lights, locks, thermostat, scenes via Home Assistant). "
+            "It has NO file system, NO browser, NO code tools.\n"
+            "- research: web search, news, notes/documents lookup.\n"
+            "- creative: music/media playback, calendar, reminders.\n"
+            "- general: EVERYTHING else — including writing code or files, building HTML/apps, "
+            "opening applications, running commands, anything on the user's computer or desktop, "
+            "and plain conversation. It has the full tool set.\n"
+            "When unsure, choose general — a specialist with the wrong tools must refuse, "
+            "general never has to.\n"
             "Return JSON: {\"workers\": [\"category1\"], \"strategy\": \"single\"} or "
             "{\"workers\": [\"cat1\", \"cat2\"], \"strategy\": \"parallel\"}\n\n"
             f"User: {text}\n\nJSON:"

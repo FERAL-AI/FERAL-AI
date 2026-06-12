@@ -262,6 +262,96 @@ async def test_route_with_llm_strips_markdown_fence():
     assert out["workers"] == ["creative"]
 
 
+# ── AgentRouter general-override + word boundaries ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_router_coding_request_forces_general_before_llm():
+    """'Build it on my desktop as an html' must NEVER reach a specialist —
+    only the general worker has computer_use/file tools. Regression for the
+    iOS 'I'm the FERAL Home Controller, I don't have file system access'
+    refusal."""
+    llm = MagicMock()
+    llm.available = True
+    llm.chat = AsyncMock()
+    r = AgentRouter(llm=llm)
+    out = await r.route("Build it on my desktop as an html and open after you build it")
+    assert out["workers"] == ["general"]
+    assert out["strategy"] == "single"
+    llm.chat.assert_not_awaited()  # hard guard runs before the LLM classifier
+
+
+@pytest.mark.asyncio
+async def test_router_file_and_code_keywords_force_general():
+    r = AgentRouter(llm=None)
+    for text in (
+        "write a python script for me",
+        "save that to a file please",
+        "run this command in the terminal",
+        "make a css animation",
+    ):
+        out = await r.route(text)
+        assert out["workers"] == ["general"], text
+
+
+def test_router_keywords_use_word_boundaries_not_substrings():
+    """'play' in 'display', 'ac' in 'exactly', 'fan' in 'fantastic' must not
+    score — bare substring matching dragged unrelated text to specialists."""
+    r = AgentRouter(llm=None)
+    out = r._route_with_keywords("display exactly that fantastic thing")
+    assert out["workers"] == ["general"]
+
+
+def test_router_keywords_real_words_still_match():
+    r = AgentRouter(llm=None)
+    out = r._route_with_keywords("play a song")
+    assert out["workers"] == ["creative"]
+
+
+# ── AgentWorker empty-response recovery + token budget ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_agent_worker_empty_response_nudges_then_recovers():
+    llm = MagicMock()
+    llm.available = True
+    llm.chat = AsyncMock(return_value={})
+    responses = iter([("", []), ("recovered answer", [])])
+    llm.extract_response = MagicMock(side_effect=lambda _r: next(responses))
+
+    w = AgentWorker("gen", "G", "SYS", [], llm=llm)
+    r = await w.run("s1", "hello")
+    assert r.text == "recovered answer"
+    assert llm.chat.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_worker_never_surfaces_no_response_generated():
+    llm = MagicMock()
+    llm.available = True
+    llm.chat = AsyncMock(return_value={})
+    llm.extract_response = MagicMock(return_value=("", []))
+
+    w = AgentWorker("gen", "G", "SYS", [], llm=llm)
+    r = await w.run("s1", "hello")
+    assert "No response generated" not in r.text
+    assert r.text  # friendly, non-empty fallback
+
+
+@pytest.mark.asyncio
+async def test_agent_worker_chat_uses_expanded_token_budget():
+    """The provider default (1024) hard-truncated long answers mid-sentence
+    on the multi-agent path. Workers must request an explicit larger budget."""
+    llm = MagicMock()
+    llm.available = True
+    llm.chat = AsyncMock(return_value={})
+    llm.extract_response = MagicMock(return_value=("ok", []))
+
+    w = AgentWorker("gen", "G", "SYS", [], llm=llm)
+    await w.run("s1", "long question")
+    assert llm.chat.call_args.kwargs.get("max_tokens", 0) >= 4096
+
+
 # ── ResponseMerger ──────────────────────────────────────────────────────────
 
 
