@@ -749,7 +749,7 @@ class Orchestrator:
         if self.memory:
             self.memory.working_push(
                 session_id,
-                {"role": "assistant", "text": summary[:300]},
+                {"role": "assistant", "text": summary},
             )
         return {
             "status": "approved",
@@ -1623,10 +1623,17 @@ class Orchestrator:
                     if response_text:
                         await self._try_send_sdui(session_id, response_text)
                         if self.memory:
-                            self.memory.working_push(session_id, {"role": "assistant", "text": response_text[:300]})
+                            # Full text, not [:300] — the phone's chat_response
+                            # falls back to working memory and must not get a
+                            # truncated stub (working_context_string slices to
+                            # [:200] itself, so prompt size is unaffected).
+                            self.memory.working_push(session_id, {"role": "assistant", "text": response_text})
                         if self.learner:
                             asyncio.ensure_future(self.learner.on_message(session_id, "user", text))
-                        return
+                        # Return the full final text so callers (api/server.py
+                        # chat_request handler) can carry it in chat_response
+                        # instead of relying on the working-memory fallback.
+                        return response_text
                 except Exception as e:
                     logger.warning(f"Multi-agent failed, falling back to single-agent: {e}")
 
@@ -1770,6 +1777,7 @@ class Orchestrator:
         route_ref = self._route_for_tier(current_tier)
 
         sent_response = False
+        final_response_text = ""
         for _ in range(max_iterations):
             effective_system_prompt = system_prompt
             if pending_retry_addition:
@@ -1999,11 +2007,12 @@ class Orchestrator:
                     self._mitosis_engine.observe_interaction(session_id, text, tools_used)
             elif text_content:
                 if self.memory:
-                    self.memory.working_push(session_id, {"role": "assistant", "text": text_content[:300]})
+                    self.memory.working_push(session_id, {"role": "assistant", "text": text_content})
                     await self._emit_brain_event(session_id, "memory_write", {"type": "episodic"})
 
                 await self._send_text(session_id, text_content)
                 sent_response = True
+                final_response_text = text_content
                 break
             else:
                 break
@@ -2024,6 +2033,11 @@ class Orchestrator:
         # ``turns_threshold`` since its last compaction (async, no
         # block).
         self._maybe_auto_compact(session_id)
+
+        # Return the final assistant text so synchronous callers
+        # (phone chat_request → chat_response) get the FULL reply
+        # rather than reconstructing it from working memory.
+        return final_response_text or None
 
     async def handle_command_stream(self, session_id: str, text: str, context: Optional[dict] = None):
         """Streaming variant of handle_command with a per-session lock."""
@@ -2090,15 +2104,17 @@ class Orchestrator:
                 if response_text:
                     await self._try_send_sdui(session_id, response_text)
                     if self.memory:
+                        # Full text (no [:300]) — see the non-stream
+                        # multi-agent branch for rationale.
                         self.memory.working_push(
                             session_id,
-                            {"role": "assistant", "text": response_text[:300]},
+                            {"role": "assistant", "text": response_text},
                         )
                     if self.learner:
                         asyncio.ensure_future(
                             self.learner.on_message(session_id, "user", text)
                         )
-                    return
+                    return response_text
             except Exception as e:
                 logger.warning(
                     f"Multi-agent (stream) failed, falling back to single-agent: {e}"
@@ -2492,7 +2508,7 @@ class Orchestrator:
             if accumulated_text:
                 got_final_text = True
                 if self.memory:
-                    self.memory.working_push(session_id, {"role": "assistant", "text": accumulated_text[:300]})
+                    self.memory.working_push(session_id, {"role": "assistant", "text": accumulated_text})
                     await self._emit_brain_event(session_id, "memory_write", {"type": "episodic"})
                 break
 
@@ -2515,6 +2531,10 @@ class Orchestrator:
         # the non-stream `_handle_command_impl` epilogue.
         self._maybe_snapshot_primary(session_id)
         self._maybe_auto_compact(session_id)
+
+        # Symmetric with `_handle_command_impl`: hand the full final
+        # text back to synchronous callers (phone chat_request).
+        return accumulated_text if got_final_text else None
 
     # ─────────────────────────────────────────────
     # Proactive Agent Loop
