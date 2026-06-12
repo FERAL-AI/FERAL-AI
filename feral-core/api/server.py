@@ -2780,6 +2780,21 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     "temperature", "accelerometer", "gesture",
                 }:
                     _handle_biometric_device_event(node_id, ev_type, de_payload)
+                elif ev_type in {"robot_telemetry", "robot_event"}:
+                    # CuteBot bridge node feedback (HUP §6.2). Thin path:
+                    # normalize payload → perception.update_sensors(robot=…).
+                    _robot_payload = _unwrap_hup_frame(de_payload)
+                    _robot_sensors = {
+                        "mode": str(_robot_payload.get("mode") or ""),
+                        "state": str(_robot_payload.get("state") or ""),
+                        "sonar_cm": float(_robot_payload.get("sonar_cm") or 0.0),
+                        "online": True,
+                        "battery": bool(_robot_payload.get("battery", False)),
+                    }
+                    for sid in state.get_sessions_for_daemon(node_id):
+                        state.perception.update_sensors(
+                            sid, {"robot": _robot_sensors},
+                        )
                 elif ev_type.endswith("_status"):
                     # Sub-device status frames (e.g. ``glasses_status``,
                     # future ``apple_health_status`` /

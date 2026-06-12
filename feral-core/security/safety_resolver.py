@@ -93,6 +93,33 @@ _LEGACY_READ_ONLY_TOKENS = (
 )
 
 
+def _cutebot_drive_speed_deny(tool_name: str, args: dict) -> Optional[PolicyDecision]:
+    """Deny dangerous CuteBot wheel speeds before manifest metadata wins.
+
+    Mirrors the legacy ``robot_move`` speed cap (``safety_resolver`` lines
+    103–104) but applies to ``cutebot__drive`` left/right parameters.
+    """
+    if tool_name != "cutebot__drive":
+        return None
+    try:
+        left = abs(int((args or {}).get("left", 0) or 0))
+        right = abs(int((args or {}).get("right", 0) or 0))
+    except (TypeError, ValueError):
+        left = right = 0
+    if left > 80 or right > 80:
+        return PolicyDecision(
+            tool_name=tool_name,
+            surface="",
+            level=LEVEL_DENY,
+            sources={"cutebot_speed_limit": True},
+            deny_reason=(
+                f"CuteBot wheel speed exceeds safe limit (max 80): "
+                f"left={left}, right={right}"
+            ),
+        )
+    return None
+
+
 def _legacy_substring_level(tool_name: str, args: dict) -> tuple[str, str]:
     """Return ``(level, source_label)`` from the legacy heuristic so the
     resolver can fall back transparently when nothing more authoritative
@@ -206,6 +233,11 @@ def resolve_policy(
             sources={"surface_deny": True},
             deny_reason=f"Tool '{tool_name}' is denied on surface '{surface}'.",
         )
+
+    speed_deny = _cutebot_drive_speed_deny(tool_name, args)
+    if speed_deny is not None:
+        speed_deny.surface = surface
+        return speed_deny
 
     endpoint = _find_endpoint(tool_name, registry)
     manifest_level = _safety_from_manifest(endpoint)

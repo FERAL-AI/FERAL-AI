@@ -84,7 +84,8 @@ class SandboxPolicy:
             "hardware": {
                 "sensors": {
                     "allowed": ["heart_rate", "spo2", "temperature", "uv", "steps",
-                                "accelerometer", "gyroscope", "ambient_light", "gps"],
+                                "accelerometer", "gyroscope", "ambient_light", "gps",
+                                "telemetry"],
                     "blocked": [],
                     "max_read_rate_per_second": {
                         "heart_rate": 1,

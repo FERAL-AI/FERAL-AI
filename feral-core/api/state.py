@@ -376,6 +376,7 @@ class BrainState:
         self.gemini_proxy: Optional[GeminiRealtimeProxy] = None
         self.gateway_registry: Optional[MethodRegistry] = None
         self.hardware_mesh: Optional[HardwareMesh] = None
+        self.hardware_orchestrator = None
         self.identity_workspace: Optional[IdentityWorkspace] = None
         self.genui_engine: Optional[GenUIEngine] = None
         self.service_providers: Optional[ServiceProviderRegistry] = None
@@ -1457,6 +1458,40 @@ class BrainState:
                 # and the boot report already surfaces the underlying
                 # failure if memory isn't ready yet.
                 pass
+
+        with boot_subsystem(self._boot_report, "BrainLocalDevices"):
+            import asyncio
+            from hardware.command_contract import CommandLedger
+            from hardware.discovery import discover_brain_local_devices
+            from hardware.orchestrator import HardwareOrchestrator
+
+            self.hardware_orchestrator = HardwareOrchestrator(
+                registry=self.device_registry,
+                ledger=CommandLedger(),
+                perception=self.perception,
+            )
+            self._brain_local_devices: list = []
+            for adapter in discover_brain_local_devices():
+                try:
+                    self.device_registry.register_device(adapter.manifest, adapter)
+                    if await adapter.connect():
+                        self._brain_local_devices.append(adapter)
+                        self.register_background_task(
+                            asyncio.create_task(
+                                adapter.start_telemetry_loop(
+                                    self.perception,
+                                    lambda: list(self.sessions.keys()),
+                                    memory=self.memory,
+                                ),
+                                name=f"feral-cutebot-telemetry-{adapter.device_id}",
+                            )
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Brain-local device %s failed to connect: %s",
+                        getattr(adapter, "device_id", "?"),
+                        exc,
+                    )
 
         with boot_subsystem(self._boot_report, "MockRoomba"):
             # Closes THESIS_SCENARIOS S5 on demo machines without HA.

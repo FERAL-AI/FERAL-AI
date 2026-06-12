@@ -199,13 +199,31 @@ class DeviceRegistry:
             )
 
         start = time.time()
+        duration_ms = 0
         try:
             result_data = await adapter.execute(action)
-            result = HUPResult(
-                action_id=action.action_id, device_id=action.device_id,
-                status="success", data=result_data,
-                duration_ms=int((time.time() - start) * 1000),
-            )
+            duration_ms = int((time.time() - start) * 1000)
+            if isinstance(result_data, HUPResult):
+                result = result_data
+                if not result.action_id:
+                    result.action_id = action.action_id
+                if not result.device_id:
+                    result.device_id = action.device_id
+                if not result.duration_ms:
+                    result.duration_ms = duration_ms
+            elif isinstance(result_data, dict):
+                result = HUPResult(
+                    action_id=action.action_id, device_id=action.device_id,
+                    status="success", data=result_data,
+                    duration_ms=duration_ms,
+                )
+            else:
+                result = HUPResult(
+                    action_id=action.action_id, device_id=action.device_id,
+                    status="failure",
+                    error=f"Unexpected adapter return type: {type(result_data).__name__}",
+                    duration_ms=duration_ms,
+                )
         except Exception as e:
             result = HUPResult(
                 action_id=action.action_id, device_id=action.device_id,

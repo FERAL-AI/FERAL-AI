@@ -134,6 +134,11 @@ try:
 except ImportError:
     pass
 
+try:
+    import skills.impl.cutebot_skill
+except ImportError:
+    pass
+
 
 # robot_action uses WS_EXECUTE method — handled natively by SkillExecutor via daemon WebSocket
 # The RobotActionSkill bridge in robot_action.py is available for direct HUP use if needed

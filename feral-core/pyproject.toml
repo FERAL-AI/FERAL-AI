@@ -51,6 +51,8 @@ dependencies = [
     "openai>=1.50.0",
     "PyJWT>=2.8.0",
     "prometheus-client>=0.20",
+    # Brain-local CuteBot USB serial (micro:bit @ 115200).
+    "pyserial>=3.5",
     # v2026.5.33 Option C: MemoryStore is async-native. aiosqlite is the
     # async wrapper around the stdlib sqlite3 driver — it runs SQLite
     # calls on a single dedicated thread per connection so the asyncio

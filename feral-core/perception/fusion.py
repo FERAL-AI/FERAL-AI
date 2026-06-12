@@ -34,6 +34,11 @@ logger = logging.getLogger("feral.perception")
 # so the model never quotes a stale Apple HealthKit value as live.
 _CONTEXT_FRESH_S = 120.0
 
+# Robot telemetry (CuteBot) uses a tighter freshness window than vitals:
+# autonomous mode / sonar readings go stale quickly when the agent is
+# deciding whether to nudge, halt, or ask the user to reposition.
+_ROBOT_CONTEXT_FRESH_S = 15.0
+
 
 # Live-wearable sources are preferred over Apple HealthKit when both
 # are emitting samples. Operator report 2026-06-05 demo prep: the
@@ -177,6 +182,14 @@ class PerceptionFrame:
     # Device
     connected_nodes: list[str] = field(default_factory=list)
 
+    # Robot (CuteBot) — optional block populated via sensors["robot"].
+    robot_online: bool = False
+    robot_mode: str = ""
+    robot_state: str = ""
+    robot_sonar_cm: float = 0.0
+    robot_battery: bool = False
+    robot_ts: float = 0.0
+
     def to_system_context(self) -> str:
         """
         Serialize into a compact LLM-injectable context block.
@@ -279,6 +292,27 @@ class PerceptionFrame:
         # Nodes
         if self.connected_nodes:
             sections.append(f"Connected nodes: {', '.join(self.connected_nodes)}")
+
+        # Robot — only when online and recently updated (CuteBot feedback loop).
+        robot_ts = float(getattr(self, "robot_ts", 0.0) or 0.0)
+        if self.robot_online and robot_ts > 0:
+            robot_age = now - robot_ts
+            if robot_age <= _ROBOT_CONTEXT_FRESH_S:
+                mode = self.robot_mode or "unknown"
+                state = self.robot_state or "unknown"
+                if state == "gave_up":
+                    state = "gave_up (needs repositioning on track)"
+                sonar_val = self.robot_sonar_cm
+                sonar_str = (
+                    str(int(sonar_val))
+                    if sonar_val == int(sonar_val)
+                    else str(round(sonar_val, 1))
+                )
+                battery_label = "ok" if self.robot_battery else "low"
+                sections.append(
+                    f"Robot (CuteBot): mode={mode} state={state} "
+                    f"sonar={sonar_str}cm battery={battery_label}"
+                )
 
         return "\n".join(sections) if sections else "No sensor data available."
 
@@ -485,6 +519,21 @@ class PerceptionEngine:
         gps = sensors.get("gps")
         if gps:
             frame.location = gps
+
+        # Robot (CuteBot) — isolated branch; does not touch HR/SpO2 logic.
+        robot = sensors.get("robot")
+        if isinstance(robot, dict) and robot:
+            if "online" in robot:
+                frame.robot_online = bool(robot["online"])
+            if "mode" in robot:
+                frame.robot_mode = str(robot.get("mode") or "")
+            if "state" in robot:
+                frame.robot_state = str(robot.get("state") or "")
+            if "sonar_cm" in robot:
+                frame.robot_sonar_cm = float(robot.get("sonar_cm") or 0.0)
+            if "battery" in robot:
+                frame.robot_battery = bool(robot["battery"])
+            frame.robot_ts = time.time()
 
     def update_vision(self, session_id: str, vision_buffer: "VisionBuffer", node_id: str):
         """Update vision data from the latest frame in the buffer."""

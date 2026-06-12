@@ -124,7 +124,14 @@ async def execute_hardware_action(body: dict):
         timeout_ms=body.get("timeout_ms", 5000),
     )
 
-    if state.policy and not state.policy.can_read_sensor(action.capability_id.replace("read_", "")):
+    # The sensor allowlist only applies to read capabilities; actuator
+    # capabilities (halt, drive, ...) are governed by the device registry's
+    # permission tiers, not the sensor policy.
+    if (
+        state.policy
+        and action.capability_id.startswith("read_")
+        and not state.policy.can_read_sensor(action.capability_id.replace("read_", ""))
+    ):
         return {"error": "Blocked by sandbox policy"}
 
     result = await state.device_registry.execute_action(action)
