@@ -98,6 +98,11 @@ class HUPAction(BaseModel):
     timeout_ms: int = 5000
     priority: int = 0  # 0=normal, 1=high, 2=critical
     requires_confirmation: bool = False
+    # Set by callers whose own safety layer (ToolRunner approval, operator
+    # REST) has already obtained confirmation. Without this flag a
+    # requires_confirmation capability dead-ends in pending_confirmation
+    # with no resume path.
+    confirmed: bool = False
     safety_context: str = ""
     timestamp: float = Field(default_factory=time.time)
 
@@ -184,7 +189,7 @@ class DeviceRegistry:
                 status="failure", error=f"Capability not found: {action.capability_id}"
             )
 
-        if cap.requires_confirmation or action.requires_confirmation:
+        if (cap.requires_confirmation or action.requires_confirmation) and not action.confirmed:
             return HUPResult(
                 action_id=action.action_id, device_id=action.device_id,
                 status="pending_confirmation",
@@ -241,7 +246,13 @@ class DeviceRegistry:
         if not self._devices:
             return "No hardware devices connected."
 
-        lines = ["Connected hardware devices:"]
+        lines = [
+            "Connected hardware devices:",
+            "(Closed-loop rule: actuator results include a 'verified' flag "
+            "read back from device telemetry. Only claim an action worked "
+            "if verified=true; otherwise diagnose and retry or report the "
+            "failure honestly.)",
+        ]
         for device in self._devices.values():
             lines.append(f"\n[{device.name}] ({device.device_type}, {device.connection_type})")
             if device.location:

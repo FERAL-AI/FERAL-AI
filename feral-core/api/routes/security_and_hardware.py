@@ -122,6 +122,7 @@ async def execute_hardware_action(body: dict):
         action_type=HUPActionType(body.get("action_type", "execute")),
         parameters=body.get("parameters", {}),
         timeout_ms=body.get("timeout_ms", 5000),
+        confirmed=bool(body.get("confirmed", False)),
     )
 
     # The sensor allowlist only applies to read capabilities; actuator
