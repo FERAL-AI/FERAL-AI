@@ -12,7 +12,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hardware.protocol import HUPAction, HUPActionType, HUPResult  # noqa: E402
+from hardware.protocol import (  # noqa: E402
+    DeviceCapability,
+    DeviceManifest,
+    DeviceRegistry,
+    HUPAction,
+    HUPActionType,
+    HUPResult,
+)
 from security.safety_resolver import (  # noqa: E402
     LEVEL_AUTO,
     LEVEL_CONFIRM,
@@ -44,11 +51,38 @@ ENDPOINT_TO_CAPABILITY = {
     "status": ("read_telemetry", HUPActionType.READ),
 }
 
+# Mode telemetry that makes closed-loop verification pass for each endpoint.
+_GOOD_MODE = {
+    "follow_line": "line_follow",
+    "explore": "explore",
+    "drive": "stopped",  # transient — firmware reverts after 1.5s
+    "halt": "stopped",
+}
+
+
+def _telemetry(mode: str, *, online: bool = True) -> dict:
+    return {
+        "online": online,
+        "mode": mode,
+        "state": "ok" if online else "",
+        "sonar_cm": 25.0,
+        "line_left": False,
+        "line_right": False,
+        "battery": online,
+    }
+
 
 class _MockDeviceRegistry:
-    def __init__(self, *, connected: bool = True):
+    """Fake DeviceRegistry: acks every command, serves scripted telemetry.
+
+    ``telemetry_sequence`` is consumed one snapshot per read_telemetry call;
+    the last snapshot repeats once the script runs out.
+    """
+
+    def __init__(self, *, connected: bool = True, telemetry_sequence: list[dict] | None = None):
         self.connected = connected
         self.calls: list[HUPAction] = []
+        self.telemetry_sequence = list(telemetry_sequence or [_telemetry("stopped")])
 
     def get_device(self, device_id: str):
         if self.connected and device_id == DEVICE_ID:
@@ -57,12 +91,32 @@ class _MockDeviceRegistry:
 
     async def execute_action(self, action: HUPAction) -> HUPResult:
         self.calls.append(action)
+        if action.capability_id == "read_telemetry":
+            snap = self.telemetry_sequence[0]
+            if len(self.telemetry_sequence) > 1:
+                self.telemetry_sequence.pop(0)
+            return HUPResult(
+                action_id=action.action_id,
+                device_id=action.device_id,
+                status="success",
+                data=dict(snap),
+            )
         return HUPResult(
             action_id=action.action_id,
             device_id=action.device_id,
             status="success",
             data={"ok": True, "capability": action.capability_id},
         )
+
+    def commands_sent(self, capability_id: str) -> list[HUPAction]:
+        return [c for c in self.calls if c.capability_id == capability_id]
+
+
+def _make_skill(registry) -> CuteBotSkill:
+    skill = CuteBotSkill()
+    skill.set_device_registry(registry)
+    skill.verify_delay_s = 0  # no real waiting in unit tests
+    return skill
 
 
 @pytest.fixture
@@ -80,32 +134,49 @@ def test_cutebot_manifest_loads_and_exposes_five_tools(cutebot_registry: SkillRe
     assert len(tools) == 5
 
 
+def test_cutebot_manifest_instructs_verified_execution(cutebot_registry: SkillRegistry):
+    """The LLM-facing descriptions must teach the closed-loop contract."""
+    skill = cutebot_registry.skills["cutebot"]
+    assert "verified=true" in skill.description
+    for ep_id in ("follow_line", "explore"):
+        ep = next(e for e in skill.endpoints if e.id == ep_id)
+        assert "verified" in ep.description.lower()
+
+
 @pytest.mark.parametrize("endpoint_id", list(ENDPOINT_TO_CAPABILITY.keys()))
 @pytest.mark.asyncio
 async def test_impl_maps_endpoint_to_capability(endpoint_id: str):
     capability_id, action_type = ENDPOINT_TO_CAPABILITY[endpoint_id]
-    registry = _MockDeviceRegistry(connected=True)
-    skill = CuteBotSkill()
-    skill.set_device_registry(registry)
+    good_mode = _GOOD_MODE.get(endpoint_id, "stopped")
+    registry = _MockDeviceRegistry(
+        connected=True, telemetry_sequence=[_telemetry(good_mode)]
+    )
+    skill = _make_skill(registry)
 
     args = {"left": 30, "right": 30} if endpoint_id == "drive" else {}
     result = await skill.execute(endpoint_id, args, {})
 
     assert result["success"] is True
-    assert len(registry.calls) == 1
-    action = registry.calls[0]
+    sent = registry.commands_sent(capability_id)
+    assert len(sent) >= 1
+    action = sent[0]
     assert action.device_id == DEVICE_ID
     assert action.capability_id == capability_id
     assert action.action_type == action_type
+    # Pin the confirmation-gate fix: the skill must pre-confirm its actions
+    # (ToolRunner already enforced the approval tier upstream).
+    assert action.confirmed is True
     if endpoint_id == "drive":
         assert action.parameters == {"left": 30, "right": 30}
+    if endpoint_id == "status":
+        # Pure read — exactly one wire call, no verification round-trip.
+        assert len(registry.calls) == 1
 
 
 @pytest.mark.asyncio
 async def test_impl_unplugged_device_returns_clear_error():
     registry = _MockDeviceRegistry(connected=False)
-    skill = CuteBotSkill()
-    skill.set_device_registry(registry)
+    skill = _make_skill(registry)
 
     result = await skill.execute("follow_line", {}, {})
     assert result["success"] is False
@@ -115,13 +186,231 @@ async def test_impl_unplugged_device_returns_clear_error():
 
 @pytest.mark.asyncio
 async def test_impl_halt_attempts_even_when_unplugged():
-    registry = _MockDeviceRegistry(connected=False)
-    skill = CuteBotSkill()
-    skill.set_device_registry(registry)
+    registry = _MockDeviceRegistry(
+        connected=False, telemetry_sequence=[_telemetry("", online=False)]
+    )
+    skill = _make_skill(registry)
 
-    await skill.execute("halt", {}, {})
-    assert len(registry.calls) == 1
-    assert registry.calls[0].capability_id == "halt"
+    result = await skill.execute("halt", {}, {})
+    halts = registry.commands_sent("halt")
+    assert len(halts) == 1
+    # Offline robot: halt stays a no-op success, but it is honestly unverified.
+    assert result["success"] is True
+    assert result["data"]["verified"] is False
+
+
+# ── Closed-loop verification ─────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_explore_verification_pass_includes_verified_telemetry():
+    registry = _MockDeviceRegistry(telemetry_sequence=[_telemetry("explore")])
+    skill = _make_skill(registry)
+
+    result = await skill.execute("explore", {}, {})
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["verified"] is True
+    assert data["mode"] == "explore"
+    assert data["telemetry"]["online"] is True
+    assert data["retried"] is False
+    # One command + one telemetry read — no retry needed.
+    assert len(registry.commands_sent("explore")) == 1
+    assert len(registry.commands_sent("read_telemetry")) == 1
+
+
+@pytest.mark.asyncio
+async def test_follow_line_verification_pass():
+    registry = _MockDeviceRegistry(telemetry_sequence=[_telemetry("line_follow")])
+    skill = _make_skill(registry)
+
+    result = await skill.execute("follow_line", {}, {})
+    assert result["success"] is True
+    assert result["data"]["verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_explore_verification_fail_retries_once_then_fails_loudly():
+    # Robot acks but stays stopped through both verification reads.
+    registry = _MockDeviceRegistry(
+        telemetry_sequence=[_telemetry("stopped"), _telemetry("stopped")]
+    )
+    skill = _make_skill(registry)
+
+    result = await skill.execute("explore", {}, {})
+
+    assert result["success"] is False
+    # Exactly one retry: two explore commands on the wire, two telemetry reads.
+    assert len(registry.commands_sent("explore")) == 2
+    assert len(registry.commands_sent("read_telemetry")) == 2
+    error = result["error"]
+    assert "did not enter explore mode" in error
+    assert "stopped" in error
+    # The multi-agent path forwards only `data` to the LLM, so failure facts
+    # must be embedded there too.
+    data = result["data"]
+    assert data["verified"] is False
+    assert data["observed_mode"] == "stopped"
+    assert data["error"] == error
+
+
+@pytest.mark.asyncio
+async def test_explore_verification_retry_recovers():
+    # First read shows stopped (command didn't take), retry nudge works.
+    registry = _MockDeviceRegistry(
+        telemetry_sequence=[_telemetry("stopped"), _telemetry("explore")]
+    )
+    skill = _make_skill(registry)
+
+    result = await skill.execute("explore", {}, {})
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["verified"] is True
+    assert data["retried"] is True
+    assert len(registry.commands_sent("explore")) == 2
+
+
+@pytest.mark.asyncio
+async def test_drive_transient_reports_post_state_without_failing():
+    # Firmware auto-reverts drive after 1.5s — "stopped" afterwards is normal.
+    registry = _MockDeviceRegistry(telemetry_sequence=[_telemetry("stopped")])
+    skill = _make_skill(registry)
+
+    result = await skill.execute("drive", {"left": 30, "right": 30}, {})
+
+    assert result["success"] is True
+    data = result["data"]
+    assert data["verified"] is True
+    assert data["transient"] is True
+    assert data["telemetry"]["mode"] == "stopped"
+    # Transient command: never retried.
+    assert len(registry.commands_sent("drive")) == 1
+
+
+@pytest.mark.asyncio
+async def test_halt_verification_pass():
+    registry = _MockDeviceRegistry(telemetry_sequence=[_telemetry("stopped")])
+    skill = _make_skill(registry)
+
+    result = await skill.execute("halt", {}, {})
+
+    assert result["success"] is True
+    assert result["data"]["verified"] is True
+    # Halt is single-check: one halt command, one telemetry read, no retry.
+    assert len(registry.commands_sent("halt")) == 1
+    assert len(registry.commands_sent("read_telemetry")) == 1
+
+
+@pytest.mark.asyncio
+async def test_halt_failure_is_never_masked():
+    # Robot acks halt but telemetry shows it is still exploring.
+    registry = _MockDeviceRegistry(telemetry_sequence=[_telemetry("explore")])
+    skill = _make_skill(registry)
+
+    result = await skill.execute("halt", {}, {})
+
+    assert result["success"] is False
+    assert "STILL IN MODE" in result["error"]
+    assert result["data"]["verified"] is False
+    assert result["data"]["observed_mode"] == "explore"
+    # Single check — halt is not blindly re-issued by the skill (the LLM
+    # decides, with the error text telling it to re-issue immediately).
+    assert len(registry.commands_sent("halt")) == 1
+
+
+# ── Confirmation-gate regression (end-to-end through a real registry) ───────
+
+
+class _FakeMotionAdapter:
+    """Real-DeviceRegistry adapter: acks motion, reports matching telemetry."""
+
+    def __init__(self):
+        self.executed: list[HUPAction] = []
+        self.mode = "stopped"
+
+    async def execute(self, action: HUPAction) -> HUPResult:
+        self.executed.append(action)
+        if action.capability_id == "read_telemetry":
+            return HUPResult(
+                action_id=action.action_id,
+                device_id=action.device_id,
+                status="success",
+                data=_telemetry(self.mode),
+            )
+        if action.capability_id == "explore":
+            self.mode = "explore"
+        return HUPResult(
+            action_id=action.action_id,
+            device_id=action.device_id,
+            status="success",
+            data={"ok": True, "command": action.capability_id},
+        )
+
+
+def _real_registry_with_confirmation_gate() -> tuple[DeviceRegistry, _FakeMotionAdapter]:
+    registry = DeviceRegistry()
+    adapter = _FakeMotionAdapter()
+    manifest = DeviceManifest(
+        device_id=DEVICE_ID,
+        device_type="robot",
+        name="QtBot (CuteBot)",
+        connection_type="serial",
+        capabilities=[
+            DeviceCapability(
+                id="explore",
+                name="Explore Table",
+                description="Roam",
+                category="actuator",
+                permission_tier="active",
+                requires_confirmation=True,
+            ),
+            DeviceCapability(
+                id="read_telemetry",
+                name="Read Telemetry",
+                description="Snapshot",
+                category="sensor",
+                permission_tier="passive",
+            ),
+        ],
+    )
+    registry.register_device(manifest, adapter)
+    return registry, adapter
+
+
+@pytest.mark.asyncio
+async def test_confirmed_flag_executes_motion_through_real_registry():
+    """requires_confirmation=True must NOT dead-end when the skill calls it:
+    the skill pre-confirms (ToolRunner already gated) and the registry honors
+    action.confirmed. Regression for the silent pending_confirmation bug."""
+    registry, adapter = _real_registry_with_confirmation_gate()
+    skill = _make_skill(registry)
+
+    result = await skill.execute("explore", {}, {})
+
+    assert result["success"] is True
+    assert result["data"]["verified"] is True
+    assert any(a.capability_id == "explore" for a in adapter.executed)
+
+
+@pytest.mark.asyncio
+async def test_registry_gate_still_blocks_unconfirmed_actions():
+    """The fix must not weaken the gate for callers that do NOT confirm."""
+    registry, adapter = _real_registry_with_confirmation_gate()
+
+    action = HUPAction(
+        device_id=DEVICE_ID,
+        capability_id="explore",
+        action_type=HUPActionType.EXECUTE,
+    )
+    result = await registry.execute_action(action)
+
+    assert result.status == "pending_confirmation"
+    assert adapter.executed == []
+
+
+# ── Safety policy tiers ──────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
