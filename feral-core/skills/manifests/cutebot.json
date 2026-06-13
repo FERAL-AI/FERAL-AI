@@ -9,7 +9,7 @@
     "logo_url": "https://img.icons8.com/ios-filled/50/22C55E/robot-2.png",
     "icon_set": "sf_symbols"
   },
-  "description": "Control the QtBot/CuteBot desk robot (Elecfreaks Smart Cutebot on micro:bit V2) over USB. Use for line-following on the black-on-white track, table exploration with built-in edge and obstacle reflexes, emergency stop, manual wheel drive, and telemetry reads.",
+  "description": "Control the QtBot/CuteBot desk robot (Elecfreaks Smart Cutebot on micro:bit V2) over USB. Use for line-following on the black-on-white track, table exploration with built-in edge and obstacle reflexes, emergency stop, manual wheel drive, and telemetry reads. Motion commands are CLOSED-LOOP: every result includes 'verified' (read back from robot telemetry). NEVER tell the user a motion command worked unless verified=true. If verified=false, call cutebot__status to diagnose, retry once if it makes sense, and otherwise report the concrete blocker (battery switch, robot lifted, USB link) honestly.",
   "trigger_phrases": [
     "start line following",
     "follow the line",
@@ -34,9 +34,9 @@
       "id": "follow_line",
       "method": "PYTHON",
       "url": "python://cutebot/follow_line",
-      "description": "Start autonomous line following on the QtBot/CuteBot desk robot. The robot follows a black line on a white track; firmware handles obstacle reflexes. Requires user confirmation before motion starts.",
+      "description": "Start autonomous line following on the QtBot/CuteBot desk robot. The robot follows a black line on a white track; firmware handles obstacle reflexes. Requires user confirmation before motion starts. The result is VERIFIED against robot telemetry: only claim line-following started if verified=true. If verified=false the robot did NOT start — use the error text and cutebot__status to diagnose, then report the real blocker.",
       "params": [],
-      "returns_description": "{ok, command, mode}",
+      "returns_description": "{ok, command, verified, mode, telemetry}",
       "ui_hint": "card",
       "safety_tier": "confirm",
       "requires_user_approval": true
@@ -45,9 +45,9 @@
       "id": "explore",
       "method": "PYTHON",
       "url": "python://cutebot/explore",
-      "description": "Start table exploration on the QtBot/CuteBot desk robot. The robot roams an open surface with built-in edge detection and obstacle avoidance reflexes. Requires user confirmation before motion starts.",
+      "description": "Start table exploration on the QtBot/CuteBot desk robot. The robot roams an open surface with built-in edge detection and obstacle avoidance reflexes. Requires user confirmation before motion starts. The result is VERIFIED against robot telemetry: only claim exploration started if verified=true. If verified=false the robot did NOT start — use the error text and cutebot__status to diagnose, then report the real blocker.",
       "params": [],
-      "returns_description": "{ok, command, mode}",
+      "returns_description": "{ok, command, verified, mode, telemetry}",
       "ui_hint": "card",
       "safety_tier": "confirm",
       "requires_user_approval": true
@@ -56,7 +56,7 @@
       "id": "drive",
       "method": "PYTHON",
       "url": "python://cutebot/drive",
-      "description": "Manually drive the QtBot/CuteBot desk robot wheels. Set left and right motor speeds from -100 to 100 (negative = reverse). Dangerous — requires confirmation; speeds above 80 are denied. Firmware auto-reverts to autonomous mode after 1.5s without drive commands.",
+      "description": "Manually drive the QtBot/CuteBot desk robot wheels. Set left and right motor speeds from -100 to 100 (negative = reverse). Dangerous — requires confirmation; speeds above 80 are denied. Firmware auto-reverts to autonomous mode after 1.5s without drive commands, so drive is a transient pulse: the result reports post-action telemetry and a 'stopped' state afterwards is normal, not a failure.",
       "params": [
         {
           "name": "left",
@@ -71,7 +71,7 @@
           "description": "Right wheel speed from -100 to 100."
         }
       ],
-      "returns_description": "{ok, command, left, right}",
+      "returns_description": "{ok, command, left, right, verified, transient, telemetry}",
       "ui_hint": "card",
       "safety_tier": "confirm",
       "requires_user_approval": true
@@ -80,9 +80,9 @@
       "id": "halt",
       "method": "PYTHON",
       "url": "python://cutebot/halt",
-      "description": "Emergency stop for the QtBot/CuteBot desk robot. Stops motors immediately and keeps them stopped. Always allowed without approval — use when the user says stop or when a behavior must be cancelled.",
+      "description": "Emergency stop for the QtBot/CuteBot desk robot. Stops motors immediately and keeps them stopped. Always allowed without approval — use when the user says stop or when a behavior must be cancelled. The result is VERIFIED against telemetry; if it ever reports failure the robot may STILL BE MOVING — re-issue halt and warn the user immediately.",
       "params": [],
-      "returns_description": "{ok, command}",
+      "returns_description": "{ok, command, verified, observed_mode, telemetry}",
       "ui_hint": "card",
       "safety_tier": "safe"
     },
