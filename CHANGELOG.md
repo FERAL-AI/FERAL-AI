@@ -1,10 +1,21 @@
 # Changelog
 
-<!-- feral-version: 2026.6.10 -->
+<!-- feral-version: 2026.6.11 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.11] — 2026-06-13 — robot motion actually executes + unlimited tool-iteration budget
+
+Patch release. Follow-up to v2026.6.10 that closes the silent confirmation dead-end blocking all CuteBot motion, adds a closed-loop verify-and-retry so the brain reports reality, and replaces the old fixed tool-iteration caps with an unlimited-by-default budget.
+
+### Brain (feral-core)
+
+- **fix(hardware): honor the `confirmed` flag so robot motion commands actually execute.** `HUPAction` gains a `confirmed` field and `DeviceRegistry.execute_action` only short-circuits to `pending_confirmation` when a `requires_confirmation` capability has not been confirmed. Previously every confirmation-gated capability dead-ended in `pending_confirmation` with no resume path, so all robot motion commands silently stalled. Callers with their own safety layer (ToolRunner approval tier, operator REST) now set `confirmed=True`; `POST /api/hardware/execute` forwards `body["confirmed"]`.
+- **feat(agents): unlimited-by-default tool-iteration budget.** New `agents/iteration_budget.py` `IterationBudget` is unlimited by default (replacing the old fixed caps of 20 single-agent / 4 multi-agent worker), with a no-progress guard that stops a loop once it stops making forward progress and a wall-clock backstop (`agents.tool_loop_max_seconds`, default 900s). The user can cap iterations via `agents.max_tool_iterations` in `settings.json` or the `FERAL_MAX_ITERATIONS` env var. Wired into all three tool loops: single-agent non-stream + stream and the multi-agent worker.
+- **feat(hardware): closed-loop verify-and-retry for CuteBot motion + honest failure reporting.** After a motion command the `cutebot` skill re-reads telemetry and confirms the robot entered the expected mode; if not it retries once and otherwise returns explicit failure text, so the LLM reports reality instead of claiming success. `pending_confirmation` is surfaced as a loud error. `describe_devices()` and the `cutebot.json` manifest instruct the LLM to rely on verified state and never claim success unless verified.
+- **test: scoped coverage.** New `tests/test_iteration_budget.py` (unlimited default, user limit via settings + env, no-progress guard, wall-clock backstop) and extended `tests/test_cutebot_skill.py` (verify-loop + confirmed-flag dispatch) — 117 tests in the scoped run, all passing; the broader orchestrator/tool_runner/multi-agent/HUP/proactive/safety run is green (435 passed, 1 skipped; the only failure is the pre-existing co-located-iOS-plist check, which does not occur in CI).
 
 ## [2026.6.10] — 2026-06-12 — CuteBot robot integration + multi-agent chat fixes
 
