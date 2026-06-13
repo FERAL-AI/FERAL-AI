@@ -150,7 +150,22 @@ class AgentWorker:
         tool_results = []
         nudged_for_text = False
 
-        for iteration in range(4):
+        # v2026.6.11 — UNLIMITED rounds by default (was a hard-coded 4,
+        # which cut closed-loop hardware tasks off mid-verify). A limit is
+        # user-set only (agents.max_tool_iterations / FERAL_MAX_ITERATIONS);
+        # runaway loops are stopped by the no-progress guard + wall clock.
+        from agents.iteration_budget import (
+            IterationBudget,
+            NO_PROGRESS_GUIDANCE,
+            resolve_max_tool_iterations,
+            resolve_tool_loop_max_seconds,
+        )
+        budget = IterationBudget(
+            resolve_max_tool_iterations(), resolve_tool_loop_max_seconds()
+        )
+        final_answer_only = False
+
+        while budget.start_iteration():
             try:
                 # Explicit max_tokens: the provider default is 1024, which
                 # hard-truncates long answers mid-sentence on every surface
@@ -158,10 +173,16 @@ class AgentWorker:
                 # matches the single-agent orchestrator's chat budget.
                 response = await self._llm.chat(
                     messages=messages,
-                    tools=tools if tools else None,
+                    tools=None if final_answer_only else (tools if tools else None),
                     max_tokens=4096,
                 )
                 text_content, tool_calls = self._llm.extract_response(response)
+
+                if tool_calls and final_answer_only:
+                    # Loop guard already withdrew tools and the model is
+                    # still trying to call one — stop and synthesize from
+                    # whatever tool results exist.
+                    break
 
                 if tool_calls and self._executor:
                     assistant_msg = {"role": "assistant"}
@@ -190,6 +211,13 @@ class AgentWorker:
                                         "name": tc["name"],
                                         "content": json.dumps(result.get("data") or result, default=str)[:2000],
                                     })
+                                    if budget.observe_tool(
+                                        tc["name"], tc.get("args", {}),
+                                        bool(result.get("success")), result,
+                                    ):
+                                        final_answer_only = True
+                    if final_answer_only:
+                        messages.append({"role": "system", "content": NO_PROGRESS_GUIDANCE})
                     continue
 
                 if text_content:

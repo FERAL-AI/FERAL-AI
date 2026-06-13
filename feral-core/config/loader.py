@@ -207,6 +207,14 @@ DEFAULT_SETTINGS = {
     "security": {
         "node_api_key": "",
     },
+    # Agent tool-loop budget (v2026.6.11). 0 = unlimited iterations — the
+    # loop is governed by the no-progress guard (identical failing tool
+    # call repeated) plus the wall-clock backstop below, not by an
+    # arbitrary count. Set max_tool_iterations > 0 to impose a hard limit.
+    "agents": {
+        "max_tool_iterations": 0,
+        "tool_loop_max_seconds": 900,
+    },
     "skills": {
         "enabled": [],
         "disabled": [],

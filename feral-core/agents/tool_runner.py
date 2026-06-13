@@ -1030,15 +1030,19 @@ class ToolRunner:
             }
 
         goal = str(args.get("goal", "") or "").strip()
+        # 0 = unlimited (v2026.6.11 default) — spawned sub-workers still get
+        # a concrete per-spawn default of 8 rounds unless the caller asks
+        # for more, since they run unattended and in parallel.
         max_iterations = self._orch._max_iterations
+        default_iters = min(max_iterations, 8) if max_iterations else 8
         try:
             max_workers = int(args.get("max_workers", min(3, len(tasks))) or 3)
         except Exception:
             max_workers = min(3, len(tasks))
         try:
-            max_iters = int(args.get("max_iterations", min(max_iterations, 8)) or 4)
+            max_iters = int(args.get("max_iterations", default_iters) or default_iters)
         except Exception:
-            max_iters = min(max_iterations, 8)
+            max_iters = default_iters
         max_workers = max(1, min(max_workers, 6))
         max_iters = max(1, min(max_iters, 12))
         sem = asyncio.Semaphore(max_workers)

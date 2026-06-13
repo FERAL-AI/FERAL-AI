@@ -218,10 +218,17 @@ class Orchestrator:
 
         # Streaming config
         self._streaming_enabled = os.environ.get("FERAL_STREAMING", "true").lower() in ("true", "1", "yes")
-        try:
-            self._max_iterations = max(1, min(int(os.environ.get("FERAL_MAX_ITERATIONS", "20")), 40))
-        except ValueError:
-            self._max_iterations = 20
+        # v2026.6.11 — tool loops are UNLIMITED by default (0). A limit is
+        # a user-set option only: settings.json ``agents.max_tool_iterations``
+        # or the FERAL_MAX_ITERATIONS env var. Runaway loops are stopped by
+        # the no-progress guard + a generous configurable wall-clock backstop
+        # instead of an arbitrary count (see agents/iteration_budget.py).
+        from agents.iteration_budget import (
+            resolve_max_tool_iterations,
+            resolve_tool_loop_max_seconds,
+        )
+        self._max_iterations = resolve_max_tool_iterations()
+        self._tool_loop_max_seconds = resolve_tool_loop_max_seconds()
 
         self.executor.load_vault_from_env()
 
@@ -1738,7 +1745,11 @@ class Orchestrator:
 
         history = self._compact_context(self.conversation_history[session_id].copy())
 
-        max_iterations = self._max_iterations
+        from agents.iteration_budget import IterationBudget, NO_PROGRESS_GUIDANCE
+        budget = IterationBudget(self._max_iterations, self._tool_loop_max_seconds)
+        # Set by the no-progress guard: tools are withdrawn and the model
+        # gets exactly one more round to produce an honest final answer.
+        final_answer_only = False
         refusal_retry_used = False
         reasoning_retry_count = 0
         empty_retry_used = False
@@ -1778,7 +1789,7 @@ class Orchestrator:
 
         sent_response = False
         final_response_text = ""
-        for _ in range(max_iterations):
+        while budget.start_iteration():
             effective_system_prompt = system_prompt
             if pending_retry_addition:
                 effective_system_prompt = (
@@ -1885,6 +1896,18 @@ class Orchestrator:
                         await self._direct_execute(session_id, text, relevant_skills)
                     return
 
+                if tool_calls and final_answer_only:
+                    # Tools were withdrawn after the loop guard tripped,
+                    # yet the model still tried to call one — hard stop
+                    # before the assistant msg lands in history (a
+                    # tool_calls msg without tool results poisons the
+                    # next turn's OpenAI-shape conversation).
+                    logger.warning(
+                        "[%s] tool call after loop guard closed tools; stopping",
+                        session_id[:8],
+                    )
+                    break
+
                 assistant_msg = {"role": "assistant"}
                 if text_content:
                     assistant_msg["content"] = text_content
@@ -1984,6 +2007,10 @@ class Orchestrator:
                         "name": tc["name"],
                         "content": json.dumps(result_data, default=str)[:2000]
                     })
+                    if budget.observe_tool(
+                        tc["name"], tc.get("args", {}), tool_success, result_data
+                    ):
+                        final_answer_only = True
                     anti_loop_guidance = result_data.get("_anti_loop_guidance")
                     if anti_loop_guidance:
                         history.append({"role": "system", "content": anti_loop_guidance})
@@ -2005,6 +2032,13 @@ class Orchestrator:
                 if self._mitosis_engine:
                     tools_used = [tc["name"] for tc in tool_calls]
                     self._mitosis_engine.observe_interaction(session_id, text, tools_used)
+
+                if final_answer_only:
+                    # No-progress guard: withdraw tools and steer the model
+                    # to one final honest answer instead of a third
+                    # identical failing call.
+                    tools = None
+                    history.append({"role": "system", "content": NO_PROGRESS_GUIDANCE})
             elif text_content:
                 if self.memory:
                     self.memory.working_push(session_id, {"role": "assistant", "text": text_content})
@@ -2210,7 +2244,10 @@ class Orchestrator:
         pending_retry_addition: Optional[str] = None
         if self.refusal_handler.is_ack_execution(text):
             pending_retry_addition = self.refusal_handler.ACK_EXECUTION_FAST_PATH_INSTRUCTION
-        for _ in range(self._max_iterations):
+        from agents.iteration_budget import IterationBudget, NO_PROGRESS_GUIDANCE
+        budget = IterationBudget(self._max_iterations, self._tool_loop_max_seconds)
+        final_answer_only = False
+        while budget.start_iteration():
             effective_system_prompt = system_prompt
             if pending_retry_addition:
                 effective_system_prompt = (
@@ -2392,6 +2429,16 @@ class Orchestrator:
                     await self._direct_execute(session_id, text, relevant_skills)
                 return
 
+            if normalized_tool_calls and final_answer_only:
+                # Loop guard already withdrew tools; a further tool call
+                # means the model is stuck — stop before the dangling
+                # tool_calls assistant msg lands in history.
+                logger.warning(
+                    "[%s] (stream) tool call after loop guard closed tools; stopping",
+                    session_id[:8],
+                )
+                break
+
             if accumulated_text or normalized_tool_calls:
                 assistant_msg = {"role": "assistant"}
                 if accumulated_text:
@@ -2480,6 +2527,10 @@ class Orchestrator:
                         "name": tc["name"],
                         "content": json.dumps(result_data, default=str)[:2000],
                     })
+                    if budget.observe_tool(
+                        tc["name"], tc.get("args", {}), stream_tool_success, result_data
+                    ):
+                        final_answer_only = True
                     anti_loop_guidance = result_data.get("_anti_loop_guidance")
                     if anti_loop_guidance:
                         history.append({"role": "system", "content": anti_loop_guidance})
@@ -2503,6 +2554,12 @@ class Orchestrator:
                 if self._mitosis_engine:
                     tools_used = [tc["name"] for tc in normalized_tool_calls]
                     self._mitosis_engine.observe_interaction(session_id, text, tools_used)
+
+                if final_answer_only:
+                    # No-progress guard: withdraw tools, steer to one final
+                    # honest answer.
+                    tools = None
+                    history.append({"role": "system", "content": NO_PROGRESS_GUIDANCE})
                 continue
 
             if accumulated_text:

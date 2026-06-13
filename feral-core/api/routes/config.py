@@ -85,7 +85,23 @@ async def update_config(body: dict):
         return {"error": "section and key are required"}
     state.config.update_settings(section, key, value)
 
-    if section == "features" and key == "multi_agent" and state.orchestrator:
+    if section == "agents" and state.orchestrator:
+        # v2026.6.11 — live-apply the tool-loop budget so the operator's
+        # setting takes effect on the next turn, not the next restart.
+        # Invalid values are persisted as-is but ignored at apply time
+        # (the boot-time resolver also degrades them to the defaults).
+        if key == "max_tool_iterations":
+            try:
+                state.orchestrator._max_iterations = max(0, int(value or 0))
+            except (TypeError, ValueError):
+                pass
+        elif key == "tool_loop_max_seconds":
+            try:
+                state.orchestrator._tool_loop_max_seconds = max(0.0, float(value or 0))
+            except (TypeError, ValueError):
+                pass
+
+    elif section == "features" and key == "multi_agent" and state.orchestrator:
         enabled = value if isinstance(value, bool) else str(value).lower() in ("true", "1", "yes", "on")
         os.environ["FERAL_MULTI_AGENT"] = str(enabled).lower()
         state.orchestrator._multi_agent_enabled = enabled
