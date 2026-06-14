@@ -136,7 +136,11 @@ class TestHealthAutomations:
             await engine._deliver(msg)
 
         mock_get.assert_called_once_with("smart_home_hue")
-        mock_impl.execute.assert_called_once_with("set_scene", {"scene": "calming"}, {})
+        mock_impl.execute.assert_called_once_with(
+            "call_service",
+            {"domain": "scene", "service": "turn_on", "entity_id": "scene.calming"},
+            {},
+        )
         callback.assert_called_once_with(msg)
 
     @pytest.mark.asyncio
@@ -157,7 +161,11 @@ class TestHealthAutomations:
 
         with patch("skills.impl.get_implementation", return_value=mock_impl):
             await engine._deliver(msg)
-        mock_impl.execute.assert_called_once_with("set_scene", {"scene": "breathing"}, {})
+        mock_impl.execute.assert_called_once_with(
+            "call_service",
+            {"domain": "scene", "service": "turn_on", "entity_id": "scene.breathing"},
+            {},
+        )
 
     @pytest.mark.asyncio
     async def test_deliver_no_payload_skips_automation(self):
