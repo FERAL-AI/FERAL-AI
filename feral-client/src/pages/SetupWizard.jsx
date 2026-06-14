@@ -191,7 +191,7 @@ export default function SetupWizard({ onComplete }) {
             );
           })}
         </div>
-        <div className="mt-auto pt-8 text-xs opacity-30">FERAL v2026.6.11</div>
+        <div className="mt-auto pt-8 text-xs opacity-30">FERAL v2026.6.12</div>
       </div>
 
       {/* Right Panel */}

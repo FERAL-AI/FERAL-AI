@@ -1,10 +1,21 @@
 # Changelog
 
-<!-- feral-version: 2026.6.11 -->
+<!-- feral-version: 2026.6.12 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.12] — 2026-06-13 — glasses vitals history: durable biometric time-series + week-over-week trends without a third-party wearable
+
+Patch release. Live W300 glasses HR/SpO2 now persist to a durable, bounded time-series, and FERAL derives real 7-day vitals trends from those glasses samples when no third-party wearable is connected — instead of returning "no data". Purely additive; the recently-fixed HR-correctness logic is untouched.
+
+### Brain (feral-core)
+
+- **feat(health): persist glasses biometrics to a durable time-series.** Live W300 glasses HR/SpO2 (HUP `device_events`) now write to a new `biometric_samples` table in the existing `~/.feral/baselines.db` via `BaselineEngine`, with 35-day retention and auto-prune so the store stays bounded. Wired through `api/state.py` and `api/server.py`.
+- **feat(health): derive week-over-week vitals trends without a third-party wearable.** `HealthAggregator.get_health_summary` (`integrations/health_platforms.py`) now derives real 7-day vitals trends — resting-HR trend, HR range, SpO2 avg/min — from the persisted glasses samples when NO third-party source (Whoop/Oura/HealthKit) is connected, rather than returning "no data". When a third-party wearable is connected, that source still takes priority unchanged.
+- **feat(skills): `vitals_trend` health_data endpoint.** New `vitals_trend` endpoint + triggers in `skills/manifests/health_data.json` expose the derived trend to the LLM.
+- **test: scoped coverage + a stale-assertion fix.** New `tests/test_glasses_vitals_history.py` and extended `tests/test_health_data_manifest.py` — `tests/test_glasses_vitals_history.py` + `tests/test_health_data_manifest.py` = 14 passed; broader hr_pipeline/proactive/health/baseline/manifest/creative run green (520 passed), pytest -q --no-cov on Python 3.11.11. The only failure in a full run remains the pre-existing co-located-iOS-plist check, which does not occur in CI. This release also corrects two stale `TestHealthAutomations` assertions in `tests/test_creative_features.py` to the current Home Assistant `call_service` (scene.turn_on) convention — a test-only fix for a prior call-convention change, unrelated to the glasses-vitals work.
 
 ## [2026.6.11] — 2026-06-13 — robot motion actually executes + unlimited tool-iteration budget
 
