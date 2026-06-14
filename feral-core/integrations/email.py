@@ -10,8 +10,10 @@ from __future__ import annotations
 import base64
 import email as email_stdlib
 import imaplib
+import json
 import logging
 import os
+import smtplib
 from email.mime.text import MIMEText
 from typing import Any, Callable, Optional
 
@@ -20,6 +22,17 @@ import httpx
 logger = logging.getLogger("feral.integrations.email")
 
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
+
+# App-password (IMAP/SMTP) path — used when the operator pastes a Gmail
+# address + 16-char App Password in Settings → Integrations instead of
+# running the full Google OAuth flow.
+GMAIL_IMAP_HOST = "imap.gmail.com"
+GMAIL_IMAP_PORT = 993
+GMAIL_SMTP_HOST = "smtp.gmail.com"
+GMAIL_SMTP_PORT = 587
+
+# Vault key under which the Gmail address + App Password are persisted.
+EMAIL_CRED_VAULT_KEY = "email_app_credential"
 
 
 class EmailIntegration:
@@ -35,6 +48,98 @@ class EmailIntegration:
         self._imap_user: Optional[str] = os.environ.get("FERAL_EMAIL_IMAP_USER")
         self._imap_pass: Optional[str] = os.environ.get("FERAL_EMAIL_IMAP_PASS")
         self._imap_port: int = int(os.environ.get("FERAL_EMAIL_IMAP_PORT", "993"))
+        # Cached App Password creds (address + app_password), loaded from the
+        # vault. Resolved lazily so a Save in Settings takes effect without a
+        # brain restart.
+        self._app_creds: Optional[dict] = self._load_app_creds()
+
+    # ── App Password credential store (IMAP/SMTP, no OAuth) ────────
+
+    def _vault(self):
+        return getattr(self._oauth, "_vault", None)
+
+    def _load_app_creds(self) -> Optional[dict]:
+        """Read the saved Gmail address + App Password from the vault."""
+        vault = self._vault()
+        if vault is None:
+            return None
+        try:
+            raw = vault.retrieve(EMAIL_CRED_VAULT_KEY, requester="email")
+        except Exception:
+            return None
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if data.get("address") and data.get("app_password"):
+            return {"address": data["address"], "app_password": data["app_password"]}
+        return None
+
+    def store_app_password(self, address: str, app_password: str) -> bool:
+        """Persist Gmail App Password creds and refresh the in-memory cache."""
+        data = {"address": address.strip(), "app_password": app_password.replace(" ", "")}
+        vault = self._vault()
+        if vault is not None:
+            vault.store(EMAIL_CRED_VAULT_KEY, json.dumps(data), stored_by="email")
+        self._app_creds = data
+        # The Google probe cache keys off "google" OAuth; an App Password
+        # connection should not be shadowed by a stale OAuth probe miss.
+        return True
+
+    def clear_app_password(self) -> None:
+        vault = self._vault()
+        if vault is not None:
+            try:
+                vault.remove(EMAIL_CRED_VAULT_KEY, removed_by="email")
+            except Exception:
+                pass
+        self._app_creds = None
+
+    def _resolve_imap(self) -> Optional[tuple[str, int, str, str]]:
+        """Return (host, port, user, password) for the IMAP path.
+
+        Explicit ``FERAL_EMAIL_IMAP_*`` env vars win; otherwise fall back
+        to the Gmail App Password saved via Settings → Integrations.
+        """
+        if self._imap_host and self._imap_user and self._imap_pass:
+            return (self._imap_host, self._imap_port, self._imap_user, self._imap_pass)
+        creds = self._load_app_creds() or self._app_creds
+        if creds:
+            return (GMAIL_IMAP_HOST, GMAIL_IMAP_PORT, creds["address"], creds["app_password"])
+        return None
+
+    def _resolve_smtp(self) -> Optional[tuple[str, int, str, str]]:
+        creds = self._load_app_creds() or self._app_creds
+        if creds:
+            return (GMAIL_SMTP_HOST, GMAIL_SMTP_PORT, creds["address"], creds["app_password"])
+        return None
+
+    @staticmethod
+    def probe_app_password(address: str, app_password: str) -> dict:
+        """Live IMAP+SMTP login check. Blocking — call via asyncio.to_thread."""
+        address = (address or "").strip()
+        app_password = (app_password or "").replace(" ", "")
+        result: dict[str, Any] = {"imap": False, "smtp": False}
+        try:
+            conn = imaplib.IMAP4_SSL(GMAIL_IMAP_HOST, GMAIL_IMAP_PORT)
+            conn.login(address, app_password)
+            conn.logout()
+            result["imap"] = True
+        except Exception as e:  # noqa: BLE001 — surface the real reason to UI
+            result["imap_error"] = str(e)
+        try:
+            smtp = smtplib.SMTP(GMAIL_SMTP_HOST, GMAIL_SMTP_PORT, timeout=15)
+            smtp.starttls()
+            smtp.login(address, app_password)
+            smtp.quit()
+            result["smtp"] = True
+        except Exception as e:  # noqa: BLE001
+            result["smtp_error"] = str(e)
+        # Reading the inbox is the load-bearing capability; SMTP is best-effort.
+        result["ok"] = result["imap"]
+        return result
 
     async def _headers(self) -> Optional[dict]:
         if not self._oauth:
@@ -58,6 +163,11 @@ class EmailIntegration:
         """
         from integrations._probe_status import is_connected_cached
 
+        # App Password (IMAP/SMTP) path: creds are only stored after a
+        # successful live probe, so their presence means Gmail is usable.
+        if self._resolve_imap() is not None:
+            return True
+
         token_present = (
             self._oauth is not None and self._oauth.is_connected("google")
         )
@@ -65,7 +175,9 @@ class EmailIntegration:
 
     @property
     def imap_configured(self) -> bool:
-        return self._imap_host is not None
+        # An IMAP host being configured advertises the fallback path even
+        # before a full login is possible; saved App Password creds also count.
+        return self._imap_host is not None or self._load_app_creds() is not None
 
     async def probe_connected(self) -> bool:
         from integrations._probe_status import refresh
@@ -78,9 +190,11 @@ class EmailIntegration:
 
     @property
     def _use_imap(self) -> bool:
-        return self._imap_host is not None and (
-            self._oauth is None or not self._oauth.is_connected("google")
-        )
+        # Prefer Gmail OAuth (full API) when present; otherwise use the
+        # IMAP/SMTP App Password path if any IMAP creds resolve.
+        if self._oauth is not None and self._oauth.is_connected("google"):
+            return False
+        return self._resolve_imap() is not None
 
     async def execute(self, endpoint_id: str, args: dict, vault: dict = None) -> dict:
         """Skill executor interface — called by SkillExecutor."""
@@ -101,8 +215,12 @@ class EmailIntegration:
     # ── IMAP helpers ───────────────────────────────────────────────
 
     def _imap_connect(self) -> imaplib.IMAP4_SSL:
-        conn = imaplib.IMAP4_SSL(self._imap_host, self._imap_port)
-        conn.login(self._imap_user, self._imap_pass)
+        resolved = self._resolve_imap()
+        if resolved is None:
+            raise RuntimeError("No IMAP credentials configured")
+        host, port, user, password = resolved
+        conn = imaplib.IMAP4_SSL(host, port)
+        conn.login(user, password)
         return conn
 
     @staticmethod
@@ -305,8 +423,30 @@ class EmailIntegration:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def _smtp_send(self, to: str, subject: str, body: str) -> dict:
+        resolved = self._resolve_smtp()
+        if resolved is None:
+            return {"success": False, "error": "No SMTP credentials configured"}
+        host, port, user, password = resolved
+        try:
+            mime = MIMEText(body, "plain")
+            mime["From"] = user
+            mime["To"] = to
+            mime["Subject"] = subject
+            smtp = smtplib.SMTP(host, port, timeout=20)
+            smtp.starttls()
+            smtp.login(user, password)
+            smtp.sendmail(user, [to], mime.as_string())
+            smtp.quit()
+            return {"success": True, "data": {"to": to, "subject": subject, "source": "smtp"}}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     async def send_email(self, to: str = "", subject: str = "", body: str = "", **kwargs) -> dict:
         if self._use_imap:
+            import asyncio
+            if self._resolve_smtp() is not None:
+                return await asyncio.to_thread(self._smtp_send, to, subject, body)
             return {"success": False, "error": "Cannot send via IMAP — connect Gmail"}
 
         headers = await self._headers()

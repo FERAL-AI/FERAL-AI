@@ -232,7 +232,7 @@ def test_pending_states_use_vault_when_available(
             self.store_calls: list[tuple[str, str]] = []
             self._data: dict[str, str] = {}
 
-        def store(self, key, value, requester="oauth_manager"):
+        def store(self, key, value, stored_by="oauth_manager"):
             self.store_calls.append((key, value))
             self._data[key] = value
 

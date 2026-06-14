@@ -1,5 +1,6 @@
 """OAuth, integrations, and webhook HTTP endpoints."""
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Query, Request, Response
@@ -19,11 +20,24 @@ router = APIRouter()
 async def list_integrations():
     """List all available integrations and their connection status."""
     providers = state.oauth.list_providers() if state.oauth else []
+    email_connected = bool(state.email and state.email.connected)
+    # Surface the Gmail App Password path as a first-class provider row so
+    # the Settings UI badge reflects the live IMAP/SMTP connection.
+    if not any((p.get("id") == "gmail") for p in providers):
+        providers = list(providers) + [{
+            "id": "gmail",
+            "name": "Gmail",
+            "auth_type": "app_password",
+            "connected": email_connected,
+            "has_client_id": False,
+        }]
     return {
         "providers": providers,
         "spotify_connected": state.spotify.connected if state.spotify else False,
         "home_assistant_connected": state.home_assistant.connected if state.home_assistant else False,
         "notion_connected": state.notion.connected if state.notion else False,
+        "gmail_connected": email_connected,
+        "email_connected": email_connected,
     }
 
 
@@ -56,8 +70,10 @@ async def oauth_callback(state_param: str = Query(alias="state", default=""), co
 
 @router.post("/api/integrations/token")
 async def store_integration_token(body: dict):
-    """Store a long-lived API token (e.g., Home Assistant)."""
+    """Store a long-lived API token (e.g., Home Assistant) or Gmail creds."""
     provider_id = body.get("provider_id", "")
+    if provider_id == "gmail":
+        return await _store_gmail_app_password(body)
     token = body.get("token", "")
     if not provider_id or not token:
         return {"error": "provider_id and token are required"}
@@ -66,9 +82,37 @@ async def store_integration_token(body: dict):
     return {"ok": True, "provider": provider_id}
 
 
+async def _store_gmail_app_password(body: dict) -> dict:
+    """Validate Gmail address + App Password against Gmail's IMAP/SMTP
+    servers and persist only on success, so a green badge is truthful."""
+    address = (body.get("address") or "").strip()
+    app_password = (body.get("app_password") or body.get("token") or "").replace(" ", "")
+    if not address or not app_password:
+        return {"error": "address and app_password are required"}
+    if not state.email:
+        return {"error": "Email integration not available"}
+    probe = await asyncio.to_thread(
+        state.email.probe_app_password, address, app_password
+    )
+    if not probe.get("imap"):
+        logger.warning("Gmail App Password probe failed: %s", probe.get("imap_error"))
+        return {
+            "ok": False,
+            "provider": "gmail",
+            "connected": False,
+            "error": probe.get("imap_error", "IMAP login failed"),
+            "probe": probe,
+        }
+    state.email.store_app_password(address, app_password)
+    return {"ok": True, "provider": "gmail", "connected": True, "probe": probe}
+
+
 @router.post("/api/integrations/disconnect/{provider_id}")
 async def disconnect_integration(provider_id: str):
     """Disconnect an integration by revoking its tokens."""
+    if provider_id == "gmail" and state.email:
+        state.email.clear_app_password()
+        return {"ok": True, "provider": "gmail"}
     if state.oauth:
         state.oauth.revoke_token(provider_id)
     return {"ok": True, "provider": provider_id}

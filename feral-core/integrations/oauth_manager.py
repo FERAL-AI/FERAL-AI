@@ -506,7 +506,7 @@ class OAuthManager:
             self._vault.store(
                 f"oauth_{provider_id}",
                 json.dumps(token_data),
-                requester="oauth_manager",
+                stored_by="oauth_manager",
             )
         else:
             OAUTH_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -534,7 +534,7 @@ class OAuthManager:
                 self._vault.store(
                     f"{PENDING_VAULT_PREFIX}{state}",
                     json.dumps(pending),
-                    requester="oauth_manager",
+                    stored_by="oauth_manager",
                 )
                 return
             except Exception as exc:
@@ -973,7 +973,7 @@ class OAuthManager:
     def revoke_token(self, provider_id: str):
         self._tokens.pop(provider_id, None)
         if self._vault:
-            self._vault.revoke(f"oauth_{provider_id}", requester="oauth_manager")
+            self._vault.remove(f"oauth_{provider_id}", removed_by="oauth_manager")
 
     def is_connected(self, provider_id: str) -> bool:
         return provider_id in self._tokens and bool(

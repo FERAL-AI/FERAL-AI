@@ -132,6 +132,50 @@ export default function Chat() {
     return () => { cancelled = true; };
   }, []);
 
+  // Nav-away recovery: the WebSocket is app-level (lives in the Shell)
+  // and stays open while the user navigates, so the brain keeps
+  // generating and records the completed turn server-side. But the
+  // stream handler + commit live in THIS page, which unmounts on
+  // navigation — so an answer that finishes while the user is on
+  // Settings/another tab is never written into the thread, and the
+  // Shell only hydrates the transcript once at boot. On every Chat
+  // mount we re-pull the canonical primary transcript and merge any
+  // turns the thread is missing (deduped by role+text), so returning
+  // to /chat shows the answer that completed while we were away
+  // instead of a silently dropped reply. Mirrors the Shell boot merge.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const transcript = await apiJson('/api/sessions/primary/transcript');
+        if (cancelled) return;
+        const wsMessages = Array.isArray(transcript?.messages) ? transcript.messages : [];
+        if (!wsMessages.length) return;
+        setMessages((prev) => {
+          const seen = new Set(prev.map((m) => `${m.role}|${(m.text || '').trim()}`));
+          const additions = [];
+          for (const m of wsMessages) {
+            const role = m?.role;
+            const text = (m?.text || '').trim();
+            if (!role || !text) continue;
+            const sig = `${role}|${text}`;
+            if (seen.has(sig)) continue;
+            seen.add(sig);
+            additions.push({
+              id: `pt_${m.ts_ms || Math.random().toString(36).slice(2, 8)}`,
+              role,
+              text,
+            });
+          }
+          return additions.length ? [...prev, ...additions] : prev;
+        });
+      } catch {
+        /* primary transcript optional — never block the page on it */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [setMessages]);
+
   const resumeThought = async (thoughtId) => {
     try {
       await apiFetch('/api/consciousness/resume', {

@@ -1,10 +1,26 @@
 # Changelog
 
-<!-- feral-version: 2026.6.12 -->
+<!-- feral-version: 2026.6.13 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.13] — 2026-06-14 — Gmail App Password path actually works (IMAP/SMTP) + honest probe errors
+
+Patch release. The Settings → Integrations "Gmail (App Password)" panel was never wired on the backend: the token endpoint ignored the `address`/`app_password` it received, and `EmailIntegration` only read IMAP creds from environment variables — so saving a Gmail address + 16-char App Password did nothing and Gmail could never authenticate. This release implements that path end to end and surfaces the real Gmail server error instead of a fake "Saved".
+
+### Brain (feral-core)
+
+- **fix(integrations): wire the Gmail App Password path end to end.** `POST /api/integrations/token` now handles `provider_id: "gmail"`: it runs a live IMAP+SMTP login probe against `imap.gmail.com` / `smtp.gmail.com`, persists the address + App Password to the vault **only on a successful probe**, and returns the real probe result (so a green badge is truthful). On failure it returns Gmail's actual error (e.g. `AUTHENTICATIONFAILED` / `BadCredentials`) instead of silently reporting success. (`api/routes/integrations_webhooks.py`)
+- **fix(integrations): EmailIntegration resolves App Password creds live.** `EmailIntegration` now reads the saved Gmail address + App Password from the vault (key `email_app_credential`) in addition to the `FERAL_EMAIL_IMAP_*` env vars, resolving them on every call so a Save in Settings takes effect with **no brain restart**. `connected`, `imap_configured`, and `_use_imap` reflect the App Password path; `send_email` now sends over SMTP on this path instead of refusing; OAuth still takes priority when present. (`integrations/email.py`)
+- **fix(integrations): Gmail surfaces as a first-class integration row.** `GET /api/integrations` now reports `gmail_connected` / `email_connected` and includes a `gmail` provider entry so the Settings badge reflects the live IMAP/SMTP connection. Gmail disconnect clears the stored App Password.
+- **fix(integrations): correct Vault API misuse that 500'd token storage.** `OAuthManager` now calls `Vault.store(..., stored_by=...)` and `Vault.remove(..., removed_by=...)` instead of the non-existent `requester=` / `revoke()` shapes, which previously raised `TypeError` → HTTP 500 for every token-based integration (Gmail, Home Assistant). (`integrations/oauth_manager.py`)
+- **test: scoped coverage.** New `tests/test_gmail_app_password.py` covers persistence, live-resolution without restart, connected/use_imap state, disconnect, and OAuth priority — 5 passed.
+
+### Web UI (feral-client-v2)
+
+- **fix(chat): recover an answer that finishes while you navigate away.** The WebSocket is app-level (in the Shell) and stays open during navigation, so the brain keeps generating and records the completed turn server-side — but the stream handler + `commit()` live on the Chat page, which unmounts when you switch to Settings/another tab, so the final answer was never written into the thread and the Shell only hydrated the transcript once at boot. Returning to `/chat` showed a silently dropped reply ("it never finishes / it stops"). Chat now re-pulls `/api/sessions/primary/transcript` on every mount and merges any missing turns (deduped by role+text), so the answer that completed while you were away appears when you come back. Purely additive — the live streaming path is untouched. New `__tests__/pages/Chat.answer-recovery.test.jsx`; full Chat vitest suite green.
 
 ## [2026.6.12] — 2026-06-13 — glasses vitals history: durable biometric time-series + week-over-week trends without a third-party wearable
 
