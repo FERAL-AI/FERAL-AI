@@ -36,13 +36,17 @@ def test_manifest_loads_and_is_valid_pydantic():
     manifest = SkillManifest(**data)
     assert manifest.skill_id == "health_data"
     endpoint_ids = {ep.id for ep in manifest.endpoints}
-    assert endpoint_ids == {"health_summary", "sleep_trend", "recovery_trend"}
+    assert endpoint_ids == {
+        "health_summary", "sleep_trend", "recovery_trend", "vitals_trend",
+    }
 
 
 def test_manifest_endpoints_match_health_aggregator_dispatch():
     """Every manifest endpoint id resolves to a HealthAggregator method."""
     validator = ToolDispatchValidator()
-    for endpoint_id in ("health_summary", "sleep_trend", "recovery_trend"):
+    for endpoint_id in (
+        "health_summary", "sleep_trend", "recovery_trend", "vitals_trend",
+    ):
         violations = validator.contract_violations("health_data", endpoint_id)
         assert not violations, (
             f"Manifest↔backend mismatch on health_data__{endpoint_id}: {violations}"

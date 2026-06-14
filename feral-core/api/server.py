@@ -3527,6 +3527,13 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
                 state.somatic_engine.update_from_perception_frame(sid, sensors)
 
     _record_biometrics_to_baseline(sensors)
+    # Purely additive (operator report 2026-06-13): append the raw
+    # reading to the durable biometric time-series so the health
+    # summary can answer "over the last week how were my vitals?" from
+    # the glasses stream alone. Runs AFTER the baseline record so it
+    # can never perturb the freshness / per-source / wearable-priority
+    # logic the baseline path depends on.
+    _record_biometrics_to_history(sensors, effective_node)
 
 
 # Vitals that must clear the live-wearable + freshness gate before they
@@ -3626,6 +3633,78 @@ def _record_biometrics_to_baseline(data: dict) -> None:
                 )
     except Exception as exc:
         logger.debug("Baseline biometric recording error: %s", exc)
+
+
+# Raw sensor key → (canonical_metric, source_key, sample_ts_key) for the
+# durable biometric time-series. ``source_key`` / ``sample_ts_key`` are
+# the sibling fields the biometric handler already stamps alongside the
+# value; ``None`` means the event type doesn't carry them (steps /
+# body temperature), in which case the source is inferred from the
+# emitting node's advertised wearable capability.
+_HISTORY_METRIC_MAP = {
+    "ppg_heart_rate": ("hr", "heart_rate_source", "heart_rate_sample_ts"),
+    "heart_rate": ("hr", "heart_rate_source", "heart_rate_sample_ts"),
+    "spo2_pct": ("spo2", "spo2_source", "spo2_sample_ts"),
+    "spo2": ("spo2", "spo2_source", "spo2_sample_ts"),
+    "skin_temperature_c": (
+        "skin_temp", "skin_temperature_source", "skin_temperature_sample_ts",
+    ),
+    "skin_temp_c": (
+        "skin_temp", "skin_temperature_source", "skin_temperature_sample_ts",
+    ),
+    "temperature": ("body_temp", None, None),
+    "steps": ("steps", None, None),
+}
+
+
+def _record_biometrics_to_history(data: dict, effective_node: str = "") -> None:
+    """Append live-wearable biometric samples to the durable time-series.
+
+    Operator report 2026-06-13: glasses HR/SpO2 fed the live snapshot
+    and the rolling baseline but were NOT persisted as a queryable
+    historical series, so "how were my vitals last week?" returned "no
+    data" for every trend. This records each genuine wearable reading
+    (W300 glasses, Veepoo wristband, any BLE PPG) into
+    ``BaselineEngine.biometric_samples`` keyed by (ts, source, metric,
+    value), which the health aggregator queries to build real
+    week-over-week stats from the glasses ALONE.
+
+    Cloud / lagging mirrors (HealthKit) are kept OUT of the wearable
+    time-series: they already have their own trend via the Whoop/Oura
+    aggregator branches and re-stamp stale reads, so persisting them
+    here would pollute the glasses-derived trend. This mirrors the
+    exclusion philosophy of ``_record_biometrics_to_baseline`` without
+    touching it.
+    """
+    eng = state.baseline_engine
+    if not eng or not data or not hasattr(eng, "record_sample"):
+        return
+    try:
+        from perception.fusion import _is_lagging_source
+
+        now = time.time()
+        for raw_key, (metric, src_key, ts_key) in _HISTORY_METRIC_MAP.items():
+            if raw_key not in data:
+                continue
+            value = data.get(raw_key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                continue
+            if value <= 0:
+                continue
+            src = str(data.get(src_key, "") or "") if src_key else ""
+            if not src:
+                src = _infer_wearable_source_from_node(effective_node) or ""
+            if _is_lagging_source(src):
+                continue
+            ts_raw = data.get(ts_key, 0.0) if ts_key else 0.0
+            ts = (
+                float(ts_raw)
+                if isinstance(ts_raw, (int, float)) and ts_raw
+                else now
+            )
+            eng.record_sample(metric, float(value), source=src, ts=ts)
+    except Exception as exc:
+        logger.debug("Biometric history recording error: %s", exc)
 
 
 # ─────────────────────────────────────────────

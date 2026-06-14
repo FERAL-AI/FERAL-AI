@@ -22,6 +22,7 @@ import sqlite3
 import statistics
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Literal, Optional
 
 logger = logging.getLogger("feral.baseline")
@@ -78,7 +79,39 @@ class BaselineEngine:
         deviation_sigma REAL NOT NULL,
         ts          REAL NOT NULL
     );
+    -- Durable biometric time-series (operator report 2026-06-13).
+    -- The rolling ``baselines`` table above keeps only the last
+    -- ``window_size`` (14) values with no per-sample timestamp, so it
+    -- can answer "is THIS reading anomalous" but NOT "over the last
+    -- week how were my vitals". Live-wearable samples (W300 glasses,
+    -- Veepoo wristband, any BLE PPG) are appended here verbatim —
+    -- (ts, source, metric, value) — so the health summary can build
+    -- real week-over-week trends from the glasses ALONE, with no
+    -- third-party wearable connected. Bounded by ``prune_samples``.
+    CREATE TABLE IF NOT EXISTS biometric_samples (
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts      REAL NOT NULL,
+        source  TEXT NOT NULL DEFAULT '',
+        metric  TEXT NOT NULL,
+        value   REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_biosamples_metric_ts
+        ON biometric_samples(metric, ts);
+    CREATE INDEX IF NOT EXISTS idx_biosamples_ts
+        ON biometric_samples(ts);
     """
+
+    # Default retention for the raw biometric time-series. 35 days
+    # comfortably covers the week-over-week ("last 7 days", "vs last
+    # week") questions while keeping the table bounded. Mirrors the
+    # retention philosophy of memory/decay.py:MemoryDecayService.
+    SAMPLE_RETENTION_DAYS: float = 35.0
+
+    # Run the retention sweep at most once every N inserts so a busy
+    # streaming wearable (≈1 sample/sec) doesn't issue a DELETE on
+    # every frame. The sweep is also exposed via ``prune_samples`` so
+    # callers / tests can force it.
+    _SAMPLE_PRUNE_EVERY_N = 256
 
     def __init__(self, db_path: str | None = None):
         if db_path is None:
@@ -88,6 +121,7 @@ class BaselineEngine:
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(self._DDL)
         self._alert_listeners: list = []
+        self._sample_writes = 0
 
     def on_alert(self, callback) -> None:
         """Register a listener that fires every time an alert is persisted.
@@ -260,6 +294,190 @@ class BaselineEngine:
             "recent_alerts": recent_alerts,
             "categories": [r["category"] for r in cats],
         }
+
+    # ------------------------------------------------------------------
+    # Durable biometric time-series (week-over-week trend source)
+    # ------------------------------------------------------------------
+
+    def record_sample(
+        self,
+        metric: str,
+        value: float,
+        source: str = "",
+        ts: float | None = None,
+        retention_days: float | None = None,
+    ) -> None:
+        """Append a raw biometric sample to the durable time-series.
+
+        Unlike :meth:`record` (which keeps only a 14-value rolling
+        window for anomaly detection) this preserves every reading with
+        its own timestamp + source so the health summary can compute
+        real daily / weekly statistics from the glasses stream alone.
+
+        Args:
+            metric: canonical metric name (``hr``, ``spo2``,
+                ``skin_temp``, ``hrv``, ``steps`` ...).
+            value: numeric reading.
+            source: emitting wearable id (``jw_health_glasses`` ...).
+            ts: sample epoch seconds. Defaults to ``time.time()``.
+            retention_days: override the prune horizon for this write.
+        """
+        if value is None:
+            return
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return
+        sample_ts = float(ts) if isinstance(ts, (int, float)) and ts else time.time()
+        self._conn.execute(
+            "INSERT INTO biometric_samples (ts, source, metric, value) "
+            "VALUES (?, ?, ?, ?)",
+            (sample_ts, str(source or ""), str(metric), v),
+        )
+        self._sample_writes += 1
+        if self._sample_writes % self._SAMPLE_PRUNE_EVERY_N == 0:
+            self.prune_samples(retention_days)
+        self._conn.commit()
+
+    def prune_samples(self, retention_days: float | None = None) -> int:
+        """Delete samples older than the retention horizon. Returns the
+        number of rows removed. Keeps the time-series bounded so it can
+        never grow without limit on a long-running brain."""
+        rd = (
+            retention_days
+            if retention_days is not None
+            else self.SAMPLE_RETENTION_DAYS
+        )
+        cutoff = time.time() - (float(rd) * 86400.0)
+        cur = self._conn.execute(
+            "DELETE FROM biometric_samples WHERE ts < ?", (cutoff,)
+        )
+        self._conn.commit()
+        return cur.rowcount or 0
+
+    def get_samples(
+        self,
+        metric: str,
+        since: float | None = None,
+        until: float | None = None,
+        source: str | None = None,
+    ) -> list[dict]:
+        """Return raw samples for *metric*, ascending by time.
+
+        Each row is ``{"ts": float, "source": str, "value": float}``.
+        """
+        query = "SELECT ts, source, value FROM biometric_samples WHERE metric = ?"
+        params: list = [str(metric)]
+        if since is not None:
+            query += " AND ts >= ?"
+            params.append(float(since))
+        if until is not None:
+            query += " AND ts <= ?"
+            params.append(float(until))
+        if source:
+            query += " AND source = ?"
+            params.append(str(source))
+        query += " ORDER BY ts ASC"
+        rows = self._conn.execute(query, params).fetchall()
+        return [
+            {"ts": r["ts"], "source": r["source"], "value": r["value"]}
+            for r in rows
+        ]
+
+    def get_daily_stats(
+        self,
+        metric: str,
+        days: int = 7,
+        source: str | None = None,
+    ) -> list[dict]:
+        """Bucket the last *days* of samples by local calendar date.
+
+        Returns a list (ascending by date) of::
+
+            {"date": "YYYY-MM-DD", "count": N, "min": x, "max": y,
+             "avg": z, "first": a, "last": b}
+
+        ``min`` doubles as the daily resting-HR estimate for the HR
+        metric (lowest sample of the day ≈ resting tone), which is the
+        slot the health summary fills when no Whoop/Oura source exists.
+        """
+        since = time.time() - (float(days) * 86400.0)
+        samples = self.get_samples(metric, since=since, source=source)
+        buckets: dict[str, list[float]] = {}
+        for s in samples:
+            day = datetime.fromtimestamp(s["ts"]).strftime("%Y-%m-%d")
+            buckets.setdefault(day, []).append(s["value"])
+        out: list[dict] = []
+        for day in sorted(buckets):
+            vals = buckets[day]
+            out.append({
+                "date": day,
+                "count": len(vals),
+                "min": round(min(vals), 2),
+                "max": round(max(vals), 2),
+                "avg": round(statistics.mean(vals), 2),
+                "first": round(vals[0], 2),
+                "last": round(vals[-1], 2),
+            })
+        return out
+
+    def get_trend(
+        self,
+        metric: str,
+        days: int = 7,
+        source: str | None = None,
+    ) -> dict:
+        """Aggregate window stats + per-day breakdown for *metric*.
+
+        Returns::
+
+            {"metric": str, "days": int, "sample_count": N,
+             "sources": [...], "min": x, "max": y, "avg": z,
+             "first_ts": ts, "last_ts": ts, "daily": [ ...daily_stats ]}
+
+        ``sample_count == 0`` means there is no persisted history for
+        this metric/window — the caller should NOT fabricate a trend.
+        """
+        since = time.time() - (float(days) * 86400.0)
+        samples = self.get_samples(metric, since=since, source=source)
+        daily = self.get_daily_stats(metric, days=days, source=source)
+        if not samples:
+            return {
+                "metric": metric,
+                "days": int(days),
+                "sample_count": 0,
+                "sources": [],
+                "min": None,
+                "max": None,
+                "avg": None,
+                "first_ts": None,
+                "last_ts": None,
+                "daily": [],
+            }
+        vals = [s["value"] for s in samples]
+        sources = sorted({s["source"] for s in samples if s["source"]})
+        return {
+            "metric": metric,
+            "days": int(days),
+            "sample_count": len(vals),
+            "sources": sources,
+            "min": round(min(vals), 2),
+            "max": round(max(vals), 2),
+            "avg": round(statistics.mean(vals), 2),
+            "first_ts": samples[0]["ts"],
+            "last_ts": samples[-1]["ts"],
+            "daily": daily,
+        }
+
+    def sample_metrics(self, days: int = 35) -> list[str]:
+        """Distinct metric names with at least one sample in the window."""
+        since = time.time() - (float(days) * 86400.0)
+        rows = self._conn.execute(
+            "SELECT DISTINCT metric FROM biometric_samples WHERE ts >= ? "
+            "ORDER BY metric",
+            (since,),
+        ).fetchall()
+        return [r["metric"] for r in rows]
 
     # ------------------------------------------------------------------
     # Internal helpers

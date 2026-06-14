@@ -1033,10 +1033,18 @@ class BrainState:
             # the freshest live-wearable reading whenever it's
             # available — same freshness window the dashboard's
             # ``latest_health`` route uses, so chat and WebUI agree.
+            # ``biometric_history_provider`` is a lazy closure over
+            # ``self.baseline_engine`` (constructed later in init at the
+            # BaselineEngine boot step) so the aggregator can build
+            # week-over-week vitals trends from the persisted glasses /
+            # wearable samples when no Whoop/Oura is connected (operator
+            # report 2026-06-13). Lazy so construction order doesn't
+            # matter and the hot path avoids importing api.state.
             self.health_aggregator = HealthAggregator(
                 whoop=whoop,
                 oura=oura,
                 live_wearable_provider=self._latest_live_wearable_snapshot,
+                biometric_history_provider=lambda: self.baseline_engine,
             )
         with boot_subsystem(self._boot_report, "LocationEngine"):
             from perception.location import LocationEngine

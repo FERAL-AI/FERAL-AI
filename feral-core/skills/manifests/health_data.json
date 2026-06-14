@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Unified personal-health view across the platforms the user has connected: Whoop (recovery, strain, sleep, HRV, resting heart rate), Oura (readiness, sleep, activity), and Apple HealthKit (heart rate, sleep, workouts — paired iPhone, ingested via the FERAL companion app). Use this skill any time the user asks about sleep, recovery, readiness, heart rate, HRV, strain, or activity — it merges whatever sources are connected and tags each data point with its source.",
+    "description": "Unified personal-health view across the platforms the user has connected: Whoop (recovery, strain, sleep, HRV, resting heart rate), Oura (readiness, sleep, activity), Apple HealthKit (heart rate, sleep, workouts — paired iPhone, ingested via the FERAL companion app), AND live wearable sensors that stream directly into the brain (W300 smart glasses, BLE wristbands — heart rate, SpO2, skin temperature). Use this skill any time the user asks about sleep, recovery, readiness, heart rate, HRV, strain, activity, or week-over-week vitals trends — it merges whatever sources are connected, tags each data point with its source, and falls back to the glasses-derived vitals trend when no third-party wearable is connected.",
     "trigger_phrases": [
         "how did i sleep",
         "how was my sleep last night",
@@ -25,6 +25,10 @@
         "show me my vitals",
         "summarize today's vitals",
         "my health summary",
+        "how were my vitals this week",
+        "how were my vitals over the last week",
+        "my heart rate this week",
+        "my vitals trend",
         "my whoop",
         "my oura",
         "healthkit"
@@ -66,6 +70,18 @@
                 {"name": "days", "type": "integer", "required": false, "description": "How many days back from today to include (default 7).", "default": "7"}
             ],
             "returns_description": "Array of {date, score, type: 'strain'|'readiness', source} entries, sorted ascending by date.",
+            "ui_hint": "list",
+            "read_only_hint": true
+        },
+        {
+            "id": "vitals_trend",
+            "method": "PYTHON",
+            "url": "python://health_data/vitals_trend",
+            "description": "Week-over-week vitals trend derived from live wearable sensors that stream directly into the brain (W300 smart glasses, BLE wristbands) — NOT third-party cloud platforms. Use this for 'how were my vitals this week / over the last week', resting heart-rate trend, HR range, or SpO2 trend when the user has no Whoop/Oura/HealthKit connected. Returns per-day resting-HR (daily min), avg/max HR, SpO2 avg/min, sample counts, and the contributing source(s). Honest about provenance ('derived from glasses sensor, N samples over Nd'). Read-only.",
+            "params": [
+                {"name": "days", "type": "integer", "required": false, "description": "How many days back from today to include (default 7).", "default": "7"}
+            ],
+            "returns_description": "{window_days, sources, primary_source, hr_sample_count, spo2_sample_count, resting_hr_trend: [{date, resting_hr, avg_hr, max_hr, samples}], hr_range: {min,max,avg}, spo2_avg, spo2_min, resting_hr_estimate, note}",
             "ui_hint": "list",
             "read_only_hint": true
         }

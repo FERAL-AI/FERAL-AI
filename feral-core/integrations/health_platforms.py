@@ -372,6 +372,7 @@ class HealthAggregator:
         whoop: Optional[WhoopClient] = None,
         oura: Optional[OuraClient] = None,
         live_wearable_provider: Optional[Callable[[], Optional[dict[str, Any]]]] = None,
+        biometric_history_provider: Optional[Callable[[], Any]] = None,
     ):
         self._whoop = whoop
         self._oura = oura
@@ -389,6 +390,19 @@ class HealthAggregator:
         # never imports ``api.state`` (would be a circular import) and
         # tests can inject a stub.
         self._live_wearable_provider = live_wearable_provider
+        # Pluggable accessor for the durable biometric time-series
+        # (``BaselineEngine.biometric_samples``). Operator report
+        # 2026-06-13: glasses HR/SpO2 streamed into the live snapshot +
+        # rolling baseline but were never persisted as a queryable
+        # series, so "over the last week how were my vitals?" returned
+        # "no data" for every trend (sleep/recovery/HRV/resting-HR) —
+        # those only came from Whoop/Oura. When NO third-party wearable
+        # is connected, ``get_health_summary`` / ``get_vitals_trend``
+        # now derive real week-over-week stats from this store so the
+        # glasses alone answer the question. Callable to keep the
+        # hot-path free of an ``api.state`` import and let tests inject
+        # an in-memory ``BaselineEngine``.
+        self._biometric_history_provider = biometric_history_provider
 
     @property
     def sources(self) -> list[str]:
@@ -425,6 +439,127 @@ class HealthAggregator:
         if not isinstance(snap, dict) or not snap:
             return None
         return snap
+
+    def _biometric_history(self) -> Optional[Any]:
+        """Resolve the durable biometric time-series store (a
+        :class:`~agents.baseline_engine.BaselineEngine`), or ``None``
+        when no provider is wired. Defensive: a raising provider must
+        never crash the summary."""
+        if self._biometric_history_provider is None:
+            return None
+        try:
+            store = self._biometric_history_provider()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "HealthAggregator biometric_history_provider raised: %s", exc,
+            )
+            return None
+        if store is None or not hasattr(store, "get_trend"):
+            return None
+        return store
+
+    @staticmethod
+    def _has_third_party_trend_source(summary: dict[str, Any]) -> bool:
+        """True when a cloud wearable (Whoop/Oura) contributed the
+        resting/recovery/HRV trend fields. When False and glasses
+        history exists, the summary falls back to the glasses-derived
+        trend instead of leaving every field null ("no data")."""
+        return any(
+            summary.get(k) is not None
+            for k in ("recovery_score", "hrv", "readiness", "strain")
+        ) or ("whoop" in summary.get("sources", []) or "oura" in summary.get("sources", []))
+
+    def _build_glasses_vitals_trend(
+        self, days: int = 7,
+    ) -> Optional[dict[str, Any]]:
+        """Compute a week-over-week vitals trend from the persisted
+        wearable samples (glasses/wristband). Returns ``None`` when no
+        history store is wired or no samples exist in the window."""
+        store = self._biometric_history()
+        if store is None:
+            return None
+        try:
+            hr = store.get_trend("hr", days=days)
+            spo2 = store.get_trend("spo2", days=days)
+            skin = store.get_trend("skin_temp", days=days)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("biometric history get_trend failed: %s", exc)
+            return None
+        if not hr["sample_count"] and not spo2["sample_count"] and not skin["sample_count"]:
+            return None
+
+        # Daily resting-HR estimate = the day's minimum sample (lowest
+        # tone of the day ≈ resting); avg gives the day's overall level.
+        resting_hr_trend = [
+            {
+                "date": d["date"],
+                "resting_hr": d["min"],
+                "avg_hr": d["avg"],
+                "max_hr": d["max"],
+                "samples": d["count"],
+            }
+            for d in hr["daily"]
+        ]
+        sources = sorted(set(hr["sources"]) | set(spo2["sources"]) | set(skin["sources"]))
+        primary_source = sources[0] if sources else "wearable sensor"
+
+        trend: dict[str, Any] = {
+            "window_days": days,
+            "sources": sources,
+            "primary_source": primary_source,
+            "hr_sample_count": hr["sample_count"],
+            "spo2_sample_count": spo2["sample_count"],
+            "resting_hr_trend": resting_hr_trend,
+            "hr_range": (
+                {"min": hr["min"], "max": hr["max"], "avg": hr["avg"]}
+                if hr["sample_count"]
+                else None
+            ),
+            "spo2_avg": spo2["avg"] if spo2["sample_count"] else None,
+            "spo2_min": spo2["min"] if spo2["sample_count"] else None,
+            "skin_temp_avg": skin["avg"] if skin["sample_count"] else None,
+        }
+        # The lowest daily-min across the window is the most honest
+        # single-number "resting HR" answer derived from the glasses.
+        resting_candidates = [d["min"] for d in hr["daily"] if d.get("min")]
+        trend["resting_hr_estimate"] = (
+            round(min(resting_candidates), 1) if resting_candidates else None
+        )
+
+        total = hr["sample_count"] + spo2["sample_count"]
+        trend["note"] = (
+            f"Derived from {primary_source} ({total} samples over {days}d); "
+            "no third-party wearable connected."
+        )
+        return trend
+
+    async def get_vitals_trend(self, days: int = 7) -> dict[str, Any]:
+        """Week-over-week vitals trend built from the persisted
+        glasses / wearable samples. Endpoint behind the ``health_data``
+        skill so chat can answer "how were my vitals this week?" with
+        real stats even when no Whoop/Oura is connected.
+
+        Returns the trend dict (see :meth:`_build_glasses_vitals_trend`)
+        or, when nothing has been persisted yet, an explicit empty
+        shape so the LLM can say so honestly instead of hallucinating.
+        """
+        trend = self._build_glasses_vitals_trend(days=days)
+        if trend is None:
+            return {
+                "window_days": days,
+                "sources": [],
+                "resting_hr_trend": [],
+                "hr_range": None,
+                "spo2_avg": None,
+                "spo2_min": None,
+                "resting_hr_estimate": None,
+                "note": (
+                    "No persisted wearable biometric history for the last "
+                    f"{days} days. Connect/stream the W300 glasses (or another "
+                    "wearable) to build a vitals trend."
+                ),
+            }
+        return trend
 
     async def get_health_summary(self) -> dict[str, Any]:
         """Merge data from all connected platforms into a unified dict."""
@@ -544,6 +679,26 @@ class HealthAggregator:
                 if spo2_source and str(spo2_source) not in summary["sources"]:
                     summary["sources"].append(str(spo2_source))
 
+        # Glasses-derived week-over-week fallback (operator report
+        # 2026-06-13). When NO third-party wearable (Whoop/Oura)
+        # contributed the trend fields, derive a real 7-day vitals
+        # trend from the persisted glasses/wristband samples so
+        # "how were my vitals this week?" stops returning "no data".
+        # When a cloud source IS connected, behaviour is unchanged —
+        # we only attach the additive glasses trend block, never
+        # overwrite cloud-mirror values.
+        if not self._has_third_party_trend_source(summary):
+            trend = self._build_glasses_vitals_trend(days=7)
+            if trend is not None:
+                summary["vitals_trend"] = trend
+                # Fill the resting-HR slot from the glasses week when
+                # neither a cloud source nor a fresh live sample did.
+                if summary["resting_hr"] is None and trend.get("resting_hr_estimate"):
+                    summary["resting_hr"] = trend["resting_hr_estimate"]
+                for src in trend.get("sources", []):
+                    if src and src not in summary["sources"]:
+                        summary["sources"].append(src)
+
         return summary
 
     async def get_sleep_trend(self, days: int = 7) -> list[dict[str, Any]]:
@@ -627,6 +782,7 @@ class HealthAggregator:
             "health_summary": self.get_health_summary,
             "sleep_trend": self.get_sleep_trend,
             "recovery_trend": self.get_recovery_trend,
+            "vitals_trend": self.get_vitals_trend,
         }
         fn = dispatch.get(endpoint_id)
         if not fn:
