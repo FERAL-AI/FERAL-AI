@@ -16,11 +16,11 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@tailwindcss/vite": "^4.2.2",
+    "@tailwindcss/vite": "^4.3.1",
     "dompurify": "^3.3.3",
     "highlight.js": "^11.11.1",
-    "katex": "^0.16.47",
-    "lucide-react": "^1.7.0",
+    "katex": "^0.17.0",
+    "lucide-react": "^1.18.0",
     "qrcode": "^1.5.4",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
@@ -33,15 +33,15 @@
     "tailwindcss": "^4.2.2"
   },
   "devDependencies": {
-    "@playwright/test": "^1.59.1",
+    "@playwright/test": "^1.61.0",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22",
     "@vitejs/plugin-react": "^4.7.0",
-    "@vitest/coverage-v8": "^4.1.4",
-    "jsdom": "^29.0.2",
+    "@vitest/coverage-v8": "^4.1.9",
+    "jsdom": "^29.1.1",
     "vite": "^6.4.2",
     "vitest": "^4.1.4"
   }
