@@ -1,10 +1,26 @@
 # Changelog
 
-<!-- feral-version: 2026.6.14 -->
+<!-- feral-version: 2026.6.15 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.15] — 2026-06-15 — security: clear all open Dependabot alerts (npm dependency patches)
+
+Patch release. Resolves every open GitHub Dependabot alert (was 40: 13 high / 17 medium / 10 low) across all five npm lockfiles via non-breaking `npm audit fix` bumps that stay within the existing semver ranges. The bundled v2 web UI was rebuilt so the patched runtime libraries actually ship to users.
+
+### Security (npm dependencies)
+
+- **fix(deps): react-router 7.14 → 7.17.** Closes the vendored turbo-stream arbitrary-constructor RCE, the `__manifest` unbounded-path-expansion DoS, the protocol-relative open redirect, and the PUT/PATCH/DELETE CSRF advisories. (`feral-client`, `feral-client-v2`)
+- **fix(deps): form-data → 4.0.6.** Closes CRLF injection via unescaped multipart field names/filenames. (`feral-extension`)
+- **fix(deps): ws → 8.21.** Closes the tiny-fragment memory-exhaustion DoS and uninitialized-memory disclosure. (`feral-nodes/ts-node-sdk`)
+- **fix(deps): vite → 6.4.3 / 8.0.16.** Closes the `server.fs.deny` bypass on Windows alternate paths and the `launch-editor` NTLMv2 hash disclosure. (all clients + `desktop`)
+- **fix(deps): dompurify → 3.4.10.** Closes multiple `IN_PLACE` / `<template>` sanitization-bypass XSS advisories. (`feral-client`, `feral-client-v2`)
+- **fix(deps): postcss → 8.5.10, js-yaml → 4.2.0, @babel/core → 7.29.6.** Closes the PostCSS `</style>` XSS, the js-yaml merge-key quadratic DoS, and the Babel `sourceMappingURL` arbitrary-file-read advisories.
+- **deps note: esbuild GHSA-gv7w-rqvm-qjhr dismissed (tolerable risk).** The advisory's RCE vector is esbuild's Deno install path (`NPM_CONFIG_REGISTRY`); FERAL builds via npm/CI where the esbuild binary is integrity-pinned by `package-lock.json`, so the vector does not apply. Its only patch (esbuild 0.28.1) requires a vite 6 → 8 major upgrade (esbuild 0.28 cannot down-level destructuring under vite 6's build target), deferred to a dedicated change.
+
+`feral-extension`, `feral-nodes/ts-node-sdk`, and `desktop` now report 0 npm vulnerabilities; both web clients are clean apart from the dismissed esbuild advisory. v2 build + full vitest (404 passed) and the feral-client build verified green; the v2 bundle was re-synced and passes the model-picker contract check.
 
 ## [2026.6.14] — 2026-06-15 — release-pipeline recovery: pin FastAPI below the 0.137 `include_router` regression + green CI
 
