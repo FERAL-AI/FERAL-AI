@@ -52,9 +52,11 @@ describe('Devices', () => {
   };
 
   it('renders connected + paired sections', async () => {
-    const { findByText, getByRole } = renderV2(<Devices />, { fetch: devResp });
+    const { findAllByText, getByRole } = renderV2(<Devices />, { fetch: devResp });
     expect(getByRole('heading', { name: /Devices/i })).toBeInTheDocument();
-    expect(await findByText(/Glasses/)).toBeInTheDocument();
+    // "Glasses" renders in both the topology view and the Live card, so
+    // assert at least one match rather than a unique one.
+    expect((await findAllByText(/Glasses/)).length).toBeGreaterThan(0);
   });
 
   it('shows empty state when everything is empty', async () => {

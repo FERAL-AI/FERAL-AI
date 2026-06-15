@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "feral-ai"
-version = "2026.6.13"
+version = "2026.6.14"
 description = "FERAL — Open-source AI agent with computer use, GenUI, voice, hardware control, and persistent memory."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -23,7 +23,13 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "fastapi>=0.115.0",
+    # Upper bound: FastAPI 0.137.0 regressed `app.include_router(...)` so
+    # that most sub-router routes silently fail to register at import time
+    # (the app boots with ~17 routes instead of the full set, tripping the
+    # boot-time auth-allowlist drift guard). Pin below 0.137 until that
+    # upstream regression is resolved. See release wheel-smoke failure for
+    # v2026.6.13.
+    "fastapi>=0.115.0,<0.137",
     # PR 10: chat composer attachments + wiki PDF ingestion both use
     # multipart/form-data, which FastAPI delegates to python-multipart.
     # Without this, /api/uploads and /api/wiki/ingest/pdf raise a

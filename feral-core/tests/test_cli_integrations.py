@@ -40,7 +40,7 @@ def stub_vault(monkeypatch):
         def retrieve(self, key, *, requester="oauth_manager"):
             return self.creds.get(key)
 
-        def store(self, key, value, *, requester="oauth_manager"):
+        def store(self, key, value, *, stored_by="oauth_manager"):
             self.creds[key] = value
 
         def list_keys(self):

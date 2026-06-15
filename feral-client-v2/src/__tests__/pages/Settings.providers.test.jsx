@@ -153,7 +153,7 @@ describe('Settings → Providers freshness (W1)', () => {
   });
 
   it('(b) renders the freshness badge as Live when last_refresh is recent', async () => {
- const FRESH_TS = (Date.now / 1000) - 60; // 1 minute ago
+ const FRESH_TS = (Date.now() / 1000) - 60; // 1 minute ago
     const modelsResponse = () => ({
       provider_id: 'openai',
       models: ['gpt-5.5'],

@@ -1,10 +1,23 @@
 # Changelog
 
-<!-- feral-version: 2026.6.13 -->
+<!-- feral-version: 2026.6.14 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.14] — 2026-06-15 — release-pipeline recovery: pin FastAPI below the 0.137 `include_router` regression + green CI
+
+Patch release. v2026.6.13 was tagged but never published: the Release wheel-smoke gate and CI both failed, so the Gmail App Password + chat answer-recovery work from 6.13 never reached PyPI. This release closes the three independent breakages and re-cuts a clean, publishable build that carries those 6.13 changes forward.
+
+### Build / dependencies (feral-core)
+
+- **fix(deps): cap `fastapi` below 0.137 — the real release blocker.** FastAPI 0.137.0 regressed `app.include_router(...)` so that most sub-router routes silently fail to register at import time: a clean-venv install booted with ~17 routes instead of the full set, which tripped the boot-time auth-allowlist drift guard (`_assert_allowlist_routes_exist`) and made `from api.server import app` raise. `pyproject.toml` had an unbounded `fastapi>=0.115.0`, so the release/CI clean venv resolved 0.137.1 even though the change set never touched `server.py` (the running dev brain stayed on 0.135.x and looked fine). Pinned to `fastapi>=0.115.0,<0.137`; the freshly built wheel now passes `scripts/release_wheel_smoke.py` end to end in a clean venv (resolves 0.136.x). Bisected: 0.136.0 registers all routes, 0.137.0+ drops them.
+
+### Tests
+
+- **fix(test): backend `pytest` green.** `tests/test_cli_integrations.py`'s stub vault still defined `store(..., requester=...)`, mirroring the pre-fix Vault API; under the corrected `OAuthManager` call (`stored_by=`) it raised `TypeError`. Updated the stub to `stored_by=` to match `security/vault.py`.
+- **fix(test): web `vitest` green.** `Settings.providers.test.jsx` computed a "fresh" timestamp with `Date.now / 1000` (missing call parens → `NaN`), so the freshness badge read `stale` and the Live-badge assertion failed; fixed to `Date.now()`. `chat_devices.test.jsx` used `findByText(/Glasses/)`, which now matches multiple nodes (the device name renders in both the topology view and the Live card); relaxed to `findAllByText` + non-empty assertion.
 
 ## [2026.6.13] — 2026-06-14 — Gmail App Password path actually works (IMAP/SMTP) + honest probe errors
 
