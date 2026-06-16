@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import email
 from email.message import EmailMessage
 
 import pytest
