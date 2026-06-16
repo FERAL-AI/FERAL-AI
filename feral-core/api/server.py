@@ -1307,18 +1307,23 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
         state.bind_session_to_daemon(session_id, node_id)
         state.perception.update_connected_nodes(session_id, list(state.daemons.keys()))
 
-    greeting = _build_greeting()
-
-    await ws.send_json(FeralMessage(
-        session_id=session_id,
-        hop="brain",
-        type="text_response",
-        payload=TextResponsePayload(
-            text=greeting
-        ).model_dump(),
-    ).model_dump())
+    # Greeting policy (RC fix for chat thread switching): only greet on
+    # the DEFAULT connection (no explicit ``?session_id=``). The WebUI
+    # reconnects this socket with an explicit session id every time the
+    # user switches to a non-primary thread; emitting a greeting on each
+    # of those reconnects injected a stray "How can I help?" bubble into
+    # the thread. Explicit-session connects skip the greeting entirely.
+    greeting = _build_greeting() if not requested_sid else ""
 
     if greeting:
+        await ws.send_json(FeralMessage(
+            session_id=session_id,
+            hop="brain",
+            type="text_response",
+            payload=TextResponsePayload(
+                text=greeting
+            ).model_dump(),
+        ).model_dump())
         state.memory.working_push(session_id, {"role": "assistant", "content": greeting})
 
     try:

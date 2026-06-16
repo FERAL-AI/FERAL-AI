@@ -30,7 +30,7 @@ export function wireSocketGlobalErrors(socket) {
       wasOpen = true;
       return;
     }
-    if (wasOpen && !socket.stopped && (state === 'closed' || state === 'error')) {
+    if (wasOpen && !socket.stopped && !socket._intentionalReconnect && (state === 'closed' || state === 'error')) {
       pushGlobalError(new ApiError({
         status: 0,
         code: 'ws_disconnect',

@@ -161,8 +161,21 @@ def _sanitize_orphan_tool_rows(rows: list[dict]) -> list[dict]:
     return cleaned
 
 
+# Boot-time status of the configured vector-index backend. Read by
+# ``api/routes/memory.py`` so the dashboard can show the TRUTH: which
+# backend the operator configured, which one the running brain actually
+# loaded, and — if they differ — why (e.g. ``chromadb`` not installed).
+# Populated by ``_load_configured_vec_index_or_default`` at boot.
+MEMORY_BACKEND_STATUS: dict = {
+    "configured": "sqlite_vec",
+    "active": "sqlite_vec",
+    "fell_back": False,
+    "error": None,
+}
+
+
 def _load_configured_vec_index_or_default():
-    """audit-r12 D4: read ``settings.memory.backend`` and either return
+    """audit-r12 D4 / RC fix: read ``settings.memory.backend`` and return
     a constructed :class:`VectorIndexBackend` for the operator's choice,
     or ``None`` so :class:`MemoryStore` falls back to its built-in
     sqlite-vec default.
@@ -176,18 +189,18 @@ def _load_configured_vec_index_or_default():
     sync :class:`VectorIndexBackend` Protocol exists exactly so this
     construction stays sync.
 
-    Fails LOUDLY on:
+    Resilience policy (changed in the RC):
 
-    * unknown backend id (``ValueError`` -> propagates, brain refuses
-      to boot);
-    * missing optional dependency (``ImportError`` -> propagates with
-      an actionable ``feral-ai[memory-<id>]`` install hint);
-    * constructor failure (e.g. corrupt Chroma persistence dir,
-      unreachable Qdrant URL) -> propagates.
-
-    Never silently falls back to sqlite-vec. Misconfiguring the
-    selector is now a boot-time failure, not a "vectors silently
-    aren't being stored" failure.
+    Previously this raised on a missing dependency / bad config, so a
+    Settings toggle to ``chroma`` without ``chromadb`` installed would
+    **brick the brain** (it refused to boot and ``feral serve`` timed
+    out). That is a terrible failure mode for an opt-in selector. We now
+    **fall back to sqlite-vec and record the error** in
+    :data:`MEMORY_BACKEND_STATUS` so the brain always boots and the
+    dashboard can surface "you picked chroma but it isn't installed —
+    here's how to fix it" instead of a dead server. The Settings API
+    additionally *preflights* the backend before persisting the choice,
+    so the common case never even reaches this fallback.
     """
     try:
         from config.loader import load_settings as _load_settings
@@ -201,22 +214,41 @@ def _load_configured_vec_index_or_default():
     settings = _load_settings() or {}
     memory_cfg = settings.get("memory") or {}
     backend_id = memory_cfg.get("backend") or "sqlite_vec"
+    MEMORY_BACKEND_STATUS.update(
+        {"configured": backend_id, "active": "sqlite_vec",
+         "fell_back": False, "error": None}
+    )
     if backend_id == "sqlite_vec":
         # MemoryStore defaults to sqlite-vec internally; nothing for us
         # to construct.
         return None
 
     backend_config = memory_cfg.get("backend_config") or {}
-    # The vector dimensionality must match whatever the embedder will
-    # later produce; constructing one here is cheap (just provider
-    # selection, no API calls) and gives us the same dim MemoryStore
-    # will use.
-    embedder = _Embedder()
-    logger.info(
-        "memory.backend=%s — constructing pluggable vector index (dim=%d)",
-        backend_id, embedder.dimension,
-    )
-    return _load_vec(backend_id, dim=embedder.dimension, **backend_config)
+    try:
+        # The vector dimensionality must match whatever the embedder will
+        # later produce; constructing one here is cheap (provider
+        # selection only — model load is lazy) and gives us the same dim
+        # MemoryStore will use.
+        embedder = _Embedder()
+        logger.info(
+            "memory.backend=%s — constructing pluggable vector index (dim=%d)",
+            backend_id, embedder.dimension,
+        )
+        backend = _load_vec(backend_id, dim=embedder.dimension, **backend_config)
+        MEMORY_BACKEND_STATUS["active"] = backend_id
+        return backend
+    except Exception as exc:  # noqa: BLE001 — never brick boot on a bad selector
+        MEMORY_BACKEND_STATUS.update(
+            {"active": "sqlite_vec", "fell_back": True, "error": str(exc)}
+        )
+        logger.error(
+            "memory.backend=%s failed to construct (%s). Falling back to "
+            "sqlite_vec so the brain still boots. Fix the backend (e.g. "
+            "`pip install feral-ai[memory-%s]`) or switch back to "
+            "sqlite_vec in Settings.",
+            backend_id, exc, backend_id,
+        )
+        return None
 
 
 class VisionBuffer:
@@ -1198,7 +1230,12 @@ class BrainState:
             logger.warning("MCP projection wiring failed: %s", exc)
 
         with boot_subsystem(self._boot_report, "TaskFlowRuntime"):
-            self.taskflows = TaskFlowRuntime(memory_store=self.memory)
+            # skill_registry exists already; the orchestrator does not yet
+            # (it's constructed below), so it's back-filled right after.
+            self.taskflows = TaskFlowRuntime(
+                memory_store=self.memory,
+                skill_registry=self.skill_registry,
+            )
             await self.taskflows.start()
 
         with boot_subsystem(self._boot_report, "UploadStore"):
@@ -1225,6 +1262,17 @@ class BrainState:
                 approval_manager=self.approval_manager,
             )
             self.orchestrator.set_llm(_shared_llm)
+            # RC fix (long-horizon tasks): TaskFlowRuntime was built before
+            # the orchestrator existed, so its ``_orchestrator`` was None and
+            # every background ``llm.chat`` step failed with "No orchestrator
+            # available" — the persistent background engine could never run an
+            # autonomous LLM step. Back-fill it now that the orchestrator is
+            # live so flows can actually drive multi-step work in the
+            # background (and survive a restart via the SQLite-backed runner).
+            if self.taskflows is not None:
+                self.taskflows._orchestrator = self.orchestrator
+                if getattr(self.taskflows, "_skill_registry", None) is None:
+                    self.taskflows._skill_registry = self.skill_registry
             # Wire the boot CostBudget into the interactive chat-path LLM so
             # an operator-set chat cap actually preflights check_and_reserve
             # on chat / chat_stream (background loops already get it via

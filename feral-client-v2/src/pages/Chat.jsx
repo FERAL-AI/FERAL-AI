@@ -143,11 +143,30 @@ export default function Chat() {
   // turns the thread is missing (deduped by role+text), so returning
   // to /chat shows the answer that completed while we were away
   // instead of a silently dropped reply. Mirrors the Shell boot merge.
+  // Bind the app-level WebSocket to the active thread's orchestrator
+  // session. For the primary thread the token is '' (default
+  // connection); other threads bind to their own session so chat turns
+  // route to — and stream back from — the right conversation. The
+  // socket persists across navigation, so a turn started here keeps
+  // running server-side even if the user leaves the page.
+  const activeSessionToken = thread?.activeSessionToken ?? '';
+  const activeSessionId = thread?.activeSessionId || '';
+  useEffect(() => {
+    if (socket && typeof socket.setSession === 'function') {
+      socket.setSession(activeSessionToken);
+    }
+  }, [socket, activeSessionToken]);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // Rehydrate THIS thread's own orchestrator transcript (never the
+      // primary's unless this IS the primary thread) so returning to a
+      // thread recovers any turn that completed while we were away —
+      // without bleeding another thread's messages in.
+      if (!activeSessionId) return;
       try {
-        const transcript = await apiJson('/api/sessions/primary/transcript');
+        const transcript = await apiJson(`/api/sessions/${encodeURIComponent(activeSessionId)}/transcript`);
         if (cancelled) return;
         const wsMessages = Array.isArray(transcript?.messages) ? transcript.messages : [];
         if (!wsMessages.length) return;
@@ -170,11 +189,11 @@ export default function Chat() {
           return additions.length ? [...prev, ...additions] : prev;
         });
       } catch {
-        /* primary transcript optional — never block the page on it */
+        /* transcript optional — never block the page on it */
       }
     })();
     return () => { cancelled = true; };
-  }, [setMessages]);
+  }, [setMessages, activeSessionId]);
 
   const resumeThought = async (thoughtId) => {
     try {
@@ -239,6 +258,26 @@ export default function Chat() {
 
     const unsub = socket.subscribe((msg) => {
       const type = msg?.type;
+      // Drop chat frames addressed to a DIFFERENT thread's session. A
+      // turn that was started on thread A can finalize after the user
+      // switched to thread B; without this guard its delta/response
+      // would render in the wrong thread. Frames without a session_id
+      // (legacy / broadcast) and frames matching the active session
+      // pass through.
+      const frameSession = msg?.session_id || '';
+      const CHAT_FRAME_TYPES = new Set([
+        'stream_delta', 'text_response', 'chat_response',
+        'tool_start', 'tool_call', 'skill_start', 'tool_end',
+        'tool_result', 'reasoning', 'budget_exceeded', 'skill_proposal',
+      ]);
+      if (
+        frameSession
+        && activeSessionId
+        && frameSession !== activeSessionId
+        && CHAT_FRAME_TYPES.has(type)
+      ) {
+        return;
+      }
       if (type === 'stream_delta') {
         const p = msg.payload || {};
         if (p.is_final) {
@@ -471,7 +510,7 @@ export default function Chat() {
       }
     });
     return unsub;
-  }, [socket]);
+  }, [socket, activeSessionId]);
 
   useEffect(() => {
     const el = bottomRef.current;
@@ -515,6 +554,11 @@ export default function Chat() {
     // into the orchestrator context so the model can ground on them.
     const envelope = {
       hop: 'client',
+      // Tag the turn with the active thread's session. The socket is
+      // already bound to this session (?session_id=), so this is mostly
+      // belt-and-suspenders, but it keeps the envelope honest for any
+      // server path that reads it.
+      ...(activeSessionId ? { session_id: activeSessionId } : {}),
       type: 'text_command',
       payload: {
         text,
@@ -898,9 +942,14 @@ export default function Chat() {
             // bubble can carry over and look like the new thread is
             // mid-reply when it isn't.
             resetStreamingState();
+            setSendError('');
             if (thread?.loadConversation) {
               const ok = await thread.loadConversation(conversationId);
+              // Don't fail silently: if the thread can't be loaded the
+              // pane used to just stay open with no feedback, which read
+              // as "it won't let me open it". Tell the user instead.
               if (ok) setPaneOpen(null);
+              else setSendError("couldn't open that thread — it may have been deleted");
               return;
             }
             try {
@@ -909,7 +958,7 @@ export default function Chat() {
               setMessages(msgs);
               setPaneOpen(null);
             } catch {
-              /* silent */
+              setSendError("couldn't open that thread — it may have been deleted");
             }
           }}
           onStartNewConversation={async () => {

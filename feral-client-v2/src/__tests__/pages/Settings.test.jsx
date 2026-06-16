@@ -67,7 +67,15 @@ function providersResponder(url) {
     return healthSnapshot;
   }
   if (url.includes('/api/memory/backend')) {
-    return { backend: 'sqlite_vec', available: ['sqlite_vec', 'chroma', 'qdrant'], configured: {} };
+    return {
+      backend: 'sqlite_vec',
+      runtime: 'sqlite_vec',
+      active_store: 'sqlite_vec',
+      pending_unapplied: false,
+      fell_back: false,
+      boot_error: null,
+      available: { sqlite_vec: true, chroma: false, qdrant: false },
+    };
   }
   if (url.includes('/api/identity')) {
     return { name: 'FERAL', personality: '', rules: [], greeting_style: '', voice: {} };
@@ -130,12 +138,13 @@ describe('Settings', () => {
   });
 
   it('Memory section renders the backend picker', async () => {
-    const { getByText, findByText } = renderV2(<Settings />, {
+    const { getByText, findAllByText } = renderV2(<Settings />, {
       fetch: providersResponder,
     });
     fireEvent.click(getByText(/^Memory$/));
- // The MemorySection renders the backend name somewhere.
-    expect(await findByText(/sqlite_vec/i)).toBeInTheDocument();
+ // The MemorySection renders the runtime backend ("In use now") plus a
+ // row per available backend, so sqlite_vec appears more than once.
+    expect((await findAllByText(/sqlite_vec/i)).length).toBeGreaterThan(0);
   });
 
   it('Access section renders current mode and tailscale snapshot', async () => {

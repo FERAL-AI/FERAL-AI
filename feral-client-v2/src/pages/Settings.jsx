@@ -1466,6 +1466,7 @@ function MemorySection() {
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [note, setNote] = useState('');
 
   const refresh = useCallback(async () => {
     try { setData(await apiJson('/api/memory/backend')); } catch (e) { setError(e.message); }
@@ -1474,39 +1475,85 @@ function MemorySection() {
 
   const switchTo = async (next) => {
     setBusy(true);
+    setError(null);
+    setNote('');
     try {
       const r = await apiFetch('/api/memory/backend', {
         method: 'POST',
         body: JSON.stringify({ backend: next }),
       });
       const body = await r.json();
+      // The switch is now preflighted server-side: a failure means the
+      // backend could NOT initialize and was NOT saved (the brain is
+      // unchanged). Surface that honestly instead of pretending it stuck.
       if (!body?.ok) setError(body?.error || 'switch failed');
+      else if (body?.note) setNote(body.note);
       await refresh();
+    } catch (e) {
+      setError(e?.message || 'switch failed');
     } finally { setBusy(false); }
   };
 
   if (!data) return <EmptyState title={error || 'Loading memory status…'} />;
 
+  // `backend` = what settings.json says; `runtime` = what the live brain
+  // actually loaded. They differ when a restart is pending or boot fell
+  // back (e.g. the dep wasn't installed).
+  const configured = data.backend;
+  const runtime = data.runtime || data.backend;
+
   return (
     <div className="v2-setting-stack">
-      <Row label="Active backend"><Status tone="live">{data.backend}</Status></Row>
+      <Row label="In use now"><Status tone="live">{runtime}</Status></Row>
+      {configured !== runtime && (
+        <Row label="Configured"><Status tone="cached">{configured}</Status></Row>
+      )}
+
+      {data.fell_back && (
+        <div className="v2-chip v2-chip--error" role="alert">
+          Configured backend “{configured}” failed to load — the brain fell
+          back to “{runtime}” so it could still start.
+          {data.boot_error ? ` Reason: ${data.boot_error}` : ''}
+        </div>
+      )}
+      {!data.fell_back && data.pending_unapplied && (
+        <div className="v2-chip v2-chip--warn" role="status">
+          Restart the Brain (<code>feral restart</code>) to load “{configured}”.
+          Currently running “{runtime}”.
+        </div>
+      )}
+
       {Object.entries(data.available || {}).map(([name, installed]) => (
         <Row
           key={name}
           label={name}
-          hint={installed ? 'Installed' : `Run: pip install feral-ai[memory-${name}]`}
+          hint={
+            !installed
+              ? `Not installed — run: pip install feral-ai[memory-${name}]`
+              : name === runtime
+                ? 'Active'
+                : name === configured
+                  ? 'Selected (restart to apply)'
+                  : 'Installed'
+          }
         >
           <button
             type="button"
-            className={`v2-btn ${data.backend === name ? 'v2-btn--primary' : ''}`}
-            disabled={busy || !installed || data.backend === name}
+            className={`v2-btn ${configured === name ? 'v2-btn--primary' : ''}`}
+            disabled={busy || !installed || configured === name}
             onClick={() => switchTo(name)}
           >
-            {data.backend === name ? 'In use' : installed ? 'Switch' : 'Not installed'}
+            {name === runtime
+              ? 'In use'
+              : configured === name
+                ? 'Selected'
+                : installed ? 'Switch' : 'Not installed'}
           </button>
         </Row>
       ))}
-      {error && <div className="v2-chip v2-chip--error">{error}</div>}
+
+      {note && <div className="v2-chip v2-chip--live" role="status">{note}</div>}
+      {error && <div className="v2-chip v2-chip--error" role="alert">{error}</div>}
     </div>
   );
 }

@@ -208,14 +208,20 @@ class SkillExecutor:
                     return {
                         "success": result["success"],
                         "status_code": result.get("status_code", 200),
-                        "data": self._sanitize_response(result.get("data")),
+                        "data": self._sanitize_response(
+                            result.get("data"),
+                            max_list_len=self._email_sanitize_list_limit(skill.skill_id, endpoint.id),
+                        ),
                         "error": result.get("error")
                     }
                 else:
                     return {
                         "success": True,
                         "status_code": 200,
-                        "data": self._sanitize_response(result),
+                        "data": self._sanitize_response(
+                            result,
+                            max_list_len=self._email_sanitize_list_limit(skill.skill_id, endpoint.id),
+                        ),
                         "error": None
                     }
             except Exception as e:
@@ -470,7 +476,20 @@ class SkillExecutor:
         if future and not future.done():
             future.set_result(result)
 
-    def _sanitize_response(self, data, max_depth: int = 5, max_str_len: int = 2000) -> any:
+    @staticmethod
+    def _email_sanitize_list_limit(skill_id: str, endpoint_id: str) -> int:
+        """Allow email feed endpoints to return more rows without widening all skills."""
+        if skill_id == "email" and endpoint_id in ("search", "read_email", "list_inbox"):
+            return 50
+        return 20
+
+    def _sanitize_response(
+        self,
+        data,
+        max_depth: int = 5,
+        max_str_len: int = 2000,
+        max_list_len: int = 20,
+    ) -> any:
         """
         Sanitize API response data before feeding back to the LLM.
         Prevents:
@@ -481,9 +500,9 @@ class SkillExecutor:
             return "[truncated]"
 
         if isinstance(data, dict):
-            return {k: self._sanitize_response(v, max_depth - 1) for k, v in list(data.items())[:50]}
+            return {k: self._sanitize_response(v, max_depth - 1, max_str_len, max_list_len) for k, v in list(data.items())[:50]}
         elif isinstance(data, list):
-            return [self._sanitize_response(item, max_depth - 1) for item in data[:20]]
+            return [self._sanitize_response(item, max_depth - 1, max_str_len, max_list_len) for item in data[:max_list_len]]
         elif isinstance(data, str):
             # Truncate long strings
             if len(data) > max_str_len:

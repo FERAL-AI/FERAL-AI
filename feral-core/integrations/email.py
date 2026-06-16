@@ -7,6 +7,7 @@ Falls back to IMAP when no Google OAuth is available.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import email as email_stdlib
 import imaplib
@@ -14,6 +15,7 @@ import json
 import logging
 import os
 import smtplib
+from datetime import datetime
 from email.mime.text import MIMEText
 from typing import Any, Callable, Optional
 
@@ -224,6 +226,119 @@ class EmailIntegration:
         return conn
 
     @staticmethod
+    def _clamp_max_results(max_results: int, default: int = 10) -> int:
+        try:
+            n = int(max_results)
+        except (TypeError, ValueError):
+            n = default
+        return min(max(1, n), 100)
+
+    @staticmethod
+    def _is_gmail_imap_host(host: str) -> bool:
+        h = (host or "").lower()
+        return h == GMAIL_IMAP_HOST or "gmail" in h
+
+    @staticmethod
+    def _normalize_imap_date(date_str: str) -> str:
+        """Convert ISO YYYY-MM-DD or YYYY/MM/DD to IMAP SINCE/BEFORE form (DD-Mon-YYYY)."""
+        cleaned = (date_str or "").strip()
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                dt = datetime.strptime(cleaned, fmt)
+                return dt.strftime("%d-%b-%Y")
+            except ValueError:
+                continue
+        raise ValueError(f"Invalid date '{date_str}'; use YYYY-MM-DD or YYYY/MM/DD")
+
+    @staticmethod
+    def _normalize_gmail_date(date_str: str) -> str:
+        """Convert ISO date to Gmail after:/before: form (YYYY/MM/DD)."""
+        cleaned = (date_str or "").strip()
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                dt = datetime.strptime(cleaned, fmt)
+                return dt.strftime("%Y/%m/%d")
+            except ValueError:
+                continue
+        raise ValueError(f"Invalid date '{date_str}'; use YYYY-MM-DD or YYYY/MM/DD")
+
+    @classmethod
+    def _compose_gmail_query(
+        cls,
+        query: str = "",
+        *,
+        from_: str = "",
+        subject: str = "",
+        since: str = "",
+        before: str = "",
+        body: str = "",
+        has_attachment: bool = False,
+    ) -> str:
+        """Build a Gmail ``q`` / X-GM-RAW string from free-text and structured filters."""
+        parts: list[str] = []
+        if query.strip():
+            parts.append(query.strip())
+        if from_.strip():
+            parts.append(f"from:{from_.strip()}")
+        if subject.strip():
+            parts.append(f"subject:{subject.strip()}")
+        if since.strip():
+            parts.append(f"after:{cls._normalize_gmail_date(since)}")
+        if before.strip():
+            parts.append(f"before:{cls._normalize_gmail_date(before)}")
+        if body.strip():
+            parts.append(body.strip())
+        if has_attachment:
+            parts.append("has:attachment")
+        return " ".join(parts)
+
+    @classmethod
+    def _build_generic_imap_search(
+        cls,
+        query: str = "",
+        *,
+        from_: str = "",
+        subject: str = "",
+        since: str = "",
+        before: str = "",
+        body: str = "",
+    ) -> str:
+        """Build RFC3501 SEARCH criteria for non-Gmail IMAP hosts."""
+        clauses: list[str] = []
+        if from_.strip():
+            clauses.append(f'FROM "{from_.strip()}"')
+        if subject.strip():
+            clauses.append(f'SUBJECT "{subject.strip()}"')
+        if since.strip():
+            clauses.append(f"SINCE {cls._normalize_imap_date(since)}")
+        if before.strip():
+            clauses.append(f"BEFORE {cls._normalize_imap_date(before)}")
+        if body.strip():
+            clauses.append(f'TEXT "{body.strip()}"')
+        if query.strip() and not any((from_, subject, since, before, body)):
+            clauses.append(f'TEXT "{query.strip()}"')
+        elif query.strip():
+            clauses.append(f'TEXT "{query.strip()}"')
+        if not clauses:
+            return "ALL"
+        if len(clauses) == 1:
+            return clauses[0]
+        return f"({' '.join(clauses)})"
+
+    @staticmethod
+    def _parse_imap_headers(raw_bytes: bytes, flags_line: str = "") -> dict[str, Any]:
+        """Parse a header-only IMAP fetch (no body) for search/list results."""
+        msg = email_stdlib.message_from_bytes(raw_bytes)
+        subject = msg.get("Subject", "") or ""
+        return {
+            "subject": subject,
+            "from": msg.get("From", "") or "",
+            "date": msg.get("Date", "") or "",
+            "snippet": subject[:200],
+            "thread_id": msg.get("Message-ID", "") or "",
+        }
+
+    @staticmethod
     def _parse_imap_message(raw_bytes: bytes) -> dict[str, Any]:
         msg = email_stdlib.message_from_bytes(raw_bytes)
         body = ""
@@ -246,6 +361,101 @@ class EmailIntegration:
             "date": msg.get("Date", ""),
             "body": body,
         }
+
+    def _imap_search_sync(
+        self,
+        query: str,
+        max_results: int,
+        from_: str = "",
+        subject: str = "",
+        since: str = "",
+        before: str = "",
+        body: str = "",
+        folder: str = "INBOX",
+        has_attachment: bool = False,
+    ) -> dict[str, Any]:
+        """Blocking IMAP search — call via ``asyncio.to_thread``.
+
+        Gmail IMAP hosts use ``X-GM-RAW`` so free-text ``query`` and structured
+        filters share Gmail search syntax. Generic IMAP hosts translate structured
+        filters into RFC3501 SEARCH criteria; a lone ``query`` becomes ``TEXT``.
+        """
+        resolved = self._resolve_imap()
+        if resolved is None:
+            raise RuntimeError("No IMAP credentials configured")
+        host, _port, _user, _password = resolved
+        gmail_host = self._is_gmail_imap_host(host)
+
+        if gmail_host:
+            query_used = self._compose_gmail_query(
+                query,
+                from_=from_,
+                subject=subject,
+                since=since,
+                before=before,
+                body=body,
+                has_attachment=has_attachment,
+            )
+            if not query_used:
+                query_used = "in:inbox"
+        else:
+            query_used = self._build_generic_imap_search(
+                query,
+                from_=from_,
+                subject=subject,
+                since=since,
+                before=before,
+                body=body,
+            )
+
+        conn = self._imap_connect()
+        try:
+            conn.select(folder or "INBOX")
+            if gmail_host:
+                _, data = conn.uid("SEARCH", "X-GM-RAW", f'"{query_used}"')
+                id_key = "uid"
+            else:
+                if query_used == "ALL":
+                    _, data = conn.search(None, "ALL")
+                else:
+                    _, data = conn.search(None, query_used)
+                id_key = "seq"
+
+            raw_ids = data[0].split() if data and data[0] else []
+            ids = raw_ids[-max_results:] if len(raw_ids) > max_results else raw_ids
+            ids.reverse()
+
+            header_fetch = "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)] FLAGS)"
+            messages: list[dict[str, Any]] = []
+            for mid in ids:
+                if id_key == "uid":
+                    _, msg_data = conn.uid("FETCH", mid, header_fetch)
+                else:
+                    _, msg_data = conn.fetch(mid, header_fetch)
+                if not msg_data or not msg_data[0]:
+                    continue
+                item = msg_data[0]
+                if not isinstance(item, tuple) or len(item) < 2:
+                    continue
+                meta = item[0]
+                if isinstance(meta, bytes):
+                    meta = meta.decode("utf-8", errors="replace")
+                parsed = self._parse_imap_headers(item[1], flags_line=str(meta))
+                parsed["id"] = mid.decode() if isinstance(mid, bytes) else str(mid)
+                if has_attachment:
+                    parsed["has_attachments"] = True
+                messages.append(parsed)
+
+            return {
+                "messages": messages,
+                "source": "imap",
+                "query_used": query_used,
+            }
+        finally:
+            try:
+                conn.logout()
+            except Exception:
+                pass
 
     # ── Gmail helpers ──────────────────────────────────────────────
 
@@ -285,6 +495,7 @@ class EmailIntegration:
     # ── Endpoints ──────────────────────────────────────────────────
 
     async def list_inbox(self, max_results: int = 20, **kwargs) -> dict:
+        max_results = self._clamp_max_results(max_results, default=20)
         if self._use_imap:
             try:
                 conn = self._imap_connect()
@@ -368,38 +579,60 @@ class EmailIntegration:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def search(self, query: str = "", max_results: int = 10, **kwargs) -> dict:
+    async def search(
+        self,
+        query: str = "",
+        max_results: int = 10,
+        from_: str = "",
+        subject: str = "",
+        since: str = "",
+        before: str = "",
+        body: str = "",
+        folder: str = "INBOX",
+        has_attachment: bool = False,
+        **kwargs,
+    ) -> dict:
+        max_results = self._clamp_max_results(max_results, default=10)
+
         if self._use_imap:
             try:
-                conn = self._imap_connect()
-                conn.select("INBOX")
-                _, data = conn.search(None, "SUBJECT", f'"{query}"')
-                ids = data[0].split()
-                ids = ids[-max_results:] if len(ids) > max_results else ids
-                ids.reverse()
-                messages: list[dict] = []
-                for mid in ids:
-                    _, msg_data = conn.fetch(mid, "(RFC822)")
-                    if msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
-                        parsed = self._parse_imap_message(msg_data[0][1])
-                        parsed["id"] = mid.decode()
-                        messages.append(parsed)
-                conn.logout()
-                return {"success": True, "data": {"messages": messages, "query": query, "source": "imap"}}
+                data = await asyncio.to_thread(
+                    self._imap_search_sync,
+                    query,
+                    max_results,
+                    from_,
+                    subject,
+                    since,
+                    before,
+                    body,
+                    folder,
+                    has_attachment,
+                )
+                return {"success": True, "data": data}
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
         headers = await self._headers()
         if not headers:
             return {"success": False, "error": "Not connected to Gmail"}
+        query_used = self._compose_gmail_query(
+            query,
+            from_=from_,
+            subject=subject,
+            since=since,
+            before=before,
+            body=body,
+            has_attachment=has_attachment,
+        )
         try:
             resp = await self._http.get(
                 "/messages",
-                params={"q": query, "maxResults": max_results},
+                params={"q": query_used, "maxResults": max_results},
                 headers=headers,
             )
             resp.raise_for_status()
-            msg_stubs = resp.json().get("messages", [])
+            payload = resp.json()
+            msg_stubs = payload.get("messages", [])
             messages = []
             for stub in msg_stubs:
                 detail = await self._http.get(
@@ -412,14 +645,25 @@ class EmailIntegration:
                 hdr: dict[str, str] = {}
                 for h in d.get("payload", {}).get("headers", []):
                     hdr[h["name"].lower()] = h["value"]
-                messages.append({
+                entry: dict[str, Any] = {
                     "id": d.get("id", ""),
+                    "thread_id": d.get("threadId", ""),
                     "subject": hdr.get("subject", ""),
                     "from": hdr.get("from", ""),
                     "date": hdr.get("date", ""),
                     "snippet": d.get("snippet", ""),
-                })
-            return {"success": True, "data": {"messages": messages, "query": query, "source": "gmail"}}
+                }
+                if has_attachment:
+                    entry["has_attachments"] = True
+                messages.append(entry)
+            result: dict[str, Any] = {
+                "messages": messages,
+                "source": "gmail",
+                "query_used": query_used,
+            }
+            if payload.get("nextPageToken"):
+                result["next_page_token"] = payload["nextPageToken"]
+            return {"success": True, "data": result}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

@@ -139,6 +139,12 @@ function ShellFrame() {
   // on the first user message.
   const [ready, setReady] = useState(true);
   const hydratedRef = useRef(false);
+  // The brain's per-install primary orchestrator session id, and which
+  // UI conversation is bound to it. Every OTHER conversation is bound to
+  // its own orchestrator session (== its conversationId) so threads keep
+  // separate histories instead of all funnelling into primary.
+  const [primarySessionId, setPrimarySessionId] = useState('');
+  const [primaryConversationId, setPrimaryConversationId] = useState('');
 
   const setMessages = useCallback((next) => {
     setMessagesState((prev) => {
@@ -209,6 +215,15 @@ function ShellFrame() {
     let cancelled = false;
 
     (async () => {
+      // Resolve the brain's primary session id up front so we can tell
+      // which thread is the cross-surface "primary" one.
+      try {
+        const ps = await apiJson('/api/sessions/primary', { silent: true });
+        if (!cancelled && ps?.session_id) setPrimarySessionId(ps.session_id);
+      } catch {
+        /* primary id optional — primary thread still works via default ws */
+      }
+
       const stored = readActiveConversationId();
       let hydratedFromConversations = false;
       try {
@@ -216,6 +231,9 @@ function ShellFrame() {
         const active = await apiJson(`/api/conversations/active/thread${query}`);
         if (!active?.error && active?.id) {
           setConversation(active.id, active.messages || []);
+          // The conversation resolved by the boot hydration is the
+          // default/primary thread; bind it to the primary session.
+          if (!cancelled) setPrimaryConversationId(active.id);
           hydratedFromConversations = true;
         }
       } catch {
@@ -261,7 +279,9 @@ function ShellFrame() {
       }
 
       if (!hydratedFromConversations) {
-        await startNewConversation();
+        const created = await startNewConversation();
+        // First-boot default thread is the primary thread.
+        if (!cancelled && created?.id) setPrimaryConversationId(created.id);
       }
       // ready is always true (see useState init); no-op here so the
       // composer is interactive even when one of the hydration calls
@@ -289,6 +309,17 @@ function ShellFrame() {
     return () => clearTimeout(timer);
   }, [conversationId, messages, ready]);
 
+  // Is the active conversation the primary (cross-surface) thread? Until
+  // the primary thread id is known we optimistically treat the active
+  // thread as primary so the default chat keeps its existing behaviour.
+  const isPrimaryThread = !primaryConversationId || conversationId === primaryConversationId;
+  // Token passed to the WebSocket (?session_id=). '' = default/primary
+  // connection; a real id binds the socket to that thread's session.
+  const activeSessionToken = isPrimaryThread ? '' : conversationId;
+  // The REAL orchestrator session id this thread maps to — used for
+  // transcript rehydration and for filtering inbound WS frames.
+  const activeSessionId = isPrimaryThread ? (primarySessionId || conversationId) : conversationId;
+
   const chatThread = useMemo(() => ({
     ready,
     conversationId,
@@ -298,6 +329,10 @@ function ShellFrame() {
     loadConversation,
     startNewConversation,
     ensureConversation,
+    primarySessionId,
+    isPrimaryThread,
+    activeSessionToken,
+    activeSessionId,
   }), [
     conversationId,
     ensureConversation,
@@ -307,6 +342,10 @@ function ShellFrame() {
     setConversation,
     setMessages,
     startNewConversation,
+    primarySessionId,
+    isPrimaryThread,
+    activeSessionToken,
+    activeSessionId,
   ]);
 
   return (

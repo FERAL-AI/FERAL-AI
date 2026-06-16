@@ -22,7 +22,7 @@ export default function AppShell() {
   const [somatic, setSomatic] = useState(null);
 
   useEffect(() => {
-    fetch(`${API}/health`).then(r => r.json()).then(d => setAppVersion(d.version || '2026.6.15')).catch(() => setAppVersion('2026.6.15'));
+    fetch(`${API}/health`).then(r => r.json()).then(d => setAppVersion(d.version || '2026.6.16')).catch(() => setAppVersion('2026.6.16'));
     const interval = setInterval(() => {
       fetch(`${API}/api/dashboard`).then(r => r.json()).then(d => {
         if (d.somatic) setSomatic(d.somatic);

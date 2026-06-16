@@ -31,46 +31,32 @@ logger = logging.getLogger("feral.api.sessions")
 router = APIRouter(tags=["sessions"])
 
 
-@router.get("/api/sessions/primary/transcript")
-async def get_primary_transcript(limit: int = 100, since_ms: int = 0):
-    """Phase 9 (audit-r10 overhaul) — read the live primary-session
-    conversation history.
+def _transcript_for_session(session_id: str, limit: int, since_ms: int) -> dict:
+    """Shared transcript reader. Returns the live orchestrator
+    conversation history for ``session_id`` as plain
+    ``{role, text, ts_ms}`` rows.
 
-    The iOS chat client calls this on reconnect (`scenePhase: .active`)
-    to recover messages the brain emitted while the WebSocket was
-    torn down for background. Without this round-trip those messages
-    were lost — the operator's "chat stops after a single answer
-    instead of continuing" complaint when they backgrounded the app
-    mid-response.
-
-    Returns ``{messages: [{role, text, ts_ms}, ...], primary_session_id}``.
-    `ts_ms` is the message's logical position in the thread expressed
-    as milliseconds; clients can pass it back as `since_ms` for an
-    incremental refresh that doesn't re-download the full history.
-
-    `limit` caps the most-recent messages returned (default 100,
-    clamped 1..500). Read-only; no auth — LAN-public like the other
-    capability probes.
+    RC fix (chat thread switching): this used to exist only for the
+    primary session, and the WebUI merged the PRIMARY transcript into
+    EVERY thread on mount — so opening thread B bled thread A's turns
+    into it and the "new thread doesn't stick" bug appeared. Each UI
+    thread now binds to its OWN orchestrator session and reads ITS OWN
+    transcript through this helper, so threads stay isolated.
     """
     limit = max(1, min(limit, 500))
-    sid = state.primary_session_id
-
     orchestrator = getattr(state, "orchestrator", None)
     if orchestrator is None:
-        return {"primary_session_id": sid, "messages": [], "error": "orchestrator not ready"}
+        return {"session_id": session_id, "messages": [], "error": "orchestrator not ready"}
 
-    raw_history = []
     try:
-        raw_history = orchestrator.conversation_history.get(sid, []) or []
+        raw_history = orchestrator.conversation_history.get(session_id, []) or []
     except Exception as exc:
-        return {"primary_session_id": sid, "messages": [], "error": f"history read failed: {exc}"}
+        return {"session_id": session_id, "messages": [], "error": f"history read failed: {exc}"}
 
     # The orchestrator stores OpenAI-shaped dicts: `{role, content, ...}`.
     # Filter to user / assistant turns only — tool calls + system
-    # prompts aren't useful to the client and would just inflate the
-    # payload. Position-based ts_ms is enough for the iOS client to
-    # do `since_ms` incremental reads; we don't have wall-clock
-    # timestamps on every history entry.
+    # prompts aren't useful to the client. Position-based ts_ms lets
+    # clients do `since_ms` incremental reads.
     out: list[dict] = []
     for idx, entry in enumerate(raw_history):
         role = entry.get("role") if isinstance(entry, dict) else None
@@ -78,8 +64,6 @@ async def get_primary_transcript(limit: int = 100, since_ms: int = 0):
             continue
         content = entry.get("content")
         if isinstance(content, list):
-            # OpenAI vision-style content arrays — join the text
-            # segments so the client gets a plain string.
             text_parts = [
                 p.get("text", "") for p in content
                 if isinstance(p, dict) and p.get("type") in (None, "text")
@@ -94,12 +78,33 @@ async def get_primary_transcript(limit: int = 100, since_ms: int = 0):
             continue
         out.append({"role": role, "text": text, "ts_ms": ts_ms})
 
-    out = out[-limit:]
-    return {
-        "primary_session_id": sid,
-        "messages": out,
-        "count": len(out),
-    }
+    return {"session_id": session_id, "messages": out[-limit:], "count": len(out[-limit:])}
+
+
+@router.get("/api/sessions/primary/transcript")
+async def get_primary_transcript(limit: int = 100, since_ms: int = 0):
+    """Read the live PRIMARY-session conversation history.
+
+    The iOS chat client calls this on reconnect to recover messages
+    the brain emitted while the WebSocket was torn down for background.
+    Returns ``{messages, primary_session_id, session_id}``.
+    """
+    sid = state.primary_session_id
+    result = _transcript_for_session(sid, limit, since_ms)
+    result["primary_session_id"] = sid
+    return result
+
+
+@router.get("/api/sessions/{session_id}/transcript")
+async def get_session_transcript(session_id: str, limit: int = 100, since_ms: int = 0):
+    """Read the live conversation history for an ARBITRARY session.
+
+    Powers per-thread rehydration in the WebUI: every chat thread is
+    bound to its own orchestrator session, and on (re)mount the client
+    merges THIS session's WS-only turns — never the primary's — which
+    is what keeps switching between threads from mixing histories.
+    """
+    return _transcript_for_session(session_id, limit, since_ms)
 
 
 @router.get("/api/sessions/primary")

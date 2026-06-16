@@ -652,15 +652,20 @@ class EmbeddingProvider:
             )
             return
 
-        try:
-            from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+        # Lazy: detect availability without paying the (multi-second,
+        # first-run-downloads-a-model) construction cost on the boot
+        # critical path. The actual ``SentenceTransformer`` is built on
+        # first embed via ``_ensure_local_model``. This keeps ``feral
+        # serve`` fast regardless of the configured vector backend.
+        import importlib.util
+        if importlib.util.find_spec("sentence_transformers") is not None:
             self._provider = "sentence_transformers"
             self._dim = LOCAL_DIM
-            logger.info("Embedding provider: sentence-transformers (all-MiniLM-L6-v2)")
+            logger.info(
+                "Embedding provider: sentence-transformers "
+                "(all-MiniLM-L6-v2, lazy-loaded on first embed)"
+            )
             return
-        except ImportError:
-            pass
 
         self._provider = "hash"
         self._dim = LOCAL_DIM
@@ -927,7 +932,26 @@ class EmbeddingProvider:
             # dim mismatch or unavailable — fall through to hash so the index keeps shape
         return self._hash_embed(text, self._dim)
 
+    def _ensure_local_model(self) -> bool:
+        """Lazily construct the sentence-transformers model on first use.
+
+        Idempotent. Returns ``True`` once a usable model is loaded.
+        Construction is deferred out of ``__init__`` so boot never blocks
+        on the (slow, first-run-downloads) model load; the cost is paid
+        on the first real embed instead (typically a background task)."""
+        if self._model is not None:
+            return True
+        try:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+            return True
+        except Exception as exc:  # noqa: BLE001 — degrade to hash, never crash
+            logger.warning("sentence-transformers lazy load failed: %s", exc)
+            return False
+
     def _local_embed(self, text: str) -> np.ndarray:
+        if self._model is None and not self._ensure_local_model():
+            return self._hash_embed(text, self._dim)
         vec = self._model.encode(text[:2000], normalize_embeddings=True)
         return np.array(vec, dtype=np.float32)
 

@@ -61,12 +61,19 @@
             "id": "search",
             "method": "PYTHON",
             "url": "",
-            "description": "Search the user's mailbox with a Gmail-style query.",
+            "description": "Search the user's mailbox. With Google OAuth, uses the Gmail API ``q`` syntax (from:, subject:, after:, before:, has:attachment, label:, etc.). With App Password / generic IMAP, Gmail hosts use the IMAP ``X-GM-RAW`` extension with the same Gmail syntax in ``query``; other IMAP hosts use RFC3501 SEARCH built from the structured params (``from_``, ``subject``, ``since``, ``before``, ``body``). Prefer ``query`` for Gmail-style free text; use structured params when you need portable IMAP filters.",
             "params": [
-                {"name": "query", "type": "string", "required": true, "description": "Search query (Gmail syntax: from:, to:, subject:, after:, has:attachment, etc.)"},
-                {"name": "max_results", "type": "integer", "required": false, "description": "Max results (default 10, max 100)"}
+                {"name": "query", "type": "string", "required": false, "description": "Primary free-text search. Gmail syntax when OAuth or Gmail App Password IMAP (from:, subject:, after:YYYY/MM/DD, has:attachment, label:, etc.). On generic IMAP, maps to TEXT when no structured params are set."},
+                {"name": "max_results", "type": "integer", "required": false, "description": "Max results (default 10, clamped to 1–100)"},
+                {"name": "from_", "type": "string", "required": false, "description": "Sender filter. Gmail: composed into query; generic IMAP: FROM criterion."},
+                {"name": "subject", "type": "string", "required": false, "description": "Subject filter. Gmail: subject:…; generic IMAP: SUBJECT criterion."},
+                {"name": "since", "type": "string", "required": false, "description": "Messages on/after this date (YYYY-MM-DD or YYYY/MM/DD). Gmail: after:…; generic IMAP: SINCE."},
+                {"name": "before", "type": "string", "required": false, "description": "Messages before this date (YYYY-MM-DD or YYYY/MM/DD). Gmail: before:…; generic IMAP: BEFORE."},
+                {"name": "body", "type": "string", "required": false, "description": "Body keyword. Gmail: appended to query; generic IMAP: TEXT criterion."},
+                {"name": "folder", "type": "string", "required": false, "description": "IMAP mailbox to search (default INBOX). Examples: [Gmail]/All Mail, [Gmail]/Sent Mail. Ignored on Gmail OAuth API path."},
+                {"name": "has_attachment", "type": "boolean", "required": false, "description": "When true, restrict to messages with attachments (Gmail has:attachment; generic IMAP has no native filter)."}
             ],
-            "returns_description": "{messages: [...], query, source}",
+            "returns_description": "{messages: [{id, thread_id?, from, subject, date, snippet, has_attachments?}], source: 'gmail' | 'imap', query_used: string, next_page_token?: string}",
             "safety_tier": "safe",
             "read_only_hint": true,
             "ui_hint": "feed"

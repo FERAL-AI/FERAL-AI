@@ -1,6 +1,6 @@
 """Memory, knowledge graph, wiki, and episode endpoints."""
 
-import importlib
+import importlib.util
 import json
 import logging
 
@@ -14,30 +14,84 @@ logger = logging.getLogger("feral.memory.api")
 router = APIRouter()
 
 
-# The vector store the running brain ACTUALLY uses for chunk
-# embeddings. Today every brain runs ``MemoryStore.VectorIndex`` on
-# ``memory_chunks`` + ``vec_chunks`` (see ``memory/store.py``); the
-# alternate adapters under ``memory/backends/*`` are tested but not
-# wired into the boot path. Phase 1B of MEMORY_SYSTEM_FIX_PLAN exposes
-# this honestly so the dashboard can show "your settings say chroma
-# but the running brain stores in sqlite_vec; restart isn't enough,
-# the adapter wiring is Phase 1A".
-_ACTIVE_VECTOR_STORE = "memory_db_vec_chunks"
+# RC fix: this route used to validate the WRONG module tree
+# (``memory.backends.*``) which is NOT what boot wires — boot uses
+# ``memory.vector_index_backends.*`` (audit-r12 D4). That mismatch made
+# the "installed" check pass for chroma even when ``chromadb`` was
+# missing, let the operator persist a brick-the-brain selection, and
+# always reported ``pending_unapplied``. We now use the SAME registry +
+# loader the boot path uses, report the brain's ACTUAL runtime backend,
+# and preflight a switch before persisting it.
 
-
-_KNOWN_MEMORY_BACKENDS = {
-    "sqlite_vec": "memory.backends.sqlite_vec",
-    "chroma": "memory.backends.chroma",
-    "qdrant": "memory.backends.qdrant",
+# Optional dependency that each first-party backend needs at runtime.
+# Used for a cheap "is it installed?" check without constructing a
+# client (which would touch disk / network).
+_BACKEND_DEP: dict[str, str | None] = {
+    "sqlite_vec": None,  # built-in; degrades to FTS if the extension is absent
+    "chroma": "chromadb",
+    "qdrant": "qdrant_client",
 }
 
 
-def _memory_backend_installed(module_path: str) -> bool:
-    try:
-        importlib.import_module(module_path)
-        return True
-    except ImportError:
+def _known_backends() -> list[str]:
+    from memory.vector_index_backends.base import _REGISTRY
+    return sorted(_REGISTRY.keys())
+
+
+def _backend_available(backend_id: str) -> bool:
+    """Cheap availability probe: the backend module imports AND its
+    optional runtime dependency is importable. No client construction,
+    so no disk/network side effects."""
+    from memory.vector_index_backends.base import _REGISTRY
+    module_path = _REGISTRY.get(backend_id)
+    if module_path is None:
         return False
+    if importlib.util.find_spec(module_path) is None:
+        return False
+    dep = _BACKEND_DEP.get(backend_id, None)
+    if dep is None:
+        # sqlite_vec / unknown community backend: assume the backend
+        # module's own import is the gate.
+        return True
+    return importlib.util.find_spec(dep) is not None
+
+
+def _runtime_backend_id() -> str:
+    """The backend the RUNNING brain actually stores vectors in."""
+    mem = getattr(state, "memory", None)
+    return str(getattr(mem, "_backend_id", "sqlite_vec") or "sqlite_vec")
+
+
+async def _preflight_backend(backend_id: str) -> tuple[bool, str | None]:
+    """Actually try to construct the backend (the same way boot does)
+    so a switch can be rejected BEFORE it's persisted and bricks the
+    next boot. Returns ``(ok, error)``. Constructs and immediately
+    closes the backend on success."""
+    if backend_id == "sqlite_vec":
+        return True, None
+    try:
+        from memory.embeddings import EmbeddingProvider
+        from memory.vector_index_backends import load_vector_index
+
+        settings_path = feral_home() / "settings.json"
+        backend_config = {}
+        if settings_path.exists():
+            try:
+                cfg = json.loads(settings_path.read_text()).get("memory") or {}
+                backend_config = cfg.get("backend_config") or {}
+            except Exception:  # noqa: BLE001
+                backend_config = {}
+        dim = EmbeddingProvider().dimension
+        backend = load_vector_index(backend_id, dim=dim, **backend_config)
+        try:
+            close = getattr(backend, "close", None)
+            if close is not None:
+                await close()
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
+        return True, None
+    except Exception as exc:  # noqa: BLE001 — surface the real reason
+        return False, str(exc)
 
 
 @router.get("/api/memory/stats")
@@ -187,15 +241,19 @@ async def get_memory_context(limit: int = 20):
 @router.get("/api/memory/backend")
 async def get_memory_backend():
     """Return the configured memory backend AND what the running brain
-    actually uses for vector storage.
+    actually loaded.
 
-    Phase 1B of MEMORY_SYSTEM_FIX_PLAN: until the adapter wiring lands
-    (Phase 1A), the running brain always stores chunk embeddings in
-    ``memory.db`` regardless of the ``memory.backend`` setting. The
-    response now exposes ``active_store`` and ``pending_unapplied`` so
-    the dashboard can show the truth instead of pretending the user's
-    last toggle stuck.
+    RC fix: this now reports the TRUTH using the wired vector-index
+    backend system. ``backend`` is what ``settings.json`` says,
+    ``runtime`` is what the live :class:`MemoryStore` is actually using,
+    and ``pending_unapplied`` is true only when they genuinely differ
+    (a real "restart to apply" or "boot fell back" condition). If the
+    configured backend failed to construct at boot, ``boot_error`` /
+    ``fell_back`` explain why (e.g. ``chromadb`` not installed) so the
+    dashboard can show an actionable message instead of a silent lie.
     """
+    from api.state import MEMORY_BACKEND_STATUS
+
     settings_path = feral_home() / "settings.json"
     current = "sqlite_vec"
     if settings_path.exists():
@@ -205,33 +263,46 @@ async def get_memory_backend():
             )
         except Exception as exc:  # noqa: BLE001 — surface for ops, default for prod
             logger.warning("get_memory_backend: settings.json read failed: %s", exc)
+
+    runtime = _runtime_backend_id()
     return {
         "backend": current,
-        "active_store": _ACTIVE_VECTOR_STORE,
-        "pending_unapplied": current != "sqlite_vec",
-        "available": {
-            name: _memory_backend_installed(path)
-            for name, path in _KNOWN_MEMORY_BACKENDS.items()
-        },
+        "runtime": runtime,
+        "active_store": runtime,
+        "pending_unapplied": current != runtime,
+        "fell_back": bool(MEMORY_BACKEND_STATUS.get("fell_back")),
+        "boot_error": MEMORY_BACKEND_STATUS.get("error"),
+        "available": {name: _backend_available(name) for name in _known_backends()},
     }
 
 
 @router.post("/api/memory/backend")
 async def set_memory_backend(body: dict):
     backend = (body or {}).get("backend", "")
-    if backend not in _KNOWN_MEMORY_BACKENDS:
-        return {
-            "ok": False,
-            "error": f"unknown backend '{backend}'. Known: {list(_KNOWN_MEMORY_BACKENDS)}",
-        }
-    module_path = _KNOWN_MEMORY_BACKENDS[backend]
-    if not _memory_backend_installed(module_path):
+    known = _known_backends()
+    if backend not in known:
+        return {"ok": False, "error": f"unknown backend '{backend}'. Known: {known}"}
+
+    if not _backend_available(backend):
         return {
             "ok": False,
             "error": (
                 f"backend '{backend}' is not installed. Run "
                 f"`pip install feral-ai[memory-{backend}]` or install the "
-                "matching item from registry.feral.sh."
+                "matching item from registry.feral.sh, then try again."
+            ),
+        }
+
+    # Preflight: actually construct it the way boot will. If this fails,
+    # DO NOT persist — persisting would brick the next boot (the exact
+    # bug we're fixing). The construction is closed immediately.
+    ok, err = await _preflight_backend(backend)
+    if not ok:
+        return {
+            "ok": False,
+            "error": (
+                f"backend '{backend}' failed to initialize and was NOT saved "
+                f"(your brain is unchanged): {err}"
             ),
         }
 
@@ -244,18 +315,21 @@ async def set_memory_backend(body: dict):
         existing = {}
     existing.setdefault("memory", {})["backend"] = backend
     settings_path.write_text(json.dumps(existing, indent=2))
+
+    runtime = _runtime_backend_id()
     note = (
-        "Restart the Brain to persist the backend selection. "
-        "NOTE: until the vector-adapter wiring lands (MEMORY_SYSTEM_FIX_PLAN "
-        f"Phase 1A), the running brain still stores chunk embeddings in "
-        f"'{_ACTIVE_VECTOR_STORE}' regardless of this setting. The "
-        "dashboard's pending_unapplied flag reflects this."
+        "Saved. Restart the Brain (`feral restart`) to load the new "
+        f"backend. Existing embeddings stay in '{runtime}'; semantic "
+        "search re-populates as new content is embedded."
+        if backend != runtime
+        else "Saved. This backend is already active."
     )
     return {
         "ok": True,
         "backend": backend,
-        "active_store": _ACTIVE_VECTOR_STORE,
-        "pending_unapplied": backend != "sqlite_vec",
+        "runtime": runtime,
+        "active_store": runtime,
+        "pending_unapplied": backend != runtime,
         "note": note,
     }
 
@@ -468,7 +542,7 @@ async def memory_stats():
         "sqlite_vec_loaded": sqlite_vec_loaded,
         "embedding_provider": embed_provider,
         "chunk_count": chunk_count,
-        "active_vector_store": _ACTIVE_VECTOR_STORE,
+        "active_vector_store": _runtime_backend_id(),
         "degraded_semantic_search": (not sqlite_vec_loaded) and chunk_count > 0,
     }
     return base

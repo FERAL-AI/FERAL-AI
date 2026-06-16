@@ -141,3 +141,43 @@ def test_primary_transcript_handles_empty_history():
     assert body["primary_session_id"] == "primary-test"
     assert body["messages"] == []
     assert body["count"] == 0
+
+
+def test_generic_session_transcript_is_isolated_per_thread():
+    """RC fix (chat thread switching): each UI thread reads ITS OWN
+    orchestrator session transcript, never the primary's. Two distinct
+    sessions must not bleed into each other."""
+    state = _make_state({
+        "primary-test": [
+            {"role": "user", "content": "primary q"},
+            {"role": "assistant", "content": "primary a"},
+        ],
+        "thread-B": [
+            {"role": "user", "content": "thread B q"},
+            {"role": "assistant", "content": "thread B a"},
+        ],
+    })
+
+    with patch("api.routes.sessions.state", state):
+        client = _mount_router(state)
+        resp_b = client.get("/api/sessions/thread-B/transcript")
+        resp_primary = client.get("/api/sessions/primary/transcript")
+
+    body_b = resp_b.json()
+    assert body_b["session_id"] == "thread-B"
+    assert [m["text"] for m in body_b["messages"]] == ["thread B q", "thread B a"]
+    # Primary literal route still resolves (not shadowed by the {sid} route)
+    # and returns only the primary thread's turns.
+    body_primary = resp_primary.json()
+    assert [m["text"] for m in body_primary["messages"]] == ["primary q", "primary a"]
+
+
+def test_generic_session_transcript_unknown_session_is_empty():
+    state = _make_state({"primary-test": [{"role": "user", "content": "hi"}]})
+    with patch("api.routes.sessions.state", state):
+        client = _mount_router(state)
+        resp = client.get("/api/sessions/does-not-exist/transcript")
+    body = resp.json()
+    assert body["session_id"] == "does-not-exist"
+    assert body["messages"] == []
+    assert body["count"] == 0

@@ -8,6 +8,7 @@ const DEFAULT_RECONNECT_MS = 2000;
 
 export class FeralSocket {
   constructor(url = WS_URL, { reconnectMs = DEFAULT_RECONNECT_MS } = {}) {
+    this.baseUrl = url;
     this.url = url;
     this.reconnectMs = reconnectMs;
     this.ws = null;
@@ -15,10 +16,47 @@ export class FeralSocket {
     this.stateListeners = new Set();
     this.state = 'closed';
     this.stopped = false;
+    // The orchestrator session token this socket is bound to. '' means
+    // the default (primary) session — the brain picks primary_session_id.
+    // A non-empty token is appended as ?session_id= so chat turns route
+    // to the right thread (and stream back over THIS socket).
+    this.sessionToken = '';
+    // Set true while we are intentionally tearing the socket down to
+    // rebind it to a different session, so the global error wiring can
+    // skip the spurious "connection lost" toast on a thread switch.
+    this._intentionalReconnect = false;
+  }
+
+  _buildUrl() {
+    if (!this.sessionToken) return this.baseUrl;
+    const sep = this.baseUrl.includes('?') ? '&' : '?';
+    return `${this.baseUrl}${sep}session_id=${encodeURIComponent(this.sessionToken)}`;
+  }
+
+  /**
+   * Rebind the socket to a different orchestrator session (chat thread).
+   * Pass '' for the primary/default thread. No-op when already bound to
+   * the requested session, so navigating within one thread never churns
+   * the connection. Triggers one intentional reconnect otherwise.
+   */
+  setSession(sessionToken = '') {
+    const next = sessionToken || '';
+    if (next === this.sessionToken && this.ws) return;
+    this.sessionToken = next;
+    this.url = this._buildUrl();
+    if (this.stopped) return;
+    this._intentionalReconnect = true;
+    if (this.ws) {
+      try { this.ws.close(); } catch { /* ignore */ }
+      // onclose clears this.ws and schedules a reconnect to the new url.
+    } else {
+      this.connect();
+    }
   }
 
   connect() {
     if (this.ws || this.stopped) return;
+    this.url = this._buildUrl();
     try {
       this.ws = new WebSocket(this.url);
     } catch (err) {
@@ -28,7 +66,10 @@ export class FeralSocket {
     }
     this._transition('connecting');
 
-    this.ws.onopen = () => this._transition('open');
+    this.ws.onopen = () => {
+      this._intentionalReconnect = false;
+      this._transition('open');
+    };
     this.ws.onclose = () => {
       this.ws = null;
       this._transition('closed');
@@ -50,7 +91,10 @@ export class FeralSocket {
 
   _scheduleReconnect() {
     if (this.stopped) return;
-    setTimeout(() => this.connect(), this.reconnectMs);
+    // An intentional session rebind should reconnect promptly so a
+    // thread switch feels instant; an unexpected drop backs off.
+    const delay = this._intentionalReconnect ? 0 : this.reconnectMs;
+    setTimeout(() => this.connect(), delay);
   }
 
   _transition(state) {

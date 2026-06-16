@@ -219,9 +219,15 @@ def test_brain_state_helper_returns_none_for_default_backend(monkeypatch):
     assert state_mod._load_configured_vec_index_or_default() is None
 
 
-def test_brain_state_helper_propagates_value_error_for_unknown_backend(monkeypatch):
-    # The fail-loud invariant: misconfigured ``settings.memory.backend``
-    # MUST raise at boot, not silently fall back to sqlite-vec.
+def test_brain_state_helper_never_bricks_boot_on_bad_backend(monkeypatch):
+    # RC fix: a misconfigured ``settings.memory.backend`` (unknown id,
+    # or an installed backend whose optional dep is missing) used to RAISE
+    # at boot — which bricked the whole brain (``feral serve`` timed out).
+    # The boot seam now falls back to sqlite-vec (returns None) and records
+    # the failure in ``MEMORY_BACKEND_STATUS`` so the dashboard can surface
+    # an actionable message instead of a dead server. ``load_vector_index``
+    # itself still fails loudly (covered above); only the boot wrapper is
+    # resilient.
     from api import state as state_mod
     import config.loader as loader_mod
 
@@ -234,8 +240,13 @@ def test_brain_state_helper_propagates_value_error_for_unknown_backend(monkeypat
             },
         },
     )
-    with pytest.raises(ValueError, match="wat_is_this_even"):
-        state_mod._load_configured_vec_index_or_default()
+    result = state_mod._load_configured_vec_index_or_default()
+    assert result is None  # fell back to MemoryStore's sqlite-vec default
+    status = state_mod.MEMORY_BACKEND_STATUS
+    assert status["configured"] == "wat_is_this_even"
+    assert status["active"] == "sqlite_vec"
+    assert status["fell_back"] is True
+    assert status["error"] and "wat_is_this_even" in status["error"]
 
 
 # ─────────────────────────────────────────────

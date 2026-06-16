@@ -1,10 +1,40 @@
 # Changelog
 
-<!-- feral-version: 2026.6.15 -->
+<!-- feral-version: 2026.6.16 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.16] — 2026-06-16 — memory backend never bricks boot, real chat thread switching, long-horizon background tasks, Gmail deep search
+
+Feature + reliability release. Fixes four operator-reported problems: switching the memory backend to Chroma bricked the brain on the next boot; chat threads couldn't be reopened and new threads didn't stick; the agent couldn't sustain a long-running task; and Gmail App-Password search only ever matched the inbox subject line.
+
+### Memory backend (no more bricked boots)
+
+- **fix(memory): a bad `memory.backend` selection can no longer brick the brain.** Selecting `chroma`/`qdrant` in Settings without the optional dependency installed used to raise at boot, so `feral serve` hung and timed out. Boot now falls back to the built-in `sqlite_vec` and records the failure in `MEMORY_BACKEND_STATUS` (configured vs. active backend + actionable error) so the brain always starts and the dashboard explains why. (`api/state.py`)
+- **fix(memory): Settings now validates the backend it will actually load — and preflights the switch.** `GET/POST /api/memory/backend` used the wrong, unwired `memory.backends.*` module tree (so the "installed" check passed without `chromadb`) and always reported `pending_unapplied`. It now uses the real `memory.vector_index_backends.*` registry, does a true dependency check, reports the brain's actual runtime backend, and **preflight-constructs** a backend before persisting the selection — a switch that can't initialize is rejected and never saved, so it can't brick the next boot. (`api/routes/memory.py`)
+- **perf(memory): embedding model loads lazily.** The sentence-transformers model is no longer constructed in `EmbeddingProvider.__init__` (a multi-second, first-run-downloads cost on the boot critical path); it's built on first embed instead. (`memory/embeddings.py`)
+- **ui(settings): the Memory panel tells the truth** — shows the in-use vs. configured backend, a restart-needed banner, dependency-missing install hints, and surfaces preflight rejections instead of pretending a switch stuck. (`feral-client-v2`)
+
+### Chat threads (switching actually works)
+
+- **fix(chat): chat threads are isolated and switchable.** Every UI thread now binds to its own orchestrator session: the app WebSocket rebinds via `?session_id=` on switch, each thread rehydrates *its own* transcript via the new `GET /api/sessions/{session_id}/transcript` (the client used to merge the *primary* transcript into every thread, which bled histories together and made new threads fail to stick), inbound WS frames are filtered by session so a late reply can't land in the wrong thread, the greeting is suppressed on thread reconnects, and a failed thread-open now shows an error instead of silently doing nothing. (`api/routes/sessions.py`, `api/server.py`, `feral-client-v2`)
+
+### Long-horizon autonomous tasks
+
+- **fix(agent): the background TaskFlow engine can finally run autonomous LLM work.** `TaskFlowRuntime` was constructed before the orchestrator existed and never received it, so every background `llm.chat` step failed with "No orchestrator available." It's now back-filled at boot, so the persistent, restart-safe flow engine can drive multi-step work in the background. (`api/state.py`)
+- **feat(agent): a `background_task` skill (`start`/`status`/`list`).** The agent can now launch genuinely long-running work from a natural-language goal (or an ordered list of subtasks); each step runs as an autonomous orchestrator turn with the full tool budget (default 900s, unlimited iterations) and survives navigation away **and** a brain restart. (`api/routes/taskflows.py`, `skills/manifests/task.json`)
+
+### Gmail deep search
+
+- **feat(gmail): deep email search for App Password (IMAP) users.** App-Password Gmail search previously only matched the inbox subject line. It now searches the full mailbox: Gmail IMAP hosts use `UID SEARCH X-GM-RAW` (the same query language as the Gmail web UI, including `has:attachment`, `from:`, `label:`, etc.), and generic IMAP hosts use structured RFC3501 `SEARCH`. Results are fetched header-only (`BODY.PEEK[HEADER.FIELDS …]`) for speed, with a configurable `folder` (default `INBOX`). The OAuth/Gmail-API path gains the same structured filters and page-token passthrough. (`integrations/email.py`)
+- **feat(gmail): structured search params** — `from_`, `subject`, `since`, `before`, `body`, `folder`, `has_attachment` (plus free-text `query`, now optional), with `max_results` clamped to 1–100. The `email` skill manifest now honestly documents OAuth vs. App-Password vs. generic-IMAP behavior and returns `query_used`. (`skills/manifests/email.json`)
+- **fix(skills): executor sanitizer carve-out for email feeds** so deep-search results aren't truncated to the default 20-item cap (raised to 50 for the `email` skill's `search`/`read_email`/`list_inbox`; all other skills unchanged). (`skills/executor.py`)
+
+### Tests
+
+- Added: per-thread transcript isolation (`test_primary_transcript_api.py`), background-task surface (`test_background_task_skill.py`), memory-backend resilience (`test_memory_vector_index_backends.py` updated for the no-brick policy), and Gmail deep search (`test_email_search.py`, 15 passing with `test_gmail_app_password.py`). Full v2 vitest (404 passed) and the v2 bundle contract check green; v2 web bundle rebuilt.
 
 ## [2026.6.15] — 2026-06-15 — security: clear all open Dependabot alerts (npm dependency patches)
 

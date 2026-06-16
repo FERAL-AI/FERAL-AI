@@ -687,12 +687,29 @@ def _spawn_brain_server(
     return server_thread, server_ready, server_holder
 
 
+def _brain_server_failure_reason(
+    server_thread: threading.Thread | None,
+    server_holder: dict | None,
+) -> str | None:
+    """Return a human-readable failure if the uvicorn thread died during boot."""
+    if not server_holder:
+        return None
+    exc = server_holder.get("exc")
+    if exc is not None:
+        return str(exc)
+    if server_thread is not None and not server_thread.is_alive():
+        return "brain process exited before /health became ready"
+    return None
+
+
 def _wait_for_brain_health(
     port: int,
     ssl_kwargs: dict,
     *,
     console,
     timeout_s: int | None = None,
+    server_thread: threading.Thread | None = None,
+    server_holder: dict | None = None,
 ) -> bool:
     """Poll ``/health`` until the brain finishes ``state.init()``."""
     import time
@@ -702,7 +719,48 @@ def _wait_for_brain_health(
         "FERAL_HEALTH_URL", f"{_scheme}://127.0.0.1:{port}/health",
     )
     boot_report_url = f"{_scheme}://127.0.0.1:{port}/api/boot-report"
-    timeout_s = int(timeout_s or os.getenv("FERAL_BOOT_TIMEOUT", "90"))
+    # ``timeout_s`` is a *soft* deadline: how long a typical boot takes.
+    # A cold first run (model + embedding warmup) can exceed it, and
+    # because ``state.init()`` runs inside uvicorn's blocking startup
+    # event the server serves *no* routes — not even /health — until init
+    # finishes. Hard-failing at the soft deadline used to kill a brain
+    # that was seconds from ready, so the operator retried and stacked
+    # multiple brains on the same port. Instead we keep waiting as long as
+    # the uvicorn thread is still alive (init still running, not crashed),
+    # up to a generous hard ceiling that only bounds a genuine hang.
+    timeout_s = int(timeout_s or os.getenv("FERAL_BOOT_TIMEOUT", "180"))
+    hard_cap_s = max(timeout_s, int(os.getenv("FERAL_BOOT_HARD_CAP", "600")))
+
+    def _server_died() -> bool:
+        return _brain_server_failure_reason(server_thread, server_holder) is not None
+
+    def _health_ok() -> bool:
+        try:
+            if httpx:
+                return httpx.get(health_url, timeout=2, verify=False).status_code == 200
+            import urllib.request
+            urllib.request.urlopen(health_url, timeout=2)
+            return True
+        except Exception:
+            return False
+
+    def _current_subsystem() -> str | None:
+        try:
+            if httpx:
+                rr = httpx.get(boot_report_url, timeout=1.5, verify=False)
+                if rr.status_code == 200:
+                    body = rr.json() or {}
+                    return body.get("current") or (body.get("last") or {}).get("name")
+        except Exception:
+            return None
+        return None
+
+    def _slow_note(elapsed: int) -> str:
+        # Once past the soft deadline, reassure the operator that a live
+        # (still-booting) brain is being waited on, not hung.
+        if elapsed >= timeout_s:
+            return "still warming up (first run can take a few minutes)..."
+        return "warming up..."
 
     try:
         from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
@@ -719,66 +777,45 @@ def _wait_for_brain_health(
             console=console,
         ) as progress:
             task = progress.add_task("warming up...", start=True)
-            last_subsystem: str | None = None
-            for _i in range(timeout_s):
+            last_desc: str | None = None
+            for _i in range(hard_cap_s):
+                if _server_died():
+                    return False
                 time.sleep(1)
-                try:
-                    if httpx:
-                        r = httpx.get(health_url, timeout=2, verify=False)
-                        if r.status_code == 200:
-                            return True
-                    else:
-                        import urllib.request
-                        urllib.request.urlopen(health_url, timeout=2)
-                        return True
-                except Exception:
-                    pass
-
-                subsystem = None
-                try:
-                    if httpx:
-                        rr = httpx.get(boot_report_url, timeout=1.5, verify=False)
-                        if rr.status_code == 200:
-                            body = rr.json() or {}
-                            subsystem = body.get("current") or (body.get("last") or {}).get("name")
-                except Exception:
-                    subsystem = None
-
-                if subsystem and subsystem != last_subsystem:
-                    progress.update(task, description=f"{subsystem}...")
-                    last_subsystem = subsystem
+                if _server_died():
+                    return False
+                if _health_ok():
+                    return True
+                subsystem = _current_subsystem()
+                desc = f"{subsystem}..." if subsystem else _slow_note(_i + 1)
+                if desc != last_desc:
+                    progress.update(task, description=desc)
+                    last_desc = desc
         return False
 
     sys.stdout.write("  Starting brain...")
     sys.stdout.flush()
     last_subsystem = None
-    for i in range(timeout_s):
+    for i in range(hard_cap_s):
+        if _server_died():
+            sys.stdout.write("\n")
+            return False
         time.sleep(1)
-        try:
-            if httpx:
-                r = httpx.get(health_url, timeout=2, verify=False)
-                if r.status_code == 200:
-                    sys.stdout.write("\n")
-                    return True
-            else:
-                import urllib.request
-                urllib.request.urlopen(health_url, timeout=2)
-                sys.stdout.write("\n")
-                return True
-        except Exception:
-            pass
-        subsystem = None
-        try:
-            if httpx:
-                rr = httpx.get(boot_report_url, timeout=1.5, verify=False)
-                if rr.status_code == 200:
-                    body = rr.json() or {}
-                    subsystem = body.get("current") or (body.get("last") or {}).get("name")
-        except Exception:
-            subsystem = None
+        if _server_died():
+            sys.stdout.write("\n")
+            return False
+        if _health_ok():
+            sys.stdout.write("\n")
+            return True
+        subsystem = _current_subsystem()
         if subsystem and subsystem != last_subsystem:
             sys.stdout.write(f"\n    [{i + 1}s] {subsystem}...")
             last_subsystem = subsystem
+        elif (i + 1) == timeout_s:
+            sys.stdout.write(
+                f"\n    [{i + 1}s] still warming up (first run can take "
+                "a few minutes)..."
+            )
         else:
             sys.stdout.write(".")
         sys.stdout.flush()
@@ -835,17 +872,24 @@ def cmd_serve(host: str | None = None, port: int | None = None, tls: bool = Fals
         _banner_line(f"Brain failed to start: {server_holder['exc']}", style="red", console=_console)
         sys.exit(1)
 
-    if not _wait_for_brain_health(port, ssl_kwargs, console=_console):
-        _banner_line(
-            f"Failed to start after {os.getenv('FERAL_BOOT_TIMEOUT', '90')}s. Check logs or run: feral doctor",
-            style="red",
-            console=_console,
-        )
-        _banner_line(
-            "Tip: FERAL_BOOT_TIMEOUT=180 feral serve   # for slow first runs",
-            style="dim",
-            console=_console,
-        )
+    if not _wait_for_brain_health(
+        port, ssl_kwargs, console=_console,
+        server_thread=server_thread, server_holder=server_holder,
+    ):
+        boot_err = _brain_server_failure_reason(server_thread, server_holder)
+        if boot_err:
+            _banner_line(f"Brain failed to start: {boot_err}", style="red", console=_console)
+        else:
+            _banner_line(
+                f"Failed to start after {os.getenv('FERAL_BOOT_HARD_CAP', '600')}s. Check logs or run: feral doctor",
+                style="red",
+                console=_console,
+            )
+            _banner_line(
+                "Tip: FERAL_BOOT_HARD_CAP=1200 feral serve   # for very slow first runs",
+                style="dim",
+                console=_console,
+            )
         _stop_brain_server(server_thread, server_holder, join_timeout=5)
         sys.exit(1)
 
@@ -1087,19 +1131,26 @@ def cmd_start(
         )
         sys.exit(1)
 
-    healthy = _wait_for_brain_health(port, ssl_kwargs, console=_console)
+    healthy = _wait_for_brain_health(
+        port, ssl_kwargs, console=_console,
+        server_thread=server_thread, server_holder=server_holder,
+    )
 
     if not healthy:
-        _banner_line(
-            f"Failed to start after {os.getenv('FERAL_BOOT_TIMEOUT', '90')}s. Check logs or run: feral doctor",
-            style="red",
-            console=_console,
-        )
-        _banner_line(
-            "Tip: FERAL_BOOT_TIMEOUT=180 feral start   # for slow first runs",
-            style="dim",
-            console=_console,
-        )
+        boot_err = _brain_server_failure_reason(server_thread, server_holder)
+        if boot_err:
+            _banner_line(f"Brain failed to start: {boot_err}", style="red", console=_console)
+        else:
+            _banner_line(
+                f"Failed to start after {os.getenv('FERAL_BOOT_HARD_CAP', '600')}s. Check logs or run: feral doctor",
+                style="red",
+                console=_console,
+            )
+            _banner_line(
+                "Tip: FERAL_BOOT_HARD_CAP=1200 feral start   # for very slow first runs",
+                style="dim",
+                console=_console,
+            )
         # Try to stop the brain we spawned, then exit with non-zero so
         # the user sees the failure.
         _stop_brain_server(server_thread, server_holder, join_timeout=5)
@@ -1632,7 +1683,45 @@ def cmd_doctor():
         # operator action required.
         _info("Memory database", "not created yet — will be created on first run")
 
-    # ── 6b. Memory at-rest encryption (v2026.5.43) ──
+    # ── 6b. Memory vector backend optional deps ──
+    try:
+        from config.loader import load_settings as _load_settings_for_vec
+        _memory_cfg = (_load_settings_for_vec() or {}).get("memory") or {}
+        _vec_backend = _memory_cfg.get("backend") or "sqlite_vec"
+        if _vec_backend == "sqlite_vec":
+            _pass("Memory vector backend", "sqlite_vec (built-in default)")
+        elif _vec_backend == "chroma":
+            try:
+                import chromadb  # noqa: F401
+                _pass("Memory vector backend", "chroma — chromadb installed")
+            except ImportError:
+                _fail(
+                    "Memory vector backend",
+                    "settings.json has memory.backend=chroma but chromadb is not installed",
+                    "Run: pip install 'feral-ai[memory-chroma]'  "
+                    "OR set memory.backend to sqlite_vec in ~/.feral/settings.json",
+                )
+        elif _vec_backend == "qdrant":
+            try:
+                import qdrant_client  # noqa: F401
+                _pass("Memory vector backend", "qdrant — qdrant-client installed")
+            except ImportError:
+                _fail(
+                    "Memory vector backend",
+                    "settings.json has memory.backend=qdrant but qdrant-client is not installed",
+                    "Run: pip install 'feral-ai[memory-qdrant]'  "
+                    "OR set memory.backend to sqlite_vec in ~/.feral/settings.json",
+                )
+        else:
+            _warn(
+                "Memory vector backend",
+                f"unknown backend id {_vec_backend!r}",
+                "Set memory.backend to sqlite_vec, chroma, or qdrant in ~/.feral/settings.json",
+            )
+    except Exception as exc:
+        _warn("Memory vector backend", f"could not verify: {exc}")
+
+    # ── 6c. Memory at-rest encryption (v2026.5.43) ──
     #
     # Only renders a row when the operator has explicitly opted in
     # via ``feral memory encrypt`` (i.e. memory.db.enc exists). The
