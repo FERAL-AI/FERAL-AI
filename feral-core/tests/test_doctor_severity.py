@@ -88,6 +88,15 @@ ALLOWED_FAIL_LABELS: set[str] = {
     # ComputerUseDriver normalisation is shipped inside feral-core; an
     # import failure here means the wheel is corrupted.
     "Computer-use driver",
+    # Operator selected a non-default vector backend (chroma/qdrant) in
+    # settings.json but the optional dependency is not installed — the
+    # configured backend cannot load, so the brain falls back / degrades.
+    # A true _fail because the operator's explicit choice is broken.
+    "Memory vector backend",
+    # At-rest encryption was opted into (memory.db.enc exists) but the
+    # vault/keychain cannot be unlocked — the brain will not start until
+    # the keychain entry is restored. (v2026.5.43)
+    "Memory at-rest encryption",
 }
 
 ALLOWED_WARN_LABELS: set[str] = {
@@ -132,6 +141,11 @@ ALLOWED_WARN_LABELS: set[str] = {
     # of an existing file, which is a legitimate degradation worth a
     # yellow flag.
     "Local-agent grants",
+    # Vector backend probe degradation branches: an unknown backend id
+    # in settings.json, or the probe itself raising while trying to
+    # verify the configured backend. Either way the operator should see
+    # a yellow flag rather than a silent green.
+    "Memory vector backend",
 }
 
 
