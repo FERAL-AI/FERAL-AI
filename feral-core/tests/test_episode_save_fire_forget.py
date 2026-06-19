@@ -36,6 +36,26 @@ import pytest
 from agents.orchestrator import Orchestrator
 
 
+async def _drain_pending_tasks(timeout: float = 2.0) -> None:
+    """Cancel every task other than the current one, then wait — bounded.
+
+    The hot-path tests synthesize a fire-and-forget ``episode_save`` task
+    and exercise the *real* orchestrator stream/command path, which may in
+    turn schedule its own background tasks. Teardown must signal
+    cancellation to all of them, but it must NEVER block forever: a
+    background task that swallows ``CancelledError`` (or is parked on a
+    ``to_thread`` offload that can't be interrupted) would otherwise wedge
+    the entire sequential test run and surface as a 60s pytest-timeout
+    kill. We give tasks a brief window to exit cleanly, then move on and
+    let the loop teardown reap any stragglers.
+    """
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.wait(pending, timeout=timeout)
+
+
 def _make_orchestrator(memory: Any) -> Orchestrator:
     reg = MagicMock()
     reg.skills = {}
@@ -216,12 +236,7 @@ class TestHotPathDoesNotBlock:
         # Cancel the pending save task so pytest doesn't warn about
         # destroyed-while-pending tasks. The fire-and-forget contract
         # is that callers don't track these; tests can.
-        for task in asyncio.all_tasks() - {asyncio.current_task()}:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        await _drain_pending_tasks()
 
     @pytest.mark.asyncio
     async def test_stream_path_entry_block_under_slow_callback_budget(
@@ -279,9 +294,4 @@ class TestHotPathDoesNotBlock:
         await asyncio.sleep(0)
         memory.episode_save.assert_called_once()
 
-        for task in asyncio.all_tasks() - {asyncio.current_task()}:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        await _drain_pending_tasks()
