@@ -87,6 +87,35 @@
       "safety_tier": "safe"
     },
     {
+      "id": "set_lights",
+      "method": "PYTHON",
+      "url": "python://cutebot/set_lights",
+      "description": "Set the QtBot/CuteBot headlight and underglow color (RGB, each 0-255) for expression or signaling — e.g. green when confident/ready, red when it failed or is blocked, blue while working. Lights only: no motion, runs on USB power, no battery or confirmation needed. Use this to give the robot visible body language that matches what you tell the user.",
+      "params": [
+        {
+          "name": "r",
+          "type": "integer",
+          "required": true,
+          "description": "Red channel, 0-255."
+        },
+        {
+          "name": "g",
+          "type": "integer",
+          "required": true,
+          "description": "Green channel, 0-255."
+        },
+        {
+          "name": "b",
+          "type": "integer",
+          "required": true,
+          "description": "Blue channel, 0-255."
+        }
+      ],
+      "returns_description": "{ok, command}",
+      "ui_hint": "card",
+      "safety_tier": "safe"
+    },
+    {
       "id": "status",
       "method": "PYTHON",
       "url": "python://cutebot/status",

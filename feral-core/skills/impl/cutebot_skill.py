@@ -27,6 +27,7 @@ _ENDPOINT_MAP: dict[str, Tuple[str, str]] = {
     "explore": ("explore", "execute"),
     "drive": ("drive", "execute"),
     "halt": ("halt", "execute"),
+    "set_lights": ("set_lights", "execute"),
     "status": ("read_telemetry", "read"),
 }
 
@@ -99,6 +100,8 @@ class CuteBotSkill(BaseSkill):
         if endpoint_id == "drive":
             return await self._run_capability(endpoint_id, args)
         if endpoint_id == "halt":
+            return await self._run_capability(endpoint_id, args)
+        if endpoint_id == "set_lights":
             return await self._run_capability(endpoint_id, args)
         if endpoint_id == "status":
             return await self._run_capability(endpoint_id, args)

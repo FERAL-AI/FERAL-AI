@@ -121,7 +121,9 @@ class TestCuteBotManifest:
         assert set(m.actuators) == {"motors", "headlights", "neopixels"}
 
         caps = {c.id: c for c in m.capabilities}
-        assert set(caps) == {"follow_line", "explore", "halt", "drive", "read_telemetry"}
+        assert set(caps) == {
+            "follow_line", "explore", "halt", "drive", "set_lights", "read_telemetry"
+        }
 
         assert caps["follow_line"].permission_tier == "active"
         assert caps["follow_line"].requires_confirmation is True
@@ -132,6 +134,10 @@ class TestCuteBotManifest:
         assert caps["drive"].requires_confirmation is True
         drive_params = {p["name"] for p in caps["drive"].parameters}
         assert drive_params == {"left", "right"}
+        assert caps["set_lights"].category == "actuator"
+        assert caps["set_lights"].permission_tier == "passive"
+        light_params = {p["name"] for p in caps["set_lights"].parameters}
+        assert light_params == {"r", "g", "b"}
         assert caps["read_telemetry"].category == "sensor"
         assert caps["read_telemetry"].permission_tier == "passive"
 
@@ -157,6 +163,20 @@ class TestCuteBotExecute:
         result = await adapter.execute(_action("halt"))
         assert result.status == "success"
         assert adapter._bot.commands[-1][0] == "halt"
+
+    @pytest.mark.asyncio
+    async def test_set_lights_works_without_battery(self, adapter: CuteBotAdapter):
+        # Lights run on USB power — must NOT hit the motion battery gate.
+        adapter._bot.battery = False
+        result = await adapter.execute(_action("set_lights", r=0, g=255, b=0))
+        assert result.status == "success"
+        assert adapter._bot.commands[-1] == ("set_lights", {"r": 0, "g": 255, "b": 0})
+
+    @pytest.mark.asyncio
+    async def test_set_lights_clamps_channels(self, adapter: CuteBotAdapter):
+        result = await adapter.execute(_action("set_lights", r=999, g=-5, b=300))
+        assert result.status == "success"
+        assert adapter._bot.commands[-1] == ("set_lights", {"r": 255, "g": 0, "b": 255})
 
     @pytest.mark.asyncio
     async def test_get_state_shape(self, adapter: CuteBotAdapter):
@@ -248,6 +268,76 @@ class SerialContentionQtBot(FakeQtBot):
             return super().poll_events(seconds)
         finally:
             self._busy.release()
+
+
+class TestCuteBotEpisodeSave:
+    """Pin the episode_save contract — robot events must reach memory.
+
+    Regression: the adapter used to call episode_save(summary, metadata=...),
+    which does not match MemoryStore.episode_save(session_id, event_type,
+    summary, detail=..., ...) and raised TypeError, silently dropping every
+    gave_up / obstacle event so the agent could never recall them.
+    """
+
+    @pytest.mark.asyncio
+    async def test_save_episode_uses_memorystore_signature(self):
+        memory = MagicMock()
+        memory.episode_save = AsyncMock(return_value={})
+        adapter = CuteBotAdapter(bot=FakeQtBot())
+
+        await adapter._save_episode(
+            memory,
+            "sess-1",
+            "robot_event",
+            "The CuteBot robot lost the black line and gave up.",
+            {"event": "gave_up", "ts": 123.0},
+            importance=0.7,
+        )
+
+        memory.episode_save.assert_awaited_once()
+        kwargs = memory.episode_save.await_args.kwargs
+        assert kwargs["session_id"] == "sess-1"
+        assert kwargs["event_type"] == "robot_event"
+        assert "gave up" in kwargs["summary"]
+        assert kwargs["importance"] == 0.7
+        # The structured context is embedded via ``detail`` for recall.
+        assert "gave_up" in kwargs["detail"]
+        assert "cutebot" in kwargs["detail"]
+        # Must NOT use the old broken positional/metadata form.
+        assert memory.episode_save.await_args.args == ()
+        assert "metadata" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_gave_up_event_records_episode_through_loop(self):
+        memory = MagicMock()
+        memory.episode_save = AsyncMock(return_value={})
+        bot = FakeQtBot()
+        bot.queue_event({"event": "state_changed", "state": "gave_up"})
+        adapter = CuteBotAdapter(bot=bot)
+        perception = MagicMock()
+
+        async def stop_soon():
+            await asyncio.sleep(0.05)
+            adapter.stop_telemetry_loop()
+
+        stopper = asyncio.create_task(stop_soon())
+        await adapter.start_telemetry_loop(
+            perception, lambda: ["sess-x"], memory=memory
+        )
+        await stopper
+
+        assert memory.episode_save.await_count >= 1
+        kwargs = memory.episode_save.await_args_list[0].kwargs
+        assert kwargs["session_id"] == "sess-x"
+        assert kwargs["event_type"] == "robot_event"
+
+    @pytest.mark.asyncio
+    async def test_save_episode_swallows_failure(self):
+        memory = MagicMock()
+        memory.episode_save = AsyncMock(side_effect=RuntimeError("disk full"))
+        adapter = CuteBotAdapter(bot=FakeQtBot())
+        # Must not raise — memory failure can never break the telemetry loop.
+        await adapter._save_episode(memory, "s", "robot_event", "x", {})
 
 
 class TestSerialAccessSerialization:

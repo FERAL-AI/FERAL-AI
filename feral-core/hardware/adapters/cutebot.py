@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any, Callable, Optional
@@ -18,6 +19,10 @@ from hardware.protocol import (
 logger = logging.getLogger("feral.hup.cutebot")
 
 MOTION_CAPABILITIES = frozenset({"follow_line", "explore", "drive"})
+# Closed-loop navigation capabilities (harvested from cuteferalbot brain/).
+# These only appear in the device manifest after a pose source is attached
+# via attach_navigator(); the generic HUP skill then exposes them for free.
+NAV_CAPABILITIES = frozenset({"go_to", "patrol", "stop_navigation"})
 DEFAULT_DEVICE_ID = "cutebot-usb-0"
 DEFAULT_MAX_DRIVE_SPEED = 40
 
@@ -72,6 +77,77 @@ class CuteBotAdapter:
 
     @property
     def manifest(self) -> DeviceManifest:
+        """The device's capability manifest.
+
+        When the robot is connected we build it from the device's OWN
+        self-description (``QtBot.capabilities()["actions"]``) — the generic
+        HUP path where the brain learns the device from the device itself,
+        not from hardcoded knowledge here. The rich static manifest below is
+        the fallback used before connect or if the device predates the
+        ``actions`` self-description.
+        """
+        bot = self._bot
+        if bot is not None:
+            try:
+                caps = bot.capabilities()
+                actions = caps.get("actions") if isinstance(caps, dict) else None
+                if actions:
+                    return self._manifest_from_descriptors(caps, actions)
+            except Exception as exc:
+                logger.debug(
+                    "CuteBot self-description discovery failed (%s); "
+                    "using static manifest",
+                    exc,
+                )
+        return self._static_manifest()
+
+    def _manifest_from_descriptors(
+        self, caps: dict[str, Any], actions: list[dict[str, Any]]
+    ) -> DeviceManifest:
+        """Build a DeviceManifest from the device's own rich action descriptors.
+
+        No per-capability knowledge lives here — every field comes from what
+        the device declared. This is the literal realization of the
+        DeviceManifest docstring: "the agent reads this manifest to understand
+        what the device can do without any device-specific code."
+        """
+        device_type = caps.get("device_type") or "robot"
+        if device_type == "qtbot":
+            device_type = "robot"
+        capabilities: list[DeviceCapability] = []
+        for a in actions:
+            name = a.get("name")
+            if not name:
+                continue
+            capabilities.append(
+                DeviceCapability(
+                    id=name,
+                    name=a.get("title") or name.replace("_", " ").title(),
+                    description=a.get("description", ""),
+                    category=a.get("category", "actuator"),
+                    permission_tier=a.get("permission_tier", "passive"),
+                    parameters=list(a.get("params") or []),
+                    requires_confirmation=bool(a.get("requires_confirmation", False)),
+                    reversible=bool(a.get("reversible", True)),
+                    safety_notes=a.get("safety_notes", ""),
+                    verify=a.get("verify"),
+                )
+            )
+        return DeviceManifest(
+            device_id=self.device_id,
+            device_type=device_type,
+            name="QtBot (CuteBot)",
+            manufacturer="Elecfreaks",
+            model="EF08209",
+            connection_type="serial",
+            location="desk",
+            battery_powered=True,
+            sensors=list(caps.get("sensors") or []),
+            actuators=["motors", "headlights", "neopixels"],
+            capabilities=capabilities,
+        )
+
+    def _static_manifest(self) -> DeviceManifest:
         return DeviceManifest(
             device_id=self.device_id,
             device_type="robot",
@@ -93,6 +169,13 @@ class CuteBotAdapter:
                     requires_confirmation=True,
                     reversible=True,
                     safety_notes="Ensure track is clear; firmware handles obstacle reflex.",
+                    # Closed-loop honesty contract for the generic HUP skill:
+                    # confirm the robot actually entered line-follow mode.
+                    verify={
+                        "via": "read_telemetry",
+                        "field": "mode",
+                        "expect": ["line_follow", "track", "T"],
+                    },
                 ),
                 DeviceCapability(
                     id="explore",
@@ -101,6 +184,11 @@ class CuteBotAdapter:
                     category="actuator",
                     permission_tier="active",
                     requires_confirmation=True,
+                    verify={
+                        "via": "read_telemetry",
+                        "field": "mode",
+                        "expect": ["explore", "table", "E"],
+                    },
                 ),
                 DeviceCapability(
                     id="halt",
@@ -109,6 +197,11 @@ class CuteBotAdapter:
                     category="actuator",
                     permission_tier="passive",
                     reversible=False,
+                    verify={
+                        "via": "read_telemetry",
+                        "field": "mode",
+                        "expect": ["stopped", "M"],
+                    },
                 ),
                 DeviceCapability(
                     id="drive",
@@ -122,6 +215,20 @@ class CuteBotAdapter:
                         {"name": "right", "type": "integer", "required": True},
                     ],
                     safety_notes="Speed clamp enforced by adapter; auto-reverts after 1.5s.",
+                ),
+                DeviceCapability(
+                    id="set_lights",
+                    name="Set Lights",
+                    description="Set headlight + underglow RGB color (0-255) for expression or signaling",
+                    category="actuator",
+                    permission_tier="passive",
+                    reversible=True,
+                    parameters=[
+                        {"name": "r", "type": "integer", "required": True},
+                        {"name": "g", "type": "integer", "required": True},
+                        {"name": "b", "type": "integer", "required": True},
+                    ],
+                    safety_notes="Lights only; runs on USB power, no motion, no battery needed.",
                 ),
                 DeviceCapability(
                     id="read_telemetry",
@@ -238,7 +345,7 @@ class CuteBotAdapter:
         if cap_id == "halt":
             return await self._execute_halt(action)
 
-        if cap_id in MOTION_CAPABILITIES:
+        if cap_id in MOTION_CAPABILITIES or cap_id in NAV_CAPABILITIES:
             state = await self.get_state()
             if state.get("online") and not state.get("battery"):
                 return HUPResult(
@@ -248,6 +355,9 @@ class CuteBotAdapter:
                     error="Battery power required for motion (USB-only power)",
                     data={"battery": False},
                 )
+
+        if cap_id in NAV_CAPABILITIES:
+            return await self._run_nav_command(action, cap_id, params)
 
         if cap_id == "follow_line":
             return await self._run_bot_command(action, "follow_line")
@@ -259,6 +369,11 @@ class CuteBotAdapter:
                 int(params.get("right", 0)),
             )
             return await self._run_bot_command(action, "drive", left=left, right=right)
+        if cap_id == "set_lights":
+            r = max(0, min(255, int(params.get("r", 0))))
+            g = max(0, min(255, int(params.get("g", 0))))
+            b = max(0, min(255, int(params.get("b", 0))))
+            return await self._run_bot_command(action, "set_lights", r=r, g=g, b=b)
         if cap_id == "read_telemetry":
             state = await self.get_state()
             return HUPResult(
@@ -301,6 +416,52 @@ class CuteBotAdapter:
                 status="failure",
                 error=str(exc),
             )
+
+    async def _run_nav_command(
+        self, action: HUPAction, cap_id: str, params: dict[str, Any]
+    ) -> HUPResult:
+        """Dispatch a closed-loop navigation command to the bot.
+
+        Delegates to ``QtBot.execute`` (which only advertises these when a
+        navigator is attached, so an un-attached bot returns an honest
+        "unknown command" / "no navigator" failure rather than pretending).
+        """
+        if cap_id == "go_to":
+            kwargs: dict[str, Any] = {
+                "x_cm": float(params.get("x_cm", 0.0)),
+                "y_cm": float(params.get("y_cm", 0.0)),
+            }
+            if params.get("tolerance_cm") is not None:
+                kwargs["tolerance_cm"] = float(params["tolerance_cm"])
+            if params.get("timeout_s") is not None:
+                kwargs["timeout_s"] = float(params["timeout_s"])
+        elif cap_id == "patrol":
+            kwargs = {"waypoints": list(params.get("waypoints", []) or [])}
+            if params.get("repeat") is not None:
+                kwargs["repeat"] = bool(params["repeat"])
+        else:  # stop_navigation
+            kwargs = {}
+        return await self._run_bot_command(action, cap_id, **kwargs)
+
+    def attach_navigator(self, pose_source: Any) -> dict[str, Any]:
+        """Attach a closed-loop pose source so the bot offers go_to/patrol.
+
+        Once attached, ``QtBot.capabilities()['actions']`` includes the
+        navigation commands, which the generic HUP skill exposes to the LLM
+        automatically — no FERAL skill code per command. ``pose_source`` must
+        expose ``latest() -> Pose|None`` (e.g. cuteferalbot's ArUco
+        ``Localizer``). Returns the bot's ack dict.
+
+        NOTE: live closed-loop navigation requires coordinating serial access
+        with the telemetry loop; callers should pause/own telemetry while a
+        navigation task runs. Not attached at boot by default.
+        """
+        if self._bot is None:
+            return {"ok": False, "error": "CuteBot not connected"}
+        attach = getattr(self._bot, "attach_navigator", None)
+        if attach is None:
+            return {"ok": False, "error": "bot does not support navigation"}
+        return attach(pose_source)
 
     async def _run_bot_command(
         self,
@@ -354,22 +515,39 @@ class CuteBotAdapter:
             logger.debug("CuteBot poll_events failed: %s", exc)
             return []
 
-    async def _save_episode(self, memory: Any, summary: str, metadata: dict[str, Any]) -> None:
+    async def _save_episode(
+        self,
+        memory: Any,
+        session_id: str,
+        event_type: str,
+        summary: str,
+        detail: dict[str, Any] | None = None,
+        *,
+        importance: float = 0.6,
+    ) -> None:
         if memory is None:
             return
         episode_save = getattr(memory, "episode_save", None)
         if episode_save is None:
             return
+        meta = {
+            "category": "actuator",
+            "actuator": "robot",
+            "device_id": self.device_id,
+            "source": "cutebot",
+            **(detail or {}),
+        }
         try:
+            # MemoryStore.episode_save(session_id, event_type, summary,
+            # detail="", ..., importance=0.5). The structured context goes
+            # into ``detail`` so it is embedded for semantic recall.
             await episode_save(
-                summary,
-                metadata={
-                    "category": "actuator",
-                    "actuator": "robot",
-                    "device_id": self.device_id,
-                    "source": "cutebot",
-                    **metadata,
-                },
+                session_id=session_id,
+                event_type=event_type,
+                summary=summary,
+                detail=json.dumps(meta, default=str),
+                location="robot",
+                importance=importance,
             )
         except Exception as exc:
             logger.debug("CuteBot episode_save failed: %s", exc)
@@ -398,6 +576,7 @@ class CuteBotAdapter:
 
                 events = await self.poll_events(1.0)
                 state = await self.get_state()
+                session_ids = get_session_ids()
 
                 if not state.get("online", False):
                     # Only tear the port down after several consecutive
@@ -405,33 +584,44 @@ class CuteBotAdapter:
                     # on-demand reads interleave with this loop.
                     if self._offline_streak >= OFFLINE_DISCONNECT_THRESHOLD:
                         await self.disconnect()
-                        for sid in get_session_ids():
+                        for sid in session_ids:
                             perception.update_sensors(sid, {"robot": self._telemetry_payload(state)})
                         await asyncio.sleep(reconnect_interval)
                         continue
 
                 robot_payload = self._telemetry_payload(state)
-                for sid in get_session_ids():
+                for sid in session_ids:
                     perception.update_sensors(sid, {"robot": robot_payload})
 
+                # Episodes need a session to hang off; recall is by semantic
+                # similarity (cross-session), so this is just a stable anchor.
+                episode_session = session_ids[0] if session_ids else "cutebot-autonomous"
                 for event in events:
                     name = event.get("event", "")
                     if name == "state_changed" and event.get("state") == "gave_up":
                         await self._save_episode(
                             memory_handle,
-                            "CuteBot lost the line (gave_up)",
+                            episode_session,
+                            "robot_event",
+                            "The CuteBot robot lost the black line and gave up searching for it.",
                             {"event": "gave_up", "state": "gave_up", "ts": time.time()},
+                            importance=0.7,
                         )
                     elif name == "obstacle":
                         await self._save_episode(
                             memory_handle,
-                            f"CuteBot obstacle at {event.get('distance_cm')}cm",
+                            episode_session,
+                            "robot_event",
+                            f"The CuteBot robot detected an obstacle {event.get('distance_cm')}cm ahead and stopped.",
                             {"event": "obstacle", **event, "ts": time.time()},
+                            importance=0.7,
                         )
                     elif name == "mode_changed" and not state.get("online", True):
                         await self._save_episode(
                             memory_handle,
-                            "CuteBot disconnected",
+                            episode_session,
+                            "robot_event",
+                            "The CuteBot robot disconnected from the brain.",
                             {"event": "disconnect", "ts": time.time()},
                         )
 

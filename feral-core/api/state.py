@@ -120,6 +120,18 @@ def _feature_flag_enabled(env_key: str) -> bool:
     return isinstance(val, str) and val.strip().lower() in ("true", "1", "yes", "on")
 
 
+def _generic_hardware_skills_enabled() -> bool:
+    """Whether brain-local devices auto-expose their capabilities to the LLM
+    via the generic HUP skill bridge (``hardware.capability_skill``).
+
+    Defaults ON — this is the self-describing device path. Operators can set
+    ``FERAL_GENERIC_HARDWARE_SKILLS=0`` to fall back to hand-written skill
+    manifests only (kill switch while the generic path is A/B'd).
+    """
+    val = os.environ.get("FERAL_GENERIC_HARDWARE_SKILLS", "1")
+    return str(val).strip().lower() not in ("0", "false", "no", "off", "")
+
+
 def _sanitize_orphan_tool_rows(rows: list[dict]) -> list[dict]:
     """Drop ``role:"tool"`` rows whose announcing assistant turn is
     missing from this list.
@@ -513,6 +525,48 @@ class BrainState:
     @property
     def node_registry(self):
         return self.device_registry
+
+    def _register_generic_hardware_skill(self, adapter) -> None:
+        """Expose a brain-local device's self-described capabilities to the
+        LLM via the generic HUP path — no per-device skill file.
+
+        Runs ALONGSIDE any hand-written skill (e.g. ``cutebot.json``) so the
+        bespoke path stays as a safety net while the generic path is proven.
+        The device's own ``DeviceManifest`` is the contract; safety tiers and
+        the telemetry-verified honesty loop are derived generically in
+        ``hardware.capability_skill``.
+        """
+        if not _generic_hardware_skills_enabled():
+            return
+        try:
+            from hardware.capability_skill import (
+                GenericHardwareSkill,
+                device_manifest_to_skill_manifest,
+            )
+            from skills.impl import register_instance
+
+            manifest = adapter.manifest
+            gen_manifest = device_manifest_to_skill_manifest(manifest)
+            gen_skill = GenericHardwareSkill(
+                device_id=adapter.device_id,
+                device_registry=self.device_registry,
+                manifest=manifest,
+                skill_id=gen_manifest.skill_id,
+            )
+            register_instance(gen_manifest.skill_id, gen_skill)
+            self.skill_registry.register(gen_manifest)
+            logger.info(
+                "Registered generic HUP skill '%s' (%d capabilities) for device %s",
+                gen_manifest.skill_id,
+                len(gen_manifest.endpoints),
+                adapter.device_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Generic hardware skill registration failed for %s: %s",
+                getattr(adapter, "device_id", "?"),
+                exc,
+            )
 
     def register_background_task(self, task):
         """Track a fire-and-forget task so it can be cancelled on shutdown.
@@ -1529,8 +1583,14 @@ class BrainState:
             self._brain_local_devices: list = []
             for adapter in discover_brain_local_devices():
                 try:
+                    # Connect FIRST so the manifest reflects the device's own
+                    # runtime self-description (QtBot.capabilities()["actions"])
+                    # rather than a static fallback. Registration + the generic
+                    # skill then expose exactly what the device reports.
+                    connected = await adapter.connect()
                     self.device_registry.register_device(adapter.manifest, adapter)
-                    if await adapter.connect():
+                    self._register_generic_hardware_skill(adapter)
+                    if connected:
                         self._brain_local_devices.append(adapter)
                         self.register_background_task(
                             asyncio.create_task(

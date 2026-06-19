@@ -1,10 +1,30 @@
 # Changelog
 
-<!-- feral-version: 2026.6.16 -->
+<!-- feral-version: 2026.6.17 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.17] — 2026-06-17 — devices that describe themselves, closed-loop honesty, real-robot verification
+
+Hardware-autonomy release. The brain can now drive a piece of hardware from the device's **own self-description** — no per-device skill file, no hardcoded command list — and it tells the truth about whether an action actually worked by reading the device back.
+
+### Generic Hardware Use Protocol (self-describing devices)
+
+- **feat(hardware): a generic `DeviceManifest` → LLM-tool bridge.** Any brain-local device that publishes a `DeviceManifest` now gets LLM-callable tools, a safety policy, and parameter schemas generated automatically at registration — derived generically from each capability's category and permission tier, with no bespoke skill code. (`hardware/capability_skill.py`)
+- **feat(hardware): closed-loop verification (the honesty loop).** `DeviceCapability` gained an optional `verify` contract: after an actuator action, the dispatcher reads a sensor capability back and confirms the intended field changed, returning `verified: true/false/none` instead of blindly trusting a firmware ack. (`hardware/protocol.py`, `hardware/capability_skill.py`)
+- **feat(hardware): CuteBot builds its manifest from the live device.** When connected, `CuteBotAdapter` constructs its `DeviceManifest` from the robot's runtime `capabilities()` self-description (rich static fallback when offline), so adding a command on the device surfaces it to the LLM with no brain-side change. Navigation capabilities (`go_to`, `patrol`, `stop_navigation`) are exposed and routed generically when a navigator is attached. (`hardware/adapters/cutebot.py`)
+- **feat(boot): devices connect before they register**, so the registered manifest reflects the connected device's dynamic capabilities. The generic hardware skill is wired into boot behind a `FERAL_GENERIC_HARDWARE_SKILLS` kill switch (default on), running A/B alongside any existing bespoke skill. (`api/state.py`)
+
+### Robot control reliability
+
+- **fix(cutebot): `set_lights` is wired through the skill path** and acknowledged end-to-end on real hardware. (`skills/impl/cutebot_skill.py`, `skills/manifests/cutebot.json`)
+- **fix(mock_roomba): episode/telemetry handling hardened** for the simulated rover used in tests. (`hardware/mock_roomba.py`)
+
+### Verified on real hardware
+
+- Live-validated against a physical micro:bit CuteBot: the generic path auto-generated the tools, drove the real robot, reported `read_telemetry` online, returned an honest `verified=None` (+ telemetry) for `set_lights`, and a closed-loop `verified=True` for `halt` — with no `cutebot.json` in the loop.
 
 ## [2026.6.16] — 2026-06-16 — memory backend never bricks boot, real chat thread switching, long-horizon background tasks, Gmail deep search
 
