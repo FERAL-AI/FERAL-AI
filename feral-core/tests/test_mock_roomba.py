@@ -26,6 +26,7 @@ Tests assert:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from unittest.mock import AsyncMock
 
@@ -100,13 +101,21 @@ async def test_start_records_episode_via_memory():
     await mock.start()
     memory.episode_save.assert_awaited_once()
     args, kwargs = memory.episode_save.await_args
-    assert "mock_roomba started" in args[0]
-    meta = kwargs["metadata"]
-    assert meta["category"] == "actuator"
-    assert meta["actuator"] == "vacuum"
-    assert meta["action"] == "started"
-    assert meta["entity_id"] == DEFAULT_ENTITY_ID
-    assert meta["source"] == "mock_roomba"
+    # Must use the real MemoryStore.episode_save signature (regression: it
+    # used episode_save(summary, metadata=...) which raised TypeError and
+    # silently dropped the episode so it could never be recalled).
+    assert args == ()
+    assert "metadata" not in kwargs
+    assert kwargs["session_id"] == "mock-roomba"
+    assert kwargs["event_type"] == "actuator"
+    assert "mock_roomba started" in kwargs["summary"]
+    # Structured context is embedded in ``detail`` for semantic recall.
+    detail = json.loads(kwargs["detail"])
+    assert detail["category"] == "actuator"
+    assert detail["actuator"] == "vacuum"
+    assert detail["action"] == "started"
+    assert detail["entity_id"] == DEFAULT_ENTITY_ID
+    assert detail["source"] == "mock_roomba"
 
 
 @pytest.mark.asyncio

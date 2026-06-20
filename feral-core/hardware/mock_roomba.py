@@ -42,6 +42,7 @@ The Lane 11 acceptance criterion is:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -172,16 +173,28 @@ class MockRoomba:
             episode_save = getattr(memory, "episode_save", None)
             if episode_save is None:
                 return
+            # MemoryStore.episode_save(session_id, event_type, summary,
+            # detail="", ...). The structured context is JSON-encoded into
+            # ``detail`` so it is embedded for semantic recall — passing it
+            # as a ``metadata`` kwarg (the old bug) raised TypeError and
+            # silently dropped every actuator episode.
             await episode_save(
-                f"mock_roomba {kind} for {entity}",
-                metadata={
-                    "category": "actuator",
-                    "actuator": "vacuum",
-                    "entity_id": entity,
-                    "action": kind,
-                    "source": "mock_roomba",
-                    "ts": ts,
-                },
+                session_id="mock-roomba",
+                event_type="actuator",
+                summary=f"mock_roomba {kind} for {entity}",
+                detail=json.dumps(
+                    {
+                        "category": "actuator",
+                        "actuator": "vacuum",
+                        "entity_id": entity,
+                        "action": kind,
+                        "source": "mock_roomba",
+                        "ts": ts,
+                    },
+                    default=str,
+                ),
+                location="home",
+                importance=0.5,
             )
         except Exception as exc:
             logger.debug("mock_roomba episode_save failed: %s", exc)

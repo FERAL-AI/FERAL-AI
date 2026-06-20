@@ -40,6 +40,7 @@ EXPECTED_TOOLS = {
     "cutebot__explore",
     "cutebot__drive",
     "cutebot__halt",
+    "cutebot__set_lights",
     "cutebot__status",
 }
 
@@ -48,6 +49,7 @@ ENDPOINT_TO_CAPABILITY = {
     "explore": ("explore", HUPActionType.EXECUTE),
     "drive": ("drive", HUPActionType.EXECUTE),
     "halt": ("halt", HUPActionType.EXECUTE),
+    "set_lights": ("set_lights", HUPActionType.EXECUTE),
     "status": ("read_telemetry", HUPActionType.READ),
 }
 
@@ -126,12 +128,12 @@ def cutebot_registry() -> SkillRegistry:
     return reg
 
 
-def test_cutebot_manifest_loads_and_exposes_five_tools(cutebot_registry: SkillRegistry):
+def test_cutebot_manifest_loads_and_exposes_tools(cutebot_registry: SkillRegistry):
     assert "cutebot" in cutebot_registry.skills
     tools = cutebot_registry.get_tools_for_skills([cutebot_registry.skills["cutebot"]])
     tool_names = {t["function"]["name"] for t in tools}
     assert tool_names == EXPECTED_TOOLS
-    assert len(tools) == 5
+    assert len(tools) == 6
 
 
 def test_cutebot_manifest_instructs_verified_execution(cutebot_registry: SkillRegistry):
@@ -422,6 +424,7 @@ async def test_registry_gate_still_blocks_unconfirmed_actions():
         ("cutebot__drive", {"left": 81, "right": 10}, LEVEL_DENY),
         ("cutebot__drive", {"left": 10, "right": -90}, LEVEL_DENY),
         ("cutebot__halt", {}, LEVEL_AUTO),
+        ("cutebot__set_lights", {"r": 0, "g": 255, "b": 0}, LEVEL_AUTO),
         ("cutebot__status", {}, LEVEL_AUTO),
     ],
 )

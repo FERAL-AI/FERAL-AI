@@ -48,6 +48,14 @@ class DeviceCapability(BaseModel):
     requires_confirmation: bool = False
     reversible: bool = True
     safety_notes: str = ""
+    # Optional closed-loop verification contract for the generic
+    # capability-skill dispatcher: after an actuator action, read a sensor
+    # capability back and confirm a field matches the intended effect.
+    #   {"via": "<sensor_capability_id>", "field": "mode",
+    #    "expect": ["line_follow", "T"]}
+    # When absent, the dispatcher reports a state read-back with
+    # verified=None (honest "unknown") instead of asserting success.
+    verify: Optional[dict] = None
 
 
 class DeviceManifest(BaseModel):
