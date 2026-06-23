@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
-    "dompurify": "^3.3.3",
+    "dompurify": "^3.4.11",
     "highlight.js": "^11.11.1",
     "katex": "^0.16.47",
     "lucide-react": "^1.7.0",
@@ -44,5 +44,8 @@
     "jsdom": "^29.0.2",
     "vite": "^6.4.2",
     "vitest": "^4.1.4"
+  },
+  "overrides": {
+    "undici": "^7.28.0"
   }
 }
