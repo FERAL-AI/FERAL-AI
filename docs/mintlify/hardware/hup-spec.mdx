@@ -143,3 +143,21 @@ feral install <item_id>
 For the complete normative specification — all frame schemas, error
 codes, example wire traces, pairing flow details, and reserved fields —
 read the canonical document: [feral-nodes/HUP_SPEC.md](https://github.com/FERAL-AI/FERAL-AI/blob/main/feral-nodes/HUP_SPEC.md).
+
+## Brain-side self-description (feral-core)
+
+The wire protocol above covers daemon ↔ brain transport. On the brain, HUP is also a **generic hardware hub** for any device that self-describes:
+
+1. **Wire format** — devices return an `actions[]` envelope documented as `HUP_ACTION_SCHEMA` in `feral-core/hardware/protocol.py`. Converters `device_capability_from_action()` and `device_manifest_from_capabilities()` map it to `DeviceManifest` / `DeviceCapability` (including optional `action_type` and `verify` honesty contracts).
+
+2. **Transport adapters** — `GenericSelfDescribingAdapter` passthrough-executes any self-describing companion library; `BridgedPeripheralAdapter` routes actions to phone-bridged BLE peripherals via `mesh.invoke`; mesh nodes use `WebSocketNodeAdapter`.
+
+3. **Registration** — `state.register_generic_hardware_skill_for()` runs on every ingress (brain-local discovery, mesh `on_node_connected` with node-supplied `device_manifest`, `peripheral_bridge_register`). It registers `GenericHardwareSkill`, which auto-generates LLM tools (`hwdev_<device>__<capability>`), enforces safety tiers and `rate_limit_per_minute`, and runs the closed-loop honesty loop when `verify` is declared.
+
+4. **Discovery** — brain-local USB devices are listed in `DEVICE_DISCOVERY_SPECS` (`hardware/discovery.py`); override CuteBot path with `FERAL_CUTEBOT_PATH`.
+
+5. **Fleet API** — `GET /api/hardware/fleet` returns manifests, derived safety tiers, last verification state, mesh nodes, and announced devices for companion-app rendering.
+
+6. **Kill switch** — `FERAL_GENERIC_HARDWARE_SKILLS` (default `"1"`) enables the generic path; `"0"` falls back to hand-written skill manifests only.
+
+See also: [Hardware Mesh Protocol](/guides/hardware) and [HARDWARE_ECOSYSTEM.md](https://github.com/FERAL-AI/FERAL-AI/blob/main/docs/HARDWARE_ECOSYSTEM.md).

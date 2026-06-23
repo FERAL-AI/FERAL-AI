@@ -12,6 +12,7 @@ import EmptyState from '../ui/EmptyState';
 import SkillsLauncher, { readPinned, MAX_PINNED } from '../components/SkillsLauncher';
 import ResumeCockpit from '../components/ResumeCockpit';
 import ForYouToday from '../components/ForYouToday';
+import ConnectedHardware from '../components/ConnectedHardware';
 import { apiJson, apiFetch } from '../lib/api';
 import { useSomatic } from '../hooks/useSomatic';
 import { useSystemHealth, refreshSystemHealth } from '../hooks/useSystemHealth';
@@ -783,6 +784,8 @@ export default function Home() {
       )}
 
       <ForYouToday />
+
+      <ConnectedHardware />
 
       <ResumeCockpit />
 

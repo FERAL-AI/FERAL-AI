@@ -14,11 +14,12 @@ from hardware.protocol import (
     HUPAction,
     HUPActionType,
     HUPResult,
+    device_manifest_from_capabilities,
 )
 
 logger = logging.getLogger("feral.hup.cutebot")
 
-MOTION_CAPABILITIES = frozenset({"follow_line", "explore", "drive"})
+MOTION_CAPABILITIES = frozenset({"follow_line", "explore", "drive", "resume"})
 # Closed-loop navigation capabilities (harvested from cuteferalbot brain/).
 # These only appear in the device manifest after a pose source is attached
 # via attach_navigator(); the generic HUP skill then exposes them for free.
@@ -106,45 +107,25 @@ class CuteBotAdapter:
     ) -> DeviceManifest:
         """Build a DeviceManifest from the device's own rich action descriptors.
 
-        No per-capability knowledge lives here — every field comes from what
-        the device declared. This is the literal realization of the
-        DeviceManifest docstring: "the agent reads this manifest to understand
-        what the device can do without any device-specific code."
+        No per-capability knowledge lives here — the capability list is built
+        by the SHARED, generic ``device_manifest_from_capabilities`` HUP
+        converter (the same one any transport adapter uses); this method only
+        supplies the CuteBot's static identity (name/model/location). This is
+        the literal realization of the DeviceManifest docstring: "the agent
+        reads this manifest to understand what the device can do without any
+        device-specific code."
         """
-        device_type = caps.get("device_type") or "robot"
-        if device_type == "qtbot":
-            device_type = "robot"
-        capabilities: list[DeviceCapability] = []
-        for a in actions:
-            name = a.get("name")
-            if not name:
-                continue
-            capabilities.append(
-                DeviceCapability(
-                    id=name,
-                    name=a.get("title") or name.replace("_", " ").title(),
-                    description=a.get("description", ""),
-                    category=a.get("category", "actuator"),
-                    permission_tier=a.get("permission_tier", "passive"),
-                    parameters=list(a.get("params") or []),
-                    requires_confirmation=bool(a.get("requires_confirmation", False)),
-                    reversible=bool(a.get("reversible", True)),
-                    safety_notes=a.get("safety_notes", ""),
-                    verify=a.get("verify"),
-                )
-            )
-        return DeviceManifest(
-            device_id=self.device_id,
-            device_type=device_type,
+        return device_manifest_from_capabilities(
+            self.device_id,
+            caps,
             name="QtBot (CuteBot)",
             manufacturer="Elecfreaks",
             model="EF08209",
             connection_type="serial",
             location="desk",
             battery_powered=True,
-            sensors=list(caps.get("sensors") or []),
+            type_aliases={"qtbot": "robot"},
             actuators=["motors", "headlights", "neopixels"],
-            capabilities=capabilities,
         )
 
     def _static_manifest(self) -> DeviceManifest:
@@ -339,12 +320,24 @@ class CuteBotAdapter:
         return await self.get_state()
 
     async def execute(self, action: HUPAction) -> HUPResult:
-        cap_id = action.capability_id
-        params = action.parameters or {}
+        """Dispatch a capability to the bot.
 
+        The body is GENERIC passthrough — ``QtBot.execute(cap_id, **params)``
+        handles every self-described command, so a new capability the device
+        advertises works with no new branch here. Only the CuteBot's own
+        *safety* lives as explicit steps: an emergency-stop fast path, a
+        motion battery gate, and parameter hardening (drive clamp / RGB clamp /
+        nav coercion). Everything else falls through to passthrough.
+        """
+        cap_id = action.capability_id
+        params = dict(action.parameters or {})
+
+        # Emergency stop: works even offline; never blocked by the battery gate.
         if cap_id == "halt":
             return await self._execute_halt(action)
 
+        # Motion safety: refuse to command motion when the robot is on USB
+        # power only (no battery) — it cannot move and would dead-end.
         if cap_id in MOTION_CAPABILITIES or cap_id in NAV_CAPABILITIES:
             state = await self.get_state()
             if state.get("online") and not state.get("battery"):
@@ -356,24 +349,7 @@ class CuteBotAdapter:
                     data={"battery": False},
                 )
 
-        if cap_id in NAV_CAPABILITIES:
-            return await self._run_nav_command(action, cap_id, params)
-
-        if cap_id == "follow_line":
-            return await self._run_bot_command(action, "follow_line")
-        if cap_id == "explore":
-            return await self._run_bot_command(action, "explore")
-        if cap_id == "drive":
-            left, right = self._clamp_drive(
-                int(params.get("left", 0)),
-                int(params.get("right", 0)),
-            )
-            return await self._run_bot_command(action, "drive", left=left, right=right)
-        if cap_id == "set_lights":
-            r = max(0, min(255, int(params.get("r", 0))))
-            g = max(0, min(255, int(params.get("g", 0))))
-            b = max(0, min(255, int(params.get("b", 0))))
-            return await self._run_bot_command(action, "set_lights", r=r, g=g, b=b)
+        # Pure sensor read short-circuits to fresh telemetry.
         if cap_id == "read_telemetry":
             state = await self.get_state()
             return HUPResult(
@@ -383,12 +359,27 @@ class CuteBotAdapter:
                 data=state,
             )
 
-        return HUPResult(
-            action_id=action.action_id,
-            device_id=self.device_id,
-            status="failure",
-            error=f"Unknown capability: {cap_id}",
-        )
+        if cap_id in NAV_CAPABILITIES:
+            return await self._run_nav_command(action, cap_id, params)
+
+        # Generic passthrough for every actuator capability (follow_line,
+        # explore, resume, drive, set_lights, …) after device-specific
+        # parameter hardening.
+        params = self._harden_params(cap_id, params)
+        return await self._run_bot_command(action, cap_id, **params)
+
+    def _harden_params(self, cap_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Clamp safety-relevant parameters before passthrough (CuteBot-only)."""
+        if cap_id == "drive":
+            left, right = self._clamp_drive(
+                int(params.get("left", 0)),
+                int(params.get("right", 0)),
+            )
+            params["left"], params["right"] = left, right
+        elif cap_id == "set_lights":
+            for ch in ("r", "g", "b"):
+                params[ch] = max(0, min(255, int(params.get(ch, 0))))
+        return params
 
     async def _execute_halt(self, action: HUPAction) -> HUPResult:
         if self._bot is None:

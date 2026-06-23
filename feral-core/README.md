@@ -28,3 +28,5 @@ Then open `http://localhost:9090`.
 
 - Main repo README: `../README.md`
 - Mintlify docs: `../docs/mintlify`
+- Hardware / HUP: `../docs/HARDWARE_ECOSYSTEM.md`, `../docs/mintlify/guides/hardware.mdx`
+- Self-describing wire format: `hardware/protocol.py` (`HUP_ACTION_SCHEMA`, `device_manifest_from_capabilities`)

@@ -1,15 +1,24 @@
-"""Brain-local hardware discovery (USB-attached devices on the brain host)."""
+"""Brain-local hardware discovery (USB/host-attached devices).
+
+Config-driven: each entry in :data:`DEVICE_DISCOVERY_SPECS` names a companion
+library (module + class), a no-arg availability probe, and which adapter to
+wrap it in. Adding a brand-new device class to the brain therefore needs only
+its companion lib on the path plus one spec entry — no new discovery code.
+
+The CuteBot keeps its bespoke :class:`CuteBotAdapter` (battery gate, drive
+clamp, telemetry/episode loop). Any other self-describing device uses the
+generic passthrough :class:`GenericSelfDescribingAdapter`.
+"""
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from hardware.adapters.cutebot import CuteBotAdapter
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("feral.hardware.discovery")
 
@@ -22,49 +31,106 @@ _CUTEBOT_PATH_CANDIDATES = (
 )
 
 
-def _ensure_cuteferalbot_path() -> bool:
-    for candidate in _CUTEBOT_PATH_CANDIDATES:
+@dataclass
+class DeviceDiscoverySpec:
+    """Declarative description of one discoverable brain-local device class."""
+
+    device_id: str
+    module: str
+    class_name: str
+    # Static/class method on the device class returning bool "is present?".
+    probe: str = "available"
+    # "cutebot" -> bespoke CuteBotAdapter; "generic" -> passthrough adapter.
+    adapter: str = "generic"
+    # Marker file (relative to a candidate root) proving the lib lives there.
+    path_marker: str = ""
+    path_candidates: tuple[Optional[str], ...] = ()
+    identity: dict[str, Any] = field(default_factory=dict)
+    type_aliases: dict[str, str] = field(default_factory=dict)
+    telemetry_key: Optional[str] = None
+
+
+DEVICE_DISCOVERY_SPECS: list[DeviceDiscoverySpec] = [
+    DeviceDiscoverySpec(
+        device_id="cutebot-usb-0",
+        module="cutebot.device",
+        class_name="QtBot",
+        probe="available",
+        adapter="cutebot",
+        path_marker="cutebot/device.py",
+        path_candidates=_CUTEBOT_PATH_CANDIDATES,
+    ),
+]
+
+
+def _ensure_on_path(spec: DeviceDiscoverySpec) -> None:
+    if not spec.path_marker:
+        return
+    for candidate in spec.path_candidates:
         if not candidate:
             continue
         root = Path(candidate)
-        if (root / "cutebot" / "device.py").is_file():
+        if (root / spec.path_marker).is_file():
             path = str(root)
             if path not in sys.path:
                 sys.path.insert(0, path)
-            return True
-    return False
+            return
 
 
-def _import_qtbot():
+def _load_device_class(spec: DeviceDiscoverySpec) -> Optional[type]:
     try:
-        from cutebot.device import QtBot
-
-        return QtBot
+        module = importlib.import_module(spec.module)
     except ImportError:
-        if not _ensure_cuteferalbot_path():
-            return None
+        _ensure_on_path(spec)
         try:
-            from cutebot.device import QtBot
-
-            return QtBot
+            module = importlib.import_module(spec.module)
         except ImportError as exc:
-            logger.debug("cuteferalbot unavailable: %s", exc)
+            logger.debug("device lib %s unavailable: %s", spec.module, exc)
             return None
+    return getattr(module, spec.class_name, None)
 
 
-def discover_brain_local_devices() -> list["CuteBotAdapter"]:
-    """Return constructed-but-not-connected adapters for local USB devices."""
-    QtBot = _import_qtbot()
-    if QtBot is None:
-        return []
-
+def _is_available(cls: type, spec: DeviceDiscoverySpec) -> bool:
+    probe = getattr(cls, spec.probe, None)
+    if probe is None:
+        # No probe -> assume present (caller's spec opted out of probing).
+        return True
     try:
-        if not QtBot.available():
-            return []
+        return bool(probe())
     except Exception as exc:
-        logger.debug("CuteBot discovery check failed: %s", exc)
-        return []
+        logger.debug("%s availability probe failed: %s", spec.device_id, exc)
+        return False
 
-    from hardware.adapters.cutebot import CuteBotAdapter
 
-    return [CuteBotAdapter()]
+def _build_adapter(cls: type, spec: DeviceDiscoverySpec, *, memory: Any = None):
+    if spec.adapter == "cutebot":
+        from hardware.adapters.cutebot import CuteBotAdapter
+
+        return CuteBotAdapter(device_id=spec.device_id, memory=memory)
+
+    from hardware.adapters.generic import GenericSelfDescribingAdapter
+
+    return GenericSelfDescribingAdapter(
+        spec.device_id,
+        device_factory=cls,
+        identity=spec.identity,
+        type_aliases=spec.type_aliases,
+        memory=memory,
+        telemetry_key=spec.telemetry_key,
+    )
+
+
+def discover_brain_local_devices(*, memory: Any = None) -> list[Any]:
+    """Return constructed-but-not-connected adapters for present local devices."""
+    adapters: list[Any] = []
+    for spec in DEVICE_DISCOVERY_SPECS:
+        cls = _load_device_class(spec)
+        if cls is None:
+            continue
+        if not _is_available(cls, spec):
+            continue
+        try:
+            adapters.append(_build_adapter(cls, spec, memory=memory))
+        except Exception as exc:
+            logger.warning("Failed to build adapter for %s: %s", spec.device_id, exc)
+    return adapters

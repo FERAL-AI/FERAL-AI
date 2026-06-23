@@ -206,6 +206,114 @@ class TestGenericDispatch:
         assert out["status_code"] == 400
 
 
+class _RecordingRegistry(_FakeRegistry):
+    """Adds the fleet-API verification recorder + scriptable per-cap telemetry."""
+
+    def __init__(self, telemetry=None):
+        super().__init__(telemetry)
+        self.verifications: dict = {}
+        self.dispatch_count = 0
+
+    async def execute_action(self, action: HUPAction) -> HUPResult:
+        if action.capability_id != "status":
+            self.dispatch_count += 1
+        return await super().execute_action(action)
+
+    def record_verification(self, device_id, info):
+        self.verifications[device_id] = info
+
+
+class TestVerifyContractExtras:
+    @pytest.mark.asyncio
+    async def test_transient_reports_post_state_without_failing(self):
+        reg = _FakeRegistry(telemetry={"online": True, "mode": "stopped"})
+        m = _manifest()
+        # Turn drive into a transient-verify capability.
+        for c in m.capabilities:
+            if c.id == "drive":
+                c.verify = {"via": "status", "transient": True}
+        skill = GenericHardwareSkill(
+            device_id="cutebot-usb-0", device_registry=reg, manifest=m
+        )
+        out = await skill.execute("drive", {"left": 10, "right": 10}, {})
+        assert out["success"] is True
+        assert out["data"]["transient"] is True
+        assert out["data"]["verified"] is True  # telemetry was readable
+
+    @pytest.mark.asyncio
+    async def test_retries_reissue_then_verify(self):
+        # Telemetry stays wrong, so a single retry is attempted and it fails.
+        reg = _RecordingRegistry(telemetry={"online": True, "mode": "stopped"})
+        m = _manifest()
+        for c in m.capabilities:
+            if c.id == "follow_line":
+                c.verify = {"via": "status", "field": "mode",
+                            "expect": ["line_follow"], "retries": 1}
+        skill = GenericHardwareSkill(
+            device_id="cutebot-usb-0", device_registry=reg, manifest=m
+        )
+        out = await skill.execute("follow_line", {}, {})
+        assert out["success"] is False
+        assert out["data"]["verified"] is False
+        assert out["data"]["retried"] == 1
+        # Original dispatch + one retry dispatch = 2 actuator sends.
+        assert reg.dispatch_count == 2
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_blocks_excess_calls(self):
+        reg = _FakeRegistry()
+        m = _manifest()
+        for c in m.capabilities:
+            if c.id == "set_lights":
+                c.rate_limit_per_minute = 1
+        skill = GenericHardwareSkill(
+            device_id="cutebot-usb-0", device_registry=reg, manifest=m
+        )
+        first = await skill.execute("set_lights", {"r": 1}, {})
+        second = await skill.execute("set_lights", {"r": 2}, {})
+        assert first["success"] is True
+        assert second["success"] is False
+        assert second["status_code"] == 429
+
+    @pytest.mark.asyncio
+    async def test_records_episode_and_verify_history(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        memory = MagicMock()
+        memory.episode_save = AsyncMock(return_value={})
+        reg = _RecordingRegistry()
+        skill = GenericHardwareSkill(
+            device_id="cutebot-usb-0", device_registry=reg,
+            manifest=_manifest(), memory=memory,
+        )
+        await skill.execute("set_lights", {"r": 1}, {})
+        memory.episode_save.assert_awaited()
+        kwargs = memory.episode_save.await_args.kwargs
+        assert kwargs["event_type"] == "actuator"
+        assert "set_lights" in kwargs["summary"]
+        assert "hup_generic" in kwargs["detail"]
+        # Verify history + registry recorder both populated.
+        assert skill.verify_history[-1]["capability"] == "set_lights"
+        assert reg.verifications["cutebot-usb-0"]["capability"] == "set_lights"
+
+    @pytest.mark.asyncio
+    async def test_announce_device_upserts_kg_entity(self):
+        from unittest.mock import AsyncMock
+
+        kg = type("KG", (), {})()
+        kg.add_entity = AsyncMock(return_value={})
+        skill = GenericHardwareSkill(
+            device_id="cutebot-usb-0", device_registry=_FakeRegistry(),
+            manifest=_manifest(), knowledge_graph=kg,
+        )
+        await skill.announce_device()
+        kg.add_entity.assert_awaited_once()
+        kwargs = kg.add_entity.await_args.kwargs
+        assert kwargs["entity_type"] == "device"
+        assert kwargs["metadata"]["category"] == "device"
+        assert "follow_line" in kwargs["metadata"]["capabilities"]
+
+
 class TestRealCuteBotManifestIsSelfDescribing:
     """The real adapter manifest must drive the generic path end-to-end with
     no cutebot-specific code — proving the self-describing HUP contract."""

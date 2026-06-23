@@ -7,74 +7,131 @@ slug: /guides/hardware
 
 # Hardware Mesh Protocol
 
-FERAL controls physical devices through the **Hardware Use Protocol (HUP)** — a WebSocket-based mesh that lets devices register, stream telemetry, and receive commands with no cloud roundtrip. Everything runs on the local network.
+FERAL controls physical devices through the **Hardware Use Protocol (HUP)** — a generic, self-describing hardware hub. Devices declare what they can do via an `actions[]` envelope; the brain converts that into a `DeviceManifest`, registers a transport adapter, auto-generates LLM tools, and runs a closed-loop **honesty loop** when capabilities declare a `verify` contract. Communication stays local-first over USB, WebSocket mesh, or phone-bridged BLE.
 
 ## HUP Overview
 
-HUP is to hardware what MCP is to software tools. Devices connect to the Brain over WebSocket, announce their capabilities via a declarative manifest, and the agent can then invoke those capabilities as tools.
+HUP is to hardware what MCP is to software tools. Devices connect to the Brain (directly or through a bridge), announce their capabilities, and the agent invokes them as tools — without per-device skill code on the brain.
 
 ```
-Device → WebSocket → Brain (HUP endpoint /v1/node)
-         ←commands←
+Device → Transport Adapter → DeviceRegistry → GenericHardwareSkill → Orchestrator
+         ←commands←                              ↑ honesty loop (verify)
          →telemetry→
 ```
 
 Key properties:
-- **Local-first**: all communication stays on the LAN.
-- **Declarative**: devices describe what they can do, not how.
+- **Local-first**: all communication stays on the LAN (or host-attached USB).
+- **Self-describing**: devices publish an `actions[]` envelope; the brain maps it generically (`HUP_ACTION_SCHEMA`, `device_capability_from_action`, `device_manifest_from_capabilities` in `hardware/protocol.py`).
 - **Bidirectional**: the Brain sends commands; devices push telemetry.
-- **Hot-pluggable**: devices can join and leave the mesh at any time.
+- **Hot-pluggable**: devices can join and leave; registration re-runs when manifests change.
+- **Honest feedback**: actuator tools report `verified: true/false/none` based on post-action sensor read-back, not bare firmware acks.
 
-## Device Manifests
+### Ingress paths
 
-Every HUP device registers with a JSON manifest that describes its identity, capabilities, and telemetry streams.
+| Path | Adapter | Example |
+|:-----|:--------|:--------|
+| Brain-local USB/serial | `GenericSelfDescribingAdapter` (+ optional `_preprocess` hooks) | CuteBot via `cuteferalbot.QtBot` |
+| Mesh WebSocket node | `WebSocketNodeAdapter` | Phone daemon, desktop node |
+| Phone-bridged BLE peripheral | `BridgedPeripheralAdapter` via `mesh.invoke` | Glasses/wristband through iPhone |
+
+Every ingress calls `state.register_generic_hardware_skill_for(manifest, adapter)` unless `FERAL_GENERIC_HARDWARE_SKILLS=0`.
+
+## Self-describing wire format (`actions[]`)
+
+Companion libraries and bridge nodes return a `capabilities()` / `device_manifest` envelope. Each `actions[]` entry becomes one LLM tool and one safety policy — no hand-written skill manifest required.
 
 ```json
 {
-  "device_id": "wristband-001",
-  "name": "FERAL Wristband",
-  "type": "wearable",
-  "firmware_version": "2.1.0",
-  "capabilities": [
+  "device_type": "robot",
+  "transport": {"kind": "usb_serial"},
+  "sensors": ["sonar_cm", "battery"],
+  "actuators": ["motors"],
+  "actions": [
     {
-      "id": "heart_rate",
-      "type": "sensor",
-      "description": "Real-time heart rate in BPM",
-      "unit": "bpm",
-      "sample_rate_hz": 1
-    },
-    {
-      "id": "spo2",
-      "type": "sensor",
-      "description": "Blood oxygen saturation",
-      "unit": "percent",
-      "sample_rate_hz": 0.1
-    },
-    {
-      "id": "vibrate",
-      "type": "actuator",
-      "description": "Haptic vibration motor",
+      "name": "drive",
+      "category": "actuator",
+      "permission_tier": "dangerous",
+      "requires_confirmation": true,
+      "description": "Direct wheel speeds -100..100",
       "params": [
-        {"name": "pattern", "type": "string", "enum": ["short", "long", "sos"]},
-        {"name": "intensity", "type": "number", "min": 0, "max": 100}
+        {"name": "left", "type": "integer", "required": true},
+        {"name": "right", "type": "integer", "required": true}
       ]
+    },
+    {
+      "name": "read_telemetry",
+      "category": "sensor",
+      "permission_tier": "passive",
+      "description": "Snapshot: sonar, mode, battery"
     }
-  ],
-  "telemetry": {
-    "interval_ms": 1000,
-    "streams": ["heart_rate", "spo2"]
-  }
+  ]
 }
 ```
 
-Once registered, the agent sees these as tools:
+Optional per-action fields: `action_type`, `rate_limit_per_minute`, `verify`, `returns`, `safety_notes`. See `HUP_ACTION_SCHEMA` in `feral-core/hardware/protocol.py` for the full schema.
+
+## Device Manifests
+
+The in-brain model is `DeviceManifest` + `DeviceCapability` (`hardware/protocol.py`). Once registered, capabilities appear as LLM tools named **`hwdev_<device_id>__<capability_id>`** (device IDs are sanitized; e.g. `cutebot-usb-0` → `hwdev_cutebot_usb_0__drive`).
+
+```json
+{
+  "device_id": "cutebot-usb-0",
+  "device_type": "robot",
+  "name": "QtBot (CuteBot)",
+  "connection_type": "serial",
+  "capabilities": [
+    {
+      "id": "follow_line",
+      "name": "Follow Line",
+      "category": "actuator",
+      "permission_tier": "active",
+      "requires_confirmation": true,
+      "verify": {
+        "via": "read_telemetry",
+        "field": "mode",
+        "expect": ["line_follow"],
+        "delay_ms": 1600,
+        "retries": 1
+      }
+    },
+    {
+      "id": "read_telemetry",
+      "name": "Read Telemetry",
+      "category": "sensor",
+      "permission_tier": "passive"
+    }
+  ],
+  "sensors": ["sonar_cm", "battery"],
+  "actuators": ["motors"]
+}
+```
+
+Once registered, the agent sees tools like:
 
 ```
 Available tools:
-  - wristband-001.heart_rate (sensor: read heart rate)
-  - wristband-001.spo2 (sensor: read blood oxygen)
-  - wristband-001.vibrate (actuator: trigger haptic vibration)
+  - hwdev_cutebot_usb_0__follow_line (actuator: confirm + approval)
+  - hwdev_cutebot_usb_0__read_telemetry (sensor: read-only)
 ```
+
+## Honesty loop (`verify` contract)
+
+Actuator capabilities may declare a closed-loop verification contract on `DeviceCapability.verify`. After execution, `GenericHardwareSkill` re-reads the named sensor capability (`via`), checks `field` against `expect`, honors `delay_ms` and `retries`, and returns:
+
+- `verified: true` — observed state matches expectation
+- `verified: false` — action ran but state did not match (retries exhausted)
+- `verified: none` — no contract declared; telemetry attached but success is not asserted
+
+History is recorded on the `DeviceRegistry` and exposed via `GET /api/hardware/fleet`.
+
+## Brain-local discovery
+
+USB/host-attached devices are discovered via **`DEVICE_DISCOVERY_SPECS`** in `hardware/discovery.py`. Each entry names a Python module/class, availability probe, and adapter kind (`generic` or device-specific like `cutebot`). Set **`FERAL_CUTEBOT_PATH`** to point at the `cuteferalbot` repo when it is not installed as a package.
+
+## Kill switch
+
+**`FERAL_GENERIC_HARDWARE_SKILLS`** defaults to `"1"` (generic path enabled). Set to `"0"` to disable auto-generated tools and use hand-written skill manifests only (legacy `cutebot.json` remains as a fallback).
 
 ## Capability Types
 
@@ -199,33 +256,41 @@ Devices push telemetry at their configured interval. The Brain routes it to:
 
 ## Writing a Custom Adapter
 
-Implement the `HUPAdapter` interface to connect any device:
+For a **self-describing** companion library, use `GenericSelfDescribingAdapter` — it passthrough-executes any capability the device declares. Override `_preprocess` / `_harden_params` only for device-specific safety:
 
 ```python
-from feral_core.hardware import HUPAdapter, DeviceManifest
+from hardware.adapters.generic import GenericSelfDescribingAdapter
+from hardware.protocol import HUPAction, HUPResult
 
-class MyDeviceAdapter(HUPAdapter):
-    async def get_manifest(self) -> DeviceManifest:
-        return DeviceManifest(
-            device_id="my-device",
-            name="My Custom Device",
-            capabilities=[...],
-        )
+class MyRobotAdapter(GenericSelfDescribingAdapter):
+    async def _preprocess(self, action: HUPAction, params: dict) -> dict | HUPResult:
+        if action.capability_id == "drive" and not (await self.get_state()).get("battery"):
+            return HUPResult(action_id=action.action_id, device_id=self.device_id,
+                             status="failure", error="Battery off")
+        return params
 
-    async def execute(self, capability_id: str, params: dict) -> dict:
-        if capability_id == "toggle":
-            await self._send_command(params["state"])
-            return {"status": "ok"}
-
-    async def read_telemetry(self) -> list[dict]:
-        return [{"capability": "temperature", "value": self._read_temp()}]
+    def _harden_params(self, cap_id: str, params: dict) -> dict:
+        if cap_id == "drive":
+            for k in ("left", "right"):
+                if k in params:
+                    params[k] = max(-80, min(80, int(params[k])))
+        return params
 ```
+
+For **phone-bridged BLE peripherals**, the brain uses `BridgedPeripheralAdapter` — actions route through `mesh.invoke` to the bridge node. The peripheral's manifest (from `peripheral_bridge_register`) drives tools and the honesty loop with no per-device code.
+
+Add brain-local discovery by appending a `DeviceDiscoverySpec` to `DEVICE_DISCOVERY_SPECS` in `hardware/discovery.py`.
 
 ## API Reference
 
 | Endpoint | Method | Description |
 |:---------|:-------|:------------|
 | `/v1/node` | WebSocket | HUP device connection endpoint |
+| `/api/hardware/devices` | GET | Registered HUP devices and manifests |
+| `/api/hardware/execute` | POST | Execute a HUP action on a device |
+| `/api/hardware/fleet` | GET | Unified fleet view — manifests, derived safety tiers, last verification state, mesh nodes, announced devices, stats |
+| `/api/hardware/context` | GET | LLM-facing hardware capability summary |
+| `/api/hardware/mesh` | GET | Hardware mesh state |
 | `/api/devices/connected` | GET | List all connected devices with types and metrics |
 | `/api/devices/paired` | GET | List all paired edge-node devices |
 | `/api/devices/pair` | POST | Pair a new edge-node device |

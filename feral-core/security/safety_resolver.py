@@ -93,13 +93,30 @@ _LEGACY_READ_ONLY_TOKENS = (
 )
 
 
+def _is_drive_tool(tool_name: str) -> bool:
+    """True for any robot wheel-drive tool, legacy OR generic-HUP.
+
+    The legacy hand-written CuteBot skill emits ``cutebot__drive``; the
+    generic self-describing path emits ``hwdev_<device>__drive`` (skill id is
+    ``hwdev_<device>`` and the endpoint id is the device's ``drive``
+    capability). Both reach the same physical wheels, so the same speed cap
+    must cover both — additive coverage, nothing removed.
+    """
+    if not tool_name:
+        return False
+    if tool_name == "cutebot__drive":
+        return True
+    return tool_name.startswith("hwdev_") and tool_name.endswith("__drive")
+
+
 def _cutebot_drive_speed_deny(tool_name: str, args: dict) -> Optional[PolicyDecision]:
-    """Deny dangerous CuteBot wheel speeds before manifest metadata wins.
+    """Deny dangerous robot wheel speeds before manifest metadata wins.
 
     Mirrors the legacy ``robot_move`` speed cap (``safety_resolver`` lines
-    103–104) but applies to ``cutebot__drive`` left/right parameters.
+    103–104) but applies to the ``drive`` left/right parameters of BOTH the
+    legacy ``cutebot__drive`` tool and any generic ``hwdev_*__drive`` tool.
     """
-    if tool_name != "cutebot__drive":
+    if not _is_drive_tool(tool_name):
         return None
     try:
         left = abs(int((args or {}).get("left", 0) or 0))
@@ -113,7 +130,7 @@ def _cutebot_drive_speed_deny(tool_name: str, args: dict) -> Optional[PolicyDeci
             level=LEVEL_DENY,
             sources={"cutebot_speed_limit": True},
             deny_reason=(
-                f"CuteBot wheel speed exceeds safe limit (max 80): "
+                f"Robot wheel speed exceeds safe limit (max 80): "
                 f"left={left}, right={right}"
             ),
         )

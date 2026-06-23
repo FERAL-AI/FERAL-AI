@@ -1,8 +1,24 @@
 # CuteBot & External Hardware Architecture Plan
 
-**Status:** Investigation + design (no code changes)  
-**Date:** 2026-06-12  
+**Status:** Partially implemented — generic self-describing HUP hub shipped (2026-06); this doc retains the original investigation/design context.  
+**Date:** 2026-06-12 (updated 2026-06-23)  
 **Scope:** Extend FERAL's existing HUP/hardware stack for robots and IoT; CuteBot (Elecfreaks Smart Cutebot / micro:bit V2) as first adapter.
+
+### Implemented since this plan (see CHANGELOG v2026.6.17+)
+
+| Planned item | Status | Location |
+|:-------------|:-------|:---------|
+| `CuteBotAdapter` + USB discovery | ✅ Shipped | `hardware/adapters/cutebot.py`, `hardware/discovery.py` |
+| `DeviceManifest` from live `capabilities()` | ✅ Shipped | `device_manifest_from_capabilities()`, CuteBot adapter |
+| Generic LLM tools (no per-device skill) | ✅ Shipped | `GenericHardwareSkill`, `register_generic_hardware_skill_for` |
+| Generic passthrough execute | ✅ Shipped | `GenericSelfDescribingAdapter` |
+| Phone-bridged peripherals | ✅ Shipped | `BridgedPeripheralAdapter`, `peripheral_bridge_register` |
+| Config-driven discovery | ✅ Shipped | `DEVICE_DISCOVERY_SPECS`, `FERAL_CUTEBOT_PATH` |
+| Honesty loop (`verify` contract) | ✅ Shipped | `DeviceCapability.verify`, `GenericHardwareSkill` |
+| Fleet API | ✅ Shipped | `GET /api/hardware/fleet` |
+| Legacy kill switch | ✅ Shipped | `FERAL_GENERIC_HARDWARE_SKILLS` (default on) |
+| `HardwareOrchestrator` intent sequences | ❌ Not yet | Still proposed below |
+| Typed robot fields in `PerceptionFrame` | ⚠️ Partial | Generic telemetry key via adapter loop |
 
 ---
 

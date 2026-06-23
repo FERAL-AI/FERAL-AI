@@ -22,6 +22,7 @@ from hardware.protocol import (
     DeviceCapability,
     HUPAction,
     HUPResult,
+    device_manifest_from_capabilities,
 )
 from hardware.command_contract import (
     CommandEnvelope,
@@ -170,27 +171,36 @@ class HardwareMesh:
         platform = registration_payload.get("platform", "unknown")
         capabilities = registration_payload.get("capabilities", [])
 
-        if node_type in ("phone", "ios", "android"):
-            manifest = PHONE_MANIFEST_TEMPLATE.model_copy(update={
-                "device_id": node_id,
-                "name": f"Phone ({platform})",
-            })
-        else:
-            manifest = DeviceManifest(
-                device_id=node_id,
-                device_type=node_type,
-                name=f"{node_type.title()} Node ({platform})",
-                manufacturer="FERAL",
-                connection_type="websocket",
-                capabilities=[
-                    DeviceCapability(
-                        id=cap, name=cap.replace("_", " ").title(),
-                        description=f"Device capability: {cap}",
-                        category="compute", permission_tier="active",
-                    )
-                    for cap in capabilities
-                ],
-            )
+        # Prefer a node-SUPPLIED self-description (rich actions[] manifest)
+        # over the coarse capability-name stubs. A node that knows its own
+        # control surface (glasses, wristband) sends `device_manifest`; we
+        # build a real DeviceManifest from it via the shared HUP converter,
+        # so its tools/safety/verify come from the device itself.
+        supplied = registration_payload.get("device_manifest")
+        manifest = self._manifest_from_supplied(node_id, node_type, platform, supplied)
+
+        if manifest is None:
+            if node_type in ("phone", "ios", "android"):
+                manifest = PHONE_MANIFEST_TEMPLATE.model_copy(update={
+                    "device_id": node_id,
+                    "name": f"Phone ({platform})",
+                })
+            else:
+                manifest = DeviceManifest(
+                    device_id=node_id,
+                    device_type=node_type,
+                    name=f"{node_type.title()} Node ({platform})",
+                    manufacturer="FERAL",
+                    connection_type="websocket",
+                    capabilities=[
+                        DeviceCapability(
+                            id=cap, name=cap.replace("_", " ").title(),
+                            description=f"Device capability: {cap}",
+                            category="compute", permission_tier="active",
+                        )
+                        for cap in capabilities
+                    ],
+                )
 
         adapter = WebSocketNodeAdapter(node_id, self._daemons, self._pending_invokes)
         self._registry.register_device(manifest, adapter)
@@ -200,7 +210,61 @@ class HardwareMesh:
             "platform": platform,
         }
         self.node_health.record_connect(node_id)
+        # Universal HUP ingress: expose the node's self-described capabilities
+        # to the LLM via the SAME generic path as a USB device — no per-node
+        # skill code. No-op when the node only announced capability-name stubs
+        # (the generic registrar skips empty/stub manifests).
+        self._register_generic_skill(manifest, adapter, node_id)
         logger.info(f"Node auto-registered as HUP device: {node_id} ({node_type}/{platform})")
+
+    @staticmethod
+    def _manifest_from_supplied(
+        node_id: str, node_type: str, platform: str, supplied
+    ) -> Optional[DeviceManifest]:
+        """Build a DeviceManifest from a node-supplied self-description.
+
+        Accepts either the HUP ``actions[]`` envelope (preferred — routed
+        through the shared generic converter) or a full DeviceManifest dict.
+        Returns ``None`` to fall back to the coarse stub path."""
+        if not isinstance(supplied, dict):
+            return None
+        try:
+            if supplied.get("actions"):
+                return device_manifest_from_capabilities(
+                    node_id,
+                    supplied,
+                    name=supplied.get("name") or f"{node_type.title()} ({platform})",
+                    manufacturer=supplied.get("manufacturer", ""),
+                    model=supplied.get("model", ""),
+                    device_type=supplied.get("device_type") or node_type,
+                    location=supplied.get("location", ""),
+                )
+            # Full DeviceManifest dict (capabilities already in model shape).
+            data = dict(supplied)
+            data.setdefault("device_id", node_id)
+            data.setdefault("device_type", node_type)
+            data.setdefault("name", f"{node_type.title()} ({platform})")
+            data.setdefault("connection_type", "websocket")
+            if isinstance(data.get("capabilities"), list) and (
+                not data["capabilities"]
+                or isinstance(data["capabilities"][0], dict)
+            ):
+                return DeviceManifest(**data)
+        except Exception as exc:
+            logger.debug("node %s supplied manifest unusable: %s", node_id, exc)
+        return None
+
+    @staticmethod
+    def _register_generic_skill(manifest, adapter, device_id: str) -> None:
+        """Best-effort generic HUP skill registration for a mesh ingress."""
+        try:
+            from api.state import state
+
+            register = getattr(state, "register_generic_hardware_skill_for", None)
+            if callable(register):
+                register(manifest, adapter, device_id=device_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("generic skill registration skipped for %s: %s", device_id, exc)
 
     def on_node_disconnected(self, node_id: str):
         """Unregister a daemon when it disconnects."""

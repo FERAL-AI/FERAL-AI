@@ -128,7 +128,7 @@ def test_save_credentials_starts_channel_using_request_payload(client, monkeypat
         for _ in range(10):
             await asyncio.sleep(0)
 
-    asyncio.get_event_loop().run_until_complete(_drain())
+    asyncio.run(_drain())
 
     mock.channel_manager.start_channel.assert_called()
     args, kwargs = mock.channel_manager.start_channel.call_args
@@ -178,7 +178,7 @@ def test_save_credentials_starts_whatsapp_using_request_payload(client, monkeypa
         for _ in range(10):
             await asyncio.sleep(0)
 
-    asyncio.get_event_loop().run_until_complete(_drain())
+    asyncio.run(_drain())
 
     calls = [call for call in mock.channel_manager.start_channel.call_args_list if call.args[0] == "whatsapp"]
     assert calls, "whatsapp channel should restart after credential save"
@@ -244,9 +244,7 @@ def test_start_channels_reads_from_config_credentials_without_env(monkeypatch):
     fake_state.sessions = {}
     fake_state._channel_collectors = {}
 
-    asyncio.get_event_loop().run_until_complete(
-        BrainState._start_channels(fake_state)
-    )
+    asyncio.run(BrainState._start_channels(fake_state))
 
     fake_state.channel_manager.start_channel.assert_called()
     started = {
@@ -286,9 +284,7 @@ def test_start_channels_passes_whatsapp_app_secret_without_env(monkeypatch):
     fake_state.sessions = {}
     fake_state._channel_collectors = {}
 
-    asyncio.get_event_loop().run_until_complete(
-        BrainState._start_channels(fake_state)
-    )
+    asyncio.run(BrainState._start_channels(fake_state))
 
     started = {
         call.args[0]: call.args[1] for call in fake_state.channel_manager.start_channel.call_args_list
