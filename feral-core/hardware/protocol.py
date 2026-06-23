@@ -36,12 +36,22 @@ logger = logging.getLogger("feral.hup")
 # ─────────────────────────────────────────────
 
 class DeviceCapability(BaseModel):
-    """A single thing a device can do."""
+    """A single thing a device can do.
+
+    This is the in-brain model of one entry in a device's self-description.
+    The wire form a device sends is an ``actions[]`` descriptor (see
+    :data:`HUP_ACTION_SCHEMA` / :func:`device_capability_from_action`); the
+    field names line up 1:1 except the wire uses ``name``/``params`` where the
+    model uses ``id``/``parameters`` (the converter handles both).
+    """
     id: str
     name: str
     description: str
     category: str  # "sensor", "actuator", "display", "audio", "network", "compute"
     permission_tier: str = "passive"  # passive, active, privileged, dangerous
+    # Universal HUP verb the agent should treat this as. Optional: when unset
+    # the dispatcher infers READ for sensors and EXECUTE for everything else.
+    action_type: Optional[str] = None
     parameters: list[dict] = Field(default_factory=list)
     returns: Optional[dict] = None
     rate_limit_per_minute: Optional[int] = None
@@ -52,7 +62,8 @@ class DeviceCapability(BaseModel):
     # capability-skill dispatcher: after an actuator action, read a sensor
     # capability back and confirm a field matches the intended effect.
     #   {"via": "<sensor_capability_id>", "field": "mode",
-    #    "expect": ["line_follow", "T"]}
+    #    "expect": ["line_follow", "T"],
+    #    "delay_ms": 1600, "retries": 1, "transient": false}
     # When absent, the dispatcher reports a state read-back with
     # verified=None (honest "unknown") instead of asserting success.
     verify: Optional[dict] = None
@@ -77,6 +88,151 @@ class DeviceManifest(BaseModel):
     battery_powered: bool = False
     location: str = ""  # "living_room", "garage", "wrist", "head"
     tags: list[str] = Field(default_factory=list)
+
+
+# ─────────────────────────────────────────────
+# HUP self-description wire format (actions[])
+# ─────────────────────────────────────────────
+#
+# A self-describing device returns, from its companion library, an envelope:
+#
+#   {
+#     "device_type": "robot",                # free-form class hint
+#     "transport":   {"kind": "usb_serial", "port": "..."},
+#     "sensors":     ["sonar_cm", "battery", ...],
+#     "actuators":   ["motors", ...],        # optional, informational
+#     "actions":     [ <ACTION>, <ACTION>, ... ]
+#   }
+#
+# Each <ACTION> is a flat, JSON-serializable dict — the unit the brain turns
+# into one LLM tool + one safety policy + (optionally) one honesty contract,
+# with NO per-device code:
+#
+#   name                    str   required. tool/capability id ([A-Za-z0-9_]).
+#   category                str   "sensor" | "actuator" | "display" | "audio"
+#                                 | "network" | "compute". "sensor" => read-only.
+#   permission_tier         str   "passive" | "active" | "privileged"
+#                                 | "dangerous". Drives the safety tier.
+#   action_type             str   optional universal verb (read/write/execute/…);
+#                                 inferred from category when omitted.
+#   requires_confirmation   bool  optional. Force a confirm gate.
+#   reversible              bool  optional (default true). Surfaced to the LLM.
+#   description             str   human/LLM-facing summary.
+#   params                  list  optional. [{name,type,required,description,
+#                                 default,enum}], type in HUP param types.
+#   returns                 dict  optional. Return-shape hint for the LLM.
+#   rate_limit_per_minute   int   optional. Generic per-capability throttle.
+#   verify                  dict  optional honesty contract:
+#                                 {via:<sensor action name>, field:<key>,
+#                                  expect:[...], delay_ms:int, retries:int,
+#                                  transient:bool}
+#   safety_notes            str   optional free text appended to the tool desc.
+#
+# ``device_capability_from_action`` / ``device_manifest_from_capabilities``
+# below are the ONE generic place this wire format is mapped into the brain's
+# models, so every transport adapter (serial, BLE bridge, WS node) shares it.
+
+HUP_ACTION_SCHEMA: dict[str, str] = {
+    "name": "str (required) — capability id, [A-Za-z0-9_]",
+    "category": "sensor|actuator|display|audio|network|compute",
+    "permission_tier": "passive|active|privileged|dangerous",
+    "action_type": "read|write|execute|... (optional)",
+    "requires_confirmation": "bool (optional)",
+    "reversible": "bool (optional, default true)",
+    "description": "str",
+    "params": "list[{name,type,required,description,default,enum}]",
+    "returns": "dict (optional return-shape hint)",
+    "rate_limit_per_minute": "int (optional)",
+    "verify": "{via,field,expect,delay_ms,retries,transient} (optional)",
+    "safety_notes": "str (optional)",
+}
+
+
+def device_capability_from_action(action: dict) -> Optional["DeviceCapability"]:
+    """Map ONE self-description ``actions[]`` entry to a ``DeviceCapability``.
+
+    The single generic translation of the HUP wire format — no device-specific
+    knowledge. Accepts the wire spellings (``name``/``params``) as well as the
+    model spellings (``id``/``parameters``) so older/newer producers both work.
+    Returns ``None`` for an entry with no usable id.
+    """
+    if not isinstance(action, dict):
+        return None
+    cap_id = action.get("name") or action.get("id")
+    if not cap_id:
+        return None
+    title = action.get("title") or action.get("name") or str(cap_id)
+    return DeviceCapability(
+        id=str(cap_id),
+        name=str(title if action.get("title") else str(cap_id).replace("_", " ").title()),
+        description=str(action.get("description", "") or ""),
+        category=str(action.get("category", "actuator") or "actuator"),
+        permission_tier=str(action.get("permission_tier", "passive") or "passive"),
+        action_type=action.get("action_type"),
+        parameters=list(action.get("params") or action.get("parameters") or []),
+        returns=action.get("returns"),
+        rate_limit_per_minute=action.get("rate_limit_per_minute"),
+        requires_confirmation=bool(action.get("requires_confirmation", False)),
+        reversible=bool(action.get("reversible", True)),
+        safety_notes=str(action.get("safety_notes", "") or ""),
+        verify=action.get("verify"),
+    )
+
+
+def device_manifest_from_capabilities(
+    device_id: str,
+    caps: dict,
+    *,
+    name: str = "",
+    manufacturer: str = "",
+    model: str = "",
+    connection_type: str = "",
+    location: str = "",
+    battery_powered: bool = False,
+    device_type: str = "",
+    type_aliases: Optional[dict[str, str]] = None,
+    sensors: Optional[list] = None,
+    actuators: Optional[list] = None,
+    **overrides: Any,
+) -> "DeviceManifest":
+    """Build a ``DeviceManifest`` from a device's ``capabilities()`` envelope.
+
+    The generic realization of the ``DeviceManifest`` docstring: every
+    capability comes from what the device declared in its ``actions[]``, with
+    no per-capability code. Callers supply only static identity overrides
+    (name/manufacturer/location), never the capability list.
+    """
+    actions = caps.get("actions") if isinstance(caps, dict) else None
+    capabilities: list[DeviceCapability] = []
+    for a in actions or []:
+        cap = device_capability_from_action(a)
+        if cap is not None:
+            capabilities.append(cap)
+
+    resolved_type = device_type or (caps.get("device_type") if isinstance(caps, dict) else "") or "device"
+    if type_aliases and resolved_type in type_aliases:
+        resolved_type = type_aliases[resolved_type]
+
+    transport = caps.get("transport") if isinstance(caps, dict) else None
+    if not connection_type and isinstance(transport, dict):
+        connection_type = str(transport.get("kind", "") or "")
+
+    return DeviceManifest(
+        device_id=device_id,
+        device_type=resolved_type,
+        name=name or device_id,
+        manufacturer=manufacturer,
+        model=model,
+        connection_type=connection_type or "websocket",
+        location=location,
+        battery_powered=battery_powered,
+        sensors=list(sensors) if sensors is not None
+        else (list(caps.get("sensors") or []) if isinstance(caps, dict) else []),
+        actuators=list(actuators) if actuators is not None
+        else (list(caps.get("actuators") or []) if isinstance(caps, dict) else []),
+        capabilities=capabilities,
+        **overrides,
+    )
 
 
 # ─────────────────────────────────────────────
@@ -141,6 +297,20 @@ class DeviceRegistry:
         self._devices: dict[str, DeviceManifest] = {}
         self._adapters: dict[str, "DeviceAdapter"] = {}
         self._action_log: list[HUPResult] = []
+        # device_id -> latest {capability, verified, observed, ...} from the
+        # generic honesty loop, for the unified fleet API / companion UI.
+        self._verifications: dict[str, dict] = {}
+
+    def record_verification(self, device_id: str, info: dict) -> None:
+        """Store the most recent action+verify outcome for a device."""
+        if device_id:
+            self._verifications[device_id] = dict(info or {})
+
+    def last_verification(self, device_id: str) -> Optional[dict]:
+        return self._verifications.get(device_id)
+
+    def all_verifications(self) -> dict[str, dict]:
+        return dict(self._verifications)
 
     def register_device(self, manifest: DeviceManifest, adapter: Optional["DeviceAdapter"] = None):
         self._devices[manifest.device_id] = manifest

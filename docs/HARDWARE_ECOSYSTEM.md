@@ -2,19 +2,109 @@
 
 This document defines the contract for connecting hardware devices to FERAL. Any device class -- wearables, robotics, home appliances, IoT sensors, phone bridges -- uses the same protocol.
 
+> **2026-06 update:** The brain now treats HUP as a **generic self-describing hardware hub**. A device's own `capabilities()` envelope (the `actions[]` wire format) drives LLM tools, safety tiers, and the closed-loop honesty loop — with no per-device skill code. See [Generic self-describing path](#generic-self-describing-path) below.
+
 ## Architecture
 
 ```mermaid
 flowchart TD
-  device[Physical Device] --> adapter[Edge Adapter]
-  adapter --> daemon[Hardware Daemon]
-  daemon -->|"wss /v1/node"| brain[FERAL Brain]
-  brain --> registry[Device Registry]
-  brain --> mesh[Hardware Mesh]
-  brain --> orchestrator[Orchestrator]
+  device[Physical Device] --> adapter[Edge / Transport Adapter]
+  adapter --> ingress[Brain HUP Ingress]
+  ingress --> registry[Device Registry]
+  ingress --> genSkill[GenericHardwareSkill]
+  genSkill --> orchestrator[Orchestrator]
+  registry --> orchestrator
+  mesh[Hardware Mesh] --> ingress
 ```
 
-Devices connect to the FERAL Brain as **hardware daemons** over an authenticated WebSocket channel. The Brain auto-registers each daemon into the HUP (Hardware Use Protocol) device registry. The agent can then discover, query, and command any connected device through a universal abstraction.
+Devices reach the FERAL Brain through one of three **ingress paths**, all converging on the same generic registration:
+
+| Ingress | Transport adapter | Typical example |
+|:--------|:------------------|:----------------|
+| Brain-local USB/serial | `GenericSelfDescribingAdapter` or bespoke wrapper (e.g. `CuteBotAdapter`) | CuteBot over USB |
+| Mesh WebSocket node | `WebSocketNodeAdapter` | Phone, desktop daemon, robot bridge |
+| Phone-bridged peripheral | `BridgedPeripheralAdapter` → `mesh.invoke` | BLE glasses/wristband via iPhone |
+
+On every ingress the brain calls `state.register_generic_hardware_skill_for(manifest, adapter)`, which turns the manifest into LLM tools (`hwdev_<device_id>__<capability_id>`) unless `FERAL_GENERIC_HARDWARE_SKILLS=0`.
+
+## Generic self-describing path
+
+### Wire format (`actions[]`)
+
+Self-describing devices return a `capabilities()` envelope. The schema is documented as `HUP_ACTION_SCHEMA` in `feral-core/hardware/protocol.py`. Each entry in `actions[]` becomes one `DeviceCapability` via `device_capability_from_action()`; the full manifest is built by `device_manifest_from_capabilities()`:
+
+```json
+{
+  "device_type": "robot",
+  "transport": {"kind": "usb_serial", "port": "/dev/ttyACM0"},
+  "sensors": ["sonar_cm", "battery"],
+  "actuators": ["motors"],
+  "actions": [
+    {
+      "name": "drive",
+      "category": "actuator",
+      "permission_tier": "dangerous",
+      "requires_confirmation": true,
+      "description": "Direct wheel speeds -100..100",
+      "params": [
+        {"name": "left", "type": "integer", "required": true},
+        {"name": "right", "type": "integer", "required": true}
+      ],
+      "verify": {
+        "via": "read_telemetry",
+        "field": "mode",
+        "expect": ["manual"],
+        "delay_ms": 1600,
+        "retries": 1,
+        "transient": false
+      }
+    },
+    {
+      "name": "read_telemetry",
+      "category": "sensor",
+      "permission_tier": "passive",
+      "description": "Snapshot: sonar, mode, battery"
+    }
+  ]
+}
+```
+
+Optional fields per action: `action_type`, `rate_limit_per_minute`, `reversible`, `returns`, `safety_notes`. Wire spellings `name`/`params` and model spellings `id`/`parameters` are both accepted.
+
+### Generic transport adapters
+
+**`GenericSelfDescribingAdapter`** (`hardware/adapters/generic.py`) is the default execute path for any companion library that exposes:
+
+- `capabilities() -> dict`
+- `execute(command, **params) -> dict`
+- `status() -> dict` (optional)
+- `poll_events(seconds) -> list[dict]` (optional)
+
+Device-specific safety (battery gate, parameter clamping) belongs in thin subclasses overriding `_preprocess` / `_harden_params`. **`CuteBotAdapter`** is the reference: generic passthrough plus CuteBot-specific hardening.
+
+**`BridgedPeripheralAdapter`** (`hardware/adapters/bridge.py`) forwards HUP actions to a peripheral through its bridge node (`mesh.invoke`), used when a phone announces a BLE sub-device via `peripheral_bridge_register`.
+
+### LLM tools and the honesty loop
+
+**`GenericHardwareSkill`** (`hardware/capability_skill.py`) generates a `SkillManifest` from any `DeviceManifest` at registration. Tool names follow `hwdev_<sanitized_device_id>__<capability_id>` (see `skill_id_for_device()`).
+
+After actuator calls the skill:
+
+1. Dispatches via `DeviceRegistry.execute_action`.
+2. If the capability declares a `verify` contract, re-reads the named sensor (`via`), waits `delay_ms`, retries up to `retries` times, and returns `verified: true/false/none`.
+3. Enforces `rate_limit_per_minute` per capability.
+4. Records episodic memory and a knowledge-graph entity on register (memory parity with the legacy path).
+5. Records action+verify history on the `DeviceRegistry` for the fleet API.
+
+Safety tiers are derived generically from each capability's `category`, `permission_tier`, and `requires_confirmation`. Additive drive speed limits in `security/safety_resolver.py` apply to both legacy `cutebot__drive` and generic `hwdev_*__drive`.
+
+### Brain-local discovery
+
+USB/host-attached devices are discovered via **`DEVICE_DISCOVERY_SPECS`** in `hardware/discovery.py`. Each `DeviceDiscoverySpec` names a module/class, availability probe, adapter kind (`cutebot` or `generic`), and optional path candidates. Override the CuteBot repo location with **`FERAL_CUTEBOT_PATH`**.
+
+### Kill switch
+
+**`FERAL_GENERIC_HARDWARE_SKILLS`** defaults to `"1"` (generic path on). Set to `"0"` to disable auto-generated tools and rely on hand-written skill manifests only (e.g. legacy `skills/manifests/cutebot.json`). The generic and legacy paths can run alongside each other during A/B.
 
 ## The Three-Layer Contract
 
@@ -42,7 +132,7 @@ On connection, every daemon sends a registration message declaring its identity,
 }
 ```
 
-For richer integration, capabilities can be declared using the HUP `DeviceManifest` schema (see below). The Brain will auto-register daemons with either format.
+For richer integration, include a **`device_manifest`** in the registration payload — either the preferred **`actions[]` self-description envelope** (converted by `device_manifest_from_capabilities()`) or a full `DeviceManifest` dict. When present, the brain builds LLM tools, safety tiers, and verify contracts from the device itself instead of coarse capability-name stubs.
 
 ### Layer 3: Execution
 
@@ -298,13 +388,24 @@ The edge adapter translates the device's native protocol into the daemon WebSock
 | `/api/devices/{device_id}` | DELETE | Revoke (un-pair) a device |
 | `/api/nodes/health` | GET | All node health status with heartbeat freshness |
 | `/api/commands/recent` | GET | Recent commands with lifecycle state |
+| `/api/hardware/devices` | GET | Registered HUP devices and manifests |
+| `/api/hardware/execute` | POST | Execute a HUP action on a device |
+| `/api/hardware/fleet` | GET | Unified fleet view — manifests, safety tiers, last verification state, mesh nodes, announced devices, stats |
+| `/api/hardware/context` | GET | LLM-facing hardware capability summary |
+| `/api/hardware/mesh` | GET | Hardware mesh state |
 | `/v1/node` | WS | Hardware daemon WebSocket channel |
 
 ## Implementation Reference
 
-- Protocol: `feral-core/hardware/protocol.py` (`DeviceManifest`, `DeviceCapability`, `HUPAction`, `HUPResult`)
-- Mesh: `feral-core/hardware/mesh.py` (`HardwareMesh`, `WebSocketNodeAdapter`)
-- Server handler: `feral-core/api/server.py` (`/v1/node` WebSocket)
+- Protocol: `feral-core/hardware/protocol.py` (`HUP_ACTION_SCHEMA`, `device_capability_from_action`, `device_manifest_from_capabilities`, `DeviceManifest`, `DeviceCapability`, `HUPAction`, `HUPResult`)
+- Generic skill: `feral-core/hardware/capability_skill.py` (`GenericHardwareSkill`, `skill_id_for_device`)
+- Adapters: `feral-core/hardware/adapters/generic.py`, `feral-core/hardware/adapters/bridge.py`, `feral-core/hardware/adapters/cutebot.py`
+- Discovery: `feral-core/hardware/discovery.py` (`DEVICE_DISCOVERY_SPECS`, `DeviceDiscoverySpec`)
+- Registration: `feral-core/api/state.py` (`register_generic_hardware_skill_for`)
+- Mesh: `feral-core/hardware/mesh.py` (`HardwareMesh`, `WebSocketNodeAdapter`, node-supplied `device_manifest`)
+- Fleet API: `feral-core/api/routes/security_and_hardware.py` (`GET /api/hardware/fleet`)
+- Safety: `feral-core/security/safety_resolver.py` (additive `cutebot__drive` + `hwdev_*__drive` speed limit)
+- Server handler: `feral-core/api/server.py` (`/v1/node` WebSocket, `peripheral_bridge_register`)
 - Python SDK: `feral-nodes/python-node-sdk/`
 - iOS bridge: `feral-nodes/ios-bridge/`
 - Android bridge: `feral-nodes/android-bridge/`

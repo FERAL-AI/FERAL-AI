@@ -1,6 +1,6 @@
 name: "FERAL AI Brain"
 description: "AI Operating System for your smart home — local-first, privacy-respecting"
-version: "2026.6.17"
+version: "2026.6.18"
 slug: feral-brain
 url: "https://github.com/FERAL-AI/FERAL-AI"
 arch:

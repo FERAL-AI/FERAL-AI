@@ -137,6 +137,19 @@ curl -X POST http://localhost:9090/api/identity/twin/ask \
 | `GET` | `/api/commands/{command_id}` | Single command detail including state history |
 | `POST` | `/api/proactive/dismiss` | Dismiss a proactive alert (learns from it) |
 
+### HUP device registry
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/hardware/devices` | List registered HUP devices and their manifests |
+| `GET` | `/api/hardware/device/{device_id}` | Single device manifest and adapter status |
+| `POST` | `/api/hardware/execute` | Execute a HUP action on a device (`device_id`, `capability_id`, `action_type`, `parameters`, optional `confirmed`) |
+| `GET` | `/api/hardware/context` | LLM-facing hardware context string (capabilities summary) |
+| `GET` | `/api/hardware/stats` | Device registry statistics |
+| `GET` | `/api/hardware/mesh` | Hardware mesh state (connected nodes, announced peripherals) |
+| `GET` | `/api/hardware/fleet` | **Unified fleet view** — full manifests with derived safety tiers, last verification (honesty loop) state, mesh nodes, announced devices, and registry stats. Intended for companion-app device cards without per-device UI code. |
+| `POST` | `/api/hardware/invoke` | Invoke a capability on a mesh node by `node_id` |
+
 ## Access Mode & Remote Reachability
 
 | Method | Path | Description |

@@ -1,10 +1,36 @@
 # Changelog
 
-<!-- feral-version: 2026.6.17 -->
+<!-- feral-version: 2026.6.18 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.18] - 2026-06-23
+
+### Added
+- (fill me in — what shipped that did not exist before?)
+
+### Fixed
+- (fill me in — what regressions did this release close?)
+
+### Changed
+- (fill me in — what user-visible behavior changed?)
+
+### Coverage
+- pytest (feral-core): TODO collected, TODO passed, TODO skipped.
+- vitest (feral-client-v2): TODO passed.
+
+
+### Generic HUP hardware hub (self-describing devices)
+
+- **feat(hardware): formalized HUP self-description wire format.** `HUP_ACTION_SCHEMA` in `hardware/protocol.py` documents the `actions[]` envelope; `device_capability_from_action()` and `device_manifest_from_capabilities()` convert a device's `capabilities()` response into a `DeviceManifest`. `DeviceCapability` gained an optional `action_type` field.
+- **feat(hardware): generic transport adapters.** `GenericSelfDescribingAdapter` (`hardware/adapters/generic.py`) passthrough-executes any self-describing companion library; `CuteBotAdapter` refactored to use it with device-specific `_preprocess` / `_harden_params` hooks (battery gate, drive-speed clamp). `BridgedPeripheralAdapter` (`hardware/adapters/bridge.py`) routes HUP actions to peripherals reached through a mesh node via `mesh.invoke`.
+- **feat(hardware): config-driven brain-local discovery.** `DEVICE_DISCOVERY_SPECS` + `DeviceDiscoverySpec` in `hardware/discovery.py` replaced hardcoded discovery; `FERAL_CUTEBOT_PATH` env override for the cuteferalbot repo root.
+- **feat(hardware): `GenericHardwareSkill`.** Generates LLM tools from any manifest at registration; honors the full `verify` contract (`via` / `delay_ms` / `retries` / `transient`) for the closed-loop honesty loop; enforces `rate_limit_per_minute`; records episodic memory + knowledge-graph entity on register; records action+verify history to `DeviceRegistry`. Central ingress: `state.register_generic_hardware_skill_for` (brain-local discovery, mesh `on_node_connected` with node-supplied `device_manifest`, `peripheral_bridge_register`).
+- **feat(api): `GET /api/hardware/fleet`.** Unified fleet view — device manifests, derived safety tiers, last verification (honesty) state, mesh nodes + announced devices, stats.
+- **feat(security): additive drive speed-limit.** `security/safety_resolver.py` now covers both legacy `cutebot__drive` and generic `hwdev_*__drive` tool names.
+- **feat(hardware): legacy fallback preserved.** Hand-written CuteBot skill remains behind `FERAL_GENERIC_HARDWARE_SKILLS` (default `"1"` = generic on; `"0"` = legacy only).
 
 ## [2026.6.17] — 2026-06-17 — devices that describe themselves, closed-loop honesty, real-robot verification
 

@@ -115,6 +115,8 @@ These tune the runtime flags applied to every container started by `security/doc
 |----------|---------|-------------|
 | `FERAL_BLE_ENABLED` | `true` | Enable Bluetooth device scanning |
 | `FERAL_HUP_PORT` | `9091` | Hardware Unified Protocol WebSocket port |
+| `FERAL_GENERIC_HARDWARE_SKILLS` | `1` | When enabled (default), any self-describing `DeviceManifest` auto-generates LLM tools via `GenericHardwareSkill`. Set to `0` to fall back to hand-written skill manifests only (e.g. legacy `cutebot.json`). |
+| `FERAL_CUTEBOT_PATH` | — | Path to the `cuteferalbot` repo root when CuteBot is not installed as a package. Used by brain-local discovery (`hardware/discovery.py`). |
 | `FERAL_HA_URL` | — | Home Assistant URL (e.g., `http://192.168.1.50:8123`) |
 | `FERAL_HA_TOKEN` | — | Home Assistant long-lived access token |
 

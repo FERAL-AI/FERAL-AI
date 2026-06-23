@@ -323,3 +323,110 @@ async def hardware_mesh_status():
         "nodes": state.hardware_mesh.connected_nodes,
         "announced_devices": state.hardware_mesh.list_announced_devices(),
     }
+
+
+def _serialize_capability(cap) -> dict:
+    """JSON-safe capability + the generically-derived safety tier.
+
+    The ``safety_tier`` / ``read_only`` / ``requires_approval`` come from the
+    SAME generic resolver the LLM tool layer uses, so the companion's device
+    card badges match exactly what the brain enforces."""
+    from hardware.capability_skill import _safety_for
+
+    try:
+        tier, read_only, requires_approval = _safety_for(cap)
+    except Exception:
+        tier, read_only, requires_approval = "safe", False, False
+    return {
+        "id": cap.id,
+        "name": cap.name,
+        "description": cap.description,
+        "category": cap.category,
+        "permission_tier": cap.permission_tier,
+        "action_type": getattr(cap, "action_type", None),
+        "safety_tier": tier,
+        "read_only": read_only,
+        "requires_approval": requires_approval,
+        "requires_confirmation": cap.requires_confirmation,
+        "reversible": cap.reversible,
+        "rate_limit_per_minute": cap.rate_limit_per_minute,
+        "params": list(cap.parameters or []),
+        "returns": cap.returns,
+        "has_verify": isinstance(getattr(cap, "verify", None), dict),
+    }
+
+
+def _serialize_fleet_device(manifest, verification) -> dict:
+    return {
+        "device_id": manifest.device_id,
+        "device_type": manifest.device_type,
+        "name": manifest.name,
+        "manufacturer": manifest.manufacturer,
+        "model": manifest.model,
+        "connection_type": manifest.connection_type,
+        "location": manifest.location,
+        "battery_powered": manifest.battery_powered,
+        "tags": list(manifest.tags or []),
+        "sensors": list(manifest.sensors or []),
+        "actuators": list(manifest.actuators or []),
+        "capabilities": [_serialize_capability(c) for c in manifest.capabilities],
+        "last_verified": verification,
+    }
+
+
+@router.get("/api/hardware/fleet")
+async def hardware_fleet():
+    """Unified, server-driven fleet view for the companion app.
+
+    One fetch returns every self-describing device the brain knows about —
+    its full manifest (capabilities, params, generically-derived safety
+    tiers, verify contracts), plus each device's last action+verify outcome
+    (the live "honesty loop" state), mesh-announced peripherals, and connected
+    nodes. The companion renders device cards directly from this; a newly
+    registered device appears with no app change.
+    """
+    registry = state.device_registry
+    if registry is None:
+        return {
+            "devices": [],
+            "verifications": {},
+            "mesh": {"nodes": [], "announced_devices": []},
+            "stats": {},
+            "primary_session_id": getattr(state, "primary_session_id", None),
+        }
+
+    verifications = {}
+    try:
+        verifications = registry.all_verifications()
+    except Exception:
+        verifications = {}
+
+    devices = []
+    for manifest in registry.list_devices():
+        devices.append(
+            _serialize_fleet_device(manifest, verifications.get(manifest.device_id))
+        )
+
+    mesh = {"nodes": [], "announced_devices": []}
+    if state.hardware_mesh:
+        try:
+            mesh = {
+                "nodes": state.hardware_mesh.connected_nodes,
+                "announced_devices": state.hardware_mesh.list_announced_devices(),
+            }
+        except Exception:
+            pass
+
+    stats = {}
+    try:
+        stats = registry.stats
+    except Exception:
+        stats = {}
+
+    return {
+        "devices": devices,
+        "verifications": verifications,
+        "mesh": mesh,
+        "stats": stats,
+        "primary_session_id": getattr(state, "primary_session_id", None),
+    }

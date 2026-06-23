@@ -64,6 +64,10 @@ This page is the source of truth for which FERAL capabilities are usable today, 
 | Capability | Status | Notes |
 |------------|--------|-------|
 | HUP 1.3.0 (Hardware Unified Protocol) | Available | Unified across brain, SDKs, and daemon manifests. CI-gated. |
+| Generic self-describing hardware hub | Available | `actions[]` → `DeviceManifest` → `GenericHardwareSkill` LLM tools; honesty loop via `verify` contract. Kill switch: `FERAL_GENERIC_HARDWARE_SKILLS`. |
+| Brain-local device discovery | Available | Config-driven `DEVICE_DISCOVERY_SPECS`; CuteBot via `FERAL_CUTEBOT_PATH`. |
+| Phone-bridged BLE peripherals | Available | `BridgedPeripheralAdapter` + `peripheral_bridge_register`. |
+| Hardware fleet API | Available | `GET /api/hardware/fleet` — manifests, safety tiers, last verification state, mesh snapshot. |
 | Device registry + pairing | Available | QR pair / WebUI pair / CLI `feral devices`. |
 | Hardware mesh | Available | Request/response correlation across nodes. |
 | Home Assistant bridge | Available — operator setup | Requires a running HA instance and long-lived access token. |

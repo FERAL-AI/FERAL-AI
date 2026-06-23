@@ -530,13 +530,42 @@ class BrainState:
         """Expose a brain-local device's self-described capabilities to the
         LLM via the generic HUP path — no per-device skill file.
 
+        Thin wrapper that reads the manifest off an adapter; see
+        :meth:`register_generic_hardware_skill_for` for the core logic.
+        """
+        try:
+            self.register_generic_hardware_skill_for(
+                adapter.manifest, adapter, device_id=adapter.device_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "Generic hardware skill registration failed for %s: %s",
+                getattr(adapter, "device_id", "?"),
+                exc,
+            )
+
+    def register_generic_hardware_skill_for(
+        self, manifest, adapter, *, device_id: str = ""
+    ) -> None:
+        """Register the generic HUP skill for ANY ingress (brain-local USB,
+        mesh node, phone-bridged peripheral).
+
+        Idempotent: safe to call again when a device's manifest changes (e.g.
+        CuteBot navigation attach, a node re-announcing richer capabilities) —
+        the skill id is derived from the device id, so re-registration patches
+        the existing tools in place.
+
         Runs ALONGSIDE any hand-written skill (e.g. ``cutebot.json``) so the
         bespoke path stays as a safety net while the generic path is proven.
         The device's own ``DeviceManifest`` is the contract; safety tiers and
-        the telemetry-verified honesty loop are derived generically in
-        ``hardware.capability_skill``.
+        the telemetry-verified honesty loop are derived generically.
         """
         if not _generic_hardware_skills_enabled():
+            return
+        if manifest is None:
+            return
+        dev_id = device_id or getattr(manifest, "device_id", "") or getattr(adapter, "device_id", "")
+        if not dev_id:
             return
         try:
             from hardware.capability_skill import (
@@ -545,26 +574,50 @@ class BrainState:
             )
             from skills.impl import register_instance
 
-            manifest = adapter.manifest
+            if not manifest.capabilities:
+                # Nothing to expose yet (e.g. a node that announced only a
+                # capability-name stub). Skip quietly; a later richer
+                # manifest re-registers with real capabilities.
+                return
             gen_manifest = device_manifest_to_skill_manifest(manifest)
+            kg = getattr(self.memory, "knowledge_graph", None)
             gen_skill = GenericHardwareSkill(
-                device_id=adapter.device_id,
+                device_id=dev_id,
                 device_registry=self.device_registry,
                 manifest=manifest,
                 skill_id=gen_manifest.skill_id,
+                memory=self.memory,
+                knowledge_graph=kg,
             )
             register_instance(gen_manifest.skill_id, gen_skill)
             self.skill_registry.register(gen_manifest)
+            # Memory parity: announce the device into the knowledge graph so
+            # "what hardware do I have?" answers the same for a brain-local
+            # self-describing device as for a mesh-announced peripheral.
+            # Fire-and-forget so registration never blocks on the KG.
+            try:
+                import asyncio as _aio
+
+                self.register_background_task(
+                    _aio.create_task(
+                        gen_skill.announce_device(),
+                        name=f"hup-kg-announce-{dev_id}",
+                    )
+                )
+            except RuntimeError:
+                # No running loop (e.g. sync test harness) — skip the async
+                # KG announce; episodic memory still records on each action.
+                pass
             logger.info(
                 "Registered generic HUP skill '%s' (%d capabilities) for device %s",
                 gen_manifest.skill_id,
                 len(gen_manifest.endpoints),
-                adapter.device_id,
+                dev_id,
             )
         except Exception as exc:
             logger.warning(
                 "Generic hardware skill registration failed for %s: %s",
-                getattr(adapter, "device_id", "?"),
+                dev_id,
                 exc,
             )
 

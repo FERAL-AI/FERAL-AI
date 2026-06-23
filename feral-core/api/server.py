@@ -2549,7 +2549,32 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         if not isinstance(manifest_dict.get("actuators"), list):
                             manifest_dict["actuators"] = []
                         manifest = DeviceManifest(**manifest_dict)
-                        state.device_registry.register_device(manifest)
+                        # Give the peripheral a transport so its actions can
+                        # actually execute (relayed through the bridge node),
+                        # instead of registering a manifest with no adapter.
+                        bridge_adapter = None
+                        try:
+                            from hardware.adapters.bridge import BridgedPeripheralAdapter
+
+                            bridge_adapter = BridgedPeripheralAdapter(
+                                manifest.device_id,
+                                node_id=node_id,
+                                mesh=getattr(state, "hardware_mesh", None),
+                                manifest=manifest,
+                            )
+                        except Exception:
+                            bridge_adapter = None
+                        state.device_registry.register_device(manifest, bridge_adapter)
+                        # Universal HUP ingress: self-describing peripherals
+                        # become LLM tools + safety + honesty loop generically.
+                        try:
+                            register = getattr(
+                                state, "register_generic_hardware_skill_for", None
+                            )
+                            if callable(register) and bridge_adapter is not None:
+                                register(manifest, bridge_adapter, device_id=manifest.device_id)
+                        except Exception:
+                            pass
                         if manifest.device_id:
                             registered_ids.append(manifest.device_id)
                     state.devices[bridge_id] = {
