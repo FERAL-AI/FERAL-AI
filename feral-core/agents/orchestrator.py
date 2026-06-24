@@ -77,6 +77,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger("feral.orchestrator")
 
 
+def _smart_loops_enabled() -> bool:
+    """Whether the smart-loops tools (feral_routines / feral_workflows) are
+    auto-exposed to the LLM. Defaults ON; ``FERAL_SMART_LOOPS=0`` is the kill
+    switch (mirrors the FERAL_GENERIC_HARDWARE_SKILLS pattern)."""
+    val = os.environ.get("FERAL_SMART_LOOPS", "1")
+    return str(val).strip().lower() not in ("0", "false", "no", "off", "")
+
+
 class Orchestrator:
     """
     The core agentic loop — fully wired to perception, memory, and safety.
@@ -106,7 +114,17 @@ class Orchestrator:
         # Memory + search
         "notes_memory",
         "web_search",
+        # Smart loops — recurring routines + multi-step workflows as
+        # first-class tools (gated by FERAL_SMART_LOOPS, default on, via
+        # _ensure_core_skills below).
+        "feral_routines",
+        "feral_workflows",
     }
+
+    # Smart-loops skill ids whose *exposure* can be killed with
+    # ``FERAL_SMART_LOOPS=0`` without touching the rest of the always-include
+    # surface. Mirrors the FERAL_GENERIC_HARDWARE_SKILLS kill-switch pattern.
+    _SMART_LOOPS_SKILLS = {"feral_routines", "feral_workflows"}
 
     def __init__(
         self,
@@ -3052,7 +3070,10 @@ class Orchestrator:
     def _ensure_core_skills(self, skills: list[SkillManifest]) -> list[SkillManifest]:
         """Guarantee core skills like desktop_control are always available to the LLM."""
         existing_ids = {s.skill_id for s in skills}
+        smart_loops_on = _smart_loops_enabled()
         for core_id in self.ALWAYS_INCLUDE_SKILLS:
+            if core_id in self._SMART_LOOPS_SKILLS and not smart_loops_on:
+                continue
             if core_id not in existing_ids and core_id in self.skills.skills:
                 skills.append(self.skills.skills[core_id])
         return skills

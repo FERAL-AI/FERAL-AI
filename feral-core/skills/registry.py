@@ -26,8 +26,26 @@ class SkillRegistry:
         self._cron_service = None
 
     def set_cron_service(self, cron_service):
-        """Wire the CronService so _auto_create_routines can register jobs."""
+        """Wire the CronService so _auto_create_routines can register jobs.
+
+        Boot order is: ``load_builtin_skills()`` (api/state.py) runs BEFORE the
+        CronService exists, so every manifest cron was silently dropped at
+        registration time (``_cron_service`` was None). We now re-scan all
+        already-registered manifests as soon as the service is wired, with
+        dedupe so the persisted SQLite jobs aren't duplicated on every boot.
+        """
         self._cron_service = cron_service
+        if cron_service is not None:
+            self._rescan_auto_routines()
+
+    def _rescan_auto_routines(self):
+        """Re-run _auto_create_routines for every registered manifest now that
+        the CronService is available. Idempotent via dedupe."""
+        for manifest in list(self.skills.values()):
+            try:
+                self._auto_create_routines(manifest)
+            except Exception as exc:
+                logger.debug("rescan auto-routine failed for %s: %s", getattr(manifest, "skill_id", "?"), exc)
 
     def load_builtin_skills(self):
         """Load the default skills that ship with FERAL."""
@@ -101,32 +119,83 @@ class SkillRegistry:
 
     register_skill = register  # Alias for the skill generator
 
+    def _auto_routine_exists(self, svc, description: str) -> bool:
+        """Dedupe key: the deterministic ``[auto] ...`` description. Jobs
+        persist in SQLite, so without this every boot would re-create them."""
+        try:
+            for job in svc.list_jobs():
+                if (job.description or "") == description:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _flow_to_taskflow_steps(self, manifest: SkillManifest, flow_id: str) -> list[dict]:
+        """Translate a manifest SkillFlow (endpoint sequence) into TaskFlow
+        skill.invoke steps so a cron ``flow_id`` can run via the L2 flow
+        branch. Minimal: maps each step's endpoint_id; condition branching in
+        SkillFlow is not auto-translated (kept additive / non-sprawling)."""
+        for flow in (manifest.flows or []):
+            if getattr(flow, "id", None) != flow_id:
+                continue
+            steps: list[dict] = []
+            for fstep in (getattr(flow, "steps", []) or []):
+                ep = getattr(fstep, "endpoint_id", None)
+                if ep:
+                    steps.append({"type": "skill.invoke", "skill_id": manifest.skill_id, "endpoint": ep})
+            return steps
+        return []
+
     def _auto_create_routines(self, manifest: SkillManifest):
         try:
-            from agents.scheduler import CronService, JobType
+            from agents.scheduler import JobType
             svc = getattr(self, '_cron_service', None)
             if svc is None:
                 return
+            default_ep = manifest.endpoints[0].id if manifest.endpoints else ''
             for cdef in (manifest.crons or []):
-                expr = getattr(cdef, 'expression', '') or getattr(cdef, 'cron_expr', '')
+                # CronDefinition.schedule is the canonical field; keep legacy
+                # attribute fallbacks for non-standard / older manifests.
+                expr = (
+                    getattr(cdef, 'schedule', '')
+                    or getattr(cdef, 'expression', '')
+                    or getattr(cdef, 'cron_expr', '')
+                )
                 if not expr:
                     continue
-                desc = f"[auto] {manifest.skill_id}: {getattr(cdef, 'description', expr)}"
-                payload = {
-                    "skill": manifest.skill_id,
-                    "endpoint": getattr(cdef, 'endpoint', '') or (manifest.endpoints[0].id if manifest.endpoints else ''),
-                    "args": getattr(cdef, 'args', {}) or {},
-                }
+                cron_id = getattr(cdef, 'id', '') or expr
+                desc = f"[auto] {manifest.skill_id}:{cron_id}"
+                if self._auto_routine_exists(svc, desc):
+                    continue
+
+                flow_id = getattr(cdef, 'flow_id', None)
+                endpoint = getattr(cdef, 'endpoint_id', None) or getattr(cdef, 'endpoint', None)
+
+                if flow_id and not endpoint:
+                    steps = self._flow_to_taskflow_steps(manifest, flow_id)
+                    if not steps:
+                        logger.debug("cron flow_id %s has no resolvable steps in %s", flow_id, manifest.skill_id)
+                        continue
+                    payload = {"flow_id": flow_id, "steps": steps}
+                else:
+                    payload = {
+                        "skill": manifest.skill_id,
+                        "endpoint": endpoint or default_ep,
+                        "args": getattr(cdef, 'args', {}) or {},
+                    }
+
                 svc.create_job(JobType.SCHEDULED, expr, desc, payload, "")
                 logger.info("Auto-created routine for cron: %s in skill %s", expr, manifest.skill_id)
             for tdef in (manifest.triggers or []):
-                event = getattr(tdef, 'event', '') or getattr(tdef, 'trigger', '')
+                event = getattr(tdef, 'event', '') or getattr(tdef, 'trigger', '') or getattr(tdef, 'id', '')
                 if not event:
                     continue
                 desc = f"[auto] {manifest.skill_id}: trigger on {event}"
+                if self._auto_routine_exists(svc, desc):
+                    continue
                 payload = {
                     "skill": manifest.skill_id,
-                    "endpoint": getattr(tdef, 'endpoint', '') or (manifest.endpoints[0].id if manifest.endpoints else ''),
+                    "endpoint": getattr(tdef, 'action_endpoint_id', None) or getattr(tdef, 'endpoint', None) or default_ep,
                     "trigger_event": event,
                     "condition": getattr(tdef, 'condition', None),
                 }
