@@ -29,6 +29,45 @@ def _workflow_dict(pack: Any) -> dict:
     return pack.model_dump()
 
 
+def instantiate_pack(
+    workflow_id: str,
+    *,
+    session_id: str | None = None,
+    title: str | None = None,
+    context: dict | None = None,
+) -> dict:
+    """Materialise a workflow pack into a live TaskFlow row.
+
+    Shared by the REST route below and the cron ``_routine_executor`` so a
+    ``workflow_id`` payload on a routine reuses the exact same instantiate
+    semantics (no duplicated step-building logic).
+
+    Raises ``KeyError`` for an unknown pack id and ``RuntimeError`` if the
+    TaskFlow runtime is not ready, so callers can map to the right surface
+    (HTTP status vs cron run record).
+    """
+    packs = getattr(state, "workflow_packs", {}) or {}
+    pack = packs.get(workflow_id)
+    if pack is None:
+        raise KeyError(workflow_id)
+    if state.taskflows is None:
+        raise RuntimeError("TaskFlow runtime is not ready")
+
+    resolved_session = session_id or f"pack-{workflow_id}"
+    resolved_title = title or pack.name
+    resolved_context = context or {
+        "instantiated_from": "workflow_pack",
+        "workflow_id": workflow_id,
+    }
+    steps = [step.model_dump() for step in pack.steps]
+    return state.taskflows.create_flow(
+        session_id=resolved_session,
+        title=resolved_title,
+        steps=steps,
+        context=resolved_context,
+    )
+
+
 @router.get("/api/agents/personas")
 async def list_personas() -> dict:
     """Return the catalog of first-party agent personas."""
@@ -78,31 +117,21 @@ async def instantiate_workflow_pack(workflow_id: str, body: dict | None = None) 
     row via the existing ``TaskFlowRuntime.create_flow`` API, returning
     the new ``flow_id`` plus the runtime dict.
     """
-    packs = getattr(state, "workflow_packs", {}) or {}
-    pack = packs.get(workflow_id)
-    if pack is None:
+    body = body or {}
+    try:
+        flow = instantiate_pack(
+            workflow_id,
+            session_id=body.get("session_id"),
+            title=body.get("title"),
+            context=body.get("context"),
+        )
+    except KeyError:
         raise HTTPException(
             status_code=404,
             detail=f"Unknown workflow pack {workflow_id!r}",
         )
-    if state.taskflows is None:
-        raise HTTPException(status_code=503, detail="TaskFlow runtime is not ready")
-
-    body = body or {}
-    session_id = body.get("session_id") or f"pack-{workflow_id}"
-    title = body.get("title") or pack.name
-    context = body.get("context") or {
-        "instantiated_from": "workflow_pack",
-        "workflow_id": workflow_id,
-    }
-    steps = [step.model_dump() for step in pack.steps]
-    try:
-        flow = state.taskflows.create_flow(
-            session_id=session_id,
-            title=title,
-            steps=steps,
-            context=context,
-        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to instantiate workflow pack %s", workflow_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc

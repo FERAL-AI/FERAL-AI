@@ -55,6 +55,7 @@ from security.device_pairing import DevicePairingStore  # used in type hint
 from api.routes.dashboard import router as dashboard_router
 from api.routes.config import router as config_router
 from api.routes.skills import router as skills_router
+from api.routes.tools import router as tools_router
 from api.routes.memory import router as memory_router
 from api.routes.routines import router as routines_router
 from api.routes.taskflows import router as taskflows_router
@@ -605,6 +606,7 @@ app.add_middleware(APIKeyMiddleware)
 app.include_router(dashboard_router)
 app.include_router(config_router)
 app.include_router(skills_router)
+app.include_router(tools_router)
 app.include_router(memory_router)
 app.include_router(routines_router)
 app.include_router(taskflows_router)
@@ -780,6 +782,159 @@ async def metrics_endpoint(request: Request):
 # Lifecycle
 # ─────────────────────────────────────────────
 
+def execute_routine_job(job):
+    """Dispatch a fired CronService routine.
+
+    Module-level (rather than a startup closure) so it is unit-testable by
+    monkeypatching ``api.server.state``. Resolution order for a routine's
+    payload:
+
+      1. ``workflow_id`` — instantiate a workflow pack as a live TaskFlow.
+      2. ``flow_id`` + inline ``steps`` — create an ad-hoc TaskFlow.
+      3. ``skill`` + ``endpoint`` — direct skill invoke, behind a safety
+         pre-flight on surface="cron" (DENY → skip + record).
+      4. ``prompt`` / ``action_text`` — run through the orchestrator.
+      5. otherwise — log a no-op.
+    """
+    import asyncio as _aio
+    logger.info("Routine fired: id=%s type=%s desc=%s", job.id, job.job_type, job.description)
+    run_id = state.cron_service.record_run_start(job.id)
+    try:
+        payload = job.payload or {}
+        skill_id = payload.get("skill")
+        endpoint = payload.get("endpoint")
+        # NL automations stash the action under "action_text"; treat it as a
+        # prompt so those routines stop silently no-op'ing.
+        prompt = payload.get("prompt") or payload.get("action_text")
+        workflow_id = payload.get("workflow_id")
+        flow_id = payload.get("flow_id")
+        flow_steps = payload.get("steps")
+
+        # Workflow branch: a routine can launch a workflow pack each time it
+        # fires, reusing the exact instantiate semantics the REST route uses.
+        if workflow_id:
+            from api.routes.personas import instantiate_pack
+            try:
+                flow = instantiate_pack(
+                    workflow_id,
+                    session_id=job.session_id or f"routine-{job.id}",
+                    context={
+                        "instantiated_from": "routine",
+                        "routine_id": job.id,
+                        "workflow_id": workflow_id,
+                    },
+                )
+                state.cron_service.record_run_finish(
+                    run_id, "success", {"flow_id": flow.get("id"), "workflow_id": workflow_id}, None,
+                )
+            except KeyError:
+                state.cron_service.record_run_finish(
+                    run_id, "error", {}, f"Unknown workflow pack '{workflow_id}'",
+                )
+            except Exception as exc:
+                state.cron_service.record_run_finish(run_id, "error", {}, str(exc))
+            return
+
+        # Ad-hoc multi-step branch: routine carries an inline flow def.
+        if flow_id and isinstance(flow_steps, list) and flow_steps and state.taskflows:
+            flow = state.taskflows.create_flow(
+                session_id=job.session_id or f"routine-{job.id}",
+                title=payload.get("title") or job.description or f"routine-{job.id}",
+                steps=flow_steps,
+                context={"instantiated_from": "routine", "routine_id": job.id},
+            )
+            state.cron_service.record_run_finish(
+                run_id, "success", {"flow_id": flow.get("id")}, None,
+            )
+            return
+
+        if skill_id and endpoint and state.skill_registry:
+            # audit / smart-loops S2 — the cron skill path bypasses the
+            # orchestrator's safety resolver entirely. Run an explicit
+            # pre-flight on surface="cron" so a DENY verdict skips (and
+            # records) the run instead of firing blind.
+            skill_args = payload.get("args", {}) or {}
+            try:
+                from security.safety_resolver import resolve_policy, LEVEL_DENY
+                decision = resolve_policy(
+                    f"{skill_id}__{endpoint}",
+                    skill_args,
+                    surface="cron",
+                    registry=state.skill_registry,
+                )
+            except Exception:
+                decision = None
+            if decision is not None and decision.level == LEVEL_DENY:
+                state.cron_service.record_run_finish(
+                    run_id, "skipped", {"policy": decision.to_dict()},
+                    f"denied by safety policy: {decision.deny_reason}",
+                )
+                return
+
+            skill = state.skill_registry.get_skill(skill_id)
+            if skill:
+                loop = _aio.new_event_loop()
+                try:
+                    result = loop.run_until_complete(
+                        skill.execute(endpoint, skill_args, {})
+                    )
+                finally:
+                    loop.close()
+                state.cron_service.record_run_finish(
+                    run_id, "success" if result.get("success") else "error",
+                    result, result.get("error"),
+                )
+                return
+
+        if prompt and state.orchestrator:
+            # audit-r14 / S6 — pre-flight against the cron cost cap before
+            # invoking the orchestrator. A scheduled routine is the same cost
+            # class as a user chat turn, so a paused cap must skip the turn
+            # and let the operator see why via the UI banner. CronService runs
+            # on a daemon thread so the guard's broadcast is a no-op (no
+            # running asyncio loop) — the structured log line is still emitted.
+            guard = getattr(state, "cron_cost_guard", None)
+            if guard is not None and not guard.allow(
+                model="gpt-4o-mini",
+                estimated_max_tokens=512,
+            ):
+                state.cron_service.record_run_finish(
+                    run_id,
+                    "skipped",
+                    {},
+                    "cost cap reached; routine deferred",
+                )
+                return
+            session_id = job.session_id or f"routine-{job.id}"
+            # Pass an explicit context so the Supervisor audit log can
+            # distinguish cron-driven turns from user / web. Without this,
+            # source defaulted to "web".
+            cron_context = {
+                "source": "cron",
+                "actor": "system",
+                "routine_id": job.id,
+                "routine_type": job.job_type,
+            }
+            loop = _aio.new_event_loop()
+            try:
+                loop.run_until_complete(
+                    state.orchestrator.handle_command(session_id, prompt, context=cron_context)
+                )
+            finally:
+                loop.close()
+            state.cron_service.record_run_finish(run_id, "success", {"prompt": prompt}, None)
+            return
+
+        state.cron_service.record_run_finish(
+            run_id, "success",
+            {"message": "No skill or prompt configured; routine logged."},
+            None,
+        )
+    except Exception as exc:
+        logger.exception("Routine execution error for job %s", job.id)
+        state.cron_service.record_run_finish(run_id, "error", {}, str(exc))
+
+
 @app.on_event("startup")
 async def startup():
     # audit-r12 A1 — surface FERAL_LOCAL_BYPASS=1 on non-loopback bind
@@ -796,84 +951,7 @@ async def startup():
     if state.memory:
         state.memory.start_background_tasks()
     if state.cron_service:
-        def _routine_executor(job):
-            import asyncio as _aio
-            logger.info("Routine fired: id=%s type=%s desc=%s", job.id, job.job_type, job.description)
-            run_id = state.cron_service.record_run_start(job.id)
-            try:
-                payload = job.payload or {}
-                skill_id = payload.get("skill")
-                endpoint = payload.get("endpoint")
-                prompt = payload.get("prompt")
-
-                if skill_id and endpoint and state.skill_registry:
-                    skill = state.skill_registry.get_skill(skill_id)
-                    if skill:
-                        loop = _aio.new_event_loop()
-                        try:
-                            result = loop.run_until_complete(
-                                skill.execute(endpoint, payload.get("args", {}), {})
-                            )
-                        finally:
-                            loop.close()
-                        state.cron_service.record_run_finish(
-                            run_id, "success" if result.get("success") else "error",
-                            result, result.get("error"),
-                        )
-                        return
-
-                if prompt and state.orchestrator:
-                    # audit-r14 / S6 — pre-flight against the cron
-                    # cost cap before invoking the orchestrator. A
-                    # scheduled routine is the same cost class as a
-                    # user chat turn, so a paused cap must skip the
-                    # turn and let the operator see why via the UI
-                    # banner. CronService runs on a daemon thread so
-                    # the guard's broadcast is a no-op (no running
-                    # asyncio loop) — the structured log line is
-                    # still emitted.
-                    guard = getattr(state, "cron_cost_guard", None)
-                    if guard is not None and not guard.allow(
-                        model="gpt-4o-mini",
-                        estimated_max_tokens=512,
-                    ):
-                        state.cron_service.record_run_finish(
-                            run_id,
-                            "skipped",
-                            {},
-                            "cost cap reached; routine deferred",
-                        )
-                        return
-                    session_id = job.session_id or f"routine-{job.id}"
-                    # Pass an explicit context so the Supervisor audit log
-                    # can distinguish cron-driven turns from user / web.
-                    # Without this, source defaulted to "web".
-                    cron_context = {
-                        "source": "cron",
-                        "actor": "system",
-                        "routine_id": job.id,
-                        "routine_type": job.job_type,
-                    }
-                    loop = _aio.new_event_loop()
-                    try:
-                        loop.run_until_complete(
-                            state.orchestrator.handle_command(session_id, prompt, context=cron_context)
-                        )
-                    finally:
-                        loop.close()
-                    state.cron_service.record_run_finish(run_id, "success", {"prompt": prompt}, None)
-                    return
-
-                state.cron_service.record_run_finish(
-                    run_id, "success",
-                    {"message": "No skill or prompt configured; routine logged."},
-                    None,
-                )
-            except Exception as exc:
-                logger.exception("Routine execution error for job %s", job.id)
-                state.cron_service.record_run_finish(run_id, "error", {}, str(exc))
-
-        state.cron_service.start(_routine_executor)
+        state.cron_service.start(execute_routine_job)
 
     async def _state_heartbeat():
         """Push dashboard/system state to all WS clients every 10s."""

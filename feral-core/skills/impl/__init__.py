@@ -130,6 +130,16 @@ except ImportError:
     pass
 
 try:
+    import skills.impl.feral_routines
+except ImportError:
+    pass
+
+try:
+    import skills.impl.feral_workflows
+except ImportError:
+    pass
+
+try:
     import skills.impl.notes_memory
 except ImportError:
     pass

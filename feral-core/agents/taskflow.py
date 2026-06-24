@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -429,6 +430,33 @@ class TaskFlowRuntime:
                     conn.commit()
                 return
 
+            # L4 — accumulate step output into the flow context so later
+            # steps (and {{ step_N }} / {{ previous_output }} templating) can
+            # consume it. The next loop iteration reloads the flow, so the
+            # persisted context is what downstream steps see.
+            context = dict(flow.get("context") or {})
+            step_results = dict(context.get("step_results") or {})
+            output_text = self._step_output_text(outcome)
+            step_results[str(current_step)] = {
+                "type": step.get("step_type"),
+                "status": outcome.get("status"),
+                "output": output_text,
+            }
+            context["step_results"] = step_results
+            if output_text is not None:
+                context["previous_output"] = output_text
+
+            # L4 — condition steps perform a real branch-jump. ``branch`` is
+            # the then/else *index* computed by _execute_step; when present
+            # and valid we jump there instead of falling through.
+            next_step = current_step + 1
+            if step.get("step_type") == "condition":
+                branch = outcome.get("branch")
+                if isinstance(branch, bool):
+                    branch = None  # guard: bools are ints in Python
+                if isinstance(branch, int) and branch >= 0:
+                    next_step = branch
+
             with self._lock:
                 conn = self._conn
                 conn.execute(
@@ -439,21 +467,33 @@ class TaskFlowRuntime:
                     """,
                     (json.dumps(outcome), time.time(), step_id),
                 )
-                current_step += 1
                 conn.execute(
                     """
                     UPDATE taskflows
-                    SET current_step = ?, status = ?, wait_until = NULL, updated_at = ?
+                    SET current_step = ?, status = ?, context_json = ?, wait_until = NULL, updated_at = ?
                     WHERE id = ?
                     """,
-                    (current_step, TaskFlowStatus.RUNNING.value, time.time(), flow_id),
+                    (next_step, TaskFlowStatus.RUNNING.value, json.dumps(context, default=str), time.time(), flow_id),
                 )
                 conn.commit()
+            current_step = next_step
+            self._record_flow_progress(flow, next_step)
 
     async def _execute_step(self, flow: dict, step: dict) -> dict:
         step_type = step.get("step_type", "")
         raw_payload = step.get("payload", {})
         payload = raw_payload.get("config", raw_payload) if isinstance(raw_payload.get("config"), dict) else raw_payload
+
+        # L4 — render {{ step_N }} / {{ previous_output }} against the
+        # accumulated flow context, then apply convenience aliases so the LLM
+        # can author steps loosely (prompt_template→prompt, q→query).
+        context = flow.get("context", {}) or {}
+        payload = self._render_templates(payload, context)
+        if isinstance(payload, dict):
+            if not payload.get("prompt") and payload.get("prompt_template"):
+                payload["prompt"] = payload.get("prompt_template")
+            if not payload.get("query") and payload.get("q") is not None:
+                payload["query"] = payload.get("q")
 
         if step_type == "noop":
             return {"status": "completed", "message": "noop"}
@@ -524,6 +564,25 @@ class TaskFlowRuntime:
             if not skill:
                 return {"status": "failed", "error": f"Skill '{skill_id}' not found"}
             args = payload.get("args", {})
+            # Smart-loops S2 — TaskFlow's skill.invoke also bypasses the
+            # orchestrator safety resolver. Pre-flight on surface="taskflow"
+            # and fail the step (rather than silently running) on DENY.
+            try:
+                from security.safety_resolver import resolve_policy, LEVEL_DENY
+                decision = resolve_policy(
+                    f"{skill_id}__{endpoint}",
+                    args,
+                    surface="taskflow",
+                    registry=self._skill_registry,
+                )
+            except Exception:
+                decision = None
+            if decision is not None and decision.level == LEVEL_DENY:
+                return {
+                    "status": "failed",
+                    "error": f"denied by safety policy: {decision.deny_reason}",
+                    "policy": decision.to_dict(),
+                }
             result = await skill.execute(endpoint, args, {})
             ok = result.get("success", False)
             return {
@@ -540,8 +599,11 @@ class TaskFlowRuntime:
                 return {"status": "failed", "error": "No orchestrator available"}
             session_id = flow.get("session_id") or f"taskflow-{flow['id']}"
             try:
-                await self._orchestrator.handle_command(session_id, prompt)
-                return {"status": "completed", "prompt": prompt}
+                # L4 — capture the reply text so downstream steps can consume
+                # it via {{ previous_output }} / {{ step_N }}.
+                reply = await self._orchestrator.handle_command(session_id, prompt)
+                reply_text = "" if reply is None else str(reply)
+                return {"status": "completed", "prompt": prompt, "output": reply_text, "reply": reply_text}
             except Exception as exc:
                 return {"status": "failed", "error": str(exc)}
 
@@ -579,6 +641,76 @@ class TaskFlowRuntime:
             }
 
         return {"status": "failed", "error": f"Unsupported step type: {step_type}"}
+
+    # ── L4 composition helpers ───────────────────────────────────────────
+
+    _TEMPLATE_RE = re.compile(r"\{\{\s*(previous_output|step_(\d+))\s*\}\}")
+
+    def _render_templates(self, value: Any, context: dict) -> Any:
+        """Recursively render template tokens in strings of a payload."""
+        if isinstance(value, str):
+            return self._render_string(value, context)
+        if isinstance(value, dict):
+            return {k: self._render_templates(v, context) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._render_templates(v, context) for v in value]
+        return value
+
+    def _render_string(self, text: str, context: dict) -> str:
+        if "{{" not in text:
+            return text
+        step_results = context.get("step_results") or {}
+
+        def _repl(match: "re.Match") -> str:
+            token = match.group(1)
+            if token == "previous_output":
+                return str(context.get("previous_output", "") or "")
+            idx = match.group(2)
+            entry = step_results.get(str(idx))
+            if isinstance(entry, dict):
+                return str(entry.get("output", "") or "")
+            return str(entry or "")
+
+        return self._TEMPLATE_RE.sub(_repl, text)
+
+    @staticmethod
+    def _step_output_text(outcome: dict) -> Optional[str]:
+        """Best-effort text representation of a step's result, used as
+        ``previous_output`` and the ``{{ step_N }}`` substitution value."""
+        if not isinstance(outcome, dict):
+            return None
+        if outcome.get("output") is not None:
+            return str(outcome["output"])
+        for key in ("reply", "body_preview", "text"):
+            if outcome.get(key) is not None:
+                return str(outcome[key])
+        result = outcome.get("result")
+        if isinstance(result, dict) and result.get("data") is not None:
+            data = result["data"]
+            return data if isinstance(data, str) else json.dumps(data, default=str)
+        if outcome.get("results") is not None:
+            return json.dumps(outcome["results"], default=str)
+        if outcome.get("note") is not None:
+            return json.dumps(outcome["note"], default=str)
+        return None
+
+    def _record_flow_progress(self, flow: dict, step: int) -> None:
+        """Advance the consciousness flow entity as the workflow progresses so
+        'where did I leave off' surfaces the live step, not step 0."""
+        try:
+            from api.state import state as _state
+            store = getattr(_state, "consciousness", None)
+            if store is None:
+                return
+            store.record_flow(
+                flow_id=flow["id"],
+                title=flow.get("title", "") or "",
+                step=step,
+                steps=len(flow.get("steps", []) or []),
+                session_id=flow.get("session_id", "") or "",
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _flow_row_to_dict(row: sqlite3.Row) -> dict:

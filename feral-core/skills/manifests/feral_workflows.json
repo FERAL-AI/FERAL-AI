@@ -1,0 +1,105 @@
+{
+  "skill_id": "feral_workflows",
+  "version": "1.0.0",
+  "author": "feral-core",
+  "brand": {
+    "name": "FERAL Workflows",
+    "primary_color": "#10B981",
+    "secondary_color": "#059669",
+    "logo_url": "",
+    "icon_set": "sf_symbols"
+  },
+  "description": "Author and run multi-step WORKFLOWS for complicated tasks that need several ordered steps. Use this when the user describes a task with multiple stages, e.g. 'first do X, then Y, then save the result', or anything that chains skill calls, web fetches, LLM reasoning, conditions, and notes. Each workflow runs in the background as a resumable TaskFlow. Step types include: skill.invoke (call any skill endpoint), llm.chat (reason / produce text), note.save, memory.search, http.get, sleep, condition (branch), and noop. Steps can reference earlier output via {{previous_output}} and {{step_N}} templating.",
+  "trigger_phrases": [
+    "workflow",
+    "multi-step",
+    "multi step",
+    "first do",
+    "then do",
+    "and then",
+    "step by step",
+    "a series of steps",
+    "run a workflow",
+    "build a workflow",
+    "automate the process",
+    "pipeline"
+  ],
+  "categories": ["productivity", "automation", "workflows"],
+  "auth": { "type": "none" },
+  "endpoints": [
+    {
+      "id": "create",
+      "method": "PYTHON",
+      "url": "python://feral_workflows/create",
+      "description": "Author and queue a multi-step workflow. Provide a title and an ordered list of steps. Each step is an object with a 'type' and type-specific fields, e.g. {\"type\":\"skill.invoke\",\"skill_id\":\"web_search\",\"endpoint\":\"search\",\"args\":{\"q\":\"...\"}}, {\"type\":\"llm.chat\",\"prompt\":\"summarize {{previous_output}}\"}, {\"type\":\"note.save\",\"content\":\"{{previous_output}}\"}, {\"type\":\"condition\",\"field\":\"...\",\"op\":\"truthy\",\"then\":3,\"else\":4}. The workflow runs in the background; poll with get.",
+      "params": [
+        {"name": "title", "type": "string", "required": true, "description": "Short title for the workflow."},
+        {"name": "steps", "type": "array", "required": true, "description": "Ordered list of step objects. Each must have a 'type'. Supported: skill.invoke, llm.chat, note.save, memory.search, http.get, sleep, condition, noop.", "items": {"type": "object"}},
+        {"name": "session_id", "type": "string", "required": false, "description": "Session id to associate the workflow with.", "default": ""},
+        {"name": "context", "type": "object", "required": false, "description": "Optional initial context dict available to step templating."}
+      ],
+      "returns_description": "{flow: {id, title, status, steps, ...}}",
+      "ui_hint": "detail_card",
+      "safety_tier": "safe"
+    },
+    {
+      "id": "list",
+      "method": "GET",
+      "url": "python://feral_workflows/list",
+      "description": "List workflows, optionally filtered by session_id and/or status (queued, running, waiting, completed, failed, cancelled).",
+      "params": [
+        {"name": "session_id", "type": "string", "required": false, "description": "Filter to a session."},
+        {"name": "status", "type": "string", "required": false, "description": "Filter by status."}
+      ],
+      "returns_description": "{flows: [...], count}",
+      "ui_hint": "list",
+      "read_only_hint": true,
+      "safety_tier": "safe"
+    },
+    {
+      "id": "get",
+      "method": "GET",
+      "url": "python://feral_workflows/get",
+      "description": "Get a single workflow by flow_id, including per-step status and results.",
+      "params": [
+        {"name": "flow_id", "type": "string", "required": true, "description": "The workflow (flow) id returned by create."}
+      ],
+      "returns_description": "{flow: {...}}",
+      "ui_hint": "detail_card",
+      "read_only_hint": true,
+      "safety_tier": "safe"
+    },
+    {
+      "id": "cancel",
+      "method": "POST",
+      "url": "python://feral_workflows/cancel",
+      "description": "Cancel a running or queued workflow by flow_id.",
+      "params": [
+        {"name": "flow_id", "type": "string", "required": true, "description": "The workflow (flow) id to cancel."}
+      ],
+      "returns_description": "{flow: {...}}",
+      "ui_hint": "detail_card",
+      "safety_tier": "safe"
+    },
+    {
+      "id": "instantiate_pack",
+      "method": "POST",
+      "url": "python://feral_workflows/instantiate_pack",
+      "description": "Instantiate a named first-party workflow pack (template) into a live workflow run.",
+      "params": [
+        {"name": "workflow_id", "type": "string", "required": true, "description": "The workflow pack id (from the first-party catalog)."},
+        {"name": "session_id", "type": "string", "required": false, "description": "Session id to associate the run with."},
+        {"name": "title", "type": "string", "required": false, "description": "Optional override title for the instantiated run."}
+      ],
+      "returns_description": "{flow: {...}, workflow_id}",
+      "ui_hint": "detail_card",
+      "safety_tier": "safe"
+    }
+  ],
+  "flows": [],
+  "crons": [],
+  "triggers": [],
+  "permissions": ["automation"],
+  "requires_daemon": false,
+  "max_calls_per_hour": 10000
+}
