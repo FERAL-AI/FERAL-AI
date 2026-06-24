@@ -1,10 +1,26 @@
 # Changelog
 
-<!-- feral-version: 2026.6.18 -->
+<!-- feral-version: 2026.6.19 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.19] - 2026-06-24
+
+### Added
+- (fill me in — what shipped that did not exist before?)
+
+### Fixed
+- (fill me in — what regressions did this release close?)
+
+### Changed
+- (fill me in — what user-visible behavior changed?)
+
+### Coverage
+- pytest (feral-core): TODO collected, TODO passed, TODO skipped.
+- vitest (feral-client-v2): TODO passed.
+
 
 ## [2026.6.18] - 2026-06-23
 
