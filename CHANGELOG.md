@@ -1,10 +1,32 @@
 # Changelog
 
-<!-- feral-version: 2026.6.19 -->
+<!-- feral-version: 2026.6.20 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.20] - 2026-06-29 — demo-blockers: routine time-context, pairing contract, 24 kHz voice STT
+
+Demo-blocker fixes across the brain and the iOS companion. All three changes are additive — already-correct callers see no behavior change.
+
+### Added
+- **feat(automation): host-local timezone derivation + injection.** The brain now derives the host's local timezone and injects it into the orchestrator/scheduler/identity time-context, so natural-language schedules ("every day at 5pm") resolve against the user's wall clock instead of UTC. An explicit `automation.timezone` config still overrides. (`agents/orchestrator.py`, `agents/identity_loader.py`, `agents/scheduler.py`, `config/loader.py`)
+- **feat(automation): recurring routines as first-class.** Recurring device/automation requests route through `feral_routines` (recurring vs one-shot correctly distinguished) rather than collapsing to a one-shot reminder; honest create (verify-after-write) reports failure when a job did not actually persist, plus `auto_confirm` for unambiguous setups. (`skills/impl/feral_routines.py`, `skills/impl/feral_reminders.py`, `skills/manifests/feral_routines.json`, `api/routes/routines.py`)
+- **feat(automation): multi-turn routine intent + conversational coreference.** A routine setup carries its intent across a clarification turn, and follow-ups ("do that for the kitchen too") resolve against the last concrete subject without hijacking genuine new topics or chit-chat. (`agents/orchestrator.py`)
+- **tests:** `tests/test_automation_time_context.py` (new), `tests/test_peripheral_bridge_register_contract.py` (new), expanded `tests/test_voice_router.py`, `tests/test_tools_rest_surface.py`.
+
+### Fixed
+- **fix(pairing): peripheral register contract normalized on both ends.** The brain now normalizes legacy peripheral envelopes — `protocol: 'ble'` → `native_bridge` and `kind: 'wristband'` → `band` — on receipt (canonical values still accepted unchanged), and the iOS companion now sends the canonical values. The iOS client also no longer treats a recoverable per-envelope validation error (`bad_payload` / `bad_schema` / `recoverable: true`) as fatal, which was the root cause of the "reconnecting forever" pairing loop (a single bad `peripheral_bridge_register` tore the WebSocket down, the client re-dialed, and re-sent the same bad envelope). (`models/protocol.py`, `api/server.py`; companion: `BrainClient.swift`, `PeripheralManifests.swift`)
+- **fix(voice): chained Deepgram STT opens at 24 kHz.** The chained STT path now passes the client sample rate through to the Deepgram session; it was defaulting to 16 kHz against the W300 glasses' 24 kHz microphone, producing garbled/degraded transcripts. (`voice/router.py`)
+
+### Changed
+- **perf(scheduler): ~1s poll cadence near due jobs.** The scheduler tightens its poll interval to roughly one second as a job approaches its due time (bounded), so recurring routines fire on time instead of drifting by the previous coarse poll interval. (`agents/scheduler.py`)
+
+### Coverage
+- pytest (feral-core): full suite green except the known, pre-existing event-loop pollution flake (`tests/test_episode_save_fire_forget.py::TestHotPathDoesNotBlock::test_stream_path_entry_block_under_slow_callback_budget` timeout — unrelated to this release's code; PR #189 admin-merged on that flake with the failed-job log captured). The four suites touched by this release — `test_automation_time_context.py`, `test_voice_router.py`, `test_peripheral_bridge_register_contract.py`, `test_tools_rest_surface.py` — pass (56 passed locally and in CI).
+- vitest (feral-client-v2): 410 passed (CI green).
+
 
 ## [2026.6.19] - 2026-06-24
 
