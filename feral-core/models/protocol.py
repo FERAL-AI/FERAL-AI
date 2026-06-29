@@ -7,7 +7,7 @@ This is the single source of truth for all message types.
 """
 
 from __future__ import annotations
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 from typing import Optional, Literal, Any
 from uuid import uuid4
 from time import time
@@ -217,14 +217,61 @@ class LocationUpdatePayload(BaseModel):
     ts: Optional[float] = None
 
 
+# Legacy / alternate spellings → canonical literal for bridged
+# peripherals. BLE peripherals are bridged *through* the phone node and
+# relayed over its WS (see hardware/adapters/bridge.py), so the canonical
+# protocol for a raw "ble" device is ``native_bridge`` (NOT
+# ``web_bluetooth``, which is the browser Web Bluetooth transport).
+PERIPHERAL_PROTOCOL_ALIASES = {
+    "ble": "native_bridge",
+    "bluetooth": "native_bridge",
+    "bluetooth_le": "native_bridge",
+    "ble_bridge": "native_bridge",
+    "bridge": "native_bridge",
+    "webble": "web_bluetooth",
+    "web_ble": "web_bluetooth",
+}
+PERIPHERAL_KIND_ALIASES = {
+    "wristband": "band",
+    "bracelet": "band",
+    "wearable": "band",
+}
+
+
 class PeripheralBridgeDevicePayload(BaseModel):
-    """One bridged peripheral exposed by the phone peer."""
+    """One bridged peripheral exposed by the phone peer.
+
+    Tolerant-by-design: phone builds (and older app installs) send
+    alternate spellings for ``protocol`` and ``kind`` — most notably
+    ``protocol="ble"`` (raw transport name) and ``kind="wristband"``.
+    The brain treats these as aliases of its canonical literals so a
+    single bad spelling never rejects the whole registration batch and
+    leaves the companion app stuck "reconnecting…". New canonical
+    values are still accepted unchanged; only legacy aliases are
+    rewritten (see ``PERIPHERAL_PROTOCOL_ALIASES`` /
+    ``PERIPHERAL_KIND_ALIASES``).
+    """
+
     device_id: str
     kind: Literal["glasses", "watch", "band"]
     protocol: Literal["web_bluetooth", "native_bridge", "none"]
     capabilities: list[str] = Field(default_factory=list)
     status: Literal["connected", "connecting", "disconnected"] = "connecting"
     manifest: dict = Field(default_factory=dict)
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def _normalize_protocol(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return PERIPHERAL_PROTOCOL_ALIASES.get(value.strip().lower(), value)
+        return value
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _normalize_kind(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return PERIPHERAL_KIND_ALIASES.get(value.strip().lower(), value)
+        return value
 
 
 class PeripheralBridgeRegisterPayload(BaseModel):

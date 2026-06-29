@@ -854,6 +854,12 @@ def execute_routine_job(job):
             # pre-flight on surface="cron" so a DENY verdict skips (and
             # records) the run instead of firing blind.
             skill_args = payload.get("args", {}) or {}
+            # A routine the user DELIBERATELY created with auto-confirm is an
+            # explicit, pre-authorised action — the cron pre-flight must not
+            # silently DENY it (there is no human at fire time to approve).
+            # We still skip a DENY for routines that were NOT user-confirmed,
+            # so an auto-generated/unsafe routine can't fire blind.
+            auto_confirm = bool(payload.get("auto_confirm"))
             try:
                 from security.safety_resolver import resolve_policy, LEVEL_DENY
                 decision = resolve_policy(
@@ -864,7 +870,14 @@ def execute_routine_job(job):
                 )
             except Exception:
                 decision = None
-            if decision is not None and decision.level == LEVEL_DENY:
+            # Physical-safety denials (e.g. robot wheel speed > limit) are
+            # NEVER overridable by auto_confirm — they protect hardware.
+            hard_physical_deny = bool(
+                decision is not None
+                and (decision.sources or {}).get("cutebot_speed_limit")
+            )
+            deny_overridden = auto_confirm and not hard_physical_deny
+            if decision is not None and decision.level == LEVEL_DENY and not deny_overridden:
                 state.cron_service.record_run_finish(
                     run_id, "skipped", {"policy": decision.to_dict()},
                     f"denied by safety policy: {decision.deny_reason}",
@@ -914,6 +927,11 @@ def execute_routine_job(job):
                 "actor": "system",
                 "routine_id": job.id,
                 "routine_type": job.job_type,
+                # Surfaced so the orchestrator can auto-approve a device action
+                # the user explicitly scheduled with auto-confirm (no human at
+                # fire time). Honoured by confirmation-gated paths that consult
+                # the turn context.
+                "auto_confirm": bool(payload.get("auto_confirm")),
             }
             loop = _aio.new_event_loop()
             try:

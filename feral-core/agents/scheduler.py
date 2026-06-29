@@ -24,7 +24,7 @@ from typing import Any, Callable, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from config.loader import feral_data_home
+from config.loader import feral_data_home, local_timezone_name
 
 logger = logging.getLogger("feral.scheduler")
 
@@ -228,7 +228,19 @@ class CronService:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._callback: Optional[Callable[[ScheduledJob], None]] = None
-        self._timezone: ZoneInfo = ZoneInfo(config.get("timezone", "UTC"))
+        # Default to the HOST's local timezone (derived, not hardcoded) so
+        # "follow the line at 3:01 PM" fires at 15:01 LOCAL, not UTC. An
+        # explicit config["timezone"] still overrides; a bad value degrades
+        # to the host local tz, then UTC. Per-job ``tz_name`` (stored on
+        # each row) is unaffected — already-scheduled jobs keep their tz.
+        configured_tz = (config.get("timezone") or "").strip()
+        if configured_tz:
+            try:
+                self._timezone = ZoneInfo(configured_tz)
+            except Exception:
+                self._timezone = ZoneInfo(local_timezone_name())
+        else:
+            self._timezone = ZoneInfo(local_timezone_name())
         self._max_concurrent: int = int(config.get("max_concurrent_jobs", 5))
         self._running_jobs: set[int] = set()
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
@@ -740,9 +752,37 @@ class CronService:
         if caught_up:
             logger.info("Caught up %d missed jobs", caught_up)
 
+    _MAX_POLL_SECONDS = 30.0
+
+    def _poll_interval(self) -> float:
+        """Adaptive sleep before the next due-job scan.
+
+        Historically the loop slept a flat 30s, so a job due at 15:01:00
+        could fire as late as 15:01:30. We keep the 30s ceiling when no
+        job is near, but shrink the wait to ~1s granularity as the
+        soonest ``next_run`` approaches so wall-clock routines fire on
+        time. One cheap indexed MIN() query per tick — no scheduler
+        rewrite. Any failure falls back to the flat 30s.
+        """
+        try:
+            now = time.time()
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT MIN(next_run) AS soonest FROM scheduled_jobs WHERE enabled = 1"
+                ).fetchone()
+            soonest = row["soonest"] if row is not None else None
+            if soonest is None:
+                return self._MAX_POLL_SECONDS
+            delta = float(soonest) - now
+            if delta <= 0:
+                return 1.0
+            return max(1.0, min(self._MAX_POLL_SECONDS, delta))
+        except Exception:
+            return self._MAX_POLL_SECONDS
+
     def _loop(self) -> None:
         self._catchup_missed_jobs()
-        while not self._stop.wait(30.0):
+        while not self._stop.wait(self._poll_interval()):
             if self._callback is None:
                 continue
             due = self.get_due_jobs()
