@@ -132,7 +132,27 @@ class FeralRemindersSkill(BaseSkill):
             }
             items.append(reminder)
             _save_items(path, items)
-            return {"success": True, "status_code": 200, "data": {"reminder": reminder, "count": len(items)}, "error": None}
+            # Honesty principle: re-read the store and confirm the reminder
+            # actually persisted before reporting success. Never claim a
+            # reminder was created when it is not in the list.
+            persisted = _load_items(path)
+            if not any(str(it.get("id")) == reminder["id"] for it in persisted):
+                return {
+                    "success": False,
+                    "status_code": 500,
+                    "data": None,
+                    "error": (
+                        "Reminder could not be confirmed — it is not in the list "
+                        "after write. Nothing was saved; please retry."
+                    ),
+                    "reason": "verify_after_write_failed",
+                }
+            return {
+                "success": True,
+                "status_code": 200,
+                "data": {"reminder": reminder, "count": len(persisted), "verified": True},
+                "error": None,
+            }
 
         if endpoint_id == "list":
             include_completed = _to_bool(_arg_value(args, "include_completed"))

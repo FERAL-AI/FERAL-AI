@@ -1043,6 +1043,20 @@ class VoiceRouter:
         stt_model = opts.get("stt_model", "nova-3")
         tts_model = opts.get("tts_model", "gpt-4o-mini-tts")
         tts_voice = opts.get("tts_voice", "alloy")
+        # STT sample rate MUST match the source audio. The iOS HFP /
+        # glasses path streams 24 kHz mono PCM16 (AVAudioConverter on
+        # the iOS side feeds the brain), and the live audio routers
+        # (``handle_audio_from_node`` / ``handle_audio_from_client``)
+        # both default to 24 kHz too. Before this fix the STT provider
+        # constructors fell through to their own 16 kHz default, which
+        # made Deepgram interpret 24 kHz audio as 16 kHz (1.5× playback
+        # speed) — producing the live "weird words then degraded"
+        # symptom because every phoneme arrived 50% too fast. Always
+        # pass an explicit rate; honour the per-session opt then fall
+        # back to the audio-path default of 24 kHz. ``_try_chained_morph``
+        # already threads the bound node's sample_rate through opts, so
+        # the morph path picks up the real value when known.
+        stt_sample_rate = int(opts.get("sample_rate") or 24000)
 
         # Resolve each provider's key via vault_keys.get_active_key
         # (with env fallback) so a labeled-only entry like
@@ -1066,6 +1080,7 @@ class VoiceRouter:
             stt_name,
             api_key=stt_keys.get(stt_name, ""),
             model=stt_model,
+            sample_rate=stt_sample_rate,
         )
         tts_kwargs = {"api_key": tts_keys.get(tts_name, "")}
         if tts_name == "openai":

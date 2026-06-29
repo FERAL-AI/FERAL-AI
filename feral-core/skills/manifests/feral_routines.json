@@ -9,7 +9,7 @@
     "logo_url": "",
     "icon_set": "sf_symbols"
   },
-  "description": "Create and manage RECURRING routines (scheduled, repeating jobs) that run on a cron-like schedule. Use this for anything the user wants done repeatedly on a timer, e.g. 'do X every day at 5pm', 'every 30 minutes', 'every weekday at 9am'. A routine can either run a specific skill endpoint, run a free-text instruction through the brain, or kick off a workflow. This is distinct from feral_reminders, which is a one-shot reminder at a single time.",
+  "description": "Create and manage scheduled routines that run on a cron-like schedule — both RECURRING jobs ('do X every day at 5pm', 'every 30 minutes', 'every weekday at 9am') AND one-shot scheduled actions at a specific clock time ('run the cutebot one time today at 3:01pm' → recurring=false). Use this for ANY request to PERFORM an action at a scheduled time, especially device/hardware actions like 'at 3pm follow the line'. A routine can run a specific skill endpoint (skill_id+endpoint_id), run a free-text instruction through the brain (prompt), or kick off a workflow. This is distinct from feral_reminders, which only fires a one-shot NOTIFICATION ('remind me to call mom at 5pm') and does not perform actions.",
   "trigger_phrases": [
     "every day at",
     "every morning",
@@ -44,8 +44,9 @@
         {"name": "prompt", "type": "string", "required": false, "description": "Free-text instruction executed through the brain on each run (e.g. 'follow the line and report the result')."},
         {"name": "workflow_id", "type": "string", "required": false, "description": "A workflow pack id to instantiate on each run."},
         {"name": "session_id", "type": "string", "required": false, "description": "Session id to associate the routine with.", "default": ""},
-        {"name": "recurring", "type": "boolean", "required": false, "description": "If false, the routine fires once then disables itself. Defaults true."},
-        {"name": "tz_name", "type": "string", "required": false, "description": "IANA timezone name for wall-clock schedules (e.g. 'America/Los_Angeles'). Defaults to the scheduler timezone."}
+        {"name": "recurring", "type": "boolean", "required": false, "description": "If false, the routine fires once then disables itself. Defaults true. Use false for 'one time today at 3pm'."},
+        {"name": "tz_name", "type": "string", "required": false, "description": "IANA timezone name for wall-clock schedules (e.g. 'America/Los_Angeles'). Defaults to the scheduler timezone, which is the host's local timezone."},
+        {"name": "auto_confirm", "type": "boolean", "required": false, "description": "If true, a routine that drives a device (skill_id+endpoint_id) fires the action DIRECTLY at run time without a confirmation prompt. Set this when the user explicitly says to 'auto confirm' a scheduled device action (there is no human to approve at fire time). Hard physical-safety limits (e.g. robot wheel speed caps) still apply."}
       ],
       "returns_description": "{routine: {id, cron_expr, next_run, description, payload, ...}}",
       "ui_hint": "detail_card",

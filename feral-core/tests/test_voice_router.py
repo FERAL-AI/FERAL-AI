@@ -233,3 +233,81 @@ def test_voice_router_deepgram_elevenlabs_keys_resolve_independently(
     assert _resolve_provider_key("deepgram", "DEEPGRAM_API_KEY") == "dg-secret"
     assert _resolve_provider_key("elevenlabs", "ELEVENLABS_API_KEY") == "el-secret"
     assert _resolve_provider_key("openai", "OPENAI_API_KEY") == ""
+
+
+# ── Chained STT sample-rate plumbing (bug 2 regression) ─────────────
+
+
+@pytest.mark.asyncio
+async def test_open_chained_session_threads_sample_rate_to_stt(monkeypatch):
+    """The chained pipeline's STT provider MUST be constructed with the
+    same sample rate the audio source is sending. The iOS HFP / glasses
+    path streams 24 kHz mono PCM16; before the fix the router built the
+    STT provider with no explicit rate, so providers fell through to
+    their 16 kHz default and Deepgram interpreted the 24 kHz buffer at
+    16 kHz — slurring phonemes and producing the live "weird words then
+    degrades" symptom. This test pins the per-session opt as the source
+    of truth and the 24 kHz default when opts is silent.
+    """
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-test")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "el-test")
+    captured: dict = {}
+
+    def _spy_get_stt_provider(name, **kwargs):
+        captured["name"] = name
+        captured["kwargs"] = kwargs
+        provider = MagicMock()
+        provider.close = AsyncMock()
+        return provider
+
+    def _spy_get_tts_provider(name, **kwargs):
+        provider = MagicMock()
+        provider.close = AsyncMock()
+        return provider
+
+    r = VoiceRouter(audio_pipeline=MagicMock(), orchestrator=MagicMock())
+    chained = MagicMock()
+    chained.open_session = AsyncMock(return_value=MagicMock())
+    r.set_chained_pipeline(chained)
+
+    # Stub the audio settings so the router uses the default
+    # ``deepgram + elevenlabs`` pair from chained_fallback.
+    r._load_audio_settings = MagicMock(return_value={
+        "chained_fallback": {
+            "stt_provider": "deepgram",
+            "tts_provider": "elevenlabs",
+        },
+    })
+
+    # ``open_chained_session`` imports both providers lazily inside the
+    # function, so the patch target is the source module, not router.
+    with patch("voice.stt_providers.get_stt_provider", side_effect=_spy_get_stt_provider), \
+         patch("voice.tts_providers.get_tts_provider", side_effect=_spy_get_tts_provider):
+        # Explicit per-session opt — overrides the 24 kHz default.
+        await r.open_chained_session("sess-1", {"sample_rate": 24000})
+        assert captured["name"] == "deepgram"
+        assert captured["kwargs"]["sample_rate"] == 24000
+
+        # No opt → falls back to the 24 kHz default the iOS path uses.
+        captured.clear()
+        await r.open_chained_session("sess-2", {})
+        assert captured["kwargs"]["sample_rate"] == 24000
+
+        # A different opt (e.g. a wristband at 16 kHz) is honoured.
+        captured.clear()
+        await r.open_chained_session("sess-3", {"sample_rate": 16000})
+        assert captured["kwargs"]["sample_rate"] == 16000
+
+
+def test_deepgram_provider_honours_sample_rate_in_url():
+    """Belt-and-braces: the Deepgram URL must encode the configured
+    sample_rate so the server-side STT decodes at the right rate. If
+    this regresses, the live transcript "degraded" symptom returns
+    even when ``open_chained_session`` is wired correctly."""
+    from voice.stt_providers.deepgram import DEEPGRAM_WS_URL, DeepgramSTTProvider
+
+    prov = DeepgramSTTProvider(api_key="dg-key", sample_rate=24000)
+    url = DEEPGRAM_WS_URL.format(
+        model=prov._model, sample_rate=prov._sample_rate, language=prov._language,
+    )
+    assert "sample_rate=24000" in url

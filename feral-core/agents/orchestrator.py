@@ -1663,7 +1663,7 @@ class Orchestrator:
                     logger.warning(f"Multi-agent failed, falling back to single-agent: {e}")
 
         # Step 1: Semantic Tool Routing
-        relevant_skills = await self._route_prompt(text)
+        relevant_skills = await self._route_prompt(text, session_id=session_id)
 
         if relevant_skills:
             logger.info(f"  Matched: {[s.brand.name for s in relevant_skills]}")
@@ -1729,7 +1729,7 @@ class Orchestrator:
             relevant_skills,
             session_id,
             memory_filter=active_memory_filter,
-            query=text or "",
+            query=self._coref_query_for_prompt(session_id, text or ""),
         )
         if specialist:
             system_prompt = self._build_specialist_system_prompt(specialist, system_prompt)
@@ -2172,7 +2172,7 @@ class Orchestrator:
                     f"Multi-agent (stream) failed, falling back to single-agent: {e}"
                 )
 
-        relevant_skills = await self._route_prompt(text)
+        relevant_skills = await self._route_prompt(text, session_id=session_id)
         relevant_skills = self._ensure_core_skills(relevant_skills)
 
         specialist = None
@@ -2222,7 +2222,7 @@ class Orchestrator:
             relevant_skills,
             session_id,
             memory_filter=active_memory_filter,
-            query=text or "",
+            query=self._coref_query_for_prompt(session_id, text or ""),
         )
         if specialist:
             system_prompt = self._build_specialist_system_prompt(specialist, system_prompt)
@@ -2835,6 +2835,31 @@ class Orchestrator:
         re.I,
     )
 
+    # Scheduled-automation phrasings that must become a RECURRING routine
+    # (feral_routines), never a one-shot reminder. "every day at 5pm",
+    # "every morning", "every 30 minutes", "daily", "weekly", "every Monday".
+    _R_ROUTINE_RECURRING = re.compile(
+        r"\b("
+        r"every\s+(?:day|morning|afternoon|evening|night|weekday|hour|week|"
+        r"\d+\s*(?:m|mins?|minutes?|h|hrs?|hours?))|"
+        r"each\s+(?:day|morning|afternoon|evening|night)|"
+        r"every\s+(?:mon|tues?|wed(?:nes)?|thur?s?|fri|sat(?:ur)?|sun)(?:day)?|"
+        r"daily|weekly"
+        r")\b",
+        re.I,
+    )
+
+    # One-shot scheduled-action markers — a clock time ("at 3pm", "at 3:01pm",
+    # "at 15:01") or an explicit single-fire phrase ("one time", "once"). These
+    # only route to feral_routines when paired with an action (see
+    # ``_heuristic_route``) so "remind me at 3pm" stays a reminder.
+    _R_ROUTINE_ONESHOT = re.compile(
+        r"(?:\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)\b)|"
+        r"(?:\bat\s+\d{1,2}:\d{2}\b)|"
+        r"\b(?:one\s+time|just\s+once|once)\b",
+        re.I,
+    )
+
     # Health / vitals — "what's my heart rate", "how did I sleep"
     _R_HEALTH = re.compile(
         r"\b("
@@ -2856,18 +2881,27 @@ class Orchestrator:
         re.I,
     )
 
-    def _heuristic_route(self, text: str) -> tuple[list["SkillManifest"], str]:
+    def _heuristic_route(self, text: str, session_id: str = "") -> tuple[list["SkillManifest"], str]:
         """Try to pick relevant skills without an LLM call.
 
         Returns ``(skills, reason)`` where ``reason`` is one of
         ``"empty"``, ``"prefix"``, ``"regex:<name>"``,
         ``"trigger_strong"``, ``"confident_lead"``,
-        ``"action_fallback"``, ``"small_catalog"``, or ``"ambiguous"``
-        (the only value that triggers an LLM disambiguation call).
+        ``"action_fallback"``, ``"small_catalog"``, ``"carry:routine"``,
+        or ``"ambiguous"`` (the only value that triggers an LLM
+        disambiguation call).
 
         The orchestrator's primary contract: ``"ambiguous"`` is the
         ONLY exit that fires an LLM call. Every other return value is
         a free routing decision.
+
+        ``session_id`` is optional and enables multi-turn routine-intent
+        carry-over: when the user expressed a recurring/scheduled-action
+        intent on a recent prior turn but the brain is still mid-setup
+        (asked a clarifying question and the user's new turn doesn't
+        repeat the time marker), the route still hoists ``feral_routines``
+        so the model creates the real routine instead of inventing a
+        "background task workaround".
         """
         if not text or not text.strip():
             return ([], "empty")
@@ -2894,6 +2928,45 @@ class Orchestrator:
         ):
             if pattern.search(stripped) and sid in self.skills.skills:
                 return ([self.skills.skills[sid]], label)
+
+        # 2.5 Scheduled device/action requests → feral_routines.
+        # A recurring marker ("every day at 5pm", "daily") OR a one-shot
+        # clock time paired with an action ("at 3:01pm follow the line",
+        # "run the cutebot one time today at 3pm") should create a routine,
+        # NOT a one-shot reminder. Genuine "remind me" notifications were
+        # already claimed by ``_R_REMINDER`` above, so they never reach here.
+        # We expose feral_routines FIRST plus the top keyword matches so the
+        # model can still pick the device skill (e.g. cutebot) for the
+        # routine payload.
+        if "feral_routines" in self.skills.skills:
+            recurring_hit = self._R_ROUTINE_RECURRING.search(stripped)
+            oneshot_hit = self._R_ROUTINE_ONESHOT.search(stripped)
+            current_hit = bool(
+                recurring_hit
+                or (oneshot_hit and self._query_implies_action(stripped))
+            )
+            # Multi-turn carry-over: a prior turn in this session already
+            # expressed a routine intent ("every night at 9") and the
+            # brain asked a clarifying question; the user's current
+            # follow-up names the action ("just make it spin") but no
+            # longer repeats the time marker. Without this carry-over the
+            # heuristic would route only to the action skill (cutebot) and
+            # the model would invent a "background task workaround"
+            # because feral_routines would only be reachable via the
+            # always-include fallback (appended last, easily missed).
+            # Guarded by ``_query_implies_action`` so an unrelated chit-
+            # chat turn after a routine ask doesn't sticky-route forever.
+            carry_hit = bool(
+                not current_hit
+                and session_id
+                and self._query_implies_action(stripped)
+                and self._has_pending_routine_intent(session_id)
+            )
+            if current_hit or carry_hit:
+                ranked = self.skills.find_skills_for_query(stripped, top_k=4)
+                result = [self.skills.skills["feral_routines"]]
+                result += [s for s in ranked if s.skill_id != "feral_routines"]
+                return (result[:5], "regex:routine" if current_hit else "carry:routine")
 
         # 3. Catalog ≤ 5 — registry's keyword ranking is always
         # enough; LLM routing would be more expensive than just
@@ -2969,26 +3042,286 @@ class Orchestrator:
                 best += 5.0
         return best
 
-    async def _route_prompt(self, text: str) -> list["SkillManifest"]:
+    # Coreference cue words that mark an utterance as a follow-up referring
+    # back to a recently-discussed subject/device rather than a fresh topic.
+    _COREF_CUES = {
+        "it", "that", "this", "them", "those", "these",
+        "same", "again", "one", "now", "there",
+    }
+    # Bare command verbs that, on their own (or with a coref cue), are
+    # follow-ups whose object is implied by the prior turn.
+    _COREF_BARE_VERBS = {
+        "check", "do", "run", "try", "go", "start", "stop", "continue",
+        "repeat", "retry", "again", "redo", "rerun",
+    }
+    # Function words that carry no concrete object. Used to tell a truly
+    # underspecified follow-up ("check now") from a self-contained command
+    # that merely starts with a bare verb ("check the cutebot").
+    _COREF_STOPWORDS = {
+        "the", "a", "an", "please", "just", "to", "of", "for", "on",
+        "my", "your", "right", "ok", "okay", "then", "too", "also",
+    }
+
+    def _coref_state(self) -> dict[str, str]:
+        """Lazily-initialised per-session "active subject" map.
+
+        Tracks the most recent *concrete* (non-underspecified) user
+        utterance per session so multi-turn follow-ups resolve against
+        the real topic instead of an intermediate pronoun-only turn
+        (e.g. "check the cutebot" → "do it" → "again" all resolve to the
+        cutebot, not to "do it"). Lazy so it survives instances built in
+        tests without touching ``__init__``.
+        """
+        store = getattr(self, "_session_active_subject", None)
+        if store is None:
+            store = {}
+            self._session_active_subject = store
+        return store
+
+    def _coref_query_state(self) -> dict[str, str]:
+        """Per-session cache of the coref-resolved routing text for the
+        current turn, so the same resolution can be reused when building
+        the system prompt (feeds tool selection + prompt, not just
+        routing). Cleared on concrete turns."""
+        store = getattr(self, "_session_coref_query", None)
+        if store is None:
+            store = {}
+            self._session_coref_query = store
+        return store
+
+    def _is_underspecified_followup(self, text: str) -> bool:
+        """True when ``text`` is a short follow-up whose object is implied
+        by a prior turn (carries a coref cue or is a bare command verb).
+
+        Conservative: only short utterances (≤ 5 words) qualify so genuine
+        new topics are never treated as follow-ups.
+        """
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        words = [w.strip(".,!?;:") for w in stripped.lower().split()]
+        words = [w for w in words if w]
+        if not words or len(words) > 5:
+            return False
+        has_cue = any(w in self._COREF_CUES for w in words)
+        bare_cmd = words[0] in self._COREF_BARE_VERBS
+        if not (has_cue or bare_cmd):
+            return False
+        # A bare verb / cue with an explicit object ("check the cutebot")
+        # is self-contained, not a follow-up. Only treat it as
+        # underspecified when it has NO content word (every token is a
+        # cue, a bare verb, or a function word).
+        noncontent = self._COREF_CUES | self._COREF_BARE_VERBS | self._COREF_STOPWORDS
+        has_content_word = any(w not in noncontent for w in words)
+        return not has_content_word
+
+    def _set_active_subject(self, session_id: str, text: str) -> None:
+        """Record a concrete utterance as the session's active subject."""
+        if not session_id:
+            return
+        t = (text or "").strip()
+        if t:
+            self._coref_state()[session_id] = t[:200]
+
+    def _last_referenced_subject(self, session_id: str) -> str:
+        """Return the most recent prior *concrete* subject for this session.
+
+        Resolution order:
+          1. the tracked active subject (set on the last concrete turn —
+             this is what lets the reference survive intervening
+             pronoun-only follow-ups);
+          2. a scan of the orchestrator's conversation history that
+             SKIPS underspecified follow-ups (so "do it again" never
+             resolves to a previous "check it");
+          3. working memory as a last resort.
+        Returns "" when nothing usable is found.
+        """
+        tracked = self._coref_state().get(session_id, "")
+        if tracked:
+            return tracked
+
+        history = self.conversation_history.get(session_id) or []
+        fallback = ""
+        for msg in reversed(history):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, list):
+                content = " ".join(
+                    p.get("text", "")
+                    for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+            text = str(content or "").strip()
+            if not text:
+                continue
+            if self._is_underspecified_followup(text):
+                # Remember the first non-empty one as a weak fallback but
+                # keep looking for a concrete subject behind it.
+                if not fallback:
+                    fallback = text
+                continue
+            return text[:200]
+
+        if self.memory and hasattr(self.memory, "working_get"):
+            try:
+                for entry in reversed(self.memory.working_get(session_id, 10)):
+                    if entry.get("role") == "user":
+                        t = str(entry.get("text") or entry.get("summary") or "").strip()
+                        if t and not self._is_underspecified_followup(t):
+                            return t[:200]
+            except Exception:
+                pass
+        return fallback[:200] if fallback else ""
+
+    def _augment_routing_text_with_context(self, session_id: str, text: str) -> str:
+        """Resolve coreference for routing AND track the active subject.
+
+        - A *concrete* turn (not an underspecified follow-up) becomes the
+          session's active subject and is returned unchanged — so it never
+          degrades normal routing and so it overrides a stale subject when
+          the user genuinely switches topics.
+        - An *underspecified* follow-up ("check now", "do it", "the same
+          one") is rewritten as ``"<text> (re: <subject>)"`` so routing
+          can see the implied device/skill. The resolved text is cached
+          for this turn so the system-prompt builder can reuse it.
+        """
+        stripped = (text or "").strip()
+        if not stripped:
+            return text
+
+        if not self._is_underspecified_followup(stripped):
+            # Concrete turn — define/refresh the active subject and clear
+            # any stale coref resolution from a previous follow-up turn.
+            self._set_active_subject(session_id, stripped)
+            self._coref_query_state().pop(session_id, None)
+            return text
+
+        prior = self._last_referenced_subject(session_id)
+        if not prior or prior.strip().lower() == stripped.lower():
+            self._coref_query_state().pop(session_id, None)
+            return text
+        augmented = f"{stripped} (re: {prior})"
+        if session_id:
+            self._coref_query_state()[session_id] = augmented
+        logger.debug(
+            "coref routing: '%s' resolved against prior subject '%s'",
+            stripped, prior[:60],
+        )
+        return augmented
+
+    def _coref_query_for_prompt(self, session_id: str, fallback: str) -> str:
+        """Return the coref-resolved query for the current turn if routing
+        produced one, else ``fallback``. Lets the system prompt / tool
+        selection see the same resolved subject routing used."""
+        if not session_id:
+            return fallback
+        return self._coref_query_state().get(session_id) or fallback
+
+    # Max user turns scanned for a pending routine intent. Two is enough
+    # to cover "request → clarification → answer" (the typical
+    # demo-blocker flow) without sticky-routing feral_routines forever
+    # after a long-completed setup.
+    _PENDING_ROUTINE_USER_TURN_WINDOW = 2
+
+    def _has_pending_routine_intent(self, session_id: str) -> bool:
+        """True when the user expressed a routine intent on a recent prior
+        turn but no ``feral_routines__create`` tool call has succeeded
+        since. This is what lets the routing heuristic still hoist
+        ``feral_routines`` on a clarification follow-up whose own text
+        carries no recurring marker (e.g. "I just want you to make it
+        spin" after "every night at 9").
+
+        Scans the last :data:`_PENDING_ROUTINE_USER_TURN_WINDOW` user
+        turns and bails early on:
+          * an assistant ``feral_routines__create`` tool call (the
+            routine was already created — intent is satisfied),
+          * an explicit ``tool``-role result for that call.
+        Conservative by design — the caller (``_heuristic_route``) also
+        gates this on ``_query_implies_action`` so a chit-chat turn
+        after a routine ask doesn't sticky-route here.
+        """
+        if not session_id:
+            return False
+        history = self.conversation_history.get(session_id) or []
+        if not history:
+            return False
+        user_turns_scanned = 0
+        for msg in reversed(history):
+            role = msg.get("role")
+            if role == "assistant":
+                tool_calls = msg.get("tool_calls") or []
+                if isinstance(tool_calls, list):
+                    for tc in tool_calls:
+                        if not isinstance(tc, dict):
+                            continue
+                        fn = (tc.get("function") or {}) if isinstance(tc.get("function"), dict) else {}
+                        name = fn.get("name") or tc.get("name") or ""
+                        if name == "feral_routines__create":
+                            # The brain already asked the scheduler to
+                            # create the routine — intent is consumed.
+                            return False
+                continue
+            if role == "tool":
+                if (msg.get("name") or "") == "feral_routines__create":
+                    content = msg.get("content")
+                    if isinstance(content, str) and '"success": true' in content.lower():
+                        return False
+                continue
+            if role != "user":
+                continue
+            user_turns_scanned += 1
+            if user_turns_scanned > self._PENDING_ROUTINE_USER_TURN_WINDOW:
+                break
+            content = msg.get("content")
+            if isinstance(content, list):
+                text_str = " ".join(
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                )
+            else:
+                text_str = str(content or "")
+            text_str = text_str.strip()
+            if not text_str:
+                continue
+            if self._R_ROUTINE_RECURRING.search(text_str):
+                return True
+            if self._R_ROUTINE_ONESHOT.search(text_str) and self._query_implies_action(text_str):
+                return True
+        return False
+
+    async def _route_prompt(self, text: str, session_id: str = "") -> list["SkillManifest"]:
         """Pick which skills the LLM sees this turn.
 
         WS2 — heuristic-first; LLM disambiguation through
         ``LLMProvider.route_call(call_site="routing", tier="cheap")``
         only when the heuristic exit is ``"ambiguous"`` (see
         ``_heuristic_route`` table above).
+
+        Conversational coreference: an ambiguous short follow-up
+        ("check now", "do it", "the same one") is resolved against the
+        last-referenced subject from this session's recent turns BEFORE
+        routing, so "check now" right after "check the cutebot" still
+        routes to the cutebot device skill. This only augments the
+        routing input, never the actual LLM turn (which already sees the
+        full conversation history).
         """
         if not self.skills.skills:
             return []
 
+        if session_id:
+            text = self._augment_routing_text_with_context(session_id, text)
+
         # Pre-WS2 behaviour preserved when the LLM is unavailable:
         # heuristic is the only available choice.
         if not getattr(self.llm, "available", False):
-            results, _reason = self._heuristic_route(text)
+            results, _reason = self._heuristic_route(text, session_id=session_id)
             if not results:
                 results = self._fallback_skills_for_query(text, top_k=5)
             return await self._apply_routing_penalties(results)
 
-        skills, reason = self._heuristic_route(text)
+        skills, reason = self._heuristic_route(text, session_id=session_id)
         if reason != "ambiguous":
             logger.debug(
                 "route_prompt heuristic exit=%s skills=%s",

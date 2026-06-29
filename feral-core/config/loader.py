@@ -271,6 +271,61 @@ def feral_data_home() -> Path:
     return Path.home() / ".feral"
 
 
+def local_timezone_name() -> str:
+    """Best-effort IANA timezone name for the host machine.
+
+    The scheduler and the orchestrator's per-turn time context both need
+    a real IANA key (e.g. ``America/Los_Angeles``) so ``ZoneInfo`` can
+    anchor wall-clock schedules — a bare offset name like ``PDT`` is not
+    enough. Resolution order (first that yields a valid ZoneInfo wins):
+
+      1. ``FERAL_TIMEZONE`` env override (explicit operator control).
+      2. ``TZ`` env var, when it names a valid zone.
+      3. The ``/etc/localtime`` symlink target (macOS + most Linux),
+         parsed back to its IANA key.
+      4. ``datetime.now().astimezone().tzinfo.key`` when the platform
+         exposes a ZoneInfo-backed local tz.
+      5. ``UTC`` as the safe fallback.
+
+    Never raises — every probe is best-effort.
+    """
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZoneInfo
+
+    def _valid(name: str) -> bool:
+        try:
+            _ZoneInfo(name)
+            return True
+        except Exception:
+            return False
+
+    env_tz = os.environ.get("FERAL_TIMEZONE", "").strip()
+    if env_tz and _valid(env_tz):
+        return env_tz
+
+    tz_env = os.environ.get("TZ", "").strip()
+    if tz_env and _valid(tz_env):
+        return tz_env
+
+    try:
+        link = os.readlink("/etc/localtime")
+        if "zoneinfo/" in link:
+            cand = link.split("zoneinfo/", 1)[1].lstrip("/")
+            if cand and _valid(cand):
+                return cand
+    except OSError:
+        pass
+
+    try:
+        key = getattr(_dt.now().astimezone().tzinfo, "key", None)
+        if isinstance(key, str) and key and _valid(key):
+            return key
+    except Exception:
+        pass
+
+    return "UTC"
+
+
 def load_settings() -> dict:
     """Lightweight module-level helper that returns the merged settings
     dict from ``~/.feral/settings.json`` (+ project + env overrides).

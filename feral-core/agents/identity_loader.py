@@ -50,6 +50,48 @@ def clear_memory_snapshots() -> None:
     _memory_snapshots.clear()
 
 
+def current_time_context() -> str:
+    """Concise, always-present 'now' line for the system prompt.
+
+    The brain previously had no reliable sense of the current local time
+    or the user's timezone, so it kept asking and mis-scheduled jobs.
+    This injects the host's local wall-clock + IANA timezone into every
+    turn's preamble. The timezone is DERIVED from the host (see
+    ``config.loader.local_timezone_name``), never hardcoded. Best-effort:
+    any failure falls back to UTC rather than blocking the prompt.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from config.loader import local_timezone_name
+
+    try:
+        tz_name = local_timezone_name()
+        now = datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        from datetime import timezone as _tz
+        tz_name = "UTC"
+        now = datetime.now(_tz.utc)
+
+    # e.g. "Wednesday, June 24 2026, 3:15 PM PDT". ``%-I`` (no zero pad)
+    # is glibc/BSD-only; fall back to the portable ``%I`` elsewhere.
+    try:
+        stamp = now.strftime("%A, %B %d %Y, %-I:%M %p %Z").strip()
+    except ValueError:
+        stamp = now.strftime("%A, %B %d %Y, %I:%M %p %Z").strip()
+    offset = now.strftime("%z")
+    return (
+        "## Current Time\n"
+        f"Current local time: {stamp} (timezone {tz_name}, UTC offset {offset}).\n"
+        "Use THIS as 'now' for scheduling and relative-time reasoning. When the\n"
+        "user gives a clock time without a date (e.g. '3:01 PM', 'at 5pm'),\n"
+        "interpret it in this local timezone — do NOT ask the user for their\n"
+        "timezone, and do NOT assume UTC. When creating routines/reminders, the\n"
+        "scheduler already defaults to this timezone; only pass an explicit\n"
+        "tz_name if the user names a different one.\n"
+    )
+
+
 class IdentityLoader:
     """Loads agent identity files and builds the LLM system prompt."""
 
@@ -232,6 +274,21 @@ class IdentityLoader:
             "   today's-events preview block is present in this prompt — that block\n"
             "   is a hint, not the authoritative answer for 'do I have anything\n"
             "   Friday' type questions.\n"
+            "6. **Scheduled / recurring actions** ('every day at 5pm', 'every night\n"
+            "   at 9', 'every weekday', 'daily', 'every 30 minutes', or a clock time\n"
+            "   like 'at 3:01pm' paired with an action) → call\n"
+            "   `feral_routines__create`. There is NO 'background task' alternative\n"
+            "   and no separate automation engine to defer to. `feral_routines` IS\n"
+            "   FERAL's scheduling primitive: it persists a real cron job that fires\n"
+            "   at the requested time and dispatches the chosen action (skill\n"
+            "   endpoint, free-text prompt, or workflow). NEVER claim FERAL has no\n"
+            "   built-in automation feature and NEVER invent a 'workaround\n"
+            "   background task' — that is a hallucination, not honesty. If the user\n"
+            "   already said the schedule on an earlier turn and the current turn\n"
+            "   only fills in the action ('just make it spin'), combine them and\n"
+            "   call `feral_routines__create` immediately — do not ask the schedule\n"
+            "   question again. For a device action without a confirmer at fire\n"
+            "   time, pass `auto_confirm: true`.\n"
             "\n"
             "When a tool returns nothing or errors, SAY SO honestly with the specific\n"
             "blocker — never paper over it with parametric guessing.\n"
@@ -278,6 +335,13 @@ class IdentityLoader:
             "Do not produce a plan-only answer when the user asked for the result;\n"
             "produce the result.\n"
         )
+
+        # Always-present "now" so the brain never asks the user for their
+        # timezone and never mis-schedules against UTC.
+        try:
+            prompt += f"\n{current_time_context()}"
+        except Exception:
+            logger.debug("current_time_context failed", exc_info=True)
 
         if identity:
             prompt += f"\n## Identity\n{identity}\n"

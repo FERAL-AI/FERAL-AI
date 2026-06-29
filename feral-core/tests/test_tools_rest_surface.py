@@ -121,7 +121,7 @@ async def test_execute_confirm_requires_flag(env):
     assert res["status_code"] == 412
     assert env["confirm"].calls == []
 
-    ok = await tools.execute_tool({"tool_name": "rest_confirm__act", "confirm": True})
+    ok = await tools.execute_tool({"tool_name": "rest_confirm__act", "confirm": True}) 
     assert ok["success"] is True
     assert env["confirm"].calls == [("act", {})]
 

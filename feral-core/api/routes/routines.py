@@ -43,7 +43,15 @@ async def create_routine(body: dict):
     if body.get("prompt"):
         payload["prompt"] = body["prompt"]
     session_id = body.get("session_id", "")
-    job = state.scheduler.create_job(jt, cron_expr, description, payload, session_id)
+    # tz_name defaults to the scheduler's timezone (the host local tz unless
+    # overridden) so chat- and REST-created routines share wall-clock
+    # semantics; callers may still pass an explicit IANA tz_name.
+    tz_name = body.get("tz_name") or None
+    recurring = bool(body.get("recurring", True))
+    job = state.scheduler.create_job(
+        jt, cron_expr, description, payload, session_id,
+        recurring=recurring, tz_name=tz_name,
+    )
     return {"ok": True, "routine": _job_to_dict(job)}
 
 

@@ -162,6 +162,11 @@ class FeralRoutinesSkill(BaseSkill):
         session_id = str(_arg_value(args, "session_id") or "")
         recurring = _to_bool(_arg_value(args, "recurring"), default=True)
         tz_name = _arg_value(args, "tz_name")
+        # When the user explicitly asks the routine to run an action without a
+        # confirmation prompt ("auto confirm it"), stamp the payload so the
+        # cron executor dispatches the device action directly (the cron
+        # surface has no human to approve at fire time).
+        auto_confirm = _to_bool(_arg_value(args, "auto_confirm"), default=False)
 
         payload: Dict[str, Any] = {}
         if skill_id:
@@ -172,6 +177,8 @@ class FeralRoutinesSkill(BaseSkill):
             payload["args"] = call_args
         if prompt:
             payload["prompt"] = str(prompt)
+        if auto_confirm:
+            payload["auto_confirm"] = True
         if workflow_id:
             payload["workflow_id"] = str(workflow_id)
         if flow_id:
@@ -193,10 +200,35 @@ class FeralRoutinesSkill(BaseSkill):
         except Exception as exc:
             return {"success": False, "status_code": 500, "data": None, "error": str(exc)}
 
+        # Honesty principle: verify the routine actually landed by re-reading
+        # it from the store before reporting success. The brain must never
+        # claim a routine was created when it is not in the list.
+        confirmed = None
+        try:
+            confirmed = scheduler.get_job(job.id)
+        except Exception:
+            confirmed = None
+        if confirmed is None:
+            try:
+                confirmed = next((j for j in scheduler.list_jobs(session_id or None) if j.id == job.id), None)
+            except Exception:
+                confirmed = None
+        if confirmed is None:
+            return {
+                "success": False,
+                "status_code": 500,
+                "data": None,
+                "error": (
+                    "Routine creation could not be confirmed — it is not in the "
+                    "routine list after write. Nothing was scheduled; please retry."
+                ),
+                "reason": "verify_after_write_failed",
+            }
+
         return {
             "success": True,
             "status_code": 200,
-            "data": {"routine": _job_to_dict(job)},
+            "data": {"routine": _job_to_dict(confirmed), "verified": True},
             "error": None,
         }
 
