@@ -88,7 +88,10 @@ jobs:
         # Addopts there enables --cov by default, but we still pass the
         # explicit flags here so the CI output is self-documenting and
         # the XML report is emitted for Codecov.
-        run: pytest tests/ -x -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=50
+        # -p no:randomly: deterministic collection order in CI (the
+        # pytest-randomly [dev] plugin is a local order-dep surfacer,
+        # OFF by default in CI — see feral-core/pyproject.toml policy).
+        run: pytest tests/ -p no:randomly -x -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=50
 
       - name: Upload coverage
         if: always()
@@ -136,7 +139,12 @@ jobs:
         # GitHub ubuntu otherwise — see PR #157 investigation). --ignore=
         # tests/perf skips Lane 08 latency + Lane 11 hardware benchmarks
         # (those run on full matrix push-to-main only).
-        run: pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-fail-under=50 --ignore=tests/perf --timeout=60 --timeout-method=thread
+        # -p no:randomly: pytest-randomly is now installed (it's a [dev]
+        # dep so contributors can surface order-dependent bleed locally),
+        # but CI runs in deterministic collection order so a green/red
+        # result is reproducible and bisectable. Per the policy note in
+        # feral-core/pyproject.toml, the plugin is OFF by default in CI.
+        run: pytest tests/ -p no:randomly -v --tb=short --cov=. --cov-report=term-missing --cov-fail-under=50 --ignore=tests/perf --timeout=60 --timeout-method=thread
 
   client-build:
     name: Client — vite build
