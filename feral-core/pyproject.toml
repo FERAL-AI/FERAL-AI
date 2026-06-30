@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "feral-ai"
-version = "2026.6.22"
+version = "2026.6.23"
 description = "FERAL — Open-source AI agent with computer use, GenUI, voice, hardware control, and persistent memory."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -94,8 +94,8 @@ dependencies = [
     # "PyObjC Quartz not importable") that no amount of FERAL setup
     # could clear — the deps simply weren't in the wheel. The PEP-508
     # environment marker keeps Linux/Windows wheels untouched.
-    "pyobjc-framework-ApplicationServices>=10.0,<12.0; sys_platform == 'darwin'",
-    "pyobjc-framework-Quartz>=10.0,<12.0; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices>=10.0,<13.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0,<13.0; sys_platform == 'darwin'",
 ]
 
 # ─────────────────────────────────────────────────────────────
