@@ -64,7 +64,9 @@ class GenericSelfDescribingAdapter:
         self._connected = device is not None
         self._telemetry_running = False
         # Serializes all access to the (typically non-thread-safe) device.
-        self._io_lock = asyncio.Lock()
+        from hardware.async_io_lock import ThreadAsyncIOLock
+
+        self._io_lock = ThreadAsyncIOLock()
 
     # ── manifest (the device tells us what it can do) ────────────────────
 

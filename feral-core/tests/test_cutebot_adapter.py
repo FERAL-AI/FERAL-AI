@@ -179,6 +179,44 @@ class TestCuteBotExecute:
         assert adapter._bot.commands[-1] == ("set_lights", {"r": 255, "g": 0, "b": 255})
 
     @pytest.mark.asyncio
+    async def test_set_lights_survives_foreign_event_loop(self, adapter: CuteBotAdapter):
+        """Regression: asyncio.Lock on the adapter broke voice/REST set_lights.
+
+        Telemetry pins the lock on the brain startup loop; tool calls from
+        the realtime voice loop (or any foreign loop) must still succeed.
+        """
+        owning_loop = asyncio.get_running_loop()
+
+        async def _prime_lock() -> None:
+            await adapter.get_state()
+
+        await _prime_lock()
+
+        foreign_loop = asyncio.new_event_loop()
+        done = threading.Event()
+        result_holder: dict[str, HUPResult] = {}
+
+        def _run_foreign() -> None:
+            asyncio.set_event_loop(foreign_loop)
+            try:
+                result_holder["result"] = foreign_loop.run_until_complete(
+                    adapter.execute(_action("set_lights", r=0, g=255, b=0))
+                )
+            finally:
+                foreign_loop.close()
+                done.set()
+
+        t = threading.Thread(target=_run_foreign, daemon=True)
+        t.start()
+        assert done.wait(timeout=5.0), "foreign-loop set_lights timed out"
+        t.join(timeout=1.0)
+
+        result = result_holder["result"]
+        assert result.status == "success", result.error
+        assert adapter._bot.commands[-1] == ("set_lights", {"r": 0, "g": 255, "b": 0})
+        assert asyncio.get_running_loop() is owning_loop
+
+    @pytest.mark.asyncio
     async def test_get_state_shape(self, adapter: CuteBotAdapter):
         state = await adapter.get_state()
         assert set(state.keys()) == {

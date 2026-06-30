@@ -8,6 +8,7 @@ import logging
 import time
 from typing import Any, Callable, Optional
 
+from hardware.async_io_lock import ThreadAsyncIOLock
 from hardware.protocol import (
     DeviceCapability,
     DeviceManifest,
@@ -71,7 +72,7 @@ class CuteBotAdapter:
         # QtBot/CutebotClient are not thread-safe: the telemetry loop and
         # on-demand execute/read paths each run bot calls in worker threads,
         # and two concurrent readline()s on one Serial corrupt/raise.
-        self._io_lock = asyncio.Lock()
+        self._io_lock = ThreadAsyncIOLock()
         self._last_good_state: Optional[dict[str, Any]] = None
         self._last_good_at = 0.0
         self._offline_streak = 0
