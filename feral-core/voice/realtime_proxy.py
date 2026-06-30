@@ -32,6 +32,7 @@ from uuid import uuid4
 import httpx
 
 from agents.tool_display import tool_feedback_text
+from voice.transcript_filter import should_commit_user_transcript
 
 logger = logging.getLogger("feral.voice.openai")
 
@@ -239,7 +240,19 @@ class RealtimeSession:
                             "type": "server_vad",
                             "threshold": 0.5,
                             "prefix_padding_ms": 300,
-                            "silence_duration_ms": 800,
+                            # Bumped 800→1000ms to reduce VAD splits on
+                            # trailing HFP silence — empirically this
+                            # also lowers (but does not eliminate) the
+                            # rate of whisper-1 hallucinated closers.
+                            # The blocklist gate above is the authoritative
+                            # filter; this just gives the user another
+                            # ~200ms of natural pause before a commit.
+                            # Latency tradeoff: voice replies start
+                            # ~200ms later when the user trails off, but
+                            # interruption / barge-in latency is
+                            # unchanged (driven by speech_started, not
+                            # silence_duration_ms).
+                            "silence_duration_ms": 1000,
                         },
                     },
                     "output": {
@@ -448,6 +461,18 @@ class RealtimeSession:
 
         elif event_type == "conversation.item.input_audio_transcription.completed":
             text = event.get("transcript", "")
+            # Bug 3 (phantom commit gate): drop whisper-1's stock
+            # closers ("Bye-bye.", "Thank you.", "Thanks for watching.",
+            # bare "You.", etc.) BEFORE they reach the proxy callback,
+            # so the orchestrator never sees a phantom user turn. Real
+            # short commands ("yes", "stop", "halt") still go through —
+            # see ``voice/transcript_filter.py`` for the allowlist.
+            if not should_commit_user_transcript(text):
+                logger.info(
+                    "realtime: dropping phantom user transcript session=%s text=%r",
+                    self.session_id, text,
+                )
+                return
             if text and self._on_transcript:
                 await self._on_transcript(self.session_id, f"[user] {text}", True)
 
@@ -879,15 +904,88 @@ class RealtimeProxy:
             try:
                 conv_id = f"voice:{session_id}"
                 role = "user" if text.startswith("[user] ") else "assistant"
-                clean = text[len("[user] "):] if text.startswith("[user] ") else text
+                clean_for_store = text[len("[user] "):] if text.startswith("[user] ") else text
                 if hasattr(self._memory, "conversation_append"):
                     await self._memory.conversation_append(
-                        conv_id, role, clean,
+                        conv_id, role, clean_for_store,
                         source="voice_realtime_openai",
                         title=f"Voice session {session_id[:8]}",
                     )
             except Exception as exc:
                 logger.debug("voice transcript persistence skipped: %s", exc)
+
+        # Bug 1 + Bug 2(B) hook: hand the final USER transcript to the
+        # orchestrator so coref tracking, conversation_history, and
+        # temporal-recall side-channels stay in sync with the text
+        # path — the audio path bypasses ``handle_command_stream`` so
+        # this is the only seam where voice can touch that state.
+        #
+        # Realtime timing caveat: by the time we receive this event,
+        # server VAD has likely already triggered ``response.create`` on
+        # the OpenAI side, so the model is mid-generation when we
+        # inject ``context_hint``. We still attempt the inject for the
+        # CURRENT turn (it's a no-op if the response has already
+        # completed) and the active-subject tracker IS authoritative
+        # for the NEXT turn either way — so the "what about now"
+        # follow-up resolves correctly from turn N+1 onward, and
+        # opportunistically from turn N when the response is still
+        # in flight.
+        if (
+            is_final
+            and text
+            and text.startswith("[user] ")
+            and self._orchestrator is not None
+        ):
+            clean = text[len("[user] "):]
+            try:
+                hook_out = await self._orchestrator.note_voice_user_turn(
+                    session_id, clean, emit_temporal_timeline=True,
+                )
+            except Exception:
+                logger.exception(
+                    "realtime: note_voice_user_turn failed (non-fatal)"
+                )
+                hook_out = {}
+
+            context_hint = (hook_out or {}).get("context_hint") or ""
+            if context_hint:
+                rs = self._sessions.get(session_id)
+                if rs is not None:
+                    try:
+                        await rs.inject_context(context_hint)
+                    except Exception:
+                        logger.debug(
+                            "realtime: inject_context for active-subject hint failed",
+                            exc_info=True,
+                        )
+
+            # Bug 2(B) — voice recall parity: when the utterance is a
+            # memory / temporal-recall query, the system prompt's
+            # ``[Memory Context]`` block was built ONCE at session
+            # start with no query, so episodes from earlier in the
+            # session never surface. Refresh per-turn via
+            # ``build_context_for_llm(session_id, query=clean)`` and
+            # inject the (cheap) result so the model has the relevant
+            # episodes when it generates the next reply.
+            #
+            # Fire-and-forget on a background task — the build is
+            # async-safe but pulls from SQLite + vec index, so we don't
+            # want it on the hot transcript path. Realtime timing:
+            # this lands as a second ``conversation.item.create`` after
+            # the user's transcript is already in flight, so the
+            # *current* turn is best-effort; the NEXT turn is
+            # authoritative. Same caveat as the active-subject hint.
+            try:
+                from agents.orchestrator import Orchestrator as _Orch
+                if _Orch._R_MEMORY.search(clean) and self._memory:
+                    asyncio.create_task(
+                        self._refresh_memory_context(session_id, clean)
+                    )
+            except Exception:
+                logger.debug(
+                    "realtime: per-turn memory refresh schedule failed",
+                    exc_info=True,
+                )
 
         if is_final and text:
             rs = self._sessions.get(session_id)
@@ -956,6 +1054,39 @@ class RealtimeProxy:
                 )
                 await self.stop_session(session_id)
 
+    async def _refresh_memory_context(self, session_id: str, query: str) -> None:
+        """Pull the freshest memory context relevant to ``query`` and
+        inject it into the realtime session as a ``[Memory Context]``
+        system frame. Background-only; never raises.
+
+        Used by the live-voice recall path so a question like "what did
+        my robot do yesterday?" sees the episodes saved by earlier voice
+        tool calls in this session, instead of the stale once-per-session
+        context built when the realtime WS was opened.
+        """
+        rs = self._sessions.get(session_id)
+        if not rs or not self._memory:
+            return
+        try:
+            ctx = await self._memory.build_context_for_llm(
+                session_id, query=query, max_tokens_budget=600,
+            )
+        except Exception:
+            logger.debug(
+                "realtime: build_context_for_llm failed for refresh",
+                exc_info=True,
+            )
+            return
+        if not ctx:
+            return
+        try:
+            await rs.inject_context(f"[Memory Context — query: {query[:80]}]\n{ctx}")
+        except Exception:
+            logger.debug(
+                "realtime: inject_context for memory refresh failed",
+                exc_info=True,
+            )
+
     async def _handle_tool_call(
         self, session_id: str, call_id: str, name: str, arguments: str,
     ) -> str:
@@ -1015,7 +1146,141 @@ class RealtimeProxy:
                 "role": "tool", "tool": name, "result_summary": str(result.get("data", ""))[:200],
             })
 
+        # Bug 2 (A) — voice tool calls used to leave NO episode trail,
+        # so "what did my robot do yesterday?" returned nothing. The
+        # hand-written CuteBot skill doesn't record episodes
+        # (``GenericHardwareSkill._record_episode`` does, but the
+        # router picks the bespoke skill for cutebot first), and this
+        # voice path itself never wrote one. Centralizing the
+        # persistence here means EVERY voice-driven hardware action
+        # gets logged — anchored to the user's live session_id, not
+        # the device's anonymous ``hwdev-*`` fallback — so recall
+        # queries surface it.
+        #
+        # Fire-and-forget so the tool-result round-trip stays on
+        # the latency budget (the orchestrator's
+        # ``_save_episode_async`` does the same thing on the text
+        # path; if it's wired we delegate, otherwise we call
+        # ``episode_save`` directly).
+        try:
+            await self._record_voice_tool_episode(session_id, name, args, result)
+        except Exception:
+            logger.debug(
+                "realtime: voice tool episode persistence skipped",
+                exc_info=True,
+            )
+
         return json.dumps(result.get("data") or {"status": result.get("error", "done")})
+
+    async def _record_voice_tool_episode(
+        self,
+        session_id: str,
+        name: str,
+        args: dict,
+        result: dict,
+    ) -> None:
+        """Persist a voice-driven tool call as an episode anchored to the
+        live session. Mirrors the shape of
+        ``hardware/capability_skill.GenericHardwareSkill._record_episode``
+        and the orchestrator's text-path ``_save_episode_async`` so
+        recall code (timeline_fusion, episode_search) can match either
+        source uniformly.
+
+        Hardware tool calls (cutebot__*, hwdev_*) get
+        ``event_type="actuator"`` (or ``"sensor"`` for telemetry reads)
+        so the timeline / recall surface that already filters on
+        ``event_type`` in {"actuator","sensor"} surfaces them. Non-
+        hardware tools fall through to ``event_type="tool"`` which is
+        still searchable by name/summary.
+        """
+        if not self._memory:
+            return
+        episode_save = getattr(self._memory, "episode_save", None)
+        if episode_save is None:
+            return
+
+        # Classify the tool. Hand-written hardware skills are e.g.
+        # ``cutebot__drive``, ``cutebot__status`` — the second token
+        # ``status``/``read_telemetry``/``get_*`` is a read; anything
+        # else is an actuator. Generic auto-generated hardware skills
+        # use the ``hwdev_<id>__<cap>`` shape; same heuristic applies.
+        parts = name.split("__", 1)
+        skill_id = parts[0] if parts else ""
+        endpoint_id = parts[1] if len(parts) == 2 else ""
+        is_hardware = (
+            skill_id == "cutebot"
+            or skill_id.startswith("hwdev_")
+        )
+        sensor_endpoints = {"status", "read", "read_telemetry", "get_state"}
+        is_sensor = endpoint_id in sensor_endpoints or endpoint_id.startswith("get_")
+        if is_hardware:
+            event_type = "sensor" if is_sensor else "actuator"
+        else:
+            event_type = "tool"
+
+        success = bool(result.get("success"))
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        verified = data.get("verified") if isinstance(data, dict) else None
+        verdict = (
+            "verified" if verified is True
+            else "UNVERIFIED" if verified is False
+            else "ok" if success else "failed"
+        )
+        summary = f"{skill_id}: {endpoint_id} {verdict}"
+
+        # Compact JSON detail — keeps the rows small but preserves the
+        # args + observed/expected fields that the LLM uses to narrate
+        # recall ("yesterday at 10:32 you asked the cutebot to drive").
+        try:
+            detail = json.dumps(
+                {
+                    "category": event_type,
+                    "tool_name": name,
+                    "skill_id": skill_id,
+                    "endpoint": endpoint_id,
+                    "params": dict(args or {}),
+                    "success": success,
+                    "verified": verified,
+                    "observed": data.get("observed") if isinstance(data, dict) else None,
+                    "expected": data.get("expected") if isinstance(data, dict) else None,
+                    "source": "voice_realtime",
+                    "ts": time.time(),
+                },
+                default=str,
+            )[:2000]
+        except Exception:
+            detail = ""
+
+        # Importance heuristic matches GenericHardwareSkill: sensor
+        # reads are routine (0.3), unverified or failed actuators
+        # are interesting (0.7), verified actuators are 0.6.
+        if event_type == "sensor":
+            importance = 0.3
+        elif not success or verified is False:
+            importance = 0.7
+        else:
+            importance = 0.6
+
+        async def _runner() -> None:
+            try:
+                await episode_save(
+                    session_id=session_id,
+                    event_type=event_type,
+                    summary=summary,
+                    detail=detail,
+                    location=skill_id or "voice",
+                    importance=importance,
+                )
+            except Exception:
+                logger.debug(
+                    "realtime: episode_save for voice tool call raised",
+                    exc_info=True,
+                )
+
+        try:
+            asyncio.create_task(_runner())
+        except RuntimeError:
+            await _runner()
 
     async def _handle_speech_started(self, session_id: str):
         """User started speaking — cancel current response and notify client."""

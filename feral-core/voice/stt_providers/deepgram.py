@@ -25,6 +25,7 @@ from voice.stt_providers import (
     TranscriptFragment,
     register_stt_provider,
 )
+from voice.transcript_filter import should_commit_user_transcript
 
 logger = logging.getLogger("feral.voice.stt.deepgram")
 
@@ -136,6 +137,23 @@ class DeepgramSTTProvider(STTProvider):
         is_final = event.get("is_final", False)
         speech_final = event.get("speech_final", False)
         confidence = best.get("confidence", 1.0)
+
+        # Bug 3 (phantom commit gate): Deepgram nova-3 commits the same
+        # stock closers whisper does ("bye-bye", "thank you", "thanks
+        # for watching") on trailing silence — usually with low
+        # confidence + speech_final=True. Apply the shared gate to
+        # FINAL fragments only so partials still stream through for
+        # latency visibility; partial-only phantoms never reach the
+        # LLM either way because the pipeline acts on finals.
+        if is_final and not should_commit_user_transcript(
+            text, confidence=confidence, speech_final=speech_final,
+        ):
+            logger.info(
+                "deepgram: dropped phantom/low-conf final commit "
+                "text=%r conf=%.2f speech_final=%s",
+                text, confidence, speech_final,
+            )
+            return
 
         fragment = TranscriptFragment(
             text=text,
