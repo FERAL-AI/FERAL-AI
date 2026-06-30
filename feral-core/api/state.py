@@ -1369,6 +1369,26 @@ class BrainState:
                 approval_manager=self.approval_manager,
             )
             self.orchestrator.set_llm(_shared_llm)
+            # Live-voice "different event loop" fix: pin the
+            # orchestrator's owning loop to the brain's main loop the
+            # moment the orchestrator is constructed inside ``BrainState.init``,
+            # which itself runs inside the FastAPI startup coroutine on
+            # the uvicorn loop. Without this, the orchestrator would
+            # capture its owning loop lazily on the first
+            # ``_save_episode_async`` call — and if the first call
+            # arrives from the cron daemon thread (which spawns its
+            # own ``asyncio.new_event_loop()`` per job) the binding
+            # would latch onto the wrong loop and every subsequent
+            # voice-driven device action would silently drop its
+            # ``device_action`` episode. See ``Orchestrator._owning_loop``.
+            try:
+                import asyncio as _aio_owning
+                self.orchestrator.set_owning_loop(_aio_owning.get_running_loop())
+            except RuntimeError:
+                # Should be unreachable inside an async ``init``; keep
+                # the guard so a sync re-wire path (tests) doesn't
+                # crash boot.
+                pass
             # RC fix (long-horizon tasks): TaskFlowRuntime was built before
             # the orchestrator existed, so its ``_orchestrator`` was None and
             # every background ``llm.chat`` step failed with "No orchestrator

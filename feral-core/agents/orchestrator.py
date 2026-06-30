@@ -188,6 +188,35 @@ class Orchestrator:
         # and the ``add_done_callback`` discards the entry on
         # completion so the set never grows unbounded.
         self._background_tasks: set[asyncio.Task] = set()
+        # Event-loop affinity (live-voice "different event loop" fix).
+        #
+        # The orchestrator's stateful asyncio primitives — the memory
+        # store's aiosqlite connection pool (an ``asyncio.Queue`` that
+        # binds itself to the loop on first contended ``get``), the
+        # ``_session_locks`` dict, the daemon-result futures — were
+        # all opened on whatever loop first touched them at brain
+        # boot (typically the main FastAPI / uvicorn loop). Any
+        # subsequent caller that lands on a DIFFERENT loop (the
+        # cron/routine path uses ``asyncio.new_event_loop()`` in a
+        # daemon thread; an embed of the brain into another async
+        # runtime could re-host the orchestrator) and then schedules
+        # a fire-and-forget ``episode_save`` via the new device-action
+        # logging hook in :meth:`_emit_tool_result` triggers
+        # ``RuntimeError: <Queue ...> is bound to a different event
+        # loop`` the first time the runner has to wait on the pool —
+        # which is what the user perceives on the realtime voice path
+        # as "the command isn't going through, there's a misalignment
+        # in the event loop". The error is caught in :meth:`_save_episode_async`'s
+        # runner so the tool itself doesn't fail, but the
+        # device_action episode never lands and the brain (correctly)
+        # reports the failure.
+        #
+        # ``_owning_loop`` is captured the first time any background
+        # scheduler sees a running loop. Subsequent foreign-loop
+        # scheduling is routed back to the owning loop via
+        # ``call_soon_threadsafe`` so the runner runs on the loop
+        # that owns the memory pool. See :meth:`_save_episode_async`.
+        self._owning_loop: Optional[asyncio.AbstractEventLoop] = None
         # Per-session execution surface, populated from handle_command's
         # context dict. Threaded into ToolRunner.enforce_safety so
         # surface deny-lists fire on the actual invocation surface
@@ -1450,6 +1479,37 @@ class Orchestrator:
         task.add_done_callback(self._background_tasks.discard)
         return task
 
+    def _capture_owning_loop(self) -> Optional[asyncio.AbstractEventLoop]:
+        """Return — and lazily capture — the loop that owns the
+        orchestrator's shared asyncio primitives.
+
+        Called from any path that schedules a fire-and-forget task
+        whose body touches the memory store / session locks. The
+        first call from inside a running loop pins ``_owning_loop``;
+        every subsequent call returns the pinned value (or ``None``
+        if no loop was ever observed, e.g. a unit test poking the
+        helper from sync code).
+
+        ``set_owning_loop`` lets BrainState seed the loop explicitly
+        at boot when the orchestrator is constructed before any
+        coroutine runs — the lazy path covers everything else.
+        """
+        if self._owning_loop is not None:
+            return self._owning_loop
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        self._owning_loop = loop
+        return loop
+
+    def set_owning_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Pin the loop that owns the orchestrator's shared asyncio
+        primitives. BrainState calls this from its startup coroutine
+        so the binding is set before the first cron / voice tool
+        call arrives from a foreign loop."""
+        self._owning_loop = loop
+
     async def drain_background_tasks(self, timeout: float = 5.0) -> None:
         """Await every tracked fire-and-forget task with a bounded gather.
 
@@ -1562,6 +1622,67 @@ class Orchestrator:
                     )
                 except Exception:
                     pass
+
+        # Event-loop affinity (see ``self._owning_loop`` docstring).
+        #
+        # The runner's first await lands inside ``memory.episode_save``,
+        # which awaits ``self._pool.get()`` — an ``asyncio.Queue`` that
+        # binds itself to the loop on the first contended ``get``.
+        # If we are currently servicing a different loop than the one
+        # that owns the memory pool (the cron/routine path opens a
+        # fresh ``asyncio.new_event_loop()`` per job; the realtime
+        # voice path *can* land here when the orchestrator was wired
+        # before the WS handler's loop took over), naïvely calling
+        # ``asyncio.create_task(_runner())`` schedules the task on the
+        # foreign loop and the first ``get`` raises
+        # ``RuntimeError: <Queue ...> is bound to a different event
+        # loop``. The runner catches it (so the tool succeeds) but the
+        # ``device_action`` episode silently never lands and the
+        # operator sees the "what did my robot do" recall path return
+        # nothing.
+        #
+        # Route the scheduling back to the owning loop instead.
+        try:
+            running_loop: Optional[asyncio.AbstractEventLoop] = (
+                asyncio.get_running_loop()
+            )
+        except RuntimeError:
+            running_loop = None
+
+        owning_loop = self._capture_owning_loop()
+
+        if (
+            owning_loop is not None
+            and running_loop is not None
+            and running_loop is not owning_loop
+        ):
+            # Foreign-loop scheduling. ``call_soon_threadsafe`` is the
+            # one safe hand-off across loops: it wakes the owning
+            # loop, which then creates the task in its own context so
+            # the task — and every primitive it awaits — is bound to
+            # the loop that owns the memory pool. The task can't be
+            # returned to the foreign caller (it doesn't exist yet on
+            # this loop, and asyncio Tasks aren't loop-portable), so
+            # we return ``None`` — the contract for the foreign-loop
+            # branch. Tests that need to await the side-effect must
+            # drive ``drain_background_tasks`` from the owning loop.
+            def _spawn_on_owning() -> None:
+                try:
+                    self._track_background_task(
+                        owning_loop.create_task(_runner())
+                    )
+                except RuntimeError:
+                    # Owning loop is closing. Nothing useful we can do
+                    # from the foreign loop; drop the schedule. The
+                    # tool already succeeded — this is best-effort
+                    # provenance logging, not user-visible behaviour.
+                    pass
+
+            try:
+                owning_loop.call_soon_threadsafe(_spawn_on_owning)
+            except RuntimeError:
+                return None
+            return None
 
         try:
             return self._track_background_task(asyncio.create_task(_runner()))
