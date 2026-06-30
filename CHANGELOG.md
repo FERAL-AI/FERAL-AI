@@ -1,6 +1,6 @@
 # Changelog
 
-<!-- feral-version: 2026.6.21 -->
+<!-- feral-version: 2026.6.22 -->
 
 All notable changes to FERAL are documented here.
 

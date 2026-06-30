@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FERAL AI",
-  "version": "2026.6.21",
+  "version": "2026.6.22",
   "description": "Your AI brain, right in your browser. Chat, voice, page context, and proactive alerts.",
   "permissions": ["activeTab", "storage", "sidePanel", "contextMenus", "notifications"],
   "host_permissions": ["*://*/*"],
