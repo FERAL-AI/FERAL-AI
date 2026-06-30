@@ -1,10 +1,31 @@
 # Changelog
 
-<!-- feral-version: 2026.6.20 -->
+<!-- feral-version: 2026.6.21 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.21] - 2026-06-30 — live-voice: coreference, robot memory, STT phantom-commit gate
+
+Live-voice (OpenAI Realtime + Gemini Live) reliability release. The realtime/Gemini paths previously bypassed the orchestrator hooks the text path enjoys, so follow-ups like _"how about now"_ lost their subject, voice-driven hardware actions never reached episodic memory, and whisper-1 / Deepgram stock-closer hallucinations could spawn phantom user turns. All three are now fixed; the text path retains its existing behavior.
+
+### Added
+- **feat(voice): conversational coreference for live realtime + Gemini.** New `Orchestrator.note_voice_user_turn(...)` hook is called by both realtime proxies on every recognized user turn. It tracks the active subject (e.g. the cutebot) and returns a coref-resolved transcript plus a system-style context hint that the proxies inject into the live LLM session, so follow-ups like _"how about now"_ / _"what about now"_ resolve to the active subject instead of being treated as fresh utterances. The text-path follow-up classifier was fixed for the same phrasings for parity. (`agents/orchestrator.py`, `voice/realtime_proxy.py`, `voice/gemini_realtime.py`)
+- **feat(voice): per-turn memory-context refresh on voice.** The live session refreshes its memory context on each voice user turn, so device-recall phrasing (_"what did my robot/it do yesterday"_) matches the temporal/recall triggers (`_R_TEMPORAL` / `_R_MEMORY`) and the orchestrator's notes-memory routing fires from voice exactly as it does from text. (`agents/orchestrator.py`, `voice/realtime_proxy.py`, `voice/gemini_realtime.py`)
+- **feat(voice): STT phantom-commit gate.** New `voice/transcript_filter.py` drops whisper-1 / Deepgram stock-closer hallucinations (_"bye-bye"_, _"thank you"_, _"thanks for watching"_, …) and low-confidence fragments before they reach the proxy callback, so phantom user turns never reach the orchestrator or generate a reply. Real short commands (_"stop"_, _"halt"_) still pass through. Wired into the chained pipeline and the Deepgram STT provider; server-VAD silence tightened 800 → 1000 ms to reduce premature commits. (`voice/transcript_filter.py` _(new)_, `voice/chained_pipeline.py`, `voice/stt_providers/deepgram.py`, `voice/realtime_proxy.py`)
+- **tests:** `feral-core/tests/test_voice_live_fixes.py` _(new — 16 tests)_ covering all three bugs: coref resolution + system-hint injection (realtime + Gemini), episode persistence anchored to the live session id + temporal/recall trigger matching, and the phantom-commit gate (closer-phrase drop, low-confidence drop, real-command pass-through).
+
+### Fixed
+- **fix(voice): voice-driven hardware tool calls persist episodes to the live session.** They previously wrote to an anonymous `hwdev-*` per-device session, so device-recall (_"what did my robot do yesterday"_) couldn't find them. Episodes are now anchored to the live realtime/Gemini session id. (`agents/orchestrator.py`, `voice/realtime_proxy.py`, `voice/gemini_realtime.py`)
+
+### Changed
+- Server-side VAD silence threshold tightened from 800 → 1000 ms in the realtime proxy to reduce phantom-commit pressure on top of the new transcript filter. (`voice/realtime_proxy.py`)
+
+### Coverage
+- pytest (feral-core): full suite green except the known, pre-existing event-loop pollution flake (`tests/test_episode_save_fire_forget.py::TestHotPathDoesNotBlock::test_stream_path_entry_block_under_slow_callback_budget` Timeout — unrelated to this release's code; PR #190 admin-merged on that flake with the failed-job log captured, same precedent as v2026.6.18 / v2026.6.19 / v2026.6.20). The new suite touched by this release — `tests/test_voice_live_fixes.py` — passes (16 passed locally).
+- vitest (feral-client-v2): 410 passed (CI green).
+
 
 ## [2026.6.20] - 2026-06-29 — demo-blockers: routine time-context, pairing contract, 24 kHz voice STT
 
