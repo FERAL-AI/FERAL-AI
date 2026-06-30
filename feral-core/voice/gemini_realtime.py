@@ -15,6 +15,7 @@ from typing import Optional, Callable
 from uuid import uuid4
 
 from agents.tool_display import tool_feedback_text
+from voice.transcript_filter import should_commit_user_transcript
 
 logger = logging.getLogger("feral.voice.gemini")
 
@@ -533,6 +534,16 @@ class GeminiRealtimeProxy:
 
     async def _handle_input_transcript(self, session_id: str, text: str):
         """Handle user-speech transcription returned by Gemini."""
+        # Bug 3 (phantom commit gate): same blocklist the OpenAI
+        # Realtime path applies — Gemini Live ALSO commits hallucinated
+        # closers on trailing silence (mirrors whisper's training-set
+        # bias). Filter the commit before any downstream side-effect.
+        if not should_commit_user_transcript(text):
+            logger.info(
+                "gemini: dropping phantom user transcript session=%s text=%r",
+                session_id, text,
+            )
+            return
         if text and self._memory:
             self._memory.working_push(session_id, {
                 "role": "user", "text": text[:300], "source": "gemini_realtime_input",
@@ -546,6 +557,51 @@ class GeminiRealtimeProxy:
                     )
             except Exception as exc:
                 logger.debug("gemini voice input persistence skipped: %s", exc)
+
+        # Bug 1 + Bug 2(B) hook (Gemini parity with realtime_proxy):
+        # let the orchestrator track active subject + scan for
+        # temporal-recall queries on the voice path even though
+        # Gemini's audio bypass means ``handle_command_stream`` never
+        # runs. See ``Orchestrator.note_voice_user_turn`` for the
+        # contract; the Gemini equivalent of OpenAI's ``inject_context``
+        # is ``send_text`` with a system-style framing — there's no
+        # explicit ``role=system`` channel in BidiGenerateContent so we
+        # piggyback on ``send_text`` with a square-bracketed header
+        # that the model treats as out-of-band context.
+        if text and self._orchestrator is not None:
+            try:
+                hook_out = await self._orchestrator.note_voice_user_turn(
+                    session_id, text, emit_temporal_timeline=True,
+                )
+            except Exception:
+                logger.exception(
+                    "gemini: note_voice_user_turn failed (non-fatal)"
+                )
+                hook_out = {}
+            context_hint = (hook_out or {}).get("context_hint") or ""
+            if context_hint:
+                gs_for_hint = self._sessions.get(session_id)
+                if gs_for_hint is not None:
+                    try:
+                        await gs_for_hint.send_text(context_hint)
+                    except Exception:
+                        logger.debug(
+                            "gemini: send_text for active-subject hint failed",
+                            exc_info=True,
+                        )
+            # Per-turn memory refresh for recall queries (Bug 2 B parity).
+            try:
+                from agents.orchestrator import Orchestrator as _Orch
+                if _Orch._R_MEMORY.search(text) and self._memory:
+                    asyncio.create_task(
+                        self._refresh_memory_context(session_id, text)
+                    )
+            except Exception:
+                logger.debug(
+                    "gemini: per-turn memory refresh schedule failed",
+                    exc_info=True,
+                )
+
         gs = self._sessions.get(session_id)
         if not gs:
             return
@@ -559,6 +615,34 @@ class GeminiRealtimeProxy:
             await self._send_to_session(session_id, msg)
         elif self._send_to_node:
             await self._send_to_node(gs.node_id, {"type": "transcript", "payload": payload})
+
+    async def _refresh_memory_context(self, session_id: str, query: str) -> None:
+        """Pull the freshest memory context relevant to ``query`` and
+        inject it into the Gemini live session via ``send_text``. Mirror
+        of ``RealtimeProxy._refresh_memory_context``. Background-only,
+        never raises."""
+        gs = self._sessions.get(session_id)
+        if not gs or not self._memory:
+            return
+        try:
+            ctx = await self._memory.build_context_for_llm(
+                session_id, query=query, max_tokens_budget=600,
+            )
+        except Exception:
+            logger.debug(
+                "gemini: build_context_for_llm failed for refresh",
+                exc_info=True,
+            )
+            return
+        if not ctx:
+            return
+        try:
+            await gs.send_text(f"[Memory Context — query: {query[:80]}]\n{ctx}")
+        except Exception:
+            logger.debug(
+                "gemini: send_text for memory refresh failed",
+                exc_info=True,
+            )
 
     async def _handle_tool_call(self, session_id: str, call_id: str, name: str, arguments: str) -> str:
         if not self._skill_executor or not self._skill_registry:
@@ -600,7 +684,110 @@ class GeminiRealtimeProxy:
             except Exception:
                 logger.exception("gemini voice tool_result emit failed")
 
+        # Bug 2 (A) — Gemini parity with RealtimeProxy: persist a
+        # voice-driven tool call as an episode anchored to the live
+        # session so "what did my robot do?" surfaces it. See
+        # ``RealtimeProxy._record_voice_tool_episode`` for the shape.
+        try:
+            await self._record_voice_tool_episode(session_id, name, args, result)
+        except Exception:
+            logger.debug(
+                "gemini: voice tool episode persistence skipped",
+                exc_info=True,
+            )
+
         return json.dumps(result.get("data") or {"status": result.get("error", "done")})
+
+    async def _record_voice_tool_episode(
+        self,
+        session_id: str,
+        name: str,
+        args: dict,
+        result: dict,
+    ) -> None:
+        """Persist a voice-driven tool call as an episode anchored to the
+        live session. Gemini parity of
+        ``RealtimeProxy._record_voice_tool_episode`` — same shape so
+        recall code surfaces voice episodes uniformly regardless of
+        which realtime provider fired the tool.
+        """
+        if not self._memory:
+            return
+        episode_save = getattr(self._memory, "episode_save", None)
+        if episode_save is None:
+            return
+
+        parts = name.split("__", 1)
+        skill_id = parts[0] if parts else ""
+        endpoint_id = parts[1] if len(parts) == 2 else ""
+        is_hardware = (
+            skill_id == "cutebot"
+            or skill_id.startswith("hwdev_")
+        )
+        sensor_endpoints = {"status", "read", "read_telemetry", "get_state"}
+        is_sensor = endpoint_id in sensor_endpoints or endpoint_id.startswith("get_")
+        if is_hardware:
+            event_type = "sensor" if is_sensor else "actuator"
+        else:
+            event_type = "tool"
+
+        success = bool(result.get("success"))
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        verified = data.get("verified") if isinstance(data, dict) else None
+        verdict = (
+            "verified" if verified is True
+            else "UNVERIFIED" if verified is False
+            else "ok" if success else "failed"
+        )
+        summary = f"{skill_id}: {endpoint_id} {verdict}"
+
+        try:
+            detail = json.dumps(
+                {
+                    "category": event_type,
+                    "tool_name": name,
+                    "skill_id": skill_id,
+                    "endpoint": endpoint_id,
+                    "params": dict(args or {}),
+                    "success": success,
+                    "verified": verified,
+                    "observed": data.get("observed") if isinstance(data, dict) else None,
+                    "expected": data.get("expected") if isinstance(data, dict) else None,
+                    "source": "voice_realtime_gemini",
+                    "ts": time.time(),
+                },
+                default=str,
+            )[:2000]
+        except Exception:
+            detail = ""
+
+        if event_type == "sensor":
+            importance = 0.3
+        elif not success or verified is False:
+            importance = 0.7
+        else:
+            importance = 0.6
+
+        async def _runner() -> None:
+            try:
+                await episode_save(
+                    session_id=session_id,
+                    event_type=event_type,
+                    summary=summary,
+                    detail=detail,
+                    location=skill_id or "voice",
+                    importance=importance,
+                )
+            except Exception:
+                logger.debug(
+                    "gemini: episode_save for voice tool call raised",
+                    exc_info=True,
+                )
+
+        try:
+            asyncio.create_task(_runner())
+        except RuntimeError:
+            await _runner()
 
     async def _handle_speech_started(self, session_id: str):
         gs = self._sessions.get(session_id)

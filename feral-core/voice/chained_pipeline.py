@@ -28,6 +28,7 @@ from enum import Enum
 from typing import Any, Awaitable, Callable
 
 from voice.stt_providers import STTProvider, TranscriptFragment
+from voice.transcript_filter import should_commit_user_transcript
 from voice.tts_providers import TTSProvider
 
 logger = logging.getLogger("feral.voice.chained_pipeline")
@@ -143,6 +144,21 @@ class ChainedVoicePipeline:
 
             if not transcript.strip():
                 logger.debug("Empty transcript, returning to idle")
+                await self._set_state(session, VoiceState.IDLE)
+                return
+
+            # Bug 3 (chained pipeline parity): the Deepgram path filters
+            # its own phantoms at the WS-receive boundary, but
+            # buffered providers (Whisper/Groq) commit a single
+            # post-utterance transcript that bypasses Deepgram's per-
+            # fragment gate. Apply the shared blocklist here so the
+            # full pipeline (regardless of STT choice) never feeds the
+            # LLM a stock whisper closer.
+            if not should_commit_user_transcript(transcript):
+                logger.info(
+                    "chained: dropped phantom transcript before LLM: %r",
+                    transcript,
+                )
                 await self._set_state(session, VoiceState.IDLE)
                 return
 

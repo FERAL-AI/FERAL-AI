@@ -2761,6 +2761,12 @@ class Orchestrator:
         r"\b("
         # "what did/have I do/say/ask/save/note/work on/focus on/accomplish"
         r"what\s+(?:did|have)\s+i\s+(?:do|done|say|said|ask|asked|save|saved|note|noted|work(?:ed)?\s+on|focus(?:ed)?\s+on|accomplish(?:ed)?)|"
+        # "what did/has my robot/device/cutebot/it do/done" — device recall
+        # (parallels the "what did I do" clause; covers voice-driven
+        # cutebot episodes that BUG 2 (B) used to miss). Accepts an
+        # optional "my"/"the" determiner so "what did THE device do"
+        # also matches.
+        r"what\s+(?:did|has|have)\s+(?:(?:my|the)\s+)?(?:robot|device|cutebot|drone|roomba|it)\s+(?:do|done|did)|"
         # "summarize/recap/review <window>"
         r"(?:summari[sz]e|recap|review)\s+(?:today|yesterday|tonight|this\s+(?:morning|afternoon|evening|week|day)|my\s+(?:morning|afternoon|evening|night|day|week|month))|"
         # "what happened/went on/was going on" — any temporal context
@@ -2795,6 +2801,11 @@ class Orchestrator:
         r"\b("
         # "what did/have I do/done/say/work on/focus on/accomplish …"
         r"what\s+(?:did|have)\s+i\s+(?:do|done|say|said|ask|asked|save|saved|note|noted|work(?:ed)?\s+on|focus(?:ed)?\s+on|accomplish(?:ed)?)|"
+        # "what did/has my robot/device/cutebot/it do/done" — voice-driven
+        # device recall ("what did my robot do yesterday?"). Parallels the
+        # "what did I do" clause so the fused-timeline side-channel mounts
+        # for device episodes too. Accepts optional "my"/"the" determiner.
+        r"what\s+(?:did|has|have)\s+(?:(?:my|the)\s+)?(?:robot|device|cutebot|drone|roomba|it)\s+(?:do|done|did)|"
         # "summarize/recap/review <window>"
         r"(?:summari[sz]e|recap|review)\s+(?:today|yesterday|tonight|this\s+(?:morning|afternoon|evening|week|day)|my\s+(?:morning|afternoon|evening|night|day|week|month))|"
         # "what happened/went on/was going on" — temporal recall
@@ -3057,10 +3068,33 @@ class Orchestrator:
     # Function words that carry no concrete object. Used to tell a truly
     # underspecified follow-up ("check now") from a self-contained command
     # that merely starts with a bare verb ("check the cutebot").
+    #
+    # Voice fix (live-voice coref hole): "how about now" / "what about now"
+    # were classified as concrete turns because "how"/"what"/"about" were
+    # content words. Treating them as stopwords (in this narrow follow-up
+    # context — not in routing at large) lets the same short-utterance
+    # gate identify them as underspecified follow-ups so the active subject
+    # is reused. We additionally pattern-match "how about" / "what about"
+    # below (see ``_R_FOLLOWUP_ABOUT``) so a multi-word follow-up never
+    # bypasses the word-set gate.
     _COREF_STOPWORDS = {
         "the", "a", "an", "please", "just", "to", "of", "for", "on",
         "my", "your", "right", "ok", "okay", "then", "too", "also",
+        # voice-follow-up steerers ("how about now", "what about now",
+        # "how about", "what about") — see _R_FOLLOWUP_ABOUT.
+        "how", "what", "about",
     }
+
+    # Explicit follow-up phrases that should ALWAYS be treated as
+    # underspecified follow-ups, regardless of the cue/bare-verb word
+    # gate. The realtime path commits "how about now" / "what about now"
+    # as a fresh transcript with the prior subject only implied — without
+    # this regex the (short-utterance, content-word) gate would still
+    # need every token to be in the stopword set, which is brittle.
+    _R_FOLLOWUP_ABOUT = re.compile(
+        r"^(?:how|what)\s+about(?:\s+(?:now|it|that|this|them))?\??$",
+        re.I,
+    )
 
     def _coref_state(self) -> dict[str, str]:
         """Lazily-initialised per-session "active subject" map.
@@ -3099,6 +3133,12 @@ class Orchestrator:
         stripped = (text or "").strip()
         if not stripped:
             return False
+        # Explicit voice-followup phrases — "how about now",
+        # "what about now", "how about", "what about" — short-circuit
+        # the cue/word-set gate so realtime turns with these stems are
+        # always coref-resolved against the active subject.
+        if self._R_FOLLOWUP_ABOUT.match(stripped.rstrip("?!. ")):
+            return True
         words = [w.strip(".,!?;:") for w in stripped.lower().split()]
         words = [w for w in words if w]
         if not words or len(words) > 5:
@@ -3217,6 +3257,133 @@ class Orchestrator:
         if not session_id:
             return fallback
         return self._coref_query_state().get(session_id) or fallback
+
+    # ─────────────────────────────────────────────
+    # Live-voice transcript hook
+    # ─────────────────────────────────────────────
+    #
+    # The ``openai_realtime`` / ``gemini_live`` modes relay raw audio
+    # straight to the upstream provider and BYPASS ``handle_command_stream``
+    # — so coreference tracking, per-turn memory recall, and episode
+    # logging that exist for text chat never run for voice. This entry
+    # point hooks the realtime *transcript* path (not the audio path) so
+    # voice turns at least keep the orchestrator's session state honest:
+    #
+    #   1. The final USER transcript is appended to
+    #      ``conversation_history[session_id]`` so subsequent text/voice
+    #      turns can see the voice utterance in the same history that
+    #      text chat sees.
+    #   2. Concrete turns refresh the active-subject tracker so the NEXT
+    #      voice/text follow-up ("how about now") coref-resolves
+    #      against the right subject.
+    #   3. Underspecified follow-ups are coref-resolved synchronously so
+    #      the caller can inject the resolved context into the realtime
+    #      session before the LLM generates a reply.
+    #
+    # The voice provider has already started generating a response by
+    # the time we see the transcript (server VAD is faster than the
+    # transcription event), so steering the *current* turn is best-
+    # effort. The tracker IS authoritative for the NEXT turn either way.
+    async def note_voice_user_turn(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        emit_temporal_timeline: bool = False,
+    ) -> dict[str, str]:
+        """Hook the live-voice transcript path into orchestrator state.
+
+        Called by ``voice/realtime_proxy.py`` (OpenAI Realtime) and
+        ``voice/gemini_realtime.py`` (Gemini Live) on every *final* user
+        transcript so the orchestrator's coref tracker, conversation
+        history, and (optionally) the temporal-timeline side-channel
+        all see the voice turn even though the audio path bypasses
+        ``handle_command_stream``.
+
+        Returns::
+
+            {
+                "resolved_text": <text>,         # coref-augmented when
+                                                 # the turn was an
+                                                 # underspecified
+                                                 # follow-up; the raw
+                                                 # text otherwise
+                "active_subject": <subject>,    # last concrete subject
+                                                 # for this session
+                "context_hint": <str>,           # ready-to-inject system
+                                                 # message; empty for
+                                                 # concrete turns
+            }
+
+        ``emit_temporal_timeline`` is opt-in: when true and the
+        utterance matches the strict temporal-recall regex the orchestrator
+        dispatches the timeline-fusion side-channel as it would for the
+        text path. The dispatch is fire-and-forget so the voice latency
+        budget is untouched.
+        """
+        out = {"resolved_text": text or "", "active_subject": "", "context_hint": ""}
+        clean = (text or "").strip()
+        if not session_id or not clean:
+            return out
+
+        # 1. Conversation-history append (so follow-up routing / recall
+        # scans the voice utterance too). Cap matches the text path
+        # so a long-running voice session can't unbounded-grow memory.
+        try:
+            hist = self.conversation_history.setdefault(session_id, [])
+            hist.append({"role": "user", "content": clean, "source": "voice_realtime"})
+            if len(hist) > self._conversation_max_per_session:
+                self.conversation_history[session_id] = hist[
+                    -self._conversation_max_per_session:
+                ]
+        except Exception:
+            logger.debug("note_voice_user_turn: history append skipped", exc_info=True)
+
+        # 2 + 3. Coref-resolution + active-subject tracking. Reuses the
+        # exact same helper the text path uses so behaviour stays in
+        # lock-step. ``_augment_routing_text_with_context`` updates
+        # ``_session_active_subject`` for concrete turns and caches a
+        # resolved query for follow-ups.
+        try:
+            resolved = self._augment_routing_text_with_context(session_id, clean)
+        except Exception:
+            logger.debug("note_voice_user_turn: coref resolve failed", exc_info=True)
+            resolved = clean
+        out["resolved_text"] = resolved or clean
+        try:
+            out["active_subject"] = self._last_referenced_subject(session_id) or ""
+        except Exception:
+            out["active_subject"] = ""
+
+        # Build a small system-style context hint the voice proxy can
+        # inject into the live realtime session. Only emitted for
+        # underspecified follow-ups (resolved_text differs from clean)
+        # so concrete turns don't pollute the session with redundant
+        # "active subject is …" frames.
+        if resolved and resolved != clean and out["active_subject"]:
+            out["context_hint"] = (
+                "[Active subject hint]\n"
+                f"The user's current follow-up '{clean}' refers to: "
+                f"{out['active_subject'][:160]}. Interpret short references "
+                f"(it/that/now/again) against this subject."
+            )
+
+        # Fire-and-forget temporal-timeline side-channel for voice recall
+        # parity. Same fan-out the text path uses; the side-channel
+        # itself is fully defensive, so a failure can't break voice.
+        if emit_temporal_timeline:
+            try:
+                if self._R_TEMPORAL.search(clean):
+                    asyncio.create_task(
+                        self._maybe_emit_temporal_timeline(session_id, clean)
+                    )
+            except Exception:
+                logger.debug(
+                    "note_voice_user_turn: temporal timeline schedule failed",
+                    exc_info=True,
+                )
+
+        return out
 
     # Max user turns scanned for a pending routine intent. Two is enough
     # to cover "request → clarification → answer" (the typical
