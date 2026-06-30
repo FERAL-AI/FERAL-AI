@@ -36,6 +36,25 @@ import pytest
 from agents.orchestrator import Orchestrator
 
 
+async def _cancel_all_pending(timeout: float = 2.0) -> None:
+    """Cancel every task other than the current one, then bounded-wait.
+
+    Belt-and-suspenders teardown net for the hot-path tests, which drive
+    the *real* orchestrator stream/command path. ``drain_background_tasks``
+    handles the orchestrator's own tracked tasks, but a turn can leave an
+    incidental loop task (e.g. a provider/transport coroutine the mocks
+    don't fully resolve) that — if left pending — wedges the NEXT test's
+    function-scoped event-loop teardown on Linux runners and surfaces as a
+    60s pytest-timeout kill (macOS reaps it silently). Cancelling here
+    keeps the sequential run deterministic across platforms.
+    """
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.wait(pending, timeout=timeout)
+
+
 def _make_orchestrator(memory: Any) -> Orchestrator:
     reg = MagicMock()
     reg.skills = {}
@@ -245,6 +264,9 @@ class TestHotPathDoesNotBlock:
         # ``asyncio.wait`` on tasks-we-don't-own, no magic sleep.
         await orch.drain_background_tasks(timeout=3.0)
         assert orch._background_tasks == set()
+        # Final cross-platform net: cancel any incidental loop task so the
+        # next test's loop teardown can't wedge (see _cancel_all_pending).
+        await _cancel_all_pending()
 
     @pytest.mark.asyncio
     async def test_stream_path_entry_block_under_slow_callback_budget(
@@ -304,3 +326,4 @@ class TestHotPathDoesNotBlock:
 
         await orch.drain_background_tasks(timeout=3.0)
         assert orch._background_tasks == set()
+        await _cancel_all_pending()

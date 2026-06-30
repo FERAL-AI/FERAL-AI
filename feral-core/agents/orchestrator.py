@@ -1474,10 +1474,31 @@ class Orchestrator:
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
+            # A tracked task overran the drain budget. Do NOT just log and
+            # leave it running — an un-cancelled straggler parked on the
+            # loop wedges the *next* consumer's loop teardown (this is the
+            # ubuntu-only "Task was pending" → 60s pytest-timeout kill that
+            # macOS never reproduced). Cancel the stragglers and await the
+            # cancellation under a short secondary budget so the tracked
+            # set drains via the done-callback discard. Bounded throughout.
+            stragglers = list(self._background_tasks)
             logger.warning(
-                "drain_background_tasks: %d task(s) still pending after %.1fs",
-                len(self._background_tasks), timeout,
+                "drain_background_tasks: %d task(s) still pending after "
+                "%.1fs — cancelling", len(stragglers), timeout,
             )
+            for task in stragglers:
+                task.cancel()
+            if stragglers:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*stragglers, return_exceptions=True),
+                        timeout=1.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "drain_background_tasks: %d task(s) ignored "
+                        "cancellation", len(self._background_tasks),
+                    )
 
     # ─────────────────────────────────────────────
     # Fire-and-forget episode save (Lane 08 WS1)
