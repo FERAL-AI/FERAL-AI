@@ -295,10 +295,10 @@ async def test_reminders_create_reports_failure_when_not_persisted(monkeypatch):
 # ── P4: one-shot auto-confirm routine drives the device ────────────
 
 
-def test_oneshot_autoconfirm_routine_dispatches_follow_line():
+def test_oneshot_autoconfirm_routine_dispatches_follow_line(monkeypatch):
     import api.server as server
     from skills.base import BaseSkill
-    from skills.impl import register_instance
+    from skills.impl import SKILL_IMPLEMENTATIONS
     from skills.registry import SkillRegistry
 
     class _RecordingSkill(BaseSkill):
@@ -333,7 +333,12 @@ def test_oneshot_autoconfirm_routine_dispatches_follow_line():
             ],
         )
     )
-    register_instance("cutebot", cutebot)
+    # CI-flake fix: use ``monkeypatch.setitem`` instead of the legacy
+    # ``register_instance`` call. The autouse ``restore_skill_implementations``
+    # fixture in ``tests/conftest.py`` already snapshots the registry,
+    # but mutating it through ``monkeypatch`` makes the per-test scope
+    # explicit and survives an accidental fixture re-order.
+    monkeypatch.setitem(SKILL_IMPLEMENTATIONS, "cutebot", cutebot)
 
     saved = {k: getattr(server.state, k, None) for k in ("cron_service", "skill_registry", "orchestrator", "cron_cost_guard", "taskflows")}
     server.state.cron_service = cron

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -30,6 +31,33 @@ from fastapi.testclient import TestClient
 
 
 pytestmark = pytest.mark.no_auto_feral_home
+
+
+def _wait_for(predicate, *, timeout: float = 2.0, interval: float = 0.01) -> None:
+    """Poll ``predicate()`` until it's truthy or the budget runs out.
+
+    The ``/api/config/credentials`` handler schedules
+    ``channel_manager.start_channel`` via ``asyncio.create_task`` on
+    the TestClient's portal loop. The task runs in the portal thread
+    *after* the response returns to the test thread, so the assertion
+    needs to give the loop a chance to schedule it.
+
+    Replaces the previous ``asyncio.run(_drain())`` pattern, which
+    span up a fresh event loop on the test thread that had no
+    relation to the portal loop the task was actually scheduled on
+    (and emitted a ``DeprecationWarning`` from
+    ``asyncio.get_event_loop()`` on Python 3.12+).
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(interval)
+    # One last check so the caller still sees the post-deadline state.
+    if not predicate():
+        raise AssertionError(
+            f"predicate {predicate!r} did not become true within {timeout}s"
+        )
 
 
 CHANNEL_TOKEN_KEYS = (
@@ -62,13 +90,22 @@ def client(tmp_path, monkeypatch):
     for key in CHANNEL_TOKEN_KEYS:
         monkeypatch.delenv(key, raising=False)
     mock = _build_state_mock(tmp_path)
+    # ``api.server`` did ``from api.state import state`` at module load,
+    # so the routes mounted on ``app`` reach the BrainState through the
+    # module-local binding ``api.server.state`` — patching ONLY
+    # ``api.state.state`` leaves ``api.server.state`` pointing at the
+    # original singleton and the route handlers happily reach through
+    # to the real BrainState. Patch the binding actually used by the
+    # importer (and the same applies to every routes/* module that did
+    # ``from api.state import state``).
+    from api import server as api_server  # ensure module imported first
     with (
         patch("api.state.state", mock),
+        patch.object(api_server, "state", mock),
         patch("api.routes.config.state", mock),
         patch("api.routes.channels.state", mock),
     ):
-        from api.server import app
-        yield TestClient(app, raise_server_exceptions=False), mock
+        yield TestClient(api_server.app, raise_server_exceptions=False), mock
 
 
 def test_save_credentials_does_not_export_channel_tokens_to_env(client, monkeypatch):
@@ -124,11 +161,7 @@ def test_save_credentials_starts_channel_using_request_payload(client, monkeypat
     )
     assert r.status_code == 200
 
-    async def _drain():
-        for _ in range(10):
-            await asyncio.sleep(0)
-
-    asyncio.run(_drain())
+    _wait_for(lambda: mock.channel_manager.start_channel.call_count >= 1)
 
     mock.channel_manager.start_channel.assert_called()
     args, kwargs = mock.channel_manager.start_channel.call_args
@@ -153,6 +186,13 @@ def test_two_sequential_writes_do_not_leak_first_value_via_env(client, monkeypat
     assert r2.status_code == 200
     assert os.environ.get("FERAL_TELEGRAM_BOT_TOKEN") is None
 
+    _wait_for(
+        lambda: any(
+            (call.args[1] or {}).get("bot_token") == "second"
+            for call in mock.channel_manager.start_channel.call_args_list
+        )
+    )
+
     last_call = mock.channel_manager.start_channel.call_args_list[-1]
     _ch_type, ch_config = last_call.args[0], last_call.args[1]
     assert ch_config["bot_token"] == "second"
@@ -174,11 +214,12 @@ def test_save_credentials_starts_whatsapp_using_request_payload(client, monkeypa
     )
     assert r.status_code == 200
 
-    async def _drain():
-        for _ in range(10):
-            await asyncio.sleep(0)
-
-    asyncio.run(_drain())
+    _wait_for(
+        lambda: any(
+            call.args[0] == "whatsapp"
+            for call in mock.channel_manager.start_channel.call_args_list
+        )
+    )
 
     calls = [call for call in mock.channel_manager.start_channel.call_args_list if call.args[0] == "whatsapp"]
     assert calls, "whatsapp channel should restart after credential save"

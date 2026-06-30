@@ -70,7 +70,14 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[all,dev]"
+        # ``--constraint requirements.lock`` pins every direct + transitive
+        # dep to the committed resolution. Without it a clean resolve on
+        # the runner is allowed to pull a freshly-published next-major
+        # that breaks the import surface (we already got bitten by
+        # fastapi==0.137 — see the inline comment in
+        # feral-core/pyproject.toml). Regenerate via
+        # scripts/regen_lockfile.sh.
+        run: pip install --constraint requirements.lock -e ".[all,dev]"
 
       - name: Audit Python dependencies
         run: pip install pip-audit && pip-audit --strict 2>&1 || echo "::warning::pip-audit found vulnerabilities"
@@ -81,7 +88,10 @@ jobs:
         # Addopts there enables --cov by default, but we still pass the
         # explicit flags here so the CI output is self-documenting and
         # the XML report is emitted for Codecov.
-        run: pytest tests/ -x -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=50
+        # -p no:randomly: deterministic collection order in CI (the
+        # pytest-randomly [dev] plugin is a local order-dep surfacer,
+        # OFF by default in CI — see feral-core/pyproject.toml policy).
+        run: pytest tests/ -p no:randomly -x -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=50
 
       - name: Upload coverage
         if: always()
@@ -114,7 +124,11 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[all,dev]" pytest-timeout
+        # See note on the matrix job: --constraint requirements.lock
+        # makes the resolver reproducible. ``pytest-timeout`` is now a
+        # base dev dep (feral-core/pyproject.toml), so it no longer
+        # needs to be listed on the command line.
+        run: pip install --constraint requirements.lock -e ".[all,dev]"
 
       - name: Run tests with coverage (50% threshold)
         # --timeout=60 per-test ceiling: surfaces any single hanging test as a
@@ -125,7 +139,12 @@ jobs:
         # GitHub ubuntu otherwise — see PR #157 investigation). --ignore=
         # tests/perf skips Lane 08 latency + Lane 11 hardware benchmarks
         # (those run on full matrix push-to-main only).
-        run: pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-fail-under=50 --ignore=tests/perf --timeout=60 --timeout-method=thread
+        # -p no:randomly: pytest-randomly is now installed (it's a [dev]
+        # dep so contributors can surface order-dependent bleed locally),
+        # but CI runs in deterministic collection order so a green/red
+        # result is reproducible and bisectable. Per the policy note in
+        # feral-core/pyproject.toml, the plugin is OFF by default in CI.
+        run: pytest tests/ -p no:randomly -v --tb=short --cov=. --cov-report=term-missing --cov-fail-under=50 --ignore=tests/perf --timeout=60 --timeout-method=thread
 
   client-build:
     name: Client — vite build

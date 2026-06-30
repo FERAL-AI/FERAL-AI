@@ -20,7 +20,7 @@ from agents.persona_loader import WorkflowPackManifest, WorkflowStep
 from models.skill_manifest import BrandProfile, SkillEndpoint, SkillManifest
 from skills.base import BaseSkill
 from skills.registry import SkillRegistry
-from skills.impl import register_instance
+from skills.impl import SKILL_IMPLEMENTATIONS
 
 import api.server as server
 
@@ -53,7 +53,7 @@ def _manifest(skill_id, endpoint_id, safety_tier):
 
 
 @pytest.fixture
-def env():
+def env(monkeypatch):
     fd, cron_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     fd, flow_path = tempfile.mkstemp(suffix=".db")
@@ -67,8 +67,11 @@ def env():
     danger = _RecordingSkill("danger_skill")
     reg.register(_manifest("safe_skill", "ping", "safe"))
     reg.register(_manifest("danger_skill", "wipe", "deny"))
-    register_instance("safe_skill", safe)
-    register_instance("danger_skill", danger)
+    # CI-flake fix: monkeypatch the global registry so these test
+    # fakes are restored at teardown (otherwise they leak into
+    # ``test_manifest_dispatch_contract`` and similar).
+    monkeypatch.setitem(SKILL_IMPLEMENTATIONS, "safe_skill", safe)
+    monkeypatch.setitem(SKILL_IMPLEMENTATIONS, "danger_skill", danger)
 
     pack = WorkflowPackManifest(
         workflow_id="demo_pack",

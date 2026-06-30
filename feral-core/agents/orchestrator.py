@@ -177,6 +177,17 @@ class Orchestrator:
         # ordering. Different sessions still run fully parallel — only
         # turns on the same session are serialised.
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # CI-flake fix: track every fire-and-forget background task the
+        # orchestrator schedules (episode_save, temporal-timeline
+        # side-channel, etc.) so tests can drain them deterministically
+        # via ``drain_background_tasks()`` instead of scanning
+        # ``asyncio.all_tasks()`` with a magic timeout. Production
+        # behaviour is unchanged — callers still do not await these
+        # tasks; the set just holds a strong reference until the task
+        # finishes (preventing the GC-warning on never-awaited tasks)
+        # and the ``add_done_callback`` discards the entry on
+        # completion so the set never grows unbounded.
+        self._background_tasks: set[asyncio.Task] = set()
         # Per-session execution surface, populated from handle_command's
         # context dict. Threaded into ToolRunner.enforce_safety so
         # surface deny-lists fire on the actual invocation surface
@@ -968,6 +979,100 @@ class Orchestrator:
         except Exception:
             pass
 
+    # ─────────────────────────────────────────────
+    # Device/robot action provenance (timeline gap fix)
+    # ─────────────────────────────────────────────
+    #
+    # Physical-device skills (CuteBot, robot arm, smart-home) executed
+    # the requested action but recorded NOTHING durable — only the
+    # user's command *text* was saved as a ``user_command`` episode in
+    # ``handle_command``. So when the user later asked "what did my
+    # robot do today?", ``notes_memory__fused_timeline`` had no entry
+    # describing the action itself and the brain truthfully answered
+    # "I don't have logs of that" even though the robot had been busy.
+    #
+    # Writing the *result* of every device action here — the one
+    # tool-result hook that all three dispatch paths funnel through
+    # (approved-pending, non-stream, stream) — closes that gap without
+    # scattering ``episode_save`` calls across every adapter.
+    _DEVICE_ACTION_SKILLS: tuple[str, ...] = (
+        "cutebot",
+        "robot_ext",
+        "robot_arm",
+        "smart_home",
+        "smart_home_hue",
+    )
+    # Read-only endpoints are telemetry/status polls, not actions —
+    # logging them would bury the real activity ("drove", "set lights")
+    # under a stream of status noise.
+    _DEVICE_READ_ENDPOINTS: frozenset = frozenset({
+        "status",
+        "read_telemetry",
+        "telemetry",
+        "get_entities",
+        "get_entity_state",
+        "get_state",
+        "read",
+        "list",
+    })
+    _DEVICE_LABELS: dict = {
+        "cutebot": "CuteBot",
+        "robot_ext": "Robot arm",
+        "robot_arm": "Robot arm",
+        "smart_home": "Smart home",
+        "smart_home_hue": "Smart home",
+    }
+
+    def _device_action_episode_fields(
+        self, tool_call: dict, result_data: dict
+    ) -> Optional[tuple]:
+        """Return ``(summary, detail)`` for a successful, loggable device
+        action — or ``None`` when the tool call is not a physical action
+        worth a timeline entry (wrong skill, read-only endpoint, or the
+        action did not succeed)."""
+        name = str(tool_call.get("name") or "")
+        if "__" not in name:
+            return None
+        skill_id, _, endpoint = name.partition("__")
+        if skill_id not in self._DEVICE_ACTION_SKILLS:
+            return None
+        if endpoint in self._DEVICE_READ_ENDPOINTS:
+            return None
+        if not isinstance(result_data, dict):
+            return None
+        success = bool(
+            result_data.get("success")
+            or result_data.get("status") == "command_sent_to_hardware_daemon"
+        )
+        if not success:
+            return None
+
+        args = tool_call.get("args")
+        args = args if isinstance(args, dict) else {}
+        data = result_data.get("data")
+        data = data if isinstance(data, dict) else {}
+        verified = data.get("verified")
+
+        device_label = self._DEVICE_LABELS.get(skill_id, skill_id)
+        arg_bits = ", ".join(
+            f"{k}={v}"
+            for k, v in list(args.items())[:4]
+            if not isinstance(v, (dict, list))
+        )
+        summary = f"{device_label}: {endpoint}"
+        if arg_bits:
+            summary += f" ({arg_bits})"
+        if verified is True:
+            summary += " — verified"
+        elif verified is False:
+            summary += " — UNVERIFIED"
+
+        detail = json.dumps(
+            {"tool": name, "args": args, "verified": verified},
+            default=str,
+        )[:2000]
+        return summary, detail
+
     async def _emit_tool_result(
         self,
         session_id: str,
@@ -1005,6 +1110,26 @@ class Orchestrator:
             await self._maybe_emit_timeline_frame(session_id, tool_call, result_data)
         except Exception:
             logger.debug("timeline frame emit failed (non-fatal)", exc_info=True)
+
+        # Persist what the robot actually DID (not just what the user
+        # asked) so temporal recall can answer "what did my robot do
+        # today?" with grounded entries. Fire-and-forget; never blocks
+        # or raises on the tool-result hot path.
+        try:
+            fields = self._device_action_episode_fields(tool_call, result_data)
+            if fields is not None:
+                summary, detail = fields
+                self._save_episode_async(
+                    session_id=session_id,
+                    event_type="device_action",
+                    summary=summary,
+                    detail=detail,
+                    importance=0.6,
+                )
+        except Exception:
+            logger.debug(
+                "device-action episode log failed (non-fatal)", exc_info=True
+            )
 
     async def _maybe_emit_timeline_frame(
         self,
@@ -1285,6 +1410,97 @@ class Orchestrator:
         return lock
 
     # ─────────────────────────────────────────────
+    # Background-task bookkeeping (CI flake fix)
+    # ─────────────────────────────────────────────
+    #
+    # Bare ``asyncio.create_task(...)`` calls had two failure modes
+    # under pytest-asyncio:
+    #
+    #   1. The reference is dropped immediately, so the event loop may
+    #      garbage-collect the task before it runs to completion — a
+    #      "Task was destroyed but it is pending!" warning that flips
+    #      to a test failure under ``--strict``.
+    #   2. Tests that wanted to "make sure the side-effect happened"
+    #      resorted to scanning ``asyncio.all_tasks()`` with a magic
+    #      sleep, which deadlocks when a task is parked on an
+    #      ``aiosqlite`` worker-thread (``Thread.join()`` can't be
+    #      interrupted, defeating ``--timeout-method=thread`` and
+    #      surfacing as the 60s fast-lane timeout that's been
+    #      admin-merged for four releases).
+    #
+    # ``_track_background_task`` stores a strong reference in
+    # ``self._background_tasks`` and attaches a discard callback so
+    # the set self-cleans. ``drain_background_tasks`` lets tests await
+    # everything the orchestrator scheduled this turn with a bounded
+    # ``gather`` instead of an unsafe ``all_tasks`` sweep.
+
+    def _track_background_task(
+        self, task: Optional[asyncio.Task]
+    ) -> Optional[asyncio.Task]:
+        """Register a fire-and-forget task for deterministic teardown.
+
+        Returns the task unchanged so call-sites stay one-liner:
+        ``self._track_background_task(asyncio.create_task(...))``.
+        ``None`` passes through (caller already handled the no-loop
+        / no-memory branch).
+        """
+        if task is None:
+            return None
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    async def drain_background_tasks(self, timeout: float = 5.0) -> None:
+        """Await every tracked fire-and-forget task with a bounded gather.
+
+        Tests should call this in teardown (or wherever they need to
+        prove the background side-effect landed) instead of scanning
+        ``asyncio.all_tasks()``. Exceptions inside background tasks
+        have already been logged + metric-counted by their respective
+        runners; ``return_exceptions=True`` keeps the drain from
+        masking those with a re-raise.
+
+        Production callers do NOT need this — the tracked set already
+        cleans itself via the ``add_done_callback`` discard. The
+        timeout exists as a safety net for a pathological hang and is
+        deliberately conservative.
+        """
+        pending = list(self._background_tasks)
+        if not pending:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*pending, return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            # A tracked task overran the drain budget. Do NOT just log and
+            # leave it running — an un-cancelled straggler parked on the
+            # loop wedges the *next* consumer's loop teardown (this is the
+            # ubuntu-only "Task was pending" → 60s pytest-timeout kill that
+            # macOS never reproduced). Cancel the stragglers and await the
+            # cancellation under a short secondary budget so the tracked
+            # set drains via the done-callback discard. Bounded throughout.
+            stragglers = list(self._background_tasks)
+            logger.warning(
+                "drain_background_tasks: %d task(s) still pending after "
+                "%.1fs — cancelling", len(stragglers), timeout,
+            )
+            for task in stragglers:
+                task.cancel()
+            if stragglers:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*stragglers, return_exceptions=True),
+                        timeout=1.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "drain_background_tasks: %d task(s) ignored "
+                        "cancellation", len(self._background_tasks),
+                    )
+
+    # ─────────────────────────────────────────────
     # Fire-and-forget episode save (Lane 08 WS1)
     # ─────────────────────────────────────────────
     #
@@ -1348,7 +1564,7 @@ class Orchestrator:
                     pass
 
         try:
-            return asyncio.create_task(_runner())
+            return self._track_background_task(asyncio.create_task(_runner()))
         except RuntimeError:
             # No running loop — extremely rare on the orchestrator
             # hot path, but defensively swallow so the caller can
@@ -1710,9 +1926,9 @@ class Orchestrator:
         forced_tool = self._force_tool_for_query(text, tools)
         if not forced_tool:
             try:
-                asyncio.create_task(
+                self._track_background_task(asyncio.create_task(
                     self._maybe_emit_temporal_timeline(session_id, text)
-                )
+                ))
             except Exception:
                 logger.debug(
                     "temporal-timeline side-channel: task schedule failed",
@@ -2203,9 +2419,9 @@ class Orchestrator:
         forced_tool = self._force_tool_for_query(text, tools)
         if not forced_tool:
             try:
-                asyncio.create_task(
+                self._track_background_task(asyncio.create_task(
                     self._maybe_emit_temporal_timeline(session_id, text)
-                )
+                ))
             except Exception:
                 logger.debug(
                     "temporal-timeline side-channel: task schedule failed",
@@ -3374,9 +3590,9 @@ class Orchestrator:
         if emit_temporal_timeline:
             try:
                 if self._R_TEMPORAL.search(clean):
-                    asyncio.create_task(
+                    self._track_background_task(asyncio.create_task(
                         self._maybe_emit_temporal_timeline(session_id, clean)
-                    )
+                    ))
             except Exception:
                 logger.debug(
                     "note_voice_user_turn: temporal timeline schedule failed",
@@ -3735,7 +3951,7 @@ class Orchestrator:
             return None
 
         msg_id = str(uuid4())[:8]
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_frame_futures[msg_id] = future
 
         request_msg = FeralMessage(

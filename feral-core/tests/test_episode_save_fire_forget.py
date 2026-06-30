@@ -36,18 +36,17 @@ import pytest
 from agents.orchestrator import Orchestrator
 
 
-async def _drain_pending_tasks(timeout: float = 2.0) -> None:
-    """Cancel every task other than the current one, then wait — bounded.
+async def _cancel_all_pending(timeout: float = 2.0) -> None:
+    """Cancel every task other than the current one, then bounded-wait.
 
-    The hot-path tests synthesize a fire-and-forget ``episode_save`` task
-    and exercise the *real* orchestrator stream/command path, which may in
-    turn schedule its own background tasks. Teardown must signal
-    cancellation to all of them, but it must NEVER block forever: a
-    background task that swallows ``CancelledError`` (or is parked on a
-    ``to_thread`` offload that can't be interrupted) would otherwise wedge
-    the entire sequential test run and surface as a 60s pytest-timeout
-    kill. We give tasks a brief window to exit cleanly, then move on and
-    let the loop teardown reap any stragglers.
+    Belt-and-suspenders teardown net for the hot-path tests, which drive
+    the *real* orchestrator stream/command path. ``drain_background_tasks``
+    handles the orchestrator's own tracked tasks, but a turn can leave an
+    incidental loop task (e.g. a provider/transport coroutine the mocks
+    don't fully resolve) that — if left pending — wedges the NEXT test's
+    function-scoped event-loop teardown on Linux runners and surfaces as a
+    60s pytest-timeout kill (macOS reaps it silently). Cancelling here
+    keeps the sequential run deterministic across platforms.
     """
     pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
     for task in pending:
@@ -168,6 +167,31 @@ class TestSaveEpisodeAsync:
         # orchestrator must not synthesize one.
         assert "importance" not in memory.episode_save.await_args.kwargs
 
+    @pytest.mark.asyncio
+    async def test_drain_background_tasks_awaits_tracked_set(self) -> None:
+        """CI-flake fix contract: every fire-and-forget save lands in
+        ``self._background_tasks`` and the set self-cleans on
+        completion. ``drain_background_tasks`` awaits the tracked
+        gather instead of an ``all_tasks()`` sweep so tests can prove
+        side-effects landed without a magic sleep.
+        """
+        memory = MagicMock()
+        memory.episode_save = AsyncMock(return_value={})
+        orch = _make_orchestrator(memory=memory)
+
+        task = orch._save_episode_async(
+            session_id="sess-track",
+            event_type="user_command",
+            summary="hi",
+        )
+        assert task is not None
+        # Task is enrolled in the tracked set immediately.
+        assert task in orch._background_tasks
+        # Drain awaits it; the done-callback then discards it.
+        await orch.drain_background_tasks(timeout=2.0)
+        memory.episode_save.assert_awaited_once()
+        assert orch._background_tasks == set()
+
 
 class TestHotPathDoesNotBlock:
     """The user-visible regression: hot path return time must NOT
@@ -233,10 +257,16 @@ class TestHotPathDoesNotBlock:
         await asyncio.sleep(0)
         memory.episode_save.assert_called_once()
 
-        # Cancel the pending save task so pytest doesn't warn about
-        # destroyed-while-pending tasks. The fire-and-forget contract
-        # is that callers don't track these; tests can.
-        await _drain_pending_tasks()
+        # Deterministically await every fire-and-forget task the
+        # orchestrator scheduled this turn (episode_save +
+        # temporal-timeline side-channel). Bounded gather via the
+        # orchestrator's tracked set — no ``all_tasks()`` sweep, no
+        # ``asyncio.wait`` on tasks-we-don't-own, no magic sleep.
+        await orch.drain_background_tasks(timeout=3.0)
+        assert orch._background_tasks == set()
+        # Final cross-platform net: cancel any incidental loop task so the
+        # next test's loop teardown can't wedge (see _cancel_all_pending).
+        await _cancel_all_pending()
 
     @pytest.mark.asyncio
     async def test_stream_path_entry_block_under_slow_callback_budget(
@@ -294,4 +324,6 @@ class TestHotPathDoesNotBlock:
         await asyncio.sleep(0)
         memory.episode_save.assert_called_once()
 
-        await _drain_pending_tasks()
+        await orch.drain_background_tasks(timeout=3.0)
+        assert orch._background_tasks == set()
+        await _cancel_all_pending()
