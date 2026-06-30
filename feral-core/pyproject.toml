@@ -35,48 +35,48 @@ dependencies = [
     # Without this, /api/uploads and /api/wiki/ingest/pdf raise a
     # ``RuntimeError: Form data requires "python-multipart"`` at first
     # use — surfacing the dependency at install time avoids that.
-    "python-multipart>=0.0.9",
-    "uvicorn[standard]>=0.30.0",
-    "pydantic>=2.9.0",
-    "websockets>=13.0",
-    "httpx>=0.27.0",
-    "pyyaml>=6.0",
-    "rich>=13.0.0",
+    "python-multipart>=0.0.9,<1.0",
+    "uvicorn[standard]>=0.30.0,<1.0",
+    "pydantic>=2.9.0,<3.0",
+    "websockets>=13.0,<16.0",
+    "httpx>=0.27.0,<1.0",
+    "pyyaml>=6.0,<7.0",
+    "rich>=13.0.0,<15.0",
     # CLI UX overhaul: arrow-key selects + masked-character paste in
     # `feral setup`, `feral install`, `feral key`, and `feral access`.
     # InquirerPy wraps prompt_toolkit to render selects, fuzzy
     # filters, and a per-character masked secret input. Falls back to
     # plain `input` / `getpass` when stdin/stdout is non-interactive.
-    "InquirerPy>=0.3.4",
-    "duckduckgo-search>=6.0.0",
-    "html2text>=2024.2.26",
-    "pymupdf",
-    "numpy>=1.24.0",
-    "Pillow>=10.0.0",
-    "aiohttp>=3.9.0",
-    "openai>=1.50.0",
-    "PyJWT>=2.8.0",
-    "prometheus-client>=0.20",
+    "InquirerPy>=0.3.4,<1.0",
+    "duckduckgo-search>=6.0.0,<9.0",
+    "html2text>=2024.2.26,<2026.0",
+    "pymupdf>=1.24.0,<2.0",
+    "numpy>=1.24.0,<3.0",
+    "Pillow>=10.0.0,<12.0",
+    "aiohttp>=3.9.0,<4.0",
+    "openai>=1.50.0,<2.0",
+    "PyJWT>=2.8.0,<3.0",
+    "prometheus-client>=0.20,<1.0",
     # Brain-local CuteBot USB serial (micro:bit @ 115200).
-    "pyserial>=3.5",
+    "pyserial>=3.5,<4.0",
     # v2026.5.33 Option C: MemoryStore is async-native. aiosqlite is the
     # async wrapper around the stdlib sqlite3 driver — it runs SQLite
     # calls on a single dedicated thread per connection so the asyncio
     # event loop never blocks on a query. Every FERAL memory path
     # (FastAPI handlers, orchestrator, sync scheduler, decay sweeper)
     # awaits MemoryStore directly without thread-pool bridging.
-    "aiosqlite>=0.20.0",
-    "cryptography>=41.0.0",
-    "pynacl>=1.5.0",
+    "aiosqlite>=0.20.0,<1.0",
+    "cryptography>=41.0.0,<47.0",
+    "pynacl>=1.5.0,<2.0",
     # W9: vault encryption-at-rest. The OS keychain is now a hard
     # requirement of the security path — `keyring` reads/writes the
     # 32-byte ChaCha20-Poly1305 master key from
     # macOS Keychain / Linux Secret Service / Windows Credential Manager.
-    "keyring>=25.0",
+    "keyring>=25.0,<26.0",
     # W9: pairing-token hashing. argon2id is the primary KDF; bcrypt is
     # the documented fallback when argon2-cffi is genuinely unavailable
     # on a given platform (see security/device_pairing.py).
-    "argon2-cffi>=23.1",
+    "argon2-cffi>=23.1,<24.0",
     # v2026.5.36 — QR pairing is a first-run feature, NOT an opt-in
     # extra. Pre-v2026.5.36 the `qrcode[pil]` package only landed via
     # the `[discovery]` or `[all]` extras, which meant a bare
@@ -85,7 +85,7 @@ dependencies = [
     # with a 500 because `/api/devices/pair/qr` couldn't import
     # `qrcode`. Promoting the dep into the base block is the only
     # honest fix: anyone who installs FERAL can immediately pair.
-    "qrcode[pil]>=7.4",
+    "qrcode[pil]>=7.4,<9.0",
     # v2026.5.36 — Honest macOS TCC probes (Accessibility / Screen
     # Recording) require Apple's ApplicationServices + Quartz APIs,
     # which are exposed to Python only via PyObjC. Pre-v2026.5.36 the
@@ -94,93 +94,119 @@ dependencies = [
     # "PyObjC Quartz not importable") that no amount of FERAL setup
     # could clear — the deps simply weren't in the wheel. The PEP-508
     # environment marker keeps Linux/Windows wheels untouched.
-    "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
-    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices>=10.0,<12.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0,<12.0; sys_platform == 'darwin'",
 ]
+
+# ─────────────────────────────────────────────────────────────
+# Dependency-ceiling policy (CI-flake fix, P1)
+# ─────────────────────────────────────────────────────────────
+#
+# Every runtime dep above carries an upper bound of the form
+# ``<next-major`` (or ``<next-minor`` for pre-1.0 libraries where the
+# minor IS the breaking-change line). The bounds exist because the
+# release wheel-smoke (``scripts/release_wheel_smoke.py``) is a bare
+# ``pip install`` with no constraints — a clean resolve a week from
+# now is allowed to pull a freshly-published next-major that breaks
+# the import surface. We have ALREADY been bitten by that pattern
+# (``fastapi==0.137`` regressed ``include_router``, see comment above
+# its bound), and the cost of an emergency hotfix is two admin-merges
+# and a CHANGELOG entry per occurrence. Conservative upper bounds keep
+# security patches reachable (every patch-/minor-bump still installs)
+# while making major-bump breakage a deliberate, audited operation —
+# someone has to raise the ceiling on purpose.
+#
+# Reproducibility: the committed ``requirements.lock`` (alongside this
+# file, generated by ``scripts/regen_lockfile.sh``) pins every
+# transitive dep too. The CI install (.github/workflows/ci.yml) and
+# the release wheel-smoke (publish.yml) feed it via
+# ``--constraint requirements.lock`` so the wheel is built and tested
+# against an exact resolution. Re-pin by re-running the regen script
+# whenever a runtime dep is updated.
 
 [project.optional-dependencies]
 llm = [
-    "openai>=1.50.0",
-    "exa-py>=1.0.0",
-    "numpy>=1.24.0",
-    "Pillow>=10.0.0",
-    "aiohttp>=3.9.0",
+    "openai>=1.50.0,<2.0",
+    "exa-py>=1.0.0,<3.0",
+    "numpy>=1.24.0,<3.0",
+    "Pillow>=10.0.0,<12.0",
+    "aiohttp>=3.9.0,<4.0",
 ]
 vec = [
-    "sqlite-vec>=0.1.1",
+    "sqlite-vec>=0.1.1,<1.0",
 ]
 memory-chroma = [
-    "chromadb>=0.5.0",
+    "chromadb>=0.5.0,<2.0",
 ]
 memory-qdrant = [
-    "qdrant-client>=1.11.0",
+    "qdrant-client>=1.11.0,<2.0",
 ]
 groq = [
-    "openai>=1.50.0",
+    "openai>=1.50.0,<2.0",
 ]
 local = [
-    "llama-cpp-python>=0.3.0",
+    "llama-cpp-python>=0.3.0,<1.0",
 ]
 wasm = [
-    "wasmtime>=22.0.0",
+    "wasmtime>=22.0.0,<50.0",
 ]
 sync = [
-    "zeroconf>=0.131.0",
+    "zeroconf>=0.131.0,<1.0",
 ]
 discovery = [
-    "zeroconf>=0.131.0",
+    "zeroconf>=0.131.0,<1.0",
     # NOTE: `qrcode[pil]` moved to base `dependencies` in v2026.5.36 —
     # QR pairing is first-run, not opt-in. Kept this extra alive (it's
     # widely referenced in docs / install guides) so `pip install
     # feral-ai[discovery]` still resolves; pip handles the duplicate.
 ]
 stt = [
-    "faster-whisper>=1.0.0",
+    "faster-whisper>=1.0.0,<2.0",
 ]
 tts = [
-    "piper-tts>=1.2.0",
+    "piper-tts>=1.2.0,<2.0",
 ]
 wake = [
-    "openwakeword>=0.6.0",
-    "onnxruntime>=1.16.0",
+    "openwakeword>=0.6.0,<1.0",
+    "onnxruntime>=1.16.0,<2.0",
 ]
 desktop = [
-    "pyautogui>=0.9.54",
+    "pyautogui>=0.9.54,<1.0",
 ]
 browser = [
-    "playwright>=1.40.0",
+    "playwright>=1.40.0,<2.0",
 ]
 mqtt = [
-    "aiomqtt>=2.0.0",
+    "aiomqtt>=2.0.0,<3.0",
 ]
 observability = [
-    "opentelemetry-sdk>=1.20",
-    "opentelemetry-exporter-otlp-proto-http>=1.20",
+    "opentelemetry-sdk>=1.20,<2.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20,<2.0",
     # W13: Prometheus exposition for /metrics + named registry. The
     # OTel SDK pulls prometheus_client transitively in some installs but
     # not all wheels, so it's pinned here so `pip install feral-ai[observability]`
     # always provides the registry the dashboard + alerts target.
-    "prometheus-client>=0.20",
+    "prometheus-client>=0.20,<1.0",
 ]
 # Track A provider + channel extras (added in 2026.4.18).
 # Together, OpenRouter, Fireworks all speak OpenAI-compatible JSON — the
 # `openai` client is already a core dep, but the extras here are named so
 # users discover them via `pip install feral-ai[together]` etc.
 together = [
-    "openai>=1.50.0",
+    "openai>=1.50.0,<2.0",
 ]
 openrouter = [
-    "openai>=1.50.0",
+    "openai>=1.50.0,<2.0",
 ]
 fireworks = [
-    "openai>=1.50.0",
+    "openai>=1.50.0,<2.0",
 ]
 bedrock = [
-    "boto3>=1.34.0",
+    "boto3>=1.34.0,<2.0",
 ]
 # Channel extras are opt-in because each ships heavyweight deps.
 channel-matrix = [
-    "matrix-nio>=0.24.0",
+    "matrix-nio>=0.24.0,<1.0",
 ]
 channel-signal = [
     # Pick ONE backend — signald (JSON socket, cleaner) vs signal-cli-rest-api
@@ -188,45 +214,58 @@ channel-signal = [
     # follow-up PR lands; no hard dep is added here yet.
 ]
 channel-voice-call = [
-    "twilio>=9.0.0",
+    "twilio>=9.0.0,<11.0",
 ]
 channel-feishu = [
-    "lark-oapi>=1.4.0",
+    "lark-oapi>=1.4.0,<2.0",
 ]
 channel-zalo = [
     # Zalo OA REST API is plain HTTPS over httpx (already a core dep).
 ]
 all = [
-    "openai>=1.50.0",
-    "exa-py>=1.0.0",
-    "numpy>=1.24.0",
-    "pyautogui>=0.9.54",
-    "Pillow>=10.0.0",
-    "aiohttp>=3.9.0",
-    "playwright>=1.40.0",
-    "wasmtime>=22.0.0",
-    "zeroconf>=0.131.0",
+    "openai>=1.50.0,<2.0",
+    "exa-py>=1.0.0,<3.0",
+    "numpy>=1.24.0,<3.0",
+    "pyautogui>=0.9.54,<1.0",
+    "Pillow>=10.0.0,<12.0",
+    "aiohttp>=3.9.0,<4.0",
+    "playwright>=1.40.0,<2.0",
+    "wasmtime>=22.0.0,<50.0",
+    "zeroconf>=0.131.0,<1.0",
     # v2026.5.36 — `qrcode[pil]` moved to base `dependencies` (first-run
     # feature). Left out of `[all]` to avoid pip resolver duplicate
     # work; the base wheel always carries it.
-    "onnxruntime>=1.16.0",
-    "rich>=13.0.0",
-    "faster-whisper>=1.0.0",
-    "piper-tts>=1.2.0",
-    "aiomqtt>=2.0.0",
-    "opentelemetry-sdk>=1.20",
-    "opentelemetry-exporter-otlp-proto-http>=1.20",
-    "prometheus-client>=0.20",
+    "onnxruntime>=1.16.0,<2.0",
+    "rich>=13.0.0,<15.0",
+    "faster-whisper>=1.0.0,<2.0",
+    "piper-tts>=1.2.0,<2.0",
+    "aiomqtt>=2.0.0,<3.0",
+    "opentelemetry-sdk>=1.20,<2.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20,<2.0",
+    "prometheus-client>=0.20,<1.0",
 ]
 dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.24.0",
-    "pytest-cov>=5.0.0",
+    "pytest>=8.0.0,<9.0",
+    "pytest-asyncio>=0.24.0,<1.0",
+    "pytest-cov>=5.0.0,<7.0",
+    # CI-flake fix: pin the test-timeout plugin into dev so a clean
+    # ``pip install -e .[dev]`` reproduces the CI "fast lane" gating
+    # (--timeout=60 surfaces single-test hangs as a named failure
+    # instead of swallowing the whole job into a 30-min CI cancel).
+    "pytest-timeout>=2.3.0,<3.0",
+    # CI-flake fix: pytest-randomly is a dev tool that exposes order-
+    # dependent test bleed by shuffling collection per run. Adding it
+    # to dev (off by default in CI to keep diagnostics reproducible;
+    # devs run with the plugin to surface order-deps locally) is the
+    # difference between catching the next manifest-dispatch-style
+    # leak before merge vs four releases of admin-merging the same
+    # 60s timeout.
+    "pytest-randomly>=3.15.0,<5.0",
     # W9: freezegun is used by tests/test_pairing_hash.py
     # (TestVerify.test_freezegun_simulates_ttl_passage and
     # TestVerify.test_successful_verify_slides_window) to drive the
     # sliding-TTL window deterministically without sleeping.
-    "freezegun>=1.4.0",
+    "freezegun>=1.4.0,<2.0",
 ]
 
 # Optional demo data + simulators. NEVER installed by default —
@@ -235,7 +274,7 @@ dev = [
 # `pip install feral-demo-data`) to get scripted scenarios + the
 # wristband / smart-home simulators for development.
 demo = [
-    "feral-demo-data>=0.1.0",
+    "feral-demo-data>=0.1.0,<1.0",
 ]
 
 [project.scripts]
@@ -305,6 +344,17 @@ exclude = ["tests*"]
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+# CI-flake fix: pin the pytest-asyncio event-loop scope to ``function``
+# explicitly. The default in pytest-asyncio 0.24 is already
+# ``function`` for ``asyncio_mode=auto``, but the project was relying
+# on the implicit default — a future minor-version bump (e.g. 0.25
+# considered changing the default to ``session``) would silently
+# share the loop across tests and reintroduce the cross-test bleed
+# we just fixed in ``test_episode_save_fire_forget.py`` /
+# ``test_a13_env_isolation.py``. Pin both scopes here so the
+# behaviour is explicit and tracked in this file.
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
 markers = [
     "no_auto_feral_home: skip the autouse FERAL_HOME isolation fixture",
     "chaos: federated-sync chaos / recovery tests (W11, roadmap §3.3 #1)",    "soak: long-duration soak test (gated behind --runsoak); see W12 / roadmap §3.4 #3-4",

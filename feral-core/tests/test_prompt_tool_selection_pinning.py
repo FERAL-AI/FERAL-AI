@@ -209,9 +209,25 @@ def test_health_worker_grounds_in_actual_data() -> None:
 
 
 def test_home_worker_lists_devices_before_acting() -> None:
+    """The home-worker prompt must reference the registered home skill
+    and instruct the LLM to list devices before acting on one.
+
+    Historical note: this test originally asserted ``"home_assistant"``
+    appears in ``HOME_PROMPT``. The home skill was refactored to
+    ``smart_home_hue`` (see ``agents/workers/home_worker.py`` —
+    ``_HOME_SKILLS = ("smart_home_hue", ...)`` — and the
+    fan-out prompt mentions ``smart_home_hue.get_entities`` /
+    ``smart_home_hue.get_entity_state``). The assertion is now updated
+    to the real skill id so the test stops being the "pre-existing
+    failure to ignore" that's been blocking release workers for
+    months.
+    """
     from agents.workers.home_worker import HOME_PROMPT
 
-    assert "home_assistant" in HOME_PROMPT
+    assert "smart_home_hue" in HOME_PROMPT, (
+        "Home worker prompt must reference the registered smart_home_hue "
+        "skill (the home_assistant skill was retired)."
+    )
     lowered = HOME_PROMPT.lower()
     assert "list" in lowered and ("devices" in lowered or "device" in lowered), (
         "Home worker must list devices before claiming one exists."

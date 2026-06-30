@@ -28,6 +28,14 @@ This script is intentionally dependency-light: it relies only on what
 the installed wheel already brings in (``fastapi``'s ``TestClient``
 ships via ``httpx`` in the wheel's runtime deps).
 
+The caller is expected to ``pip install`` the wheel with
+``--constraint feral-core/requirements.lock`` so the resolution is
+reproducible (see ``.github/workflows/publish.yml``). Without that
+constraint, the smoke is at the mercy of whatever transitive PyPI
+publishes between CI green and the build job — see the
+``fastapi==0.137`` regression that surfaced as the v2026.6.13 admin
+merge.
+
 Usage::
 
     python scripts/release_wheel_smoke.py [--expected-version X.Y.Z]

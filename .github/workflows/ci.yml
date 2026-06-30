@@ -70,7 +70,14 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[all,dev]"
+        # ``--constraint requirements.lock`` pins every direct + transitive
+        # dep to the committed resolution. Without it a clean resolve on
+        # the runner is allowed to pull a freshly-published next-major
+        # that breaks the import surface (we already got bitten by
+        # fastapi==0.137 — see the inline comment in
+        # feral-core/pyproject.toml). Regenerate via
+        # scripts/regen_lockfile.sh.
+        run: pip install --constraint requirements.lock -e ".[all,dev]"
 
       - name: Audit Python dependencies
         run: pip install pip-audit && pip-audit --strict 2>&1 || echo "::warning::pip-audit found vulnerabilities"
@@ -114,7 +121,11 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[all,dev]" pytest-timeout
+        # See note on the matrix job: --constraint requirements.lock
+        # makes the resolver reproducible. ``pytest-timeout`` is now a
+        # base dev dep (feral-core/pyproject.toml), so it no longer
+        # needs to be listed on the command line.
+        run: pip install --constraint requirements.lock -e ".[all,dev]"
 
       - name: Run tests with coverage (50% threshold)
         # --timeout=60 per-test ceiling: surfaces any single hanging test as a

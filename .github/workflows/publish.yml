@@ -106,7 +106,16 @@ jobs:
           python -m venv .wheel-smoke
           source .wheel-smoke/bin/activate
           python -m pip install --upgrade pip
-          python -m pip install feral-core/dist/*.whl
+          # ``--constraint feral-core/requirements.lock`` pins every
+          # transitive dep to the resolution we tested in CI, so the
+          # pre-publish smoke is guaranteed to match the runtime graph
+          # the broader test suite ran against. Without this, a
+          # freshly-published next-major can sneak in between CI green
+          # and the build job's smoke (see the fastapi==0.137
+          # regression we admin-merged for four releases).
+          python -m pip install \
+            --constraint feral-core/requirements.lock \
+            feral-core/dist/*.whl
           python scripts/release_wheel_smoke.py \
             --expected-version "${{ steps.meta.outputs.version }}"
 
@@ -215,7 +224,11 @@ jobs:
             ls -la .stage-dist >&2
             exit 1
           fi
+          # The constraint file lives in the checked-out tree (not in
+          # the downloaded wheel); use it to pin transitive deps the
+          # same way the in-tree pre-publish smoke does.
           python -m pip install \
+            --constraint feral-core/requirements.lock \
             --index-url https://pypi.org/simple/ \
             "${wheels[0]}"
 

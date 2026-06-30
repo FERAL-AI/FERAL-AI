@@ -386,11 +386,27 @@ async def test_fallback_mode_whisper_preserves_legacy(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_missing_chained_keys_falls_back_to_whisper(monkeypatch):
-    """fallback_mode=chained but DEEPGRAM_API_KEY unset → whisper degrade
-    (so the user still hears something instead of total silence)."""
+    """fallback_mode=chained but EVERY chained provider key (including
+    the OpenAI auto-fallback chain at voice/router.py:680-689) is
+    unset → legacy whisper degrade (so the user still hears something
+    instead of total silence).
+
+    Earlier revisions of this test left ``OPENAI_API_KEY`` set, which
+    silently routed through the new auto-fallback ("if the configured
+    chained providers have no keys but an OpenAI key IS present, use
+    OpenAI Whisper STT + OpenAI TTS"). That made the test stale —
+    the chained morph happily proceeded instead of degrading. The
+    test now asserts the real contract: when there is NO viable
+    chained path at all, the router emits the legacy ``whisper``
+    voice_status frame.
+    """
     monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
-    monkeypatch.setenv("ELEVENLABS_API_KEY", "el-test")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    # IMPORTANT: also unset OPENAI_API_KEY so the auto-fallback at
+    # voice/router.py:680 doesn't promote this to a working chained
+    # session via openai_whisper+openai. The vault preflight uses the
+    # same env-var resolver, so unsetting here is enough.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     sender, captured = _capture_sender()
     router = VoiceRouter(audio_pipeline=MagicMock(), send_to_session=sender)
     router.set_chained_pipeline(MagicMock())

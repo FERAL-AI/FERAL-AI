@@ -87,6 +87,42 @@ def isolate_feral_home(request, tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def restore_skill_implementations():
+    """Snapshot + restore ``skills.impl.SKILL_IMPLEMENTATIONS`` around tests.
+
+    CI-flake fix (P1, test order-independence): several test modules
+    register fake skill instances via ``register_instance("cutebot", ...)``
+    (or similar) without restoring the global registry afterwards. The
+    next module that runs — for example ``tests/test_manifest_dispatch_contract.py``
+    — then sees a leaked stub instance whose ``execute()`` has no
+    dispatch dict and the contract validator reports "no backend
+    dispatch table found", failing all ``cutebot-*`` parametrised
+    cases (and only those — alone the test passes, which is exactly
+    what made this an order-dependent flake).
+    
+    Snapshotting the dict reference and restoring its contents after
+    every test makes the registry behave like any other shared
+    fixture state. Tests that intentionally mutate the registry now
+    do so within a per-test sandbox.
+    """
+    try:
+        from skills.impl import SKILL_IMPLEMENTATIONS
+    except Exception:
+        # Importing ``skills.impl`` triggers auto-loading of every
+        # backing implementation. If that fails (unrelated to this
+        # fixture's concern), skip the snapshot — we're not in a test
+        # that touches the registry.
+        yield
+        return
+    snapshot = dict(SKILL_IMPLEMENTATIONS)
+    try:
+        yield
+    finally:
+        SKILL_IMPLEMENTATIONS.clear()
+        SKILL_IMPLEMENTATIONS.update(snapshot)
+
+
+@pytest.fixture(autouse=True)
 def isolate_os_keychain(monkeypatch):
     """Replace the OS keychain with a per-test in-memory dict.
 

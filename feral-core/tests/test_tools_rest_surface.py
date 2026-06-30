@@ -7,7 +7,7 @@ from models.skill_manifest import BrandProfile, SkillEndpoint, SkillManifest
 from skills.base import BaseSkill
 from skills.registry import SkillRegistry
 from skills.executor import SkillExecutor
-from skills.impl import register_instance
+from skills.impl import SKILL_IMPLEMENTATIONS
 
 import api.routes.tools as tools
 
@@ -40,7 +40,7 @@ def _manifest(skill_id, endpoint_id, safety_tier):
 
 
 @pytest.fixture
-def env():
+def env(monkeypatch):
     reg = SkillRegistry()
     reg.load_builtin_skills()
     safe = _RecordingSkill("rest_safe")
@@ -49,9 +49,13 @@ def env():
     reg.register(_manifest("rest_safe", "ping", "safe"))
     reg.register(_manifest("rest_danger", "wipe", "deny"))
     reg.register(_manifest("rest_confirm", "act", "confirm"))
-    register_instance("rest_safe", safe)
-    register_instance("rest_danger", danger)
-    register_instance("rest_confirm", confirm)
+    # CI-flake fix: monkeypatch the global skill registry so the
+    # fakes are restored at teardown automatically — no leak into
+    # ``test_manifest_dispatch_contract`` or any other suite ordered
+    # after this one.
+    monkeypatch.setitem(SKILL_IMPLEMENTATIONS, "rest_safe", safe)
+    monkeypatch.setitem(SKILL_IMPLEMENTATIONS, "rest_danger", danger)
+    monkeypatch.setitem(SKILL_IMPLEMENTATIONS, "rest_confirm", confirm)
 
     saved_reg = getattr(tools.state, "skill_registry", None)
     saved_orch = getattr(tools.state, "orchestrator", None)
