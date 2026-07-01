@@ -468,7 +468,11 @@ class GeminiRealtimeProxy:
 
     def _get_tools(self) -> list[dict]:
         if self._skill_registry:
-            return self._skill_registry.get_all_tools()
+            from agents.tool_list import OPENAI_TOOL_HARD_LIMIT, cap_tools_with_pins
+            return cap_tools_with_pins(
+                self._skill_registry.get_all_tools(),
+                max_tools=OPENAI_TOOL_HARD_LIMIT,
+            )
         return []
 
     @staticmethod

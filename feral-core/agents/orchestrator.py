@@ -3662,6 +3662,7 @@ class Orchestrator:
         text: str,
         *,
         emit_temporal_timeline: bool = False,
+        tools: Optional[list[dict]] = None,
     ) -> dict[str, str]:
         """Hook the live-voice transcript path into orchestrator state.
 
@@ -3685,6 +3686,11 @@ class Orchestrator:
                 "context_hint": <str>,           # ready-to-inject system
                                                  # message; empty for
                                                  # concrete turns
+                "forced_tool": <str>,            # when schedule/temporal
+                                                 # intent matches and the
+                                                 # tool is in ``tools``,
+                                                 # the name to force on
+                                                 # the voice realtime path
             }
 
         ``emit_temporal_timeline`` is opt-in: when true and the
@@ -3693,7 +3699,12 @@ class Orchestrator:
         text path. The dispatch is fire-and-forget so the voice latency
         budget is untouched.
         """
-        out = {"resolved_text": text or "", "active_subject": "", "context_hint": ""}
+        out = {
+            "resolved_text": text or "",
+            "active_subject": "",
+            "context_hint": "",
+            "forced_tool": "",
+        }
         clean = (text or "").strip()
         if not session_id or not clean:
             return out
@@ -3754,6 +3765,24 @@ class Orchestrator:
                     "note_voice_user_turn: temporal timeline schedule failed",
                     exc_info=True,
                 )
+
+        # Voice parity with the text orchestrator path: when the utterance
+        # is a scheduled device/action request, force feral_routines__create
+        # (or fused_timeline on temporal recall) so the realtime model
+        # cannot fall through to reminders/workflows/notes.
+        try:
+            query_for_force = out.get("resolved_text") or clean
+            if isinstance(tools, list) and tools:
+                forced = self._force_tool_for_query(
+                    query_for_force, tools, session_id,
+                )
+                if forced:
+                    out["forced_tool"] = forced
+        except Exception:
+            logger.debug(
+                "note_voice_user_turn: forced_tool resolution failed",
+                exc_info=True,
+            )
 
         return out
 

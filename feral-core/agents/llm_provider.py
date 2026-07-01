@@ -64,6 +64,7 @@ from agents.multimodal_blocks import (
     to_provider_tool_choice,
     tool_list_contains,
 )
+from agents.tool_list import OPENAI_TOOL_HARD_LIMIT, cap_tools_with_pins
 
 # Cost-budget surface (Wave 1 Lane 04). The runtime gate lives on the
 # public chat entry points — see ``_budget_check`` /
@@ -80,6 +81,11 @@ logger = logging.getLogger("feral.llm")
 def _gemini_api_key() -> str | None:
     """Return Gemini API key. Prefers GEMINI_API_KEY; falls back to GOOGLE_API_KEY."""
     return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+
+def _cap_openai_chat_tools(clean_tools: list[dict]) -> list[dict]:
+    """Pin essential automation tools before applying OpenAI's 128 cap."""
+    return cap_tools_with_pins(clean_tools, max_tools=OPENAI_TOOL_HARD_LIMIT)
 
 
 def _resolve_tool_choice(
@@ -784,14 +790,8 @@ class LLMProvider:
             # Prioritise retention of the first tools since skills
             # register alphabetically and the brain-auto skills that
             # appear first are the hottest path.
-            if self.provider in ("openai",) and len(clean_tools) > 128:
-                logger.warning(
-                    "openai chat/completions: truncating tools from %d → 128 "
-                    "(OpenAI hard limit). Later-registered tools will not be "
-                    "exposed to the model for this call.",
-                    len(clean_tools),
-                )
-                clean_tools = clean_tools[:128]
+            if self.provider in ("openai",):
+                clean_tools = _cap_openai_chat_tools(clean_tools)
             body["tools"] = clean_tools
             body["tool_choice"] = _resolve_tool_choice(
                 self.provider, clean_tools, force_tool,
@@ -2087,14 +2087,8 @@ class LLMProvider:
 
         if tools:
             clean_tools = [{k: v for k, v in t.items() if k != "_feral_meta"} for t in tools]
-            if self.provider in ("openai",) and len(clean_tools) > 128:
-                # Same 128-tool hard limit as the non-streaming path.
-                # See commentary in the paired site above.
-                logger.warning(
-                    "openai chat/completions (stream): truncating tools "
-                    "from %d → 128 (OpenAI hard limit).", len(clean_tools),
-                )
-                clean_tools = clean_tools[:128]
+            if self.provider in ("openai",):
+                clean_tools = _cap_openai_chat_tools(clean_tools)
             body["tools"] = clean_tools
             body["tool_choice"] = _resolve_tool_choice(
                 self.provider, clean_tools, force_tool,
@@ -3669,14 +3663,8 @@ class LLMProvider:
             }
             if tools:
                 clean_tools = [{k: v for k, v in t.items() if k != "_feral_meta"} for t in tools]
-                if self.provider in ("openai",) and len(clean_tools) > 128:
-                    # Same 128-tool cap as the other chat/completions paths.
-                    logger.warning(
-                        "openai chat/completions (failover primary): truncating "
-                        "tools from %d → 128 (OpenAI hard limit).",
-                        len(clean_tools),
-                    )
-                    clean_tools = clean_tools[:128]
+                if self.provider in ("openai",):
+                    clean_tools = _cap_openai_chat_tools(clean_tools)
                 body["tools"] = clean_tools
                 body["tool_choice"] = _resolve_tool_choice(
                     self.provider, clean_tools, force_tool,
@@ -3736,14 +3724,8 @@ class LLMProvider:
             }
             if tools:
                 clean_tools = [{k: v for k, v in t.items() if k != "_feral_meta"} for t in tools]
-                if provider_name in ("openai",) and len(clean_tools) > 128:
-                    # Same 128-tool cap, fallback provider path.
-                    logger.warning(
-                        "openai chat/completions (failover fallback): truncating "
-                        "tools from %d → 128 (OpenAI hard limit).",
-                        len(clean_tools),
-                    )
-                    clean_tools = clean_tools[:128]
+                if provider_name in ("openai",):
+                    clean_tools = _cap_openai_chat_tools(clean_tools)
                 body["tools"] = clean_tools
                 body["tool_choice"] = _resolve_tool_choice(
                     provider_name, clean_tools, force_tool,

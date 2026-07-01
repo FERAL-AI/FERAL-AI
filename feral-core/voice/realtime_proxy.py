@@ -32,6 +32,12 @@ from uuid import uuid4
 import httpx
 
 from agents.tool_display import tool_feedback_text
+from agents.tool_list import (
+    OPENAI_TOOL_HARD_LIMIT,
+    cap_tools_with_pins,
+    openai_realtime_tool_choice,
+    resolve_forced_tool_choice,
+)
 from voice.transcript_filter import should_commit_user_transcript
 
 logger = logging.getLogger("feral.voice.openai")
@@ -126,6 +132,8 @@ class RealtimeSession:
         self._connected = False
         self._recv_task: Optional[asyncio.Task] = None
         self._pending_tool_calls: dict[str, dict] = {}
+        # When set, the next tool result resets tool_choice back to auto.
+        self._active_force_tool: str = ""
 
     @staticmethod
     def _normalize_language_hint(language_hint: str) -> str:
@@ -202,7 +210,28 @@ class RealtimeSession:
                 logger.warning("OpenAI WS connect failed (attempt %d/3) — retrying", attempt + 1)
                 await asyncio.sleep(2 ** attempt)
 
-    async def configure(self, system_prompt: str = "", tools: list[dict] | None = None):
+    @staticmethod
+    def _feral_tools_to_openai(tools: list[dict]) -> list[dict]:
+        """Convert registry OpenAI-shape defs to Realtime GA flat tool objects."""
+        openai_tools = []
+        for t in tools:
+            fn = t.get("function", {}) if isinstance(t.get("function"), dict) else {}
+            name = fn.get("name") or t.get("name") or ""
+            openai_tools.append({
+                "type": "function",
+                "name": name,
+                "description": fn.get("description") or t.get("description") or "",
+                "parameters": fn.get("parameters") or t.get("parameters") or {},
+            })
+        return openai_tools
+
+    async def configure(
+        self,
+        system_prompt: str = "",
+        tools: list[dict] | None = None,
+        *,
+        force_tool: str = "",
+    ):
         """Send session.update with GA session shape (type='realtime', audio config)."""
         if not self._connected:
             return
@@ -211,15 +240,9 @@ class RealtimeSession:
         if tools is not None:
             self._tools = tools
 
-        openai_tools = []
-        for t in self._tools:
-            fn = t.get("function", {})
-            openai_tools.append({
-                "type": "function",
-                "name": fn.get("name", ""),
-                "description": fn.get("description", ""),
-                "parameters": fn.get("parameters", {}),
-            })
+        capped = cap_tools_with_pins(self._tools, max_tools=OPENAI_TOOL_HARD_LIMIT)
+        openai_tools = self._feral_tools_to_openai(capped)
+        tool_choice = resolve_forced_tool_choice(capped, force_tool or None)
 
         transcription_cfg = {"model": "whisper-1"}
         if self._language_hint:
@@ -261,7 +284,7 @@ class RealtimeSession:
                     },
                 },
                 "tools": openai_tools,
-                "tool_choice": "auto",
+                "tool_choice": tool_choice,
                 # NOTE: GA Realtime API no longer accepts
                 # `session.temperature` at the session.update path —
                 # live test surfaced:
@@ -273,18 +296,44 @@ class RealtimeSession:
             },
         }
 
-        # OpenAI also caps tools at 128 per request; GA Realtime is
-        # the same as /v1/chat/completions in this respect.
-        if len(openai_tools) > 128:
-            logger.warning(
-                "realtime session.update: truncating tools from %d → 128 "
-                "(OpenAI hard limit).",
-                len(openai_tools),
-            )
-            session_update["session"]["tools"] = openai_tools[:128]
-
         await self._send(session_update)
-        logger.info(f"Realtime session configured (GA): {len(openai_tools)} tools, voice={self._voice}")
+        logger.info(
+            "Realtime session configured (GA): %d tools (from %d raw), voice=%s%s",
+            len(openai_tools),
+            len(self._tools),
+            self._voice,
+            f", force_tool={force_tool}" if force_tool else "",
+        )
+
+    async def force_tool_for_turn(self, tool_name: str) -> None:
+        """Pin ``tool_choice`` to one function and (re)start the model turn.
+
+        Realtime server VAD usually fires ``response.create`` before the
+        user transcript reaches us, so schedule-intent forcing happens here
+        on the transcript hook — cancel any in-flight response, update
+        ``tool_choice``, then create a fresh response.
+        """
+        if not self._connected or not tool_name:
+            return
+        self._active_force_tool = tool_name
+        await self._send({
+            "type": "session.update",
+            "session": {
+                "tool_choice": openai_realtime_tool_choice(tool_name),
+            },
+        })
+        await self.cancel_response()
+        await self._send({"type": "response.create"})
+
+    async def reset_tool_choice(self) -> None:
+        """Restore free tool selection after a one-shot forced turn."""
+        if not self._connected:
+            return
+        self._active_force_tool = ""
+        await self._send({
+            "type": "session.update",
+            "session": {"tool_choice": "auto"},
+        })
 
     async def send_audio(self, audio_b64: str):
         """Relay PCM16 audio from the phone to OpenAI Realtime."""
@@ -321,6 +370,8 @@ class RealtimeSession:
                 "output": result,
             },
         })
+        if self._active_force_tool:
+            await self.reset_tool_choice()
         await self._send({"type": "response.create"})
 
     async def cancel_response(self):
@@ -802,7 +853,8 @@ class RealtimeProxy:
 
     def _get_tools(self) -> list[dict]:
         if self._skill_registry:
-            return self._skill_registry.get_all_tools()
+            raw = self._skill_registry.get_all_tools()
+            return cap_tools_with_pins(raw, max_tools=OPENAI_TOOL_HARD_LIMIT)
         return []
 
     @staticmethod
@@ -937,15 +989,32 @@ class RealtimeProxy:
             and self._orchestrator is not None
         ):
             clean = text[len("[user] "):]
+            voice_tools = self._get_tools()
             try:
                 hook_out = await self._orchestrator.note_voice_user_turn(
                     session_id, clean, emit_temporal_timeline=True,
+                    tools=voice_tools,
                 )
             except Exception:
                 logger.exception(
                     "realtime: note_voice_user_turn failed (non-fatal)"
                 )
                 hook_out = {}
+
+            forced_tool = (hook_out or {}).get("forced_tool") or ""
+            if forced_tool:
+                rs_for_force = self._sessions.get(session_id)
+                if rs_for_force is not None:
+                    try:
+                        await rs_for_force.force_tool_for_turn(forced_tool)
+                        logger.info(
+                            "realtime: forced %s for schedule intent session=%s",
+                            forced_tool, session_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "realtime: force_tool_for_turn failed (non-fatal)"
+                        )
 
             context_hint = (hook_out or {}).get("context_hint") or ""
             if context_hint:
