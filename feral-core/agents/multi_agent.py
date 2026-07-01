@@ -328,6 +328,16 @@ class AgentRouter:
         r"file|files|folder|directory|desktop|terminal|command|shell)\b",
         re.IGNORECASE,
     )
+    # Robot/CuteBot LED commands must NOT route to the home worker — it
+    # only exposes smart_home_hue (Philips/HA bridge lights). The general
+    # worker carries the full tool catalog including cutebot__set_lights.
+    ROBOT_LIGHTS_OVERRIDE_RE = re.compile(
+        r"\b(?:robot|cutebot|qtbot)\b.{0,40}\b(?:light|lights|led|glow|color|colour|"
+        r"red|green|blue|off|on|dim|bright)\b|"
+        r"\b(?:light|lights|led|glow|color|colour|red|green|blue|off|on|dim|bright)\b"
+        r".{0,40}\b(?:robot|cutebot|qtbot)\b",
+        re.IGNORECASE,
+    )
 
     def __init__(self, llm=None):
         self._llm = llm
@@ -340,6 +350,9 @@ class AgentRouter:
         # only be served by the general worker (full tool set). Routing it
         # to a specialist guarantees a refusal.
         if self.GENERAL_OVERRIDE_RE.search(text):
+            return {"workers": ["general"], "strategy": "single"}
+
+        if self.ROBOT_LIGHTS_OVERRIDE_RE.search(text):
             return {"workers": ["general"], "strategy": "single"}
 
         if self._llm and self._llm.available:
@@ -379,7 +392,8 @@ class AgentRouter:
             "Route the user's request to the worker(s) whose TOOLS can serve it:\n"
             "- health: biometrics only (heart rate, SpO2, sleep, fitness, wellness).\n"
             "- home: smart-home DEVICES only (lights, locks, thermostat, scenes via Home Assistant). "
-            "It has NO file system, NO browser, NO code tools.\n"
+            "It has NO file system, NO browser, NO code tools. NOT for CuteBot/QtBot robot LED "
+            "commands — those use cutebot__set_lights via the general worker.\n"
             "- research: web search, news, notes/documents lookup.\n"
             "- creative: music/media playback, calendar, reminders.\n"
             "- general: EVERYTHING else — including writing code or files, building HTML/apps, "

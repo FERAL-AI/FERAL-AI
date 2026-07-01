@@ -9,7 +9,7 @@
     "logo_url": "https://img.icons8.com/ios-filled/50/22C55E/robot-2.png",
     "icon_set": "sf_symbols"
   },
-  "description": "Control the QtBot/CuteBot desk robot (Elecfreaks Smart Cutebot on micro:bit V2) over USB. Use for line-following on the black-on-white track, table exploration with built-in edge and obstacle reflexes, emergency stop, manual wheel drive, and telemetry reads. Motion commands are CLOSED-LOOP: every result includes 'verified' (read back from robot telemetry). NEVER tell the user a motion command worked unless verified=true. If verified=false, call cutebot__status to diagnose, retry once if it makes sense, and otherwise report the concrete blocker (battery switch, robot lifted, USB link) honestly. For scheduled/recurring motion (e.g. 'nightly spin'), use `feral_routines__create` with `auto_confirm: true` — chat-time confirmation does NOT mean FERAL cannot schedule the action.",
+  "description": "Control the QtBot/CuteBot desk robot (Elecfreaks Smart Cutebot on micro:bit V2) over USB. Use for line-following on the black-on-white track, table exploration with built-in edge and obstacle reflexes, emergency stop, manual wheel drive, robot LED headlight/underglow (`set_lights` — the ONLY tool for robot light/color/off commands in text AND voice), and telemetry reads. Motion commands are CLOSED-LOOP: every result includes 'verified' (read back from robot telemetry). NEVER tell the user a motion command worked unless verified=true. If verified=false, call cutebot__status to diagnose, retry once if it makes sense, and otherwise report the concrete blocker (battery switch, robot lifted, USB link) honestly. For scheduled/recurring motion (e.g. 'nightly spin'), use `feral_routines__create` with `auto_confirm: true` — chat-time confirmation does NOT mean FERAL cannot schedule the action.",
   "trigger_phrases": [
     "start line following",
     "follow the line",
@@ -21,6 +21,10 @@
     "how is the robot doing",
     "robot status",
     "drive the robot",
+    "robot lights",
+    "cutebot lights",
+    "set robot lights red",
+    "turn off robot lights",
     "explore the table",
     "qtbot",
     "cutebot"
@@ -90,7 +94,7 @@
       "id": "set_lights",
       "method": "PYTHON",
       "url": "python://cutebot/set_lights",
-      "description": "Set the QtBot/CuteBot headlight and underglow color (RGB, each 0-255) for expression or signaling — e.g. green when confident/ready, red when it failed or is blocked, blue while working. Lights only: no motion, runs on USB power, no battery or confirmation needed. Use this to give the robot visible body language that matches what you tell the user.",
+      "description": "Set the QtBot/CuteBot headlight and underglow color (RGB, each 0-255) for expression or signaling — e.g. green when confident/ready, red when it failed or is blocked, blue while working, (0,0,0) to turn off. THE tool for ALL robot LED commands in text chat and voice — never route robot light/color/off requests to smart_home_hue. Lights only: no motion, runs on USB power, no battery or confirmation needed. Use this to give the robot visible body language that matches what you tell the user.",
       "params": [
         {
           "name": "r",

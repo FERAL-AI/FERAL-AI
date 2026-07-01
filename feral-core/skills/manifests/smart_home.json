@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Control your Home Assistant smart home: list entities, read state, toggle switches, change light brightness/color, and trigger automations. Backend: HomeAssistantIntegration (REST API + long-lived access token).",
+    "description": "Control your Home Assistant smart home: list entities, read state, toggle switches, change light brightness/color, and trigger automations. Backend: HomeAssistantIntegration (REST API + long-lived access token). NOT for the CuteBot/QtBot desk robot — that device's headlight/underglow uses `cutebot__set_lights`, not this skill.",
     "trigger_phrases": [
         "turn on the lights",
         "turn off the lights",

@@ -1278,6 +1278,7 @@ class Orchestrator:
     # the right tool name is in the tool list before forcing).
     _FORCED_TIMELINE_TOOL_NAME = "notes_memory__fused_timeline"
     _FORCED_ROUTINE_TOOL_NAME = "feral_routines__create"
+    _FORCED_ROBOT_LIGHTS_TOOL_NAME = "cutebot__set_lights"
 
     @staticmethod
     def _tool_list_contains(tools: list[dict], target: str) -> bool:
@@ -1331,6 +1332,13 @@ class Orchestrator:
         try:
             if self._R_TEMPORAL.search(text):
                 target = self._FORCED_TIMELINE_TOOL_NAME
+                if self._tool_list_contains(tools, target):
+                    return target
+        except Exception:
+            pass
+        try:
+            if self._query_is_robot_lights(text, session_id):
+                target = self._FORCED_ROBOT_LIGHTS_TOOL_NAME
                 if self._tool_list_contains(tools, target):
                     return target
         except Exception:
@@ -3243,6 +3251,31 @@ class Orchestrator:
         re.I,
     )
 
+    # Robot/CuteBot LED strip — NOT Philips Hue / Home Assistant lights.
+    # Text chat was routing "make robot lights red" to smart_home_hue because
+    # the Hue manifest owns generic "lights" triggers; voice already pinned
+    # cutebot__set_lights. Explicit robot+cutebot+qtbot phrasings plus
+    # ambiguous "lights … red/off" when the session's active subject is a robot.
+    _R_ROBOT_SUBJECT = re.compile(r"\b(?:robot|cutebot|qtbot)\b", re.I)
+    _R_ROBOT_LIGHTS = re.compile(
+        r"\b("
+        r"(?:robot|cutebot|qtbot)(?:'?s)?\s+(?:the\s+)?lights?|"
+        r"lights?\s+(?:on\s+)?(?:the\s+)?(?:robot|cutebot|qtbot)|"
+        r"(?:make|turn|set|change|flash)\s+(?:the\s+)?(?:robot|cutebot|qtbot)\s+(?:the\s+)?lights?|"
+        r"(?:robot|cutebot|qtbot).{0,40}\b(?:red|green|blue|yellow|purple|orange|white|off|on|dim|bright|color|colour)|"
+        r"\b(?:red|green|blue|yellow|purple|orange|white|off|on|dim|bright|color|colour).{0,40}(?:robot|cutebot|qtbot)"
+        r")\b",
+        re.I,
+    )
+    _R_LIGHTS_ACTION = re.compile(
+        r"\b("
+        r"(?:turn|set|make|change|flash)\s+(?:the\s+)?lights?\s+(?:to\s+)?(?:red|green|blue|off|on)|"
+        r"lights?\s+(?:to\s+)?(?:red|green|blue|off|on)|"
+        r"(?:red|green|blue|yellow|purple|orange|white)\s+lights?"
+        r")\b",
+        re.I,
+    )
+
     # Health / vitals — "what's my heart rate", "how did I sleep"
     _R_HEALTH = re.compile(
         r"\b("
@@ -3351,6 +3384,13 @@ class Orchestrator:
                 result += [s for s in ranked if s.skill_id != "feral_routines"]
                 return (result[:5], "regex:routine" if current_hit else "carry:routine")
 
+        # 2.6 Robot LED strip → cutebot, never smart_home_hue. Generic
+        # "turn on the lights" still routes to Hue; only robot-scoped
+        # light commands (explicit mention or session coref subject) land here.
+        if self._query_is_robot_lights(stripped, session_id):
+            if "cutebot" in self.skills.skills:
+                return ([self.skills.skills["cutebot"]], "regex:robot_lights")
+
         # 3. Catalog ≤ 5 — registry's keyword ranking is always
         # enough; LLM routing would be more expensive than just
         # exposing the whole list.
@@ -3391,6 +3431,31 @@ class Orchestrator:
             return (list(self.skills.skills.values()), "action_fallback")
 
         return (ranked or [], "ambiguous")
+
+    def _query_is_robot_lights(self, text: str, session_id: str = "") -> bool:
+        """True when ``text`` is a robot/CuteBot LED command, not Hue.
+
+        Matches explicit robot+cutebot+qtbot light phrasings, or an
+        ambiguous lights/color/off command when the session's active
+        subject (coref tracker or recent history) is robot-scoped.
+        """
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        if self._R_ROBOT_LIGHTS.search(stripped):
+            return True
+        if not self._R_LIGHTS_ACTION.search(stripped):
+            return False
+        if self._R_ROBOT_SUBJECT.search(stripped):
+            return True
+        if session_id:
+            try:
+                prior = self._last_referenced_subject(session_id) or ""
+            except Exception:
+                prior = ""
+            if prior and self._R_ROBOT_SUBJECT.search(prior):
+                return True
+        return False
 
     @staticmethod
     def _trigger_score(query: str, skill: "SkillManifest") -> float:
@@ -3603,8 +3668,28 @@ class Orchestrator:
             return text
 
         if not self._is_underspecified_followup(stripped):
-            # Concrete turn — define/refresh the active subject and clear
-            # any stale coref resolution from a previous follow-up turn.
+            # Concrete turn — define/refresh the active subject. When the
+            # user names a lights/color action without repeating "robot"
+            # but the session's prior subject was robot-scoped ("check the
+            # cutebot" → "make the lights red"), augment routing text the
+            # same way underspecified follow-ups do so Hue never wins.
+            prior = self._coref_state().get(session_id, "") if session_id else ""
+            if (
+                prior
+                and prior.strip().lower() != stripped.lower()
+                and self._R_ROBOT_SUBJECT.search(prior)
+                and self._R_LIGHTS_ACTION.search(stripped)
+                and not self._R_ROBOT_SUBJECT.search(stripped)
+            ):
+                augmented = f"{stripped} (re: {prior})"
+                if session_id:
+                    self._coref_query_state()[session_id] = augmented
+                self._set_active_subject(session_id, stripped)
+                logger.debug(
+                    "coref routing: robot lights '%s' resolved against prior '%s'",
+                    stripped, prior[:60],
+                )
+                return augmented
             self._set_active_subject(session_id, stripped)
             self._coref_query_state().pop(session_id, None)
             return text
