@@ -447,6 +447,7 @@ class Orchestrator:
                 memory=self.memory,
                 perception=self.perception,
                 send_to_client=self.send,
+                orchestrator=self,
             )
             logger.info("Multi-agent orchestrator initialized with workers: %s", list(self._multi_agent._workers.keys()))
         except Exception as e:
@@ -1276,10 +1277,23 @@ class Orchestrator:
     # tests can introspect (and the orchestrator's guards can confirm
     # the right tool name is in the tool list before forcing).
     _FORCED_TIMELINE_TOOL_NAME = "notes_memory__fused_timeline"
+    _FORCED_ROUTINE_TOOL_NAME = "feral_routines__create"
 
-    @classmethod
+    @staticmethod
+    def _tool_list_contains(tools: list[dict], target: str) -> bool:
+        """True when ``target`` appears in an OpenAI-style tool list."""
+        for t in tools:
+            if not isinstance(t, dict):
+                continue
+            fn = t.get("function")
+            if isinstance(fn, dict) and fn.get("name") == target:
+                return True
+            if t.get("name") == target:
+                return True
+        return False
+
     def _force_tool_for_query(
-        cls, text: str, tools: Optional[list[dict]],
+        self, text: str, tools: Optional[list[dict]], session_id: str = "",
     ) -> Optional[str]:
         """Return the tool name to force the LLM to call this turn, or
         ``None`` for the default (auto) tool-selection behaviour.
@@ -1295,35 +1309,52 @@ class Orchestrator:
         makes it deterministic at the wire by passing the tool name
         through to per-provider ``tool_choice`` forcing.
 
-        Guards:
-          * ``text`` must match the strict ``_R_TEMPORAL`` regex
-            (same gate the side-channel uses; non-temporal turns get
-            free tool selection so we never block ``play music``).
+        Scheduled-automation queries get the same treatment: when the
+        user asks for a recurring or one-shot scheduled device action
+        (or is mid-setup after stating the schedule on a prior turn),
+        force ``feral_routines__create`` so the brain stops inventing
+        "background task" workarounds or refusing to schedule motion.
+
+        Guards (each branch):
+          * The query must match the branch's regex / intent gate
+            (non-matching turns keep free tool selection).
           * ``tools`` must actually contain the forced tool name —
-            never force a tool the model wasn't given (a typo or a
-            routing skip would make the wire request invalid).
+            never force a tool the model wasn't given.
 
         Returns the tool name when both gates pass, ``None`` otherwise.
-        The orchestrator uses ``None`` as the signal to leave the
-        side-channel timeline-fusion task scheduled (the prose stays
-        un-grounded but the widget still mounts).
+        Temporal recall takes priority when both gates would match.
+        The orchestrator uses ``None`` on the temporal path as the
+        signal to leave the side-channel timeline-fusion task scheduled.
         """
         if not text or not isinstance(tools, list) or not tools:
             return None
         try:
-            if not cls._R_TEMPORAL.search(text):
-                return None
+            if self._R_TEMPORAL.search(text):
+                target = self._FORCED_TIMELINE_TOOL_NAME
+                if self._tool_list_contains(tools, target):
+                    return target
         except Exception:
-            return None
-        target = cls._FORCED_TIMELINE_TOOL_NAME
-        for t in tools:
-            if not isinstance(t, dict):
-                continue
-            fn = t.get("function")
-            if isinstance(fn, dict) and fn.get("name") == target:
-                return target
-            if t.get("name") == target:
-                return target
+            pass
+        try:
+            stripped = text.strip()
+            recurring_hit = self._R_ROUTINE_RECURRING.search(stripped)
+            oneshot_hit = self._R_ROUTINE_ONESHOT.search(stripped)
+            current_hit = bool(
+                recurring_hit
+                or (oneshot_hit and self._query_implies_action(stripped))
+            )
+            carry_hit = bool(
+                not current_hit
+                and session_id
+                and self._query_implies_action(stripped)
+                and self._has_pending_routine_intent(session_id)
+            )
+            if current_hit or carry_hit:
+                target = self._FORCED_ROUTINE_TOOL_NAME
+                if self._tool_list_contains(tools, target):
+                    return target
+        except Exception:
+            pass
         return None
 
     async def _maybe_emit_temporal_timeline(
@@ -2036,25 +2067,23 @@ class Orchestrator:
                 tools = (tools or []) + mcp_tools
 
         # v2026.5.48 grounded-memory closure (non-stream path). See the
-        # docstring on ``_force_tool_for_query``. ``forced_tool`` is
-        # ``None`` when the query isn't temporal or the timeline tool
-        # didn't make it into the routed tool set — in which case the
-        # side-channel below STAYS scheduled as the safety net. When
-        # forced, the natural ``_emit_tool_result`` → ``_maybe_emit_timeline_frame``
-        # branch will mount the widget once the LLM dispatches the
-        # tool, so we skip the side-channel to avoid a double
-        # ``timeline_fusion()`` run.
-        forced_tool = self._force_tool_for_query(text, tools)
-        if not forced_tool:
-            try:
+        # docstring on ``_force_tool_for_query``. ``forced_tool`` pins
+        # the LLM to ``notes_memory__fused_timeline`` (or
+        # ``feral_routines__create`` for scheduled actions), but the
+        # proactive side-channel still runs on every ``_R_TEMPORAL``
+        # match — live testing showed models ignore forced_tool and pick
+        # ``search_notes`` unless the timeline card is already mounted.
+        forced_tool = self._force_tool_for_query(text, tools, session_id)
+        try:
+            if self._R_TEMPORAL.search(text or ""):
                 self._track_background_task(asyncio.create_task(
                     self._maybe_emit_temporal_timeline(session_id, text)
                 ))
-            except Exception:
-                logger.debug(
-                    "temporal-timeline side-channel: task schedule failed",
-                    exc_info=True,
-                )
+        except Exception:
+            logger.debug(
+                "temporal-timeline side-channel: task schedule failed",
+                exc_info=True,
+            )
 
         perception_frame = self.perception.get_frame(session_id)
         # When a specialist is routing this turn, thread its memory_filter
@@ -2533,21 +2562,21 @@ class Orchestrator:
                 tools = (tools or []) + mcp_tools
 
         # v2026.5.48 grounded-memory closure (stream path). Mirrors the
-        # non-stream branch — decide whether to force the LLM to call
-        # ``notes_memory__fused_timeline`` this turn, and skip the
-        # proactive side-channel when we do (the natural tool-result
-        # branch will mount the widget AND ground the prose).
-        forced_tool = self._force_tool_for_query(text, tools)
-        if not forced_tool:
-            try:
+        # non-stream branch — force the timeline tool when the gate
+        # fires, AND always mount the proactive side-channel on
+        # ``_R_TEMPORAL`` matches (forced_tool alone is not enough;
+        # models still pick ``search_notes`` without the widget).
+        forced_tool = self._force_tool_for_query(text, tools, session_id)
+        try:
+            if self._R_TEMPORAL.search(text or ""):
                 self._track_background_task(asyncio.create_task(
                     self._maybe_emit_temporal_timeline(session_id, text)
                 ))
-            except Exception:
-                logger.debug(
-                    "temporal-timeline side-channel: task schedule failed",
-                    exc_info=True,
-                )
+        except Exception:
+            logger.debug(
+                "temporal-timeline side-channel: task schedule failed",
+                exc_info=True,
+            )
 
         perception_frame = self.perception.get_frame(session_id)
         # When a specialist is routing this turn, thread its memory_filter
@@ -3104,6 +3133,9 @@ class Orchestrator:
         # optional "my"/"the" determiner so "what did THE device do"
         # also matches.
         r"what\s+(?:did|has|have)\s+(?:(?:my|the)\s+)?(?:robot|device|cutebot|drone|roomba|it)\s+(?:do|done|did)|"
+        # "what is/was my robot/cutebot doing" — progressive recall
+        r"what\s+(?:is|was|were)\s+(?:(?:my|the)\s+)?(?:robot|device|cutebot|drone|roomba|it)\s+doing|"
+        r"what\s+(?:is|was|were)\s+i\s+doing|"
         # "summarize/recap/review <window>"
         r"(?:summari[sz]e|recap|review)\s+(?:today|yesterday|tonight|this\s+(?:morning|afternoon|evening|week|day)|my\s+(?:morning|afternoon|evening|night|day|week|month))|"
         # "what happened/went on/was going on" — any temporal context
@@ -3143,6 +3175,9 @@ class Orchestrator:
         # "what did I do" clause so the fused-timeline side-channel mounts
         # for device episodes too. Accepts optional "my"/"the" determiner.
         r"what\s+(?:did|has|have)\s+(?:(?:my|the)\s+)?(?:robot|device|cutebot|drone|roomba|it)\s+(?:do|done|did)|"
+        # "what is/was my robot/cutebot doing" — progressive recall
+        r"what\s+(?:is|was|were)\s+(?:(?:my|the)\s+)?(?:robot|device|cutebot|drone|roomba|it)\s+doing|"
+        r"what\s+(?:is|was|were)\s+i\s+doing|"
         # "summarize/recap/review <window>"
         r"(?:summari[sz]e|recap|review)\s+(?:today|yesterday|tonight|this\s+(?:morning|afternoon|evening|week|day)|my\s+(?:morning|afternoon|evening|night|day|week|month))|"
         # "what happened/went on/was going on" — temporal recall
@@ -3192,7 +3227,7 @@ class Orchestrator:
         r"\d+\s*(?:m|mins?|minutes?|h|hrs?|hours?))|"
         r"each\s+(?:day|morning|afternoon|evening|night)|"
         r"every\s+(?:mon|tues?|wed(?:nes)?|thur?s?|fri|sat(?:ur)?|sun)(?:day)?|"
-        r"daily|weekly"
+        r"daily|weekly|nightly"
         r")\b",
         re.I,
     )

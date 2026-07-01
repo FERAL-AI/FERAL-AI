@@ -9,7 +9,7 @@
     "logo_url": "https://img.icons8.com/ios-filled/50/22C55E/robot-2.png",
     "icon_set": "sf_symbols"
   },
-  "description": "Control the QtBot/CuteBot desk robot (Elecfreaks Smart Cutebot on micro:bit V2) over USB. Use for line-following on the black-on-white track, table exploration with built-in edge and obstacle reflexes, emergency stop, manual wheel drive, and telemetry reads. Motion commands are CLOSED-LOOP: every result includes 'verified' (read back from robot telemetry). NEVER tell the user a motion command worked unless verified=true. If verified=false, call cutebot__status to diagnose, retry once if it makes sense, and otherwise report the concrete blocker (battery switch, robot lifted, USB link) honestly.",
+  "description": "Control the QtBot/CuteBot desk robot (Elecfreaks Smart Cutebot on micro:bit V2) over USB. Use for line-following on the black-on-white track, table exploration with built-in edge and obstacle reflexes, emergency stop, manual wheel drive, and telemetry reads. Motion commands are CLOSED-LOOP: every result includes 'verified' (read back from robot telemetry). NEVER tell the user a motion command worked unless verified=true. If verified=false, call cutebot__status to diagnose, retry once if it makes sense, and otherwise report the concrete blocker (battery switch, robot lifted, USB link) honestly. For scheduled/recurring motion (e.g. 'nightly spin'), use `feral_routines__create` with `auto_confirm: true` — chat-time confirmation does NOT mean FERAL cannot schedule the action.",
   "trigger_phrases": [
     "start line following",
     "follow the line",

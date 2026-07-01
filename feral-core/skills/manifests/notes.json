@@ -49,7 +49,7 @@
             "id": "search_notes",
             "method": "GET",
             "url": "http://localhost:9090/internal/memory/search",
-            "description": "Search saved notes and memories. Returns matching notes ranked by relevance.",
+            "description": "Search saved NOTES ONLY (user-written snippets tagged in memory). Does NOT query episodic robot/device activity, chat turns, or calendar events — those live in the fused timeline. For temporal recall ('what did my cutebot do yesterday', 'what was I doing this morning') call `fused_timeline`, NOT this endpoint.",
             "params": [
                 {"name": "query", "type": "string", "required": true, "description": "Search query"},
                 {"name": "limit", "type": "number", "required": false, "default": "10", "description": "Max results"}

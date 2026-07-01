@@ -233,6 +233,9 @@ def test_temporal_regex_matches_device_recall():
     assert R.search("what has my cutebot done")
     assert R.search("what did the device do this morning")
     assert R.search("What did it do yesterday")
+    assert R.search("what was my cutebot doing yesterday")
+    assert R.search("what is my robot doing")
+    assert R.search("what was I doing this morning")
     # The "what did I" clause must still match.
     assert R.search("what did i do yesterday")
 

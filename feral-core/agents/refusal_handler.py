@@ -86,6 +86,7 @@ class RefusalHandler:
         "create", "open", "make", "write", "run", "play", "generate", "send",
         "install", "build", "edit", "delete", "move", "copy", "search", "find",
         "start", "stop", "launch", "record", "download", "upload",
+        "spin", "flash", "schedule", "rotate",
     }
 
     DESTRUCTIVE_ACTION_WORDS = {

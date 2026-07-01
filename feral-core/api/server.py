@@ -782,6 +782,51 @@ async def metrics_endpoint(request: Request):
 # Lifecycle
 # ─────────────────────────────────────────────
 
+async def _log_routine_device_action(
+    session_id: str,
+    skill_id: str,
+    endpoint: str,
+    skill_args: dict,
+    result: dict,
+    run_id: int,
+) -> None:
+    """Persist a cron-fired device action to the episodic timeline.
+
+    The chat/voice paths log via ``Orchestrator._emit_tool_result``;
+    the cron skill branch bypasses the orchestrator entirely, so recall
+    queries like "what did my cutebot do yesterday?" missed routine-
+    driven motion until this hook landed.
+    """
+    orch = getattr(state, "orchestrator", None)
+    if orch is None:
+        return
+    try:
+        tool_call = {
+            "name": f"{skill_id}__{endpoint}",
+            "args": skill_args or {},
+            "id": f"routine-{run_id}",
+        }
+        fields = orch._device_action_episode_fields(tool_call, result)
+        if fields is None:
+            return
+        summary, detail = fields
+        memory = getattr(orch, "memory", None)
+        if memory is None or not hasattr(memory, "episode_save"):
+            return
+        await memory.episode_save(
+            session_id=session_id or f"routine-{run_id}",
+            event_type="device_action",
+            summary=summary,
+            detail=detail,
+            importance=0.6,
+        )
+    except Exception:
+        logger.debug(
+            "routine device-action episode log failed (non-fatal)",
+            exc_info=True,
+        )
+
+
 def execute_routine_job(job):
     """Dispatch a fired CronService routine.
 
@@ -887,10 +932,23 @@ def execute_routine_job(job):
             skill = state.skill_registry.get_skill(skill_id)
             if skill:
                 loop = _aio.new_event_loop()
+                session_id = job.session_id or f"routine-{job.id}"
+
+                async def _dispatch_skill():
+                    result = await skill.execute(endpoint, skill_args, {})
+                    if isinstance(result, dict) and result.get("success"):
+                        await _log_routine_device_action(
+                            session_id,
+                            skill_id,
+                            endpoint,
+                            skill_args,
+                            result,
+                            run_id,
+                        )
+                    return result
+
                 try:
-                    result = loop.run_until_complete(
-                        skill.execute(endpoint, skill_args, {})
-                    )
+                    result = loop.run_until_complete(_dispatch_skill())
                 finally:
                     loop.close()
                 state.cron_service.record_run_finish(

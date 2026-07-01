@@ -20,10 +20,10 @@ LLM call site, which translates per-provider:
     (degrade — the OpenAI-compat layer can't name a single tool; the
     side-channel stays in place as the safety net for this provider).
 
-Additionally, the orchestrator dedupes the side-channel
-``_maybe_emit_temporal_timeline`` task on the forced-tool path so
-``timeline_fusion()`` runs once (via the natural tool-result branch)
-instead of twice.
+Additionally, the orchestrator always schedules the side-channel
+``_maybe_emit_temporal_timeline`` on ``_R_TEMPORAL`` matches — even
+when ``force_tool`` pins ``notes_memory__fused_timeline`` — because
+models still pick ``search_notes`` without the widget mounted.
 """
 
 from __future__ import annotations
@@ -409,6 +409,18 @@ async def test_provider_without_named_force_degrades_gracefully():
 # ─────────────────────────────────────────────────────────────────────
 
 
+def _orch_for_force_tool():
+    """Minimal orchestrator stub for ``_force_tool_for_query`` tests."""
+    from agents.orchestrator import Orchestrator
+    from agents.refusal_handler import RefusalHandler
+    from unittest.mock import MagicMock
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.refusal_handler = RefusalHandler(MagicMock())
+    orch.conversation_history = {}
+    return orch
+
+
 def test_force_tool_for_query_returns_tool_on_temporal_with_tool_present():
     """The orchestrator's classification helper returns the timeline
     tool name iff (a) the text matches ``_R_TEMPORAL`` and (b) the
@@ -422,20 +434,18 @@ def test_force_tool_for_query_returns_tool_on_temporal_with_tool_present():
          "function": {"name": "web_search__web_search"}},
     ]
 
-    out = Orchestrator._force_tool_for_query(
+    out = _orch_for_force_tool()._force_tool_for_query(
         "what did I do yesterday?", tools,
     )
     assert out == "notes_memory__fused_timeline"
 
 
 def test_force_tool_for_query_returns_none_on_non_temporal():
-    from agents.orchestrator import Orchestrator
-
     tools = [
         {"type": "function",
          "function": {"name": "notes_memory__fused_timeline"}},
     ]
-    assert Orchestrator._force_tool_for_query(
+    assert _orch_for_force_tool()._force_tool_for_query(
         "explain the TLS handshake", tools,
     ) is None
 
@@ -443,51 +453,43 @@ def test_force_tool_for_query_returns_none_on_non_temporal():
 def test_force_tool_for_query_returns_none_when_tool_absent():
     """Guard at the orchestrator level: even on a temporal query, never
     force a tool the routed skill set doesn't expose."""
-    from agents.orchestrator import Orchestrator
-
     tools = [
         {"type": "function",
          "function": {"name": "calendar__list"}},
     ]
-    assert Orchestrator._force_tool_for_query(
+    assert _orch_for_force_tool()._force_tool_for_query(
         "what did I do yesterday?", tools,
     ) is None
 
 
 @pytest.mark.asyncio
-async def test_forced_tool_path_does_not_double_dispatch_timeline(monkeypatch):
-    """On the forced-tool path, the side-channel
-    ``_maybe_emit_temporal_timeline`` MUST NOT be scheduled — the
-    natural ``_emit_tool_result`` → ``_maybe_emit_timeline_frame``
-    branch handles the widget AND grounds the prose. Running
-    ``timeline_fusion()`` twice would double-bill memory I/O.
-    """
+async def test_forced_temporal_path_still_runs_side_channel(monkeypatch):
+    """On the forced-tool path for temporal recall, the side-channel
+    ``_maybe_emit_temporal_timeline`` MUST still be scheduled — live
+    testing showed models ignore ``force_tool`` and pick
+    ``search_notes`` unless the timeline widget is already mounted."""
     from agents.orchestrator import Orchestrator
 
     orch = Orchestrator.__new__(Orchestrator)
 
-    # Spy on the side-channel — we assert it is NOT called.
     side_channel = AsyncMock(return_value=False)
     orch._maybe_emit_temporal_timeline = side_channel  # type: ignore[assignment]
 
-    # Force the gate to behave like the live orchestrator: temporal +
-    # tool in routed set → forced tool name returned.
     tools = [
         {"type": "function",
          "function": {"name": "notes_memory__fused_timeline"}},
     ]
-    forced = Orchestrator._force_tool_for_query(
+    forced = _orch_for_force_tool()._force_tool_for_query(
         "what did I do yesterday?", tools,
     )
     assert forced == "notes_memory__fused_timeline"
 
-    # Mimic the orchestrator's decision branch directly (the production
-    # paths in ``_handle_command_impl`` / ``_handle_command_stream_impl``
-    # only schedule the side-channel when ``forced_tool`` is falsy).
-    if not forced:
+    # Mimic the orchestrator's decision branch: ``_R_TEMPORAL`` match
+    # schedules the side-channel regardless of ``forced_tool``.
+    if Orchestrator._R_TEMPORAL.search("what did I do yesterday?"):
         await orch._maybe_emit_temporal_timeline("sess-1", "what did I do yesterday?")
 
-    side_channel.assert_not_called()
+    side_channel.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -506,12 +508,12 @@ async def test_unforced_temporal_path_still_runs_side_channel():
         {"type": "function",
          "function": {"name": "calendar__list"}},
     ]
-    forced = Orchestrator._force_tool_for_query(
+    forced = _orch_for_force_tool()._force_tool_for_query(
         "what did I do yesterday?", tools,
     )
     assert forced is None
 
-    if not forced:
+    if Orchestrator._R_TEMPORAL.search("what did I do yesterday?"):
         await orch._maybe_emit_temporal_timeline("sess-1", "what did I do yesterday?")
 
     side_channel.assert_awaited_once()
@@ -519,7 +521,7 @@ async def test_unforced_temporal_path_still_runs_side_channel():
 
 # ─────────────────────────────────────────────────────────────────────
 # End-to-end: orchestrator wires force_tool into chat_with_failover and
-# the side-channel is suppressed on the forced path.
+# the side-channel still runs on temporal queries (even when forced).
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -617,17 +619,15 @@ async def test_orchestrator_forwards_force_tool_to_chat_with_failover(monkeypatc
         "Orchestrator MUST forward force_tool='notes_memory__fused_timeline' "
         f"into chat_with_failover on temporal queries; got {kwargs!r}"
     )
-    # Side-channel suppressed on the forced path.
-    side_channel.assert_not_called()
+    # Side-channel runs alongside forced_tool on temporal queries.
+    side_channel.assert_called()
 
 
 @pytest.mark.asyncio
 async def test_orchestrator_omits_force_tool_for_non_temporal_query():
     """Negative control on the wiring: non-temporal text → no
-    ``force_tool`` kwarg propagated, and the side-channel never fires
-    (regex gate inside ``_maybe_emit_temporal_timeline`` would no-op
-    anyway, but the schedule itself is also skipped to keep the path
-    clean)."""
+    ``force_tool`` kwarg propagated, and the side-channel is not
+    scheduled (``_R_TEMPORAL`` gate keeps the path clean)."""
     from agents.orchestrator import Orchestrator
 
     skill = _live_skill("notes_memory", ["my notes"])
@@ -683,11 +683,8 @@ async def test_orchestrator_omits_force_tool_for_non_temporal_query():
     assert kwargs.get("force_tool") in (None, ""), (
         f"Non-temporal turn must not force a tool; got force_tool={kwargs.get('force_tool')!r}"
     )
-    # Non-temporal → side-channel still scheduled (legacy unconditional
-    # behaviour preserved when forced_tool is None), but its inner regex
-    # gate will reject the text. We assert the schedule happened so the
-    # safety net coverage is intact.
-    side_channel.assert_called()
+    # Non-temporal → side-channel must NOT be scheduled.
+    side_channel.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────

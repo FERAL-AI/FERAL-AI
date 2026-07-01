@@ -90,6 +90,33 @@ async def test_master_prompt_pins_fused_timeline_directive() -> None:
     )
 
 
+async def test_master_prompt_pins_feral_routines_directive() -> None:
+    """The scheduled-automation directive must name feral_routines__create.
+
+    Live testing showed the LLM refusing to schedule robot motion even
+    though the backend supports feral_routines__create. The Execution
+    Bias echo must pin the tool name so the model can't defer to a
+    fictional 'background task' workaround.
+    """
+    prompt = await _build_master_prompt()
+    assert "feral_routines__create" in prompt, (
+        "Master prompt must name feral_routines__create so the model "
+        "knows which tool to call for scheduled/recurring actions."
+    )
+    bias_idx = prompt.find("## Execution Bias")
+    assert bias_idx >= 0, "Execution Bias section must exist."
+    bias_block = prompt[bias_idx:]
+    assert "feral_routines__create" in bias_block, (
+        "feral_routines__create directive must appear in the Execution "
+        "Bias echo block, mirroring the fused_timeline pinning pattern."
+    )
+    lowered = bias_block.lower()
+    assert "nightly" in lowered or "every day" in lowered or "every night" in lowered, (
+        "Execution Bias should include a canonical scheduled-action "
+        "trigger phrase."
+    )
+
+
 async def test_master_prompt_warns_against_memory_block_alone() -> None:
     """The `## Memory` working-set block is lossy.
 

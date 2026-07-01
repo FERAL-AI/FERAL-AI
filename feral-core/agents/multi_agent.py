@@ -94,6 +94,7 @@ class AgentWorker:
         memory=None,
         perception=None,
         bus: AgentBus = None,
+        orchestrator=None,
     ):
         self.worker_id = worker_id
         self.name = name
@@ -105,6 +106,7 @@ class AgentWorker:
         self._memory = memory
         self._perception = perception
         self._bus = bus
+        self._orchestrator = orchestrator
 
     def get_tools(self) -> list[dict]:
         if not self._skills:
@@ -167,6 +169,15 @@ class AgentWorker:
 
         while budget.start_iteration():
             try:
+                forced_tool = None
+                if self._orchestrator is not None:
+                    try:
+                        forced_tool = self._orchestrator._force_tool_for_query(
+                            user_text, tools, session_id,
+                        )
+                    except Exception:
+                        forced_tool = None
+
                 # Explicit max_tokens: the provider default is 1024, which
                 # hard-truncates long answers mid-sentence on every surface
                 # that rides the multi-agent path (iOS chat, voice). 4096
@@ -175,6 +186,7 @@ class AgentWorker:
                     messages=messages,
                     tools=None if final_answer_only else (tools if tools else None),
                     max_tokens=4096,
+                    force_tool=forced_tool,
                 )
                 text_content, tool_calls = self._llm.extract_response(response)
 
@@ -203,8 +215,22 @@ class AgentWorker:
                             if skill:
                                 endpoint = next((ep for ep in skill.endpoints if ep.id == endpoint_id), None)
                                 if endpoint:
+                                    t0 = time.time()
                                     result = await self._executor.execute(tc["name"], tc["args"], skill, endpoint)
                                     tool_results.append(result)
+                                    if self._orchestrator is not None:
+                                        try:
+                                            await self._orchestrator._emit_tool_result(
+                                                session_id,
+                                                tc,
+                                                result,
+                                                (time.time() - t0) * 1000.0,
+                                            )
+                                        except Exception:
+                                            logger.debug(
+                                                "multi-agent tool_result emit failed",
+                                                exc_info=True,
+                                            )
                                     messages.append({
                                         "role": "tool",
                                         "tool_call_id": tc.get("id", str(uuid4())[:8]),
@@ -414,6 +440,7 @@ class MultiAgentOrchestrator:
         memory=None,
         perception=None,
         send_to_client=None,
+        orchestrator=None,
     ):
         self._llm = llm
         self._skills = skill_registry
@@ -421,6 +448,7 @@ class MultiAgentOrchestrator:
         self._memory = memory
         self._perception = perception
         self._send = send_to_client
+        self._orchestrator = orchestrator
         self._bus = AgentBus()
         self._router = AgentRouter(llm=llm)
         self._workers: dict[str, AgentWorker] = {}
@@ -470,6 +498,7 @@ class MultiAgentOrchestrator:
                 worker_id=wid, name=name, system_prompt=prompt, skill_ids=skills,
                 llm=self._llm, skill_registry=self._skills, skill_executor=self._executor,
                 memory=self._memory, perception=self._perception, bus=self._bus,
+                orchestrator=self._orchestrator,
             )
             self._workers[wid] = worker
             self._bus.register(wid)
@@ -482,6 +511,22 @@ class MultiAgentOrchestrator:
         logger.info(f"Multi-agent routing: {worker_ids} ({strategy})")
 
         workers = [self._workers.get(wid, self._workers["general"]) for wid in worker_ids]
+
+        # Temporal-recall parity with the single-agent path: always mount
+        # the fused-timeline side-channel on ``_R_TEMPORAL`` matches —
+        # even when force_tool pins fused_timeline, models still pick
+        # search_notes unless the widget is already on screen.
+        if self._orchestrator is not None:
+            try:
+                if self._orchestrator._R_TEMPORAL.search(text or ""):
+                    await self._orchestrator._maybe_emit_temporal_timeline(
+                        session_id, text,
+                    )
+            except Exception:
+                logger.debug(
+                    "multi-agent temporal side-channel skipped",
+                    exc_info=True,
+                )
 
         if strategy == "parallel" and len(workers) > 1:
             tasks = [w.run(session_id, text) for w in workers]

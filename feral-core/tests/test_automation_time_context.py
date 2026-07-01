@@ -188,6 +188,15 @@ async def test_oneshot_device_action_routes_to_routines():
 
 
 @pytest.mark.asyncio
+async def test_nightly_schedule_routes_to_routines():
+    orch = _make_orchestrator()
+    result = await orch._route_prompt("nightly at 9pm spin the cutebot for a few seconds")
+    ids = [s.skill_id for s in result]
+    assert ids and ids[0] == "feral_routines"
+    assert "cutebot" in ids
+
+
+@pytest.mark.asyncio
 async def test_genuine_remind_me_still_routes_to_reminders():
     orch = _make_orchestrator()
     result = await orch._route_prompt("remind me to call mom at 5pm")
@@ -362,6 +371,90 @@ def test_oneshot_autoconfirm_routine_dispatches_follow_line(monkeypatch):
         assert cutebot.calls == []
         run2 = cron.get_runs(job2.id, limit=1)[0]
         assert run2["status"] == "skipped"
+    finally:
+        for k, v in saved.items():
+            setattr(server.state, k, v)
+        cron.close()
+        os.unlink(cron_path)
+
+
+def test_oneshot_autoconfirm_routine_logs_device_episode(monkeypatch):
+    """Cron-fired device skills must write device_action episodes."""
+    import api.server as server
+    from agents.orchestrator import Orchestrator
+    from skills.base import BaseSkill
+    from skills.impl import SKILL_IMPLEMENTATIONS
+    from skills.registry import SkillRegistry
+
+    class _RecordingSkill(BaseSkill):
+        def __init__(self, skill_id):
+            super().__init__(skill_id=skill_id)
+            self.calls = []
+
+        async def execute(self, endpoint_id, args, vault):
+            self.calls.append((endpoint_id, args))
+            return {
+                "success": True,
+                "status_code": 200,
+                "data": {"verified": True, "mode": endpoint_id},
+                "error": None,
+            }
+
+    fd, cron_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    cron = CronService(db_path=cron_path)
+    reg = SkillRegistry()
+    cutebot = _RecordingSkill("cutebot")
+    reg.register(
+        SkillManifest(
+            skill_id="cutebot",
+            brand=BrandProfile(name="cutebot", primary_color="#111"),
+            description="robot",
+            endpoints=[
+                SkillEndpoint(
+                    id="drive",
+                    method="PYTHON",
+                    url="python://cutebot/drive",
+                    description="drive",
+                    safety_tier="safe",
+                )
+            ],
+        )
+    )
+    monkeypatch.setitem(SKILL_IMPLEMENTATIONS, "cutebot", cutebot)
+
+    memory = MagicMock()
+    memory.episode_save = AsyncMock(return_value={})
+    orch = Orchestrator(
+        skill_registry=reg,
+        send_to_client=AsyncMock(),
+        daemons={},
+        memory=memory,
+        vision_buffer=None,
+        perception=None,
+        learner=None,
+    )
+
+    saved = {k: getattr(server.state, k, None) for k in ("cron_service", "skill_registry", "orchestrator", "cron_cost_guard", "taskflows")}
+    server.state.cron_service = cron
+    server.state.skill_registry = reg
+    server.state.orchestrator = orch
+    server.state.cron_cost_guard = None
+    server.state.taskflows = None
+    try:
+        payload = {
+            "skill": "cutebot",
+            "endpoint": "drive",
+            "args": {"left": 60, "right": -60},
+            "auto_confirm": True,
+        }
+        job = cron.create_job(JobType.SCHEDULED, "daily 15:01", "cutebot", payload, "sess-cron", recurring=False)
+        server.execute_routine_job(job)
+        assert cutebot.calls == [("drive", {"left": 60, "right": -60})]
+        memory.episode_save.assert_awaited()
+        kwargs = memory.episode_save.await_args.kwargs
+        assert kwargs["event_type"] == "device_action"
+        assert "CuteBot: drive" in kwargs["summary"]
     finally:
         for k, v in saved.items():
             setattr(server.state, k, v)
