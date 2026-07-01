@@ -112,11 +112,44 @@ async def test_realtime_force_tool_for_turn_updates_tool_choice():
     await rs.force_tool_for_turn("feral_routines__create")
 
     updates = [e for e in sent if e["type"] == "session.update"]
+    assert updates[-1]["session"]["type"] == "realtime"
     assert updates[-1]["session"]["tool_choice"] == {
         "type": "function",
         "name": "feral_routines__create",
     }
     assert any(e["type"] == "response.create" for e in sent)
+
+
+@pytest.mark.asyncio
+async def test_realtime_reset_tool_choice_includes_session_type():
+    rs = RealtimeSession(session_id="s", node_id="n", api_key="sk")
+    rs._ws = AsyncMock()
+    rs._connected = True
+    sent: list[dict] = []
+    rs._ws.send = AsyncMock(side_effect=lambda msg: sent.append(json.loads(msg)))
+
+    rs._active_force_tool = "feral_routines__create"
+    await rs.reset_tool_choice()
+
+    su = [e for e in sent if e["type"] == "session.update"][0]
+    assert su["session"]["type"] == "realtime"
+    assert su["session"]["tool_choice"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_realtime_force_tool_skips_when_already_executed():
+    """Late transcript hook must not re-force after VAD drove the tool."""
+    rs = RealtimeSession(session_id="s", node_id="n", api_key="sk")
+    rs._ws = AsyncMock()
+    rs._connected = True
+    sent: list[dict] = []
+    rs._ws.send = AsyncMock(side_effect=lambda msg: sent.append(json.loads(msg)))
+
+    rs._turn_tools_executed.add("feral_routines__create")
+    await rs.force_tool_for_turn("feral_routines__create")
+
+    assert not [e for e in sent if e["type"] == "session.update"]
+    assert not [e for e in sent if e["type"] == "response.create"]
 
 
 @pytest.mark.asyncio

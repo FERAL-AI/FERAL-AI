@@ -134,6 +134,10 @@ class RealtimeSession:
         self._pending_tool_calls: dict[str, dict] = {}
         # When set, the next tool result resets tool_choice back to auto.
         self._active_force_tool: str = ""
+        # Tools executed during the current user speech turn — used to
+        # skip redundant force_tool_for_turn when the transcript hook
+        # arrives after VAD already drove the correct tool call.
+        self._turn_tools_executed: set[str] = set()
 
     @staticmethod
     def _normalize_language_hint(language_hint: str) -> str:
@@ -225,6 +229,14 @@ class RealtimeSession:
             })
         return openai_tools
 
+    @staticmethod
+    def _ga_session_update(**session_fields) -> dict:
+        """Build a GA ``session.update`` — ``session.type`` is required."""
+        return {
+            "type": "session.update",
+            "session": {"type": "realtime", **session_fields},
+        }
+
     async def configure(
         self,
         system_prompt: str = "",
@@ -248,53 +260,49 @@ class RealtimeSession:
         if self._language_hint:
             transcription_cfg["language"] = self._language_hint
 
-        session_update = {
-            "type": "session.update",
-            "session": {
-                "type": "realtime",
-                "model": self._model,
-                "output_modalities": ["audio"],
-                "instructions": self._system_prompt,
-                "audio": {
-                    "input": {
-                        "format": {"type": "audio/pcm", "rate": self._input_sample_rate},
-                        "transcription": transcription_cfg,
-                        "turn_detection": {
-                            "type": "server_vad",
-                            "threshold": 0.5,
-                            "prefix_padding_ms": 300,
-                            # Bumped 800→1000ms to reduce VAD splits on
-                            # trailing HFP silence — empirically this
-                            # also lowers (but does not eliminate) the
-                            # rate of whisper-1 hallucinated closers.
-                            # The blocklist gate above is the authoritative
-                            # filter; this just gives the user another
-                            # ~200ms of natural pause before a commit.
-                            # Latency tradeoff: voice replies start
-                            # ~200ms later when the user trails off, but
-                            # interruption / barge-in latency is
-                            # unchanged (driven by speech_started, not
-                            # silence_duration_ms).
-                            "silence_duration_ms": 1000,
-                        },
-                    },
-                    "output": {
-                        "format": {"type": "audio/pcm", "rate": self._output_sample_rate},
-                        "voice": self._voice,
+        session_update = self._ga_session_update(
+            model=self._model,
+            output_modalities=["audio"],
+            instructions=self._system_prompt,
+            audio={
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": self._input_sample_rate},
+                    "transcription": transcription_cfg,
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "prefix_padding_ms": 300,
+                        # Bumped 800→1000ms to reduce VAD splits on
+                        # trailing HFP silence — empirically this
+                        # also lowers (but does not eliminate) the
+                        # rate of whisper-1 hallucinated closers.
+                        # The blocklist gate above is the authoritative
+                        # filter; this just gives the user another
+                        # ~200ms of natural pause before a commit.
+                        # Latency tradeoff: voice replies start
+                        # ~200ms later when the user trails off, but
+                        # interruption / barge-in latency is
+                        # unchanged (driven by speech_started, not
+                        # silence_duration_ms).
+                        "silence_duration_ms": 1000,
                     },
                 },
-                "tools": openai_tools,
-                "tool_choice": tool_choice,
-                # NOTE: GA Realtime API no longer accepts
-                # `session.temperature` at the session.update path —
-                # live test surfaced:
-                #   "Unknown parameter: 'session.temperature'"
-                # which silently broke session configuration so the
-                # model never responded. `max_output_tokens` is still
-                # accepted at session scope as of GA 2025-11.
-                "max_output_tokens": 4096,
+                "output": {
+                    "format": {"type": "audio/pcm", "rate": self._output_sample_rate},
+                    "voice": self._voice,
+                },
             },
-        }
+            tools=openai_tools,
+            tool_choice=tool_choice,
+            # NOTE: GA Realtime API no longer accepts
+            # `session.temperature` at the session.update path —
+            # live test surfaced:
+            #   "Unknown parameter: 'session.temperature'"
+            # which silently broke session configuration so the
+            # model never responded. `max_output_tokens` is still
+            # accepted at session scope as of GA 2025-11.
+            max_output_tokens=4096,
+        )
 
         await self._send(session_update)
         logger.info(
@@ -315,13 +323,16 @@ class RealtimeSession:
         """
         if not self._connected or not tool_name:
             return
+        if tool_name in self._turn_tools_executed:
+            logger.info(
+                "realtime: skip force %s — already executed this turn session=%s",
+                tool_name, self.session_id,
+            )
+            return
         self._active_force_tool = tool_name
-        await self._send({
-            "type": "session.update",
-            "session": {
-                "tool_choice": openai_realtime_tool_choice(tool_name),
-            },
-        })
+        await self._send(self._ga_session_update(
+            tool_choice=openai_realtime_tool_choice(tool_name),
+        ))
         await self.cancel_response()
         await self._send({"type": "response.create"})
 
@@ -330,10 +341,7 @@ class RealtimeSession:
         if not self._connected:
             return
         self._active_force_tool = ""
-        await self._send({
-            "type": "session.update",
-            "session": {"tool_choice": "auto"},
-        })
+        await self._send(self._ga_session_update(tool_choice="auto"))
 
     async def send_audio(self, audio_b64: str):
         """Relay PCM16 audio from the phone to OpenAI Realtime."""
@@ -528,6 +536,7 @@ class RealtimeSession:
                 await self._on_transcript(self.session_id, f"[user] {text}", True)
 
         elif event_type == "input_audio_buffer.speech_started":
+            self._turn_tools_executed.clear()
             if self._on_speech_started:
                 await self._on_speech_started(self.session_id)
 
@@ -539,6 +548,8 @@ class RealtimeSession:
 
             if self._on_tool_call:
                 result = await self._on_tool_call(self.session_id, call_id, name, arguments)
+                if name:
+                    self._turn_tools_executed.add(name)
                 await self.send_tool_result(call_id, result)
 
         elif event_type == "error":
