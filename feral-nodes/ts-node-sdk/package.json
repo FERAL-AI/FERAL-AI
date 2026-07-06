@@ -30,7 +30,7 @@
     "robotics"
   ],
   "dependencies": {
-    "bonjour-service": "^1.2.1",
+    "bonjour-service": "^1.4.2",
     "ws": "^8.16.0",
     "zod": "^3.23.8"
   },
@@ -38,6 +38,6 @@
     "@types/node": "^20.11.0",
     "@types/ws": "^8.5.10",
     "typescript": "^5.4.0",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.10"
   }
 }
