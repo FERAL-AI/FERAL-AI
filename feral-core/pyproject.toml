@@ -76,7 +76,7 @@ dependencies = [
     # W9: pairing-token hashing. argon2id is the primary KDF; bcrypt is
     # the documented fallback when argon2-cffi is genuinely unavailable
     # on a given platform (see security/device_pairing.py).
-    "argon2-cffi>=23.1,<24.0",
+    "argon2-cffi>=23.1,<26.0",
     # v2026.5.36 — QR pairing is a first-run feature, NOT an opt-in
     # extra. Pre-v2026.5.36 the `qrcode[pil]` package only landed via
     # the `[discovery]` or `[all]` extras, which meant a bare
