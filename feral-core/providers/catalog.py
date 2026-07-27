@@ -166,6 +166,16 @@ BUILT_IN_DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         aliases=("open ai", "openai api", "gpt", "chatgpt"),
     ),
     ProviderDescriptor(
+        provider_id="codex",
+        display_name="Codex (ChatGPT sign-in)",
+        supports_local=False,
+        requires_api_key=False,
+        default_base_url="",
+        default_model="",
+        aliases=("codex", "codex oauth", "chatgpt sign-in"),
+        notes="Requires the Codex CLI and an existing `codex login` session.",
+    ),
+    ProviderDescriptor(
         provider_id="anthropic",
         display_name="Anthropic",
         supports_local=False,
@@ -893,6 +903,9 @@ class ProviderCatalog:
             if pid == "openai":
                 from .openai_provider import OpenAIProvider
                 return OpenAIProvider(api_key=api_key, base_url=base_url)
+            if pid == "codex":
+                from .codex_provider import CodexProvider
+                return CodexProvider()
             if pid == "anthropic":
                 from .anthropic_provider import AnthropicProvider
                 return AnthropicProvider(api_key=api_key, base_url=base_url)
