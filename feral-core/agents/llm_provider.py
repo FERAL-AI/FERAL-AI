@@ -258,6 +258,7 @@ _CATALOG_PROVIDER_MAP: dict[str, str] = {
 # fallback is the whole point of this module-level constant.
 SUPPORTED_RUNTIME_PROVIDERS: frozenset[str] = frozenset({
     *_PROVIDER_REGISTRY.keys(),  # cloud + lmstudio from the registry
+    "codex",                     # ChatGPT sign-in via Codex app-server
     "ollama",                    # local, base url derived dynamically
     "local",                     # on-device inference engine
     "hybrid",                    # local + cloud splitter
@@ -395,6 +396,7 @@ class LLMProvider:
         # Local inference engine (for provider=local or hybrid)
         self._local_engine = None
         self._hybrid_cloud_provider = None
+        self._codex_adapter = None
 
         if self.provider in ("local", "hybrid"):
             self._init_local_engine()
@@ -453,6 +455,14 @@ class LLMProvider:
             self.base_url = self.base_url or "http://localhost:1234/v1"
             self.api_key = "lm-studio"
             self.model = self.model or _default_model_for("lmstudio")
+        elif self.provider == "codex":
+            adapter = self._get_codex_adapter()
+            self.base_url = "app-server://stdio"
+            # Non-secret marker used by the legacy health surface,
+            # which still calls every authentication mode "has_key".
+            self.api_key = "codex-managed-auth"
+            self.model = self.model or _default_model_for("codex")
+            self.available = adapter.cli_available()
         elif self.provider == "openai":
             # Default path. Previously this case rode the else branch
             # that also served as the silent fallback for unknown
@@ -501,13 +511,13 @@ class LLMProvider:
         # successfully and the brain would still refuse to boot with a
         # usable key because ``vault_keys`` was never read on the hot
         # path. ``ollama`` / ``lmstudio`` keep their literal stubs.
-        if not self.api_key and self.provider not in ("ollama", "lmstudio"):
+        if not self.api_key and self.provider not in ("ollama", "lmstudio", "codex"):
             resolved = _resolve_api_key(self.provider)
             if resolved:
                 self.api_key = resolved
 
         # Check if API key is available — if not, try local fallbacks
-        if not self.api_key and self.provider not in ("ollama", "lmstudio"):
+        if not self.api_key and self.provider not in ("ollama", "lmstudio", "codex"):
             logger.warning(f"No API key for provider '{self.provider}'. Trying local fallbacks...")
             ollama_model = self._detect_ollama()
             if ollama_model:
@@ -543,12 +553,17 @@ class LLMProvider:
         return [{"id": k, **v} for k, v in LLM_PRESETS.items()]
 
     def _build_client(self) -> httpx.AsyncClient:
+        if self.provider == "codex":
+            # Codex owns its own authenticated transport. Keep a plain
+            # client only to preserve the lifecycle expected by callers
+            # that unconditionally close ``LLMProvider.client``.
+            return httpx.AsyncClient(timeout=60.0)
         # Cross-cut #1 (v2026.5.42): if the slot is empty, late-bind
         # from the labeled-keys vault overlay just before the headers
         # are baked into the httpx client. Explicit ``api_key`` writes
         # from ``switch_provider`` / ``reconfigure`` are preserved —
         # we only fill the slot when the caller left it blank.
-        if not self.api_key and self.provider not in ("ollama", "lmstudio"):
+        if not self.api_key and self.provider not in ("ollama", "lmstudio", "codex"):
             resolved = _resolve_api_key(self.provider)
             if resolved:
                 self.api_key = resolved
@@ -559,6 +574,54 @@ class LLMProvider:
         elif self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return httpx.AsyncClient(base_url=self.base_url, headers=headers, timeout=60.0)
+
+    def _get_codex_adapter(self):
+        adapter = getattr(self, "_codex_adapter", None)
+        if adapter is None:
+            from providers.codex_provider import CodexProvider
+
+            adapter = CodexProvider()
+            self._codex_adapter = adapter
+        return adapter
+
+    @staticmethod
+    def _codex_messages(messages: list[dict]):
+        from providers.base import ChatMessage
+
+        converted = []
+        for message in messages:
+            content = message.get("content", "")
+            if not isinstance(content, str):
+                content = json.dumps(content, ensure_ascii=True)
+            converted.append(
+                ChatMessage(
+                    role=str(message.get("role") or "user"),
+                    content=content,
+                    name=message.get("name"),
+                    tool_calls=list(message.get("tool_calls") or []),
+                )
+            )
+        return converted
+
+    @staticmethod
+    def _codex_response_dict(response) -> dict:
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": response.text,
+        }
+        if response.tool_calls:
+            message["tool_calls"] = response.tool_calls
+        return {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": response.finish_reason,
+                }
+            ],
+            "usage": response.usage,
+            "model": response.model,
+        }
 
     @staticmethod
     def _detect_ollama() -> Optional[str]:
@@ -675,6 +738,57 @@ class LLMProvider:
         )
         if budget_block is not None:
             return budget_block
+
+        if self.provider == "codex":
+            if self._messages_contain_vision(messages):
+                return {
+                    "error": (
+                        "Codex provider image translation is not available yet; "
+                        "send a text-only turn or choose a vision provider."
+                    ),
+                    "choices": [],
+                }
+            fallbacks = (
+                self._config.get("fallback_providers")
+                if isinstance(self._config, dict)
+                else None
+            )
+            if fallbacks:
+                try:
+                    return await self.chat_with_failover(
+                        messages,
+                        tools,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        call_site=call_site,
+                        force_tool=force_tool,
+                    )
+                except BudgetExceeded as exc:
+                    return self._budget_exceeded_response(exc)
+                except Exception as exc:
+                    logger.warning("Codex failover chain exhausted: %s", exc)
+                    return {"error": str(exc), "choices": []}
+            try:
+                result = await self._call_provider(
+                    "codex",
+                    {
+                        "base_url": self.base_url,
+                        "api_key": self.api_key,
+                        "model": self.model,
+                        "supported": True,
+                    },
+                    messages,
+                    tools,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    force_tool=force_tool,
+                )
+                await self._budget_record(call_site, self.model, result)
+                return result
+            except Exception as exc:
+                detail = _describe_error(exc)
+                logger.error("Codex app-server call failed: %s", detail)
+                return {"error": detail, "choices": []}
 
         # v2026.5.23 — Responses-API route for OpenAI Pro / o-Pro /
         # deep-research / Codex / computer-use models. Must run BEFORE
@@ -2011,6 +2125,56 @@ class LLMProvider:
             }
             return
 
+        if self.provider == "codex":
+            if self._messages_contain_vision(messages):
+                yield {
+                    "type": "error",
+                    "content": (
+                        "Codex provider image translation is not available yet; "
+                        "send a text-only turn or choose a vision provider."
+                    ),
+                }
+                return
+            streamed_text = False
+            try:
+                adapter = self._get_codex_adapter()
+                converted = self._codex_messages(messages)
+                async for event in adapter.stream_events(
+                    converted, model=self.model, tools=tools
+                ):
+                    if event.get("type") == "text_delta":
+                        streamed_text = True
+                        yield {
+                            "type": "text_delta",
+                            "content": event.get("content") or "",
+                        }
+                    elif event.get("type") == "done":
+                        result = {
+                            "usage": event.get("usage") or {},
+                            "choices": [],
+                        }
+                        await self._budget_record(call_site, self.model, result)
+                        yield {"type": "done"}
+                return
+            except Exception as exc:
+                detail = _describe_error(exc)
+                logger.error("Codex app-server stream failed: %s", detail)
+                if not streamed_text:
+                    failover_events = await self._stream_via_nonstream_failover(
+                        messages,
+                        tools,
+                        temperature,
+                        max_tokens,
+                        primary_error=exc,
+                        force_tool=force_tool,
+                    )
+                    if failover_events:
+                        for event in failover_events:
+                            yield event
+                        return
+                yield {"type": "error", "content": detail}
+                return
+
         # v2026.5.23 — Responses-API stream route for OpenAI Pro / o-Pro /
         # deep-research / Codex / computer-use models. Yields the same
         # event vocabulary (text_delta / tool_call_delta / done / error)
@@ -2462,6 +2626,27 @@ class LLMProvider:
         # always omitted the kwarg keep the auto-resolved default.
         _base_url_override = base_url or ""
 
+        if provider == "codex":
+            self._codex_adapter = None
+            adapter = self._get_codex_adapter()
+            self.base_url = "app-server://stdio"
+            self.api_key = "codex-managed-auth"
+            try:
+                models = await adapter.refresh_models()
+                if not model:
+                    self.model = models[0]
+                self.available = True
+            except Exception as exc:
+                self.available = False
+                logger.warning("Codex provider probe failed: %s", exc)
+            self.client = self._build_client()
+            logger.info(
+                "Switched LLM to %s/%s (available=%s)",
+                provider,
+                self.model,
+                self.available,
+            )
+            return
         if provider == "lmstudio":
             self.base_url = _base_url_override or "http://localhost:1234/v1"
             self.api_key = "lm-studio"
@@ -3432,6 +3617,13 @@ class LLMProvider:
         # already pointed at a non-default port — the failover loop
         # then silently retried against the wrong URL. See
         # findings/13-llm-core.md fix #3.
+        if provider_name == "codex":
+            return {
+                "base_url": "app-server://stdio",
+                "api_key": "codex-managed-auth",
+                "model": _default_model_for("codex"),
+                "supported": True,
+            }
         if provider_name == "ollama":
             configured = (
                 self.base_url
@@ -3629,11 +3821,23 @@ class LLMProvider:
             selected_model = str(config.get("model") or self.model)
         else:
             selected_model = str(config.get("model", "") or "")
+        temperature = kwargs.get("temperature", 0.7)
+        max_tokens = kwargs.get("max_tokens", 1024)
+
+        if provider_name == "codex":
+            adapter = self._get_codex_adapter()
+            response = await adapter.chat(
+                self._codex_messages(messages),
+                model=selected_model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                tools=tools,
+            )
+            return self._codex_response_dict(response)
+
         model_guard_error = _chat_completions_model_guard(provider_name, selected_model)
         if model_guard_error:
             raise RuntimeError(model_guard_error)
-        temperature = kwargs.get("temperature", 0.7)
-        max_tokens = kwargs.get("max_tokens", 1024)
 
         # Primary provider — reuse existing client
         if provider_name == self.provider:

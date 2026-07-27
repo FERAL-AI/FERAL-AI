@@ -80,6 +80,26 @@ feral start
 
 You get a local brain on port `9090`, the bundled web UI, and a local config under `~/.feral/` (settings + an encrypted vault for keys).
 
+### Use an existing ChatGPT sign-in through Codex
+
+FERAL can use the Codex CLI's managed ChatGPT login without extracting OAuth
+tokens or treating them as an OpenAI API key:
+
+```bash
+npm install -g @openai/codex
+codex login
+feral setup                    # choose "Codex (ChatGPT sign-in)"
+```
+
+The adapter talks to `codex app-server --stdio`, discovers the models available
+to the signed-in account, and supports normal and streaming text turns. The
+app-server interface is experimental, and FERAL tool schemas are not yet bridged
+to Codex dynamic tools. Codex starts in `read-only` mode by default; set
+`FERAL_CODEX_SANDBOX=workspace-write` or `danger-full-access` only when that is
+the intended execution boundary. `FERAL_CODEX_PATH`, `FERAL_CODEX_CWD`, and
+`FERAL_CODEX_TIMEOUT_SECONDS` override the executable, working directory, and
+turn timeout.
+
 ### Useful CLI commands
 
 ```bash
