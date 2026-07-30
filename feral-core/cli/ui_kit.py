@@ -526,7 +526,8 @@ def _fallback_multi_select(message: str, choices: Sequence[ChoiceLike]) -> list:
     except (EOFError, KeyboardInterrupt):
         raw = ""
     toggled = set()
-    for token in (raw or "").replace(" ", "").split(","):
+    for token in (raw or "").strip().replace(" ", "").split(","):
+        token = token.strip()
         if token.isdigit():
             idx = int(token) - 1
             if 0 <= idx < len(rows):
