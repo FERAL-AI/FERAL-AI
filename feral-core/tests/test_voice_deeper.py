@@ -932,3 +932,61 @@ async def test_handle_event_speech_started_invokes_callback():
     rs = RealtimeSession("sid", "nid", api_key="k", on_speech_started=on_sp)
     await rs._handle_event({"type": "input_audio_buffer.speech_started"})
     assert started == ["sid"]
+
+
+# ----------------------------------------------------------------------
+# audio.realtime_primary — the wizard's realtime pick reaching the router
+# ----------------------------------------------------------------------
+#
+# ``feral setup``'s voice preflight has always written
+# ``audio.realtime_primary``, but nothing read it: the router only ever
+# consulted FERAL_VOICE_PROVIDER. An operator who picked Gemini Live in
+# the wizard still got OpenAI Realtime on every call.
+
+
+def _write_audio_settings(tmp_path, monkeypatch, audio: dict) -> None:
+    import json
+
+    monkeypatch.setenv("FERAL_HOME", str(tmp_path))
+    (tmp_path / "settings.json").write_text(json.dumps({"audio": audio}))
+
+
+def test_preferred_realtime_provider_reads_settings(tmp_path, monkeypatch):
+    monkeypatch.delenv(_ENV_VOICE_PROVIDER, raising=False)
+    _write_audio_settings(tmp_path, monkeypatch, {"realtime_primary": "gemini_live"})
+    assert VoiceRouter._preferred_realtime_provider() == "gemini"
+
+
+def test_preferred_realtime_provider_env_wins(tmp_path, monkeypatch):
+    _write_audio_settings(tmp_path, monkeypatch, {"realtime_primary": "gemini_live"})
+    monkeypatch.setenv(_ENV_VOICE_PROVIDER, "openai")
+    assert VoiceRouter._preferred_realtime_provider() == "openai"
+
+
+def test_preferred_realtime_provider_empty_when_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv(_ENV_VOICE_PROVIDER, raising=False)
+    _write_audio_settings(tmp_path, monkeypatch, {})
+    assert VoiceRouter._preferred_realtime_provider() == ""
+
+
+def test_session_routes_to_gemini_from_settings(tmp_path, monkeypatch):
+    monkeypatch.delenv(_ENV_VOICE_PROVIDER, raising=False)
+    _write_audio_settings(tmp_path, monkeypatch, {"realtime_primary": "gemini_live"})
+    gem = MagicMock(available=True)
+    rt = MagicMock(available=True)
+    r = VoiceRouter(realtime_proxy=rt, audio_pipeline=MagicMock())
+    r.set_gemini_proxy(gem)
+    r.set_session_voice_mode("sess-cfg", "realtime")
+    assert r._resolve_session_provider("sess-cfg") == "gemini"
+
+
+def test_settings_pick_does_not_override_an_unavailable_proxy(tmp_path, monkeypatch):
+    """Picking Gemini in the wizard must not route to a proxy that
+    isn't up — the router still falls back to OpenAI Realtime."""
+    monkeypatch.delenv(_ENV_VOICE_PROVIDER, raising=False)
+    _write_audio_settings(tmp_path, monkeypatch, {"realtime_primary": "gemini_live"})
+    rt = MagicMock(available=True)
+    r = VoiceRouter(realtime_proxy=rt, audio_pipeline=MagicMock())
+    r.set_gemini_proxy(MagicMock(available=False))
+    r.set_session_voice_mode("sess-down", "realtime")
+    assert r._resolve_session_provider("sess-down") == "openai"

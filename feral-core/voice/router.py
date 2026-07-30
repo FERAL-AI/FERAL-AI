@@ -149,28 +149,6 @@ class VoiceRouter:
     # Provider selection helpers
     # ------------------------------------------------------------------
 
-    @classmethod
-    def _preferred_realtime_provider(cls) -> str:
-        """Operator's realtime preference: 'gemini', 'openai', or ''.
-
-        ``FERAL_VOICE_PROVIDER`` wins so an env override still beats
-        persisted settings. Falling back to ``audio.realtime_primary``
-        is what makes the setup wizard's realtime pick mean something:
-        the wizard has always written that key, but nothing read it, so
-        an operator who chose Gemini Live in ``feral setup`` still got
-        OpenAI Realtime on every call.
-        """
-        env_provider = os.getenv(_ENV_VOICE_PROVIDER, "").strip().lower()
-        if env_provider:
-            return env_provider
-        primary = str(cls._load_audio_settings().get("realtime_primary") or "")
-        return {
-            "gemini_live": "gemini",
-            "gemini": "gemini",
-            "openai_realtime": "openai",
-            "openai": "openai",
-        }.get(primary.strip().lower(), "")
-
     def _resolve_provider(self, node_id: str) -> str:
         """Return 'gemini', 'openai', 'chained', or 'whisper' for a given node."""
         cfg = self._node_voice_config.get(node_id, {})
@@ -197,8 +175,8 @@ class VoiceRouter:
             if self._realtime and self._realtime.available:
                 return "openai"
 
-        preferred = self._preferred_realtime_provider()
-        if preferred == "gemini" and self._gemini and self._gemini.available:
+        env_provider = os.getenv(_ENV_VOICE_PROVIDER, "").lower()
+        if env_provider == "gemini" and self._gemini and self._gemini.available:
             return "gemini"
 
         if cfg.get("supports_realtime") is True:
@@ -217,8 +195,8 @@ class VoiceRouter:
         if mode != "realtime":
             return "whisper"
 
-        preferred = self._preferred_realtime_provider()
-        if preferred == "gemini" and self._gemini and self._gemini.available:
+        env_provider = os.getenv(_ENV_VOICE_PROVIDER, "").lower()
+        if env_provider == "gemini" and self._gemini and self._gemini.available:
             return "gemini"
 
         if self._realtime and self._realtime.available:
