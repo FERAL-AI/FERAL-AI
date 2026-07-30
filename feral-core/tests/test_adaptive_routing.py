@@ -104,9 +104,18 @@ def _llm(config: dict | None = None, *, provider="openai", model="gpt-5"):
 
 
 def test_cheap_tier_downshifts_model_within_same_provider():
+    # Asserted against ``_CHEAP_SIBLING["openai"]``, refreshed 2026-07-30
+    # from ``gpt-4o-mini`` (deprecated — see ``_DEPRECATED_OPENAI_IDS`` in
+    # tests/test_provider_catalog.py) to ``gpt-5-nano``, the cheapest SKU
+    # OpenAI currently publishes. What this test actually pins is the
+    # invariant, not the id: the cheap tier stays on the SAME provider
+    # and swaps only the model.
+    from agents.llm_provider import LLMProvider as _LP
+
     ref = _llm().route_call("chat", tier="cheap")
     assert ref["provider"] == "openai"
-    assert ref["model"] == "gpt-4o-mini"  # cheaper sibling, same vendor
+    assert ref["model"] == _LP._CHEAP_SIBLING["openai"]
+    assert ref["model"] != "gpt-5"  # actually downshifted from the primary
 
 
 def test_balanced_and_premium_keep_operator_model():

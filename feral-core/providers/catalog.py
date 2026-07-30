@@ -265,6 +265,94 @@ BUILT_IN_DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         chat_ready=True,
         stub_reason="",
     ),
+    # ── Providers that had a runtime binding but no descriptor ──────
+    #
+    # ``kimi`` and ``qwen`` were dispatchable by
+    # ``agents/llm_provider.py`` for their entire lifetime yet had no
+    # descriptor here, so ``ProviderCatalog`` never advertised them:
+    # the setup wizard could not offer them and the v2 picker could not
+    # render them. ``xai`` was the mirror-image bug — catalog data with
+    # no runtime binding. ``tests/test_provider_registry_consistency.py``
+    # is what stops all three classes of drift recurring.
+    #
+    # NOTE the id: the catalog speaks ``moonshot``; the runtime
+    # historically says ``kimi``. ``_CATALOG_PROVIDER_MAP`` in
+    # agents/llm_provider.py is the (one-entry) translation table.
+    ProviderDescriptor(
+        provider_id="moonshot",
+        display_name="Moonshot (Kimi)",
+        supports_local=False,
+        requires_api_key=True,
+        default_base_url="https://api.moonshot.ai/v1",
+        default_model="",
+        credential_env_var="MOONSHOT_API_KEY",
+        aliases=("kimi", "moonshot ai"),
+        notes=(
+            "API host is api.moonshot.ai — the docs host moved to "
+            "platform.kimi.ai but the API host did not. Model ids use "
+            "dots (kimi-k2.7-code)."
+        ),
+    ),
+    ProviderDescriptor(
+        provider_id="qwen",
+        display_name="Qwen (Alibaba)",
+        supports_local=False,
+        requires_api_key=True,
+        default_base_url=(
+            "https://[{WorkspaceId}].ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+        ),
+        default_model="",
+        credential_env_var="DASHSCOPE_API_KEY",
+        aliases=("alibaba", "dashscope", "tongyi"),
+        notes=(
+            "Base URL is workspace-scoped: {WorkspaceId} must be substituted "
+            "from DASHSCOPE_WORKSPACE_ID before the client can dial."
+        ),
+    ),
+    ProviderDescriptor(
+        provider_id="xai",
+        display_name="xAI (Grok)",
+        supports_local=False,
+        requires_api_key=True,
+        default_base_url="https://api.x.ai/v1",
+        default_model="",
+        credential_env_var="XAI_API_KEY",
+        aliases=("grok", "x.ai", "x ai"),
+        notes="OpenAI-compatible chat; model index is hand-curated (not pollable).",
+    ),
+    ProviderDescriptor(
+        provider_id="zai",
+        display_name="Z.ai (GLM)",
+        supports_local=False,
+        requires_api_key=True,
+        default_base_url="https://api.z.ai/api/paas/v4/",
+        default_model="",
+        credential_env_var="ZAI_API_KEY",
+        aliases=("z.ai", "z ai", "glm", "zhipu"),
+        notes="glm-5.2 is text-only — no vision.",
+    ),
+    ProviderDescriptor(
+        provider_id="minimax",
+        display_name="MiniMax",
+        supports_local=False,
+        requires_api_key=True,
+        default_base_url="https://api.minimax.io/v1",
+        default_model="",
+        credential_env_var="MINIMAX_API_KEY",
+        aliases=("mini max",),
+        notes="Model id is CamelCase — MiniMax-M3.",
+    ),
+    ProviderDescriptor(
+        provider_id="mistral",
+        display_name="Mistral AI",
+        supports_local=False,
+        requires_api_key=True,
+        default_base_url="https://api.mistral.ai/v1",
+        default_model="",
+        credential_env_var="MISTRAL_API_KEY",
+        aliases=("mistral ai", "le chat"),
+        notes="Model ids are date-coded (mistral-medium-2604); no rolling aliases.",
+    ),
     ProviderDescriptor(
         provider_id="ollama",
         display_name="Ollama (local)",
@@ -773,6 +861,26 @@ class ProviderCatalog:
         pid = descriptor.provider_id
         api_key = api_key if api_key is not None else self._env_api_key(descriptor)
         base_url = base_url or descriptor.default_base_url or None
+        # Imported here (not at module scope) to keep this module's
+        # import graph flat — every other adapter import below is
+        # function-local for the same reason.
+        from .openai_compat import (
+            MiniMaxProvider,
+            MistralProvider,
+            MoonshotProvider,
+            QwenProvider,
+            XAIProvider,
+            ZaiProvider,
+        )
+
+        _OPENAI_COMPAT_ADAPTERS = {
+            "moonshot": MoonshotProvider,
+            "qwen": QwenProvider,
+            "xai": XAIProvider,
+            "zai": ZaiProvider,
+            "minimax": MiniMaxProvider,
+            "mistral": MistralProvider,
+        }
         try:
             if pid == "openai":
                 from .openai_provider import OpenAIProvider
@@ -808,6 +916,11 @@ class ProviderCatalog:
                     aws_session_token=extra.get("aws_session_token")
                     or os.environ.get("AWS_SESSION_TOKEN"),
                 )
+            # OpenAI-wire-format providers share one parameterised
+            # adapter (providers/openai_compat.py) — no per-provider
+            # copy of the same 80 lines, and no model/price literals.
+            if pid in _OPENAI_COMPAT_ADAPTERS:
+                return _OPENAI_COMPAT_ADAPTERS[pid](api_key=api_key, base_url=base_url)
             if pid == "ollama":
                 from .ollama_provider import OllamaProvider
                 return OllamaProvider(base_url=base_url)

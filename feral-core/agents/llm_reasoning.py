@@ -90,8 +90,14 @@ def _apply_anthropic_reasoning_fork(model: str, body: dict) -> dict:
 
     Extended-thinking models (Sonnet 4.6, Haiku 4.5, Sonnet / Opus 4.5)
     accept ``thinking={"type":"enabled","budget_tokens":N}`` and require
-    ``temperature=1``. Adaptive-thinking models (Opus 4.7) decline the
-    explicit block — the model chooses its own depth.
+    ``temperature=1``. Adaptive-thinking models (Claude 4.7 and later)
+    decline the explicit block — the model chooses its own depth — and
+    reject ``temperature`` / ``top_p`` / ``top_k`` outright.
+
+    Which model falls in which bucket is read from the catalog's
+    ``capabilities`` block through :class:`AnthropicProvider`, never
+    from a literal in this file. See
+    ``providers/catalog_data.py`` for why.
     """
     from providers.model_classes import classify
     if classify("anthropic", model) != "reasoning":
@@ -112,12 +118,13 @@ def _apply_anthropic_reasoning_fork(model: str, body: dict) -> dict:
             body.pop("temperature", None)
     elif probe.supports_adaptive_thinking(model):
         body.pop("thinking", None)
-        # Live smoke on 2026-04-26 confirmed: claude-opus-4-7 returns
-        # 400 ``temperature is deprecated for this model`` when any
-        # temperature value is sent. The adaptive-thinking contract
-        # says the model chooses its own behaviour; temperature is no
-        # longer a caller-controlled knob for this class. Drop it.
-        body.pop("temperature", None)
+    # Sampling params were removed on Claude 4.7 and later: sending
+    # temperature / top_p / top_k returns a 400. Strip all three, not
+    # just temperature — the earlier version of this fork dropped only
+    # temperature, so a caller passing top_p still 400'd.
+    if not probe.supports_sampling_params(model):
+        for key in ("temperature", "top_p", "top_k"):
+            body.pop(key, None)
     return body
 
 

@@ -27,6 +27,7 @@ from typing import Any, Iterable, Optional
 import httpx
 
 from .base import BaseProvider, ChatMessage, ChatResponse
+from .catalog_data import bundled_models
 from .model_classes import classify
 
 logger = logging.getLogger("feral.providers.deepseek")
@@ -128,15 +129,15 @@ class DeepSeekProvider(BaseProvider):
     provider_id = "deepseek"
     display_name = "DeepSeek"
 
-    # Verified 2026-04-26 from the DeepSeek API pricing page. Legacy
-    # ``deepseek-chat`` and ``deepseek-reasoner`` remain in the list
-    # for compatibility until 2026-07-24.
-    _models = [
-        "deepseek-v4-pro",
-        "deepseek-v4-flash",
-        "deepseek-chat",
-        "deepseek-reasoner",
-    ]
+    # Bundled fallback model list, read from
+    # ``providers/model_catalog.json`` rather than hardcoded here.
+    # A literal list goes stale the moment the provider ships a new
+    # frontier name (roadmap §3.5 P0) — and because
+    # ``ProviderCatalog.default_model_for`` falls back to this list when
+    # no live refresh has run, a stale literal here silently became the
+    # provider's DEFAULT model. Instances replace it with the live
+    # ``/v1/models`` response in :meth:`refresh_models`.
+    _models = bundled_models("deepseek")
     # Pricing (USD per 1k tokens). The v4-pro limited-time 75%-off
     # discount (valid until 2026-05-05) is reflected here; the
     # post-discount sticker price is in the comment on each row so a

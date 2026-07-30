@@ -232,10 +232,53 @@ _PROVIDER_REGISTRY: dict[str, tuple[str, str]] = {
     # hit ``api.deepseek.com/chat/completions`` (404) while the
     # primary path worked. See findings/13-llm-core.md fix #3.
     "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
-    "kimi": ("https://api.moonshot.cn/v1", "MOONSHOT_API_KEY"),
-    "qwen": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY"),
+    # The Moonshot API host is api.moonshot.**ai**. The DOCS host moved
+    # to platform.kimi.ai but the API host did NOT — and the previous
+    # value here (api.moonshot.**cn**) was a different, older estate.
+    "kimi": ("https://api.moonshot.ai/v1", "MOONSHOT_API_KEY"),
+    # Qwen's OpenAI-compatible host is now WORKSPACE-SCOPED. The literal
+    # below is the documented template, not a dialable host —
+    # ``_resolve_workspace_base_url`` substitutes {WorkspaceId} from
+    # DASHSCOPE_WORKSPACE_ID at connect time. The old
+    # dashscope.aliyuncs.com/compatible-mode/v1 endpoint this replaced
+    # is no longer the documented path.
+    "qwen": (
+        "https://[{WorkspaceId}].ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        "DASHSCOPE_API_KEY",
+    ),
+    # xai had catalog data but no runtime binding — the catalog
+    # advertised Grok models the brain could not actually dispatch to.
+    # Its API is OpenAI-compatible, so the binding is one line.
+    "xai": ("https://api.x.ai/v1", "XAI_API_KEY"),
+    "zai": ("https://api.z.ai/api/paas/v4", "ZAI_API_KEY"),
+    "minimax": ("https://api.minimax.io/v1", "MINIMAX_API_KEY"),
+    "mistral": ("https://api.mistral.ai/v1", "MISTRAL_API_KEY"),
     "lmstudio": ("http://localhost:1234/v1", ""),
 }
+
+
+def _resolve_workspace_base_url(base_url: str) -> str:
+    """Substitute ``{WorkspaceId}`` in a workspace-scoped base URL.
+
+    Alibaba moved Qwen's OpenAI-compatible endpoint to a per-workspace
+    host. The registry stores the documented template; the operator's
+    workspace id comes from ``DASHSCOPE_WORKSPACE_ID`` (or
+    ``QWEN_WORKSPACE_ID``). When neither is set the template is returned
+    unchanged so the caller surfaces an honest "unresolved base URL"
+    error instead of dialling a host literally named ``{WorkspaceId}``.
+    """
+    if "{WorkspaceId}" not in (base_url or ""):
+        return base_url
+    workspace = (
+        os.environ.get("DASHSCOPE_WORKSPACE_ID")
+        or os.environ.get("QWEN_WORKSPACE_ID")
+        or ""
+    ).strip()
+    if not workspace:
+        return base_url
+    return base_url.replace("[{WorkspaceId}]", workspace).replace(
+        "{WorkspaceId}", workspace
+    )
 
 
 # Catalog id ↔ legacy llm_provider id. The catalog only knows
@@ -441,14 +484,6 @@ class LLMProvider:
             self.base_url = self.base_url or "https://api.deepseek.com/v1"
             self.api_key = os.getenv("DEEPSEEK_API_KEY", self.api_key)
             self.model = self.model or _default_model_for("deepseek")
-        elif self.provider == "kimi":
-            self.base_url = self.base_url or "https://api.moonshot.cn/v1"
-            self.api_key = os.getenv("MOONSHOT_API_KEY", self.api_key)
-            self.model = self.model or _default_model_for("kimi")
-        elif self.provider == "qwen":
-            self.base_url = self.base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1"
-            self.api_key = os.getenv("DASHSCOPE_API_KEY", self.api_key)
-            self.model = self.model or _default_model_for("qwen")
         elif self.provider == "lmstudio":
             self.base_url = self.base_url or "http://localhost:1234/v1"
             self.api_key = "lm-studio"
@@ -462,6 +497,29 @@ class LLMProvider:
             self.base_url = self.base_url or "https://api.openai.com/v1"
             self.api_key = os.getenv("OPENAI_API_KEY", self.api_key)
             self.model = self.model or _default_model_for("openai")
+        elif self.provider in _PROVIDER_REGISTRY:
+            # Registry-driven branch for every remaining OpenAI-compatible
+            # provider (kimi, qwen, xai, zai, minimax, mistral). These used
+            # to need a hand-written ``elif`` apiece, which is how kimi and
+            # qwen ended up with base URLs that had drifted from the
+            # registry tuple sitting a few hundred lines above. Reading the
+            # registry directly makes that drift structurally impossible:
+            # adding a provider is now a one-line registry edit.
+            registry_base, registry_env = _PROVIDER_REGISTRY[self.provider]
+            self.base_url = self.base_url or _resolve_workspace_base_url(registry_base)
+            if registry_env:
+                self.api_key = os.getenv(registry_env, self.api_key)
+            self.model = self.model or _default_model_for(self.provider)
+            if "{" in (self.base_url or ""):
+                # Workspace-scoped host with no workspace id supplied.
+                # Fail visibly rather than dial a literal "{WorkspaceId}".
+                logger.warning(
+                    "%s base URL is still a template (%s) — set "
+                    "DASHSCOPE_WORKSPACE_ID. Marking provider unavailable.",
+                    self.provider,
+                    self.base_url,
+                )
+                self.available = False
         else:
             # Unknown provider id. Previously this branch silently
             # defaulted to ``https://api.openai.com/v1`` with the
@@ -2755,18 +2813,26 @@ class LLMProvider:
     # enable by default — the cheap tier never leaves the provider the
     # operator already has a key for; it only swaps to a cheaper model.
     # Operators wanting cross-provider tiers set ``settings.llm.tier_map``.
+    # Refreshed 2026-07-30 against the catalog. Entries whose cheap SKU
+    # could not be verified were REMOVED rather than left pointing at a
+    # retired id: ``_cheap_sibling_model`` returning None simply disables
+    # cheap-tier routing for that provider, whereas a stale literal
+    # routes real traffic at a model that 404s. ``xai`` lost its
+    # ``grok-3-mini`` entry for exactly that reason — grok-3-mini is
+    # retired and the current line (grok-4.5 / grok-4.3 / grok-build-0.1)
+    # has no confirmed cheap tier.
     _CHEAP_SIBLING: dict[str, str] = {
-        "openai": "gpt-4o-mini",
+        "openai": "gpt-5-nano",
         "anthropic": "claude-haiku-4-5",
-        "google": "gemini-2.5-flash",
-        "gemini": "gemini-2.5-flash",
+        "google": "gemini-3.5-flash-lite",
+        "gemini": "gemini-3.5-flash-lite",
         "deepseek": "deepseek-v4-flash",
-        "openrouter": "openai/gpt-4o-mini",
+        "openrouter": "openai/gpt-5-nano",
         "groq": "llama-3.1-8b-instant",
         "together": "meta-llama/Llama-3.1-8B-Instruct-Turbo",
         "fireworks": "accounts/fireworks/models/llama-v3p1-8b-instruct",
-        "mistral": "mistral-small-latest",
-        "xai": "grok-3-mini",
+        "mistral": "mistral-small-2603",
+        "kimi": "kimi-k2.5",
     }
 
     def _cheap_sibling_model(self, provider: str, current_model: str) -> Optional[str]:
