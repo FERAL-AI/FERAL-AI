@@ -15,6 +15,7 @@ from typing import Any, Optional
 import httpx
 
 from .base import BaseProvider, ChatMessage, ChatResponse
+from .catalog_data import bundled_models
 from .model_classes import classify
 
 logger = logging.getLogger("feral.providers.openai")
@@ -61,23 +62,15 @@ class OpenAIProvider(BaseProvider):
     provider_id = "openai"
     display_name = "OpenAI"
 
-    # Populated from model_catalog.json on load; seed with the verified
-    # 2026-04-24 frontier names so a fresh install lists current models
-    # even before the first live catalog refresh. Keep this list in sync
-    # with feral-core/providers/model_catalog.json (the canonical bundled
-    # source of truth).
-    _models = [
-        "gpt-5.5",
-        "gpt-5.5-pro",
-        "gpt-5.5-2026-04-23",
-        "gpt-5.4",
-        "gpt-5.4-mini",
-        "gpt-5.4-nano",
-        "gpt-5",
-        "gpt-5-mini",
-        "text-embedding-3-small",
-        "text-embedding-3-large",
-    ]
+    # Bundled fallback model list, read from
+    # ``providers/model_catalog.json`` rather than hardcoded here.
+    # A literal list goes stale the moment the provider ships a new
+    # frontier name (roadmap §3.5 P0) — and because
+    # ``ProviderCatalog.default_model_for`` falls back to this list when
+    # no live refresh has run, a stale literal here silently became the
+    # provider's DEFAULT model. Instances replace it with the live
+    # ``/v1/models`` response in :meth:`refresh_models`.
+    _models = bundled_models("openai")
     # Pricing lives in providers/model_catalog.json (single source of
     # truth).  this adapter shipped its own divergent literals
     # — gpt-5.5 was 0.006/0.018 here vs 0.005/0.030 in the catalog,

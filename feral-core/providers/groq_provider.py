@@ -8,6 +8,7 @@ from typing import Any, Optional
 import httpx
 
 from .base import BaseProvider, ChatMessage, ChatResponse
+from .catalog_data import bundled_models
 from .model_classes import classify
 
 logger = logging.getLogger("feral.providers.groq")
@@ -42,12 +43,15 @@ class GroqProvider(BaseProvider):
     provider_id = "groq"
     display_name = "Groq"
 
-    _models = [
-        "llama-3.3-70b-versatile",
-        "llama-3.1-8b-instant",
-        "mixtral-8x7b-32768",
-        "gemma2-9b-it",
-    ]
+    # Bundled fallback model list, read from
+    # ``providers/model_catalog.json`` rather than hardcoded here.
+    # A literal list goes stale the moment the provider ships a new
+    # frontier name (roadmap §3.5 P0) — and because
+    # ``ProviderCatalog.default_model_for`` falls back to this list when
+    # no live refresh has run, a stale literal here silently became the
+    # provider's DEFAULT model. Instances replace it with the live
+    # ``/v1/models`` response in :meth:`refresh_models`.
+    _models = bundled_models("groq")
     # Pricing lives in providers/model_catalog.json — see
     # findings/13-llm-core.md fix #4.
     _pricing: dict[str, dict[str, float]] = {}

@@ -351,8 +351,8 @@ def test_run_setup_reimport_still_exposes_shim():
         ("groq", "api.groq.com"),
         ("openrouter", "openrouter.ai"),
         ("deepseek", "api.deepseek.com"),
-        ("kimi", "api.moonshot.cn"),
-        ("qwen", "dashscope.aliyuncs.com"),
+        ("kimi", "api.moonshot.ai"),
+        ("qwen", "dashscope-intl.aliyuncs.com"),
     ],
 )
 async def test_validate_key_success_per_provider(provider, url_suffix, mock_console):

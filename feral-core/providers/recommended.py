@@ -41,7 +41,16 @@ from typing import FrozenSet
 #      provider has one.
 
 _RECOMMENDED_OPENAI: FrozenSet[str] = frozenset({
-    # Flagship (2026 generation)
+    # Flagship (2026-07 generation). The 5.6 line names its tiers
+    # sol / terra / luna; ``gpt-5.6`` is an alias of ``gpt-5.6-sol``.
+    "gpt-5.6-sol",
+    "gpt-5.6",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    # Cheapest SKU — the cheap-tier target in
+    # ``LLMProvider._CHEAP_SIBLING``.
+    "gpt-5-nano",
+    # Previous flagship generation (still current, still recommended)
     "gpt-5.5",
     "gpt-5.5-pro",
     "gpt-5.4",
@@ -60,6 +69,13 @@ _RECOMMENDED_OPENAI: FrozenSet[str] = frozenset({
 })
 
 _RECOMMENDED_ANTHROPIC: FrozenSet[str] = frozenset({
+    # Claude 5 generation (2026-07). Ids are DATELESS — the bare id is
+    # itself a pinned snapshot; appending a date 404s.
+    "claude-opus-5",
+    "claude-fable-5",
+    "claude-sonnet-5",
+    # Claude 4.x, still current
+    "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
     "claude-sonnet-4-6",
@@ -76,7 +92,12 @@ _RECOMMENDED_DEEPSEEK: FrozenSet[str] = frozenset({
 })
 
 _RECOMMENDED_GEMINI: FrozenSet[str] = frozenset({
-    # 3.1 tier (current)
+    # 3.5 / 3.6 flash tiers (2026-07)
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    # 3.1 tier (current). NOTE: the ``-preview`` suffix is part of the
+    # model id — there is no stable ``gemini-3.1-pro``.
     "gemini-3.1-pro-preview",
     "gemini-3.1-flash-lite-preview",
     "gemini-3.1-flash-image-preview",
@@ -111,10 +132,13 @@ _RECOMMENDED_GROQ: FrozenSet[str] = frozenset({
 # when they want a specific route.
 _RECOMMENDED_OPENROUTER_PREFIXES: FrozenSet[str] = frozenset({
     # Anthropic on OpenRouter
+    "anthropic/claude-opus-5",
+    "anthropic/claude-fable-5",
+    "anthropic/claude-sonnet-5",
     "anthropic/claude-opus-4",
     "anthropic/claude-sonnet-4",
     "anthropic/claude-haiku-4",
-    # OpenAI on OpenRouter
+    # OpenAI on OpenRouter ("openai/gpt-5" also covers the 5.6 line)
     "openai/gpt-5",
     "openai/gpt-4.1",
     "openai/o3",
@@ -135,6 +159,12 @@ _RECOMMENDED_OPENROUTER_PREFIXES: FrozenSet[str] = frozenset({
     "mistralai/mixtral-",
     # Qwen
     "qwen/qwen3",
+    # Moonshot / Kimi
+    "moonshotai/kimi-k",
+    # Z.ai / GLM
+    "z-ai/glm-5",
+    # MiniMax
+    "minimax/minimax-m",
 })
 
 # Locally-hosted backends: there is no upstream catalog — whatever the
@@ -185,34 +215,65 @@ def is_recommended(provider_id: str, model_id: str) -> bool:
 # a priority entry keep caller order.
 _TIER_RANK: dict[str, list[tuple[str, int]]] = {
     "openai": [
-        ("gpt-5.5-pro", 0),
-        ("gpt-5.5", 1),
-        ("gpt-5.4", 2),
-        ("gpt-5-mini", 3),
-        ("gpt-5", 3),  # tied with mini; stable order preserved
-        ("o4-", 4),
-        ("o3", 5),
-        ("gpt-4.1", 6),  # previous-gen; still recommended but below current
+        ("gpt-5.6-sol", 0),
+        ("gpt-5.6-terra", 1),
+        ("gpt-5.6-luna", 2),
+        ("gpt-5.6", 3),
+        ("gpt-5.5-pro", 4),
+        ("gpt-5.5", 5),
+        ("gpt-5.4", 6),
+        ("gpt-5-mini", 7),
+        ("gpt-5-nano", 7),
+        ("gpt-5", 7),  # tied with mini/nano; stable order preserved
+        ("o4-", 8),
+        ("o3", 9),
+        ("gpt-4.1", 10),  # previous-gen; still recommended but below current
     ],
+    # ``default_model_for`` takes rank 0, so this ladder also chooses
+    # the provider's DEFAULT model — not merely the display order.
+    # claude-opus-5 leads rather than claude-fable-5 deliberately:
+    # Fable is the premium tier at $10/$50 per 1M vs Opus 5's $5/$25,
+    # and silently defaulting every operator to the 2x-cost model is
+    # not a defensible default. Fable sits immediately below so it is
+    # one click away in the picker.
     "anthropic": [
-        ("claude-opus-4-7", 0),
-        ("claude-opus-4-6", 1),
-        ("claude-sonnet-4-6", 2),
-        ("claude-haiku-4-5", 3),
+        ("claude-opus-5", 0),
+        ("claude-fable-5", 1),
+        ("claude-sonnet-5", 2),
+        ("claude-opus-4-8", 3),
+        ("claude-opus-4-7", 4),
+        ("claude-opus-4-6", 5),
+        ("claude-sonnet-4-6", 6),
+        ("claude-haiku-4-5", 7),
     ],
     "gemini": [
         ("gemini-3.1-pro", 0),
-        ("gemini-3.1-flash", 1),
-        ("gemini-3-pro", 2),
-        ("gemini-3-flash", 3),
-        ("gemini-2.5-pro", 4),
-        ("gemini-2.5-flash", 5),
-        ("gemini-pro-latest", 6),
-        ("gemini-flash-latest", 7),
+        ("gemini-3.6-flash", 1),
+        ("gemini-3.5-flash-lite", 3),  # more specific than 3.5-flash
+        ("gemini-3.5-flash", 2),
+        ("gemini-3.1-flash", 4),
+        ("gemini-3-pro", 5),
+        ("gemini-3-flash", 6),
+        ("gemini-2.5-pro", 7),
+        ("gemini-2.5-flash", 8),
+        ("gemini-pro-latest", 9),
+        ("gemini-flash-latest", 10),
     ],
     "deepseek": [
         ("deepseek-v4-pro", 0),
         ("deepseek-v4-flash", 1),
+    ],
+    # OpenRouter's recommended set is a prefix match over 360+ routes
+    # which arrive alphabetically sorted, so without a ladder the
+    # default lands on whichever ``anthropic/…`` slug sorts first —
+    # ``claude-fable-5``, the $10/$50 premium tier. Same reasoning as
+    # the anthropic ladder above: lead with the cost-balanced flagship.
+    "openrouter": [
+        ("anthropic/claude-opus-5", 0),
+        ("openai/gpt-5.6", 1),
+        ("google/gemini-3.1-pro", 2),
+        ("anthropic/claude-sonnet-5", 3),
+        ("anthropic/claude-fable-5", 4),
     ],
     "groq": [
         ("llama-3.3-70b", 0),

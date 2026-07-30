@@ -8,12 +8,19 @@ still renders something on a first-run host).
 
 Extended-thinking handling
 --------------------------
-The 2026-04-26 Anthropic models endpoint returns a ``capabilities``
-object per model; today Opus 4.7 uses *adaptive* thinking (no explicit
-``thinking`` block — the model decides) while Sonnet 4.6 / Haiku 4.5
-support *enabled* thinking with an explicit ``budget_tokens`` knob.
-Sending ``thinking={"type":"enabled"}`` to Opus 4.7 is a 400. We fork
-on the live capability flag to avoid that regression.
+The Anthropic models endpoint returns a ``capabilities`` object per
+model. Claude 4.7 and later use *adaptive* thinking (no explicit
+``thinking`` block — the model decides) while Sonnet 4.6 / Haiku 4.5 and
+earlier support *enabled* thinking with an explicit ``budget_tokens``
+knob. Sending ``thinking={"type":"enabled"}`` to an adaptive model is a
+400, and so is sending ``temperature`` / ``top_p`` / ``top_k`` to one.
+
+Neither split is hardcoded here any more. Both are read from the
+catalog's ``capabilities`` block via :mod:`providers.catalog_data`,
+which ``scripts/research_providers.py`` refreshes from the live
+endpoint. The old static ``frozenset({"claude-opus-4-7"})`` would have
+silently 400'd every Claude 5 call carrying a temperature the moment the
+Claude 5 ids were added to the model list.
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ from typing import Any, Optional
 import httpx
 
 from .base import BaseProvider, ChatMessage, ChatResponse
+from .catalog_data import bundled_models, capability, models_with_capability
 from .model_classes import classify
 
 logger = logging.getLogger("feral.providers.anthropic")
@@ -57,57 +65,17 @@ class AnthropicProvider(BaseProvider):
     provider_id = "anthropic"
     display_name = "Anthropic"
 
-    # Hand-curated as of 2026-04-24. Anthropic does not expose a public
-    # /v1/models endpoint, so this list IS the catalog — bumping it is
-    # the only way new Claude IDs reach the v2 picker until provider
-    # docs add a discovery endpoint. Mirrors anthropic.models in
-    # feral-core/providers/model_catalog.json (curated_at 2026-04-24).
-    # Verified 2026-04-26 against the Anthropic models-overview doc.
-    # Opus 4.7 uses adaptive thinking (no extended); Sonnet 4.6 and
-    # Haiku 4.5 support extended thinking with budget_tokens. The
-    # dated snapshot ids are the ones returned by the models/list API;
-    # they resolve to the same weights as their aliases.
-    _models = [
-        "claude-opus-4-7",
-        "claude-sonnet-4-6",
-        "claude-haiku-4-5",
-        "claude-haiku-4-5-20251001",
-        "claude-opus-4-6",
-        "claude-sonnet-4-5",
-        "claude-sonnet-4-5-20250929",
-        "claude-opus-4-5",
-        "claude-opus-4-5-20251101",
-        "claude-opus-4-1",
-        "claude-opus-4-1-20250805",
-    ]
-    # Pricing (USD per 1k tokens) from anthropic.com/docs/about-claude/pricing
-    # verified 2026-04-26. Dated snapshots share the base alias price.
+    # Bundled fallback model list. NOT a literal — read from
+    # ``providers/model_catalog.json`` so a catalog refresh (daily
+    # workflow, or a hot edit) is the only thing needed to surface a new
+    # Claude id in the v2 picker. Instances replace this with the live
+    # ``/v1/models`` response in :meth:`refresh_models` when a key is
+    # present.
+    _models = bundled_models("anthropic")
     # Pricing lives in providers/model_catalog.json — see
     # findings/13-llm-core.md fix #4.
     _pricing: dict[str, dict[str, float]] = {}
     _capabilities = {"tool_calling", "vision", "streaming", "thinking"}
-    # Adaptive-thinking models decline the explicit ``thinking`` block;
-    # extended-thinking models accept it with ``budget_tokens``. This
-    # set is the static overlay consulted when the live
-    # ``/v1/models`` response's capability flags are unavailable (e.g.
-    # first boot with no key). The refresh path will populate the
-    # instance-level ``_thinking_caps`` dict from the live response.
-    _ADAPTIVE_THINKING_MODELS = frozenset({
-        "claude-opus-4-7",
-    })
-    _EXTENDED_THINKING_MODELS = frozenset({
-        "claude-sonnet-4-6",
-        "claude-sonnet-4-6-20260203",
-        "claude-haiku-4-5",
-        "claude-haiku-4-5-20251001",
-        "claude-opus-4-6",
-        "claude-sonnet-4-5",
-        "claude-sonnet-4-5-20250929",
-        "claude-opus-4-5",
-        "claude-opus-4-5-20251101",
-        "claude-opus-4-1",
-        "claude-opus-4-1-20250805",
-    })
 
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None) -> None:
         self._api_key = api_key
@@ -118,17 +86,57 @@ class AnthropicProvider(BaseProvider):
         # Falls back to the static overlay above when empty.
         self._thinking_caps: dict[str, dict[str, bool]] = {}
 
+    # ------------------------------------------------------------------
+    # Capability lookups
+    # ------------------------------------------------------------------
+    #
+    # Resolution order for every lookup below:
+    #   1. ``self._thinking_caps`` — flags parsed from the live
+    #      ``/v1/models`` response by :meth:`refresh_models`.
+    #   2. the bundled catalog's ``capabilities`` block (refreshed daily
+    #      from the same endpoint by scripts/research_providers.py).
+    #   3. a conservative default for ids neither source knows.
+    #
+    # Step 2 replaces the two hand-maintained frozensets this class used
+    # to carry. See the module docstring.
+
+    @staticmethod
+    def adaptive_thinking_models() -> frozenset[str]:
+        """Catalog-derived set of adaptive-thinking Claude ids."""
+        return models_with_capability("anthropic", "thinking", "adaptive")
+
+    @staticmethod
+    def extended_thinking_models() -> frozenset[str]:
+        """Catalog-derived set of ``budget_tokens``-accepting Claude ids."""
+        return models_with_capability("anthropic", "thinking", "enabled")
+
     def supports_extended_thinking(self, model: str) -> bool:
         live = self._thinking_caps.get(model, {})
         if "thinking_enabled" in live:
             return bool(live["thinking_enabled"])
-        return model in self._EXTENDED_THINKING_MODELS
+        return model in self.extended_thinking_models()
 
     def supports_adaptive_thinking(self, model: str) -> bool:
         live = self._thinking_caps.get(model, {})
         if "thinking_adaptive" in live:
             return bool(live["thinking_adaptive"])
-        return model in self._ADAPTIVE_THINKING_MODELS
+        return model in self.adaptive_thinking_models()
+
+    def supports_sampling_params(self, model: str) -> bool:
+        """Whether *model* accepts ``temperature`` / ``top_p`` / ``top_k``.
+
+        These were removed on Claude 4.7 and every later model: sending
+        any of them returns HTTP 400. Unknown ids default to ``True`` so
+        a model released after the last catalog refresh keeps the
+        historical behaviour rather than silently losing a caller's
+        temperature.
+        """
+        explicit = capability("anthropic", model, "sampling_params")
+        if explicit is not None:
+            return bool(explicit)
+        # No explicit record: adaptive thinking is the observable proxy
+        # — the two changed together on 4.7 and have tracked since.
+        return not self.supports_adaptive_thinking(model)
 
     async def chat(
         self,
@@ -193,11 +201,21 @@ class AnthropicProvider(BaseProvider):
                 # a 400. Drop the caller-supplied value silently.
                 temperature = None
         elif want_reasoning and self.supports_adaptive_thinking(model):
-            # Opus 4.7 chooses its own thinking depth; pass no thinking
-            # block. Live smoke on 2026-04-26 also confirmed that
-            # adaptive-thinking models (currently Opus 4.7) return 400
-            # "temperature is deprecated for this model" — drop
-            # caller-supplied temperature here too.
+            # Adaptive-thinking models choose their own depth; pass no
+            # thinking block.
+            temperature = None
+
+        # Sampling params were REMOVED (not deprecated) on Claude 4.7 and
+        # every later model — temperature / top_p / top_k each return a
+        # 400. This guard is deliberately outside the reasoning fork
+        # above: that fork only fires when the caller asked for reasoning
+        # or the classifier tagged the model as reasoning, whereas the
+        # 400 fires on *any* request carrying the param. A plain chat
+        # turn on claude-opus-5 with a temperature has to be caught here.
+        if temperature is not None and not self.supports_sampling_params(model):
+            logger.debug(
+                "dropping temperature for %s: model rejects sampling params", model
+            )
             temperature = None
 
         if temperature is not None:

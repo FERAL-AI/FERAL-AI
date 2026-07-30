@@ -537,12 +537,12 @@ async def _validate_key_for_provider(provider: str, api_key: str, base_url: str 
                     return True, "Key validates (method-not-allowed is OK for perplexity)"
             elif provider in ("kimi", "moonshot"):
                 r = await client.get(
-                    "https://api.moonshot.cn/v1/models",
+                    "https://api.moonshot.ai/v1/models",
                     headers={"Authorization": f"Bearer {api_key}"},
                 )
             elif provider in ("qwen", "dashscope"):
                 r = await client.get(
-                    "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
+                    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models",
                     headers={"Authorization": f"Bearer {api_key}"},
                 )
             else:

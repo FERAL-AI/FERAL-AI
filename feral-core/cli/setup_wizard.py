@@ -246,18 +246,22 @@ PROVIDERS = {
     "kimi": {
         "name": "Kimi (Moonshot)",
         "env_key": "MOONSHOT_API_KEY",
-        "base_url": "https://api.moonshot.cn/v1",
-        "desc": "Moonshot v1 / Kimi K2, 128K context, strong Chinese + English",
+        # API host is api.moonshot.ai. The DOCS host moved to
+        # platform.kimi.ai but the API host did NOT.
+        "base_url": "https://api.moonshot.ai/v1",
+        "desc": "Kimi K3 / K2.7, 1M context, strong Chinese + English",
         "models": [],
         "default_model": "",
         "voice": False,
-        "key_hint": "From platform.moonshot.cn",
+        "key_hint": "From platform.kimi.ai",
     },
     "qwen": {
         "name": "Qwen (Alibaba)",
         "env_key": "DASHSCOPE_API_KEY",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "desc": "Qwen Max/Plus/Turbo, strong multilingual",
+        # Workspace-scoped since 2026; {WorkspaceId} is substituted
+        # from DASHSCOPE_WORKSPACE_ID at connect time.
+        "base_url": "https://[{WorkspaceId}].ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        "desc": "Qwen3.7 Max/Plus, Qwen3.6 Flash, strong multilingual",
         "models": [],
         "default_model": "",
         "voice": False,
@@ -460,8 +464,12 @@ async def validate_provider_key(provider: str, key: str) -> tuple[bool, str]:
         "groq": ("https://api.groq.com/openai/v1/models", {"Authorization": f"Bearer {key}"}),
         "openrouter": ("https://openrouter.ai/api/v1/models", {"Authorization": f"Bearer {key}"}),
         "deepseek": ("https://api.deepseek.com/models", {"Authorization": f"Bearer {key}"}),
-        "kimi": ("https://api.moonshot.cn/v1/models", {"Authorization": f"Bearer {key}"}),
-        "qwen": ("https://dashscope.aliyuncs.com/compatible-mode/v1/models", {"Authorization": f"Bearer {key}"}),
+        "kimi": ("https://api.moonshot.ai/v1/models", {"Authorization": f"Bearer {key}"}),
+        # Qwen key validation uses the non-workspace-scoped international
+        # DashScope host: the workspace-scoped chat host needs a
+        # workspace id the operator has not supplied yet at this point
+        # in the wizard.
+        "qwen": ("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models", {"Authorization": f"Bearer {key}"}),
     }
 
     if provider not in endpoints:
