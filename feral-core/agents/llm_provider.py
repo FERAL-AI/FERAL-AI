@@ -921,13 +921,32 @@ class LLMProvider:
                 return True, ""
             return False, narrow_reason
 
-        # Anthropic, DeepSeek, Groq all support vision on their
-        # frontier chat models; the provider registry already carries
-        # that signal in the bundled ``_capabilities`` set. If we
-        # ever ship a text-only Anthropic build the per-model hook
-        # ``_capabilities_for_model`` narrows this.
-        if self.provider in ("anthropic", "deepseek", "groq"):
+        # Anthropic and Groq support vision on their frontier chat models;
+        # the provider registry carries that signal in the bundled
+        # ``_capabilities`` set. If we ever ship a text-only Anthropic
+        # build the per-model hook ``_capabilities_for_model`` narrows it.
+        if self.provider in ("anthropic", "groq"):
             return True, ""
+
+        # DeepSeek was listed above on the assumption that every frontier
+        # chat model takes images. It does not: the chat-completions API
+        # rejects an ``image_url`` content block outright with
+        # HTTP 400 ``invalid_request_error`` --
+        #   "Failed to deserialize the JSON body into the target type:
+        #    messages[0]: unknown variant `image_url`, expected `text`"
+        # -- observed live on 2026-07-30 against ``deepseek-v4-pro``. Because
+        # this returned True, the vision guard let the request through, so a
+        # DeepSeek hop in the failover chain 400'd on any turn carrying a
+        # screen frame or an attached image instead of degrading to text.
+        # Returning False here makes the caller strip the image blocks and
+        # send the text, which is a usable answer rather than an exhausted
+        # chain.
+        if self.provider == "deepseek":
+            return (
+                False,
+                "DeepSeek chat models are text-only and reject image content "
+                "blocks. Images will be dropped for this hop.",
+            )
 
         if self.provider == "ollama":
             model_lower = (self.model or "").lower()
