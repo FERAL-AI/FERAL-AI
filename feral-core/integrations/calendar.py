@@ -15,6 +15,8 @@ from typing import Any, Optional
 
 import httpx
 
+from integrations._http_errors import http_error_detail
+
 logger = logging.getLogger("feral.integrations.calendar")
 
 GCAL_API = "https://www.googleapis.com/calendar/v3"
@@ -100,7 +102,13 @@ class CalendarIntegration:
     # ── ICS helpers ────────────────────────────────────────────────
 
     async def _fetch_ics_events(self) -> list[dict[str, Any]]:
-        """Parse VEVENT blocks from a remote ICS URL using regex only."""
+        """Parse VEVENT blocks from a remote ICS URL using regex only.
+
+        Fetch failures propagate. Swallowing them and returning ``[]``
+        made a 404, a DNS failure, or a timeout indistinguishable from
+        a genuinely empty calendar — every caller turned that into
+        ``success: True`` and told the user they had no events.
+        """
         if not self._ics_url:
             return []
         try:
@@ -108,9 +116,12 @@ class CalendarIntegration:
                 resp = await client.get(self._ics_url)
                 resp.raise_for_status()
                 text = resp.text
-        except Exception as e:
-            logger.warning("ICS fetch failed: %s", e)
-            return []
+        except Exception:
+            # Log with the feed URL, which the caller's error string
+            # does not carry, then re-raise — the caller turns this into
+            # success: False.
+            logger.warning("ICS fetch failed for %s", self._ics_url)
+            raise
 
         events: list[dict[str, Any]] = []
         blocks = re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", text, re.DOTALL)
@@ -175,7 +186,7 @@ class CalendarIntegration:
                 filtered.sort(key=lambda e: e["start"])
                 return {"success": True, "data": {"events": filtered, "source": "ics"}}
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
 
         headers = await self._headers()
         if not headers:
@@ -197,7 +208,7 @@ class CalendarIntegration:
             events = [self._parse_gcal_event(e) for e in items]
             return {"success": True, "data": {"events": events, "source": "google"}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def get_today(self, **kwargs) -> dict:
         now = datetime.now(timezone.utc)
@@ -215,7 +226,7 @@ class CalendarIntegration:
                 today.sort(key=lambda e: e["start"])
                 return {"success": True, "data": {"events": today, "date": now.strftime("%Y-%m-%d"), "source": "ics"}}
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
 
         headers = await self._headers()
         if not headers:
@@ -236,7 +247,7 @@ class CalendarIntegration:
             events = [self._parse_gcal_event(e) for e in items]
             return {"success": True, "data": {"events": events, "date": now.strftime("%Y-%m-%d"), "source": "google"}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def create_event(self, title: str = "", start: str = "", end: str = "", description: str = "", **kwargs) -> dict:
         if self._use_ics:
@@ -262,7 +273,7 @@ class CalendarIntegration:
             created = resp.json()
             return {"success": True, "data": self._parse_gcal_event(created)}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def next_event(self, **kwargs) -> dict:
         """Nearest upcoming event — optimised for ambient strip display."""
@@ -283,7 +294,7 @@ class CalendarIntegration:
                     return {"success": True, "data": nearest}
                 return {"success": True, "data": {"message": "No upcoming events"}}
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
 
         headers = await self._headers()
         if not headers:
@@ -305,7 +316,7 @@ class CalendarIntegration:
                 return {"success": True, "data": self._parse_gcal_event(items[0])}
             return {"success": True, "data": {"message": "No upcoming events"}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def search_events(self, query: str = "", days_back: int = 30, **kwargs) -> dict:
         if self._use_ics:
@@ -315,7 +326,7 @@ class CalendarIntegration:
                 matched = [e for e in all_events if q in e.get("summary", "").lower() or q in e.get("description", "").lower()]
                 return {"success": True, "data": {"events": matched, "query": query, "source": "ics"}}
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
 
         headers = await self._headers()
         if not headers:
@@ -339,7 +350,7 @@ class CalendarIntegration:
             events = [self._parse_gcal_event(e) for e in items]
             return {"success": True, "data": {"events": events, "query": query, "source": "google"}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def delete_event(self, event_id: str = "", **kwargs) -> dict:
         if self._use_ics:
@@ -356,7 +367,7 @@ class CalendarIntegration:
             resp.raise_for_status()
             return {"success": True, "data": {"deleted": event_id}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def close(self):
         await self._http.aclose()

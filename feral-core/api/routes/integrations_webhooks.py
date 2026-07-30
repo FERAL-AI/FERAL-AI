@@ -78,8 +78,74 @@ async def store_integration_token(body: dict):
     if not provider_id or not token:
         return {"error": "provider_id and token are required"}
     if state.oauth:
+        # An OAuth2 provider has no long-lived token to paste. The
+        # WebUI used to POST the *client secret* here, which landed in
+        # the access_token slot with a 30-year expiry: is_connected went
+        # permanently True, every API call 401'd, and the IMAP/ICS
+        # fallbacks that key off is_connected were switched off.
+        provider = state.oauth.get_provider(provider_id)
+        if provider is not None and provider.auth_type == "oauth2":
+            return {
+                "error": (
+                    f"{provider.name} uses OAuth2 — a client secret is not "
+                    "an access token. POST client_id + client_secret to "
+                    "/api/integrations/oauth/client, then run the authorize "
+                    "flow."
+                ),
+                "reason": "oauth2_provider",
+                "provider": provider_id,
+            }
         state.oauth.store_api_token(provider_id, token)
     return {"ok": True, "provider": provider_id}
+
+
+@router.post("/api/integrations/oauth/client")
+async def store_oauth_client(body: dict):
+    """Save the operator's own OAuth app credentials for a provider.
+
+    Client credentials identify the *application*; the user's tokens
+    still come from the authorize flow afterwards. Persisted where
+    ``OAuthManager`` resolves credentials (vault, or the
+    ``first_party_clients.json`` overlay) and reloaded in place, so
+    ``/api/oauth/authorize/{provider_id}`` works without a restart.
+    """
+    if not state.oauth:
+        return {
+            "error": "OAuth manager not initialized",
+            "reason": "oauth_unavailable",
+        }
+    provider_id = (body.get("provider_id") or "").strip()
+    client_id = (body.get("client_id") or "").strip()
+    client_secret = (body.get("client_secret") or "").strip()
+    try:
+        state.oauth.store_client_credentials(
+            provider_id, client_id, client_secret,
+        )
+    except ValueError as exc:
+        return {
+            "error": str(exc),
+            "reason": "invalid_client_credentials",
+            "provider": provider_id,
+        }
+    # An env var or a hand-edited ~/.feral/oauth_providers.json outranks
+    # what we just saved. Report that instead of a green "saved" that
+    # does nothing.
+    provider = state.oauth.get_provider(provider_id)
+    applied = provider is not None and provider.client_id == client_id
+    return {
+        "ok": True,
+        "provider": provider_id,
+        "applied": applied,
+        "setup_status": state.oauth.setup_status(provider_id),
+        "has_client_secret": bool(client_secret),
+        **({} if applied else {
+            "warning": (
+                "Saved, but a higher-priority source (environment variable "
+                "or ~/.feral/oauth_providers.json) still supplies the "
+                "client_id for this provider."
+            ),
+        }),
+    }
 
 
 async def _store_gmail_app_password(body: dict) -> dict:

@@ -4,7 +4,6 @@ voice sessions, email received, device routing.
 """
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -230,12 +229,17 @@ async def test_email_watcher_emits_email_received_for_vip():
     mock_mail.fetch = MagicMock(return_value=("OK", [(b"1", raw_email_bytes)]))
     watcher._mail = mock_mail
 
+    # The loop the brain captured in start(). This test used to patch
+    # ``email_watcher.asyncio`` wholesale so ``get_event_loop()`` handed
+    # back a mock — which masked the RuntimeError the real worker thread
+    # hit, and let the "drops every email" bug ship green. Set the same
+    # attribute start() sets instead, so the hand-off path under test is
+    # the production one.
     mock_loop = MagicMock()
+    watcher._loop = mock_loop
 
     with patch(STATE_PATH, fake_state), \
-         patch("integrations.email_watcher.asyncio") as mock_asyncio:
-        mock_asyncio.get_event_loop.return_value = mock_loop
-        mock_asyncio.create_task = MagicMock()
+         patch("integrations.email_watcher.asyncio.create_task", MagicMock()):
         watcher._process_message(b"1")
 
     assert watcher._processed_count == 1

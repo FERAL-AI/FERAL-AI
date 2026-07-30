@@ -11,7 +11,7 @@ import logging
 import os
 import ssl
 import time
-from typing import Optional, Callable, Awaitable
+from typing import Optional, Callable
 
 logger = logging.getLogger("feral.integrations.mqtt")
 
@@ -44,6 +44,7 @@ class MQTTBridge:
         self._on_device_event = on_device_event
         self._client = None
         self._running = False
+        self._task: Optional[asyncio.Task] = None
         self._devices: dict[str, dict] = {}
         self._message_count = 0
         self._publish_lock = asyncio.Lock()
@@ -91,7 +92,9 @@ class MQTTBridge:
             return False
 
         self._running = True
-        asyncio.create_task(self._subscribe_loop())
+        # Keep the handle: api/state.py registers it so shutdown can
+        # cancel the loop.
+        self._task = asyncio.create_task(self._subscribe_loop())
         logger.info("MQTT bridge started: %s (topics: %s, tls: %s)",
                      self._broker_url, self._topics, self._tls_enabled)
         return True
