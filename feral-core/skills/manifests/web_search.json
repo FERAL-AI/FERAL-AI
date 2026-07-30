@@ -1,49 +1,59 @@
 {
-    "skill_id": "web_search",
-    "version": "1.0.0",
-    "author": "feral-core",
-    "brand": {
-        "name": "Web Search",
-        "primary_color": "#E74C3C",
-        "secondary_color": "#2C3E50",
-        "logo_url": "",
-        "icon_set": "sf_symbols"
-    },
-    "description": "Search the web using Tavily AI search. Get comprehensive results with AI-powered summaries.",
-    "trigger_phrases": [
-        "search for",
-        "google",
-        "look up",
-        "what is",
-        "who is",
-        "find information about",
-        "search the web",
-        "how does",
-        "define",
-        "wikipedia"
-    ],
-    "categories": ["search", "knowledge", "utility"],
-    "auth": {
-        "type": "api_key",
-        "api_key_header": "X-API-Key"
-    },
-    "endpoints": [
+  "skill_id": "web_search",
+  "version": "1.0.0",
+  "author": "feral-core",
+  "brand": {
+    "name": "Web Search",
+    "primary_color": "#E74C3C",
+    "secondary_color": "#2C3E50",
+    "logo_url": "",
+    "icon_set": "sf_symbols"
+  },
+  "description": "Search the web using Tavily AI search. Get comprehensive results with AI-powered summaries.",
+  "trigger_phrases": [
+    "search for",
+    "google",
+    "look up",
+    "what is",
+    "who is",
+    "find information about",
+    "search the web",
+    "how does",
+    "define",
+    "wikipedia"
+  ],
+  "categories": [
+    "search",
+    "knowledge",
+    "utility"
+  ],
+  "auth": {
+    "type": "api_key",
+    "api_key_header": "X-API-Key"
+  },
+  "endpoints": [
+    {
+      "id": "web_search",
+      "method": "POST",
+      "url": "https://api.tavily.com/search",
+      "description": "Search the web and get AI-summarized results with sources. Backed by Python implementation \u2014 this manifest is for documentation; actual execution uses skills/impl/web_search.py.",
+      "params": [
         {
-            "id": "web_search",
-            "method": "POST",
-            "url": "https://api.tavily.com/search",
-            "description": "Search the web and get AI-summarized results with sources. Backed by Python implementation — this manifest is for documentation; actual execution uses skills/impl/web_search.py.",
-            "params": [
-                {"name": "query", "type": "string", "required": true, "description": "Search query"}
-            ],
-            "returns_description": "AI-generated answer plus array of {title, url, content} results",
-            "ui_hint": "list"
+          "name": "query",
+          "type": "string",
+          "required": true,
+          "description": "Search query"
         }
-    ],
-    "flows": [],
-    "crons": [],
-    "triggers": [],
-    "permissions": [],
-    "requires_daemon": false,
-    "max_calls_per_hour": 500
+      ],
+      "returns_description": "AI-generated answer plus array of {title, url, content} results",
+      "ui_hint": "list",
+      "emit_result_preview": true
+    }
+  ],
+  "flows": [],
+  "crons": [],
+  "triggers": [],
+  "permissions": [],
+  "requires_daemon": false,
+  "max_calls_per_hour": 500
 }

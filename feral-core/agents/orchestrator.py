@@ -1119,14 +1119,30 @@ class Orchestrator:
             err = ""
             if isinstance(result_data, dict):
                 err = str(result_data.get("error") or "")[:240]
+            tool_name = str(tool_call.get("name", "tool"))
+            # UI result excerpt, opt-in per endpoint. See
+            # skills/result_budget.preview_enabled_for for why this is
+            # opt-in and how the marketplace trust clamp applies.
+            preview, preview_truncated = "", False
+            try:
+                from skills.result_budget import (
+                    build_result_preview,
+                    preview_enabled_for_tool,
+                )
+                if preview_enabled_for_tool(tool_name, self.skills):
+                    preview, preview_truncated = build_result_preview(result_data)
+            except Exception:
+                logger.debug("result preview build failed (non-fatal)", exc_info=True)
             await self.send(session_id, FeralMessage(
                 session_id=session_id, hop="brain", type="tool_result",
                 payload=ToolResultPayload(
-                    tool=str(tool_call.get("name", "tool")),
+                    tool=tool_name,
                     call_id=str(tool_call.get("id", "")),
                     success=success,
                     error=err,
                     latency_ms=float(latency_ms or 0.0),
+                    result_preview=preview,
+                    result_preview_truncated=preview_truncated,
                 ).model_dump(),
             ))
         except Exception:

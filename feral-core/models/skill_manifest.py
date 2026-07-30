@@ -96,6 +96,13 @@ class SkillEndpoint(BaseModel):
     # runtime-installed skills are clamped to "standard" whatever they claim.
     result_budget: Optional[str] = None
 
+    # Opt in to sending a human-readable excerpt of this endpoint's result to
+    # the chat UI. Default off: results routinely carry vault reads, tokens,
+    # file contents and mail bodies, and there is no redaction pass in this
+    # codebase. Same trust clamp as result_budget - honoured only for
+    # manifests shipping in feral-core/skills/manifests/.
+    emit_result_preview: bool = False
+
 
 class FlowStep(BaseModel):
     """One step in a multi-step flow."""
@@ -175,6 +182,13 @@ class SkillManifest(BaseModel):
     # Default result budget tier for every endpoint in this skill; see
     # SkillEndpoint.result_budget and skills/result_budget.py.
     result_budget: Optional[str] = None
+
+    # Opt in to sending a human-readable excerpt of this endpoint's result to
+    # the chat UI. Default off: results routinely carry vault reads, tokens,
+    # file contents and mail bodies, and there is no redaction pass in this
+    # codebase. Same trust clamp as result_budget - honoured only for
+    # manifests shipping in feral-core/skills/manifests/.
+    emit_result_preview: bool = False
 
 
 # ─────────────────────────────────────────────

@@ -286,6 +286,84 @@ def budget_for(
     return get_budget(declared)
 
 
+# Ceiling on the UI-facing result excerpt. Independent of the model-facing
+# budgets above: the chat renderer needs something a person can read and
+# scroll, not the whole payload the model receives.
+PREVIEW_MAX_CHARS: int = 4000
+
+
+def preview_enabled_for(
+    skill_id: str,
+    endpoint_id: str = "",
+    manifest: Any = None,
+) -> bool:
+    """Whether this endpoint may send a UI result preview. Default False.
+
+    Opt-in rather than opt-out, and deliberately so. Tool results routinely
+    carry vault reads, API responses holding tokens, file contents and mail
+    bodies, and there is no redaction pass anywhere in this codebase to lean
+    on (no ``redact``/``redact_secrets`` helper exists in ``security/`` or
+    ``agents/``). An opt-out default would leak by omission the first time
+    anyone added a credential-touching endpoint.
+
+    Same trust clamp as :func:`budget_for`: a declaration is honoured only
+    for manifests that ship in this repo, so a runtime-installed marketplace
+    skill cannot switch previews on for itself and exfiltrate its own
+    results into the transcript.
+    """
+    declared: Any = None
+    if manifest is not None:
+        if endpoint_id:
+            for endpoint in getattr(manifest, "endpoints", None) or []:
+                if getattr(endpoint, "id", None) == endpoint_id:
+                    declared = getattr(endpoint, "emit_result_preview", None)
+                    break
+        if declared is None:
+            declared = getattr(manifest, "emit_result_preview", None)
+
+    if not declared:
+        return False
+
+    if skill_id not in builtin_skill_ids():
+        logger.info(
+            "Skill %r is not a built-in manifest; ignoring its declared "
+            "emit_result_preview and withholding the UI preview",
+            skill_id,
+        )
+        return False
+
+    return bool(declared)
+
+
+def preview_enabled_for_tool(tool_name: str, registry: Any = None) -> bool:
+    """``preview_enabled_for`` keyed by an LLM-facing ``skill__endpoint`` name."""
+    skill_id, _, endpoint_id = (tool_name or "").partition("__")
+    if not skill_id or not endpoint_id:
+        return False
+    manifest = None
+    if registry is not None:
+        manifest = getattr(registry, "skills", {}).get(skill_id)
+    return preview_enabled_for(skill_id, endpoint_id, manifest)
+
+
+def build_result_preview(result_data: Any) -> tuple[str, bool]:
+    """Render ``result_data`` as a bounded UI excerpt.
+
+    Returns ``(preview, truncated)``. Prefers the payload's own ``data``
+    when present, since that is the tool's actual output rather than the
+    success/error envelope wrapping it.
+    """
+    payload = result_data
+    if isinstance(result_data, dict) and "data" in result_data:
+        payload = result_data["data"]
+    if payload is None:
+        return "", False
+    text = payload if isinstance(payload, str) else _dumps(payload)
+    if len(text) <= PREVIEW_MAX_CHARS:
+        return text, False
+    return text[:PREVIEW_MAX_CHARS], True
+
+
 def budget_for_tool(tool_name: str, registry: Any = None) -> ResultBudget:
     """Resolve the budget from an LLM-facing ``skill__endpoint`` tool name.
 

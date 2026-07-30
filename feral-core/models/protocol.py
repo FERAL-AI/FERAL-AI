@@ -377,6 +377,17 @@ class ToolResultPayload(BaseModel):
     success: bool = True
     error: str = ""
     latency_ms: float = 0.0
+    # Human-readable excerpt of what the tool returned, for the chat UI's
+    # result renderer. OPT-IN per endpoint via ``emit_result_preview`` in the
+    # skill manifest, and default OFF: tool results routinely carry vault
+    # reads, API responses holding tokens, file contents and mail bodies,
+    # and this codebase has no redaction pass to lean on. Empty string means
+    # "not offered for this endpoint", which the client renders as an
+    # explicit note rather than implying the tool returned nothing.
+    result_preview: str = ""
+    # True when ``result_preview`` was cut to fit, so the client can say so
+    # instead of presenting a fragment as the whole result.
+    result_preview_truncated: bool = False
 
 
 class GesturePayload(BaseModel):
