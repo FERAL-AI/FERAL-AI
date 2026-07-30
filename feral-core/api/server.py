@@ -1722,12 +1722,30 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                     )
                 except Exception as e:
                     logger.debug(f"Identity maintenance skipped: {e}")
-        state.sessions.pop(session_id, None)
-        state.audio.clear_session(session_id)
-        # Perception buffers are surface-local (one fusion frame per
-        # active socket); clear unconditionally so a stale frame from
-        # a closed tab doesn't leak into the next session.
-        state.perception.clear(session_id)
+        # Identity-checked de-registration. ``state.sessions`` holds ONE
+        # WebSocket per session_id, and every web tab that connects
+        # without ``?session_id=`` resolves to ``primary_session_id`` —
+        # so a second surface (another browser tab, the iOS app)
+        # overwrites the slot at line 1422 on connect. Popping
+        # unconditionally here meant the *older* handler's disconnect
+        # de-registered the *newer*, still-live socket. After that
+        # ``BrainState.send_to_session`` misses the key and silently
+        # returns, so every stream_delta / text_response for the turn
+        # goes nowhere while the client socket stays open and healthy:
+        # the composer spins on "thinking" forever with no error, no
+        # toast, and no reconnect. Operator report 2026-07 ("say hi,
+        # switch to another tab, it stops replying").
+        #
+        # Only tear down the shared per-session state when the socket in
+        # the slot is still ours; if a newer surface owns it, that
+        # surface owns its audio and perception buffers too.
+        if state.sessions.get(session_id) is ws:
+            state.sessions.pop(session_id, None)
+            state.audio.clear_session(session_id)
+            # Perception buffers are surface-local (one fusion frame per
+            # active socket); clear so a stale frame from a closed tab
+            # doesn't leak into the next session.
+            state.perception.clear(session_id)
         # Working memory + orchestrator history persist while ANY
         # surface remains AND for the primary session always. The
         # snapshot store handles cold-boot durability.

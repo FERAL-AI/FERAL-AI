@@ -21,15 +21,11 @@ The phone never talks to OpenAI directly — the Brain owns the context.
 
 from __future__ import annotations
 import asyncio
-import base64
 import json
 import logging
 import os
 import time
 from typing import Optional, Callable, Awaitable, Any
-from uuid import uuid4
-
-import httpx
 
 from agents.tool_display import tool_feedback_text
 from agents.tool_list import (
@@ -163,7 +159,6 @@ class RealtimeSession:
             return
 
         try:
-            import websockets
             url = f"{OPENAI_REALTIME_URL}?model={self._model}"
             headers = {
                 "Authorization": f"Bearer {self._api_key}",
@@ -434,8 +429,25 @@ class RealtimeSession:
             try:
                 await self._ws.send(json.dumps(event))
             except Exception as e:
+                # Symmetry with ``_receive_loop`` below: a failed send is
+                # just as terminal as a failed receive, so it must reach
+                # ``RealtimeProxy._handle_error`` for classification and
+                # fallback. Before this, a send failure only flipped
+                # ``_connected = False`` while leaving the session
+                # registered in ``_sessions`` / ``_node_to_session``.
+                # ``VoiceRouter`` then found a non-None session, skipped
+                # re-opening, and dropped every subsequent audio chunk on
+                # the ``rs.connected`` gate — voice went dead with no
+                # error, no voice_status frame, and no recovery short of
+                # a brain restart (operator report 2026-07: "the voice
+                # collapses").
                 logger.error(f"Realtime send error: {e}")
                 self._connected = False
+                if self._on_error:
+                    try:
+                        await self._on_error(self.session_id, str(e))
+                    except Exception:
+                        logger.exception("Realtime on_error callback failed")
 
     async def _receive_loop(self):
         """Process incoming events from OpenAI Realtime."""

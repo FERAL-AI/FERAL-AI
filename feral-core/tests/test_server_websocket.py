@@ -365,6 +365,45 @@ class TestSessionWebSocket:
         ws_mock_state.perception.clear.assert_called_with(sid)
         ws_mock_state.memory.working_clear.assert_called_with(sid)
 
+    def test_disconnect_does_not_evict_a_newer_surface(self, ws_mock_state, ws_client):
+        """An older surface closing must not de-register a newer live socket.
+
+        ``state.sessions`` holds ONE WebSocket per session_id, and every web
+        tab connecting without ``?session_id=`` resolves to the same
+        ``primary_session_id``. Surface B therefore overwrites A's slot on
+        connect. When A later disconnects, an unconditional
+        ``state.sessions.pop`` removed B's still-live socket, after which
+        ``send_to_session`` silently no-ops and the brain's replies go
+        nowhere: chat spins on "thinking" forever with no error.
+
+        Operator report 2026-07 ("say hi, switch to another tab, it stops
+        replying").
+
+        Two *concurrent* TestClient websockets deadlock on the shared
+        blocking portal, so surface B is simulated by overwriting the slot
+        while A is open, which is exactly what ``server.py:1422`` does on
+        B's connect. The assertion is on the identity check itself.
+        """
+        surface_b = object()  # stands in for B's live WebSocket
+
+        with ws_client.websocket_connect("/v1/session") as ws_a:
+            ws_a.receive_json()
+            sid = next(iter(ws_mock_state.sessions.keys()))
+            assert ws_mock_state.sessions[sid] is not surface_b
+
+            # Surface B connects on the same session_id and takes the slot.
+            ws_mock_state.sessions[sid] = surface_b
+
+            # A disconnects on leaving this block, while B still holds it.
+
+        # B must survive A's teardown, or every reply it is owed is dropped.
+        assert ws_mock_state.sessions.get(sid) is surface_b
+
+        # A's teardown must also leave B's surface-local buffers alone.
+        for mock in (ws_mock_state.audio.clear_session,
+                     ws_mock_state.perception.clear):
+            assert sid not in [c.args[0] for c in mock.call_args_list if c.args]
+
     def test_skill_gen_proposal_after_command(self, ws_mock_state, ws_client):
         sg = MagicMock()
         sg.detect_unmet_need = AsyncMock(
