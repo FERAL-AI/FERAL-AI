@@ -392,6 +392,15 @@ class SandboxPolicy:
     def max_movement_speed(self) -> int:
         return self._data.get("hardware", {}).get("movement", {}).get("max_speed_pct", 50)
 
+    def emergency_stop_enabled(self) -> bool:
+        """Whether the host-side dead-man watchdog may issue an automatic
+        halt to a motion-capable device on command timeout, link loss, or
+        brain shutdown. Mirrors ``hardware.movement.emergency_stop_enabled``
+        and defaults to True so the safety behavior is on unless a policy
+        explicitly disables it."""
+        movement = self._data.get("hardware", {}).get("movement", {})
+        return bool(movement.get("emergency_stop_enabled", True))
+
     def can_capture_camera(self) -> bool:
         return self._data.get("hardware", {}).get("cameras", {}).get("allowed", True)
 

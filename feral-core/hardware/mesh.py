@@ -33,6 +33,14 @@ from hardware.command_contract import (
 
 logger = logging.getLogger("feral.hardware.mesh")
 
+# Continuous-motion command names the host-side dead-man watchdog guards.
+# On a command timeout to a motion-capable node we send a best-effort halt
+# so a robot mid-motion doesn't keep going after the brain stops waiting.
+MOTION_COMMANDS = frozenset(
+    {"follow_line", "explore", "drive", "resume", "go_to", "patrol"}
+)
+HALT_COMMAND = "halt"
+
 NODE_COMMANDS = {
     "camera.snap": {
         "description": "Capture a photo",
@@ -141,6 +149,7 @@ class HardwareMesh:
         node_health: Optional[NodeHealth] = None,
         *,
         knowledge_graph=None,
+        emergency_stop_enabled: bool = True,
     ):
         self._registry = device_registry
         self._daemons = daemons
@@ -148,6 +157,10 @@ class HardwareMesh:
         self._node_metadata: dict[str, dict] = {}
         self.ledger: CommandLedger = ledger or CommandLedger()
         self.node_health: NodeHealth = node_health or NodeHealth()
+        # Host-side dead-man gate (mirrors SandboxPolicy
+        # hardware.movement.emergency_stop_enabled). Gates the best-effort
+        # halt issued to a motion-capable node when its command times out.
+        self._emergency_stop_enabled = bool(emergency_stop_enabled)
         # HUP v1.3.0 §5.4.4 — discovered peripherals. Maps
         # ``device_id`` → discovery record (last_seen, scanner_node_id,
         # rssi, metadata). Lane 12 reads from /api/hardware/mesh; the
@@ -202,7 +215,10 @@ class HardwareMesh:
                     ],
                 )
 
-        adapter = WebSocketNodeAdapter(node_id, self._daemons, self._pending_invokes)
+        adapter = WebSocketNodeAdapter(
+            node_id, self._daemons, self._pending_invokes,
+            emergency_stop_enabled=self._emergency_stop_enabled,
+        )
         self._registry.register_device(manifest, adapter)
         self._node_metadata[node_id] = {
             "registered_at": time.time(),
@@ -363,6 +379,7 @@ class HardwareMesh:
                 request_id, CommandState.TIMED_OUT,
                 message=f"Timeout after {timeout}s waiting for {command}",
             )
+            await self._failsafe_halt_on_timeout(node_id, command)
             return {"success": False, "error": f"Timeout waiting for {command} on {node_id}", "command_id": request_id}
 
         except Exception as e:
@@ -372,6 +389,44 @@ class HardwareMesh:
             )
             self.node_health.increment_errors(node_id)
             return {"success": False, "error": str(e), "command_id": request_id}
+
+    async def _failsafe_halt_on_timeout(self, node_id: str, command: str) -> None:
+        """Host-side dead-man: on a motion-command timeout, send a best-effort
+        halt to the node so a robot mid-motion stops even though the brain gave
+        up waiting. Fire-and-forget (we do not await an ack — the node is
+        already unresponsive). Never raises; logs honestly on failure and does
+        not pretend the halt landed when the link is gone.
+        """
+        if not self._emergency_stop_enabled:
+            return
+        if command == HALT_COMMAND or command not in MOTION_COMMANDS:
+            return
+        ws = self._daemons.get(node_id)
+        if ws is None:
+            logger.warning(
+                "Motion command %r to %s timed out but the node is gone; "
+                "cannot issue fail-safe halt", command, node_id,
+            )
+            return
+        try:
+            await ws.send_json({
+                "type": "hup_action_request",
+                "payload": {
+                    "action_id": str(uuid4()),
+                    "name": HALT_COMMAND,
+                    "params": {},
+                    "timeout_ms": 2000,
+                },
+            })
+            logger.warning(
+                "Fail-safe halt sent to %s after motion command %r timed out",
+                node_id, command,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Fail-safe halt to %s failed after %r timeout: %s",
+                node_id, command, exc,
+            )
 
     def resolve_invoke(self, request_id: str, result: dict):
         """Called when a daemon sends back an execute_result.
@@ -540,10 +595,19 @@ class WebSocketNodeAdapter:
     Bridges the HUP action model to the node.invoke pattern.
     """
 
-    def __init__(self, node_id: str, daemons: dict, pending: dict):
+    def __init__(
+        self,
+        node_id: str,
+        daemons: dict,
+        pending: dict,
+        *,
+        emergency_stop_enabled: bool = True,
+    ):
         self._node_id = node_id
         self._daemons = daemons
         self._pending = pending
+        # Host-side dead-man gate for the timeout fail-safe halt.
+        self._emergency_stop_enabled = bool(emergency_stop_enabled)
 
     async def execute(self, action: HUPAction) -> HUPResult:
         """Execute a HUP action by sending it to the daemon."""
@@ -584,6 +648,7 @@ class WebSocketNodeAdapter:
             )
         except asyncio.TimeoutError:
             self._pending.pop(request_id, None)
+            await self._failsafe_halt_on_timeout(command)
             return HUPResult(
                 action_id=action.action_id, device_id=action.device_id,
                 status="timeout", error=f"Timeout ({action.timeout_ms}ms)",
@@ -593,4 +658,41 @@ class WebSocketNodeAdapter:
             return HUPResult(
                 action_id=action.action_id, device_id=action.device_id,
                 status="failure", error=str(e),
+            )
+
+    async def _failsafe_halt_on_timeout(self, command: str) -> None:
+        """Host-side dead-man: on a motion-action timeout, send a best-effort
+        halt to the daemon so a robot mid-motion stops even though the brain
+        gave up waiting. Never raises; logs honestly and no-ops when the gate
+        is off, the command isn't motion, or the node is gone.
+        """
+        if not self._emergency_stop_enabled:
+            return
+        if command == HALT_COMMAND or command not in MOTION_COMMANDS:
+            return
+        ws = self._daemons.get(self._node_id)
+        if ws is None:
+            logger.warning(
+                "Motion action %r to %s timed out but the node is gone; "
+                "cannot issue fail-safe halt", command, self._node_id,
+            )
+            return
+        try:
+            await ws.send_json({
+                "type": "hup_action_request",
+                "payload": {
+                    "action_id": str(uuid4()),
+                    "name": HALT_COMMAND,
+                    "params": {},
+                    "timeout_ms": 2000,
+                },
+            })
+            logger.warning(
+                "Fail-safe halt sent to %s after motion action %r timed out",
+                self._node_id, command,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Fail-safe halt to %s failed after %r timeout: %s",
+                self._node_id, command, exc,
             )

@@ -126,9 +126,11 @@ feral install <item_id>
   returns an API key the daemon saves locally.
 - Steady-state: daemon sends `Authorization: Bearer <key>` in the WebSocket
   upgrade.
-- Per-capability gating: the user approves each capability (camera, audio,
-  actuator) in Settings. The Brain only sends `hup_action_request` frames
-  for capabilities the user has granted.
+- Per-capability gating (in development): the `node_ack` frame carries
+  `granted_capabilities` / `denied_capabilities`, the intended surface for
+  approving each capability (camera, audio, actuator) in Settings. Today the
+  Brain grants every capability a node advertises and denies none —
+  user-gated per-capability approval is not yet enforced.
 
 ## Compliance
 

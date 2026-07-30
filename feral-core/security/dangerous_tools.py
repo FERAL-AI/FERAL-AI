@@ -206,6 +206,18 @@ SURFACE_DENY_LISTS: dict[str, set[str]] = {
     },
 }
 
+# Voice-realtime and autonomous multi-agent surfaces have NO inline
+# human-approval loop: a hands-free realtime voice turn and a spawned
+# subagent worker cannot render a CONFIRM card and wait. So they inherit
+# http_api's CRITICAL deny floor here, and the call sites
+# (voice/realtime_proxy.py, voice/gemini_realtime.py,
+# agents/multi_agent.py) additionally refuse any tool that does not
+# resolve to AUTO. Declared centrally so the floor shows up in
+# ``known_surfaces()`` and is a single source of truth.
+SURFACE_DENY_LISTS["voice"] = set(SURFACE_DENY_LISTS["http_api"])
+SURFACE_DENY_LISTS["agent"] = set(SURFACE_DENY_LISTS["http_api"])
+
+
 # Frozen snapshots for introspection / tests (optional).
 SURFACE_DENY_LISTS_FROZEN: dict[str, FrozenSet[str]] = {
     k: frozenset(v) for k, v in SURFACE_DENY_LISTS.items()
@@ -259,6 +271,37 @@ _DEVICE_TARGET_TO_SURFACE: dict[str, str] = {
     "phone": "phone_actuator",
     "glasses": "phone_actuator",
 }
+
+
+# Surfaces that grant MORE than the minimally-trusted default and must
+# therefore never be selectable by an untrusted/remote client via a raw
+# ``context["surface"]`` claim. ``local_cli`` has an empty deny list
+# (fully unrestricted) and ``brain_host`` grants Mac desktop/shell
+# control. The legitimate way to reach these is the trusted transport
+# (loopback CLI) or an explicit, separately-authorized ``device_target``
+# — not a client-declared surface string.
+_EXPLICIT_PRIVILEGED_SURFACES: FrozenSet[str] = frozenset({"local_cli", "brain_host"})
+
+
+def is_privileged_surface(surface: str) -> bool:
+    """True when ``surface`` is unrestricted/privileged and so must not be
+    selectable by an untrusted client.
+
+    Privileged means any of:
+      * unknown / unregistered — ``is_tool_allowed`` treats these as
+        unrestricted, so honoring an unknown claim would bypass all deny
+        lists;
+      * an empty deny list (``local_cli``) — nothing is blocked;
+      * an explicitly privileged surface (``brain_host``).
+    """
+    if surface in _EXPLICIT_PRIVILEGED_SURFACES:
+        return True
+    denies = SURFACE_DENY_LISTS.get(surface)
+    if denies is None:          # unknown surface -> unrestricted
+        return True
+    if not denies:              # empty deny list -> unrestricted
+        return True
+    return False
 
 
 def known_surfaces() -> tuple[str, ...]:
@@ -359,9 +402,16 @@ def resolve_surface_from_context(
 ) -> str:
     """Map a ``handle_command`` context dict to an execution surface.
 
-    Resolution order (Phase 1 — audit-r10 overhaul):
-      1. ``context["surface"]`` — explicit override if the caller already
-         knows the surface.
+    Resolution order:
+      1. ``context["surface"]`` — an explicit override, but honored ONLY
+         when it is an *un-privileged* surface (Batch 1 trust-boundary
+         fix #6). A client / paired remote node must not be able to
+         escalate by declaring ``surface="local_cli"`` (or any unknown /
+         unrestricted surface) to escape the deny lists — such claims are
+         ignored and resolution falls through to the transport-derived
+         signals below. Un-privileged claims (e.g. the strict
+         ``http_api``) only ever *restrict*, so they stay honored for the
+         trusted internal callers that set them.
       2. ``context["device_target"]`` — Phase 1 wire field
          (`brain`/`phone`/`glasses`). When present and non-``auto``,
          dispatches to the matching surface so the orchestrator can
@@ -377,7 +427,7 @@ def resolve_surface_from_context(
     if not context:
         return default
     surface = context.get("surface") if isinstance(context, Mapping) else None
-    if isinstance(surface, str) and surface:
+    if isinstance(surface, str) and surface and not is_privileged_surface(surface):
         return surface
     device_target = (
         context.get("device_target") if isinstance(context, Mapping) else None
@@ -408,5 +458,6 @@ __all__ = [
     "get_danger_level",
     "requires_approval",
     "is_tool_allowed",
+    "is_privileged_surface",
     "resolve_surface_from_context",
 ]

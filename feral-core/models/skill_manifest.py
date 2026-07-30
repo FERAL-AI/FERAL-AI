@@ -79,6 +79,12 @@ class SkillEndpoint(BaseModel):
     safety_tier: Optional[Literal["safe", "confirm", "deny"]] = None
     read_only_hint: bool = False
     requires_user_approval: bool = False
+    # Capability this endpoint needs at runtime. When set, the executor
+    # refuses to run the endpoint unless the value also appears in the
+    # skill manifest's ``permissions`` list (see skills/executor.py). Left
+    # None by default so every existing manifest keeps loading and running
+    # unchanged — enforcement is opt-in per endpoint.
+    required_permission: Optional[str] = None
 
 
 class FlowStep(BaseModel):

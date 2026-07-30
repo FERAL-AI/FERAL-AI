@@ -86,6 +86,56 @@ class TestInvoke:
         assert "Timeout" in result["error"]
 
 
+class TestFailSafeHaltOnTimeout:
+    """Batch 2 — host-side dead-man: motion timeout issues a best-effort halt."""
+
+    @pytest.mark.asyncio
+    async def test_motion_command_timeout_issues_halt(self):
+        reg = DeviceRegistry()
+        daemons: dict = {}
+        mesh = HardwareMesh(reg, daemons)
+        ws = MagicMock()
+        # Never resolves the pending future -> the command times out.
+        ws.send_json = AsyncMock(return_value=None)
+        daemons["robot-1"] = ws
+
+        result = await mesh.invoke(
+            "robot-1", "drive", {"left": 30, "right": 30}, timeout=0.05
+        )
+        assert result.get("success") is False
+        # Two sends: the original drive command, then the fail-safe halt.
+        assert ws.send_json.await_count == 2
+        halt_msg = ws.send_json.await_args_list[-1].args[0]
+        assert halt_msg["payload"]["name"] == "halt"
+
+    @pytest.mark.asyncio
+    async def test_nonmotion_command_timeout_no_halt(self):
+        reg = DeviceRegistry()
+        daemons: dict = {}
+        mesh = HardwareMesh(reg, daemons)
+        ws = MagicMock()
+        ws.send_json = AsyncMock(return_value=None)
+        daemons["cam-1"] = ws
+
+        result = await mesh.invoke("cam-1", "camera.snap", {}, timeout=0.05)
+        assert result.get("success") is False
+        # Only the original command — a camera snap is not motion.
+        assert ws.send_json.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_estop_disabled_suppresses_halt(self):
+        reg = DeviceRegistry()
+        daemons: dict = {}
+        mesh = HardwareMesh(reg, daemons, emergency_stop_enabled=False)
+        ws = MagicMock()
+        ws.send_json = AsyncMock(return_value=None)
+        daemons["robot-2"] = ws
+
+        result = await mesh.invoke("robot-2", "drive", {}, timeout=0.05)
+        assert result.get("success") is False
+        assert ws.send_json.await_count == 1
+
+
 class TestNodeCommands:
     """NODE_COMMANDS catalog."""
 

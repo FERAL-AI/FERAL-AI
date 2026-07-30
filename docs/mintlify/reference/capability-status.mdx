@@ -3,9 +3,9 @@ title: "Capability status"
 description: "What's available today in FERAL, what depends on operator setup, and what's coming soon."
 ---
 
-This page is the source of truth for which FERAL capabilities are usable today, which need operator configuration to come online, and which are still in active development. It's regenerated against the running code at each release; the version stamp is the published wheel on PyPI.
+This page is the source of truth for which FERAL capabilities are usable today, which need operator configuration to come online, and which are still in active development. It is hand-maintained and verified against the shipped code at each release (there is no code generator for this file yet); the version stamp is the published wheel on PyPI.
 
-**Version:** v2026.5.41 — `pip install feral-ai==2026.5.41`
+**Version:** v2026.6.29 — `pip install feral-ai==2026.6.29`
 
 | Legend | Meaning |
 |--------|---------|
@@ -17,14 +17,15 @@ This page is the source of truth for which FERAL capabilities are usable today, 
 
 | Capability | Status | Notes |
 |------------|--------|-------|
-| LLM orchestration (9 providers) | Available | OpenAI, Anthropic, Gemini, OpenRouter, Groq, Mistral, Cohere, DeepSeek, Ollama. Per-call routing with automatic failover. |
+| LLM orchestration (10 runtime providers) | Available | OpenAI, Anthropic, Google Gemini, Groq, DeepSeek, OpenRouter, Moonshot (Kimi), Qwen, plus local Ollama and LM Studio. Per-call routing with automatic failover. |
+| Together / Fireworks / Amazon Bedrock | In development | Exposed in the provider catalogue and Settings UI, but they do not yet share the OpenAI-compatible runtime chat adapter the providers above use (Bedrock runs a separate `converse` path). Reconciling this catalog↔runtime split is in progress. |
 | Multi-key per provider | Available | Add multiple labeled keys per provider in **Settings → Providers**; switch the active key without restarting. |
 | Skill registry + tool dispatch | Available | 157 manifest endpoints, contract-tested. See [Skills](/guides/skills). |
 | MCP client | Available | Connects to external MCP servers (HTTP, stdio, SSE). |
 | MCP server | Available | Exposes FERAL tools at `/mcp` for other agents. |
 | Autonomy modes (strict / hybrid / loose) | Available | Enforced on every tool dispatch path. See [Autonomy](/guides/autonomy). |
 | Approval queue | Available | Blocks dangerous operations until you confirm in the WebUI or CLI. |
-| Cost budget + per-call caps | Available | Chat-path budgets emit a banner when exceeded. ScreenLoop pause banner is **In development**. |
+| Cost budget + per-call caps | Available | Per-subsystem and global caps (unlimited until you set one). Both the chat path and the ScreenLoop path emit a budget banner when a configured cap is hit. |
 
 ## Memory
 
@@ -35,8 +36,10 @@ This page is the source of truth for which FERAL capabilities are usable today, 
 | Knowledge graph | Available | Entities and relations queryable via API and CLI. |
 | Timeline (`/api/timeline`) | Available | Reads episodes for a unified life view; degrades gracefully under load. |
 | Wiki compilation | Available | Ingest repositories, PDFs, plain text; browse and search. |
-| HLC-based peer sync | Available — operator setup | Requires at least two paired FERAL nodes on the same network or remote tunnel. |
-| At-rest encryption | In development | Today the database is protected by your OS keychain-derived vault for credentials only; full database envelope encryption ships in a follow-up. |
+| HLC-based peer sync | Available — operator setup | Requires at least two paired FERAL nodes on the same network or remote tunnel. The `/sync` handshake authenticates with a constant-time passphrase comparison and a per-peer failed-attempt lockout. |
+| Vault (credential) encryption at rest | Available | Secrets live in a ChaCha20-Poly1305 vault whose master key is derived from your OS keychain. |
+| Memory-database encryption at rest | Available — operator setup | `feral memory encrypt` encrypts `~/.feral/memory.db` with ChaCha20-Poly1305 (subkey via HKDF-SHA256 from the vault master). It is a one-shot, brain-stopped operation (`feral stop` → `feral memory encrypt` → `feral start`); the DB is decrypted to a runtime file on boot. |
+| Always-live memory encryption + key rotation | In development | Encrypting the DB while it is in use (rather than decrypting to a plaintext runtime file) and `feral memory encrypt --rotate` are not yet shipped. |
 
 ## Voice
 
@@ -48,7 +51,7 @@ This page is the source of truth for which FERAL capabilities are usable today, 
 | Provider catalogue (`/api/voice/providers`) | Available | Lists all 8 providers with live probe status. |
 | Push-to-talk + hot-mic modes | Available | Configurable per device in **Settings → Voice**. |
 | Wake word | Available — operator setup | `openwakeword` integration; quality varies by environment. |
-| Realtime → chained automatic fallback on quota | In development | Today, an OpenAI quota error triggers a TTS-only fallback; switching to the full chained pipeline is operator-driven. |
+| Realtime → chained automatic fallback on quota | Available — operator setup | An OpenAI Realtime quota / 1013-class error auto-morphs the live session to the chained Deepgram + ElevenLabs pipeline (`audio.fallback_mode: chained`, the default) and emits a `voice_status` degraded banner. Needs Deepgram + ElevenLabs keys in the vault. |
 
 ## Perception
 
@@ -64,7 +67,8 @@ This page is the source of truth for which FERAL capabilities are usable today, 
 | Capability | Status | Notes |
 |------------|--------|-------|
 | HUP 1.3.0 (Hardware Unified Protocol) | Available | Unified across brain, SDKs, and daemon manifests. CI-gated. |
-| Generic self-describing hardware hub | Available | `actions[]` → `DeviceManifest` → `GenericHardwareSkill` LLM tools; honesty loop via `verify` contract. Kill switch: `FERAL_GENERIC_HARDWARE_SKILLS`. |
+| Generic self-describing hardware hub | Available | `actions[]` → `DeviceManifest` → `GenericHardwareSkill` LLM tools; per-manifest permission tiers and `rate_limit_per_minute` are enforced on dispatch; honesty loop via `verify` contract. Kill switch: `FERAL_GENERIC_HARDWARE_SKILLS`. |
+| Robot motion fail-safe (host-side) | Available | A host-side dead-man watchdog issues a best-effort `halt` when the brain shuts down or the serial / mesh link drops, so a continuous-motion command cannot run away. |
 | Brain-local device discovery | Available | Config-driven `DEVICE_DISCOVERY_SPECS`; CuteBot via `FERAL_CUTEBOT_PATH`. |
 | Phone-bridged BLE peripherals | Available | `BridgedPeripheralAdapter` + `peripheral_bridge_register`. |
 | Hardware fleet API | Available | `GET /api/hardware/fleet` — manifests, safety tiers, last verification state, mesh snapshot. |
@@ -73,6 +77,7 @@ This page is the source of truth for which FERAL capabilities are usable today, 
 | Home Assistant bridge | Available — operator setup | Requires a running HA instance and long-lived access token. |
 | Smart-glasses ingest (camera node) | Available — operator setup | Phone-camera node streams `glasses_frame`. |
 | Smart-glasses BLE adapter (W610 / QCSDK) | In development | Hardware-specific adapter wiring; phone-camera path is the supported alternative today. |
+| Per-device capability grants (`node_ack`) | In development | The HUP `node_ack` frame carries `granted_capabilities` / `denied_capabilities`, but the brain currently grants every capability a node advertises and denies none — user-gated per-capability approval is not yet enforced. |
 
 ## iOS companion app
 
@@ -93,7 +98,7 @@ This page is the source of truth for which FERAL capabilities are usable today, 
 | Code interpreter | Available | Docker sandbox isolated by default; refuses host fallback when Docker is missing. |
 | Search | Available | 7 providers with failover, caching, and deduplication. |
 | Cron | Available | Time-zone aware, missed-job catch-up, concurrency limits. |
-| Smart-home control | Available — operator setup | Lights / switches / climate / media via Home Assistant. Vacuum control is **In development**. |
+| Smart-home control | Available — operator setup | Lights / switches / climate / media / vacuum (start / stop / return-to-base) via Home Assistant. |
 | Health summary aggregation | Available — operator setup | Whoop and Oura integrations live; HealthKit fusion is **In development**. |
 
 ## Generative UI (GenUI / SDUI)
@@ -116,7 +121,7 @@ This page is the source of truth for which FERAL capabilities are usable today, 
 | Microsoft 365 (Outlook / OneDrive) | Available — operator setup | OAuth self-serve. |
 | Push notifications (FCM / APNs) | Available — operator setup | Operator provides FCM or APNs credentials; brain refuses to send when missing. |
 | Custom webhooks | Available | Persistent SQLite store, signed receive URLs, action routing. |
-| Integration ingress webhooks (GitHub / Stripe / HA / Notion) | Available — operator setup | Per-app secret + signature header validated. Persistent storage ships in a follow-up. |
+| Integration ingress webhooks (GitHub / Stripe / HA / Notion) | Available — operator setup | Per-app secret + signature header validated; configs persist across restarts in a SQLite store (`integration_webhooks`). |
 
 ## Security
 
@@ -124,7 +129,8 @@ This page is the source of truth for which FERAL capabilities are usable today, 
 |------------|--------|-------|
 | BlindVault (encrypted secrets) | Available | ChaCha20-Poly1305 AEAD; master key derived from your OS keychain. |
 | Audit log (fail-loud) | Available | Append-only; tampering surfaces in `feral doctor`. |
-| Sandbox policy module | Available | YAML-loaded; enforced for skill execution and computer use. Daemon shell command policy enforcement ships in a follow-up. |
+| Sandbox policy module | Available | YAML-loaded; enforced for skill execution, computer use, and the `daemon://local/shell` path (allowlisted binaries + shell-metacharacter rejection via `validate_shell_command`). |
+| Marketplace / skill install hardening | Available | Archive members are validated **before** extraction (zip-slip / path-traversal entries rejected), and remote install URLs are SSRF-guarded (private, loopback, and link-local address ranges blocked). |
 | Approval bypass tests | Available | CI-gated; ships in every release. |
 | Local-bypass for paired LAN | Available | Off by default; opt-in per device. |
 

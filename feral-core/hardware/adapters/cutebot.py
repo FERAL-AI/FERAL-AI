@@ -25,6 +25,11 @@ MOTION_CAPABILITIES = frozenset({"follow_line", "explore", "drive", "resume"})
 # These only appear in the device manifest after a pose source is attached
 # via attach_navigator(); the generic HUP skill then exposes them for free.
 NAV_CAPABILITIES = frozenset({"go_to", "patrol", "stop_navigation"})
+# Continuous-motion commands the host-side dead-man watchdog guards. If one
+# of these is active and the link drops, telemetry goes stale, or the brain
+# shuts down, a best-effort halt is issued. ``stop_navigation``/``halt`` are
+# excluded — they *end* motion.
+CONTINUOUS_MOTION_CAPABILITIES = MOTION_CAPABILITIES | {"go_to", "patrol"}
 DEFAULT_DEVICE_ID = "cutebot-usb-0"
 DEFAULT_MAX_DRIVE_SPEED = 40
 
@@ -60,6 +65,7 @@ class CuteBotAdapter:
         max_drive_speed: int = DEFAULT_MAX_DRIVE_SPEED,
         memory: Any = None,
         bot: Any = None,
+        emergency_stop_enabled: bool = True,
     ):
         self.device_id = device_id
         self._port = port
@@ -68,6 +74,14 @@ class CuteBotAdapter:
         self._bot = bot
         self._connected = False
         self._telemetry_running = False
+        # Host-side dead-man gate (mirrors SandboxPolicy
+        # hardware.movement.emergency_stop_enabled). When True, a
+        # disconnect / telemetry-loop teardown while a continuous-motion
+        # command is active issues a best-effort halt so the robot does not
+        # keep driving after the brain lets go of the link.
+        self._emergency_stop_enabled = bool(emergency_stop_enabled)
+        # The continuous-motion command currently believed active, or None.
+        self._active_motion: Optional[str] = None
         # Serializes every touch of the underlying pyserial connection.
         # QtBot/CutebotClient are not thread-safe: the telemetry loop and
         # on-demand execute/read paths each run bot calls in worker threads,
@@ -249,7 +263,27 @@ class CuteBotAdapter:
             self._connected = False
             self._bot = None
             if bot is None:
+                self._active_motion = None
                 return
+            # Host-side dead-man: stop the motors BEFORE dropping the serial
+            # link so a robot mid-motion does not run away when the brain
+            # lets go. Best-effort — a genuinely gone link makes halt() raise;
+            # we log honestly and never claim success when offline. We call
+            # bot.halt directly (not _execute_halt) because we already hold
+            # the io lock.
+            if self._emergency_stop_enabled:
+                try:
+                    await asyncio.to_thread(bot.halt)
+                    logger.info(
+                        "CuteBot fail-safe halt issued before disconnect (%s)",
+                        self.device_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "CuteBot fail-safe halt before disconnect failed for %s: %s",
+                        self.device_id, exc,
+                    )
+            self._active_motion = None
             try:
                 await asyncio.to_thread(bot.close)
             except Exception as exc:
@@ -335,6 +369,7 @@ class CuteBotAdapter:
 
         # Emergency stop: works even offline; never blocked by the battery gate.
         if cap_id == "halt":
+            self._active_motion = None
             return await self._execute_halt(action)
 
         # Motion safety: refuse to command motion when the robot is on USB
@@ -359,6 +394,15 @@ class CuteBotAdapter:
                 status="success",
                 data=state,
             )
+
+        # Track continuous-motion state for the dead-man watchdog. We mark
+        # it active at dispatch (after the battery gate) so a link loss /
+        # shutdown mid-command triggers the fail-safe halt; stop_navigation
+        # clears it.
+        if cap_id == "stop_navigation":
+            self._active_motion = None
+        elif cap_id in CONTINUOUS_MOTION_CAPABILITIES:
+            self._active_motion = cap_id
 
         if cap_id in NAV_CAPABILITIES:
             return await self._run_nav_command(action, cap_id, params)
@@ -486,6 +530,33 @@ class CuteBotAdapter:
                 status="failure",
                 error=str(exc),
             )
+
+    async def _failsafe_halt_on_teardown(self, reason: str) -> None:
+        """Best-effort dead-man halt on telemetry-loop teardown / shutdown.
+
+        Only fires when the emergency-stop gate is on AND a continuous-motion
+        command was active — there is nothing to stop otherwise. Never raises;
+        logs honestly and does not claim success when the write fails.
+        """
+        if not self._emergency_stop_enabled or not self._active_motion:
+            return
+        bot = self._bot
+        if bot is None:
+            self._active_motion = None
+            return
+        try:
+            async with self._io_lock:
+                await asyncio.to_thread(bot.halt)
+            logger.info(
+                "CuteBot fail-safe halt (%s) issued for %s", reason, self.device_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "CuteBot fail-safe halt (%s) failed for %s: %s",
+                reason, self.device_id, exc,
+            )
+        finally:
+            self._active_motion = None
 
     async def emergency_stop(self) -> HUPResult:
         action = HUPAction(
@@ -622,6 +693,10 @@ class CuteBotAdapter:
                 await asyncio.sleep(0.1)
 
             except asyncio.CancelledError:
+                # Loop cancellation is the brain-shutdown dead-man trigger:
+                # if a continuous-motion command was active, stop the robot
+                # before exiting so it doesn't keep driving headless.
+                await self._failsafe_halt_on_teardown("telemetry loop cancelled")
                 raise
             except Exception as exc:
                 logger.debug("CuteBot telemetry loop error: %s", exc)

@@ -6,13 +6,16 @@ Skills are downloaded, validated, and registered with the SkillRegistry.
 """
 
 from __future__ import annotations
+import ipaddress
 import json
 import logging
 import os
 import shutil
+import socket
 import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -27,6 +30,76 @@ from skills.package import (
 )
 
 logger = logging.getLogger("feral.marketplace")
+
+
+def _assert_safe_url(url: str) -> None:
+    """SSRF guard: allow only http(s) URLs whose host resolves to public IPs.
+
+    Rejects non-http(s) schemes and any host that resolves to a
+    private/loopback/link-local/reserved/multicast address (which covers the
+    cloud metadata endpoint 169.254.169.254).
+    """
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"Unsafe URL scheme '{parsed.scheme or ''}': only http/https allowed")
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"URL has no host: {url}")
+
+    port = parsed.port or (443 if scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        raise ValueError(f"Cannot resolve host '{host}': {e}")
+
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise ValueError(
+                f"Blocked SSRF target: host '{host}' resolves to non-public IP {ip}"
+            )
+
+
+def _assert_safe_member(name: str, dest: Path) -> None:
+    """Reject archive members that would escape the extraction directory."""
+    if not name:
+        return
+    p = Path(name)
+    if p.is_absolute():
+        raise ValueError(f"Unsafe archive member (absolute path): {name}")
+    if ".." in p.parts:
+        raise ValueError(f"Unsafe archive member (parent traversal): {name}")
+    target = (dest / name).resolve()
+    if target != dest and dest not in target.parents:
+        raise ValueError(f"Unsafe archive member (escapes extraction dir): {name}")
+
+
+def _safe_extract_zip(zf, dest: Path) -> None:
+    dest = dest.resolve()
+    for member in zf.infolist():
+        _assert_safe_member(member.filename, dest)
+        mode = (member.external_attr >> 16) & 0o170000
+        if mode == 0o120000:
+            raise ValueError(f"Unsafe archive member (symlink): {member.filename}")
+    zf.extractall(dest)
+
+
+def _safe_extract_tar(tf, dest: Path) -> None:
+    dest = dest.resolve()
+    members = tf.getmembers()
+    for m in members:
+        _assert_safe_member(m.name, dest)
+        if m.issym() or m.islnk():
+            raise ValueError(f"Unsafe archive member (link): {m.name}")
+    tf.extractall(dest, members=members)
 
 DEFAULT_REGISTRY_URL = market_registry_url()
 
@@ -97,6 +170,11 @@ class MarketplaceClient:
 
     async def _install_from_url(self, skill_id: str, url: str) -> dict:
         """Install from a direct URL (git repo or archive)."""
+        try:
+            _assert_safe_url(url)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
         if url.endswith(".git") or "github.com" in url:
             return self._install_from_git(skill_id, url)
         resp = await self._client.get(url)
@@ -107,6 +185,11 @@ class MarketplaceClient:
     def _install_from_git(self, skill_id: str, git_url: str) -> dict:
         """Clone a git repo as a skill."""
         import subprocess
+
+        try:
+            _assert_safe_url(git_url)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
 
         dest = SKILLS_DIR / skill_id
         if dest.exists():
@@ -161,24 +244,36 @@ class MarketplaceClient:
         import io
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
             try:
+                # Safe-extract: reject any member that escapes the tmpdir
+                # (Zip-Slip / tar traversal), is absolute, or is a symlink.
                 if archive_bytes[:2] == b"PK":
                     with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
-                        zf.extractall(tmpdir)
+                        _safe_extract_zip(zf, tmp_path)
                 else:
                     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:*") as tf:
-                        tf.extractall(tmpdir)
+                        _safe_extract_tar(tf, tmp_path)
 
                 # Find the manifest
-                tmp_path = Path(tmpdir)
                 manifest_files = list(tmp_path.rglob("manifest.json"))
                 if not manifest_files:
                     return {"success": False, "error": "No manifest.json found in archive"}
 
                 pkg_dir = manifest_files[0].parent
-                pkg = install_package(pkg_dir, SKILLS_DIR)
 
-                issues = self._validator.validate(pkg)
+                # Validate BEFORE copying into SKILLS_DIR; block on SECURITY
+                # findings (mirrors the git install path).
+                staged = SkillPackage(pkg_dir)
+                if not staged.load():
+                    return {"success": False, "error": f"Invalid package: {staged.errors}"}
+
+                issues = self._validator.validate(staged)
+                security_issues = [i for i in issues if "SECURITY" in i]
+                if security_issues:
+                    return {"success": False, "error": f"Security check failed: {security_issues}"}
+
+                pkg = install_package(pkg_dir, SKILLS_DIR)
                 if self._skill_registry and pkg.manifest:
                     self._skill_registry.register(pkg.manifest)
 

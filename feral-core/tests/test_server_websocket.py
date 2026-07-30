@@ -544,6 +544,58 @@ class TestNodeWebSocket:
             ws_mock_state.skill_executor.unregister_daemon.assert_called_with("disc-node")
             ws_mock_state.hardware_mesh.on_node_disconnected.assert_called_with("disc-node")
 
+    def test_token_bound_to_node_cannot_register_as_other_node(
+        self, ws_mock_state, pairing_store_mock
+    ):
+        """A credential paired to node A must not be able to register as
+        node B (trust-boundary Batch 1, fix #3)."""
+        pairing_store_mock.verify_device = MagicMock(return_value="device-1")
+        pairing_store_mock.node_id_for_device = MagicMock(return_value="node-a")
+
+        with _node_client(ws_mock_state, pairing_store_mock) as client:
+            with client.websocket_connect("/v1/node?api_key=paired-token") as ws:
+                ws.send_json(
+                    {
+                        "type": "node_register",
+                        "payload": {
+                            "node_id": "node-b",
+                            "node_type": "desktop",
+                            "platform": "linux",
+                            "capabilities": [],
+                        },
+                    }
+                )
+                err = ws.receive_json()
+                assert err["type"] == "error"
+                assert err["payload"]["name"] == "node_id_mismatch"
+
+        assert "node-b" not in ws_mock_state.daemons
+        assert "node-a" not in ws_mock_state.daemons
+
+    def test_token_bound_to_node_registers_as_same_node(
+        self, ws_mock_state, pairing_store_mock
+    ):
+        """The matching node_id is still accepted (no false-positive lockout)."""
+        pairing_store_mock.verify_device = MagicMock(return_value="device-1")
+        pairing_store_mock.node_id_for_device = MagicMock(return_value="node-a")
+
+        with _node_client(ws_mock_state, pairing_store_mock) as client:
+            with client.websocket_connect("/v1/node?api_key=paired-token") as ws:
+                ws.send_json(
+                    {
+                        "type": "node_register",
+                        "payload": {
+                            "node_id": "node-a",
+                            "node_type": "desktop",
+                            "platform": "linux",
+                            "capabilities": [],
+                        },
+                    }
+                )
+                ack = ws.receive_json()
+                assert ack["type"] == "node_ack"
+                assert ack["payload"]["node_id"] == "node-a"
+
 
 # ─────────────────────────────────────────────────────────────
 # Session / daemon integration

@@ -189,15 +189,67 @@ def test_missing_device_target_preserves_legacy_behavior():
     assert surface == "http_api"
 
 
-def test_explicit_surface_overrides_everything():
-    """`context["surface"]` is the explicit escape hatch — if the
-    caller already knows the surface, the resolver respects it."""
+def test_privileged_surface_claim_is_rejected():
+    """SECURITY (Batch 1 trust-boundary fix #6): a client may NOT escalate
+    by declaring a privileged ``context["surface"]``.
+
+    This UPDATES the old ``test_explicit_surface_overrides_everything``,
+    which pinned the escape-hatch behavior where a raw
+    ``surface="local_cli"`` claim won outright. ``local_cli`` is
+    unrestricted, so honoring a client claim let a paired remote node
+    bypass every deny list. The claim is now ignored and the surface is
+    derived from the trusted transport signals (device_target / source).
+    """
     surface = resolve_surface_from_context({
         "surface": "local_cli",
         "source": "phone_surface",
         "device_target": "brain",
     })
-    assert surface == "local_cli"
+    # The local_cli claim is discarded; device_target="brain" (a
+    # separately-authorized escalation) still resolves to brain_host.
+    assert surface == "brain_host"
+
+
+def test_paired_remote_node_cannot_escalate_to_local_cli():
+    """A paired remote node sending ``context.surface="local_cli"`` must
+    not land on the unrestricted local_cli surface; it falls through to
+    the transport-derived source mapping (phone_surface → http_api)."""
+    surface = resolve_surface_from_context({
+        "surface": "local_cli",
+        "source": "phone_surface",
+    })
+    assert surface != "local_cli"
+    assert surface == "http_api"
+
+
+def test_unknown_surface_claim_is_rejected():
+    """An unknown surface is unrestricted (is_tool_allowed treats it as
+    such), so a client claim of one must be ignored."""
+    surface = resolve_surface_from_context({
+        "surface": "totally_made_up",
+        "source": "voice",
+    })
+    assert surface == "websocket"
+
+
+def test_brain_host_surface_claim_is_rejected():
+    """brain_host is privileged (Mac control) and reachable only via
+    device_target="brain", never a raw surface claim."""
+    surface = resolve_surface_from_context({
+        "surface": "brain_host",
+        "source": "phone_surface",
+    })
+    assert surface == "http_api"
+
+
+def test_unprivileged_surface_claim_still_honored():
+    """A restrictive surface like http_api only tightens policy, so
+    trusted internal callers that set it keep working."""
+    surface = resolve_surface_from_context({
+        "surface": "http_api",
+        "source": "voice",
+    })
+    assert surface == "http_api"
 
 
 def test_unknown_device_target_falls_through_to_source():

@@ -648,6 +648,30 @@ class GeminiRealtimeProxy:
                 exc_info=True,
             )
 
+    def _safety_refusal(self, name: str) -> Optional[dict]:
+        """Return a refusal dict when ``name`` is not AUTO-tier on the
+        voice surface, else ``None``. Parity with
+        ``RealtimeProxy._safety_refusal``: the hands-free voice surface
+        has no inline confirmation, so only AUTO tools may run. Resolver
+        errors fail open, matching the REST gate."""
+        try:
+            from security.safety_resolver import resolve_policy, LEVEL_AUTO
+            decision = resolve_policy(
+                name, {}, surface="voice", registry=self._skill_registry,
+            )
+        except Exception:
+            return None
+        if decision.level == LEVEL_AUTO:
+            return None
+        return {
+            "success": False,
+            "error": (
+                f"Tool '{name}' is blocked on the voice surface "
+                f"(policy: {decision.level})."
+            ),
+            "policy": decision.to_dict(),
+        }
+
     async def _handle_tool_call(self, session_id: str, call_id: str, name: str, arguments: str) -> str:
         if not self._skill_executor or not self._skill_registry:
             return json.dumps({"error": "No skill executor"})
@@ -676,6 +700,21 @@ class GeminiRealtimeProxy:
                 await self._orchestrator._emit_tool_start(session_id, tool_call)
             except Exception:
                 logger.exception("gemini voice tool_start emit failed")
+
+        # Safety gate: parity with RealtimeProxy — only AUTO-tier tools
+        # may run on the hands-free voice surface; CONFIRM/DENY are
+        # refused (see voice/realtime_proxy.py::_safety_refusal).
+        refusal = self._safety_refusal(name)
+        if refusal is not None:
+            if self._orchestrator is not None:
+                latency_ms = (time.time() - t0) * 1000.0
+                try:
+                    await self._orchestrator._emit_tool_result(
+                        session_id, tool_call, refusal, latency_ms,
+                    )
+                except Exception:
+                    logger.exception("gemini voice tool_result (refusal) emit failed")
+            return json.dumps(refusal)
 
         result = await self._skill_executor.execute(name, args, skill, endpoint)
 

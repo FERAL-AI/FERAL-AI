@@ -1243,6 +1243,29 @@ class DevicePairingStore:
             )
         return device_id
 
+    def node_id_for_device(self, device_id: str) -> Optional[str]:
+        """Return the ``node_id`` bound to *device_id* at pair time, or
+        ``None`` when the device is unknown or was paired without a node
+        identity (legacy / browser-only pairs whose ``node_id`` is empty).
+
+        The ``/v1/node`` handshake uses this to bind a credential to the
+        node it was paired for, so a token paired to node A cannot be
+        used to register as node B.
+        """
+        if not device_id:
+            return None
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT node_id FROM paired_devices WHERE device_id = ?",
+                (device_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return row["node_id"] or None
+
     # ── Listing / revocation ───────────────────────────────────────
 
     def list_devices(self, *, include_unclaimed: bool = True) -> list[dict]:

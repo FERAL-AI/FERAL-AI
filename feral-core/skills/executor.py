@@ -11,7 +11,9 @@ import asyncio
 import os
 import json
 import logging
+import time
 import uuid
+from collections import deque
 from typing import Optional
 
 import httpx
@@ -57,6 +59,10 @@ class SkillExecutor:
         # -A14: prefer narrow facade over a direct ``api.state`` import so
         # tests can inject and so global-state coupling shrinks.
         self._sandbox_port: SandboxPort = sandbox_port or default_sandbox_port()
+        # Per-skill hourly call windows (sliding 3600s) enforcing each
+        # manifest's ``max_calls_per_hour``. In-memory + bounded; a restart
+        # resets it, which is fine for a rate limiter.
+        self._call_windows: dict[str, deque] = {}
 
     def set_sandbox_port(self, port: SandboxPort) -> None:
         """Replace the sandbox facade (used for tests/embedding scenarios)."""
@@ -144,6 +150,69 @@ class SkillExecutor:
                 return key
         return self._vault.get(skill_id)
 
+    def _check_permission(self, skill: SkillManifest, endpoint: SkillEndpoint) -> Optional[dict]:
+        """Enforce the endpoint's declared permission requirement.
+
+        Refuses execution when an endpoint declares ``required_permission``
+        that the manifest's ``permissions`` list does not grant. Endpoints
+        that declare no requirement (the default) are always allowed, so the
+        empty-``permissions`` default keeps every existing manifest working.
+        """
+        required = getattr(endpoint, "required_permission", None)
+        if not required:
+            return None
+        declared = set(skill.permissions or [])
+        if required in declared:
+            return None
+        return {
+            "success": False,
+            "status_code": 403,
+            "data": None,
+            "error": (
+                f"Permission '{required}' required by endpoint "
+                f"'{skill.skill_id}__{endpoint.id}' is not declared in the "
+                f"skill manifest's permissions {sorted(declared)}."
+            ),
+        }
+
+    def _check_rate_limit(self, skill: SkillManifest) -> Optional[dict]:
+        """Enforce ``skill.max_calls_per_hour`` with a per-skill sliding
+        1-hour window. Returns a refusal dict when the cap is exceeded,
+        else records the call and returns None. A non-positive cap means
+        "unlimited" (preserves permissive behavior for opted-out manifests).
+        """
+        try:
+            cap = int(getattr(skill, "max_calls_per_hour", 1000))
+        except (TypeError, ValueError):
+            cap = 1000
+        if cap <= 0:
+            return None
+
+        now = time.time()
+        cutoff = now - 3600.0
+        window = self._call_windows.setdefault(skill.skill_id, deque())
+        while window and window[0] < cutoff:
+            window.popleft()
+
+        if len(window) >= cap:
+            retry = 3600.0 - (now - window[0])
+            return {
+                "success": False,
+                "status_code": 429,
+                "data": None,
+                "error": (
+                    f"Rate limit exceeded for skill '{skill.skill_id}': "
+                    f"{cap} calls/hour. Retry in {int(retry) + 1}s."
+                ),
+            }
+
+        window.append(now)
+        # Bound the tracking dict: drop empty windows for other skills.
+        if len(self._call_windows) > 1024:
+            for k in [k for k, w in self._call_windows.items() if not w]:
+                del self._call_windows[k]
+        return None
+
     async def execute(
         self,
         tool_name: str,
@@ -154,6 +223,23 @@ class SkillExecutor:
         """
         Execute a skill endpoint call.
         """
+        # Manifest enforcement (additive; execute() signature unchanged).
+        # 1) Permission gate: an endpoint that declares a required
+        #    permission must have it granted in the manifest.
+        perm_refusal = self._check_permission(skill, endpoint)
+        if perm_refusal is not None:
+            logger.warning(
+                "Refusing %s: %s", tool_name, perm_refusal["error"],
+            )
+            return perm_refusal
+        # 2) Per-skill hourly rate limit.
+        rate_refusal = self._check_rate_limit(skill)
+        if rate_refusal is not None:
+            logger.warning(
+                "Refusing %s: %s", tool_name, rate_refusal["error"],
+            )
+            return rate_refusal
+
         logger.info(f"Executing: {tool_name} → {endpoint.method} {endpoint.url}")
         logger.info(f"  args: {args}")
 

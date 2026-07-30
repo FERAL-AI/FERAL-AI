@@ -453,6 +453,81 @@ class TestSerialAccessSerialization:
         assert bot.closed is False
 
 
+class TestCuteBotFailSafeStop:
+    """Batch 2 — host-side dead-man: motion must stop on teardown."""
+
+    @pytest.mark.asyncio
+    async def test_disconnect_issues_halt_before_close(self):
+        bot = FakeQtBot()
+        adapter = CuteBotAdapter(bot=bot)
+        await adapter.disconnect()
+        assert ("halt", {}) in bot.commands
+        # halt is the last serial command, i.e. issued before close().
+        assert bot.commands[-1][0] == "halt"
+        assert bot.closed is True
+
+    @pytest.mark.asyncio
+    async def test_disconnect_skips_halt_when_estop_disabled(self):
+        bot = FakeQtBot()
+        adapter = CuteBotAdapter(bot=bot, emergency_stop_enabled=False)
+        await adapter.disconnect()
+        assert all(cmd[0] != "halt" for cmd in bot.commands)
+        assert bot.closed is True
+
+    @pytest.mark.asyncio
+    async def test_disconnect_halt_failure_never_raises(self):
+        bot = FakeQtBot()
+        bot.halt = MagicMock(side_effect=RuntimeError("link gone"))
+        adapter = CuteBotAdapter(bot=bot)
+        # A dead link makes halt() raise; disconnect must still complete
+        # and never claim success — it logs honestly and closes.
+        await adapter.disconnect()
+        assert bot.closed is True
+
+    @pytest.mark.asyncio
+    async def test_telemetry_cancel_halts_active_motion(self):
+        bot = FakeQtBot()
+        adapter = CuteBotAdapter(bot=bot)
+        adapter._connected = True
+        await adapter.execute(_action("follow_line"))
+        assert adapter._active_motion == "follow_line"
+
+        perception = MagicMock()
+        task = asyncio.create_task(
+            adapter.start_telemetry_loop(perception, lambda: ["s"], memory=None)
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert any(cmd[0] == "halt" for cmd in bot.commands)
+
+    @pytest.mark.asyncio
+    async def test_telemetry_cancel_no_halt_without_active_motion(self):
+        bot = FakeQtBot()
+        adapter = CuteBotAdapter(bot=bot)
+        adapter._connected = True
+
+        perception = MagicMock()
+        task = asyncio.create_task(
+            adapter.start_telemetry_loop(perception, lambda: ["s"], memory=None)
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert all(cmd[0] != "halt" for cmd in bot.commands)
+
+    @pytest.mark.asyncio
+    async def test_halt_clears_active_motion(self):
+        bot = FakeQtBot()
+        adapter = CuteBotAdapter(bot=bot)
+        await adapter.execute(_action("drive", left=20, right=20))
+        assert adapter._active_motion == "drive"
+        await adapter.execute(_action("halt"))
+        assert adapter._active_motion is None
+
+
 class TestDeviceRegistryHUPResultNormalization:
     @pytest.mark.asyncio
     async def test_dict_adapter_return(self):

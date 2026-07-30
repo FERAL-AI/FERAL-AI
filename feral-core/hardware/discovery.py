@@ -102,11 +102,21 @@ def _is_available(cls: type, spec: DeviceDiscoverySpec) -> bool:
         return False
 
 
-def _build_adapter(cls: type, spec: DeviceDiscoverySpec, *, memory: Any = None):
+def _build_adapter(
+    cls: type,
+    spec: DeviceDiscoverySpec,
+    *,
+    memory: Any = None,
+    emergency_stop_enabled: bool = True,
+):
     if spec.adapter == "cutebot":
         from hardware.adapters.cutebot import CuteBotAdapter
 
-        return CuteBotAdapter(device_id=spec.device_id, memory=memory)
+        return CuteBotAdapter(
+            device_id=spec.device_id,
+            memory=memory,
+            emergency_stop_enabled=emergency_stop_enabled,
+        )
 
     from hardware.adapters.generic import GenericSelfDescribingAdapter
 
@@ -120,7 +130,9 @@ def _build_adapter(cls: type, spec: DeviceDiscoverySpec, *, memory: Any = None):
     )
 
 
-def discover_brain_local_devices(*, memory: Any = None) -> list[Any]:
+def discover_brain_local_devices(
+    *, memory: Any = None, emergency_stop_enabled: bool = True
+) -> list[Any]:
     """Return constructed-but-not-connected adapters for present local devices."""
     adapters: list[Any] = []
     for spec in DEVICE_DISCOVERY_SPECS:
@@ -130,7 +142,12 @@ def discover_brain_local_devices(*, memory: Any = None) -> list[Any]:
         if not _is_available(cls, spec):
             continue
         try:
-            adapters.append(_build_adapter(cls, spec, memory=memory))
+            adapters.append(
+                _build_adapter(
+                    cls, spec, memory=memory,
+                    emergency_stop_enabled=emergency_stop_enabled,
+                )
+            )
         except Exception as exc:
             logger.warning("Failed to build adapter for %s: %s", spec.device_id, exc)
     return adapters

@@ -99,3 +99,6 @@ docs/WAVE5_HARDENING_PROMPT.md
 
 # Local editor / agent config — not part of the shipped product.
 .cursor/
+
+# Regression-test scratch home (contains real api_key / oauth state / paired devices)
+.regress_home/

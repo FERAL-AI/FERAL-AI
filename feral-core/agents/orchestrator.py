@@ -3691,7 +3691,7 @@ class Orchestrator:
                 )
                 return augmented
             self._set_active_subject(session_id, stripped)
-            self._coref_query_state().pop(session_id, None)
+            self._coref_query_state().pop(session_id, None) 
             return text
 
         prior = self._last_referenced_subject(session_id)

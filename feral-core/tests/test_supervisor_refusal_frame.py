@@ -122,6 +122,43 @@ async def test_policy_denied_emits_refusal_frame(store):
 
 
 @pytest.mark.asyncio
+async def test_policy_gate_exception_fails_closed(store):
+    """Batch 1 trust-boundary fix #5: a ``policy_gate`` that RAISES must
+    fail CLOSED. Previously the exception was swallowed and the verdict
+    defaulted to ``"allowed"`` — a crashing safety check became an open
+    door. Now the failure is treated as a denial: the orchestrator never
+    runs, a structured refusal frame is emitted (no 500), and the audit
+    row records the gate error.
+    """
+    def _boom(event):
+        raise RuntimeError("gate exploded")
+
+    sup = Supervisor(store=store, policy_gate=_boom)
+    orch = _OrchStub()
+    sup.wrap(orch)
+
+    result = await orch.handle_command(session_id="s-cccccccc", text="rm -rf /")
+
+    assert result is None
+    assert orch.handle_command_called is False
+
+    refusals = [f for f in orch.sent_frames if f.get("type") == "refusal"]
+    assert len(refusals) == 1, f"expected 1 refusal frame, got {orch.sent_frames}"
+    payload = refusals[0]["payload"]
+    assert payload["reason"] == "policy_gate_error"
+    assert payload["source"] == "supervisor"
+    assert payload["kind"] == "handle_command"
+    assert payload["retry_hint"]
+
+    recent = sup.recent(limit=5)
+    assert any(
+        r["decision"] == "denied"
+        and r.get("detail", {}).get("reason") == "policy_gate_error"
+        for r in recent
+    )
+
+
+@pytest.mark.asyncio
 async def test_allowed_request_passes_through_without_refusal(store):
     sup = Supervisor(store=store)
     orch = _OrchStub()

@@ -121,6 +121,33 @@ class AgentWorker:
             return self._skills.get_all_tools()
         return tools
 
+    def _safety_refusal(self, name: str) -> Optional[dict]:
+        """Return a refusal dict when ``name`` is not AUTO-tier on the
+        autonomous "agent" surface, else ``None``.
+
+        A spawned worker runs without a human in the loop, so only
+        AUTO-tier tools may execute; CONFIRM/DENY (WARN / CRITICAL,
+        surface-denied shell, etc.) are refused. Resolver errors fail
+        open, matching the REST gate in ``api/routes/tools.py``.
+        """
+        try:
+            from security.safety_resolver import resolve_policy, LEVEL_AUTO
+            decision = resolve_policy(
+                name, {}, surface="agent", registry=self._skills,
+            )
+        except Exception:
+            return None
+        if decision.level == LEVEL_AUTO:
+            return None
+        return {
+            "success": False,
+            "error": (
+                f"Tool '{name}' is blocked on the agent surface "
+                f"(policy: {decision.level})."
+            ),
+            "policy": decision.to_dict(),
+        }
+
     async def run(self, session_id: str, user_text: str, context: str = "") -> WorkerResult:
         if not self._llm or not self._llm.available:
             return WorkerResult(worker_id=self.worker_id, error="LLM not available")
@@ -216,7 +243,18 @@ class AgentWorker:
                                 endpoint = next((ep for ep in skill.endpoints if ep.id == endpoint_id), None)
                                 if endpoint:
                                     t0 = time.time()
-                                    result = await self._executor.execute(tc["name"], tc["args"], skill, endpoint)
+                                    # Safety gate: an autonomous worker has
+                                    # no inline approval loop, so only
+                                    # AUTO-tier tools may run on the "agent"
+                                    # surface; CONFIRM/DENY are refused. The
+                                    # refusal flows through the same
+                                    # tool_result trace + message path so the
+                                    # loop and the client see it.
+                                    refusal = self._safety_refusal(tc["name"])
+                                    if refusal is not None:
+                                        result = refusal
+                                    else:
+                                        result = await self._executor.execute(tc["name"], tc["args"], skill, endpoint)
                                     tool_results.append(result)
                                     if self._orchestrator is not None:
                                         try:

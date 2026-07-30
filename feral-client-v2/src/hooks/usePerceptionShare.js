@@ -144,7 +144,7 @@ export function usePerceptionShare({
   video = true,
   token = null,
 } = {}) {
-  const [status, setStatus] = useState('idle'); // idle | requesting | running | paused | error
+  const [status, setStatus] = useState('idle'); // idle | requesting | running | paused | disconnected | error
   const [error, setError] = useState(null);
   const [stats, setStats] = useState({ framesSent: 0, audioChunksSent: 0, lastFrameAt: 0 });
   const [controls, setControls] = useState({ fps, audioMuted: !audio, videoMuted: !video });
@@ -159,6 +159,16 @@ export function usePerceptionShare({
   const visibilityTimerRef = useRef(null);
   const nodeIdRef = useRef(pickNodeId());
   const chunkIdxRef = useRef(0);
+  // Mirror `status` into a ref so callbacks captured once at start()
+  // (the audio worklet's onaudioprocess, the socket onclose) can read
+  // the live status without going stale. Privacy-critical: the audio
+  // send path gates on this, so a pause must be visible immediately and
+  // not wait for a React re-render.
+  const statusRef = useRef('idle');
+  const setStatusSafe = useCallback((next) => {
+    statusRef.current = next;
+    setStatus(next);
+  }, []);
 
   const sendRaw = useCallback((obj) => {
     const ws = socketRef.current;
@@ -234,7 +244,12 @@ export function usePerceptionShare({
       const source = ctx.createMediaStreamSource(stream);
       const processor = ctx.createScriptProcessor(4096, 1, 1);
       processor.onaudioprocess = (event) => {
-        if (controls.audioMuted) return;
+        // Privacy gate: never emit PCM unless the share is actively
+        // running. Muting the mic OR any non-running status (paused,
+        // disconnected, error, idle) hard-stops transmission. Suspending
+        // the AudioContext in pause() already stops these events, but we
+        // gate here too so no frame can slip out between transitions.
+        if (controls.audioMuted || statusRef.current !== 'running') return;
         const input = event.inputBuffer.getChannelData(0);
         const buf = new Float32Array(input);
         const data_b64 = float32ToPcm16Base64(buf);
@@ -306,14 +321,22 @@ export function usePerceptionShare({
       };
       ws.onerror = () => reject(new Error('perception socket error'));
       ws.onclose = () => {
-        if (status !== 'idle') {
-          setStatus('paused');
-        }
+        // Ignore closes for a socket we've already torn down/replaced
+        // (stop() nulls socketRef before the async onclose fires).
+        if (socketRef.current !== ws) return;
+        // A normal stop() has already moved status to 'idle'.
+        if (statusRef.current === 'idle') return;
+        // Unexpected drop mid-share. Surface a DISTINCT disconnected
+        // state — do not masquerade as an active or user-paused share —
+        // and halt capture so nothing is queued against a dead socket.
+        stopFrameLoop();
+        try { audioCtxRef.current?.suspend?.(); } catch { /* ignore */ }
+        setStatusSafe('disconnected');
       };
     } catch (err) {
       reject(err);
     }
-  }), [audio, buildEnvelope, status, video]);
+  }), [audio, buildEnvelope, setStatusSafe, stopFrameLoop, video]);
 
   const closeSocket = useCallback(() => {
     try { socketRef.current?.close(); } catch { /* ignore */ }
@@ -363,13 +386,13 @@ export function usePerceptionShare({
     } catch { /* ignore */ }
     streamRef.current = null;
     closeSocket();
-    setStatus('idle');
-  }, [closeSocket, detachAudioWorklet, detachVideo, stopFrameLoop]);
+    setStatusSafe('idle');
+  }, [closeSocket, detachAudioWorklet, detachVideo, setStatusSafe, stopFrameLoop]);
 
   const start = useCallback(async () => {
     if (status === 'running' || status === 'requesting') return;
     setError(null);
-    setStatus('requesting');
+    setStatusSafe('requesting');
     try {
       // Lane 11 fix — auth-gate the WS before requesting camera/mic
       // so a denied auth doesn't leave the user with a permission
@@ -382,7 +405,7 @@ export function usePerceptionShare({
       await openSocket(pairToken);
       await attachAudioWorklet(stream);
       startFrameLoop();
-      setStatus('running');
+      setStatusSafe('running');
     } catch (e) {
       // Tear down side effects first (mic / camera tracks, partial
       // WS) — then flip to ``error`` so the caller's UI shows the
@@ -390,23 +413,29 @@ export function usePerceptionShare({
       // state must come AFTER so the user sees what went wrong.
       stop();
       setError(e?.message || 'permission denied');
-      setStatus('error');
+      setStatusSafe('error');
     }
-  }, [attachAudioWorklet, attachVideo, audio, openSocket, startFrameLoop, status, stop, token, video]);
+  }, [attachAudioWorklet, attachVideo, audio, openSocket, setStatusSafe, startFrameLoop, status, stop, token, video]);
 
   const pause = useCallback(() => {
     stopFrameLoop();
-    setStatus('paused');
-  }, [stopFrameLoop]);
+    // Privacy: stop audio transmission too. Flip status first (the
+    // onaudioprocess gate reads statusRef synchronously) then suspend the
+    // AudioContext so the worklet stops firing entirely. No PCM leaves the
+    // device while paused.
+    setStatusSafe('paused');
+    try { audioCtxRef.current?.suspend?.(); } catch { /* ignore */ }
+  }, [setStatusSafe, stopFrameLoop]);
 
   const resume = useCallback(() => {
     if (!streamRef.current || !socketRef.current) {
       start();
       return;
     }
+    try { audioCtxRef.current?.resume?.(); } catch { /* ignore */ }
     startFrameLoop();
-    setStatus('running');
-  }, [start, startFrameLoop]);
+    setStatusSafe('running');
+  }, [setStatusSafe, start, startFrameLoop]);
 
   const setFps = useCallback((next) => {
     setControls((c) => ({ ...c, fps: Math.max(1, Math.min(10, Math.round(next))) }));

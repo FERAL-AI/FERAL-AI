@@ -43,6 +43,53 @@ class FakeSocket {
 }
 FakeSocket.instances = [];
 
+// Minimal AudioContext stand-in so the ScriptProcessor audio path runs in
+// jsdom. Captures the created processor so a test can fire onaudioprocess
+// manually and assert whether PCM is transmitted.
+class FakeScriptProcessor {
+  constructor() {
+    this.onaudioprocess = null;
+    this.connected = false;
+    this.disconnected = false;
+  }
+  connect() { this.connected = true; }
+  disconnect() { this.disconnected = true; }
+}
+
+class FakeAudioContext {
+  constructor(opts) {
+    this.sampleRate = opts?.sampleRate || 48000;
+    this.state = 'running';
+    this.destination = {};
+    this.suspendCalls = 0;
+    this.resumeCalls = 0;
+    this.closeCalls = 0;
+    this.processor = null;
+    FakeAudioContext.instances.push(this);
+  }
+  createMediaStreamSource() { return { connect: () => {} }; }
+  createScriptProcessor() {
+    this.processor = new FakeScriptProcessor();
+    return this.processor;
+  }
+  suspend() { this.suspendCalls += 1; this.state = 'suspended'; return Promise.resolve(); }
+  resume() { this.resumeCalls += 1; this.state = 'running'; return Promise.resolve(); }
+  close() { this.closeCalls += 1; this.state = 'closed'; return Promise.resolve(); }
+}
+FakeAudioContext.instances = [];
+
+function fireAudioFrame(ctx) {
+  ctx.processor?.onaudioprocess?.({
+    inputBuffer: { getChannelData: () => new Float32Array(4096) },
+  });
+}
+
+function audioFramesSent(sock) {
+  return sock.sent
+    .map((s) => { try { return JSON.parse(s); } catch { return {}; } })
+    .filter((m) => m.type === 'audio_frame').length;
+}
+
 const fakeStream = {
   getTracks: () => [{ stop: () => {} }],
   getVideoTracks: () => [],
@@ -141,5 +188,67 @@ describe('usePerceptionShare auth gate', () => {
     const sock = FakeSocket.instances[0];
     expect(sock.protocols).toEqual(['feral-token-tok-cached']);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('usePerceptionShare privacy (Batch 2)', () => {
+  let origAudioContext;
+
+  beforeEach(() => {
+    FakeAudioContext.instances = [];
+    origAudioContext = globalThis.AudioContext;
+    globalThis.AudioContext = FakeAudioContext;
+  });
+
+  afterEach(() => {
+    globalThis.AudioContext = origAudioContext;
+  });
+
+  it('pause() stops audio transmission and suspends the AudioContext', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, json: async () => ({}) });
+
+    const { result } = renderHook(() => usePerceptionShare({ token: 'tok', audio: true }));
+    await act(async () => {
+      await result.current.start();
+    });
+    await waitFor(() => expect(FakeSocket.instances.length).toBeGreaterThan(0));
+    await waitFor(() => expect(FakeAudioContext.instances.length).toBeGreaterThan(0));
+
+    const sock = FakeSocket.instances[0];
+    const ctx = FakeAudioContext.instances[0];
+
+    // While running, audio frames flow.
+    act(() => { fireAudioFrame(ctx); });
+    const runningCount = audioFramesSent(sock);
+    expect(runningCount).toBeGreaterThan(0);
+
+    // Pause must stop transmission AND suspend the context.
+    act(() => { result.current.pause(); });
+    expect(result.current.status).toBe('paused');
+    expect(ctx.suspendCalls).toBeGreaterThan(0);
+
+    // Any worklet callback that still fires must NOT emit PCM.
+    act(() => { fireAudioFrame(ctx); });
+    act(() => { fireAudioFrame(ctx); });
+    expect(audioFramesSent(sock)).toBe(runningCount);
+  });
+
+  it('surfaces a distinct "disconnected" state on unexpected socket close', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, json: async () => ({}) });
+
+    const { result } = renderHook(() => usePerceptionShare({ token: 'tok', audio: false }));
+    await act(async () => {
+      await result.current.start();
+    });
+    await waitFor(() => expect(FakeSocket.instances.length).toBeGreaterThan(0));
+    expect(result.current.status).toBe('running');
+
+    const sock = FakeSocket.instances[0];
+    // Simulate a network drop (not a user-initiated stop()).
+    act(() => { sock.onclose?.({ code: 1006, reason: 'network' }); });
+
+    // Must NOT masquerade as an active or user-paused share.
+    expect(result.current.status).toBe('disconnected');
   });
 });

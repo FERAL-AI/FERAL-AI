@@ -1628,6 +1628,9 @@ class BrainState:
             self.hardware_mesh = HardwareMesh(
                 device_registry=self.device_registry,
                 daemons=self.daemons,
+                emergency_stop_enabled=(
+                    self.policy.emergency_stop_enabled() if self.policy else True
+                ),
             )
             # Bind the KG so device_announce ingest can write
             # ``category=device`` entities. The KG is built earlier in
@@ -1654,7 +1657,12 @@ class BrainState:
                 perception=self.perception,
             )
             self._brain_local_devices: list = []
-            for adapter in discover_brain_local_devices():
+            _estop_enabled = (
+                self.policy.emergency_stop_enabled() if self.policy else True
+            )
+            for adapter in discover_brain_local_devices(
+                emergency_stop_enabled=_estop_enabled
+            ):
                 try:
                     # Connect FIRST so the manifest reflects the device's own
                     # runtime self-description (QtBot.capabilities()["actions"])

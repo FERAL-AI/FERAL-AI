@@ -351,8 +351,27 @@ class Supervisor:
                 try:
                     verdict = self.policy_gate(event) or "allowed"
                 except Exception as exc:
-                    logger.exception("policy_gate raised: %s", exc)
-                    verdict = "allowed"
+                    # Fail CLOSED: a crashing policy gate must NOT default
+                    # to "allowed" — that turns a broken safety check into
+                    # an open door. Treat the failure as a denial and
+                    # surface the same structured refusal frame (never a
+                    # raised 500 into the WS handler).
+                    logger.exception("policy_gate raised — failing closed: %s", exc)
+                    event.decision = "denied"
+                    event.detail["reason"] = "policy_gate_error"
+                    event.detail["error"] = f"{type(exc).__name__}: {exc}"
+                    self._record(event)
+                    await self._emit_refusal(
+                        session_id=str(session_id or ""),
+                        kind=kind,
+                        reason="policy_gate_error",
+                        retry_hint=(
+                            "FERAL's safety policy check failed, so the "
+                            "action was blocked for safety. Please try "
+                            "again; if it persists, check the oversight logs."
+                        ),
+                    )
+                    return None
                 event.decision = verdict
                 if verdict == "denied":
                     event.detail["reason"] = "policy_denied"

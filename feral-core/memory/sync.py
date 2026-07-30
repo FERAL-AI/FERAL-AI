@@ -20,6 +20,7 @@ Conflict resolution:
 from __future__ import annotations
 import asyncio
 import errno
+import hmac
 import json
 import logging
 import os
@@ -28,6 +29,7 @@ import sqlite3
 import sys
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -53,11 +55,98 @@ SERVICE_TYPE = "_feral._tcp.local."
 _SYNC_VAULT_NAMESPACE = "sync"
 _SYNC_VAULT_KEY = "passphrase"
 
-# TLS mutual auth configuration
+# TLS mutual auth configuration.
+#
+# TLS is the DEFAULT-preferred transport: when a cert/key (server) or CA/cert
+# (client) is configured the handshake uses ``wss://`` automatically. Set:
+#   FERAL_SYNC_TLS_CERT / FERAL_SYNC_TLS_KEY   — server identity (enables wss)
+#   FERAL_SYNC_TLS_CA                          — trust roots (client + mTLS)
+#   FERAL_SYNC_REQUIRE_CLIENT_CERT=1           — require client certs (mTLS)
+# Without these the handshake falls back to plaintext ``ws://`` for backward
+# compatibility with existing peers, and the client emits a WARNING because
+# the shared passphrase is sent unencrypted on that path.
 SYNC_TLS_CERT = os.getenv("FERAL_SYNC_TLS_CERT", "")
 SYNC_TLS_KEY = os.getenv("FERAL_SYNC_TLS_KEY", "")
 SYNC_TLS_CA = os.getenv("FERAL_SYNC_TLS_CA", "")
 SYNC_REQUIRE_CLIENT_CERT = os.getenv("FERAL_SYNC_REQUIRE_CLIENT_CERT", "").lower() in ("1", "true", "yes")
+
+
+def verify_sync_passphrase(remote: str, expected: str) -> bool:
+    """Constant-time comparison of a sync passphrase.
+
+    Uses :func:`hmac.compare_digest` so a network peer cannot use the timing
+    of a byte-by-byte ``==`` comparison to recover the passphrase. Operands
+    are coerced to ``str``; an empty ``expected`` never matches (the caller
+    rejects an unset local passphrase separately, before reaching here).
+    """
+    if not isinstance(remote, str):
+        remote = ""
+    if not isinstance(expected, str):
+        expected = ""
+    if not expected:
+        return False
+    return hmac.compare_digest(remote, expected)
+
+
+class SyncAuthLimiter:
+    """In-memory per-peer failed-attempt lockout for the ``/sync`` handshake.
+
+    Mirrors the device-pairing PIN limiter: too many wrong passphrases within
+    a rolling window locks the peer out for a cooldown. Purely in-process
+    (sync peers are LAN-local and the brain is single-process); a restart
+    clears it, which is acceptable for a bounded anti-bruteforce limiter.
+    """
+
+    MAX_FAILURES = 5
+    WINDOW_SECONDS = 900.0    # failures older than this start a fresh count
+    LOCKOUT_SECONDS = 300.0   # cooldown once the cap is hit
+    MAX_KEYS = 1024
+
+    def __init__(self):
+        self._peers: "OrderedDict[str, dict]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def check(self, peer: str) -> tuple[bool, float]:
+        """Return ``(allowed, retry_after_seconds)`` for ``peer``."""
+        now = time.time()
+        with self._lock:
+            rec = self._peers.get(peer)
+            if not rec:
+                return True, 0.0
+            locked_until = rec.get("locked_until", 0.0)
+            if locked_until > now:
+                return False, locked_until - now
+            return True, 0.0
+
+    def record_failure(self, peer: str) -> None:
+        now = time.time()
+        with self._lock:
+            rec = self._peers.get(peer)
+            if not rec or (now - rec.get("first", now)) > self.WINDOW_SECONDS:
+                rec = {"failures": 0, "first": now, "locked_until": 0.0}
+            rec["failures"] += 1
+            if rec["failures"] >= self.MAX_FAILURES:
+                rec["locked_until"] = now + self.LOCKOUT_SECONDS
+            self._peers[peer] = rec
+            self._peers.move_to_end(peer)
+            while len(self._peers) > self.MAX_KEYS:
+                self._peers.popitem(last=False)
+
+    def record_success(self, peer: str) -> None:
+        with self._lock:
+            self._peers.pop(peer, None)
+
+    def reset(self) -> None:
+        with self._lock:
+            self._peers.clear()
+
+
+# Module-level singleton (mirrors the device_pairing / vault singleton style).
+sync_auth_limiter = SyncAuthLimiter()
+
+# Tracks (addr, port) peers we've already warned about plaintext sync so the
+# per-cycle sync loop doesn't spam the log with the same WARNING.
+_plaintext_sync_warned: set[tuple[str, int]] = set()
 
 # Static peer list fallback (comma-separated host:port pairs)
 SYNC_PEERS = [p.strip() for p in os.getenv("FERAL_SYNC_PEERS", "").split(",") if p.strip()]
@@ -1311,6 +1400,20 @@ class SyncEngine:
         client_ssl = build_client_ssl_context()
         scheme = "wss" if client_ssl else "ws"
         uri = f"{scheme}://{addr}:{port}/sync"
+
+        # Honesty: the passphrase is about to cross the wire. On the
+        # plaintext ws:// fallback it is unencrypted — warn once per peer
+        # and point the operator at the env that enables wss://.
+        if client_ssl is None:
+            peer_key = (addr, int(port))
+            if peer_key not in _plaintext_sync_warned:
+                _plaintext_sync_warned.add(peer_key)
+                logger.warning(
+                    "Sync to %s:%s uses PLAINTEXT ws:// — the shared "
+                    "passphrase is sent unencrypted. Set FERAL_SYNC_TLS_CERT/"
+                    "FERAL_SYNC_TLS_KEY (and FERAL_SYNC_TLS_CA) to enable "
+                    "wss://.", addr, port,
+                )
 
         ws = await asyncio.wait_for(
             websockets.connect(uri, ssl=client_ssl),

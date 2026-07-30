@@ -1,0 +1,68 @@
+---
+title: "Gen-UI contracts & versioning"
+description: "The contract fields a Gen-UI publisher declares, and when to bump each one."
+---
+
+# Gen-UI contracts & versioning
+
+A Gen-UI app is a contract between a publisher's manifest and the FERAL host
+that renders its surfaces. This page documents the version fields you declare
+and the policy for bumping them. It complements [Manifest signing](/genui/signing)
+(how the host proves who published a manifest) and the
+[A2UI Schema Reference](/reference/a2ui-schema) (the wire format the host emits
+to a client renderer).
+
+## The four contract fields
+
+Declare explicit versions in your app manifest so the host and every client can
+negotiate compatibility instead of guessing:
+
+| Field | Scope | What it pins |
+|-------|-------|--------------|
+| `manifest.contract.manifest_schema_version` | Whole manifest | The shape of the manifest document itself. |
+| `manifest.contract.a2ui_version` | Whole manifest | The A2UI wire version your surfaces target (see below). |
+| `surfaces[*].schema_version` | One surface | The component-tree contract for a single surface. |
+| `surfaces[*].action_contract` | One surface | The `action_id` → payload contract a surface's buttons and inputs emit. |
+
+The host caches renders per surface and invalidates that cache when a surface's
+`schema_version` changes (see [Gen-UI → per-surface schema-version cache
+invalidation](/guides/genui)).
+
+## A2UI version
+
+All A2UI messages the brain emits include `"a2ui_version"`. The current wire
+version is `1.0` — see the [A2UI Schema Reference](/reference/a2ui-schema) for
+the message envelope, component types, and data-binding rules. Set
+`manifest.contract.a2ui_version` to the version your surfaces were authored
+against.
+
+## When to bump
+
+Follow the same MAJOR / MINOR / PATCH discipline the rest of the platform uses:
+
+- **MAJOR** — a breaking change: you removed a component, renamed an
+  `action_id`, or changed a payload's required fields. Old clients cannot
+  render the surface correctly. Bump `schema_version` (and `a2ui_version` if
+  the wire envelope itself changed).
+- **MINOR** — additive only: a new optional property, a new surface, or a new
+  component type. Existing clients keep working because unknown fields and
+  unknown component types are ignored, not fatal.
+- **PATCH** — no contract change: copy, styling, or data-only edits.
+
+## Forward compatibility (the receiver's half)
+
+Clients enforce the other side of the contract, so an additive bump never
+crashes an older renderer:
+
+- A client that receives an **unknown `a2ui_version`** renders a fallback
+  "update required" message instead of failing.
+- **Unknown component types** render as invisible placeholders, not crashes.
+
+Because of these rules, prefer additive (MINOR) changes wherever possible and
+reserve MAJOR bumps for genuinely breaking contract changes.
+
+## Signing still applies
+
+Bumping a contract version does not change the trust model: every install still
+goes through signed-manifest verification. Re-sign the manifest after any change
+— see [Manifest signing](/genui/signing).

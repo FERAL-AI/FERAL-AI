@@ -1279,6 +1279,27 @@ async def _prepare_chat_turn_context(
         ctx["attachments"] = attachments
     if source_node:
         ctx["source_node"] = source_node
+        # Trust boundary (Batch 1 fix #6): a paired remote node's declared
+        # context is attacker-controlled. It must NOT be able to select a
+        # privileged execution surface (local_cli / brain_host / unknown-
+        # unrestricted) by declaring `surface` or a privileged `source`.
+        # Derive the surface from the authenticated transport instead:
+        # strip any privileged claim so resolution falls back to the safe
+        # remote default. `device_target` is deliberately preserved — the
+        # operator's "do X on my Mac" (brain_host) path is a separate,
+        # explicitly-authorized escalation, not a raw surface claim.
+        from security.dangerous_tools import (
+            is_privileged_surface,
+            resolve_surface_from_context as _resolve_surface,
+        )
+        claimed_surface = ctx.get("surface")
+        if isinstance(claimed_surface, str) and is_privileged_surface(claimed_surface):
+            ctx.pop("surface", None)
+        claimed_source = ctx.get("source")
+        if isinstance(claimed_source, str) and is_privileged_surface(
+            _resolve_surface({"source": claimed_source})
+        ):
+            ctx.pop("source", None)
 
     try:
         state.memory.working_push(
@@ -1784,19 +1805,44 @@ def _extract_protocol_bearer(protocols_header: str) -> str:
     return ""
 
 
+def _bound_node_id(store: DevicePairingStore, device_id: str):
+    """Return the node_id the paired row is bound to, or None.
+
+    Defensive: older stores (and some test doubles) may not expose
+    ``node_id_for_device``; treat an absent lookup as "no binding".
+    """
+    getter = getattr(store, "node_id_for_device", None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter(device_id)
+    except Exception:
+        return None
+    # node_id is a string column; only a non-empty string is a real
+    # binding. Anything else (None, or a non-str from a loose test double)
+    # means "no binding" -> the node may self-declare.
+    return value if isinstance(value, str) and value else None
+
+
 def _verify_credential(store: DevicePairingStore, credential: str):
-    """Try pair token first, then phone bearer."""
+    """Try pair token first, then phone bearer.
+
+    Returns ``(device_id, bearer_kind, bound_node_id)``. ``bound_node_id``
+    is the node identity the paired row was created for (may be ``None``
+    for legacy / browser-only pairs) and is used to reject a credential
+    that tries to register as a different node.
+    """
     if not store or not credential:
-        return None, None
+        return None, None, None
     pair_device_id = store.verify_device(credential)
     if pair_device_id:
-        return pair_device_id, "pair_token"
+        return pair_device_id, "pair_token", _bound_node_id(store, pair_device_id)
     verify_phone_bearer = getattr(store, "verify_phone_bearer", None)
     if callable(verify_phone_bearer):
         phone_device_id = verify_phone_bearer(credential)
         if phone_device_id:
-            return phone_device_id, "phone_bearer"
-    return None, None
+            return phone_device_id, "phone_bearer", _bound_node_id(store, phone_device_id)
+    return None, None, None
 
 
 @app.websocket("/v1/node")
@@ -1824,7 +1870,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
             credential_source = "query"
 
     store = state.device_pairing_store
-    paired_device_id, bearer_kind = _verify_credential(store, credential)
+    paired_device_id, bearer_kind, bound_node_id = _verify_credential(store, credential)
 
     await ws.accept()
 
@@ -1925,6 +1971,24 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 continue
 
             if msg.type in ("node_register", "register") and isinstance(payload, NodeRegisterPayload):
+                # Bind the credential to the node it was paired for: a
+                # token/bearer paired to node A must not register as node
+                # B. Only enforced when the paired row carries a non-empty
+                # node_id — the legacy NODE_API_KEY path (bound_node_id is
+                # None) and empty-node_id browser pairs may self-declare.
+                if bound_node_id and payload.node_id != bound_node_id:
+                    logger.warning(
+                        "Rejecting node_register: credential bound to node_id=%s "
+                        "but payload declared node_id=%s (device_id=%s)",
+                        bound_node_id, payload.node_id, paired_device_id,
+                    )
+                    await _send_protocol_error(
+                        ws, 4003,
+                        f"node_id mismatch: credential is bound to '{bound_node_id}'",
+                        name="node_id_mismatch",
+                    )
+                    await ws.close(code=4003, reason="node_id mismatch")
+                    return
                 node_id = payload.node_id
                 state.daemons[node_id] = ws
                 # Stash the HUP-declared node_type on the WebSocket so
@@ -3035,9 +3099,35 @@ async def sync_peer_endpoint(ws: WebSocket):
                 # install always has a value (auto-generated + printed
                 # to the operator banner). The remote-side mismatch
                 # check below stays identical.
-                from memory.sync import SYNC_PASSPHRASE as _local_pass
+                from memory.sync import (
+                    SYNC_PASSPHRASE as _local_pass,
+                    sync_auth_limiter,
+                    verify_sync_passphrase,
+                )
                 expected_pass = os.getenv("FERAL_SYNC_PASSPHRASE", "") or _local_pass
                 remote_pass = raw.get("passphrase", "")
+                # Key the lockout on the peer's network address so a spoofed
+                # node_id can't dodge the limiter (falls back to node_id when
+                # the transport hides the client address).
+                peer_key = ws.client.host if ws.client else (peer_id or "unknown")
+
+                # Per-peer failed-attempt lockout (mirrors the pairing-code
+                # limiter) — bounded, in-memory brute-force protection.
+                allowed, retry_after = sync_auth_limiter.check(peer_key)
+                if not allowed:
+                    await ws.send_json({
+                        "type": "sync_error",
+                        "message": (
+                            "locked_out: too many failed sync attempts; "
+                            f"retry in {int(retry_after) + 1}s"
+                        ),
+                    })
+                    logger.warning(
+                        "Sync handshake locked out for %s (retry in %.0fs)",
+                        peer_key, retry_after,
+                    )
+                    break
+
                 if not expected_pass:
                     await ws.send_json({
                         "type": "sync_error",
@@ -3047,9 +3137,16 @@ async def sync_peer_endpoint(ws: WebSocket):
                         ),
                     })
                     break
-                if remote_pass != expected_pass:
+                # Constant-time comparison — no early-exit timing side channel.
+                if not verify_sync_passphrase(remote_pass, expected_pass):
+                    sync_auth_limiter.record_failure(peer_key)
                     await ws.send_json({"type": "sync_error", "message": "Invalid passphrase"})
+                    logger.warning(
+                        "Sync handshake rejected: invalid passphrase from %s", peer_key,
+                    )
                     break
+                # Successful auth clears any accumulated failure count.
+                sync_auth_limiter.record_success(peer_key)
 
                 # v2026.5.34 (PR 2 D12): refuse the handshake when a
                 # peer advertises our own node_id. The HLC protocol's

@@ -1,10 +1,57 @@
 # Changelog
 
-<!-- feral-version: 2026.6.23 -->
+<!-- feral-version: 2026.6.29 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.6.29] - 2026-06-30 — voice: GA session.update type on tool forcing
+
+Voice tool-forcing regressed under the OpenAI Realtime GA schema.
+
+### Fixed
+- **fix(voice): GA session.update missing type on voice tool forcing.** `force_tool_for_turn` and `reset_tool_choice` now include `session.type=realtime` (required by OpenAI Realtime GA) and skip redundant forcing when the pinned tool already ran on the current VAD turn. (`voice/realtime_proxy.py`)
+
+## [2026.6.28] - 2026-06-30 — route robot light commands to CuteBot, not Hue
+
+Text chat sent "robot lights" to `smart_home_hue` while the voice path already used `cutebot__set_lights`, so the same request behaved differently across modalities.
+
+### Fixed
+- **fix(routing): robot light commands route to CuteBot instead of Hue.** Added heuristic routing, force-tool pinning, a multi-agent override, manifest clarity, and session coreference for ambiguous light follow-ups. (`agents/orchestrator.py`, `skills/manifests/cutebot.json`)
+
+## [2026.6.27] - 2026-06-30 — voice realtime scheduling: pin feral_routines before the 128-tool cap
+
+### Fixed
+- **fix(voice): scheduling requests no longer dropped by the 128-tool cap.** Voice OpenAI Realtime truncated 214 tools with a naive `[:128]`, dropping `feral_routines__create`, and never applied orchestrator routine forcing. Essential automation tools are now pinned before the cap, `feral_routines__create` is forced on schedule-intent transcripts, and the same cap is applied on text chat paths. (`voice/realtime_proxy.py`, `agents/orchestrator.py`)
+
+## [2026.6.26] - 2026-06-30 — scheduling refusal + robot activity recall
+
+### Fixed
+- **fix(automation): scheduling refusal and robot activity recall.** Force `feral_routines__create` on scheduled-action queries, log cron-fired device episodes, route multi-agent temporal recall through `fused_timeline`, and always mount the timeline side-channel on `_R_TEMPORAL` matches even when `force_tool` is set. (`agents/orchestrator.py`)
+
+## [2026.6.25] - 2026-06-30 — CuteBot set_lights from voice/REST event loops
+
+### Fixed
+- **fix(hardware): CuteBot set_lights failing from voice/REST event loops.** Replaced the `asyncio.Lock` on USB adapter I/O with a thread-backed lock so actuator commands succeed when invoked from the realtime voice loop while telemetry holds the brain startup loop. (`hardware/adapters/cutebot.py`)
+
+## [2026.6.24] - 2026-06-30 — CuteBot device-action event-loop misalignment
+
+### Fixed
+- **fix(brain): route device-action episode save to the owning loop.** Fixes a CuteBot event-loop misalignment that could drop device-action episodes. (`agents/orchestrator.py`)
+
+## [2026.6.23] - 2026-06-30 — loosen pyobjc ceiling to <13.0
+
+### Changed
+- **chore(deps): loosen the pyobjc ceiling to `<13.0`** so installs stop rolling back macOS pyobjc 12.x. (`feral-core/pyproject.toml`)
+
+## [2026.6.22] - 2026-06-30 — robot activity timeline logging + CI-flakiness hardening
+
+### Added
+- **feat(brain): device-action timeline logging** for robot activity.
+
+### Fixed
+- **fix(ci): permanent CI-flakiness hardening.** (#192)
 
 ## [2026.6.21] - 2026-06-30 — live-voice: coreference, robot memory, STT phantom-commit gate
 
