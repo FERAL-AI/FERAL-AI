@@ -144,11 +144,38 @@ class CalendarIntegration:
 
     @staticmethod
     def _ics_dt(raw: str) -> Optional[datetime]:
-        """Best-effort parse of an ICS datetime string."""
-        raw = raw.replace("Z", "+00:00")
-        for fmt in ("%Y%m%dT%H%M%S%z", "%Y%m%dT%H%M%S", "%Y%m%d"):
+        """Best-effort parse of an ICS datetime string.
+
+        RFC 5545 stamps come in three shapes: UTC (``20990101T090000Z``),
+        floating local (``20990101T090000``), and date-only (``20990101``).
+
+        This previously did ``raw.replace("Z", "+00:00")`` and then sliced
+        ``raw[:len(fmt) + 4]``. Both halves were wrong:
+
+        * ``%z`` has accepted a bare ``Z`` since Python 3.7, so the replace
+          was unnecessary, and it *lengthened* the string past the slice.
+        * ``len(fmt) + 4`` assumes format-code width tracks data width. It
+          does not: ``%Y`` is 2 characters of format for 4 of data, ``%z``
+          is 2 for 6. For the UTC shape the slice cut 21 characters down to
+          19 (``20990101T090000+00:``), and all three formats then failed.
+
+        The result was ``None`` for every UTC stamp, and since effectively
+        every real feed publishes UTC, ``_fetch_ics_events`` filtered out
+        every event and the ICS fallback reported an empty calendar.
+
+        Parse the whole string instead; the bounded prefixes below are the
+        real data widths, kept only to tolerate trailing junk.
+        """
+        raw = (raw or "").strip()
+        if not raw:
+            return None
+        for value, fmt in (
+            (raw, "%Y%m%dT%H%M%S%z"),
+            (raw[:15], "%Y%m%dT%H%M%S"),
+            (raw[:8], "%Y%m%d"),
+        ):
             try:
-                return datetime.strptime(raw[:len(fmt) + 4], fmt)
+                return datetime.strptime(value, fmt)
             except (ValueError, IndexError):
                 continue
         return None
