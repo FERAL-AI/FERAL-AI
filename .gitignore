@@ -103,3 +103,6 @@ docs/WAVE5_HARDENING_PROMPT.md
 # Regression-test scratch home: holds a real api_key, oauth state, and
 # paired-device DB. Must never be committed.
 .regress_home/
+
+# Agent worktree scaffolding (transient git worktrees)
+.claude/worktrees/
