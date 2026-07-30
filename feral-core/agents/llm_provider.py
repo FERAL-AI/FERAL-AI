@@ -276,6 +276,41 @@ def is_supported_runtime_provider(provider_name: str) -> bool:
     return (provider_name or "") in SUPPORTED_RUNTIME_PROVIDERS
 
 
+# Model classes that cannot serve a chat-completions call. ``chat``,
+# ``reasoning`` and ``vision`` obviously can; ``unknown`` is deliberately
+# treated as chat-capable, matching the documented policy on
+# ``providers.model_classes.classify`` -- a newly released frontier id that
+# no rule matches yet must not be silently excluded until the next catalog
+# refresh. ``realtime`` is excluded because the Realtime API is a separate
+# WebSocket surface, not /v1/chat/completions.
+_NON_CHAT_MODEL_CLASSES: frozenset[str] = frozenset({
+    "embedding", "audio", "image", "completion-only", "realtime", "video",
+})
+
+
+def _chat_capability_of(provider_name: str, model_id: str) -> tuple[bool, str]:
+    """Return ``(is_chat_capable, model_class)`` for a failover candidate.
+
+    Pure and cheap: ``classify`` does no IO. Used to drop a candidate
+    before the wire call rather than paying a round trip to learn the same
+    fact from a 404. Failures to classify resolve to chat-capable, because
+    refusing to dial on an inconclusive signal would be worse than the 404
+    it is trying to avoid.
+
+    Imported lazily to match the existing ``classify_endpoint`` call sites
+    in this module.
+    """
+    if not model_id:
+        return True, "unknown"
+    try:
+        from providers.model_classes import classify
+        model_class = str(classify(provider_name, model_id))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("model-class lookup failed for %s/%s: %s", provider_name, model_id, exc)
+        return True, "unknown"
+    return model_class not in _NON_CHAT_MODEL_CLASSES, model_class
+
+
 def _default_model_for(provider_name: str) -> str:
     """Return the catalog's current default model id for *provider_name*.
 
@@ -3866,6 +3901,33 @@ class LLMProvider:
             retry_kwargs["_retry_delays"] = _FAILOVER_FAST_DELAYS
 
         for provider_name, config in candidates:
+            candidate_model = config.get("model") or self.model
+            chat_capable, candidate_class = _chat_capability_of(provider_name, candidate_model)
+            if not chat_capable:
+                # The model exists but is not a chat model, so the hop can
+                # only ever 404. Observed live on 2026-07-30: the ``openai``
+                # fallback resolved to a non-chat id and every turn burned a
+                # hop on
+                #   HTTP 404 invalid_request_error, param=model: "This is not
+                #   a chat model and thus not supported in the
+                #   v1/chat/completions endpoint. Did you mean to use
+                #   v1/completions?"
+                # before falling through to the next candidate. Classifying
+                # it here costs nothing and keeps the chain honest; the wire
+                # call is the expensive way to learn the same fact.
+                logger.info(
+                    "Skipping %r in failover chain: model %r is not chat-capable (%s)",
+                    provider_name, candidate_model, candidate_class,
+                )
+                last_error = last_error or RuntimeError(
+                    f"Model {candidate_model!r} on provider {provider_name!r} "
+                    "is not a chat model"
+                )
+                failed_candidates.append({
+                    "provider": provider_name,
+                    "reason": FailoverReason.MODEL_NOT_FOUND.value,
+                })
+                continue
             if not config.get("supported", True):
                 # Skip catalog-only providers with no runtime adapter.
                 # No cooldown — the problem isn't transient, it's that

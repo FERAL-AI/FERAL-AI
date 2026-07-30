@@ -55,6 +55,48 @@ class TestFailoverChainValidation:
         for prov in ConfigLoader._drop_unrunnable_providers(chain, source="test"):
             assert prov in SUPPORTED_RUNTIME_PROVIDERS
 
+    def test_non_chat_models_are_not_dialed(self):
+        """A non-chat model can only 404; classify it before the wire call.
+
+        Live 2026-07-30: the ``openai`` fallback hop resolved to a non-chat id
+        and burned a round trip on
+          HTTP 404 "This is not a chat model and thus not supported in the
+          v1/chat/completions endpoint"
+        on every turn before falling through.
+        """
+        from agents.llm_provider import _chat_capability_of
+
+        for model in ("text-embedding-3-small", "dall-e-3", "whisper-1", "babbage-002"):
+            ok, cls = _chat_capability_of("openai", model)
+            assert ok is False, f"{model} classified {cls}, should not be dialed"
+
+    def test_chat_models_are_dialed(self):
+        from agents.llm_provider import _chat_capability_of
+
+        assert _chat_capability_of("openai", "gpt-4o")[0] is True
+
+    def test_unrecognised_models_are_dialed(self):
+        """Critical: an id the stale catalog cannot classify must still dial.
+
+        `claude-opus-5` and `gpt-5.6-sol` classify as "unknown" until the
+        catalog is refreshed. Excluding unknown would break every chain the
+        moment a new frontier model is configured, which is the opposite of
+        the intent. This mirrors the documented policy on
+        ``providers.model_classes.classify``.
+        """
+        from agents.llm_provider import _chat_capability_of
+
+        for provider, model in (("anthropic", "claude-opus-5"),
+                                ("openai", "gpt-5.6-sol"),
+                                ("openai", "some-unreleased-model-2027")):
+            assert _chat_capability_of(provider, model)[0] is True, model
+
+    def test_blank_model_is_dialed(self):
+        """Empty means "use the provider default"; do not pre-emptively skip."""
+        from agents.llm_provider import _chat_capability_of
+
+        assert _chat_capability_of("openai", "")[0] is True
+
     def test_drop_is_logged_not_silent(self, caplog):
         """A dropped provider must be visible, or a typo is undiagnosable."""
         import logging
