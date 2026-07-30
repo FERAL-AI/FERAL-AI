@@ -151,6 +151,7 @@ async def test_handle_audio_from_node_openai_starts_session(monkeypatch):
     rs.send_audio = AsyncMock()
     rt = MagicMock(available=True)
     rt.get_session.return_value = None
+    rt.evict_dead_session = AsyncMock(return_value=False)
     rt.start_session = AsyncMock(return_value=rs)
 
     r = VoiceRouter(realtime_proxy=rt, audio_pipeline=MagicMock())
@@ -380,14 +381,25 @@ async def test_handle_tool_call_skill_not_found():
 
 @pytest.mark.asyncio
 async def test_handle_event_error_invokes_on_error():
+    """A SESSION-FATAL error event still reaches ``on_error``.
+
+    Updated with the fatal/non-fatal split: the old fixture used
+    ``"rate limited"``, which is now classified as a recoverable
+    per-event rejection (see
+    ``tests/test_voice_nonfatal_errors.py``). Only the credential /
+    expiry class fails a session over, so the fixture uses one.
+    """
     errors: list[tuple[str, str]] = []
 
     async def on_err(sid: str, msg: str):
         errors.append((sid, msg))
 
     rs = RealtimeSession("sid", "nid", api_key="k", on_error=on_err)
-    await rs._handle_event({"type": "error", "error": {"message": "rate limited"}})
-    assert errors and "rate" in errors[0][1].lower()
+    await rs._handle_event({
+        "type": "error",
+        "error": {"code": "insufficient_quota", "message": "quota exhausted"},
+    })
+    assert errors and "quota" in errors[0][1].lower()
 
 
 @pytest.mark.asyncio
@@ -495,6 +507,7 @@ async def test_handle_audio_from_client_openai_starts_session_and_sends(monkeypa
     rs.send_audio = AsyncMock()
     rt = MagicMock(available=True)
     rt.get_session.return_value = None
+    rt.evict_dead_session = AsyncMock(return_value=False)
     rt.start_session = AsyncMock(return_value=rs)
 
     r = VoiceRouter(realtime_proxy=rt, audio_pipeline=MagicMock())
@@ -671,18 +684,34 @@ async def test_handle_text_from_node_openai_connected(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handle_audio_from_node_openai_no_send_when_not_connected(monkeypatch):
+async def test_handle_audio_from_node_openai_evicts_dead_session(monkeypatch):
+    """A disconnected session is reaped and re-opened, not written to.
+
+    This test used to assert the audio chunk was simply dropped
+    (``send_audio.assert_not_called()``) — which pinned the zombie bug:
+    the dead handle stayed in the proxy maps forever, so EVERY later
+    chunk hit the same gate and the session never recovered. The
+    contract now: evict, re-open, and deliver on the fresh session.
+    """
     monkeypatch.delenv(_ENV_VOICE_PROVIDER, raising=False)
-    rs = MagicMock(connected=False)
-    rs.send_audio = AsyncMock()
+    dead = MagicMock(connected=False)
+    dead.send_audio = AsyncMock()
+    fresh = MagicMock(connected=True)
+    fresh.send_audio = AsyncMock()
     rt = MagicMock(available=True)
-    rt.get_session.return_value = rs
+    # Model the real proxy: once evicted, the lookup misses.
+    rt.get_session = MagicMock(return_value=None)
+    rt.evict_dead_session = AsyncMock(return_value=True)
+    rt.start_session = AsyncMock(return_value=fresh)
 
     r = VoiceRouter(realtime_proxy=rt, audio_pipeline=MagicMock())
     r.register_voice_config("n1", {"voice_provider": "openai"})
 
     await r.handle_audio_from_node("n1", "sid", "YWFh")
-    rs.send_audio.assert_not_called()
+
+    rt.evict_dead_session.assert_awaited_once_with("n1")
+    dead.send_audio.assert_not_called()
+    fresh.send_audio.assert_awaited_once_with("YWFh")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -15,6 +15,10 @@ def mock_realtime():
     rt.available = True
     rt.get_session = MagicMock(return_value=None)
     rt.start_session = AsyncMock()
+    # Zombie eviction: the audio hot path asks the proxy to reap a
+    # disconnected session before every lookup, so a proxy double has
+    # to model it. Default "nothing to evict".
+    rt.evict_dead_session = AsyncMock(return_value=False)
     rt._node_to_session = {}
     rt.shutdown = AsyncMock()
     return rt

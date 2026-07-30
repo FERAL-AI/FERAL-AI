@@ -96,6 +96,7 @@ async def test_handle_audio_from_client_uses_settings_model(feral_home):
     mock_realtime = MagicMock()
     mock_realtime.available = True
     mock_realtime.get_session = MagicMock(return_value=None)
+    mock_realtime.evict_dead_session = AsyncMock(return_value=False)
     mock_realtime.start_session = AsyncMock(return_value=MagicMock(connected=True, send_audio=AsyncMock()))
 
     router = VoiceRouter(realtime_proxy=mock_realtime)

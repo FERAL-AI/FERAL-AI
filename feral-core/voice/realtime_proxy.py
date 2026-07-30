@@ -21,15 +21,11 @@ The phone never talks to OpenAI directly — the Brain owns the context.
 
 from __future__ import annotations
 import asyncio
-import base64
 import json
 import logging
 import os
 import time
 from typing import Optional, Callable, Awaitable, Any
-from uuid import uuid4
-
-import httpx
 
 from agents.tool_display import tool_feedback_text
 from agents.tool_list import (
@@ -46,6 +42,62 @@ OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
 DEFAULT_MODEL = "gpt-realtime"
 SAMPLE_RATE = 24000
 AUDIO_FORMAT = "pcm16"
+
+# ── error event classification (voice-collapse fix, 2026-07) ─────────
+#
+# The GA Realtime API emits ``error`` events for TWO unrelated classes
+# of failure and the proxy used to treat both as terminal:
+#
+#   1. Session-fatal — the account cannot serve this session at all
+#      (quota exhausted, bad key, session expired). Only these justify
+#      the chained/whisper failover, which tears the OpenAI socket
+#      down and morphs the call onto another provider.
+#   2. Per-event rejection — the server rejected ONE client event
+#      (``Unknown parameter: ...``, ``Invalid value: ...``, an empty
+#      ``input_audio_buffer.commit``, a ``tool_choice`` naming a tool
+#      that isn't in the session list). The socket stays open and the
+#      session keeps working; the event carries ``error.event_id``
+#      naming the client event that was refused.
+#
+# Pre-fix, one stray recoverable rejection (e.g. the unguarded
+# ``force_tool_for_turn`` below sending an absent tool name) killed a
+# live call. Only the fatal set reaches ``_on_error`` now; the rest
+# logs and raises a soft notice.
+#
+# Quota + auth are the classified failover cases `_handle_error`
+# already knows how to recover from. `session_expired` joins them
+# because a Realtime session has a hard lifetime cap: once the server
+# retires it, nothing sent on that socket will ever be answered.
+_FATAL_REALTIME_ERROR_CODES = frozenset({
+    "insufficient_quota",
+    "invalid_api_key",
+    "session_expired",
+})
+
+_FATAL_REALTIME_ERROR_MARKERS = (
+    "insufficient_quota",
+    "exceeded your current quota",
+    "invalid_api_key",
+    "unauthorized",
+    "session_expired",
+)
+
+
+def _is_fatal_realtime_error(code: str, message: str) -> bool:
+    """True iff an ``error`` event means the session cannot continue.
+
+    Conservative by design: anything not positively identified as an
+    account/credential failure is treated as a recoverable per-event
+    rejection, because dropping a live call is far more damaging than
+    logging one extra warning. WS-close-level failures never come
+    through here — they surface as exceptions in ``_receive_loop``,
+    which always routes to ``_on_error``.
+    """
+    code_lc = (code or "").strip().lower()
+    if code_lc in _FATAL_REALTIME_ERROR_CODES:
+        return True
+    msg_lc = (message or "").lower()
+    return any(marker in msg_lc for marker in _FATAL_REALTIME_ERROR_MARKERS)
 
 
 def _resolve_openai_key() -> str:
@@ -104,6 +156,7 @@ class RealtimeSession:
         on_speech_started: Callable[[str], Awaitable[None]] | None = None,
         on_error: Callable[[str, str], Awaitable[None]] | None = None,
         on_conversation_item: Callable[[str, dict], Awaitable[None]] | None = None,
+        on_notice: Callable[[str, str, str], Awaitable[None]] | None = None,
     ):
         self.session_id = session_id
         self.node_id = node_id
@@ -127,6 +180,11 @@ class RealtimeSession:
         self._response_in_progress = False
         self._on_error = on_error
         self._on_conversation_item = on_conversation_item
+        # Soft channel for recoverable per-event rejections. Separate
+        # from ``on_error`` on purpose: ``on_error`` means "fail this
+        # session over", ``on_notice`` means "the session is alive,
+        # tell the operator/client what the server refused".
+        self._on_notice = on_notice
 
         self._ws = None
         self._connected = False
@@ -163,7 +221,6 @@ class RealtimeSession:
             return
 
         try:
-            import websockets
             url = f"{OPENAI_REALTIME_URL}?model={self._model}"
             headers = {
                 "Authorization": f"Bearer {self._api_key}",
@@ -320,6 +377,16 @@ class RealtimeSession:
         user transcript reaches us, so schedule-intent forcing happens here
         on the transcript hook — cancel any in-flight response, update
         ``tool_choice``, then create a fresh response.
+
+        The forced name goes through ``resolve_forced_tool_choice``
+        against the SAME 128-capped list ``configure`` sent, exactly
+        like the configure path does. Pre-fix this called
+        ``openai_realtime_tool_choice`` directly, so forcing a tool the
+        cap had evicted put a name in ``tool_choice`` that the session
+        did not declare — OpenAI answers that with an ``error`` event,
+        which (before the fatal/non-fatal split above) collapsed the
+        whole call. An absent tool now degrades to ``auto``: the model
+        still answers the turn, it just isn't pinned.
         """
         if not self._connected or not tool_name:
             return
@@ -329,10 +396,14 @@ class RealtimeSession:
                 tool_name, self.session_id,
             )
             return
-        self._active_force_tool = tool_name
-        await self._send(self._ga_session_update(
-            tool_choice=openai_realtime_tool_choice(tool_name),
-        ))
+        capped = cap_tools_with_pins(self._tools, max_tools=OPENAI_TOOL_HARD_LIMIT)
+        tool_choice = resolve_forced_tool_choice(capped, tool_name)
+        forced = tool_choice != openai_realtime_tool_choice(None)
+        # Only arm the one-shot reset when the pin actually landed;
+        # otherwise `send_tool_result` would fire a pointless
+        # `tool_choice=auto` session.update for a turn nothing pinned.
+        self._active_force_tool = tool_name if forced else ""
+        await self._send(self._ga_session_update(tool_choice=tool_choice))
         await self.cancel_response()
         await self._send({"type": "response.create"})
 
@@ -554,7 +625,10 @@ class RealtimeSession:
 
         elif event_type == "error":
             err = event.get("error", {})
+            if not isinstance(err, dict):
+                err = {"message": str(err)}
             msg = err.get("message", str(err))
+            code = str(err.get("code") or "")
             self._response_in_progress = False
             # The "no active response" cancel race is benign and
             # frequent: VAD turn-detection fires `response.cancel`
@@ -572,10 +646,29 @@ class RealtimeSession:
                     "Realtime cancel race (benign): %s session=%s",
                     msg, self.session_id,
                 )
-            else:
-                logger.error(f"Realtime API error: {msg}")
+            elif _is_fatal_realtime_error(code, msg):
+                logger.error(f"Realtime API error (fatal): {msg}")
                 if self._on_error:
                     await self._on_error(self.session_id, msg)
+            else:
+                # Recoverable: the server refused ONE event and left
+                # the socket open. Routing this to `_on_error` used to
+                # reach `_handle_error`'s catch-all
+                # (`reason="openai_realtime_error"`) and chain-morph a
+                # perfectly healthy call onto the fallback pipeline —
+                # a whole session lost to e.g. one rejected
+                # `tool_choice`. Log it loudly, tell the client the
+                # session is still up, and carry on.
+                logger.warning(
+                    "Realtime per-event rejection (session survives) "
+                    "session=%s code=%s event_id=%s: %s",
+                    self.session_id, code or "(none)",
+                    err.get("event_id") or "(none)", msg,
+                )
+                if self._on_notice:
+                    await self._on_notice(
+                        self.session_id, code or "event_rejected", msg,
+                    )
 
         elif event_type == "response.created":
             self._response_in_progress = True
@@ -681,8 +774,54 @@ class RealtimeProxy:
         return bool(self._api_key)
 
     def get_session(self, node_id: str) -> Optional[RealtimeSession]:
+        """Return the LIVE session for ``node_id``, or None.
+
+        Zombie backstop (voice-collapse fix, 2026-07): a session whose
+        ``_connected`` flipped False (WS closed by OpenAI, send failure)
+        used to stay in ``_sessions`` / ``_node_to_session`` forever.
+        Every caller then found a non-None handle, hit its own
+        ``rs.connected`` gate, and silently dropped the work — audio
+        chunks vanished into a dead socket and the next
+        ``voice_session_start`` reused the corpse. Nothing may leave
+        this method holding a disconnected session; the map entries go
+        with it so the next lookup re-opens.
+
+        The socket teardown itself is async, so callers on the hot
+        audio path should call :meth:`evict_dead_session` first — it
+        closes the WS and emits the ``voice_session`` inactive event
+        before this pruning would drop the reference.
+        """
         sid = self._node_to_session.get(node_id)
-        return self._sessions.get(sid) if sid else None
+        if not sid:
+            return None
+        rs = self._sessions.get(sid)
+        if rs is not None and not rs.connected:
+            logger.warning(
+                "realtime: pruning disconnected session %s from node=%s",
+                sid, node_id,
+            )
+            self._sessions.pop(sid, None)
+            self._node_to_session.pop(node_id, None)
+            return None
+        return rs
+
+    async def evict_dead_session(self, node_id: str) -> bool:
+        """Tear down ``node_id``'s session if it reports disconnected.
+
+        Returns True when a zombie was reaped. Complements the sync
+        pruning in :meth:`get_session` by also closing the underlying
+        WebSocket and emitting the ``voice_session`` inactive event,
+        which the sync path cannot do.
+        """
+        sid = self._node_to_session.get(node_id)
+        rs = self._sessions.get(sid) if sid else None
+        if rs is None or rs.connected:
+            return False
+        logger.warning(
+            "realtime: evicting dead session %s (node=%s) before re-open", sid, node_id,
+        )
+        await self.stop_session(sid)
+        return True
 
     async def start_session(
         self,
@@ -714,6 +853,7 @@ class RealtimeProxy:
             on_speech_started=self._handle_speech_started,
             on_error=self._handle_error,
             on_conversation_item=self._handle_conversation_item,
+            on_notice=self._handle_notice,
         )
 
         await rs.connect()
@@ -1393,6 +1533,33 @@ class RealtimeProxy:
         item = item_event.get("item", {})
         logger.debug("Conversation item %s in session %s: role=%s type=%s",
                       action, session_id[:8], item.get("role", ""), item.get("type", ""))
+
+    async def _handle_notice(self, session_id: str, code: str, detail: str):
+        """Surface a recoverable per-event rejection without failing over.
+
+        Counterpart to :meth:`_handle_error`: the session is still
+        connected, so we publish ``voice_status state=available`` with
+        the server's code as ``reason``. That both records the refusal
+        on the wire and keeps the client from rendering a stale
+        "degraded" banner for an event-level hiccup.
+        """
+        logger.warning(
+            "Realtime notice [%s]: code=%s detail=%s",
+            session_id, code, str(detail)[:200],
+        )
+        if not self._fallback_router:
+            return
+        emit_notice = getattr(self._fallback_router, "emit_voice_notice", None)
+        if not emit_notice:
+            return
+        try:
+            await emit_notice(
+                session_id,
+                reason=f"openai_realtime_{code or 'event_rejected'}",
+                detail=str(detail)[:200],
+            )
+        except Exception:
+            logger.exception("Fallback router refused realtime notice")
 
     async def _handle_error(self, session_id: str, error: str):
         """Classify an OpenAI Realtime error and trigger fallback when possible.
