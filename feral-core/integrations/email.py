@@ -21,6 +21,8 @@ from typing import Any, Callable, Optional
 
 import httpx
 
+from integrations._http_errors import http_error_detail
+
 logger = logging.getLogger("feral.integrations.email")
 
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -514,7 +516,7 @@ class EmailIntegration:
                 conn.logout()
                 return {"success": True, "data": {"messages": messages, "source": "imap"}}
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
 
         headers = await self._headers()
         if not headers:
@@ -548,7 +550,7 @@ class EmailIntegration:
                 })
             return {"success": True, "data": {"messages": messages, "source": "gmail"}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def read_email(self, message_id: str = "", **kwargs) -> dict:
         if self._use_imap:
@@ -563,7 +565,7 @@ class EmailIntegration:
                     return {"success": True, "data": parsed}
                 return {"success": False, "error": "Message not found"}
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
 
         headers = await self._headers()
         if not headers:
@@ -577,7 +579,7 @@ class EmailIntegration:
             resp.raise_for_status()
             return {"success": True, "data": self._parse_gmail_message(resp.json())}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def search(
         self,
@@ -610,7 +612,7 @@ class EmailIntegration:
                 )
                 return {"success": True, "data": data}
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
 
         headers = await self._headers()
         if not headers:
@@ -665,7 +667,7 @@ class EmailIntegration:
                 result["next_page_token"] = payload["nextPageToken"]
             return {"success": True, "data": result}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     def _smtp_send(self, to: str, subject: str, body: str) -> dict:
         resolved = self._resolve_smtp()
@@ -684,7 +686,7 @@ class EmailIntegration:
             smtp.quit()
             return {"success": True, "data": {"to": to, "subject": subject, "source": "smtp"}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def send_email(self, to: str = "", subject: str = "", body: str = "", **kwargs) -> dict:
         if self._use_imap:
@@ -710,7 +712,7 @@ class EmailIntegration:
             sent = resp.json()
             return {"success": True, "data": {"id": sent.get("id", ""), "threadId": sent.get("threadId", "")}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def draft_email(self, to: str = "", subject: str = "", body: str = "", **kwargs) -> dict:
         if self._use_imap:
@@ -733,7 +735,7 @@ class EmailIntegration:
             draft = resp.json()
             return {"success": True, "data": {"draft_id": draft.get("id", ""), "message_id": draft.get("message", {}).get("id", "")}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def get_unread_count(self, **kwargs) -> dict:
         if self._use_imap:
@@ -745,7 +747,7 @@ class EmailIntegration:
                 conn.logout()
                 return {"success": True, "data": {"unread": count, "source": "imap"}}
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
 
         headers = await self._headers()
         if not headers:
@@ -766,7 +768,7 @@ class EmailIntegration:
                 },
             }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def summarize_inbox(self, llm: Optional[Callable] = None, max_emails: int = 10, **kwargs) -> dict:
         """Fetch recent unread and optionally pass to LLM for summarisation."""
@@ -787,7 +789,7 @@ class EmailIntegration:
                 conn.logout()
                 source = "imap"
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
         else:
             headers = await self._headers()
             if not headers:
@@ -819,7 +821,7 @@ class EmailIntegration:
                     })
                 source = "gmail"
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
 
         if not messages:
             return {"success": True, "data": {"summary": "Inbox zero — no unread messages.", "count": 0, "source": source}}

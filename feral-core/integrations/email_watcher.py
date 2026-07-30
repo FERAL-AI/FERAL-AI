@@ -50,6 +50,11 @@ class EmailWatcher:
         self._on_email = on_email
         self._running = False
         self._mail: Optional[imaplib.IMAP4_SSL] = None
+        self._task: Optional[asyncio.Task] = None
+        # The brain's event loop, captured in start(). The IMAP work
+        # runs on an asyncio.to_thread worker which has no loop of its
+        # own, so every hand-off back to the brain goes through this.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._processed_count = 0
         self._idle_supported: Optional[bool] = None
         self._vip_senders = [
@@ -76,7 +81,10 @@ class EmailWatcher:
             )
             return False
         self._running = True
-        asyncio.create_task(self._watch_loop())
+        self._loop = asyncio.get_running_loop()
+        # Keep the handle: api/state.py registers it so shutdown can
+        # cancel the loop.
+        self._task = asyncio.create_task(self._watch_loop())
         logger.info("Email watcher started: %s@%s (oauth=%s)",
                      self._imap_user, self._imap_host, bool(self._oauth_token))
         return True
@@ -156,6 +164,18 @@ class EmailWatcher:
             time.sleep(self.POLL_INTERVAL_SECONDS)
 
     def _process_message(self, msg_id: bytes):
+        # Runs on the to_thread worker. Check the captured loop *before*
+        # the FETCH, because FETCH marks the message \Seen: with no way
+        # to deliver, fetching would consume the mail and drop it while
+        # stats() reported it as processed.
+        loop = self._loop
+        if loop is None:
+            logger.error(
+                "Email watcher: no event loop captured (start() not run on "
+                "the brain loop) — refusing to fetch %s rather than marking "
+                "it read and dropping it", msg_id,
+            )
+            return
         try:
             status, data = self._mail.fetch(msg_id, "(RFC822)")
             if status != "OK":
@@ -183,8 +203,13 @@ class EmailWatcher:
 
             try:
                 from api.state import state
+            except ImportError as exc:
+                # Standalone watcher (no brain process): the operator's
+                # on_email callback below still runs.
+                logger.debug("Email watcher: brain state unavailable (%s) — "
+                             "skipping email_received fan-out", exc)
+            else:
                 if state.orchestrator:
-                    loop = asyncio.get_event_loop()
                     for sid in list(state.sessions.keys()):
                         loop.call_soon_threadsafe(
                             asyncio.create_task,
@@ -194,11 +219,8 @@ class EmailWatcher:
                                 "vip": is_vip,
                             }),
                         )
-            except Exception:
-                pass
 
             if self._on_email:
-                loop = asyncio.get_event_loop()
                 loop.call_soon_threadsafe(asyncio.create_task, self._on_email(incoming))
         except Exception as e:
             logger.warning("Failed to process email %s: %s", msg_id, e)
