@@ -126,8 +126,33 @@ async def run(state: WizardState) -> None:
             return
         ui_kit.banner_line(f"Tailscale Funnel active — public URL: {snap.remote_url}")
 
+    _mirror_into_state(state, snap)
+
+
+def _mirror_into_state(state: WizardState, snap) -> None:
+    """Copy the applied profile back into ``state.settings``.
+
+    :mod:`cli.setup.network` already persisted the profile to
+    ``settings.json`` directly (shared with ``feral access``), but the
+    wizard's in-memory settings are what the finish summary renders and
+    what ``state.save()`` merges at the end of the run. Mirroring keeps
+    the two views consistent.
+
+    We write ``access.pairing_mode`` rather than a ``network.mode``
+    key: the former is what ``ConfigLoader.access_pairing_mode`` and
+    ``GET /api/devices/pair/url`` read at runtime, while the latter was
+    written by this step and read by nothing.
+    """
     state.set_setting("network", "bind_host", snap.bind_host)
-    state.set_setting("network", "mode", snap.mode)
+    pairing_mode = {"lan": "local", "remote": "remote"}.get(snap.mode, "localhost")
+    state.set_setting("access", "pairing_mode", pairing_mode)
+    if snap.remote_url:
+        access = state.settings.setdefault("access", {})
+        tailscale = dict(access.get("tailscale") or {})
+        tailscale["tailnet_url"] = snap.remote_url
+        tailscale["funnel"] = True
+        access["tailscale"] = tailscale
+        access["remote_provider"] = "tailscale"
 
 
 def _brain_port() -> int:

@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-from ..helpers import ask_text, confirm, get_console, _RICH_AVAILABLE
+from ..helpers import ask_text, confirm, get_console
 from ..state import WizardState
 
 
 def run(state: WizardState) -> None:
     console = get_console()
 
-    if _RICH_AVAILABLE:
-        console.print()
-        console.print("[bold]Step 4 · About you[/]")
-        console.print("Short identity block so the agent knows who it's helping.")
-    else:
-        console.print("\nStep 4 · About you")
+    # Step numbering belongs to the state machine's indicator.
+    console.print("Short identity block so the agent knows who it's helping.")
 
     if not confirm("  Fill in now? (you can edit later in Settings → Self)", default=True):
         return

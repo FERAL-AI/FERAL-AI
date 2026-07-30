@@ -51,9 +51,14 @@ internally; admins can also add keys through the API once that ships.
 ## 2. Sign your manifest
 
 ```bash
-feral app sign ./manifest.json --key-id pub-acme-2026 --private-key ./acme.key
+feral app sign ./manifest.json --key-id pub-acme-2026
 # writes ./manifest.signed.json next to ./manifest.json
 ```
+
+There is no `--private-key` flag: signing uses your publisher key at
+`~/.feral/publisher.key`, created on demand, which is the same keypair
+the registry authenticates publishes with. One keypair per publisher,
+not one per signing surface.
 
 The CLI calls `manifest_signing.sign(manifest_dict, private_key, key_id=...)`
 under the hood and emits a `SignedManifest` envelope:

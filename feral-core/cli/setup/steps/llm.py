@@ -8,7 +8,6 @@ catalog.
 
 from __future__ import annotations
 
-import os
 from typing import Iterable
 
 from providers.catalog import (
@@ -35,6 +34,34 @@ from ..helpers import (
 from ..state import WizardState
 
 
+def _selectable_providers(catalog: ProviderCatalog) -> list:
+    """Catalog descriptors the runtime can actually dial.
+
+    ``ProviderCatalog`` lists every descriptor the UI can *render*,
+    including ones with no OpenAI-compatible runtime adapter in this
+    build (``bedrock``, ``together``, ``fireworks``). Offering those in
+    the picker let setup "succeed" and then fail on the operator's very
+    first chat turn. ``POST /api/llm/provider`` has refused them since
+    v2026.5.x; this is the same gate for the CLI.
+    """
+    from agents.llm_provider import is_supported_runtime_provider
+
+    return [
+        desc for desc in catalog.list_providers()
+        if is_supported_runtime_provider(desc.provider_id)
+    ]
+
+
+def _unsupported_provider_ids(catalog: ProviderCatalog) -> list[str]:
+    """Catalog ids the picker hides, for the one-line disclosure."""
+    from agents.llm_provider import is_supported_runtime_provider
+
+    return [
+        desc.provider_id for desc in catalog.list_providers()
+        if not is_supported_runtime_provider(desc.provider_id)
+    ]
+
+
 async def run_provider_step(state: WizardState) -> None:
     console = get_console()
     catalog = _catalog(state)
@@ -55,6 +82,14 @@ async def run_provider_step(state: WizardState) -> None:
             "[yellow]needs API key[/] until you enter one — you can still pick them "
             "and add the key next."
         )
+        hidden = _unsupported_provider_ids(catalog)
+        if hidden:
+            console.print(
+                f"[dim]Not listed: {', '.join(hidden)} — in the catalog but "
+                f"without a runtime adapter in this build. Point "
+                f"`llm.base_url` at an OpenAI-compatible gateway to use "
+                f"them.[/]"
+            )
 
     # On the typed-fallback path (off-tty / no InquirerPy) the picker
     # cannot show inline status badges, so the wide Rich table still
@@ -217,6 +252,7 @@ async def run_model_step(state: WizardState) -> None:
                 allow_empty=False,
             )
         state.set_setting("llm", "model", picked)
+        await _smoke_test_model(catalog, provider_id, picked, console)
         return
 
     # Typed fallback path — also the path pytest exercises (the suite
@@ -247,7 +283,70 @@ async def run_model_step(state: WizardState) -> None:
                 console.print("  number out of range")
                 continue
         state.set_setting("llm", "model", raw)
-        break
+        if await _smoke_test_model(catalog, provider_id, raw, console):
+            break
+        if not confirm("  Pick a different model?", default=True):
+            break
+
+
+async def _smoke_test_model(
+    catalog,
+    provider_id: str,
+    model: str,
+    console,
+) -> bool:
+    """Send one throwaway token through provider+model. Returns ok.
+
+    A mistyped or newer-than-catalog model id used to be accepted in
+    silence — the wizard printed "You're set up" and the operator's
+    first chat turn died on a 404 model_not_found. This is the same
+    round-trip ``feral models test`` performs, run once at the point
+    the id is chosen.
+
+    Local providers are exempt: pulling a model into Ollama can be a
+    multi-GB download that the LLM step already walked the operator
+    through, and a cold model here would stall the wizard.
+    """
+    desc = catalog.get_descriptor(provider_id)
+    if desc is not None and getattr(desc, "supports_local", False):
+        return True
+
+    adapter = catalog.get_adapter(provider_id)
+    chat = getattr(adapter, "chat", None) if adapter is not None else None
+    if chat is None:
+        console.print(
+            f"  [dim]No chat adapter for {provider_id} — skipping the "
+            f"model smoke test.[/]" if _RICH_AVAILABLE else
+            f"  No chat adapter for {provider_id} — skipping the model "
+            f"smoke test."
+        )
+        return True
+
+    console.print(f"  Testing {provider_id}/{model} with a one-token request…")
+    try:
+        result = await chat(
+            model=model,
+            messages=[{"role": "user", "content": "Reply with the single word 'ok'."}],
+            max_tokens=4,
+            temperature=0.0,
+        )
+    except Exception as exc:
+        console.print(
+            f"  [red]✘[/] {provider_id}/{model} failed: {exc}"
+            if _RICH_AVAILABLE else
+            f"  ✘ {provider_id}/{model} failed: {exc}"
+        )
+        return False
+
+    text = ""
+    if isinstance(result, dict):
+        text = result.get("content") or result.get("text") or ""
+    console.print(
+        f"  [green]✓[/] {provider_id}/{model} responded: {text.strip()!r}"
+        if _RICH_AVAILABLE else
+        f"  ✓ {provider_id}/{model} responded: {text.strip()!r}"
+    )
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -455,7 +554,7 @@ def _catalog(state: WizardState) -> ProviderCatalog:
 
 async def _probe_all(catalog: ProviderCatalog) -> dict[str, ProviderStatus]:
     out: dict[str, ProviderStatus] = {}
-    for desc in catalog.list_providers():
+    for desc in _selectable_providers(catalog):
         try:
             out[desc.provider_id] = await catalog.probe(desc.provider_id)
         except Exception:
@@ -469,7 +568,7 @@ def _build_options(
     state: WizardState | None = None,
 ) -> list[Option]:
     options: list[Option] = []
-    for desc in catalog.list_providers():
+    for desc in _selectable_providers(catalog):
         status = statuses.get(desc.provider_id)
         # Bug 2 — consult EVERY credential surface the wizard knows
         # about before deciding "needs API key". The pre-fix wizard
@@ -533,7 +632,7 @@ def _build_notes(
     catalog: ProviderCatalog, statuses: dict[str, ProviderStatus]
 ) -> dict[str, dict[str, str]]:
     notes: dict[str, dict[str, str]] = {}
-    for desc in catalog.list_providers():
+    for desc in _selectable_providers(catalog):
         status = statuses.get(desc.provider_id)
         snippets: list[str] = []
         if desc.supports_local:

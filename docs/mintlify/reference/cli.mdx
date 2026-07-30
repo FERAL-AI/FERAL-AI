@@ -258,6 +258,138 @@ feral doctor
 
 Checks: Python version, FERAL package, config directory, LLM credentials (keys + Ollama), identity files, memory database, port availability, Playwright/chromium, Node.js, local audio backends (faster-whisper, piper), and core dependencies.
 
+### `feral key`
+
+Manage per-provider API keys in the encrypted vault. Multiple labeled keys per provider are supported, and `add` probes the key before the prompt closes so you see green/red immediately.
+
+```bash
+feral key add --provider openai --label prod --set-active
+feral key list --provider anthropic
+feral key remove --provider openai --label dev
+feral key reset-cooldowns
+```
+
+Actions: `add`, `list`, `remove`, `reset-cooldowns`, `recover`.
+
+### `feral models`
+
+List, test, and pin the chat model per provider.
+
+```bash
+feral models list --provider openai --live
+feral models test --provider anthropic --model claude-opus-4-7
+feral models set --provider openai --model gpt-5
+feral models add --provider openai            # append to the favorites list
+```
+
+### `feral voice`
+
+Inspect and test the STT / TTS / realtime voice catalogue. `providers` shows the same probe status the setup wizard's voice preflight renders.
+
+```bash
+feral voice providers
+feral voice test
+```
+
+### `feral integrations`
+
+Connect and disconnect third-party accounts. OAuth providers support `--self-hosted` to use your own OAuth app instead of a first-party client.
+
+```bash
+feral integrations list
+feral integrations connect gmail
+feral integrations connect notion --self-hosted
+feral integrations disconnect spotify --yes
+```
+
+Supported ids: `gmail`, `google`, `notion`, `spotify`, `microsoft`, `home-assistant`.
+
+### `feral grant`
+
+Grant or revoke folder access for the `computer_use` file tools. Paths outside an active grant are refused, and grants apply immediately without a restart.
+
+```bash
+feral grant add ~/Projects --mode readwrite
+feral grant list
+feral grant revoke ~/Projects
+```
+
+### `feral twin`
+
+Manage the digital twin's per-domain policies and its approval queue.
+
+```bash
+feral twin grant
+feral twin list
+feral twin revoke
+feral twin pending
+```
+
+### `feral memory`
+
+Memory backend, decay, and query management.
+
+```bash
+feral memory status
+feral memory list                  # installed vector-store backends
+feral memory switch qdrant
+feral memory decay now
+feral memory recall "what did I say about the roadmap"
+feral memory compact
+feral memory encrypt
+```
+
+### `feral app`
+
+Build, sign, and publish GenUI app bundles.
+
+```bash
+feral app init my-app
+feral app validate ./my-app
+feral app build ./my-app
+feral app install ./my-app
+feral app sign ./manifest.json --key-id pub-acme-2026
+feral app verify ./manifest.signed.json
+feral app publish ./my-app
+```
+
+`sign` uses your publisher key at `~/.feral/publisher.key`; there is no `--private-key` flag.
+
+### `feral bridge`
+
+Install the phone-bridge daemon on this host.
+
+```bash
+feral bridge install
+```
+
+### `feral install`
+
+Install a published skill or daemon from the FERAL registry.
+
+```bash
+feral install weather-skill
+feral install weather-skill --registry https://registry.example.com
+```
+
+### `feral publish`
+
+Publish a skill or daemon bundle to the registry. `--skill` and `--daemon` are mutually exclusive and one is required.
+
+```bash
+feral publish --skill ./my-skill/
+feral publish --daemon ./my-daemon/
+```
+
+### `feral publisher`
+
+Manage the publisher identity used by `feral publish`.
+
+```bash
+feral publisher register   # uploads your Ed25519 public key
+feral publisher login      # browser OAuth with GitHub
+```
+
 ## Exit Codes
 
 | Code | Meaning |

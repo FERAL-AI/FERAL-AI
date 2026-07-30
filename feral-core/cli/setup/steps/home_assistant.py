@@ -1,29 +1,68 @@
-"""Optional Home Assistant step — URL + long-lived token."""
+"""Optional Home Assistant step — URL + long-lived token, verified."""
 
 from __future__ import annotations
 
-from ..helpers import ask_text, confirm, get_console
+import os
+
+from ..helpers import (
+    ask_text,
+    confirm,
+    get_console,
+    probe_and_report,
+    _RICH_AVAILABLE,
+)
 from ..state import WizardState
 
 
-def run(state: WizardState) -> None:
+async def run(state: WizardState) -> None:
     console = get_console()
     console.print()
-    console.print("[bold]Step 5 · Home Assistant[/]" if _rich() else "Step 5 · Home Assistant")
+    console.print(
+        "Point FERAL at your Home Assistant instance so the agent can read "
+        "sensor state and call services."
+    )
 
     if not confirm("  Connect a Home Assistant instance?", default=False):
         return
 
-    default_url = state.get_setting("home_assistant", "url", "http://homeassistant.local:8123")
-    url = ask_text("  Home Assistant URL", default=default_url, allow_empty=False)
-    token = ask_text("  Long-lived access token", default="", allow_empty=False, secret=True)
+    default_url = state.get_setting(
+        "home_assistant", "url", "http://homeassistant.local:8123"
+    )
+    while True:
+        url = ask_text("  Home Assistant URL", default=default_url, allow_empty=False)
+        token = ask_text(
+            "  Long-lived access token", default="", allow_empty=False, secret=True,
+        )
 
-    state.set_setting("home_assistant", "enabled", True)
-    state.set_setting("home_assistant", "url", url)
-    state.set_credential("HOME_ASSISTANT_URL", url)
-    state.set_credential("HOME_ASSISTANT_TOKEN", token)
+        # ``integrations/home_assistant.py`` and ``security.probe``'s
+        # home_assistant probe both read HA_URL / HA_TOKEN. The wizard
+        # previously stored HOME_ASSISTANT_URL / HOME_ASSISTANT_TOKEN,
+        # a namespace nothing reads — the operator typed a valid token
+        # into a black hole and the integration stayed dark.
+        state.set_credential("HA_URL", url)
+        state.set_credential("HA_TOKEN", token)
+        # Export before probing: the probe resolves its base URL and
+        # bearer from the environment.
+        os.environ["HA_URL"] = url
+        os.environ["HA_TOKEN"] = token
 
+        state.set_setting("home_assistant", "enabled", True)
+        state.set_setting("home_assistant", "url", url)
 
-def _rich() -> bool:
-    from ..helpers import _RICH_AVAILABLE
-    return _RICH_AVAILABLE
+        ok, _detail = await probe_and_report(
+            "home_assistant", console=console, display_name="Home Assistant",
+        )
+        if ok:
+            return
+
+        console.print(
+            "  The URL + token are saved, but Home Assistant did not accept "
+            "them. Check the URL is reachable from this machine and that the "
+            "token is a Long-Lived Access Token (Profile → Security)."
+            if _RICH_AVAILABLE else
+            "  Saved, but Home Assistant did not accept them. Check the URL "
+            "and that the token is a Long-Lived Access Token."
+        )
+        if not confirm("  Re-enter the URL / token?", default=True):
+            return
+        default_url = url

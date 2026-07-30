@@ -93,9 +93,9 @@ async def run(state: WizardState) -> None:
         or state.has_credential("OPENAI_API_KEY")
     )
 
+    # The state machine owns the "Step N of M" header; a hardcoded
+    # number here contradicted it the moment the step list changed.
     if _RICH_AVAILABLE:
-        console.print()
-        console.print("[bold]Step 3 · Speech in / out (optional)[/]")
         console.print(
             "Pick how FERAL should listen + speak. Skip if you only use text chat."
         )

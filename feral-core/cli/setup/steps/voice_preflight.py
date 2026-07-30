@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import asyncio
 
-from cli import ui_kit
-
 from ..helpers import (
     BackNavigation,
     QuitNavigation,
@@ -37,6 +35,11 @@ from ..state import WizardState
 # by :func:`_maybe_reuse_provider_key` to detect "OpenAI key already
 # configured for chat — reuse for realtime voice?" so the wizard
 # doesn't re-prompt for the same key on the voice step.
+# How many times a rejected key may be retyped before the step gives up
+# and moves on with whatever was last entered.
+_MAX_KEY_ATTEMPTS = 3
+
+
 _VOICE_KEY_SOURCES = {
     "openai_realtime": ("openai", "OPENAI_API_KEY"),
     "openai_tts": ("openai", "OPENAI_API_KEY"),
@@ -136,7 +139,7 @@ async def run(state: WizardState) -> None:
             # Bug 1 — we MUST pass the live probe result down: a
             # stored key the provider just rejected (HTTP 401) or
             # could not be reached on must NOT be silently reused.
-            reuse_result = _maybe_reuse_provider_key(
+            reuse_result = await _maybe_reuse_provider_key(
                 state,
                 chosen.id,
                 console,
@@ -208,13 +211,15 @@ async def run(state: WizardState) -> None:
         )
         if chosen.id != "__none__":
             state.set_setting("audio", "chained_stt_provider", chosen.id)
-            stt_result = _maybe_reuse_provider_key(
+            stt_result = await _maybe_reuse_provider_key(
                 state, chosen.id, console,
                 prompt_if_missing=False,
                 probe_result=probe_results.get(chosen.id),
             )
             if stt_result == "skip":
                 state.set_setting("audio", "chained_stt_provider", "")
+            else:
+                _set_chained_fallback(state, "stt_provider", chosen.id)
 
     # ── Pick chained TTS (optional) ──────────────────────────────────
     if tts_entries:
@@ -234,18 +239,37 @@ async def run(state: WizardState) -> None:
         )
         if chosen.id != "__none__":
             state.set_setting("audio", "chained_tts_provider", chosen.id)
-            tts_result = _maybe_reuse_provider_key(
+            tts_result = await _maybe_reuse_provider_key(
                 state, chosen.id, console,
                 prompt_if_missing=False,
                 probe_result=probe_results.get(chosen.id),
             )
             if tts_result == "skip":
                 state.set_setting("audio", "chained_tts_provider", "")
+            else:
+                _set_chained_fallback(state, "tts_provider", chosen.id)
 
     state.set_setting("audio", "configured_via_wizard", True)
 
 
-def _maybe_reuse_provider_key(
+def _set_chained_fallback(state: WizardState, key: str, provider_id: str) -> None:
+    """Mirror a chained pick into ``audio.chained_fallback``.
+
+    ``audio.chained_stt_provider`` / ``audio.chained_tts_provider`` are
+    this step's own resume defaults — nothing at runtime reads them.
+    The voice router reads ``audio.chained_fallback.stt_provider`` and
+    ``.tts_provider`` (see ``voice/router.py::_try_chained_morph``), so
+    a chained pick made here had no effect on the chained pipeline that
+    actually runs. Write both: the flat key keeps the picker's default
+    stable across re-runs, the nested one is what the brain obeys.
+    """
+    audio = state.settings.setdefault("audio", {})
+    chained = dict(audio.get("chained_fallback") or {})
+    chained[key] = provider_id
+    audio["chained_fallback"] = chained
+
+
+async def _maybe_reuse_provider_key(
     state: WizardState,
     voice_provider_id: str,
     console,
@@ -306,7 +330,7 @@ def _maybe_reuse_provider_key(
             # The probe just told us this exact key is broken. Don't
             # paper over it with a green ✓ — show the operator what
             # we saw and ask what to do.
-            return _handle_bad_existing_key(
+            return await _handle_bad_existing_key(
                 state=state,
                 voice_provider_id=voice_provider_id,
                 vendor_id=vendor_id,
@@ -365,22 +389,109 @@ def _maybe_reuse_provider_key(
         )
     if not confirm(f"  Enter a {vendor_id} API key now?", default=True):
         return ""
-    key = ask_text(
-        f"  Enter your {vendor_id} API key",
-        allow_empty=False,
-        secret=True,
+    await _prompt_and_verify_key(
+        state=state,
+        vendor_id=vendor_id,
+        env_var=env_var,
+        voice_provider_id=voice_provider_id,
+        console=console,
+        prompt=f"  Enter your {vendor_id} API key",
     )
+    return "replaced"
+
+
+async def _prompt_and_verify_key(
+    *,
+    state: WizardState,
+    vendor_id: str,
+    env_var: str,
+    voice_provider_id: str,
+    console,
+    prompt: str,
+) -> bool:
+    """Prompt for a key, persist it, then probe it.
+
+    The step probed every provider up front and made a lot of noise
+    about a stored key the vendor had rejected, but a key typed *during*
+    the step went straight to the vault unverified. The operator could
+    fix a bad key with a second bad key and the wizard would say
+    nothing. Same store→probe→report→retry shape as ``feral key add``.
+
+    Only a *verdict* re-prompts. A probe that comes back "not
+    configured" is inconclusive, not a rejection: it means the probe
+    could not see the credential we just stored (a voice provider that
+    resolves its key from somewhere this process hasn't populated
+    yet), and badgering the operator to retype a key we have no
+    evidence is wrong would be worse than saying nothing. This is the
+    same distinction :func:`_probe_indicates_bad_key` already draws for
+    pre-existing keys.
+
+    Returns True when the provider accepted the key.
+    """
     import os as _os
 
-    state.set_credential(env_var, key)
-    _os.environ[env_var] = key
-    try:
-        from security import vault_keys
+    from security.probe import probe as _probe
 
-        vault_keys.add_provider_key(vendor_id, "default", key, set_active=True)
-    except Exception:
-        pass
-    return "replaced"
+    # Bounded so a provider that rejects everything (expired billing,
+    # region block) can't trap the operator in the wizard.
+    for attempt in range(_MAX_KEY_ATTEMPTS):
+        key = ask_text(prompt, allow_empty=False, secret=True)
+        state.set_credential(env_var, key)
+        _os.environ[env_var] = key
+        try:
+            from security import vault_keys
+
+            vault_keys.add_provider_key(vendor_id, "default", key, set_active=True)
+        except Exception:
+            # Best-effort, exactly as before: the env + state.credentials
+            # writes above are what the rest of this run reads.
+            pass
+
+        console.print(f"  Verifying the {vendor_id} key…")
+        result = await _probe(voice_provider_id, force=True)
+
+        if getattr(result, "ok", False):
+            console.print(
+                f"  [green]✔[/] {voice_provider_id} accepted the key."
+                if _RICH_AVAILABLE else
+                f"  ✔ {voice_provider_id} accepted the key."
+            )
+            return True
+
+        if not _probe_indicates_bad_key(result):
+            console.print(
+                f"  [dim]Stored. {voice_provider_id} could not be verified "
+                f"from here ({result.reason or 'not configured'}) — check it "
+                f"with `feral voice providers` once the brain is up.[/]"
+                if _RICH_AVAILABLE else
+                f"  Stored. {voice_provider_id} could not be verified from "
+                f"here ({result.reason or 'not configured'})."
+            )
+            return False
+
+        verdict = (
+            f"HTTP {result.status_code}"
+            if result.status_code in (401, 403)
+            else (result.reason or "unreachable")
+        )
+        console.print(
+            f"  [red]✘[/] {voice_provider_id} rejected the key ({verdict})."
+            if _RICH_AVAILABLE else
+            f"  ✘ {voice_provider_id} rejected the key ({verdict})."
+        )
+        last_attempt = attempt == _MAX_KEY_ATTEMPTS - 1
+        if last_attempt or not confirm(
+            f"  Try a different {vendor_id} key?", default=True,
+        ):
+            console.print(
+                f"  [yellow]Keeping the key as typed — {voice_provider_id} "
+                f"may not work until it's replaced.[/]"
+                if _RICH_AVAILABLE else
+                f"  Keeping the key as typed — {voice_provider_id} may not "
+                f"work until it's replaced."
+            )
+            return False
+    return False
 
 
 def _probe_indicates_bad_key(res) -> bool:
@@ -407,7 +518,7 @@ def _probe_indicates_bad_key(res) -> bool:
     return True
 
 
-def _handle_bad_existing_key(
+async def _handle_bad_existing_key(
     *,
     state: WizardState,
     voice_provider_id: str,
@@ -462,21 +573,17 @@ def _handle_bad_existing_key(
             _os.environ[env_var] = secret_now
         return "kept"
 
-    # replace → free-text prompt for a fresh key, persist everywhere.
-    key = ask_text(
-        f"  Enter a new {vendor_id} API key",
-        allow_empty=False,
-        secret=True,
+    # replace → free-text prompt for a fresh key, persist everywhere,
+    # then re-probe. Replacing a rejected key with another rejected key
+    # used to be silently accepted.
+    await _prompt_and_verify_key(
+        state=state,
+        vendor_id=vendor_id,
+        env_var=env_var,
+        voice_provider_id=voice_provider_id,
+        console=console,
+        prompt=f"  Enter a new {vendor_id} API key",
     )
-    import os as _os
-    state.set_credential(env_var, key)
-    _os.environ[env_var] = key
-    try:
-        from security import vault_keys
-
-        vault_keys.add_provider_key(vendor_id, "default", key, set_active=True)
-    except Exception:
-        pass
     return "replaced"
 
 

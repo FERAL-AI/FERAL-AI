@@ -41,11 +41,18 @@ _NO_INDICATOR_STEPS = frozenset({"welcome", "finish"})
 _STEP_TITLES = {
     "llm_provider": "LLM Provider",
     "llm_model": "Model",
+    "voice_preflight": "Voice providers",
     "audio": "Speech in / out",
     "identity": "Identity",
+    "personality": "Personality",
+    "capabilities": "Capabilities",
     "network": "Network access",
+    "integrations": "Integrations",
     "home_assistant": "Home Assistant",
+    "tool_keys": "Tool API keys",
     "channels": "Messaging channels",
+    "pairing": "Connect your phone",
+    "tcc_preflight": "System permissions",
 }
 
 
