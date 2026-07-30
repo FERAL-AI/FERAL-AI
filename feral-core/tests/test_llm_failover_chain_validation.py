@@ -29,11 +29,27 @@ class TestFailoverChainValidation:
         assert kept == ["openai", "openrouter", "deepseek", "gemini", "kimi"]
 
     def test_credential_readable_but_undialable_providers_are_dropped(self):
-        """_KEY_MAP can read these; the runtime has no adapter for them."""
+        """``_KEY_MAP`` can read a credential the runtime cannot dial.
+
+        ``cohere`` is the live example: the loader knows how to read
+        ``COHERE_API_KEY`` but no adapter exists, so a user with a Cohere key
+        would otherwise get an undialable chain entry without ever editing
+        settings.json. ``bedrock`` has a catalog descriptor and a boto3
+        adapter but no ``_PROVIDER_REGISTRY`` binding.
+
+        NOTE: xai / mistral / minimax / zai were in this list until runtime
+        bindings were added for them, which is why the assertion below is
+        written against ``SUPPORTED_RUNTIME_PROVIDERS`` rather than a
+        hardcoded expectation that goes stale the same way.
+        """
         kept = ConfigLoader._drop_unrunnable_providers(
-            ["cohere", "mistral", "xai", "anthropic"], source="test",
+            ["cohere", "bedrock", "anthropic", "openai"], source="test",
         )
-        assert kept == ["anthropic"]
+        assert "cohere" not in kept
+        assert "bedrock" not in kept
+        assert kept == ["anthropic", "openai"]
+        for prov in kept:
+            assert prov in SUPPORTED_RUNTIME_PROVIDERS
 
     def test_supported_providers_survive_untouched(self):
         chain = ["openai", "anthropic", "gemini", "groq", "deepseek", "openrouter"]
