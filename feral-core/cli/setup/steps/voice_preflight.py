@@ -35,6 +35,11 @@ from ..state import WizardState
 # by :func:`_maybe_reuse_provider_key` to detect "OpenAI key already
 # configured for chat — reuse for realtime voice?" so the wizard
 # doesn't re-prompt for the same key on the voice step.
+# How many times a rejected key may be retyped before the step gives up
+# and moves on with whatever was last entered.
+_MAX_KEY_ATTEMPTS = 3
+
+
 _VOICE_KEY_SOURCES = {
     "openai_realtime": ("openai", "OPENAI_API_KEY"),
     "openai_tts": ("openai", "OPENAI_API_KEY"),
@@ -404,7 +409,7 @@ async def _prompt_and_verify_key(
     console,
     prompt: str,
 ) -> bool:
-    """Prompt for a key, persist it, then probe it — with a retry loop.
+    """Prompt for a key, persist it, then probe it.
 
     The step probed every provider up front and made a lot of noise
     about a stored key the vendor had rejected, but a key typed *during*
@@ -412,13 +417,24 @@ async def _prompt_and_verify_key(
     fix a bad key with a second bad key and the wizard would say
     nothing. Same store→probe→report→retry shape as ``feral key add``.
 
+    Only a *verdict* re-prompts. A probe that comes back "not
+    configured" is inconclusive, not a rejection: it means the probe
+    could not see the credential we just stored (a voice provider that
+    resolves its key from somewhere this process hasn't populated
+    yet), and badgering the operator to retype a key we have no
+    evidence is wrong would be worse than saying nothing. This is the
+    same distinction :func:`_probe_indicates_bad_key` already draws for
+    pre-existing keys.
+
     Returns True when the provider accepted the key.
     """
     import os as _os
 
-    from ..helpers import probe_and_report
+    from security.probe import probe as _probe
 
-    while True:
+    # Bounded so a provider that rejects everything (expired billing,
+    # region block) can't trap the operator in the wizard.
+    for attempt in range(_MAX_KEY_ATTEMPTS):
         key = ask_text(prompt, allow_empty=False, secret=True)
         state.set_credential(env_var, key)
         _os.environ[env_var] = key
@@ -431,12 +447,42 @@ async def _prompt_and_verify_key(
             # writes above are what the rest of this run reads.
             pass
 
-        ok, _detail = await probe_and_report(
-            voice_provider_id, console=console, display_name=voice_provider_id,
-        )
-        if ok:
+        console.print(f"  Verifying the {vendor_id} key…")
+        result = await _probe(voice_provider_id, force=True)
+
+        if getattr(result, "ok", False):
+            console.print(
+                f"  [green]✔[/] {voice_provider_id} accepted the key."
+                if _RICH_AVAILABLE else
+                f"  ✔ {voice_provider_id} accepted the key."
+            )
             return True
-        if not confirm(f"  Try a different {vendor_id} key?", default=True):
+
+        if not _probe_indicates_bad_key(result):
+            console.print(
+                f"  [dim]Stored. {voice_provider_id} could not be verified "
+                f"from here ({result.reason or 'not configured'}) — check it "
+                f"with `feral voice providers` once the brain is up.[/]"
+                if _RICH_AVAILABLE else
+                f"  Stored. {voice_provider_id} could not be verified from "
+                f"here ({result.reason or 'not configured'})."
+            )
+            return False
+
+        verdict = (
+            f"HTTP {result.status_code}"
+            if result.status_code in (401, 403)
+            else (result.reason or "unreachable")
+        )
+        console.print(
+            f"  [red]✘[/] {voice_provider_id} rejected the key ({verdict})."
+            if _RICH_AVAILABLE else
+            f"  ✘ {voice_provider_id} rejected the key ({verdict})."
+        )
+        last_attempt = attempt == _MAX_KEY_ATTEMPTS - 1
+        if last_attempt or not confirm(
+            f"  Try a different {vendor_id} key?", default=True,
+        ):
             console.print(
                 f"  [yellow]Keeping the key as typed — {voice_provider_id} "
                 f"may not work until it's replaced.[/]"
@@ -445,6 +491,7 @@ async def _prompt_and_verify_key(
                 f"work until it's replaced."
             )
             return False
+    return False
 
 
 def _probe_indicates_bad_key(res) -> bool:

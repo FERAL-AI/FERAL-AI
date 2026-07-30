@@ -69,14 +69,17 @@ feral start
 
 ### What `feral setup` walks you through
 
-`feral setup` is an arrow-key wizard (space to mark, enter to confirm):
+`feral setup` is an arrow-key wizard (↑/↓ to navigate, enter to pick the highlighted row):
 
-1. **LLM provider** — OpenAI, Anthropic, Ollama, LM Studio, Together, OpenRouter, Fireworks, Bedrock, and more — with masked API key paste.
-2. **Model** — type to filter through hundreds of model ids.
-3. **Speech in / out** — cloud or fully local.
-4. **Identity** — so the agent knows who it's talking to.
-5. **Network access** — `localhost` (default), `LAN` so phones on the same Wi-Fi can pair, or `Tailscale Funnel` for free public DNS pairing from anywhere.
-6. **Optional integrations** — Home Assistant, messaging channels.
+1. **LLM provider** — OpenAI, Anthropic, Gemini, Groq, DeepSeek, OpenRouter, Ollama, LM Studio — with masked API key paste, and the key probed before you move on.
+2. **Model** — type to filter through hundreds of model ids, then a one-token round-trip confirms the id actually works.
+3. **Speech in / out** — realtime or chained, cloud or fully local.
+4. **Identity + personality** — who you are, and how the agent should talk to you.
+5. **Capabilities** — vision, proactive nudges, streaming, multi-agent, autonomy tier, and which folders the file tools may touch.
+6. **Network access** — `localhost` (default), `LAN` so phones on the same Wi-Fi can pair, or `Tailscale Funnel` for free public DNS pairing from anywhere.
+7. **Optional** — Google / Notion / Spotify / Microsoft 365 / Gmail, Home Assistant, search + weather keys, messaging channels.
+
+Catalog providers without a runtime adapter in this build (Bedrock, Together, Fireworks) are not offered; point `llm.base_url` at an OpenAI-compatible gateway to use them.
 
 You get a local brain on port `9090`, the bundled web UI, and a local config under `~/.feral/` (settings + an encrypted vault for keys).
 
@@ -87,7 +90,7 @@ feral serve            # headless brain only (no chat / no client)
 feral status           # runtime status
 feral doctor           # diagnostics — what's reachable, what needs setup
 feral access status    # current pairing / network mode
-feral key paste        # add or rotate a credential without re-running setup
+feral key add          # add or rotate a credential without re-running setup
 feral memory status    # backend, knowledge graph counts, decay schedule
 feral sync status      # federated peers + per-peer lag + last-sync clock
 ```
