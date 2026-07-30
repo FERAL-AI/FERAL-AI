@@ -29,6 +29,7 @@ from agents.tool_dispatch_validator import (
     ToolDispatchValidator,
     make_tool_error_envelope,
 )
+from skills.result_budget import serialize_tool_result
 
 MAX_LLM_TOOLS = 64
 
@@ -1153,7 +1154,13 @@ class ToolRunner:
                         "role": "tool",
                         "tool_call_id": tc.get("id", str(uuid4())[:8]),
                         "name": tc.get("name", ""),
-                        "content": json.dumps(result_data, default=str)[:2000],
+                        # Subagents read and grep the same filesystem the
+                        # parent does, so they get the same per-tool budget
+                        # instead of the old blind [:2000] slice.
+                        "content": serialize_tool_result(
+                            tc.get("name", ""), result_data,
+                            registry=self._orch.skills,
+                        ),
                     })
                 continue
 

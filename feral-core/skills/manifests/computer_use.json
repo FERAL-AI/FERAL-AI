@@ -110,7 +110,8 @@
                 {"name": "max_length", "type": "integer", "required": false, "description": "Max characters to return (default 10000)"}
             ],
             "returns_description": "Page content as plain text",
-            "ui_hint": "detail_card"
+            "ui_hint": "detail_card",
+            "result_budget": "standard"
         }
     ],
     "flows": [],
@@ -118,5 +119,6 @@
     "triggers": [],
     "permissions": ["filesystem", "network", "shell"],
     "requires_daemon": false,
-    "max_calls_per_hour": 10000
+    "max_calls_per_hour": 10000,
+    "result_budget": "workspace"
 }

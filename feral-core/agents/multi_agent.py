@@ -20,6 +20,8 @@ from typing import Optional, Any, Callable, Awaitable
 from uuid import uuid4
 from dataclasses import dataclass, field
 
+from skills.result_budget import serialize_tool_result
+
 logger = logging.getLogger("feral.multi_agent")
 
 
@@ -157,15 +159,22 @@ class AgentWorker:
         # user-set only (agents.max_tool_iterations / FERAL_MAX_ITERATIONS);
         # runaway loops are stopped by the no-progress guard + wall clock.
         from agents.iteration_budget import (
+            GUARD_STOP,
+            GUARD_WARN,
             IterationBudget,
             NO_PROGRESS_GUIDANCE,
+            NO_PROGRESS_WARNING,
             resolve_max_tool_iterations,
             resolve_tool_loop_max_seconds,
         )
         budget = IterationBudget(
             resolve_max_tool_iterations(), resolve_tool_loop_max_seconds()
         )
+        # Same two-level guard as the single-agent loop: a worker that hits
+        # one broken tool keeps the rest of its toolset and gets a warning
+        # first; only a genuine spin withdraws tools.
         final_answer_only = False
+        no_progress_warned = False
 
         while budget.start_iteration():
             try:
@@ -235,13 +244,31 @@ class AgentWorker:
                                         "role": "tool",
                                         "tool_call_id": tc.get("id", str(uuid4())[:8]),
                                         "name": tc["name"],
-                                        "content": json.dumps(result.get("data") or result, default=str)[:2000],
+                                        # Fourth site of the same blind
+                                        # [:2000] slice. Workers read files
+                                        # too, so they share the per-tool
+                                        # budget (skills/result_budget.py).
+                                        "content": serialize_tool_result(
+                                            tc["name"],
+                                            result.get("data") or result,
+                                            registry=self._skills,
+                                        ),
                                     })
-                                    if budget.observe_tool(
+                                    guard_level = budget.observe_tool(
                                         tc["name"], tc.get("args", {}),
                                         bool(result.get("success")), result,
-                                    ):
+                                    )
+                                    if guard_level == GUARD_STOP:
                                         final_answer_only = True
+                                    elif (
+                                        guard_level == GUARD_WARN
+                                        and not no_progress_warned
+                                    ):
+                                        no_progress_warned = True
+                                        messages.append({
+                                            "role": "system",
+                                            "content": NO_PROGRESS_WARNING,
+                                        })
                     if final_answer_only:
                         messages.append({"role": "system", "content": NO_PROGRESS_GUIDANCE})
                     continue

@@ -38,6 +38,7 @@ from models.protocol import (
 from models.skill_manifest import SkillManifest
 from skills.registry import SkillRegistry
 from skills.executor import SkillExecutor
+from skills.result_budget import serialize_tool_result
 from agents.llm_provider import LLMProvider
 from agents import llm_router
 from agents.genui_generator import GenUIGenerator
@@ -2137,11 +2138,19 @@ class Orchestrator:
 
         history = self._compact_context(self.conversation_history[session_id].copy())
 
-        from agents.iteration_budget import IterationBudget, NO_PROGRESS_GUIDANCE
+        from agents.iteration_budget import (
+            GUARD_STOP,
+            GUARD_WARN,
+            IterationBudget,
+            NO_PROGRESS_GUIDANCE,
+            NO_PROGRESS_WARNING,
+        )
         budget = IterationBudget(self._max_iterations, self._tool_loop_max_seconds)
-        # Set by the no-progress guard: tools are withdrawn and the model
-        # gets exactly one more round to produce an honest final answer.
+        # Set only by the guard's STOP level: tools are withdrawn and the
+        # model gets exactly one more round to produce an honest final
+        # answer. The WARN level below deliberately does NOT set this.
         final_answer_only = False
+        no_progress_warned = False
         refusal_retry_used = False
         reasoning_retry_count = 0
         empty_retry_used = False
@@ -2397,12 +2406,29 @@ class Orchestrator:
                         "role": "tool",
                         "tool_call_id": tc["id"],
                         "name": tc["name"],
-                        "content": json.dumps(result_data, default=str)[:2000]
+                        # Budgeted per tool (skills/result_budget.py). This
+                        # used to be json.dumps(...)[:2000] — a blind byte
+                        # slice that cut mid-token, so the model was
+                        # routinely handed JSON that does not parse, with
+                        # nothing saying anything had been removed.
+                        "content": serialize_tool_result(
+                            tc["name"], result_data, registry=self.skills,
+                        ),
                     })
-                    if budget.observe_tool(
+                    guard_level = budget.observe_tool(
                         tc["name"], tc.get("args", {}), tool_success, result_data
-                    ):
+                    )
+                    if guard_level == GUARD_STOP:
                         final_answer_only = True
+                    elif guard_level == GUARD_WARN and not no_progress_warned:
+                        # Warn once, keep every other tool available. The
+                        # old code withdrew the WHOLE toolset here after
+                        # two identical failures, so a single unavailable
+                        # tool disarmed an agent mid-task.
+                        no_progress_warned = True
+                        history.append(
+                            {"role": "system", "content": NO_PROGRESS_WARNING}
+                        )
                     anti_loop_guidance = result_data.get("_anti_loop_guidance")
                     if anti_loop_guidance:
                         history.append({"role": "system", "content": anti_loop_guidance})
@@ -2636,9 +2662,18 @@ class Orchestrator:
         pending_retry_addition: Optional[str] = None
         if self.refusal_handler.is_ack_execution(text):
             pending_retry_addition = self.refusal_handler.ACK_EXECUTION_FAST_PATH_INSTRUCTION
-        from agents.iteration_budget import IterationBudget, NO_PROGRESS_GUIDANCE
+        from agents.iteration_budget import (
+            GUARD_STOP,
+            GUARD_WARN,
+            IterationBudget,
+            NO_PROGRESS_GUIDANCE,
+            NO_PROGRESS_WARNING,
+        )
         budget = IterationBudget(self._max_iterations, self._tool_loop_max_seconds)
+        # Only the guard's STOP level withdraws tools; see the
+        # non-streaming path and agents/iteration_budget.py.
         final_answer_only = False
+        no_progress_warned = False
         while budget.start_iteration():
             effective_system_prompt = system_prompt
             if pending_retry_addition:
@@ -2917,12 +2952,24 @@ class Orchestrator:
                         "role": "tool",
                         "tool_call_id": tc.get("id", str(uuid4())[:8]),
                         "name": tc["name"],
-                        "content": json.dumps(result_data, default=str)[:2000],
+                        # Same per-tool budget as the non-streaming path;
+                        # see the comment there.
+                        "content": serialize_tool_result(
+                            tc["name"], result_data, registry=self.skills,
+                        ),
                     })
-                    if budget.observe_tool(
+                    guard_level = budget.observe_tool(
                         tc["name"], tc.get("args", {}), stream_tool_success, result_data
-                    ):
+                    )
+                    if guard_level == GUARD_STOP:
                         final_answer_only = True
+                    elif guard_level == GUARD_WARN and not no_progress_warned:
+                        # Warn once and leave the toolset intact; see the
+                        # non-streaming path.
+                        no_progress_warned = True
+                        history.append(
+                            {"role": "system", "content": NO_PROGRESS_WARNING}
+                        )
                     anti_loop_guidance = result_data.get("_anti_loop_guidance")
                     if anti_loop_guidance:
                         history.append({"role": "system", "content": anti_loop_guidance})
