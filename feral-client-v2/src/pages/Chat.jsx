@@ -17,6 +17,8 @@ import BudgetExceededBanner from '../components/BudgetExceededBanner';
 import { ToolCallList } from '../components/ToolCallCard';
 import ReasoningSection from '../components/ReasoningSection';
 import TimelineCard from '../components/TimelineCard';
+import ChatNotice from '../components/ChatNotice';
+import CopyButton from '../ui/CopyButton';
 
 function newId() {
   return `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -78,6 +80,11 @@ export default function Chat() {
   const [streamingText, setStreamingText] = useState('');
   const [streamingReasoning, setStreamingReasoning] = useState('');
   const [toolChip, setToolChip] = useState(null);
+  // Tool calls belonging to the turn currently in flight. Mirrors
+  // `pendingTraceRef` into React state so an in-progress call renders
+  // live (spinner + ticking elapsed) instead of appearing only after
+  // the turn commits. A hung tool used to look like a dead UI.
+  const [liveTools, setLiveTools] = useState([]);
   // S6 — yellow inline banner emitted by Lane 08's `budget_exceeded`
   // WS frame. Multiple call-sites can exceed simultaneously (chat +
   // vision), so we key the active banners by call_site.
@@ -102,10 +109,16 @@ export default function Chat() {
   const fileInputRef = useRef(null);
 
   const bottomRef = useRef(null);
+  const logRef = useRef(null);
+  const stickToBottomRef = useRef(true);
   const streamBufferRef = useRef('');
   const streamReasoningRef = useRef('');
   const pendingTraceRef = useRef([]);
   const greetingSeenRef = useRef(false);
+  // True between "user hit send" and "turn produced something". Used
+  // to decide whether an empty finalization is a benign no-op (idle
+  // socket chatter) or a turn that silently died and must surface.
+  const turnActiveRef = useRef(false);
   const chatReady = thread?.ready ?? true;
 
   // On mount, pull paused thoughts from the consciousness store so the
@@ -228,10 +241,33 @@ export default function Chat() {
   useEffect(() => {
     const traceKey = (payload) => payload?.call_id || payload?.tool || payload?.name || `tool-${Date.now()}`;
 
+    const syncTrace = (next) => {
+      pendingTraceRef.current = next;
+      setLiveTools(next);
+    };
+
     const flushTrace = () => {
       const trace = pendingTraceRef.current;
-      pendingTraceRef.current = [];
+      syncTrace([]);
       return trace.length > 0 ? trace : undefined;
+    };
+
+    const pushNotice = (notice) => {
+      setThinking(false);
+      setToolChip(null);
+      streamBufferRef.current = '';
+      setStreamingText('');
+      turnActiveRef.current = false;
+      // Keep any tool trace collected so far attached to the notice:
+      // "which call was it on when it blew up" is the first question.
+      const tools = flushTrace();
+      setMessages((prev) => [...prev, {
+        id: newId(),
+        role: 'assistant',
+        type: 'notice',
+        notice,
+        tools,
+      }]);
     };
 
     const commit = (text, extras = {}) => {
@@ -240,9 +276,26 @@ export default function Chat() {
       const tools = flushTrace();
       const timeline = extras.timeline || null;
       // If there's literally nothing to render (no text, no reasoning,
-      // no tool trace, no timeline), drop the row — otherwise an empty
-      // assistant bubble appears after every cancelled stream.
-      if (!clean && !reasoning && (!tools || tools.length === 0) && !timeline) return;
+      // no tool trace, no timeline), don't emit an empty bubble. But if
+      // the user was waiting on a live turn, say so instead of leaving
+      // the log unchanged. Silent death was the #1 complaint.
+      if (!clean && !reasoning && (!tools || tools.length === 0) && !timeline) {
+        if (turnActiveRef.current) {
+          turnActiveRef.current = false;
+          setMessages((prev) => [...prev, {
+            id: newId(),
+            role: 'assistant',
+            type: 'notice',
+            notice: {
+              kind: 'stalled',
+              message: 'The brain closed the stream without sending any content.',
+              hint: 'Send the message again, or check the brain logs if this repeats.',
+            },
+          }]);
+        }
+        return;
+      }
+      turnActiveRef.current = false;
       const id = newId();
       streamReasoningRef.current = '';
       setStreamingReasoning('');
@@ -269,6 +322,7 @@ export default function Chat() {
         'stream_delta', 'text_response', 'chat_response',
         'tool_start', 'tool_call', 'skill_start', 'tool_end',
         'tool_result', 'reasoning', 'budget_exceeded', 'skill_proposal',
+        'refusal', 'error',
       ]);
       if (
         frameSession
@@ -337,7 +391,7 @@ export default function Chat() {
           || (p.arguments != null ? p.arguments : null)
           || (p.params != null ? p.params : null)
           || '';
-        pendingTraceRef.current = [
+        syncTrace([
           ...pendingTraceRef.current.filter((t) => t.key !== key),
           {
             key,
@@ -346,8 +400,11 @@ export default function Chat() {
             success: null,
             error: '',
             latency_ms: 0,
+            // Wall-clock start so the card can tick a live elapsed
+            // counter; the brain only sends latency on completion.
+            started_at: Date.now(),
           },
-        ];
+        ]);
         setToolChip(label);
       } else if (type === 'tool_result' || type === 'skill_result') {
         const p = msg.payload || {};
@@ -372,14 +429,24 @@ export default function Chat() {
             ...next[idx],
             success: result.success,
             error: result.error,
-            latency_ms: result.latency_ms,
+            // Fall back to measured wall-clock when the brain reports
+            // 0ms so a slow call never displays as instant.
+            latency_ms: result.latency_ms
+              || (next[idx].started_at ? Date.now() - next[idx].started_at : 0),
             result_preview: result.result_preview,
           };
         } else {
           next.push(result);
         }
-        pendingTraceRef.current = next;
-        setToolChip(null);
+        syncTrace(next);
+        // Only clear the "using X…" chip when nothing else is still in
+        // flight. Parallel calls used to blank the indicator as soon
+        // as the first one returned.
+        setToolChip((prev) => {
+          const stillRunning = next.find((t) => t.success == null);
+          if (stillRunning) return stillRunning.label;
+          return prev && next.some((t) => t.label === prev && t.success == null) ? prev : null;
+        });
       } else if (type === 'budget_exceeded') {
         // S6 closer — yellow inline banner. Keyed by call_site so
         // multiple budgets can be exceeded at once. Same banner now
@@ -410,6 +477,33 @@ export default function Chat() {
           const next = { ...prev };
           delete next[site];
           return next;
+        });
+      } else if (type === 'refusal') {
+        // Structured refusal (supervisor paused / policy gate / autonomy
+        // mode). Always rendered inline: a declined turn that shows
+        // nothing is indistinguishable from a hung one.
+        const p = msg.payload || msg || {};
+        pushNotice({
+          kind: 'refusal',
+          message: p.reason || 'The request was declined.',
+          hint: p.retry_hint || '',
+          code: p.source ? String(p.source) : '',
+        });
+      } else if (type === 'error') {
+        // Transport-level error frames also raise a global toast via
+        // wireSocketGlobalErrors; the inline row is the durable record
+        // that *this turn* failed. Skip idle-socket noise: only render
+        // when a turn is actually in flight or the frame is addressed
+        // to this session.
+        const p = msg.payload || msg || {};
+        if (!turnActiveRef.current && !frameSession) return;
+        pushNotice({
+          kind: 'error',
+          message: p.message || p.detail || p.reason || 'The brain reported an error.',
+          code: p.code ? String(p.code) : '',
+          hint: p.recoverable === false
+            ? 'This one is not retryable; check the brain logs.'
+            : 'You can send the message again.',
         });
       } else if (type === 'timeline') {
         // S1 closer (cut-list item #8): the brain emits a dedicated
@@ -512,13 +606,25 @@ export default function Chat() {
     return unsub;
   }, [socket, activeSessionId]);
 
+  // Streaming polish: only follow the tail when the user is already at
+  // (or near) the bottom. Pre-fix, scrolling up to re-read an earlier
+  // answer while a new one streamed yanked the view back down on every
+  // token, which is the single most obvious "cheap chat UI" tell.
+  const onLogScroll = useCallback(() => {
+    const el = logRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distance < 80;
+  }, []);
+
   useEffect(() => {
+    if (!stickToBottomRef.current) return;
     const el = bottomRef.current;
     if (!el || typeof el.scrollIntoView !== 'function') return;
-    // Instant scroll while streaming — smooth-scroll animation fights the
-    // incoming token cadence and looks janky. Smooth only when settled.
+    // Instant scroll while streaming: a smooth-scroll animation fights
+    // the incoming token cadence and looks janky. Smooth only when settled.
     el.scrollIntoView({ behavior: streamingText ? 'auto' : 'smooth' });
-  }, [messages, thinking, streamingText]);
+  }, [messages, thinking, streamingText, liveTools]);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -548,7 +654,9 @@ export default function Chat() {
     setSendError('');
     streamBufferRef.current = '';
     pendingTraceRef.current = [];
+    setLiveTools([]);
     setStreamingText('');
+    turnActiveRef.current = true;
     // PR 10: ship the AttachmentRef list verbatim. The brain
     // (api/server.py text_command handler) forwards `payload.attachments`
     // into the orchestrator context so the model can ground on them.
@@ -588,6 +696,7 @@ export default function Chat() {
       setPendingAttachments(previousAttachments);
       setMessages((prev) => prev.slice(0, -1));
       setThinking(false);
+      turnActiveRef.current = false;
       setSendError(
         reason === 'serialize_failed'
           ? "couldn't send — message too large, try again"
@@ -687,7 +796,9 @@ export default function Chat() {
     streamBufferRef.current = '';
     streamReasoningRef.current = '';
     pendingTraceRef.current = [];
+    setLiveTools([]);
     setToolChip(null);
+    turnActiveRef.current = false;
   }, []);
 
   const respondToPermission = useCallback((requestId, granted) => {
@@ -748,7 +859,7 @@ export default function Chat() {
             })}
           </div>
         )}
-        <div className="v2-chat-log">
+        <div className="v2-chat-log" ref={logRef} onScroll={onLogScroll}>
           {messages.map((m) => (
             <div key={m.id} className={`v2-chat-row v2-chat-row--${m.role}`}>
               <div className="v2-chat-role" aria-hidden="true">
@@ -779,21 +890,45 @@ export default function Chat() {
                   </div>
                 ) : m.type === 'timeline' ? (
                   <TimelineCard timeline={m.timeline} />
+                ) : m.type === 'notice' ? (
+                  <>
+                    {m.tools?.length > 0 && <ToolCallList traces={m.tools} />}
+                    <ChatNotice {...(m.notice || {})} />
+                  </>
                 ) : (
                   <>
-                    {m.role === 'assistant' ? (
-                      <MarkdownMessage text={m.text} />
-                    ) : (
-                      m.text
-                    )}
+                    {/* Chronological order: the model reasons, then calls
+                        tools, then answers. Reasoning and tool cards are
+                        visually subordinate so the answer still reads as
+                        the primary content. */}
                     {m.reasoning && (
                       <ReasoningSection text={m.reasoning} defaultOpen={false} />
+                    )}
+                    {m.tools?.length > 0 && (
+                      <ToolCallList traces={m.tools} />
                     )}
                     {m.timeline && (
                       <TimelineCard timeline={m.timeline} />
                     )}
-                    {m.tools?.length > 0 && (
-                      <ToolCallList traces={m.tools} />
+                    {m.role === 'assistant' ? (
+                      <MarkdownMessage text={m.text} />
+                    ) : (
+                      m.text && <div className="v2-chat-bubble">{m.text}</div>
+                    )}
+                    {m.attachments?.length > 0 && (
+                      <div className="v2-chat-msg-attachments">
+                        {m.attachments.map((att) => (
+                          <span key={att.upload_id} className="v2-chat-attachment-chip">
+                            <FileText size={12} aria-hidden="true" />
+                            <span className="v2-chat-attachment-chip__name">{att.filename}</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {m.role === 'assistant' && m.text && (
+                      <div className="v2-chat-actions">
+                        <CopyButton value={m.text} label="Copy message" />
+                      </div>
                     )}
                   </>
                 )}
@@ -815,31 +950,50 @@ export default function Chat() {
               })}
             />
           ))}
-          {(streamingText || streamingReasoning) && (
+          {(streamingText || streamingReasoning || (liveTools.length > 0 && !thinking)) && (
             <div className="v2-chat-row v2-chat-row--assistant">
               <div className="v2-chat-role" aria-hidden="true"><Orb size={22} mode="speaking" /></div>
               <div className="v2-chat-body">
-                {/* While streaming, render lightweight plain text — the full
+                {streamingReasoning && (
+                  <ReasoningSection
+                    text={streamingReasoning}
+                    defaultOpen={!streamingText}
+                    streaming
+                  />
+                )}
+                {liveTools.length > 0 && <ToolCallList traces={liveTools} />}
+                {/* While streaming, render lightweight plain text: the full
                     markdown pipeline (GFM + highlight + KaTeX) is too heavy
                     to re-parse on every frame. The committed message row
-                    re-renders once as MarkdownMessage on is_final. */}
+                    re-renders once as MarkdownMessage on is_final.
+                    `min-height` on the wrapper keeps the first token from
+                    shifting the whole log by a line. */}
                 {streamingText && (
-                  <div className="v2-md v2-stream-plain" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  <div className="v2-md v2-stream-plain">
                     {streamingText}
+                    <span className="v2-chat-cursor" aria-hidden="true" />
                   </div>
                 )}
-                {streamingReasoning && !streamingText && (
-                  <ReasoningSection text={streamingReasoning} defaultOpen />
-                )}
-                <span className="v2-chat-cursor" aria-hidden="true" />
+                {!streamingText && <span className="v2-chat-cursor" aria-hidden="true" />}
               </div>
             </div>
           )}
           {thinking && !streamingText && (
             <div className="v2-chat-row v2-chat-row--assistant">
               <div className="v2-chat-role" aria-hidden="true"><Orb size={22} mode="thinking" /></div>
-              <div className="v2-chat-body v2-chat-body--thinking">
-                {toolChip ? `using ${toolChip}…` : 'thinking…'}
+              <div className="v2-chat-body">
+                <div
+                  className="v2-chat-working"
+                  role="status"
+                  aria-live="polite"
+                  data-testid="chat-working"
+                >
+                  <span className="v2-chat-working__dots" aria-hidden="true"><i /><i /><i /></span>
+                  <span className="v2-chat-working__label">
+                    {toolChip ? `using ${toolChip}…` : 'thinking…'}
+                  </span>
+                </div>
+                {liveTools.length > 0 && <ToolCallList traces={liveTools} />}
               </div>
             </div>
           )}

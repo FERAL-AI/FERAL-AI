@@ -101,7 +101,10 @@ describe('Chat — A1 rendering fixes', () => {
       .map((n) => n.textContent).join(' | ');
     expect(expanded).toContain('Search web');
     expect(expanded).toContain('17ms');
-    expect(expanded).toContain('"q":"hi"');
+    // Args are pretty-printed in the details pane (a JSON-shaped
+    // `args_preview` string is re-indented rather than shown as one
+    // long line), so assert on the indented form.
+    expect(expanded).toContain('"q": "hi"');
     expect(expanded).not.toContain('web_search__run');
   });
 });
