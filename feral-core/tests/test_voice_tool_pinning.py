@@ -103,7 +103,17 @@ async def test_realtime_configure_pins_routines_before_truncation():
 
 @pytest.mark.asyncio
 async def test_realtime_force_tool_for_turn_updates_tool_choice():
-    rs = RealtimeSession(session_id="s", node_id="n", api_key="sk")
+    # The forced name must be IN the session's tool list — forcing now
+    # runs through ``resolve_forced_tool_choice`` like the configure
+    # path does. Pre-fix this test passed with an empty tool list,
+    # which is exactly the payload OpenAI rejects with an `error`
+    # event (see test_realtime_force_tool_absent_degrades_to_auto).
+    rs = RealtimeSession(
+        session_id="s",
+        node_id="n",
+        api_key="sk",
+        tools=[_tool("feral_routines__create")],
+    )
     rs._ws = AsyncMock()
     rs._connected = True
     sent: list[dict] = []

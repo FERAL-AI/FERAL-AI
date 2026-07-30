@@ -85,6 +85,23 @@ class FakeLLMHandle:
         )
 
 
+@pytest.fixture(autouse=True)
+async def _reap_pipeline_tasks():
+    """Cancel per-session tasks tests leave behind by not closing.
+
+    ``open_session`` now owns a long-lived STT consumer task (plus a
+    silence timer while audio is arriving). Tests that skip
+    ``close_session`` would otherwise leave them pending at loop
+    teardown, which asyncio reports as "Task was destroyed but it is
+    pending" noise on every run.
+    """
+    yield
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+
+
 # ── Tests ────────────────────────────────────────────────────────────
 
 class TestChainedPipelineInit:

@@ -1705,6 +1705,24 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
             remaining_attachments = state.detach_session(session_id)
         except Exception:
             remaining_attachments = 0
+        # Voice teardown BEFORE the session de-registration below.
+        # Pre-fix no disconnect handler touched the voice router at
+        # all: a tab close / network blip / backgrounded app left the
+        # OpenAI Realtime WebSocket open and billing, and left a stale
+        # `_node_to_session` entry so the NEXT voice_session_start
+        # handed the user a dead handle.
+        #
+        # Identity-checked on purpose: when the same session_id has
+        # already reconnected on a NEW socket, `state.sessions` points
+        # at that newer ws and the voice session belongs to it. Tearing
+        # down here would kill the live call the reconnect just
+        # established. Only the socket still registered for this
+        # session may stop its voice.
+        if state.voice_router and state.sessions.get(session_id) is ws:
+            try:
+                await state.voice_router.stop_session_voice(session_id)
+            except Exception as voice_exc:
+                logger.warning(f"Voice teardown on disconnect failed: {voice_exc}")
         should_clear = state.should_clear_on_disconnect(session_id)
         if remaining_attachments == 0 and should_clear:
             if state.orchestrator:
@@ -2529,6 +2547,15 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     )
                     continue
 
+                # A barge-in cancels the ASSISTANT'S CURRENT RESPONSE.
+                # It must never be able to end the session: pre-fix,
+                # when `get_session` missed (which a zombie session
+                # guarantees), this fell through to `stop_session` on
+                # the realtime AND gemini proxies — so speaking over
+                # the assistant killed the call, and with no
+                # `voice_status` emitted the client kept rendering
+                # "listening" at a socket that no longer existed.
+                # Cancel-only now; a miss is reported as a no-op.
                 cancelled = False
                 try:
                     realtime = getattr(state.voice_router, "_realtime", None)
@@ -2539,15 +2566,16 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                             cancelled = True
                     gemini = getattr(state.voice_router, "_gemini", None)
                     if gemini and not cancelled:
-                        sid = getattr(gemini, "_node_to_session", {}).get(node_id)
-                        if sid:
-                            await gemini.stop_session(sid)
+                        gs = gemini.get_session(node_id)
+                        if gs and hasattr(gs, "cancel_response"):
+                            await gs.cancel_response()
                             cancelled = True
-                    if not cancelled and realtime:
-                        sid = getattr(realtime, "_node_to_session", {}).get(node_id)
-                        if sid:
-                            await realtime.stop_session(sid)
-                            cancelled = True
+                    if not cancelled:
+                        logger.info(
+                            "voice_interrupt for node=%s found no live session "
+                            "to cancel — ignoring (barge-in never tears a "
+                            "session down)", node_id,
+                        )
                 except Exception as exc:
                     _record_phone_envelope(
                         "error",
@@ -3018,6 +3046,22 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
         if node_id:
             logger.info(f"Daemon disconnected: {node_id}")
             state.daemons.pop(node_id, None)
+            # Same leak as the web handler: audio/perception/mesh state
+            # was cleared here but the voice router never was, so a
+            # phone that dropped LTE or went to background kept a live
+            # (billing) OpenAI Realtime socket and a stale
+            # node->session entry that poisoned its next
+            # voice_session_start. `stop_node_voice` is the
+            # node-shaped teardown — `stop_session_voice` only ever
+            # finds web sessions, whose node id is the synthetic
+            # `webclient_<sid>`.
+            if state.voice_router:
+                try:
+                    await state.voice_router.stop_node_voice(node_id)
+                except Exception as voice_exc:
+                    logger.warning(
+                        f"Voice teardown for node {node_id} failed: {voice_exc}"
+                    )
             if state.skill_executor:
                 state.skill_executor.unregister_daemon(node_id)
             if state.hardware_mesh:
