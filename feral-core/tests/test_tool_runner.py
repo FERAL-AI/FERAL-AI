@@ -302,7 +302,7 @@ class TestAntiLoop:
 
     def test_anti_loop_guidance_shell_includes_hint(self):
         msg = ToolRunner.anti_loop_guidance("desktop_control__shell_command", 4)
-        assert "computer_use__write_file" in msg
+        assert "coding_tools__write_file" in msg
 
     def test_tool_signature_deterministic(self):
         sig1 = ToolRunner.tool_signature("t", {"b": 2, "a": 1})

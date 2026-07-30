@@ -35,11 +35,6 @@ except ImportError:
     pass
 
 try:
-    import skills.impl.computer_use
-except ImportError:
-    pass
-
-try:
     import skills.impl.image_gen
 except ImportError:
     pass
@@ -145,7 +140,7 @@ except ImportError:
     pass
 
 try:
-    import skills.impl.cutebot_skill
+    import skills.impl.cutebot_skill  # noqa: F401 (imported for @register_skill side effect)
 except ImportError:
     pass
 

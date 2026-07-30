@@ -4,7 +4,7 @@ The VLM-driven autonomous loop emits ``shell`` actions to launch apps
 (``open -a ...``) and run AppleScript. Free-form shell from the VLM
 loop bypasses the canonical sandbox boundary, so non-allowlisted
 commands must be refused at the impl boundary — even before they
-reach ``computer_use__bash``'s own gating.
+reach ``coding_tools__bash``'s own gating.
 """
 
 from __future__ import annotations
@@ -48,4 +48,4 @@ async def test_do_shell_returns_blocked_message_for_unsafe_command() -> None:
     skill = AgenticComputerUseSkill()
     out = await skill._do_shell("rm -rf /tmp/feral-test")
     assert out.startswith("blocked:")
-    assert "computer_use__bash" in out
+    assert "coding_tools__bash" in out

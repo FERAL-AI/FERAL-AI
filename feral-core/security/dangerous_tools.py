@@ -64,10 +64,10 @@ TOOL_DANGER_MAP: dict[str, DangerLevel] = {
     "desktop_control__shell": DangerLevel.CRITICAL,
     "computer_use__bash": DangerLevel.CRITICAL,
     "code_interpreter__execute": DangerLevel.CRITICAL,
-    # `coding_tools` is the renamed-but-still-registered duplicate of
-    # `computer_use`; it exposes the same shell + write surface and must
-    # carry the same danger classification so http_api callers don't
-    # bypass the deny list by selecting the alias.
+    # `coding_tools` is the canonical shell + filesystem surface; the
+    # duplicate `computer_use` manifest and impl were removed. The
+    # `computer_use__*` ids above stay listed so a third-party manifest that
+    # still uses the old skill id cannot pick up a weaker classification.
     "coding_tools__bash": DangerLevel.CRITICAL,
     "coding_tools__write_file": DangerLevel.WARN,
     "coding_tools__edit_file": DangerLevel.WARN,
@@ -197,6 +197,7 @@ SURFACE_DENY_LISTS: dict[str, set[str]] = {
         "coding_tools__bash",
         "coding_tools__write_file",
         "coding_tools__edit_file",
+        "coding_tools__read_file",
         "agentic_computer_use__execute_task",
         "gui_computer_use__screenshot",
         "gui_computer_use__mouse_click",

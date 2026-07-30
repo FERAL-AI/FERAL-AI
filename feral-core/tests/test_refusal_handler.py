@@ -99,7 +99,7 @@ def test_build_action_intent_desktop_note():
         "create a desktop note with content: meeting notes",
     )
     assert tc is not None
-    assert tc["name"] == "computer_use__bash"
+    assert tc["name"] == "coding_tools__bash"
     assert "feral_note.txt" in tc["args"]["command"]
 
 
@@ -264,7 +264,7 @@ def test_build_action_intent_desktop_note_uses_default_content_when_no_clause():
     h = RefusalHandler(MagicMock())
     tc = h.build_action_intent_tool_call("make a desktop note file please")
     assert tc is not None
-    assert tc["name"] == "computer_use__bash"
+    assert tc["name"] == "coding_tools__bash"
     assert "hello world" in tc["args"]["command"]
 
 

@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Software-engineering surface: repository-scoped file edits (read/write/edit with anchor-based replacements), codebase search (grep/glob), git, package managers, test/build runners, and HTTP fetch for docs/APIs. Use this when the user is writing code, navigating a repository, running tests, or resolving a programming task. For open-ended shell, system administration, or ad-hoc one-liners that are NOT inside a source-code workflow, use `computer_use` instead.",
+    "description": "Software-engineering and general local-computer surface: repository-scoped file edits (read/write/edit with anchor-based replacements), codebase search (grep/glob), shell commands (git, package managers, test/build runners, ad-hoc one-liners), and HTTP fetch for docs/APIs. Shell commands run on the host inside a folder the operator granted; outside every grant they are refused and the operator is asked for access. This is FERAL's single canonical shell + filesystem toolset.",
     "trigger_phrases": [
         "run", "execute", "bash", "shell", "command",
         "read file", "show file", "cat",
@@ -28,14 +28,15 @@
             "id": "bash",
             "method": "PYTHON",
             "url": "",
-            "description": "Execute a shell command and return stdout/stderr. Use for running programs, git, npm, pip, etc.",
+            "description": "Execute a shell command and return stdout/stderr. Use for running programs, git, npm, pip, pytest, etc. Runs on the host in `cwd`, which must resolve inside a folder the operator granted; a command whose cwd or path arguments fall outside every grant is refused with `permission_needed` so the operator can grant access.",
             "params": [
                 {"name": "command", "type": "string", "required": true, "description": "The shell command to execute"},
+                {"name": "cwd", "type": "string", "required": false, "description": "Working directory to run in. Defaults to FERAL_CWD, then FERAL_WORKSPACE, then the brain's own directory. Must resolve inside a granted folder."},
                 {"name": "timeout", "type": "integer", "required": false, "description": "Timeout in seconds (default 30)"}
             ],
-            "returns_description": "stdout, stderr, and exit code",
+            "returns_description": "stdout, stderr, exit code, and the execution mode used (host_workspace or docker)",
             "ui_hint": "detail_card",
-            "requires_sandbox": true
+            "safety_tier": "confirm"
         },
         {
             "id": "read_file",
@@ -48,7 +49,9 @@
                 {"name": "limit", "type": "integer", "required": false, "description": "Maximum number of lines to read"}
             ],
             "returns_description": "File contents with line numbers",
-            "ui_hint": "detail_card"
+            "ui_hint": "detail_card",
+            "safety_tier": "safe",
+            "read_only_hint": true
         },
         {
             "id": "write_file",
@@ -60,7 +63,8 @@
                 {"name": "content", "type": "string", "required": true, "description": "The content to write"}
             ],
             "returns_description": "Confirmation of file creation with byte count",
-            "ui_hint": "detail_card"
+            "ui_hint": "detail_card",
+            "safety_tier": "confirm"
         },
         {
             "id": "edit_file",
@@ -73,7 +77,8 @@
                 {"name": "new_text", "type": "string", "required": true, "description": "Replacement text"}
             ],
             "returns_description": "Confirmation with diff preview",
-            "ui_hint": "detail_card"
+            "ui_hint": "detail_card",
+            "safety_tier": "confirm"
         },
         {
             "id": "grep_search",
@@ -89,7 +94,9 @@
                 {"name": "offset", "type": "integer", "required": false, "description": "Skip first N results before head_limit (paging large result sets)."}
             ],
             "returns_description": "files_with_matches: {mode, files[], total_files}; content: {mode, matches[{file,line,text}], total}; count: {mode, counts[]}. Truncated results include {truncated, pagination}.",
-            "ui_hint": "list"
+            "ui_hint": "list",
+            "safety_tier": "safe",
+            "read_only_hint": true
         },
         {
             "id": "glob_search",
@@ -102,7 +109,9 @@
                 {"name": "head_limit", "type": "integer", "required": false, "description": "Max files to return (default 100; 0 = unlimited). Truncated responses set {truncated: true}."}
             ],
             "returns_description": "{files[], total, truncated?} — files relative to workspace root, newest first",
-            "ui_hint": "list"
+            "ui_hint": "list",
+            "safety_tier": "safe",
+            "read_only_hint": true
         },
         {
             "id": "web_fetch",
@@ -114,7 +123,9 @@
                 {"name": "max_length", "type": "integer", "required": false, "description": "Max characters to return (default 10000)"}
             ],
             "returns_description": "Page content as plain text",
-            "ui_hint": "detail_card"
+            "ui_hint": "detail_card",
+            "safety_tier": "safe",
+            "read_only_hint": true
         }
     ],
     "flows": [],

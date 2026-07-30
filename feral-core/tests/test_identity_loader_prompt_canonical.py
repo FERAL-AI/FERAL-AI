@@ -15,7 +15,7 @@ def _loader() -> IdentityLoader:
     return loader
 
 
-async def test_system_prompt_uses_canonical_computer_use_file_path() -> None:
+async def test_system_prompt_uses_canonical_coding_tools_file_path() -> None:
     prompt = await _loader().build_system_prompt(
         _Frame(),
         [],
@@ -24,8 +24,8 @@ async def test_system_prompt_uses_canonical_computer_use_file_path() -> None:
         full_catalog=[],
     )
 
-    assert "computer_use__write_file" in prompt
-    assert "computer_use__bash" in prompt
+    assert "coding_tools__write_file" in prompt
+    assert "coding_tools__bash" in prompt
     assert "permission_needed" in prompt
     assert "desktop_control__shell_command" not in prompt
     assert "python3 -c" not in prompt

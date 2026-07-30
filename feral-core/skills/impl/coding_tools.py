@@ -12,10 +12,17 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import subprocess
 from pathlib import Path
 from typing import Any, Dict
 
+from security.exec_mode import (
+    MODE_DOCKER,
+    MODE_HOST_WORKSPACE,
+    MODE_REFUSED,
+    NEEDS_DOCKER,
+    NEEDS_WORKSPACE_GRANT,
+    resolve_execution_mode,
+)
 from security.fetch_guard import html_to_markdown, safe_fetch
 from security.sandbox_policy import SandboxPolicy
 from skills.base import BaseSkill
@@ -166,6 +173,15 @@ class CodingToolsSkill(BaseSkill):
     # ── bash ──────────────────────────────────────────────────────
 
     async def _bash(self, args: dict) -> dict:
+        """Run a shell command in whichever execution mode is authorised.
+
+        The pre-fix version had two outcomes: Docker, or a 503. Since the
+        manifest declared ``requires_sandbox: true`` and Docker is absent on
+        a default macOS install, the advertised developer shell never ran.
+        The mode is now decided by ``security.exec_mode.resolve_execution_mode``
+        from (command, resolved cwd, autonomy mode, grant state); see that
+        module for the full table.
+        """
         command = args.get("command", "")
         if not command:
             return {"success": False, "status_code": 400, "data": None, "error": "No command provided"}
@@ -183,11 +199,23 @@ class CodingToolsSkill(BaseSkill):
         timeout = min(int(args.get("timeout", BASH_TIMEOUT)), 120)
 
         sandbox_required = bool(args.get("_feral_require_sandbox"))
+        # Probe Docker only when a mode that needs it is in play, so the
+        # common host-workspace path does not pay for a `docker info` call.
         docker_sandbox = self._resolve_docker_sandbox() if (
             sandbox_required or self._sandbox_bash_enabled
         ) else None
 
-        if docker_sandbox is not None:
+        decision = resolve_execution_mode(
+            command,
+            policy=self._get_policy(),
+            cwd=args.get("cwd"),
+            skill_id=self.skill_id,
+            requires_sandbox=sandbox_required,
+            prefer_sandbox=self._sandbox_bash_enabled,
+            docker_available=docker_sandbox is not None,
+        )
+
+        if decision.mode == MODE_DOCKER:
             original_timeout = getattr(docker_sandbox, "_timeout", BASH_TIMEOUT)
             try:
                 docker_sandbox._timeout = timeout
@@ -205,6 +233,7 @@ class CodingToolsSkill(BaseSkill):
                 "exit_code": exit_code,
                 "execution_time_ms": result.get("execution_time_ms"),
                 "sandbox": "docker",
+                "execution_mode": MODE_DOCKER,
             }
             return {
                 "success": success,
@@ -213,26 +242,8 @@ class CodingToolsSkill(BaseSkill):
                 "error": stderr if not success else None,
             }
 
-        if sandbox_required:
-            return {
-                "success": False,
-                "status_code": 503,
-                "data": {
-                    "sandbox": "unavailable",
-                    "permission_needed": False,
-                    "setup_step": (
-                        "Start Docker Desktop (or set up an alternative "
-                        "sandbox) so coding_tools__bash can run safely. "
-                        "FERAL refuses to run shell commands on the host "
-                        "when the manifest declares requires_sandbox=true."
-                    ),
-                },
-                "error": (
-                    "coding_tools__bash requires the Docker sandbox but it "
-                    "is not available. Refusing to fall back to host "
-                    "execution."
-                ),
-            }
+        if decision.mode == MODE_REFUSED:
+            return self._refuse_bash(decision)
 
         sandbox_note = None
         if self._sandbox_bash_enabled and docker_sandbox is None:
@@ -242,7 +253,7 @@ class CodingToolsSkill(BaseSkill):
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=os.environ.get("FERAL_CWD", None),
+            cwd=decision.cwd,
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -261,9 +272,49 @@ class CodingToolsSkill(BaseSkill):
                 "stderr": stderr,
                 "exit_code": proc.returncode,
                 "sandbox": "host",
+                "execution_mode": MODE_HOST_WORKSPACE,
+                "cwd": decision.cwd,
+                "workspace": decision.workspace,
+                "workspace_source": decision.workspace_source,
                 "note": sandbox_note,
             },
             "error": stderr if proc.returncode != 0 else None,
+        }
+
+    @staticmethod
+    def _refuse_bash(decision) -> dict:
+        """Turn a refusal into something the operator can act on.
+
+        A missing grant reuses the ``permission_needed`` contract the file
+        tools already speak, so ``ToolRunner`` raises the same Allow/Deny
+        folder card it raises for ``write_file``. A missing sandbox keeps
+        the Docker setup step. Either way the response names the mode that
+        was required instead of a bare 503.
+        """
+        data = {
+            "execution_mode": MODE_REFUSED,
+            "needs": decision.needs,
+            "permission_needed": decision.needs == NEEDS_WORKSPACE_GRANT,
+        }
+        if decision.needs == NEEDS_WORKSPACE_GRANT:
+            data["path"] = decision.denied_path or decision.cwd
+            data["operation"] = "read"
+            status = 403
+        elif decision.needs == NEEDS_DOCKER:
+            data["sandbox"] = "unavailable"
+            data["setup_step"] = (
+                "Start Docker Desktop (or set up an alternative sandbox) so "
+                "generated code can run isolated. FERAL refuses to run "
+                "generated code on the host even inside a granted workspace."
+            )
+            status = 503
+        else:
+            status = 403
+        return {
+            "success": False,
+            "status_code": status,
+            "data": data,
+            "error": decision.reason,
         }
 
     # ── read_file ─────────────────────────────────────────────────

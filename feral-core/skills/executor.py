@@ -9,7 +9,6 @@ The LLM NEVER sees API keys or OAuth tokens.
 from __future__ import annotations
 import asyncio
 import os
-import json
 import logging
 import uuid
 from typing import Optional
@@ -18,6 +17,7 @@ import httpx
 
 from config.loader import feral_home
 from models.skill_manifest import SkillManifest, SkillEndpoint
+from security.exec_mode import MODE_DOCKER, MODE_REFUSED, NEEDS_DOCKER
 from skills.sandbox_ports import SandboxPort, default_sandbox_port
 
 logger = logging.getLogger("feral.executor")
@@ -174,15 +174,25 @@ class SkillExecutor:
         if sandbox_required:
             sandbox_ok, sandbox_reason = self._sandbox_requirement_status(skill, endpoint)
             if not sandbox_ok:
+                # Name the execution mode that was required. A bare "sandbox
+                # unavailable" 503 left the operator with nothing to act on;
+                # ``needs`` distinguishes "start Docker" from "grant a folder"
+                # (the workspace-scoped host mode in security/exec_mode.py).
                 msg = (
                     f"Sandbox required for '{skill.skill_id}__{endpoint.id}' "
-                    f"but unavailable: {sandbox_reason}"
+                    f"but unavailable: {sandbox_reason}. This endpoint runs "
+                    f"generated code, so the '{MODE_DOCKER}' execution mode is "
+                    f"mandatory (a workspace grant does not substitute)."
                 )
                 logger.warning(msg)
                 return {
                     "success": False,
                     "status_code": 503,
-                    "data": None,
+                    "data": {
+                        "execution_mode": MODE_REFUSED,
+                        "needs": NEEDS_DOCKER,
+                        "required_mode": MODE_DOCKER,
+                    },
                     "error": msg,
                 }
 
@@ -310,14 +320,27 @@ class SkillExecutor:
         are rejected outright, and ``execution.allow_shell_commands`` must
         be enabled. We always exec with ``shell=False`` on the parsed argv
         list — no free-form string ever reaches an interpreter.
+
+        AppleScript execution is gated by
+        ``SandboxPolicy.validate_applescript``. Before that landed, this
+        branch ran ``osascript -e <command>`` with no validation at all
+        while its sibling ``shell`` branch below was fully validated, and
+        since AppleScript can invoke a shell (``do shell script``),
+        the unvalidated path defeated the validated one.
         """
         import subprocess
         import shlex
+
+        from security.sandbox_policy import SandboxPolicy
 
         if not command:
             return {"success": False, "status_code": 400, "data": None, "error": "No command or script provided"}
 
         if path == "applescript":
+            policy = SandboxPolicy.load_default()
+            ok, reason = policy.validate_applescript(command)
+            if not ok:
+                return {"success": False, "status_code": 403, "data": None, "error": reason}
             try:
                 proc = await asyncio.to_thread(
                     subprocess.run,
@@ -335,7 +358,6 @@ class SkillExecutor:
             # policy validator. The validator enforces argv[0] allowlist and
             # rejects shell metacharacters; we then exec the parsed argv with
             # ``shell=False`` so no interpreter can re-expand the string.
-            from security.sandbox_policy import SandboxPolicy
             policy = SandboxPolicy.load_default()
             ok, reason = policy.validate_shell_command(command)
             if not ok:
