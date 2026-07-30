@@ -99,9 +99,15 @@ class Orchestrator:
 
     # Class-level constants kept on Orchestrator for backward compat
     ALWAYS_INCLUDE_SKILLS = {
-        # Core OS / desktop surface
+        # Core OS / desktop surface.
+        # ``coding_tools`` replaced ``computer_use`` here: the two skills
+        # exposed identical endpoints with identical trigger phrases, so the
+        # model saw two indistinguishable ``bash`` tools and picked
+        # arbitrarily. ``coding_tools`` is the better implementation
+        # (paginated grep/glob, workspace-relative output) and is now the
+        # single canonical shell + filesystem surface.
         "desktop_control",
-        "computer_use",
+        "coding_tools",
         "browser",
         "desktop_automation",
         "screen_capture",

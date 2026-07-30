@@ -16,7 +16,6 @@ from typing import Optional, TYPE_CHECKING
 from uuid import uuid4
 
 from security.exec_approvals import ApprovalManager
-from security.dangerous_tools import is_tool_allowed
 from security.safety_resolver import (
     LEVEL_AUTO,
     LEVEL_CONFIRM,
@@ -40,6 +39,11 @@ logger = logging.getLogger("feral.orchestrator.tool_runner")
 
 VALID_AUTONOMY_MODES = ("strict", "hybrid", "loose")
 READ_ONLY_PATTERNS = ("search", "get", "list", "query", "read", "current", "status", "forecast")
+# Tools whose `permission_needed` response is turned into an Allow/Deny
+# folder card for the operator. `computer_use` was folded into
+# `coding_tools` (identical endpoints, identical trigger phrases), but the
+# legacy ids stay listed so a third-party manifest that still uses the old
+# skill id gets the same grant flow rather than a dead error.
 _COMPUTER_USE_PERMISSION_TOOLS = {
     "computer_use__read_file",
     "computer_use__write_file",
@@ -47,17 +51,17 @@ _COMPUTER_USE_PERMISSION_TOOLS = {
     "computer_use__grep_search",
     "computer_use__glob_search",
     "computer_use__index_folder",
-    # `coding_tools` exposes the same filesystem surface as `computer_use`
-    # (PR2 made the manifests mirror each other). The permission card flow
-    # must mirror too so a `coding_tools__write_file` denial behaves
-    # identically to the `computer_use__write_file` one — same Allow/Deny
-    # surface, same workspace_grants path.
     "coding_tools__read_file",
     "coding_tools__write_file",
     "coding_tools__edit_file",
     "coding_tools__grep_search",
     "coding_tools__glob_search",
     "coding_tools__index_folder",
+    # `bash` joins the list because a shell whose cwd resolves outside every
+    # grant now refuses with the same `permission_needed` contract the file
+    # tools use. Without this entry the operator would see the refusal text
+    # but never get the card that fixes it.
+    "coding_tools__bash",
 }
 
 
@@ -415,13 +419,14 @@ class ToolRunner:
     def anti_loop_guidance(tool_name: str, streak: int) -> str:
         alt_hint = ""
         shell_tools = (
-            "desktop_control__shell_command", "computer_use__bash",
+            "desktop_control__shell_command", "coding_tools__bash",
+            "computer_use__bash",
             "desktop_control__shell", "shell_command",
         )
         if tool_name in shell_tools:
             alt_hint = (
-                " IMPORTANT: For creating or writing files, use computer_use__write_file instead "
-                "of shell echo/printf. For running programs, check if computer_use__bash or "
+                " IMPORTANT: For creating or writing files, use coding_tools__write_file instead "
+                "of shell echo/printf. For running programs, check if coding_tools__bash or "
                 "code_interpreter__execute can handle it directly."
             )
         return (

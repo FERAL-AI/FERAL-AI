@@ -269,6 +269,42 @@ that show a malicious operator-installed plugin doing privileged things
 are out of scope. Reports that show an *unauthenticated* path that lets
 a remote party install or invoke a plugin **are** in scope.
 
+## Shell execution modes
+
+A shell request resolves to exactly one of three modes, decided by
+`feral-core/security/exec_mode.resolve_execution_mode` from the command,
+the resolved working directory, the operator's autonomy mode, and the
+grant state in `~/.feral/workspace_grants.json`:
+
+- **`docker`**: mandatory for anything that runs generated code, namely
+ `code_interpreter`, `workspace_scripts`, tool-genesis output, and any
+ endpoint declaring `requires_sandbox: true`. A workspace grant does
+ **not** substitute. If Docker is unavailable the request is refused and
+ names `docker` as the mode it needed.
+- **`host_workspace`**: the operator's own developer shell
+ (`coding_tools__bash`), run on the host with its cwd inside a folder
+ the operator granted. Under `FERAL_AUTONOMY=strict` the cwd must be
+ covered by an explicit grant; under `hybrid` / `loose` a path the
+ filesystem policy already declares readable also qualifies. Path
+ arguments named on the command line are checked against the same
+ `SandboxPolicy` the file tools use, so a path denied to
+ `coding_tools__read_file` is not reachable via `cat`.
+- **`refused`**: everything else, including any cwd outside every
+ grant, any `blocked_paths` hit, and `execution.allow_shell_commands=false`.
+
+Executing on the host inside an explicitly granted folder is **in the
+threat model as designed**, not a bypass: per "What FERAL is" above, the
+boundaries protect the single trusted operator from prompt injection and
+untrusted skill code, not from their own machine. A report showing the
+brain running a shell *outside* every grant, or running generated code on
+the host in any mode, **is** in scope.
+
+`daemon://local/shell` remains separately gated by
+`SandboxPolicy.validate_shell_command` (argv[0] allowlist plus
+metacharacter reject), and `daemon://local/applescript` by
+`SandboxPolicy.validate_applescript`, which also validates the `-e`
+payloads of any `osascript` invocation reaching the shell allowlist.
+
 ## Sandbox image hygiene
 
 The two shipped sandbox images (built from `Dockerfile.sandbox` and

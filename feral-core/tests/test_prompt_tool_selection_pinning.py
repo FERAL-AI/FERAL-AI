@@ -181,16 +181,16 @@ async def test_master_prompt_local_first_honesty_anchor() -> None:
     )
 
 
-async def test_master_prompt_keeps_canonical_computer_use_paths() -> None:
+async def test_master_prompt_keeps_canonical_coding_tools_paths() -> None:
     """Regression guard for `test_identity_loader_prompt_canonical.py`.
 
     The deepening pass restructured the static header. The canonical
-    file-write directive must still resolve to computer_use__write_file
-    and computer_use__bash, NOT to shell `echo` / `python3 -c` recipes.
+    file-write directive must still resolve to coding_tools__write_file
+    and coding_tools__bash, NOT to shell `echo` / `python3 -c` recipes.
     """
     prompt = await _build_master_prompt()
-    assert "computer_use__write_file" in prompt
-    assert "computer_use__bash" in prompt
+    assert "coding_tools__write_file" in prompt
+    assert "coding_tools__bash" in prompt
     assert "permission_needed" in prompt
     assert "desktop_control__shell_command" not in prompt
     # The deepening pass spells out python3 -c as a forbidden pattern,

@@ -191,12 +191,12 @@ class TestProviderPickerGate:
         assert offered < catalogued
 
     def test_every_offered_provider_is_runtime_supported(self):
-        from agents.llm_provider import is_supported_runtime_provider
+        from agents.llm_provider import is_supported_catalog_provider
         from providers.catalog import get_shared_catalog
         from cli.setup.steps.llm import _selectable_providers
 
         for desc in _selectable_providers(get_shared_catalog()):
-            assert is_supported_runtime_provider(desc.provider_id), desc.provider_id
+            assert is_supported_catalog_provider(desc.provider_id), desc.provider_id
 
     def test_hidden_ids_are_disclosed(self):
         from providers.catalog import get_shared_catalog

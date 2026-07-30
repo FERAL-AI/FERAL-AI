@@ -8,7 +8,6 @@ every LLM conversation.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from collections import deque
@@ -313,8 +312,8 @@ class IdentityLoader:
             "  exists for it. Never say 'I can't' or 'I'm unable to' when a tool exists.\n"
             "- DON'T fake readiness. If a required setup step is missing, state the\n"
             "  exact blocker and the setup step needed — don't pretend the action ran.\n"
-            "- Local files → use `computer_use__write_file`, `computer_use__read_file`,\n"
-            "  `computer_use__edit_file`. Don't write files via shell `echo`, heredocs,\n"
+            "- Local files → use `coding_tools__write_file`, `coding_tools__read_file`,\n"
+            "  `coding_tools__edit_file`. Don't write files via shell `echo`, heredocs,\n"
             "  or python one-liners when the file tool can do it directly.\n"
             "- After a destructive or substantive action, verify with a follow-up tool\n"
             "  call (read the file back, list devices, etc.) when verification is cheap.\n"
@@ -363,10 +362,11 @@ class IdentityLoader:
             "  markup, no five-paragraph preambles before the answer.\n"
             "\n## Local Computer & Browser Control\n"
             "Prefer deterministic tools before GUI fallback:\n"
-            "- **computer_use__write_file / read_file / edit_file** — create, inspect,\n"
+            "- **coding_tools__write_file / read_file / edit_file**: create, inspect,\n"
             "  and update local files through the filesystem policy.\n"
-            "- **computer_use__bash** — open files, run commands, verify results once\n"
-            "  filesystem grants and sandbox policy allow it.\n"
+            "- **coding_tools__bash**: open files, run commands, verify results. It\n"
+            "  runs on the host inside a granted folder; outside every grant it\n"
+            "  returns `permission_needed` instead of executing.\n"
             "- **desktop_control__open_app** — launch or focus an app via AppleScript.\n"
             "- **desktop_automation__click_screen / type_text / key_combo / scroll /\n"
             "  get_cursor_position** — low-level GUI primitives, only when needed.\n"

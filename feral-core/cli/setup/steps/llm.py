@@ -44,21 +44,21 @@ def _selectable_providers(catalog: ProviderCatalog) -> list:
     first chat turn. ``POST /api/llm/provider`` has refused them since
     v2026.5.x; this is the same gate for the CLI.
     """
-    from agents.llm_provider import is_supported_runtime_provider
+    from agents.llm_provider import is_supported_catalog_provider
 
     return [
         desc for desc in catalog.list_providers()
-        if is_supported_runtime_provider(desc.provider_id)
+        if is_supported_catalog_provider(desc.provider_id)
     ]
 
 
 def _unsupported_provider_ids(catalog: ProviderCatalog) -> list[str]:
     """Catalog ids the picker hides, for the one-line disclosure."""
-    from agents.llm_provider import is_supported_runtime_provider
+    from agents.llm_provider import is_supported_catalog_provider
 
     return [
         desc.provider_id for desc in catalog.list_providers()
-        if not is_supported_runtime_provider(desc.provider_id)
+        if not is_supported_catalog_provider(desc.provider_id)
     ]
 
 

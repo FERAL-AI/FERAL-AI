@@ -289,6 +289,27 @@ _CATALOG_PROVIDER_MAP: dict[str, str] = {
     "kimi": "moonshot",
 }
 
+# Reverse of the above: catalog id -> runtime id. Needed by any caller that
+# starts from a ``ProviderDescriptor`` (the setup wizard picker, the v2
+# /setup page) and wants to know whether the runtime can dial it.
+_RUNTIME_PROVIDER_MAP: dict[str, str] = {
+    catalog_id: runtime_id for runtime_id, catalog_id in _CATALOG_PROVIDER_MAP.items()
+}
+
+
+def is_supported_catalog_provider(catalog_id: str) -> bool:
+    """``is_supported_runtime_provider`` keyed by a *catalog* provider id.
+
+    The catalog and the runtime do not always agree on a provider's key:
+    the catalog calls Moonshot ``moonshot`` while the runtime binding is
+    ``kimi``. Calling ``is_supported_runtime_provider("moonshot")`` therefore
+    returns False for a provider that works perfectly, which made the setup
+    wizard hide Kimi from the picker entirely. Resolve through the map first.
+    """
+    return is_supported_runtime_provider(
+        _RUNTIME_PROVIDER_MAP.get(catalog_id, catalog_id)
+    )
+
 
 # Canonical set of provider ids the runtime can actually execute chat
 # calls against. This is the single source of truth consulted by
