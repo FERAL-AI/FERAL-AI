@@ -63,10 +63,15 @@ def run(state: WizardState) -> None:
             "Welcome — this wizard sets up your local brain in a few steps:\n\n"
             "  [bold]1.[/]  LLM provider + model (any cloud or local)\n"
             "  [bold]2.[/]  Speech in / out (cloud or fully local)\n"
-            "  [bold]3.[/]  Identity (so the agent knows who it is talking to)\n"
+            "  [bold]3.[/]  Identity + personality\n"
             "  [bold]4.[/]  Network access (localhost / LAN / Tailscale)\n"
-            "  [bold]5.[/]  Optional: Home Assistant + messaging channels\n\n"
-            "[dim]At any prompt: ↑/↓ navigate · space to mark · enter to confirm.[/]\n"
+            "  [bold]5.[/]  Capabilities (vision, autonomy, workspace access)\n"
+            "  [bold]6.[/]  Optional: integrations, tool keys, channels\n\n"
+            # The pickers are enter-on-highlight (ui_kit.pick), not the
+            # space-to-mark ui_kit.select — telling operators to press
+            # space made them think the wizard was stuck.
+            "[dim]At any prompt: ↑/↓ navigate · enter to choose the "
+            "highlighted row.[/]\n"
             "[dim]Type [/][bold]back[/][dim] to return to the previous step, "
             "[/][bold]quit[/][dim] to stop and keep what you've entered.[/]"
         )

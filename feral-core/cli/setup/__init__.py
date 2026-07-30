@@ -19,10 +19,7 @@ config + credentials atomically, and printing the summary.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from pathlib import Path
-from typing import Optional
 
 from config.loader import feral_home
 
@@ -30,12 +27,16 @@ from .state import WizardState
 from .state_machine import StateMachine
 from .steps import (
     audio,
+    capabilities,
     channels,
     finish,
     home_assistant,
     identity,
+    integrations,
     llm,
     pairing,
+    personality,
+    tool_keys,
     welcome,
 )
 from .steps import network as network_step
@@ -80,8 +81,14 @@ async def _run_async(*, from_step: str = "") -> None:
             ("voice_preflight", voice_preflight.run),
             ("audio", audio.run),
             ("identity", identity.run),
+            # Personality sits next to identity: both write the markdown
+            # files ``agents/identity_loader`` reads on every turn.
+            ("personality", personality.run),
+            ("capabilities", capabilities.run),
             ("network", network_step.run),
+            ("integrations", integrations.run),
             ("home_assistant", home_assistant.run),
+            ("tool_keys", tool_keys.run),
             ("channels", channels.run),
             ("pairing", pairing.run),
             ("tcc_preflight", tcc_preflight.run),

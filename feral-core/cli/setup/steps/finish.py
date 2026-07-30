@@ -33,14 +33,29 @@ def run(state: WizardState) -> None:
         summary_lines.append("  HA:      enabled")
     if channels:
         summary_lines.append(f"  Channels: {', '.join(channels)}")
+    pairing_mode = (state.settings.get("access") or {}).get("pairing_mode") or "localhost"
+    summary_lines.append(f"  Access:  {pairing_mode}")
+
+    # The wizard configures a subset of what the CLI can reach. Naming
+    # only `feral start` / `feral setup` here left ~30 shipped
+    # capabilities undiscoverable unless the operator read `--help`.
     summary_lines += [
         "",
-        "Next:",
-        "  `feral start`        launches the brain + chat.",
-        "  `feral setup`        re-run this wizard anytime.",
-        "  http://localhost:9090/settings  web-based settings.",
-        "  Pair your phone:     Settings → Devices → Pair device "
-        "(open the WebUI from your phone — see the pairing step above).",
+        "Start here:",
+        "  feral start                    launch the brain + chat",
+        "  http://localhost:9090/settings web settings UI",
+        "",
+        "Add more, any time:",
+        "  feral key add                  add or rotate a provider API key",
+        "  feral models add               keep several models on tap",
+        "  feral integrations connect     Google, Notion, Spotify, MS365, Gmail",
+        "  feral grant add <path>         let file tools into a folder",
+        "  feral voice providers          re-pick STT / TTS / realtime",
+        "  feral memory switch            change the vector-store backend",
+        "  feral twin grant               per-domain digital-twin policies",
+        "  feral access status            check how this brain is reachable",
+        "  feral doctor                   what's reachable, what needs setup",
+        "  feral setup --from-step <name> re-run one step of this wizard",
     ]
     for line in summary_lines:
         console.print(line)

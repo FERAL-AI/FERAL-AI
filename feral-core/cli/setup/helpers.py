@@ -229,9 +229,7 @@ def ask_text(
     """
     console = console or get_console()
     if secret:
-        # The masked path doesn't honour back/quit by typed sentinel —
-        # an API key shouldn't get matched against literal "back".
-        return ui_kit.password(prompt, allow_empty=allow_empty)
+        return _ask_secret(prompt, allow_empty=allow_empty, console=console)
 
     while True:
         default_display = f" [{default}]" if default else ""
@@ -248,6 +246,104 @@ def ask_text(
             console.print("[yellow]This field can't be empty.[/]" if _RICH_AVAILABLE else "This field can't be empty.")
             continue
         return raw
+
+
+def _ask_secret(prompt: str, *, allow_empty: bool, console) -> str:
+    """Masked prompt that is not a one-way door.
+
+    ``ui_kit.password`` re-raises a bare ``KeyboardInterrupt``, which
+    unwinds past the state machine and kills the whole wizard. Every
+    API key and channel token went through this path, so Ctrl+C on a
+    mistyped key prompt threw away the run instead of stepping back.
+
+    A typed sentinel can't be matched loosely here — "back" is a
+    legitimate (if terrible) password — so the escape hatches are the
+    two colon-prefixed literals plus the interrupt keys, and the
+    prompt advertises them.
+    """
+    label = f"{prompt}  (:back / :quit)"
+    while True:
+        try:
+            raw = ui_kit.password(label, allow_empty=allow_empty)
+        except KeyboardInterrupt:
+            # Ctrl+C on a masked field means "get me out of this
+            # prompt", not "discard the run" — hand control back to the
+            # previous step, which offers its own quit affordance.
+            raise BackNavigation()
+        except EOFError:
+            raise QuitNavigation()
+        if raw is None:
+            # InquirerPy returns None when the prompt is skipped.
+            raise BackNavigation()
+        stripped = raw.strip().lower()
+        if stripped == ":back":
+            raise BackNavigation()
+        if stripped == ":quit":
+            raise QuitNavigation()
+        if stripped == ":menu":
+            raise JumpToStep()
+        if not raw and not allow_empty:
+            console.print(
+                "[yellow]This field can't be empty.[/]"
+                if _RICH_AVAILABLE else "This field can't be empty."
+            )
+            continue
+        return raw
+
+
+async def probe_and_report(
+    provider_id: str,
+    *,
+    console=None,
+    display_name: str = "",
+) -> tuple[bool, str]:
+    """Run ``security.probe`` for *provider_id* and print the verdict.
+
+    Mirrors the ``feral key add`` UX (store → probe → print result →
+    let the caller offer a retry). Returns ``(ok, detail)`` so callers
+    can drive their own retry loop.
+
+    The wizard used to persist Home Assistant tokens, Telegram bot
+    tokens and voice keys with no verification at all: setup reported
+    success and the operator only found out the credential was wrong
+    when the integration silently did nothing at runtime. Every one of
+    those providers already had a probe registered — nothing called it.
+
+    A provider with no registered probe reports honestly ("no probe
+    registered") rather than claiming success.
+    """
+    console = console or get_console()
+    name = display_name or provider_id
+    try:
+        from security.probe import probe as _probe
+    except Exception as exc:
+        console.print(f"  [yellow]Could not load the credential probe: {exc}[/]"
+                      if _RICH_AVAILABLE else
+                      f"  Could not load the credential probe: {exc}")
+        return False, str(exc)
+
+    console.print(f"  Probing {name}…")
+    result = await _probe(provider_id, force=True)
+
+    if result.ok:
+        console.print(f"  [green]✔[/] {name} verified (HTTP {result.status_code})"
+                      if _RICH_AVAILABLE else
+                      f"  ✔ {name} verified (HTTP {result.status_code})")
+        return True, result.detail or "ok"
+
+    if result.reason == "unknown_provider":
+        console.print(f"  [dim]No probe registered for {provider_id} — "
+                      f"stored without verification.[/]"
+                      if _RICH_AVAILABLE else
+                      f"  No probe registered for {provider_id} — "
+                      f"stored without verification.")
+        return False, result.reason
+
+    detail = result.detail or result.reason or "unreachable"
+    console.print(f"  [red]✘[/] {name} rejected the credential: {detail}"
+                  if _RICH_AVAILABLE else
+                  f"  ✘ {name} rejected the credential: {detail}")
+    return False, detail
 
 
 def confirm(prompt: str, *, default: bool = False, console=None) -> bool:

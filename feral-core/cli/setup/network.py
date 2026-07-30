@@ -24,7 +24,6 @@ import logging
 import os
 import socket
 from dataclasses import dataclass, field
-from typing import Optional
 
 from config.loader import feral_home
 from config.runtime import brain_port
@@ -134,7 +133,10 @@ async def get_snapshot() -> NetworkSnapshot:
     pairing_mode = access.get("pairing_mode", "")
     if pairing_mode == "remote":
         snap.mode = "remote"
-    elif persisted_bind not in ("127.0.0.1", "localhost", ""):
+    elif pairing_mode == "local" or persisted_bind not in ("127.0.0.1", "localhost", ""):
+        # "local" is the config-layer spelling of Mode A; the bind-host
+        # check stays as the fallback for installs whose access block
+        # predates the wizard writing a pairing mode at all.
         snap.mode = "lan"
     else:
         snap.mode = "localhost"
@@ -197,7 +199,14 @@ async def apply_lan(bind_host: str = "0.0.0.0") -> NetworkSnapshot:
             message="bind_host cannot be empty",
         )
     _persist_bind_host(bind_host)
-    _persist_pairing_mode("localhost")  # LAN is still "local" for pairing/QR purposes
+    # Mode A. ``ConfigLoader.access_pairing_mode`` understands exactly
+    # three values — "local" (LAN), "localhost" (loopback), "remote"
+    # (Funnel) — and ``GET /api/devices/pair/url`` refuses to emit a
+    # pair URL for "localhost". Persisting "localhost" here (the
+    # pre-fix behaviour) meant the operator picked LAN, walked into
+    # the next wizard step telling them to pair their phone, and hit
+    # "Mode B (localhost) does not expose pairing".
+    _persist_pairing_mode("local")
     os.environ["FERAL_BIND_HOST"] = bind_host
     return await get_snapshot()
 
@@ -409,7 +418,14 @@ def _clear_remote_url() -> None:
     ts["funnel"] = False
     ts["tailnet_url"] = ""
     access["tailscale"] = ts
-    access["pairing_mode"] = "localhost"
+    # Dropping Funnel demotes Mode C to whatever the bind host still
+    # supports — a brain bound to 0.0.0.0 is reachable on the LAN, so
+    # demoting it all the way to "localhost" would revoke phone
+    # pairing that still works.
+    bind_host = (data.get("network") or {}).get("bind_host") or "127.0.0.1"
+    access["pairing_mode"] = (
+        "localhost" if bind_host in ("127.0.0.1", "localhost", "") else "local"
+    )
     _write_settings(data)
 
 

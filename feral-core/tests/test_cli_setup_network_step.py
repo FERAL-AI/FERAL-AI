@@ -60,7 +60,7 @@ async def test_step_chooses_localhost(monkeypatch, tmp_path):
 
     await network_step.run(state)
     assert state.get_setting("network", "bind_host") == "127.0.0.1"
-    assert state.get_setting("network", "mode") == "localhost"
+    assert state.get_setting("access", "pairing_mode") == "localhost"
 
 
 @pytest.mark.asyncio
@@ -80,7 +80,9 @@ async def test_step_chooses_lan_with_confirmation(monkeypatch, tmp_path):
 
     await network_step.run(state)
     assert state.get_setting("network", "bind_host") == "0.0.0.0"
-    assert state.get_setting("network", "mode") == "lan"
+    # Mode A is spelled "local" at the config layer — this is the value
+    # ``GET /api/devices/pair/url`` needs in order to emit a pair URL.
+    assert state.get_setting("access", "pairing_mode") == "local"
 
 
 @pytest.mark.asyncio
@@ -128,7 +130,11 @@ async def test_step_tailscale_success(monkeypatch, tmp_path):
     monkeypatch.setattr(ui_kit, "pick", lambda *a, **kw: "tailscale")
 
     await network_step.run(state)
-    assert state.get_setting("network", "mode") == "remote"
+    assert state.get_setting("access", "pairing_mode") == "remote"
+    assert (
+        (state.settings["access"]["tailscale"] or {}).get("tailnet_url")
+        == "https://brain.cafe.ts.net"
+    )
 
 
 @pytest.mark.asyncio

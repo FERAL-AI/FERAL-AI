@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from ..helpers import ask_text, confirm, get_console, _RICH_AVAILABLE
+import os
+
+from ..helpers import (
+    ask_text,
+    confirm,
+    get_console,
+    probe_and_report,
+    _RICH_AVAILABLE,
+)
 from ..state import WizardState
 
 
@@ -19,11 +27,19 @@ _CHANNEL_FIELDS = {
     ],
 }
 
+# Channels whose credentials ``security.probe`` can verify. WhatsApp has
+# no registered probe, so its tokens are stored unverified and the step
+# says so instead of implying they were checked.
+_PROBEABLE_CHANNELS = ("telegram", "discord", "slack")
 
-def run(state: WizardState) -> None:
+
+async def run(state: WizardState) -> None:
     console = get_console()
     console.print()
-    console.print("[bold]Step 6 · Messaging channels[/]" if _RICH_AVAILABLE else "Step 6 · Messaging channels")
+    console.print(
+        "Talk to FERAL from a chat app. Each channel needs a bot token from "
+        "that platform's developer console."
+    )
 
     if not confirm("  Connect any messaging channels? (skip to add later)", default=False):
         return
@@ -32,13 +48,60 @@ def run(state: WizardState) -> None:
     for channel, fields in _CHANNEL_FIELDS.items():
         if not confirm(f"  Configure {channel}?", default=False):
             continue
+        if await _configure_channel(state, channel, fields, console):
+            if channel not in configured:
+                configured.append(channel)
+
+    state.set_setting("channels", "configured", configured)
+
+
+async def _configure_channel(state: WizardState, channel: str, fields, console) -> bool:
+    """Prompt for one channel's fields, then verify them.
+
+    Returns True when the channel should be recorded as configured —
+    which includes the "probe failed but the operator kept the token
+    anyway" case, since the credential is genuinely stored.
+    """
+    first_pass = True
+    while True:
         for env_key, label, secret in fields:
-            existing = state.credentials.get(env_key, "")
+            # On a retry the operator already said the stored value is
+            # wrong, so never offer to keep it.
+            existing = state.credentials.get(env_key, "") if first_pass else ""
             if existing and not confirm(f"    Replace existing {env_key}?", default=False):
+                # Make sure the probe below sees the stored value.
+                os.environ.setdefault(env_key, existing)
                 continue
             value = ask_text(f"    {label}", default="", allow_empty=False, secret=secret)
             state.set_credential(env_key, value)
-        if channel not in configured:
-            configured.append(channel)
+            # The probes resolve tokens from the environment first, and
+            # the vault write only lands in ``state.save()`` at the end
+            # of the run — export now so the probe reads what was typed.
+            os.environ[env_key] = value
 
-    state.set_setting("channels", "configured", configured)
+        if channel not in _PROBEABLE_CHANNELS:
+            console.print(
+                f"  [dim]No probe registered for {channel} — token stored "
+                f"without verification.[/]"
+                if _RICH_AVAILABLE else
+                f"  No probe registered for {channel} — token stored "
+                f"without verification."
+            )
+            return True
+
+        ok, _detail = await probe_and_report(
+            channel, console=console, display_name=channel,
+        )
+        if ok:
+            return True
+
+        first_pass = False
+        if not confirm(f"    Re-enter the {channel} credentials?", default=True):
+            console.print(
+                f"  [yellow]Keeping the {channel} token as typed — fix it "
+                f"later with `feral key add`.[/]"
+                if _RICH_AVAILABLE else
+                f"  Keeping the {channel} token as typed — fix it later "
+                f"with `feral key add`."
+            )
+            return True
