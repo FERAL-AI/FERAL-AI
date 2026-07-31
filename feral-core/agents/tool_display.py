@@ -47,7 +47,9 @@ def friendly_tool_label(
         return "Check weather"
     if skill == "browser":
         return f"Browser: {_humanize(endpoint)}" if endpoint else "Use browser"
-    if skill == "computer_use":
+    # ``computer_use`` was consolidated into ``coding_tools``; keep the old
+    # id so any daemon or marketplace skill still using it keeps its label.
+    if skill in {"coding_tools", "computer_use"}:
         if endpoint == "bash":
             return "Run local command"
         if endpoint == "write_file":
@@ -78,6 +80,6 @@ def tool_feedback_text(tool_name: str) -> str:
         return "Checking the weather."
     if skill == "browser":
         return f"Using the browser to {endpoint.replace('_', ' ')}."
-    if skill == "computer_use" and endpoint == "bash":
+    if skill in {"coding_tools", "computer_use"} and endpoint == "bash":
         return "Running a command on your computer."
     return f"Running {endpoint.replace('_', ' ')}."

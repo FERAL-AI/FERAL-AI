@@ -1,118 +1,174 @@
 {
-    "skill_id": "calendar_google",
-    "version": "2.0.0",
-    "author": "feral-core",
-    "brand": {
-        "name": "Calendar",
-        "primary_color": "#4285F4",
-        "secondary_color": "#EA4335",
-        "logo_url": "",
-        "icon_set": "sf_symbols"
-    },
-    "description": "Google Calendar (OAuth2) with ICS URL fallback. List upcoming events, get today's schedule, find the next event, search by query, create events, and delete events. Backend: CalendarIntegration.",
-    "trigger_phrases": [
-        "what's on my calendar",
-        "my schedule today",
-        "upcoming meetings",
-        "create an event",
-        "schedule a meeting",
-        "am I free at",
-        "what's next",
-        "my agenda",
-        "cancel meeting",
-        "when is my next meeting",
-        "find an event"
-    ],
-    "categories": ["productivity", "calendar", "scheduling"],
-    "auth": {
-        "type": "oauth2",
-        "authorize_url": "https://accounts.google.com/o/oauth2/auth",
-        "token_url": "https://oauth2.googleapis.com/token",
-        "scopes": ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events"]
-    },
-    "endpoints": [
+  "skill_id": "calendar_google",
+  "version": "2.0.0",
+  "author": "feral-core",
+  "brand": {
+    "name": "Calendar",
+    "primary_color": "#4285F4",
+    "secondary_color": "#EA4335",
+    "logo_url": "",
+    "icon_set": "sf_symbols"
+  },
+  "description": "Google Calendar (OAuth2) with ICS URL fallback. List upcoming events, get today's schedule, find the next event, search by query, create events, and delete events. Backend: CalendarIntegration.",
+  "trigger_phrases": [
+    "what's on my calendar",
+    "my schedule today",
+    "upcoming meetings",
+    "create an event",
+    "schedule a meeting",
+    "am I free at",
+    "what's next",
+    "my agenda",
+    "cancel meeting",
+    "when is my next meeting",
+    "find an event"
+  ],
+  "categories": [
+    "productivity",
+    "calendar",
+    "scheduling"
+  ],
+  "auth": {
+    "type": "oauth2",
+    "authorize_url": "https://accounts.google.com/o/oauth2/auth",
+    "token_url": "https://oauth2.googleapis.com/token",
+    "scopes": [
+      "https://www.googleapis.com/auth/calendar.readonly",
+      "https://www.googleapis.com/auth/calendar.events"
+    ]
+  },
+  "endpoints": [
+    {
+      "id": "list_events",
+      "method": "PYTHON",
+      "url": "python://calendar_google/list_events",
+      "description": "List upcoming events from the user's primary calendar over the next N days. Returns up to 50 events ordered by start time.",
+      "params": [
         {
-            "id": "list_events",
-            "method": "PYTHON",
-            "url": "python://calendar_google/list_events",
-            "description": "List upcoming events from the user's primary calendar over the next N days. Returns up to 50 events ordered by start time.",
-            "params": [
-                {"name": "days_ahead", "type": "integer", "required": false, "description": "How many days forward from now to include.", "default": "7"}
-            ],
-            "returns_description": "{events: [{id, summary, description, start, end, location, html_link}], source}",
-            "ui_hint": "list",
-            "read_only_hint": true
-        },
-        {
-            "id": "get_today",
-            "method": "PYTHON",
-            "url": "python://calendar_google/get_today",
-            "description": "Return events scheduled for the current calendar day in UTC. Read-only.",
-            "params": [],
-            "returns_description": "{events: [{id, summary, description, start, end, location, html_link}], date, source}",
-            "ui_hint": "list",
-            "read_only_hint": true
-        },
-        {
-            "id": "next_event",
-            "method": "PYTHON",
-            "url": "python://calendar_google/next_event",
-            "description": "Return the single nearest upcoming event from now. Optimised for ambient-strip / glance UIs. Read-only.",
-            "params": [],
-            "returns_description": "{id, summary, description, start, end, location, html_link} or {message}",
-            "ui_hint": "detail_card",
-            "read_only_hint": true
-        },
-        {
-            "id": "search_events",
-            "method": "PYTHON",
-            "url": "python://calendar_google/search_events",
-            "description": "Search the user's calendar for events whose summary or description matches a free-text query, within +/- N days of now.",
-            "params": [
-                {"name": "query", "type": "string", "required": true, "description": "Free-text search query. Matches against event title and description."},
-                {"name": "days_back", "type": "integer", "required": false, "description": "Half-window in days; the search covers (now - days_back) to (now + days_back).", "default": "30"}
-            ],
-            "returns_description": "{events: [...], query, source}",
-            "ui_hint": "list",
-            "read_only_hint": true
-        },
-        {
-            "id": "create_event",
-            "method": "PYTHON",
-            "url": "python://calendar_google/create_event",
-            "description": "Create a new event on the user's primary Google Calendar. Times are RFC3339/ISO8601 strings with timezone (e.g. '2026-05-22T14:00:00-07:00'). Not available when only the ICS fallback is connected.",
-            "params": [
-                {"name": "title", "type": "string", "required": true, "description": "Event title (Google Calendar 'summary')."},
-                {"name": "start", "type": "string", "required": true, "description": "Start datetime in RFC3339/ISO8601, e.g. '2026-05-22T14:00:00-07:00'."},
-                {"name": "end", "type": "string", "required": true, "description": "End datetime in RFC3339/ISO8601."},
-                {"name": "description", "type": "string", "required": false, "description": "Optional long-form event description.", "default": ""}
-            ],
-            "returns_description": "{id, summary, description, start, end, location, html_link}",
-            "ui_hint": "detail_card"
-        },
-        {
-            "id": "delete_event",
-            "method": "PYTHON",
-            "url": "python://calendar_google/delete_event",
-            "description": "Delete an event from the user's primary Google Calendar by id. Not available when only the ICS fallback is connected.",
-            "params": [
-                {"name": "event_id", "type": "string", "required": true, "description": "Google Calendar event id (the 'id' returned by list_events / next_event / search_events)."}
-            ],
-            "returns_description": "{deleted}",
-            "ui_hint": null,
-            "requires_user_approval": true
+          "name": "days_ahead",
+          "type": "integer",
+          "required": false,
+          "description": "How many days forward from now to include.",
+          "default": "7"
         }
-    ],
-    "flows": [],
-    "crons": [
+      ],
+      "returns_description": "{events: [{id, summary, description, start, end, location, html_link}], source}",
+      "ui_hint": "list",
+      "read_only_hint": true,
+      "emit_result_preview": true
+    },
+    {
+      "id": "get_today",
+      "method": "PYTHON",
+      "url": "python://calendar_google/get_today",
+      "description": "Return events scheduled for the current calendar day in UTC. Read-only.",
+      "params": [],
+      "returns_description": "{events: [{id, summary, description, start, end, location, html_link}], date, source}",
+      "ui_hint": "list",
+      "read_only_hint": true,
+      "emit_result_preview": true
+    },
+    {
+      "id": "next_event",
+      "method": "PYTHON",
+      "url": "python://calendar_google/next_event",
+      "description": "Return the single nearest upcoming event from now. Optimised for ambient-strip / glance UIs. Read-only.",
+      "params": [],
+      "returns_description": "{id, summary, description, start, end, location, html_link} or {message}",
+      "ui_hint": "detail_card",
+      "read_only_hint": true,
+      "emit_result_preview": true
+    },
+    {
+      "id": "search_events",
+      "method": "PYTHON",
+      "url": "python://calendar_google/search_events",
+      "description": "Search the user's calendar for events whose summary or description matches a free-text query, within +/- N days of now.",
+      "params": [
         {
-            "id": "morning_briefing",
-            "schedule": "0 7 * * *",
-            "endpoint_id": "get_today"
+          "name": "query",
+          "type": "string",
+          "required": true,
+          "description": "Free-text search query. Matches against event title and description."
+        },
+        {
+          "name": "days_back",
+          "type": "integer",
+          "required": false,
+          "description": "Half-window in days; the search covers (now - days_back) to (now + days_back).",
+          "default": "30"
         }
-    ],
-    "triggers": [],
-    "permissions": ["calendar"],
-    "requires_daemon": false,
-    "max_calls_per_hour": 500
+      ],
+      "returns_description": "{events: [...], query, source}",
+      "ui_hint": "list",
+      "read_only_hint": true,
+      "emit_result_preview": true
+    },
+    {
+      "id": "create_event",
+      "method": "PYTHON",
+      "url": "python://calendar_google/create_event",
+      "description": "Create a new event on the user's primary Google Calendar. Times are RFC3339/ISO8601 strings with timezone (e.g. '2026-05-22T14:00:00-07:00'). Not available when only the ICS fallback is connected.",
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "required": true,
+          "description": "Event title (Google Calendar 'summary')."
+        },
+        {
+          "name": "start",
+          "type": "string",
+          "required": true,
+          "description": "Start datetime in RFC3339/ISO8601, e.g. '2026-05-22T14:00:00-07:00'."
+        },
+        {
+          "name": "end",
+          "type": "string",
+          "required": true,
+          "description": "End datetime in RFC3339/ISO8601."
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "required": false,
+          "description": "Optional long-form event description.",
+          "default": ""
+        }
+      ],
+      "returns_description": "{id, summary, description, start, end, location, html_link}",
+      "ui_hint": "detail_card"
+    },
+    {
+      "id": "delete_event",
+      "method": "PYTHON",
+      "url": "python://calendar_google/delete_event",
+      "description": "Delete an event from the user's primary Google Calendar by id. Not available when only the ICS fallback is connected.",
+      "params": [
+        {
+          "name": "event_id",
+          "type": "string",
+          "required": true,
+          "description": "Google Calendar event id (the 'id' returned by list_events / next_event / search_events)."
+        }
+      ],
+      "returns_description": "{deleted}",
+      "ui_hint": null,
+      "requires_user_approval": true
+    }
+  ],
+  "flows": [],
+  "crons": [
+    {
+      "id": "morning_briefing",
+      "schedule": "0 7 * * *",
+      "endpoint_id": "get_today"
+    }
+  ],
+  "triggers": [],
+  "permissions": [
+    "calendar"
+  ],
+  "requires_daemon": false,
+  "max_calls_per_hour": 500
 }
