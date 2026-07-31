@@ -374,7 +374,22 @@ export default function Chat() {
         if (typeof p.reasoning === 'string' && p.reasoning.trim() && !streamReasoningRef.current) {
           streamReasoningRef.current = p.reasoning;
         }
-        if (text === 'FERAL Brain connected. How can I help?') {
+        // The brain re-sends its greeting on every connect that omits
+        // ?session_id=, which is every reconnect on the primary thread —
+        // and ws.js reconnects ~2s after any drop. This guard is what stops
+        // the log filling with greetings after a network blip or a brain
+        // restart.
+        //
+        // It used to compare against the literal 'FERAL Brain connected.
+        // How can I help?'. The brain actually sends
+        // `${agent_name} connected. How can I help?` (api/routes/config.py
+        // _build_greeting), i.e. "FERAL connected." with no "Brain" — and
+        // agent_name is operator-configurable, so no literal can be right.
+        // The guard therefore never fired. Match the shape instead: the
+        // greeting is the only assistant line of the form
+        // "<agent> connected. …how can I help?", in either the bare or the
+        // "Hey <name>," variant.
+        if (/^.+ connected\.\s+(how can i help\?|hey .+, how can i help\?)$/i.test(text.trim())) {
           if (greetingSeenRef.current) return;
           greetingSeenRef.current = true;
         }

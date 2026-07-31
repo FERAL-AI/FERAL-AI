@@ -1780,10 +1780,29 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                 logger.debug(f"Primary snapshot on disconnect failed: {snap_exc}")
     except Exception as exc:
         logger.error(f"Unexpected error in session {session_id[:8]}: {exc}", exc_info=True)
-        state.sessions.pop(session_id, None)
-        state.audio.clear_session(session_id)
-        state.perception.clear(session_id)
-        state.memory.working_clear(session_id)
+        # Same identity check as the WebSocketDisconnect path above, for the
+        # same reason. This sibling handler was missed when that one was
+        # fixed, so the original bug survived here in a narrower window: an
+        # exception raised inside the OLDER socket's own cleanup lands in
+        # this block and de-registers the NEWER, still-live surface, after
+        # which send_to_session silently drops every reply to it.
+        #
+        # It was additionally worse than the disconnect path: working memory
+        # was cleared unconditionally, where that path gates the same call
+        # behind ``remaining_attachments == 0 and should_clear``. On the
+        # shared primary session that wiped state out from under every other
+        # attached surface. Mirror the guard rather than re-deriving it.
+        if state.sessions.get(session_id) is ws:
+            state.sessions.pop(session_id, None)
+            state.audio.clear_session(session_id)
+            state.perception.clear(session_id)
+            try:
+                remaining = state.detach_session(session_id)
+            except Exception:
+                logger.debug("detach_session failed on the error path", exc_info=True)
+                remaining = 0
+            if remaining == 0 and state.should_clear_on_disconnect(session_id):
+                state.memory.working_clear(session_id)
 
 
 # ─────────────────────────────────────────────

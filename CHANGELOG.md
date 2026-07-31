@@ -1,10 +1,12 @@
 # Changelog
 
-<!-- feral-version: 2026.6.29 -->
+<!-- feral-version: 2026.7.31 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.7.31] - 2026-07-31 — conversation state, ambient cost, memory correctness, node auth
 
 ### Fixed
 
