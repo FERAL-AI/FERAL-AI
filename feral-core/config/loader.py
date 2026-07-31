@@ -878,6 +878,23 @@ class ConfigLoader:
         vision_on = bool(vision.get("enabled", False)) or bool(features.get("vision", False))
         env["FERAL_VISION_ENABLED"] = str(vision_on).lower()
         env["FERAL_VISION_MAX_FRAME_KB"] = str(vision.get("max_frame_kb", 512))
+        # ``SceneAnalyzer.__init__`` resolves its VLM ONLY from these env vars
+        # (perception/scene.py). Before this, ``settings.vision.provider`` and
+        # ``settings.vision.model`` were written by the operator, stored on
+        # disk, and read by nothing: ``_vlm_client`` stayed None, and every
+        # screen frame fell through ``_call_vlm`` to ``_call_default_llm``,
+        # billing the shared paid chat model.
+        #
+        # An operator who had explicitly selected free local vision
+        # (provider=ollama, model=llava) was being charged roughly
+        # $0.55-$1.12/hour for an idle machine, because the switch they set
+        # was never wired to anything. Export it.
+        if vision.get("provider"):
+            env["FERAL_VLM_PROVIDER"] = str(vision["provider"])
+        if vision.get("model"):
+            env["FERAL_VLM_MODEL"] = str(vision["model"])
+        if vision.get("base_url"):
+            env["FERAL_VLM_BASE_URL"] = str(vision["base_url"])
 
         env["FERAL_STREAMING"] = str(features.get("streaming", False)).lower()
         env["FERAL_PROACTIVE"] = str(features.get("proactive", False)).lower()
