@@ -1,10 +1,58 @@
 # Changelog
 
-<!-- feral-version: 2026.6.23 -->
+<!-- feral-version: 2026.6.29 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+### Fixed
+
+**Conversation state**
+- **fix(orchestrator): the assistant side of every turn was being lost.** Assistant rows reached `conversation_history` from only the single-agent text loop. Voice recorded the user's turn and never its own; the refusal-fallback, budget-cap, LLM-exception and multi-agent paths all returned before the write-back. The model therefore received consecutive user messages with no assistant turn between them, and correctly reported that it had never spoken. Compaction compounded it: the 15-row window was written *back* over the stored history, making truncation permanent and cumulative. The write-back is now unconditional, `note_voice_assistant_turn` records the voice side under the session lock, and compaction is a per-request view over a full stored transcript. Turn survival across 6 turns at 5 tool calls each: **2 -> 6**.
+- **fix(memory): the "Recent Context" block showed the OLDEST entries**, slicing a head against an oldest-to-newest join, and spent a budget named `max_tokens_budget` as characters.
+
+**Voice**
+- **fix(voice): transcripts rendered out of order and on the wrong side.** OpenAI documents that input transcription "may come before or after the Response events" and supplies `item_id` / `previous_item_id` to resolve it; both were read and discarded while the client appended by arrival time. Frames now carry `item_id`, `previous_item_id` and a brain-assigned `seq`, and the client inserts by predecessor link.
+- **fix(voice): user speech was wire-tagged as assistant** — the web branch omitted `role`, which defaults to `"assistant"`, while the node branch three lines below set it correctly for the same audio.
+- **fix(voice): barge-in no longer destroys and recreates the playback AudioContext**, which forced the echo canceller to re-converge exactly as the assistant resumed speaking.
+
+**Cost and ambient loops**
+- **fix(vision): `settings.vision.provider` and `.model` were read by nothing.** `SceneAnalyzer` resolves its VLM only from env vars that `export_as_env` never exported, so an operator who selected local Ollama had that choice stored on disk and ignored while every screen frame went to the shared paid chat model. Measured idle: 225 VLM calls/hour, $0.49-$1.23/hour.
+- **fix(scheduler): an unparseable schedule silently re-armed every 60 seconds.** Routines written as "nightly at 9pm" fired 4,170 times. Removing the catch-all exposed that it masked an incomplete parser rather than typos: `@hourly`, `@weekly`, `@monthly` and `@yearly` had never parsed either and were all running once a minute. The existing macro test passed only because both sides returned the same wrong value. Unparseable expressions are now rejected at write time and disable the job with a CRITICAL log.
+
+**Memory**
+- **fix(memory): pooled connections were closed rather than released, deadlocking the subsystem.** Five sites borrowed from a pool that is filled once and never refills, so after four calls the next acquire blocked forever with no timeout and no error. `_release` additionally recursed ~493 deep and leaked the connection, contradicting its own comment.
+- **fix(memory): hybrid ranking was close to anti-correlated with relevance.** BM25 rank is negative-is-better and was passed through `abs()`, so the weakest match scored 5.3x higher than the best; retention strength was applied in the decay exponent, so a nearly-forgotten memory ranked 423x higher than a healthy one; the decay rate disagreed 10x with the same constant elsewhere; and queries containing an apostrophe, `+`, `/` or parentheses raised inside FTS5 and were swallowed. Replaced with Reciprocal Rank Fusion.
+- **fix(memory): saving a conversation containing a multimodal turn returned 500**, because slicing list-shaped message content yields a list, which SQLite cannot bind.
+
+**Providers**
+- **fix(llm): undialable providers and non-chat models entered the failover chain.** A catalog-only provider burned a hop every turn; a non-chat model could be dialed and could only 404. Both are filtered before the wire call, with drops logged.
+- **fix(llm): DeepSeek was hardcoded as vision-capable** and rejects image content blocks outright, so any turn carrying a screen frame failed instead of degrading to text.
+- **fix(providers): the daily catalog-refresh workflow had passed green since April while doing nothing** — missing keys returned `None` silently. It now fails loudly, refreshes pricing as well as model lists, and polls Anthropic's models endpoint, which exists contrary to the comment claiming otherwise.
+
+**Security and honesty**
+- **fix(security): `/v1/node` accepted unauthenticated connections when `NODE_API_KEY` was unset**, the default, because the empty-string comparison admitted anyone. An unpaired node could inject text commands, poison baselines and write the knowledge graph. Now refused when no key is configured, and compared with `secrets.compare_digest` when one is.
+- **fix(hardware): tools reported success while doing nothing.** The robot-arm skill built its adapter with no port so it always simulated, and discarded its `direction` argument through a manifest mismatch; wristband haptics and thermostat control were log lines returning success. Removed from their manifests rather than left simulating.
+- **fix(orchestrator): a bare `except: pass` swallowed the entire `tool_result` emit**, leaving the UI tool chip spinning with nothing in the logs.
+
+**Sessions and shell**
+- **fix(chat): a second surface on the same session silently silenced the first**, because the older handler's disconnect de-registered the newer live socket. De-registration is now identity-checked.
+- **feat(skills): workspace-scoped host execution.** All four shell surfaces returned 503 without Docker, and the container mounts nothing from the host so it could not see the user's project regardless. Execution mode is now a function of command, resolved path, autonomy mode and grant state; generated code still requires the container.
+- **fix(agents): tool results were truncated to 2,000 characters before the model saw them**, twice, and lists to 20 items, so a file read returned ~30 lines regardless of the requested limit and 3 of 4 measured results arrived as invalid JSON. Budgets are now a per-endpoint property.
+
+**Integrations**
+- **fix(google): the OAuth path was broken end to end** — no refresh token was requested, the PKCE exchange omitted the client secret, and the Settings card wrote that secret into the access-token slot, which also disabled the working IMAP and ICS fallbacks.
+- **fix(calendar): ICS feeds with UTC timestamps parsed as an empty calendar.**
+- **fix(integrations): the email watcher consumed and discarded every message**, calling for an event loop from a worker thread where it raises, with both call sites swallowing it after the counter had incremented and the fetch had already marked the message read.
+
+**Setup**
+- **fix(setup): the wizard discarded its own answers** — the network step wrote directly to disk while the save path rewrote settings wholesale from a stale snapshot, so choosing Tailscale never persisted. LAN mode also wrote a pairing mode that then refused pairing.
+
+### Added
+- **feat(chat): structured tool cards and typed result rendering** — collapsible calls with live status and elapsed time, shape-aware results (code, tables, images, JSON), and visible error and refusal states, which both the web and phone surfaces had been discarding silently.
+- **feat(chat): opt-in tool result previews on the wire**, declared per endpoint in the skill manifest and clamped to in-repo manifests so an installed marketplace skill cannot enable previews for itself.
+
 
 ### Added
 - **feat(skills): per-tool result budgets.** New [`feral-core/skills/result_budget.py`](feral-core/skills/result_budget.py) makes "how much of a tool result the model sees" a property of the **tool**, declared in the skill manifest, instead of one global constant. Three named tiers: `standard` (2 000 chars / 20 list items — unchanged, and still the default for every third-party HTTP skill), `feed` (inbox/timeline endpoints), and `workspace` (first-party local read/search/shell, sized so the tool's own limits bind: `max_str_len` ≥ `coding_tools.MAX_OUTPUT`, `max_list_len` ≥ `GREP_DEFAULT_HEAD_LIMIT`). `SkillManifest.result_budget` / `SkillEndpoint.result_budget` carry the declaration; resolution is per endpoint, so `coding_tools__read_file` gets `workspace` while `coding_tools__web_fetch` — which relays a stranger's HTML through the same skill — stays on `standard`. A declared tier is only honoured for manifests that ship in `feral-core/skills/manifests/` (derived by scanning that directory, not a hardcoded allowlist), so a runtime-installed marketplace skill cannot widen its own budget. Operator overrides via `skills.result_budgets` in settings.json; `FERAL_RESULT_BUDGET_TIER` env pin for field debugging.
