@@ -260,6 +260,56 @@ async def test_wiki_search_does_not_500_on_operator_characters(db_path, query):
     assert [p["id"] for p in pages] == ["p1"]
 
 
+async def test_broad_mode_ors_terms_and_drops_stopwords(db_path):
+    """BROAD mode must widen recall, not narrow it.
+
+    FTS5's implicit AND returns nothing for "where are my wallet keys"
+    when the episode only says "wallet". The context builder needs the
+    OR, and the OR must survive as an *operator*.
+    """
+    expr = fts5_match_query("where are my wallet keys", mode="broad")
+    assert expr == '"wallet" OR "keys"', expr
+
+    now = time.time()
+    await _seed(db_path, [
+        ("e1", "wallet", "left it on the table", now, 1.0),
+    ] + _distractors(5, now))
+    store = MemoryStore(db_path=db_path)
+    try:
+        results = await store.episode_search_hybrid(
+            "where are my wallet keys", limit=5, fts_mode="broad"
+        )
+    finally:
+        await store.aclose()
+    assert [r["id"] for r in results] == ["e1"]
+
+
+def test_sanitising_an_already_built_expression_would_corrupt_it():
+    """Regression guard for double sanitisation.
+
+    A built expression must never be fed back through the builder: the
+    second pass sees ``OR`` as an ordinary term, quotes it, and ANDs it
+    in, turning a widening OR into a mandatory match on the word "or".
+    This is why callers pass raw text plus a mode instead of a
+    pre-built string.
+    """
+    built = fts5_match_query("wallet keys", mode="broad")
+    assert built == '"wallet" OR "keys"'
+    double = fts5_match_query(built, mode="strict")
+    assert '"OR"' in double, (
+        "expected the corruption this test documents; if it no longer "
+        "happens the double-sanitisation hazard is gone and the note in "
+        "fts_query.py can be relaxed"
+    )
+
+
+def test_broad_mode_falls_back_when_every_term_is_a_stopword():
+    """"what is it" must still search for something."""
+    assert fts5_match_query("what is it", mode="broad") == (
+        '"what" AND "is" AND "it"'
+    )
+
+
 def test_fts5_match_query_drops_terms_with_no_indexable_content():
     """Punctuation-only input tokenizes to nothing.
 

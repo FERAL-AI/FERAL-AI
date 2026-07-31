@@ -60,29 +60,30 @@ def _quote(term: str) -> str:
     return '"' + term.replace('"', '""') + '"'
 
 
-def fts5_match_query(
-    text: str,
-    *,
-    operator: str = "AND",
-    drop_stopwords: bool = False,
-) -> str:
+# Sanitisation happens exactly once, immediately before the SQL, and
+# the *caller* declares which recall behaviour it wants. Do not build
+# an expression in one layer and pass it to another that sanitises
+# again: the second pass sees "wallet" OR "keys" as three ordinary
+# terms and quotes the operator into a literal, turning a widening OR
+# into a mandatory AND on the word "or".
+STRICT = "strict"  # every term required (FTS5's implicit conjunction)
+BROAD = "broad"    # any term matches, stopwords dropped
+
+
+def fts5_match_query(text: str, *, mode: str = STRICT) -> str:
     """Build a syntactically valid FTS5 ``MATCH`` expression from free text.
 
     Parameters
     ----------
     text :
         The raw user utterance. May contain anything.
-    operator :
-        ``"AND"`` (default) keeps FTS5's implicit conjunction, so a
+    mode :
+        :data:`STRICT` (default) keeps FTS5's implicit conjunction, so a
         call site that previously passed the raw string gets the same
-        recall it always had, minus the syntax errors. ``"OR"`` widens
-        to any-term matching, which is what the LLM context builder
-        needs: FTS5's implicit AND returns zero rows for "where is my
+        recall it always had, minus the syntax errors. :data:`BROAD`
+        ORs the terms and drops stopwords, which is what the LLM context
+        builder needs: a strict AND returns zero rows for "where is my
         wallet" when the episode only says "wallet".
-    drop_stopwords :
-        Filter :data:`STOPWORDS` before building the expression. Only
-        meaningful for ``OR`` mode; an AND query over stopwords is
-        already self-limiting.
 
     Returns
     -------
@@ -92,6 +93,8 @@ def fts5_match_query(
         query" and skip the MATCH. Passing an empty string to FTS5 is
         itself a syntax error.
     """
+    if mode not in (STRICT, BROAD):
+        raise ValueError(f"unknown fts mode {mode!r}")
     terms: list[str] = []
     for raw in (text or "").split():
         # A term with no alphanumeric character (``+++``, ``--``, ``?``)
@@ -99,7 +102,7 @@ def fts5_match_query(
         # have to be dropped rather than quoted.
         if not any(ch.isalnum() for ch in raw):
             continue
-        if drop_stopwords:
+        if mode == BROAD:
             # Compare on the bare word so "wallet?" and "(urgent)" are
             # not accidentally treated as non-stopwords by punctuation.
             bare = "".join(ch for ch in raw if ch.isalnum() or ch == "'").lower()
@@ -107,5 +110,11 @@ def fts5_match_query(
                 continue
         terms.append(_quote(raw))
     if not terms:
+        # BROAD dropped everything (the utterance was all stopwords).
+        # Retry without the filter rather than returning nothing, so
+        # "what is it" still searches for something.
+        if mode == BROAD:
+            return fts5_match_query(text, mode=STRICT)
         return ""
-    return f" {operator} ".join(terms)
+    joiner = " OR " if mode == BROAD else " AND "
+    return joiner.join(terms)

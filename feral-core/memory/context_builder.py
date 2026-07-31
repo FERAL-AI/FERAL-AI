@@ -11,29 +11,9 @@ from __future__ import annotations
 import json
 import logging
 
-from memory.fts_query import fts5_match_query
+from memory.fts_query import BROAD as FTS_BROAD
 
 logger = logging.getLogger("feral.memory")
-
-
-def _fts_query(query: str) -> str:
-    """Turn a natural-language utterance into an FTS5-friendly OR query.
-
-    SQLite FTS5 treats the raw phrase as a strict AND of all terms, so
-    "where is my wallet" returns zero matches when the row only contains
-    "wallet". We tokenize, drop stopwords, and OR the rest so the search
-    actually hits.
-
-    Delegates to :func:`memory.fts_query.fts5_match_query` for the
-    escaping. The tokenizer this function used to carry kept ``'`` in
-    its character class, so every contraction ("don't", "what's") was
-    passed through unquoted and raised ``fts5: syntax error near "'"``
-    at the call site. Quoting is not optional and must have exactly one
-    implementation.
-    """
-    if not query:
-        return ""
-    return fts5_match_query(query, operator="OR", drop_stopwords=True) or query
 
 
 async def build_context_for_llm_async(
@@ -58,7 +38,10 @@ async def build_context_for_llm_async(
     if working:
         sections.append(f"## Recent Context\n{working[:budget_per_section]}")
 
-    fts = _fts_query(query)
+    # The store methods sanitise their own FTS input, so pass the raw
+    # utterance and just declare the recall we want. Pre-building an
+    # expression here and handing it to a layer that sanitises again
+    # quoted the OR into a literal term.
     if query:
         graph_ctx = ""
         if store._kg:
@@ -70,19 +53,23 @@ async def build_context_for_llm_async(
         if graph_ctx:
             sections.append(graph_ctx)
         else:
-            knowledge = await store.knowledge_search(fts or query, limit=5)
+            knowledge = await store.knowledge_search(
+                query, limit=5, fts_mode=FTS_BROAD
+            )
             if knowledge:
                 k_lines = [f"- {k['subject']} {k['predicate']} {k['object']}" for k in knowledge]
                 sections.append("## Known Facts\n" + "\n".join(k_lines)[:budget_per_section])
 
     if query:
         try:
-            episodes = await store.episode_search_hybrid(fts or query, limit=3)
+            episodes = await store.episode_search_hybrid(
+                query, limit=3, fts_mode=FTS_BROAD
+            )
         except Exception as exc:
             logger.debug("episode_search_hybrid failed, falling back to FTS: %s", exc)
-            episodes = await store.episode_search(fts or query, limit=3)
+            episodes = await store.episode_search(query, limit=3, fts_mode=FTS_BROAD)
         if not episodes:
-            episodes = await store.episode_search(fts or query, limit=3)
+            episodes = await store.episode_search(query, limit=3, fts_mode=FTS_BROAD)
     else:
         episodes = await store.episode_recent(limit=3, session_id=session_id)
     if memory_filter:

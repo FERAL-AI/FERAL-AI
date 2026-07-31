@@ -67,7 +67,7 @@ except Exception:
     pass
 
 from config.loader import feral_data_home
-from memory.fts_query import fts5_match_query
+from memory.fts_query import STRICT as FTS_STRICT, fts5_match_query
 from memory.context_builder import (
     build_context_for_llm_async as context_build_context_for_llm_async,
     compact_session as context_compact_session,
@@ -1411,6 +1411,7 @@ class MemoryStore:
         limit: int = 10,
         *,
         include_forgotten: bool = False,
+        fts_mode: str = FTS_STRICT,
     ) -> list[dict]:
         """Hybrid search: FTS5 text + vector similarity fused by
         Reciprocal Rank Fusion, plus a bounded recency prior.
@@ -1443,7 +1444,7 @@ class MemoryStore:
             # "(urgent)" all raised a syntax error into the swallowing
             # ``except`` below, so the text leg contributed nothing for
             # a large and entirely ordinary class of queries.
-            match_expr = fts5_match_query(query)
+            match_expr = fts5_match_query(query, mode=fts_mode)
             if match_expr:
                 try:
                     async with conn.execute(
@@ -1571,6 +1572,7 @@ class MemoryStore:
         limit: int = 10,
         *,
         include_forgotten: bool = False,
+        fts_mode: str = FTS_STRICT,
     ) -> list[dict]:
         """FTS-only episode search (backward compat). Honours the
         same ``forgotten_at`` filter + access tracking as
@@ -1580,7 +1582,7 @@ class MemoryStore:
         # Same quoting as the hybrid path: without it, a query holding an
         # apostrophe or a "+" fell through to the LIKE branch below on
         # every call, silently trading BM25 ordering for substring order.
-        match_expr = fts5_match_query(query)
+        match_expr = fts5_match_query(query, mode=fts_mode)
         conn = await self._conn()
         try:
             try:
@@ -1987,29 +1989,38 @@ class MemoryStore:
             for r in rows
         ]
 
-    async def knowledge_search(self, query: str, limit: int = 10) -> list[dict]:
+    async def knowledge_search(
+        self, query: str, limit: int = 10, *, fts_mode: str = FTS_STRICT,
+    ) -> list[dict]:
         if self._kg_unified_enabled():
-            return await self._knowledge_search_unified(query, limit)
-        return await self._knowledge_search_flat(query, limit)
+            return await self._knowledge_search_unified(query, limit, fts_mode=fts_mode)
+        return await self._knowledge_search_flat(query, limit, fts_mode=fts_mode)
 
     async def _knowledge_search_unified(
-        self, query: str, limit: int,
+        self, query: str, limit: int, *, fts_mode: str = FTS_STRICT,
     ) -> list[dict]:
         """KG-routed search: hit ``entities_fts`` for matching entity
         names (subject OR object), then expand each match into the
         relations it participates in."""
+        # Quoted here, at the SQL boundary, for the same reason as the
+        # episode paths: an unquoted apostrophe or operator character
+        # raised straight into the LIKE fallback below.
+        match_expr = fts5_match_query(query, mode=fts_mode)
         conn = await self._conn()
         try:
             try:
+                if not match_expr:
+                    raise ValueError("no indexable term in query")
                 async with conn.execute(
                     """SELECT e.id FROM entities_fts f
                        JOIN entities e ON f.rowid = e.rowid
                        WHERE entities_fts MATCH ? LIMIT ?""",
-                    (query, max(limit * 4, 20)),
+                    (match_expr, max(limit * 4, 20)),
                 ) as cur:
                     entity_ids = [r["id"] for r in await cur.fetchall()]
-            except Exception:
+            except Exception as exc:
                 # FTS unavailable: fall back to LIKE on names.
+                logger.debug("entities FTS search fell back to LIKE: %s", exc)
                 async with conn.execute(
                     "SELECT id FROM entities WHERE name LIKE ? LIMIT ?",
                     (f"%{query}%", max(limit * 4, 20)),
@@ -2039,19 +2050,23 @@ class MemoryStore:
         ]
 
     async def _knowledge_search_flat(
-        self, query: str, limit: int,
+        self, query: str, limit: int, *, fts_mode: str = FTS_STRICT,
     ) -> list[dict]:
+        match_expr = fts5_match_query(query, mode=fts_mode)
         conn = await self._conn()
         try:
             try:
+                if not match_expr:
+                    raise ValueError("no indexable term in query")
                 async with conn.execute(
                     """SELECT k.* FROM knowledge_fts f
                        JOIN knowledge k ON f.rowid = k.rowid
                        WHERE knowledge_fts MATCH ? ORDER BY rank LIMIT ?""",
-                    (query, limit),
+                    (match_expr, limit),
                 ) as cur:
                     rows = await cur.fetchall()
-            except Exception:
+            except Exception as exc:
+                logger.debug("knowledge FTS search fell back to LIKE: %s", exc)
                 async with conn.execute(
                     """SELECT * FROM knowledge WHERE subject LIKE ? OR object LIKE ?
                        ORDER BY updated_at DESC LIMIT ?""",
