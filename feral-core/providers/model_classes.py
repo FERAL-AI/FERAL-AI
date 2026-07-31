@@ -474,6 +474,22 @@ _RESPONSES_ONLY_OPENAI: tuple[_re_endpoint.Pattern[str], ...] = (
     _re_endpoint.compile(
         r"^gpt-5(\.[0-9]+)?(-(sol|terra|luna))?-pro(-\d{4}-\d{2}-\d{2})?$"
     ),
+    # The whole gpt-5.6 line, not just its Pro variants. These are reasoning
+    # models, and /v1/chat/completions rejects them outright when a request
+    # carries BOTH function tools and reasoning_effort:
+    #   400 invalid_request_error, param=reasoning_effort: "Function tools
+    #   with reasoning_effort are not supported for gpt-5.6-sol in
+    #   /v1/chat/completions. To use function tools, use /v1/responses or
+    #   set reasoning_effort to 'none'."
+    # FERAL sends tools on essentially every turn, so on chat_completions
+    # this model family cannot complete a single agentic turn. Observed on a
+    # clean 2026.7.31 install the moment the stale gpt-4o-mini default was
+    # removed and the catalog resolved gpt-5.6-sol. Routing to /v1/responses
+    # is what OpenAI's own error text prescribes, and keeps reasoning on
+    # rather than degrading it to 'none'.
+    _re_endpoint.compile(
+        r"^gpt-5\.6(-(sol|terra|luna))?(-\d{4}-\d{2}-\d{2})?$"
+    ),
     # o-series reasoning Pro variants (o3-pro etc).
     _re_endpoint.compile(r"^o[134]-pro(-.*)?$"),
     # Deep research models (responses-only per OpenAI docs).
