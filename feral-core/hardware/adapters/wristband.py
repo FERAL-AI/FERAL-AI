@@ -2,7 +2,11 @@
 HUP Wristband Adapter — Bluetooth wearable with health sensors.
 
 Reads heart rate, SpO2, skin temperature from BLE GATT characteristics
-and streams them as HUP telemetry. Also supports vibration alerts.
+and streams them as HUP telemetry.
+
+Read-only. Haptics and LED are not wired (no standard GATT characteristic
+exists for them), so they are neither advertised in the manifest nor
+executable — see the comments in `manifest` and `execute`.
 
 Usage:
     adapter = WristbandAdapter(ble_address="AA:BB:CC:DD:EE:FF")
@@ -34,8 +38,9 @@ class WristbandAdapter:
     This adapter demonstrates the pattern for:
     1. Declaring device capabilities via a manifest
     2. Reading sensor telemetry (heart rate, SpO2, skin temp)
-    3. Executing actuator commands (vibrate, set LED)
-    4. Streaming periodic telemetry to the Brain
+    3. Streaming periodic telemetry to the Brain
+
+    Actuator commands are intentionally absent: see the module docstring.
     """
 
     def __init__(self, ble_address: str = "", device_id: str = "wristband-01"):
@@ -82,52 +87,54 @@ class WristbandAdapter:
                     permission_tier="passive",
                     returns={"type": "object", "properties": {"temperature_c": {"type": "number"}}},
                 ),
-                DeviceCapability(
-                    id="vibrate",
-                    name="Vibrate",
-                    description="Trigger haptic vibration for alerts",
-                    category="actuator",
-                    permission_tier="active",
-                    parameters=[
-                        {"name": "pattern", "type": "string", "description": "Vibration pattern: short, long, double, sos", "default": "short"},
-                        {"name": "intensity", "type": "integer", "description": "0-100 intensity", "default": 50},
-                    ],
-                    reversible=True,
-                ),
-                DeviceCapability(
-                    id="set_led",
-                    name="Set LED Color",
-                    description="Set the wristband LED indicator color",
-                    category="actuator",
-                    permission_tier="active",
-                    parameters=[
-                        {"name": "color", "type": "string", "description": "Hex color e.g. #FF0000"},
-                        {"name": "mode", "type": "string", "description": "solid, blink, pulse", "default": "solid"},
-                    ],
-                ),
+                # `vibrate` and `set_led` are deliberately NOT advertised.
+                # Both were implemented as a `logger.info` followed by
+                # `status="success"` — no GATT write of any kind — so the
+                # brain could tell a user it had buzzed their wrist when
+                # nothing happened. Haptics and LED are vendor-specific
+                # characteristics with no standard GATT UUID, so there is
+                # nothing to write to until a concrete device defines one.
+                # An unadvertised capability cannot be offered to the LLM or
+                # rendered in the UI; execute() also refuses them by name
+                # with a reason, in case something calls them directly.
             ],
             location="wrist",
             tags=["health", "wearable", "ble"],
         )
 
     async def connect(self) -> bool:
-        """Connect to the BLE wristband."""
+        """Connect to the BLE wristband.
+
+        No "simulation mode": this used to set ``_connected = True`` with
+        ``_client`` still None, which made the adapter claim a device was
+        present when none was. ``read_telemetry`` already told the truth in
+        that state (``source: no_device``); connect() now agrees with it.
+        """
         if not self.ble_address:
-            logger.warning("No BLE address configured; running in simulation mode")
-            self._connected = True
-            return True
+            logger.error(
+                "Wristband %s has no BLE address configured — not connected. "
+                "Construct it as WristbandAdapter(ble_address='AA:BB:...') "
+                "after pairing the device.",
+                self.device_id,
+            )
+            return False
         try:
             from bleak import BleakClient
+        except ImportError:
+            logger.error(
+                "Wristband %s cannot connect: bleak is not installed. "
+                "Install it with `pip install bleak`.",
+                self.device_id,
+            )
+            return False
+        try:
             self._client = BleakClient(self.ble_address)
             await self._client.connect()
             self._connected = True
             logger.info("Connected to wristband at %s", self.ble_address)
             return True
-        except ImportError:
-            logger.info("bleak not installed; running in simulation mode")
-            self._connected = True
-            return True
         except Exception as e:
+            self._client = None
             logger.error("BLE connection failed: %s", e)
             return False
 
@@ -159,37 +166,44 @@ class WristbandAdapter:
         """Execute a HUP action on this device."""
         cap_id = action.capability_id
 
-        if cap_id == "heart_rate":
+        # A read with no device behind it returns zeros. Reporting those as
+        # a successful measurement is how a 0 bpm "reading" ends up in
+        # baselines and in health answers, so the no-device case is a
+        # failure, not a reading of zero.
+        if cap_id in ("heart_rate", "spo2", "skin_temp"):
             data = await self.read_telemetry()
+            if data.get("source") == "no_device":
+                return HUPResult(
+                    action_id=action.action_id, device_id=self.device_id,
+                    status="failure",
+                    error=(
+                        f"Wristband {self.device_id} is not connected, so "
+                        f"{cap_id} was not measured. "
+                        + str(data.get("note") or "")
+                    ).strip(),
+                )
+            field = {
+                "heart_rate": ("bpm", "heart_rate_bpm"),
+                "spo2": ("spo2_pct", "spo2_pct"),
+                "skin_temp": ("temperature_c", "skin_temp_c"),
+            }[cap_id]
             return HUPResult(
                 action_id=action.action_id, device_id=self.device_id,
-                status="success", data={"bpm": data["heart_rate_bpm"]},
+                status="success", data={field[0]: data[field[1]]},
             )
-        elif cap_id == "spo2":
-            data = await self.read_telemetry()
-            return HUPResult(
-                action_id=action.action_id, device_id=self.device_id,
-                status="success", data={"spo2_pct": data["spo2_pct"]},
+        elif cap_id in ("vibrate", "set_led"):
+            # Was: logger.info(...) + status="success". Nothing was ever
+            # written to the device. See the manifest comment above.
+            error = (
+                f"{cap_id} is not implemented for {self.device_id}: this "
+                f"adapter has no GATT characteristic to write to, so nothing "
+                f"would happen. The capability is not advertised in the "
+                f"device manifest for the same reason."
             )
-        elif cap_id == "skin_temp":
-            data = await self.read_telemetry()
+            logger.error("Refusing %s on %s — %s", cap_id, self.device_id, error)
             return HUPResult(
                 action_id=action.action_id, device_id=self.device_id,
-                status="success", data={"temperature_c": data["skin_temp_c"]},
-            )
-        elif cap_id == "vibrate":
-            pattern = (action.parameters or {}).get("pattern", "short")
-            logger.info("Vibrating wristband: pattern=%s", pattern)
-            return HUPResult(
-                action_id=action.action_id, device_id=self.device_id,
-                status="success", data={"vibrated": True, "pattern": pattern},
-            )
-        elif cap_id == "set_led":
-            color = (action.parameters or {}).get("color", "#00FF00")
-            logger.info("Setting wristband LED to %s", color)
-            return HUPResult(
-                action_id=action.action_id, device_id=self.device_id,
-                status="success", data={"led_color": color},
+                status="failure", error=error,
             )
         else:
             return HUPResult(

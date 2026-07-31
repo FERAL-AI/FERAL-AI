@@ -12,6 +12,7 @@ import collections
 import logging
 import os
 import re
+import secrets
 import time
 from collections.abc import Awaitable  # noqa: F401 — used by quoted return annotations in WS9 task spawners
 from pathlib import Path
@@ -1870,10 +1871,39 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
             "sunset=2026.7.0"
         )
 
-    if paired_device_id is None and credential != NODE_API_KEY:
-        logger.warning("Unauthorized daemon connection attempt rejected")
-        await ws.close(code=4003, reason="Unauthorized Edge Node API Key")
-        return
+    # An unset NODE_API_KEY used to mean "allow everyone": the gate was a
+    # single `credential != NODE_API_KEY`, so a node that presented no
+    # credential at all compared `"" != ""` — False — and was admitted with
+    # full capabilities. An auditor registered a node called `attacker-node`
+    # this way and got back a complete `node_ack`; from there a node can
+    # inject `text_command` (LLM spend), `telemetry`/`device_event` (poisons
+    # baselines and health answers), and `device_announce` (writes the
+    # knowledge graph). Unconfigured must mean CLOSED, never open, so the
+    # empty-key case is refused explicitly BEFORE any comparison can make an
+    # absent credential look valid. Pairing tokens and phone bearers
+    # (`_verify_credential`) are checked first and are unaffected, so
+    # legitimately paired devices keep connecting with no key configured.
+    if paired_device_id is None:
+        if not NODE_API_KEY:
+            logger.error(
+                "feral.security.node_api_key_unset: refused an unpaired "
+                "/v1/node connection because NODE_API_KEY is not configured. "
+                "An empty key NEVER grants access. Fix: set NODE_API_KEY in "
+                "the brain's environment (or security.node_api_key in "
+                "config.yaml) and give every daemon the same value, or pair "
+                "the device so it presents a pairing token instead."
+            )
+            await ws.close(
+                code=4003,
+                reason="Edge Node API Key not configured on brain",
+            )
+            return
+        # Constant-time compare: the credential is attacker-supplied and a
+        # naive `!=` leaks key length/prefix through response timing.
+        if not secrets.compare_digest(credential, NODE_API_KEY):
+            logger.warning("Unauthorized daemon connection attempt rejected")
+            await ws.close(code=4003, reason="Unauthorized Edge Node API Key")
+            return
     node_id = None
     logger.info(
         "Daemon connecting (device_id=%s bearer_kind=%s auth_source=%s)...",

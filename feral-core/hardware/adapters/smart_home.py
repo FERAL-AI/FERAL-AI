@@ -221,16 +221,14 @@ class SmartHomeAdapter:
                     parameters=[{"name": "color", "type": "string", "description": "Hex color e.g. #FF6600"}],
                     reversible=True,
                 ),
-                DeviceCapability(
-                    id="thermostat_set",
-                    name="Set Thermostat",
-                    description="Set target temperature in Celsius",
-                    category="actuator",
-                    permission_tier="active",
-                    parameters=[{"name": "temperature_c", "type": "number", "description": "Target temperature"}],
-                    requires_confirmation=True,
-                    reversible=True,
-                ),
+                # `thermostat_set` is deliberately NOT advertised. It used to
+                # return status="success" with a `"note": "requires Home
+                # Assistant integration"` buried in the payload — so the
+                # brain reported the setpoint as applied while no thermostat
+                # was ever contacted. This is a Hue adapter; there is no
+                # Home Assistant client in the tree to route it to. Reading
+                # temperature still works (Hue motion sensors expose it), so
+                # `thermostat_read` stays.
                 DeviceCapability(
                     id="thermostat_read",
                     name="Read Temperature",
@@ -281,14 +279,31 @@ class SmartHomeAdapter:
             return HUPResult(action_id=action.action_id, device_id=self.device_id, status="failure", error=result.get("error", ""))
 
         elif cap_id == "thermostat_set":
-            temp = float(params.get("temperature_c", 22.0))
+            # Was: status="success" with the setpoint echoed back and a note
+            # admitting it needed an integration that does not exist. See the
+            # manifest comment — this capability is not advertised either.
+            error = (
+                "Thermostat control is not implemented: this adapter speaks "
+                "the Philips Hue API only, and no thermostat was contacted. "
+                "The setpoint was NOT applied. Wire a Home Assistant (or "
+                "vendor) client before offering this capability."
+            )
+            logger.error("Refusing thermostat_set on %s — %s", self.device_id, error)
             return HUPResult(
-                action_id=action.action_id, device_id=self.device_id, status="success",
-                data={"setpoint_c": temp, "note": "Thermostat control requires Home Assistant integration"},
+                action_id=action.action_id, device_id=self.device_id,
+                status="failure", error=error,
             )
 
         elif cap_id == "thermostat_read":
             result = await self._read_hue_temperature_sensor()
+            # The helper reports its failures as {"error": ...}; returning
+            # that as status="success" made "Hue not configured" look like a
+            # temperature reading.
+            if "error" in result:
+                return HUPResult(
+                    action_id=action.action_id, device_id=self.device_id,
+                    status="failure", error=str(result["error"]),
+                )
             return HUPResult(action_id=action.action_id, device_id=self.device_id, status="success", data=result)
 
         elif cap_id == "scene_activate":

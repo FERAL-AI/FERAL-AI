@@ -1,7 +1,9 @@
 """Routine (cron job) CRUD endpoints."""
 
 from fastapi import APIRouter
+from starlette.responses import JSONResponse
 
+from agents.scheduler import UnparseableCronExpression
 from api.state import state
 
 router = APIRouter()
@@ -48,10 +50,19 @@ async def create_routine(body: dict):
     # semantics; callers may still pass an explicit IANA tz_name.
     tz_name = body.get("tz_name") or None
     recurring = bool(body.get("recurring", True))
-    job = state.scheduler.create_job(
-        jt, cron_expr, description, payload, session_id,
-        recurring=recurring, tz_name=tz_name,
-    )
+    # A schedule the parser cannot read is a client error, not a server one.
+    # Reject it here so the operator sees it while writing the routine —
+    # the scheduler no longer silently re-arms unparseable jobs at 60s.
+    try:
+        job = state.scheduler.create_job(
+            jt, cron_expr, description, payload, session_id,
+            recurring=recurring, tz_name=tz_name,
+        )
+    except UnparseableCronExpression as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": str(exc), "field": "cron_expr"},
+        )
     return {"ok": True, "routine": _job_to_dict(job)}
 
 
