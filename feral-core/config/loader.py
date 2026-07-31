@@ -34,7 +34,14 @@ DEFAULT_SETTINGS = {
     "version": "0.4.0",
     "llm": {
         "provider": "openai",
-        "model": "gpt-4o-mini",
+        # Empty on purpose: ``LLMProvider.__init__`` falls through to
+        # ``_default_model_for`` which reads the live model catalog. A
+        # literal here pins every new install to whatever was current
+        # when it was written -- this shipped ``gpt-4o-mini``, whose
+        # Oct-2023 training cutoff made it fabricate 2023 dates for
+        # "schedule X at 10am" on a 2026 machine. Roadmap 3.5 P0 bans
+        # hardcoded model literals for exactly this reason.
+        "model": "",
         # Lane U1 — multi-model favorites. ``llm.model`` stays the
         # active scalar choice (back-compat for every caller that
         # reads it). ``llm.models`` is the additive favorites list
@@ -849,7 +856,7 @@ class ConfigLoader:
         env = {}
         llm = self._merged.get("llm", {})
         env["FERAL_LLM_PROVIDER"] = llm.get("provider", "openai")
-        env["FERAL_LLM_MODEL"] = llm.get("model", "gpt-4o-mini")
+        env["FERAL_LLM_MODEL"] = llm.get("model", "")
         if llm.get("base_url"):
             env["FERAL_LLM_BASE_URL"] = llm["base_url"]
 
