@@ -10,6 +10,34 @@ import os
 os.environ.setdefault("FERAL_RATE_LIMIT_RPM", "10000")
 
 
+# Keep freezegun away from `transformers`, or the whole suite wedges.
+#
+# On entry, `freeze_time` walks every module in `sys.modules` and calls
+# `getattr` on each attribute, looking for datetime objects to patch.
+# `transformers` uses a LAZY module `__getattr__` that imports a submodule
+# on attribute access, so that scan drags in `transformers.agents.agents`
+# -> `pandas` -> the entire import tree, one heavyweight import per
+# attribute name.
+#
+# Measured standalone with `transformers` already loaded: a bare
+# `freeze_time(...)` entry does not complete in 120s; with this ignore it
+# takes 0.3s. In a full-suite run the effect is worse, because any earlier
+# test that imports `transformers` arms it for every freeze_time after --
+# observed as `tests/test_pairing_hash.py::test_freezegun_simulates_ttl_
+# passage` sitting at 100% CPU for 39 minutes with no output.
+#
+# The tests that freeze time care about this package's own TTL logic;
+# none of them assert anything about datetimes inside `transformers`, so
+# excluding it from the patch scan costs nothing. Set here rather than
+# per-call so a future `freeze_time` cannot reintroduce the hang.
+try:
+    import freezegun
+
+    freezegun.configure(extend_ignore_list=["transformers"])
+except Exception:  # pragma: no cover - freezegun is a test-only dep
+    pass
+
+
 # : soak tests are gated behind
 # `--runsoak`. Without the flag every test marked `@pytest.mark.soak` is
 # skipped so the regular CI run stays fast and deterministic.
