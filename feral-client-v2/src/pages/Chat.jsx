@@ -307,6 +307,11 @@ export default function Chat() {
         reasoning,
         tools,
         timeline,
+        // Only present when the provider actually reported them. Never
+        // synthesize a zero here: "0 tokens" reads as a real measurement
+        // and would be a lie on providers that report no usage.
+        model: extras.model || '',
+        usage: extras.usage || null,
       }]);
     };
 
@@ -346,7 +351,10 @@ export default function Chat() {
           setStreamingText('');
           setThinking(false);
           setToolChip(null);
-          commit(final);
+          commit(final, {
+            model: p.model || '',
+            usage: p.usage && Object.keys(p.usage).length ? p.usage : null,
+          });
           return;
         }
         // Reasoning deltas (extended thinking, R1-style models) come
@@ -399,7 +407,14 @@ export default function Chat() {
         const finalText = streamed && streamed.length > (text?.length || 0) ? streamed : text;
         streamBufferRef.current = '';
         setStreamingText('');
-        commit(finalText || '', { timeline: p.timeline || null });
+        commit(finalText || '', {
+          timeline: p.timeline || null,
+          // Same attribution contract as the terminal stream frame. This
+          // is the path a default install uses, since `features.streaming`
+          // is off unless the operator turns it on.
+          model: p.model || '',
+          usage: p.usage && Object.keys(p.usage).length ? p.usage : null,
+        });
       } else if (type === 'tool_start' || type === 'tool_call' || type === 'skill_start') {
         const p = msg.payload || {};
         const key = traceKey(p);
@@ -951,6 +966,13 @@ export default function Chat() {
                         ))}
                       </div>
                     )}
+                    {/* Sibling of the actions row, not a child: that row is
+                        hover-revealed via `opacity: 0`, and opacity is
+                        inherited by children with no way to opt back in.
+                        Attribution has to stay readable without hovering. */}
+                    {m.role === 'assistant' && (
+                      <TurnMeta model={m.model} usage={m.usage} />
+                    )}
                     {m.role === 'assistant' && m.text && (
                       <div className="v2-chat-actions">
                         <CopyButton value={m.text} label="Copy message" />
@@ -1167,6 +1189,39 @@ export default function Chat() {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Per-turn attribution: which model answered, and what it cost in tokens.
+ *
+ * Both halves are independently optional because providers differ in what
+ * they report. Renders nothing at all when neither is known, rather than
+ * showing "unknown" or a zero count. A fabricated number here is worse
+ * than an absent one, since the whole point is trusting the meter.
+ */
+export function TurnMeta({ model, usage }) {
+  const hasUsage = usage && (usage.input_tokens || usage.output_tokens || usage.total_tokens);
+  if (!model && !hasUsage) return null;
+  const inTok = Number(usage?.input_tokens || 0);
+  const outTok = Number(usage?.output_tokens || 0);
+  const total = Number(usage?.total_tokens || 0) || inTok + outTok;
+  const fmt = (n) => n.toLocaleString();
+  return (
+    <span
+      className="v2-chat-turnmeta"
+      title={hasUsage ? `${fmt(inTok)} in + ${fmt(outTok)} out = ${fmt(total)} tokens` : undefined}
+      data-testid="chat-turn-meta"
+    >
+      {model && <span className="v2-chat-turnmeta__model">{model}</span>}
+      {model && hasUsage && <span className="v2-chat-turnmeta__sep" aria-hidden="true">·</span>}
+      {hasUsage && (
+        <span className="v2-chat-turnmeta__tokens">
+          {fmt(total)}
+          {' tokens'}
+        </span>
+      )}
+    </span>
   );
 }
 

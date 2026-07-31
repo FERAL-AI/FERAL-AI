@@ -2192,6 +2192,30 @@ class LLMProvider:
                         # picks up after the generator finishes.
                         yield event
                         return
+                    if event.get("type") == "done" and event.get("usage"):
+                        # Record the turn against the operator's cost caps.
+                        # ``_budget_record`` is otherwise only reached from
+                        # the NON-streaming paths (``chat`` at :806/:932 and
+                        # ``chat_with_failover`` at :4102), so every streamed
+                        # turn was being billed at ZERO tokens and the
+                        # per-call-site caps in settings.json never moved for
+                        # it. Note this is the opt-in path, not the default:
+                        # ``features.streaming`` defaults to False, so a fresh
+                        # profile serves chat from ``_handle_command_impl``.
+                        # Both paths have to record, and now both do.
+                        #
+                        # ``_extract_usage`` already accepts the
+                        # ``{usage: {input_tokens, output_tokens}}`` shape the
+                        # Responses terminal event carries, so the dict goes
+                        # straight in. Bill against the model that ANSWERED
+                        # (present on the event after failover), not the one
+                        # configured. ``_budget_record`` is best-effort and
+                        # never raises.
+                        await self._budget_record(
+                            call_site,
+                            str(event.get("model") or self.model),
+                            event,
+                        )
                     yield event
                 if streamed_anything:
                     return

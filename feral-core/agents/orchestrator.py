@@ -68,6 +68,10 @@ from agents.response_delivery import (
     try_genui_for_result as helper_try_genui_for_result,
     try_send_sdui as helper_try_send_sdui,
 )
+from agents.turn_attribution import (
+    accumulate_turn_usage as _accumulate_turn_usage,
+    model_of_llm_response as _model_of_llm_response,
+)
 
 if TYPE_CHECKING:
     from api.server import VisionBuffer
@@ -2224,7 +2228,16 @@ class Orchestrator:
                 try:
                     response_text = await self._multi_agent.run(session_id, text, context)
                     if response_text:
-                        await self._try_send_sdui(session_id, response_text)
+                        # Attribution for the multi-agent turn. This branch
+                        # runs BEFORE the single-agent loop and returns, so
+                        # without this the default profile (multi_agent
+                        # defaults on) would show no model and no tokens at
+                        # all: the loop that records them never executes.
+                        _model, _usage = self._pop_multi_agent_attribution(session_id)
+                        await self._try_send_sdui(
+                            session_id, response_text,
+                            model=_model, usage=_usage,
+                        )
                         if self.memory:
                             # Full text, not [:300] — the phone's chat_response
                             # falls back to working memory and must not get a
@@ -2369,6 +2382,16 @@ class Orchestrator:
         reasoning_retry_count = 0
         empty_retry_used = False
         pending_retry_addition: Optional[str] = None
+        # Per-turn attribution, accumulated ACROSS ROUNDS. One user turn
+        # can drive several LLM calls (each tool round, plus refusal and
+        # empty-response retries, plus a tier escalation), and the user is
+        # billed for every one of them. Reporting only the last round
+        # would understate a tool-heavy turn by most of its real cost,
+        # which is the opposite of the point. ``turn_model`` tracks the
+        # model that produced the FINAL answer, since that is the one the
+        # user is looking at when they read the label.
+        turn_usage: dict[str, int] = {}
+        turn_model = ""
         # Never-stall: if the user turn is a short ack, inject the fast-path
         # instruction into the very first call (before the model replies).
         if self.refusal_handler.is_ack_execution(text):
@@ -2451,6 +2474,15 @@ class Orchestrator:
                         budget=response["budget_exceeded"],
                     )
                     return
+
+                # Accumulate this round's cost before any of the branches
+                # below can ``continue``/``break`` past it. A refusal retry
+                # or a tier escalation still burned real tokens, so it has
+                # to count even though its output is discarded.
+                _accumulate_turn_usage(turn_usage, response)
+                _round_model = _model_of_llm_response(response)
+                if _round_model:
+                    turn_model = _round_model
 
                 text_content, tool_calls = self.llm.extract_response(response)
 
@@ -2676,7 +2708,10 @@ class Orchestrator:
                     self.memory.working_push(session_id, {"role": "assistant", "text": text_content})
                     await self._emit_brain_event(session_id, "memory_write", {"type": "episodic"})
 
-                await self._send_text(session_id, text_content)
+                await self._send_text(
+                    session_id, text_content,
+                    model=turn_model, usage=turn_usage,
+                )
                 sent_response = True
                 final_response_text = text_content
                 break
@@ -2781,7 +2816,12 @@ class Orchestrator:
             try:
                 response_text = await self._multi_agent.run(session_id, text, context)
                 if response_text:
-                    await self._try_send_sdui(session_id, response_text)
+                    # Same as the non-stream multi-agent branch above.
+                    _model, _usage = self._pop_multi_agent_attribution(session_id)
+                    await self._try_send_sdui(
+                        session_id, response_text,
+                        model=_model, usage=_usage,
+                    )
                     if self.memory:
                         # Full text (no [:300]) — see the non-stream
                         # multi-agent branch for rationale.
@@ -3004,10 +3044,21 @@ class Orchestrator:
                         # Flush any buffered prose before the terminal frame.
                         await _flush_stream_prose()
                         if streamed_text:
+                            # Carry per-turn attribution on the terminal frame
+                            # so the UI can show which model answered and what
+                            # the turn cost. The provider reports both on its
+                            # own done event; before this they were dropped
+                            # here, so the client had no way to distinguish
+                            # "answered by the configured model" from
+                            # "answered by hop 4 of the failover chain".
+                            # Absent keys stay absent rather than rendering
+                            # a fabricated zero.
                             await self.send(session_id, FeralMessage(
                                 session_id=session_id, hop="brain", type="stream_delta",
                                 payload=StreamDeltaPayload(
                                     delta="", stream_id=stream_id, is_final=True,
+                                    model=str(delta.get("model") or ""),
+                                    usage=delta.get("usage") or {},
                                 ).model_dump(),
                             ))
                     elif delta["type"] == "budget_exceeded":
@@ -4618,14 +4669,63 @@ class Orchestrator:
     # Response Helpers
     # ─────────────────────────────────────────────
 
-    async def _send_text(self, session_id: str, text: str):
+    async def _send_text(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        model: str = "",
+        usage: dict | None = None,
+    ):
         # Record first: every path that sends text must record what it
         # sent, including the ones that return before the tool loop.
         self._note_outbound_text(session_id, text)
-        await helper_send_text(self, session_id=session_id, text=text)
+        # ``model``/``usage`` are supplied only by the main tool loop,
+        # which is the only caller that knows what the turn actually cost.
+        # The many status/error/ack sends keep the empty default, so the
+        # UI attributes an answer and stays quiet about everything else.
+        await helper_send_text(
+            self, session_id=session_id, text=text, model=model, usage=usage,
+        )
 
-    async def _try_send_sdui(self, session_id: str, text: str):
-        await helper_try_send_sdui(self, session_id=session_id, text=text)
+    def _pop_multi_agent_attribution(self, session_id: str) -> tuple[str, dict]:
+        """Attribution for the multi-agent turn that just finished.
+
+        Every failure mode returns "unknown" rather than raising. A token
+        label is cosmetic; a turn whose answer never reaches the user
+        because the label could not be computed is a real outage. The
+        multi-agent orchestrator is also swappable (``_init_multi_agent``
+        falls back, and tests inject doubles), so neither the method nor
+        the shape of what it returns can be assumed.
+        """
+        fn = getattr(self._multi_agent, "pop_turn_attribution", None)
+        if not callable(fn):
+            return "", {}
+        try:
+            attr = fn(session_id)
+        except Exception:
+            logger.debug("multi-agent attribution unavailable", exc_info=True)
+            return "", {}
+        if not isinstance(attr, dict):
+            return "", {}
+        model = attr.get("model")
+        usage = attr.get("usage")
+        return (
+            model if isinstance(model, str) else "",
+            usage if isinstance(usage, dict) else {},
+        )
+
+    async def _try_send_sdui(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        model: str = "",
+        usage: dict | None = None,
+    ):
+        await helper_try_send_sdui(
+            self, session_id=session_id, text=text, model=model, usage=usage,
+        )
 
     async def _try_genui_for_result(self, session_id: str, tool_call: dict, result_data: dict):
         await helper_try_genui_for_result(self, session_id=session_id, tool_call=tool_call, result_data=result_data)

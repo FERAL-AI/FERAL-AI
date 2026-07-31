@@ -370,6 +370,13 @@ class TextResponsePayload(BaseModel):
     """Plain text response (for CLI/chat clients)."""
     text: str
     tool_calls: Optional[list[dict]] = None
+    # Per-turn attribution, same contract as ``StreamDeltaPayload`` below.
+    # This is the path a DEFAULT install actually uses for chat, because
+    # ``features.streaming`` defaults to False, so it needs the fields at
+    # least as much as the streaming one does. ``usage`` here is summed
+    # across every LLM round the turn made, not just the final one.
+    model: str = ""
+    usage: dict = Field(default_factory=dict)
 
 
 class StreamDeltaPayload(BaseModel):
@@ -377,6 +384,21 @@ class StreamDeltaPayload(BaseModel):
     delta: str
     stream_id: str = ""
     is_final: bool = False
+    # Per-turn attribution, set only on the terminal frame (is_final=True).
+    #
+    # ``model`` is the model that ACTUALLY ANSWERED, which is not always the
+    # configured one: the failover chain can hop providers mid-turn, so a UI
+    # that shows ``llm.model`` from settings can be wrong without any way for
+    # the user to tell. Empty when the provider did not report it.
+    #
+    # ``usage`` is ``{input_tokens, output_tokens, total_tokens}``. Empty when
+    # the provider reported none. Notably the chat-completions streaming path
+    # which only emits usage if the request sets ``stream_options.include_usage``
+    # (this repo does not set it anywhere). The Responses API reports it on the
+    # terminal event with no opt-in, and gpt-5.6 routes there, so the default
+    # install does get real numbers.
+    model: str = ""
+    usage: dict = Field(default_factory=dict)
 
 
 class ToolStartPayload(BaseModel):

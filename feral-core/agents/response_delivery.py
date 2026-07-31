@@ -9,7 +9,14 @@ from agents.chat_sanitizer import sanitize_assistant_display_text
 logger = logging.getLogger("feral.orchestrator")
 
 
-async def send_text(orchestrator, session_id: str, text: str):
+async def send_text(
+    orchestrator,
+    session_id: str,
+    text: str,
+    *,
+    model: str = "",
+    usage: dict | None = None,
+):
     # Defense in depth: even non-streaming callers that hand us raw
     # model text benefit from the same artifact scrubber the stream
     # path uses.
@@ -33,7 +40,11 @@ async def send_text(orchestrator, session_id: str, text: str):
                 session_id=session_id,
                 hop="brain",
                 type="text_response",
-                payload=TextResponsePayload(text=clean).model_dump(),
+                payload=TextResponsePayload(
+                    text=clean,
+                    model=model or "",
+                    usage=usage or {},
+                ).model_dump(),
             ),
         )
 
@@ -66,8 +77,20 @@ async def send_text(orchestrator, session_id: str, text: str):
             logger.exception("Whisper fallback synth failed for %s", session_id[:8])
 
 
-async def try_send_sdui(orchestrator, session_id: str, text: str):
-    """Try to parse text as SDUI JSON, fall back to plain text."""
+async def try_send_sdui(
+    orchestrator,
+    session_id: str,
+    text: str,
+    *,
+    model: str = "",
+    usage: dict | None = None,
+):
+    """Try to parse text as SDUI JSON, fall back to plain text.
+
+    Attribution rides along to the plain-text fallback only. An SDUI card
+    is a rendered widget with nowhere to put a token count, and the
+    multi-agent path (the main caller) reaches here for every answer.
+    """
     try:
         cleaned = text.strip()
         if cleaned.startswith("```json"):
@@ -90,7 +113,7 @@ async def try_send_sdui(orchestrator, session_id: str, text: str):
             return
     except json.JSONDecodeError:
         pass
-    await send_text(orchestrator, session_id, text)
+    await send_text(orchestrator, session_id, text, model=model, usage=usage)
 
 
 async def try_genui_for_result(orchestrator, session_id: str, tool_call: dict, result_data: dict):

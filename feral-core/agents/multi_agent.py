@@ -20,6 +20,12 @@ from typing import Optional, Any, Callable, Awaitable
 from uuid import uuid4
 from dataclasses import dataclass, field
 
+from agents.turn_attribution import (
+    accumulate_turn_usage,
+    merge_turn_usage,
+    model_of_llm_response,
+)
+
 from skills.result_budget import serialize_tool_result
 
 logger = logging.getLogger("feral.multi_agent")
@@ -44,6 +50,13 @@ class WorkerResult:
     tool_results: list[dict] = field(default_factory=list)
     confidence: float = 1.0
     error: str = ""
+    # Per-turn attribution for THIS worker: the tokens it burned across
+    # all of its rounds, and the model that produced its final text. The
+    # orchestrator sums these across workers, because a parallel strategy
+    # bills the user for every worker it ran, not just the one whose
+    # answer ends up on screen. Empty when the provider reported nothing.
+    usage: dict = field(default_factory=dict)
+    model: str = ""
 
 
 class AgentBus:
@@ -127,6 +140,12 @@ class AgentWorker:
         if not self._llm or not self._llm.available:
             return WorkerResult(worker_id=self.worker_id, error="LLM not available")
 
+        # Per-worker attribution, summed over every round this worker runs
+        # (tool rounds, the empty-reply nudge, and the synthesis pass). All
+        # of them are billed, so all of them count.
+        w_usage: dict = {}
+        w_model = ""
+
         tools = self.get_tools()
         perception_ctx = ""
         if self._perception:
@@ -197,6 +216,11 @@ class AgentWorker:
                     max_tokens=4096,
                     force_tool=forced_tool,
                 )
+                accumulate_turn_usage(w_usage, response)
+                _m = model_of_llm_response(response)
+                if _m:
+                    w_model = _m
+
                 text_content, tool_calls = self._llm.extract_response(response)
 
                 if tool_calls and final_answer_only:
@@ -279,6 +303,8 @@ class AgentWorker:
                         text=text_content,
                         tool_calls_made=tool_calls_made,
                         tool_results=tool_results,
+                        usage=w_usage,
+                        model=w_model,
                     )
 
                 # Empty body with no tool calls (reasoning-only / refusal
@@ -298,7 +324,11 @@ class AgentWorker:
 
             except Exception as e:
                 logger.error(f"Worker {self.worker_id} error: {e}")
-                return WorkerResult(worker_id=self.worker_id, error=str(e))
+                # Rounds completed before the failure were still billed.
+                return WorkerResult(
+                    worker_id=self.worker_id, error=str(e),
+                    usage=w_usage, model=w_model,
+                )
 
         # Loop exhausted. If tools actually ran, synthesize a grounded
         # summary from their results rather than dropping the work on the
@@ -313,6 +343,10 @@ class AgentWorker:
                     ),
                 })
                 response = await self._llm.chat(messages=messages, tools=None, max_tokens=2048)
+                accumulate_turn_usage(w_usage, response)
+                _m = model_of_llm_response(response)
+                if _m:
+                    w_model = _m
                 text_content, _ = self._llm.extract_response(response)
                 if text_content:
                     return WorkerResult(
@@ -320,6 +354,8 @@ class AgentWorker:
                         text=text_content,
                         tool_calls_made=tool_calls_made,
                         tool_results=tool_results,
+                        usage=w_usage,
+                        model=w_model,
                     )
             except Exception as e:
                 logger.error(f"Worker {self.worker_id} synthesis error: {e}")
@@ -328,6 +364,8 @@ class AgentWorker:
             worker_id=self.worker_id,
             text="Something went wrong and I couldn't generate a reply — please try that again.",
             tool_calls_made=tool_calls_made,
+            usage=w_usage,
+            model=w_model,
         )
 
 
@@ -368,11 +406,19 @@ class AgentRouter:
 
     def __init__(self, llm=None):
         self._llm = llm
+        # Token usage of the classifier call from the most recent
+        # ``route``. Empty when the keyword fast paths answered without
+        # calling the LLM at all, which is the common case.
+        self.last_usage: dict = {}
 
     async def route(self, text: str) -> dict:
         """
         Returns: {"workers": ["health", "home", ...], "strategy": "single"|"parallel"|"sequential"}
         """
+        # Cleared per call: the keyword guards below return without ever
+        # reaching the classifier, and a stale tally from the previous
+        # turn must not be billed to this one.
+        self.last_usage = {}
         # Hard guard BEFORE any classifier: coding/file/desktop work can
         # only be served by the general worker (full tool set). Routing it
         # to a specialist guarantees a refusal.
@@ -436,6 +482,9 @@ class AgentRouter:
             [{"role": "user", "content": prompt}],
             tools=None, temperature=0.1, max_tokens=100,
         )
+        # Cheap, but not free: the classifier runs on every multi-agent
+        # turn, so its tokens belong in the turn total.
+        accumulate_turn_usage(self.last_usage, response)
         text_content, _ = self._llm.extract_response(response)
         cleaned = text_content.strip()
         if cleaned.startswith("```"):
@@ -493,6 +542,9 @@ class MultiAgentOrchestrator:
         self._bus = AgentBus()
         self._router = AgentRouter(llm=llm)
         self._workers: dict[str, AgentWorker] = {}
+        # session_id -> {"model", "usage"} for the turn that just ran.
+        # Consumed by ``pop_turn_attribution``; see ``run``.
+        self._turn_attribution: dict[str, dict] = {}
         self._init_workers()
 
     def _init_workers(self):
@@ -545,7 +597,19 @@ class MultiAgentOrchestrator:
             self._bus.register(wid)
 
     async def run(self, session_id: str, text: str, context: Optional[dict] = None) -> str:
+        # Per-turn attribution for the whole multi-agent turn. Stashed on
+        # the instance keyed by session rather than returned, because
+        # ``run`` returns bare text to two orchestrator call sites and
+        # widening that signature would ripple through every caller and
+        # test. ``pop_turn_attribution`` consumes it, so a later turn can
+        # never re-read a stale tally.
+        turn_usage: dict = {}
+        turn_model = ""
+
         routing = await self._router.route(text)
+        # The router is a real (cheap) LLM call and is billed like any
+        # other. Leaving it out would under-report every multi-agent turn.
+        merge_turn_usage(turn_usage, getattr(self._router, "last_usage", {}) or {})
         worker_ids = routing.get("workers", ["general"])
         strategy = routing.get("strategy", "single")
 
@@ -578,10 +642,53 @@ class MultiAgentOrchestrator:
                     valid_results.append(r)
                 elif isinstance(r, Exception):
                     logger.error(f"Worker exception: {r}")
+            # Every worker that ran is billed, including ones whose text
+            # the merger drops. Attribute the model of the first worker
+            # that produced one; with a parallel strategy there is no
+            # single answering model, and naming one is closer to the
+            # truth than naming none.
+            for r in valid_results:
+                merge_turn_usage(turn_usage, r.usage)
+                if not turn_model and r.model:
+                    turn_model = r.model
+            self._stash_turn_attribution(session_id, turn_model, turn_usage)
             return ResponseMerger.merge(valid_results)
         else:
             result = await workers[0].run(session_id, text)
+            merge_turn_usage(turn_usage, result.usage)
+            if result.model:
+                turn_model = result.model
+            self._stash_turn_attribution(session_id, turn_model, turn_usage)
             return result.text if result.text else (result.error or "No response.")
+
+    # Entries are normally popped by the orchestrator on the same turn, but
+    # a turn that produced no text never reaches the pop, so the map is
+    # bounded here rather than trusted to drain. One small dict per session
+    # is not a leak worth a session-lifecycle hook; unbounded growth on a
+    # long-lived brain is.
+    _ATTRIBUTION_MAX_SESSIONS = 256
+
+    def _stash_turn_attribution(self, session_id: str, model: str, usage: dict) -> None:
+        if (
+            len(self._turn_attribution) >= self._ATTRIBUTION_MAX_SESSIONS
+            and session_id not in self._turn_attribution
+        ):
+            # dicts preserve insertion order, so this evicts the least
+            # recently stashed session.
+            self._turn_attribution.pop(next(iter(self._turn_attribution)), None)
+        self._turn_attribution[session_id] = {
+            "model": model or "",
+            "usage": dict(usage or {}),
+        }
+
+    def pop_turn_attribution(self, session_id: str) -> dict:
+        """Consume the attribution recorded by the last ``run`` for a session.
+
+        Popping (not peeking) is deliberate: an unconsumed entry would be
+        re-read by a later turn that produced no numbers of its own, which
+        would show the user a token count belonging to a different message.
+        """
+        return self._turn_attribution.pop(session_id, {}) or {}
 
     @property
     def stats(self) -> dict:

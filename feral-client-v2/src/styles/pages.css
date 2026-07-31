@@ -254,6 +254,27 @@
   .v2-chat-actions { opacity: 1; }
 }
 
+/* Per-turn attribution (model + token count). Always visible, unlike the
+   hover-revealed actions: knowing which model answered and what it cost is
+   information the user asked to be able to trust at a glance. Kept at
+   tertiary weight so it reads as a footnote, not as content. */
+.v2-chat-turnmeta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--v2-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  user-select: text;
+}
+.v2-chat-turnmeta__model {
+  font-family: var(--v2-font-mono);
+  letter-spacing: -0.01em;
+}
+.v2-chat-turnmeta__sep { opacity: 0.5; }
+
 /* Turn-level working indicator. Replaces the bare italic "thinking…"
    text so an in-flight turn is unmistakable. */
 .v2-chat-working {
