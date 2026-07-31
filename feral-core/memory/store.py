@@ -36,7 +36,7 @@ import math
 import sqlite3
 import time
 from collections import deque
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 import aiosqlite
@@ -101,6 +101,47 @@ from memory.wiki import (
 logger = logging.getLogger("feral.memory")
 
 _SCHEMA_VERSION = 6  # v2026.5.34: D11 decay + D12 sync HLC columns
+
+
+def _message_text(content: Any) -> str:
+    """Flatten a chat message's ``content`` to plain text.
+
+    OpenAI-shaped messages carry either a plain string or a list of typed
+    content blocks (``{"type": "text", ...}`` / ``{"type": "image_url", ...}``)
+    once vision, screen-attach or file attachments are in play. Callers that
+    want a human-readable excerpt must not assume the string shape:
+    ``content[:120]`` on a list returns a *list*, and binding that to a TEXT
+    column raises
+
+        sqlite3.ProgrammingError: Error binding parameter 2:
+        type 'list' is not supported
+
+    which surfaced as a 500 on ``POST /api/conversations/save`` for any thread
+    containing a multimodal turn, silently losing the whole conversation
+    (operator report 2026-07-30).
+
+    Image blocks are represented by a short placeholder rather than their
+    base64 payload, which would otherwise dominate the preview.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                block_type = str(block.get("type", ""))
+                if block_type in ("image_url", "input_image", "image", "image_base64"):
+                    parts.append("[image]")
+                else:
+                    text = block.get("text") or block.get("content") or ""
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+        return " ".join(parts).strip()
+    if content is None:
+        return ""
+    return str(content)
 
 
 def _stable_knowledge_id(subject: str, predicate: str) -> str:
@@ -954,12 +995,12 @@ class MemoryStore:
         preview = ""
         for msg in reversed(messages):
             if msg.get("role") == "user" and msg.get("content"):
-                preview = msg["content"][:120]
+                preview = _message_text(msg["content"])[:120]
                 break
         if not title and messages:
             for msg in messages:
                 if msg.get("role") == "user" and msg.get("content"):
-                    title = msg["content"][:80]
+                    title = _message_text(msg["content"])[:80]
                     break
         title = title or "New conversation"
 

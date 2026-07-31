@@ -17,5 +17,12 @@
     "amazon.titan-text-premier-v1:0",
     "amazon.nova-pro-v1:0",
     "amazon.nova-lite-v1:0"
-  ]
+  ],
+  "staleness_warning": "last_verified is over three months old. Several anthropic.* entries below correspond to models RETIRED on Anthropic's first-party API in Feb 2026 (claude-3-7-sonnet-20250219, claude-3-5-haiku-20241022, and the claude-3 generation). Bedrock retires on its OWN schedule, so those entries are flagged as unverified rather than removed: we could not confirm either way without AWS credentials. Do not treat this list as authoritative, and do not assume models[0] is a sensible default.",
+  "unverified_on_bedrock": [
+    "anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "anthropic.claude-3-5-haiku-20241022-v1:0",
+    "anthropic.claude-3-opus-20240229-v1:0"
+  ],
+  "missing_current_generation": "No Claude 4.x or Claude 5 (opus-5 / sonnet-5 / fable-5) inference-profile ids are listed. Add them once verified against a live Bedrock account."
 }
