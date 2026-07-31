@@ -498,7 +498,14 @@ class CodingToolsSkill(BaseSkill):
         # Generous scan cap so pagination has something to page over.
         scan_cap = (offset + head_limit) * 4 if head_limit else 5000
 
-        for fp in root.glob(glob_pat):
+        # ``search_path`` may name a single FILE rather than a directory.
+        # ripgrep accepts that and searches it, but ``Path(file).glob(...)``
+        # yields nothing, so the fallback silently returned zero matches for
+        # every single-file grep on any machine without ripgrep installed.
+        # The rg path masked it everywhere rg happens to be present.
+        candidates = [root] if root.is_file() else root.glob(glob_pat)
+
+        for fp in candidates:
             if not fp.is_file() or fp.stat().st_size > 1_000_000:
                 continue
             try:

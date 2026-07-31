@@ -120,7 +120,23 @@ async def test_probe_force_bypasses_cache():
 
 
 @pytest.mark.asyncio
-async def test_probe_env_overrides_vault(monkeypatch):
+async def test_probe_prefers_the_stored_credential_over_the_env_var(monkeypatch):
+    """The vault entry outranks the process env var, and that is deliberate.
+
+    This test previously asserted the opposite (it was named
+    ``test_probe_env_overrides_vault``) and had been failing since the
+    resolution order was centralised in ``security.vault_keys.get_active_key``,
+    whose documented order is: active labeled secret -> default-namespace
+    vault entry -> process env var.
+
+    The probe deliberately routes through that helper rather than reading
+    ``os.getenv`` directly, so a key the operator just added through the UI
+    probes correctly without restarting the brain. Probing is the operator's
+    first "did I add this right?" check, so it has to reflect what the chat
+    and voice paths will actually use -- which is the stored credential.
+    Asserting env-wins here would have pinned the probe to a different
+    credential than the one that serves real traffic.
+    """
     mock_client = AsyncMock()
     mock_client.request = AsyncMock(return_value=_mock_response(200))
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -129,6 +145,25 @@ async def test_probe_env_overrides_vault(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
     vault = MagicMock()
     vault.get_credential.return_value = "sk-from-vault"
+
+    with patch("security.probe.httpx.AsyncClient", return_value=mock_client):
+        await probe("openai", vault=vault)
+
+    headers = mock_client.request.await_args.kwargs.get("headers") or {}
+    assert headers.get("Authorization") == "Bearer sk-from-vault"
+
+
+@pytest.mark.asyncio
+async def test_probe_falls_back_to_env_when_nothing_is_stored(monkeypatch):
+    """With no stored credential, the env var is still honoured."""
+    mock_client = AsyncMock()
+    mock_client.request = AsyncMock(return_value=_mock_response(200))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+    vault = MagicMock()
+    vault.get_credential.return_value = None
 
     with patch("security.probe.httpx.AsyncClient", return_value=mock_client):
         await probe("openai", vault=vault)
