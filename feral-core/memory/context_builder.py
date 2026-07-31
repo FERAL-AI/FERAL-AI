@@ -10,18 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
-import re
+
+from memory.fts_query import fts5_match_query
 
 logger = logging.getLogger("feral.memory")
-
-_STOPWORDS = frozenset({
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-    "do", "does", "did", "have", "has", "had", "my", "your", "his", "her",
-    "our", "their", "its", "me", "you", "we", "they", "it", "this", "that",
-    "these", "those", "and", "or", "but", "to", "of", "in", "on", "at", "for",
-    "with", "by", "from", "as", "if", "then", "so", "than", "when", "where",
-    "what", "which", "who", "whom", "how", "why", "i",
-})
 
 
 def _fts_query(query: str) -> str:
@@ -31,16 +23,17 @@ def _fts_query(query: str) -> str:
     "where is my wallet" returns zero matches when the row only contains
     "wallet". We tokenize, drop stopwords, and OR the rest so the search
     actually hits.
+
+    Delegates to :func:`memory.fts_query.fts5_match_query` for the
+    escaping. The tokenizer this function used to carry kept ``'`` in
+    its character class, so every contraction ("don't", "what's") was
+    passed through unquoted and raised ``fts5: syntax error near "'"``
+    at the call site. Quoting is not optional and must have exactly one
+    implementation.
     """
     if not query:
         return ""
-    tokens = [
-        t for t in re.split(r"[^A-Za-z0-9']+", query.lower())
-        if t and t not in _STOPWORDS and len(t) > 1
-    ]
-    if not tokens:
-        return query
-    return " OR ".join(tokens)
+    return fts5_match_query(query, operator="OR", drop_stopwords=True) or query
 
 
 async def build_context_for_llm_async(
