@@ -10,42 +10,14 @@ from __future__ import annotations
 
 import json
 import logging
-import re
+
+from memory.fts_query import BROAD as FTS_BROAD
 
 logger = logging.getLogger("feral.memory")
 
 # Rough chars→tokens ratio, used to spend ``max_tokens_budget`` as the
 # token budget its name promises.
 _CHARS_PER_TOKEN = 4
-
-_STOPWORDS = frozenset({
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-    "do", "does", "did", "have", "has", "had", "my", "your", "his", "her",
-    "our", "their", "its", "me", "you", "we", "they", "it", "this", "that",
-    "these", "those", "and", "or", "but", "to", "of", "in", "on", "at", "for",
-    "with", "by", "from", "as", "if", "then", "so", "than", "when", "where",
-    "what", "which", "who", "whom", "how", "why", "i",
-})
-
-
-def _fts_query(query: str) -> str:
-    """Turn a natural-language utterance into an FTS5-friendly OR query.
-
-    SQLite FTS5 treats the raw phrase as a strict AND of all terms, so
-    "where is my wallet" returns zero matches when the row only contains
-    "wallet". We tokenize, drop stopwords, and OR the rest so the search
-    actually hits.
-    """
-    if not query:
-        return ""
-    tokens = [
-        t for t in re.split(r"[^A-Za-z0-9']+", query.lower())
-        if t and t not in _STOPWORDS and len(t) > 1
-    ]
-    if not tokens:
-        return query
-    return " OR ".join(tokens)
-
 
 async def build_context_for_llm_async(
     store,
@@ -73,7 +45,10 @@ async def build_context_for_llm_async(
     if working:
         sections.append(f"## Recent Context\n{_tail_within(working, budget_chars_per_section)}")
 
-    fts = _fts_query(query)
+    # The store methods sanitise their own FTS input, so pass the raw
+    # utterance and just declare the recall we want. Pre-building an
+    # expression here and handing it to a layer that sanitises again
+    # quoted the OR into a literal term.
     if query:
         graph_ctx = ""
         if store._kg:
@@ -85,19 +60,23 @@ async def build_context_for_llm_async(
         if graph_ctx:
             sections.append(graph_ctx)
         else:
-            knowledge = await store.knowledge_search(fts or query, limit=5)
+            knowledge = await store.knowledge_search(
+                query, limit=5, fts_mode=FTS_BROAD
+            )
             if knowledge:
                 k_lines = [f"- {k['subject']} {k['predicate']} {k['object']}" for k in knowledge]
                 sections.append("## Known Facts\n" + "\n".join(k_lines)[:budget_chars_per_section])
 
     if query:
         try:
-            episodes = await store.episode_search_hybrid(fts or query, limit=3)
+            episodes = await store.episode_search_hybrid(
+                query, limit=3, fts_mode=FTS_BROAD
+            )
         except Exception as exc:
             logger.debug("episode_search_hybrid failed, falling back to FTS: %s", exc)
-            episodes = await store.episode_search(fts or query, limit=3)
+            episodes = await store.episode_search(query, limit=3, fts_mode=FTS_BROAD)
         if not episodes:
-            episodes = await store.episode_search(fts or query, limit=3)
+            episodes = await store.episode_search(query, limit=3, fts_mode=FTS_BROAD)
     else:
         episodes = await store.episode_recent(limit=3, session_id=session_id)
     if memory_filter:

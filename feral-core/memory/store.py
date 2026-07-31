@@ -67,6 +67,7 @@ except Exception:
     pass
 
 from config.loader import feral_data_home
+from memory.fts_query import STRICT as FTS_STRICT, fts5_match_query
 from memory.context_builder import (
     build_context_for_llm_async as context_build_context_for_llm_async,
     compact_session as context_compact_session,
@@ -160,9 +161,60 @@ def _stable_knowledge_id(subject: str, predicate: str) -> str:
     digest = hashlib.sha256(f"{subject}\0{predicate}".encode("utf-8")).hexdigest()
     return digest[:12]
 
-TEXT_WEIGHT = 0.3
-VECTOR_WEIGHT = 0.7
-DEFAULT_DECAY_RATE = 0.01
+# ── Hybrid ranking (rewritten v2026.7.x) ────────────────────────────
+#
+# The previous blend was ``0.3 * fts_score + 0.7 * vec_score`` scaled by
+# an exponential temporal factor, and it carried four independent
+# sign/scale errors that all pushed the wrong way:
+#
+#   1. ``fts_score = 1/(1 + abs(rank))``. FTS5's ``rank`` is BM25:
+#      negative, and *more* negative means a better match. ``abs()``
+#      folded the sign away, so the ordering was exactly reversed.
+#      Measured on a 28-row corpus, the weakest match scored 3.5x the
+#      best one and came back first.
+#   2. ``decay_factor`` was placed in the *exponent*. It is retention
+#      strength in (0, 1] where 1.0 is pristine, so a nearly-forgotten
+#      memory got a smaller decay rate and therefore ranked *higher*,
+#      by 423x at 30 days.
+#   3. The rate itself was 0.01/hour, a 69-hour half-life, which let a
+#      one-hour-old garbage match beat a perfect match from 14 days ago.
+#   4. The two legs' scores were never on a comparable scale to begin
+#      with, so the 0.3/0.7 weights were tuning noise on top of noise.
+#
+# Reciprocal Rank Fusion (Cormack, Clarke & Buettcher, SIGIR 2009)
+# replaces the blend. Each leg contributes ``1 / (K + position)`` for
+# the documents it ranked, and the contributions are summed. It fuses
+# incompatible scales correctly because it never touches the scores,
+# only the orderings, which is precisely why error (1) becomes
+# structurally impossible: a document's position in the BM25 ordering
+# already carries the sign, so there is no sign left to get wrong.
+# It also needs no tuning, which errors (3) and (4) show we are bad at.
+RRF_K = 60  # Standard damping constant from the original RRF paper.
+
+# RRF sums are tiny (a document ranked first in both legs scores
+# 2/61 ≈ 0.033). ``_mmr_rerank_episodes`` subtracts a fixed 0.3 * 0.5
+# session-overlap penalty from the relevance term, which would swamp a
+# raw RRF score and turn the rerank into pure diversity. Scaling by
+# ``(RRF_K + 1) / <number of legs that returned anything>`` maps the
+# fused score onto [0, 1] (first place everywhere is 1.0) without
+# changing any ordering, since it is a positive constant per query.
+#
+# Recency is then a *bounded additive* prior rather than the old
+# multiplicative exponential. At 0.05 it can move a document by about
+# three rank positions at the head of the list: enough to break ties
+# between comparable matches, never enough to promote a weak match over
+# a strong one, which is the failure mode error (3) produced.
+RECENCY_PRIOR_WEIGHT = 0.05
+
+# Hourly retention rate for the recency prior. Reconciled with
+# ``memory.decay.DecayConfig.decay_rate``: both model the same
+# Ebbinghaus curve over the same ``episodes`` rows, and they were
+# 10x apart (0.01 here vs 0.001 there), so the search-time view of how
+# fast a memory fades disagreed with the sweep that actually writes
+# ``decay_factor``. 0.001/hour is a ~29-day half-life.
+# ``tests/test_memory_ranking.py`` pins the two together so they cannot
+# drift again.
+DEFAULT_DECAY_RATE = 0.001
 
 
 class MemoryStore:
@@ -483,10 +535,24 @@ class MemoryStore:
             # Pool was resized down or a stray connection appeared.
             # Close it rather than dropping silently — leaking a
             # SQLite connection holds a file lock.
+            #
+            # This used to recurse into ``self._release(conn)``, which
+            # re-hit the full queue every time: measured 494 frames
+            # deep, then ``RecursionError`` swallowed by the broad
+            # ``except``, so the connection was never closed and the
+            # lock was held anyway, i.e. the exact opposite of what
+            # the comment above promises. Close it, for real.
+            logger.warning(
+                "Connection pool full on release; closing surplus connection"
+            )
             try:
-                await self._release(conn)
-            except Exception:
-                pass
+                await conn.close()
+            except Exception as exc:
+                # Reported, not hidden. ``_release`` runs inside the
+                # ``finally`` of every read/write in this file, so a
+                # raise here would replace whatever exception the caller
+                # was already unwinding with an unrelated one.
+                logger.warning("Failed to close surplus connection: %s", exc)
 
     async def _get_stats_read_conn(self) -> aiosqlite.Connection:
         """Lazy-open a dedicated read-only aiosqlite connection used
@@ -636,7 +702,20 @@ class MemoryStore:
                 memory_status = "corruption"
                 memory_detail = str(exc)
             finally:
-                await self._release(conn)
+                # This connection was opened here, not taken from the
+                # pool, so it must be closed here. ``_release`` used to
+                # graft it *into* the pool, growing the pool past its
+                # configured size with a connection that never had the
+                # pool's row_factory or PRAGMAs applied, or (once the
+                # pool was full) hitting the recursion bug above. This
+                # runs on every inbound sync, so it compounded fast.
+                try:
+                    await conn.close()
+                except Exception as exc:
+                    # refresh()'s contract is that it never raises: it
+                    # always returns a dict so callers surface the error
+                    # rather than crash the brain. Log and carry on.
+                    logger.warning("refresh() failed to close its connection: %s", exc)
         result["memory_db"] = memory_status
         if memory_status != "ok":
             result["memory_db_detail"] = memory_detail
@@ -1332,8 +1411,15 @@ class MemoryStore:
         limit: int = 10,
         *,
         include_forgotten: bool = False,
+        fts_mode: str = FTS_STRICT,
     ) -> list[dict]:
-        """Hybrid search: FTS5 text (0.3) + vector similarity (0.7) with temporal decay.
+        """Hybrid search: FTS5 text + vector similarity fused by
+        Reciprocal Rank Fusion, plus a bounded recency prior.
+
+        ``relevance_score`` is ``rrf_norm * Σ 1/(RRF_K + position)`` over
+        the legs that returned anything, in [0, 1], plus at most
+        :data:`RECENCY_PRIOR_WEIGHT` for a pristine, brand-new memory.
+        Scores are comparable within a query, not across queries.
 
         Uses sqlite-vec indexed search when available, numpy fallback otherwise.
 
@@ -1353,25 +1439,43 @@ class MemoryStore:
         conn = await self._conn()
         try:
             fts_results = {}
-            try:
-                async with conn.execute(
-                    f"""SELECT e.id, e.session_id, e.event_type, e.summary, e.detail,
-                              e.emotions, e.location, e.importance, e.created_at,
-                              e.decay_factor, e.forgotten_at, e.last_accessed_at,
-                              e.access_count, rank
-                       FROM episodes_fts f JOIN episodes e ON f.rowid = e.rowid
-                       WHERE episodes_fts MATCH ?{forgotten_clause}
-                       ORDER BY rank LIMIT ?""",
-                    (query, limit * 3),
-                ) as cur:
-                    rows = await cur.fetchall()
-                for r in rows:
-                    fts_results[r["id"]] = {
-                        **self._episode_row_to_dict(r),
-                        "fts_score": 1.0 / (1.0 + abs(r["rank"])),
-                    }
-            except Exception:
-                pass
+            # Quote the utterance into a valid FTS5 expression. Passing
+            # raw text meant "don't", "what's", "C++", "AI/ML" and
+            # "(urgent)" all raised a syntax error into the swallowing
+            # ``except`` below, so the text leg contributed nothing for
+            # a large and entirely ordinary class of queries.
+            match_expr = fts5_match_query(query, mode=fts_mode)
+            if match_expr:
+                try:
+                    async with conn.execute(
+                        f"""SELECT e.id, e.session_id, e.event_type, e.summary, e.detail,
+                                  e.emotions, e.location, e.importance, e.created_at,
+                                  e.decay_factor, e.forgotten_at, e.last_accessed_at,
+                                  e.access_count, rank
+                           FROM episodes_fts f JOIN episodes e ON f.rowid = e.rowid
+                           WHERE episodes_fts MATCH ?{forgotten_clause}
+                           ORDER BY rank LIMIT ?""",
+                        (match_expr, limit * 3),
+                    ) as cur:
+                        rows = await cur.fetchall()
+                    # The query is ``ORDER BY rank``, so row order is
+                    # already the BM25 ordering, best first. We record
+                    # the *position* and never the score: FTS5's rank is
+                    # negative-is-better, and every attempt to turn it
+                    # into a positive score in this file has got the sign
+                    # backwards. Position carries the sign for us.
+                    for pos, r in enumerate(rows, start=1):
+                        fts_results[r["id"]] = {
+                            **self._episode_row_to_dict(r),
+                            "fts_pos": pos,
+                        }
+                except Exception as exc:
+                    # Never silent: a dead text leg halves recall and the
+                    # old bare ``pass`` is why nobody noticed for months.
+                    logger.warning(
+                        "Episode FTS leg failed for %r (expr=%r): %s",
+                        query, match_expr, exc,
+                    )
 
             vec_results = {}
             try:
@@ -1416,22 +1520,45 @@ class MemoryStore:
         finally:
             await self._release(conn)
         now = time.time()
+
+        # ── Reciprocal Rank Fusion ──────────────────────────────────
+        # Each leg is reduced to an ordering. The FTS leg is already in
+        # BM25 order; the vector leg sorts by descending cosine. Only
+        # the positions are fused. See the RRF_K comment at the top of
+        # this module for why scores are deliberately discarded.
+        fts_order = sorted(fts_results, key=lambda e: fts_results[e]["fts_pos"])
+        vec_order = sorted(
+            vec_results, key=lambda e: vec_results[e]["vec_score"], reverse=True
+        )
+        active_legs = [order for order in (fts_order, vec_order) if order]
+        rrf: dict[str, float] = {}
+        for order in active_legs:
+            for pos, eid in enumerate(order, start=1):
+                rrf[eid] = rrf.get(eid, 0.0) + 1.0 / (RRF_K + pos)
+        # Positive per-query constant: rescales onto [0, 1] for the MMR
+        # rerank without perturbing the fused ordering.
+        rrf_norm = (RRF_K + 1) / len(active_legs) if active_legs else 0.0
+
         merged = []
         for eid in all_ids:
             info = fts_results.get(eid) or episode_cache.get(eid)
             if not info:
                 continue
 
-            fts_score = fts_results.get(eid, {}).get("fts_score", 0)
-            vec_score = vec_results.get(eid, {}).get("vec_score", 0)
-            base_score = TEXT_WEIGHT * fts_score + VECTOR_WEIGHT * vec_score
+            # Recency prior: bounded, additive, and multiplied by
+            # retention rather than divided into the rate. ``decay_factor``
+            # is retention strength in (0, 1], where 1.0 is a pristine
+            # memory and 0.05 is about to be forgotten, so it belongs on
+            # the score, where a faded memory scores lower. Putting it in
+            # the exponent (the old code) inverted that completely.
+            hours_since = max(0.0, (now - info.get("created_at", now)) / 3600.0)
+            retention = info.get("decay_factor", 1.0)
+            recency = retention * math.exp(-DEFAULT_DECAY_RATE * hours_since)
 
-            hours_since = (now - info.get("created_at", now)) / 3600.0
-            decay = info.get("decay_factor", 1.0)
-            temporal_factor = math.exp(-DEFAULT_DECAY_RATE * decay * hours_since)
-            final_score = base_score * temporal_factor
-
-            info["relevance_score"] = final_score
+            info.pop("fts_pos", None)
+            info["relevance_score"] = (
+                rrf_norm * rrf.get(eid, 0.0) + RECENCY_PRIOR_WEIGHT * recency
+            )
             merged.append(info)
 
         merged.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
@@ -1445,24 +1572,36 @@ class MemoryStore:
         limit: int = 10,
         *,
         include_forgotten: bool = False,
+        fts_mode: str = FTS_STRICT,
     ) -> list[dict]:
         """FTS-only episode search (backward compat). Honours the
         same ``forgotten_at`` filter + access tracking as
         :meth:`episode_search_hybrid`."""
         forgotten_clause = "" if include_forgotten else " AND e.forgotten_at IS NULL"
         like_clause = "" if include_forgotten else " AND forgotten_at IS NULL"
+        # Same quoting as the hybrid path: without it, a query holding an
+        # apostrophe or a "+" fell through to the LIKE branch below on
+        # every call, silently trading BM25 ordering for substring order.
+        match_expr = fts5_match_query(query, mode=fts_mode)
         conn = await self._conn()
         try:
             try:
+                if not match_expr:
+                    raise ValueError("no indexable term in query")
                 async with conn.execute(
                     f"""SELECT e.* FROM episodes_fts f
                        JOIN episodes e ON f.rowid = e.rowid
                        WHERE episodes_fts MATCH ?{forgotten_clause}
                        ORDER BY rank LIMIT ?""",
-                    (query, limit),
+                    (match_expr, limit),
                 ) as cur:
                     rows = await cur.fetchall()
-            except Exception:
+            except Exception as exc:
+                # The LIKE fallback is deliberate (brand-new DB with no
+                # FTS triggers yet), but it must be visible when it fires.
+                logger.debug(
+                    "Episode FTS search fell back to LIKE for %r: %s", query, exc
+                )
                 async with conn.execute(
                     f"""SELECT * FROM episodes
                        WHERE (summary LIKE ? OR detail LIKE ?){like_clause}
@@ -1850,29 +1989,38 @@ class MemoryStore:
             for r in rows
         ]
 
-    async def knowledge_search(self, query: str, limit: int = 10) -> list[dict]:
+    async def knowledge_search(
+        self, query: str, limit: int = 10, *, fts_mode: str = FTS_STRICT,
+    ) -> list[dict]:
         if self._kg_unified_enabled():
-            return await self._knowledge_search_unified(query, limit)
-        return await self._knowledge_search_flat(query, limit)
+            return await self._knowledge_search_unified(query, limit, fts_mode=fts_mode)
+        return await self._knowledge_search_flat(query, limit, fts_mode=fts_mode)
 
     async def _knowledge_search_unified(
-        self, query: str, limit: int,
+        self, query: str, limit: int, *, fts_mode: str = FTS_STRICT,
     ) -> list[dict]:
         """KG-routed search: hit ``entities_fts`` for matching entity
         names (subject OR object), then expand each match into the
         relations it participates in."""
+        # Quoted here, at the SQL boundary, for the same reason as the
+        # episode paths: an unquoted apostrophe or operator character
+        # raised straight into the LIKE fallback below.
+        match_expr = fts5_match_query(query, mode=fts_mode)
         conn = await self._conn()
         try:
             try:
+                if not match_expr:
+                    raise ValueError("no indexable term in query")
                 async with conn.execute(
                     """SELECT e.id FROM entities_fts f
                        JOIN entities e ON f.rowid = e.rowid
                        WHERE entities_fts MATCH ? LIMIT ?""",
-                    (query, max(limit * 4, 20)),
+                    (match_expr, max(limit * 4, 20)),
                 ) as cur:
                     entity_ids = [r["id"] for r in await cur.fetchall()]
-            except Exception:
+            except Exception as exc:
                 # FTS unavailable: fall back to LIKE on names.
+                logger.debug("entities FTS search fell back to LIKE: %s", exc)
                 async with conn.execute(
                     "SELECT id FROM entities WHERE name LIKE ? LIMIT ?",
                     (f"%{query}%", max(limit * 4, 20)),
@@ -1902,19 +2050,23 @@ class MemoryStore:
         ]
 
     async def _knowledge_search_flat(
-        self, query: str, limit: int,
+        self, query: str, limit: int, *, fts_mode: str = FTS_STRICT,
     ) -> list[dict]:
+        match_expr = fts5_match_query(query, mode=fts_mode)
         conn = await self._conn()
         try:
             try:
+                if not match_expr:
+                    raise ValueError("no indexable term in query")
                 async with conn.execute(
                     """SELECT k.* FROM knowledge_fts f
                        JOIN knowledge k ON f.rowid = k.rowid
                        WHERE knowledge_fts MATCH ? ORDER BY rank LIMIT ?""",
-                    (query, limit),
+                    (match_expr, limit),
                 ) as cur:
                     rows = await cur.fetchall()
-            except Exception:
+            except Exception as exc:
+                logger.debug("knowledge FTS search fell back to LIKE: %s", exc)
                 async with conn.execute(
                     """SELECT * FROM knowledge WHERE subject LIKE ? OR object LIKE ?
                        ORDER BY updated_at DESC LIMIT ?""",

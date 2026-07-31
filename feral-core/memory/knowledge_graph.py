@@ -27,6 +27,7 @@ from uuid import uuid4
 import aiosqlite
 import numpy as np
 
+from memory.fts_query import fts5_match_query
 from memory.embeddings import (
     EmbeddingProvider,
     vec_to_blob,
@@ -594,12 +595,20 @@ class KnowledgeGraph:
         conn = await self._conn()
         try:
             fts_results = {}
+            # Quoted, and failures logged. ``build_graph_context`` is the
+            # first leg of the LLM context builder, and passing the raw
+            # utterance meant "don't", "what's", "C++" and "AI/ML" each
+            # raised an fts5 syntax error into the bare ``except`` below,
+            # dropping the entity text leg with no trace.
+            match_expr = fts5_match_query(query)
             try:
+                if not match_expr:
+                    raise ValueError("no indexable term in query")
                 async with conn.execute(
                     """SELECT e.id, e.name, e.entity_type, e.mention_count, rank
                        FROM entities_fts f JOIN entities e ON f.rowid = e.rowid
                        WHERE entities_fts MATCH ? ORDER BY rank LIMIT ?""",
-                    (query, limit * 2),
+                    (match_expr, limit * 2),
                 ) as cur:
                     rows = await cur.fetchall()
                 for r in rows:
@@ -608,8 +617,8 @@ class KnowledgeGraph:
                         "mentions": r["mention_count"],
                         "fts_score": 1.0 / (1.0 + abs(r["rank"])),
                     }
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("entity FTS leg failed for %r: %s", query, exc)
 
             if indexed_hits:
                 # Hydrate the indexed hits with entity metadata.
