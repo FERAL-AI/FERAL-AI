@@ -536,6 +536,19 @@ class GeminiRealtimeProxy:
             except Exception as exc:
                 logger.debug("gemini voice persistence skipped: %s", exc)
 
+        # Assistant-side counterpart of the ``note_voice_user_turn``
+        # hook in ``_handle_input_transcript``. Gemini Live has the same
+        # asymmetry the OpenAI Realtime path had: only the user side
+        # reached ``conversation_history``, so the next text turn saw
+        # two consecutive user rows and the model denied having spoken.
+        if not is_partial and text and self._orchestrator is not None:
+            try:
+                await self._orchestrator.note_voice_assistant_turn(session_id, text)
+            except Exception:
+                logger.exception(
+                    "gemini: note_voice_assistant_turn failed (non-fatal)"
+                )
+
     async def _handle_input_transcript(self, session_id: str, text: str):
         """Handle user-speech transcription returned by Gemini."""
         # Bug 3 (phantom commit gate): same blocklist the OpenAI

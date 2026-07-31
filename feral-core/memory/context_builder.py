@@ -14,6 +14,10 @@ import re
 
 logger = logging.getLogger("feral.memory")
 
+# Rough chars→tokens ratio, used to spend ``max_tokens_budget`` as the
+# token budget its name promises.
+_CHARS_PER_TOKEN = 4
+
 _STOPWORDS = frozenset({
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
     "do", "does", "did", "have", "has", "had", "my", "your", "his", "her",
@@ -59,18 +63,22 @@ async def build_context_for_llm_async(
     pre-memory-filter behaviour (no filtering).
     """
     sections = []
-    budget_per_section = max_tokens_budget // 4
+    # ``max_tokens_budget`` is a TOKEN budget and is now spent as one.
+    # It used to be sliced straight onto strings as a character count,
+    # so every caller silently got a quarter of the context it asked
+    # for.
+    budget_chars_per_section = (max_tokens_budget // 4) * _CHARS_PER_TOKEN
 
     working = store.working_context_string(session_id, limit=8)
     if working:
-        sections.append(f"## Recent Context\n{working[:budget_per_section]}")
+        sections.append(f"## Recent Context\n{_tail_within(working, budget_chars_per_section)}")
 
     fts = _fts_query(query)
     if query:
         graph_ctx = ""
         if store._kg:
             try:
-                graph_ctx = await store._kg.build_graph_context(query, max_chars=budget_per_section)
+                graph_ctx = await store._kg.build_graph_context(query, max_chars=budget_chars_per_section)
             except Exception as exc:
                 logger.debug("build_graph_context failed: %s", exc)
                 graph_ctx = ""
@@ -80,7 +88,7 @@ async def build_context_for_llm_async(
             knowledge = await store.knowledge_search(fts or query, limit=5)
             if knowledge:
                 k_lines = [f"- {k['subject']} {k['predicate']} {k['object']}" for k in knowledge]
-                sections.append("## Known Facts\n" + "\n".join(k_lines)[:budget_per_section])
+                sections.append("## Known Facts\n" + "\n".join(k_lines)[:budget_chars_per_section])
 
     if query:
         try:
@@ -96,16 +104,44 @@ async def build_context_for_llm_async(
         episodes = [e for e in episodes if _topic_match(e, memory_filter)]
     if episodes:
         ep_lines = [f"- [{e['event_type']}] {e['summary']}" for e in episodes]
-        sections.append("## Past Events\n" + "\n".join(ep_lines)[:budget_per_section])
+        sections.append("## Past Events\n" + "\n".join(ep_lines)[:budget_chars_per_section])
 
     recent_execs = await store.log_recent(limit=5)
     if memory_filter:
         recent_execs = [ex for ex in recent_execs if _topic_match(ex, memory_filter)]
     if recent_execs:
         ex_lines = [f"- {ex.get('skill_id', '?')}: {ex.get('result_status', '?')}" for ex in recent_execs]
-        sections.append("## Recent Actions\n" + "\n".join(ex_lines)[:budget_per_section])
+        sections.append("## Recent Actions\n" + "\n".join(ex_lines)[:budget_chars_per_section])
 
     return "\n\n".join(sections) if sections else ""
+
+
+def _tail_within(text: str, max_chars: int) -> str:
+    """Keep the NEWEST whole lines of ``text`` that fit in ``max_chars``.
+
+    ``working_context_string`` joins its entries oldest→newest, so the
+    previous ``text[:max_chars]`` kept the OLDEST fragment and shipped
+    it under the heading "Recent Context". That is how a question the
+    user had moved on from three turns earlier resurfaced as the
+    model's idea of what was being discussed.
+    """
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    kept: list[str] = []
+    used = 0
+    for line in reversed(text.split("\n")):
+        cost = len(line) + (1 if kept else 0)
+        if used + cost > max_chars:
+            break
+        kept.append(line)
+        used += cost
+    if not kept:
+        # A single entry longer than the whole budget — keep its tail.
+        return text[-max_chars:]
+    kept.reverse()
+    return "\n".join(kept)
 
 
 def _topic_match(item: dict, topic: str) -> bool:

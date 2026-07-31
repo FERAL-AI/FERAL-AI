@@ -100,6 +100,9 @@ def _orch_for_force_tool() -> Orchestrator:
     orch = Orchestrator.__new__(Orchestrator)
     orch.refusal_handler = RefusalHandler(MagicMock())
     orch.conversation_history = {}
+    # note_voice_user_turn now appends under the per-session lock.
+    orch._session_locks = {}
+    orch._conversation_max_per_session = 200
     return orch
 
 

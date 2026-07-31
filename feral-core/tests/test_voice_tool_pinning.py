@@ -170,6 +170,9 @@ async def test_note_voice_user_turn_returns_forced_routine_tool():
     orch = Orchestrator.__new__(Orchestrator)
     orch.refusal_handler = RefusalHandler(MagicMock())
     orch.conversation_history = {}
+    # note_voice_user_turn now appends under the per-session lock.
+    orch._session_locks = {}
+    orch._conversation_max_per_session = 200
 
     tools = [_tool("feral_routines__create"), _tool("feral_reminders__create")]
     out = await orch.note_voice_user_turn(

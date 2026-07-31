@@ -1134,6 +1134,26 @@ class RealtimeProxy:
             except Exception as exc:
                 logger.debug("voice transcript persistence skipped: %s", exc)
 
+        # Assistant-side counterpart of the ``note_voice_user_turn``
+        # hook below. The realtime path used to write ONLY user rows to
+        # ``conversation_history`` — the assistant's final transcript
+        # went to working memory and the durable ``voice:<sid>`` thread
+        # and stopped there. The next text turn therefore handed the
+        # model two consecutive user messages, and the model correctly
+        # replied that it had never spoken.
+        if (
+            is_final
+            and text
+            and not text.startswith("[user] ")
+            and self._orchestrator is not None
+        ):
+            try:
+                await self._orchestrator.note_voice_assistant_turn(session_id, text)
+            except Exception:
+                logger.exception(
+                    "realtime: note_voice_assistant_turn failed (non-fatal)"
+                )
+
         # Bug 1 + Bug 2(B) hook: hand the final USER transcript to the
         # orchestrator so coref tracking, conversation_history, and
         # temporal-recall side-channels stay in sync with the text
