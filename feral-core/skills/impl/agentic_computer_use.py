@@ -413,7 +413,7 @@ class AgenticComputerUseSkill(BaseSkill):
         return f"Dragged through {len(scaled)} points"
 
     # Anything beyond this allowlist must NOT execute through the GUI
-    # vision loop. Real shell work goes through `computer_use__bash` so
+    # vision loop. Real shell work goes through `coding_tools__bash` so
     # the canonical sandbox/policy boundary applies.
     _SHELL_ACTION_ALLOWLIST = ("open", "osascript", "screencapture")
 
@@ -430,11 +430,11 @@ class AgenticComputerUseSkill(BaseSkill):
             # Refusing here is the canonical-execution promise: the VLM
             # loop can launch UIs (`open -a`, `osascript`) but cannot
             # become a generic host shell. Free-form commands belong on
-            # `computer_use__bash` where sandbox + danger gating apply.
+            # `coding_tools__bash` where the execution-mode decision applies.
             return (
                 "blocked: agentic_computer_use shell only permits "
                 f"{', '.join(self._SHELL_ACTION_ALLOWLIST)}; route other "
-                "commands through computer_use__bash"
+                "commands through coding_tools__bash"
             )
         proc = await asyncio.create_subprocess_shell(
             command,

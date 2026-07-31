@@ -32,6 +32,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
+import CopyButton from '../ui/CopyButton';
 
 // Highlight + KaTeX CSS is imported once at the app root (bootstrap.js)
 // so it lives in the shared bundle rather than being duplicated each
@@ -90,18 +91,58 @@ function CappedImage({ src, alt, title }) {
   );
 }
 
-const COMPONENTS = {
-  a: ExternalLink,
-  img: CappedImage,
-  // Override <pre> to mark the language so the highlight.js stylesheet
-  // can target the chip + scrollable container.
-  pre({ node, children, ...rest }) {
-    return (
+/** Flatten a hast subtree back to its source text. */
+function hastText(node) {
+  if (!node) return '';
+  if (node.type === 'text') return node.value || '';
+  const kids = Array.isArray(node.children) ? node.children : [];
+  let out = '';
+  for (const kid of kids) out += hastText(kid);
+  return out;
+}
+
+/** Pull `language-x` off the hast <code> child of a <pre>. */
+function preLanguage(node) {
+  const code = Array.isArray(node?.children)
+    ? node.children.find((c) => c.tagName === 'code')
+    : null;
+  const classes = code?.properties?.className;
+  const list = Array.isArray(classes) ? classes : String(classes || '').split(/\s+/);
+  for (const c of list) {
+    const m = /^language-(.+)$/.exec(String(c));
+    if (m) return m[1];
+  }
+  return '';
+}
+
+/**
+ * Fenced code block with a chrome bar: language label on the left,
+ * copy affordance on the right. The raw source is recovered from the
+ * hast node (rehype-highlight has already rewritten `children` into
+ * span trees, so React children are not usable as clipboard text).
+ */
+function CodeBlock({ node, children, ...rest }) {
+  const lang = preLanguage(node);
+  const raw = useMemo(() => hastText(node).replace(/\n$/, ''), [node]);
+  return (
+    <div className="v2-md-codeblock" data-lang={lang || undefined}>
+      <div className="v2-md-codeblock__bar">
+        <span className="v2-md-codeblock__lang">{lang || 'plain text'}</span>
+        <CopyButton value={raw} label="Copy code" className="v2-md-codeblock__copy" size={12} />
+      </div>
       <pre className="v2-md-pre" {...rest}>
         {children}
       </pre>
-    );
-  },
+    </div>
+  );
+}
+
+const COMPONENTS = {
+  a: ExternalLink,
+  img: CappedImage,
+  // Override <pre> so every fenced block gets a language label + copy
+  // button and stays inside its own horizontal scroll container.
+  pre: CodeBlock,
   code({ inline, className, children, ...rest }) {
     // react-markdown 9 dropped the `inline` prop. The reliable signal
     // for a fenced (block) code element is the presence of a

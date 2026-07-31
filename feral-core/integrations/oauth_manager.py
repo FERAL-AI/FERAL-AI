@@ -37,6 +37,7 @@ import httpx
 
 from config.loader import feral_home
 from config.runtime import brain_public_base_url
+from integrations._http_errors import response_excerpt
 
 logger = logging.getLogger("feral.oauth")
 
@@ -68,6 +69,15 @@ class OAuthProvider:
         self.auth_type: str = data.get("auth_type", "oauth2")
         self.setup_doc_url: str = data.get("setup_doc_url", "")
         self.setup_doc_summary: str = data.get("setup_doc_summary", "")
+        # Provider-specific query parameters appended to the authorize
+        # URL. Kept on the descriptor so the shared URL builder stays
+        # vendor-agnostic (Google needs access_type/prompt; nobody else
+        # does, and hardcoding a `if provider_id == "google"` branch in
+        # the builder is how that knowledge gets lost).
+        self.extra_auth_params: dict[str, str] = {
+            str(k): str(v)
+            for k, v in (data.get("extra_auth_params") or {}).items()
+        }
 
 
 # Operator-facing docs anchored on the user's own brain
@@ -183,6 +193,17 @@ BUILTIN_PROVIDERS = {
         ],
         "pkce": True,
         "auth_type": "oauth2",
+        # Google issues a refresh_token *only* when access_type=offline
+        # is on the authorize request, and it re-issues one on a repeat
+        # authorization only when the consent screen is forced. Without
+        # both, every Google connection dies ~55 minutes after consent
+        # (``get_token`` sees the expiry, ``_refresh_token`` finds no
+        # refresh_token) and reconnecting does not heal it.
+        # https://developers.google.com/identity/protocols/oauth2/web-server#offline
+        "extra_auth_params": {
+            "access_type": "offline",
+            "prompt": "consent",
+        },
     },
     "microsoft": {
         "id": "microsoft",
@@ -484,6 +505,17 @@ class OAuthManager:
             except Exception as e:
                 logger.warning(f"Failed to load custom OAuth providers: {e}")
 
+    def reload_providers(self) -> None:
+        """Re-resolve every provider from all five credential layers.
+
+        Called after the operator saves client credentials from the
+        Settings UI so the new client_id is live in this process — a
+        brain restart to pick up your own OAuth app is not an
+        acceptable step in a "paste your client id" flow.
+        """
+        self._providers = {}
+        self._load_providers()
+
     def _load_tokens(self):
         """Load saved tokens from BlindVault or fallback JSON."""
         if self._vault:
@@ -719,6 +751,10 @@ class OAuthManager:
         if provider.scopes:
             params["scope"] = " ".join(provider.scopes)
 
+        # Vendor-specific extras (Google's offline-access request, for
+        # example) come from the provider descriptor.
+        params.update(provider.extra_auth_params)
+
         pending = {"provider_id": provider_id, "created": time.time()}
 
         if provider.pkce:
@@ -774,19 +810,21 @@ class OAuthManager:
                 "reason": "unknown_provider",
             }
 
+        # PKCE and the client secret are not alternatives: Google's
+        # installed-app and Web client types require the secret on the
+        # exchange *in addition to* the code_verifier, and the refresh
+        # path below has always sent it. Splitting these into either/or
+        # branches is what made the two paths disagree.
         data = {
             "grant_type": "authorization_code",
             "code": code,
             "redirect_uri": provider.redirect_uri,
+            "client_id": provider.client_id,
         }
-
+        if provider.client_secret:
+            data["client_secret"] = provider.client_secret
         if provider.pkce:
             data["code_verifier"] = pending.get("code_verifier", "")
-            data["client_id"] = provider.client_id
-        else:
-            data["client_id"] = provider.client_id
-            if provider.client_secret:
-                data["client_secret"] = provider.client_secret
 
         try:
             headers = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -809,7 +847,10 @@ class OAuthManager:
                 result["probe"] = probe_summary
             return result
         except httpx.HTTPStatusError as exc:
-            detail = exc.response.text[:400] if exc.response is not None else str(exc)
+            detail = (
+                response_excerpt(exc.response)
+                if exc.response is not None else str(exc)
+            )
             logger.error(
                 "OAuth token exchange failed for %s: %s %s",
                 provider_id, exc.response.status_code if exc.response is not None else "?",
@@ -944,7 +985,7 @@ class OAuthManager:
                     "Token refresh rejected for %s (HTTP %s) — clearing "
                     "stored tokens so the operator gets a clean reconnect "
                     "prompt. Detail: %s",
-                    provider_id, resp.status_code, resp.text[:200],
+                    provider_id, resp.status_code, response_excerpt(resp),
                 )
                 self.revoke_token(provider_id)
                 return False
@@ -960,8 +1001,94 @@ class OAuthManager:
             logger.error(f"Token refresh failed for {provider_id}: {e}")
             return False
 
+    def store_client_credentials(
+        self,
+        provider_id: str,
+        client_id: str,
+        client_secret: str = "",
+    ) -> None:
+        """Persist operator-supplied OAuth **client** credentials.
+
+        This is the "use your own OAuth app" path in Settings. The
+        credentials identify the *application*, not the user — they are
+        not tokens, and routing them through :meth:`store_api_token`
+        parks the client secret in the ``access_token`` slot, which
+        makes :meth:`is_connected` lie forever and (because
+        ``email._use_imap`` / ``calendar._use_ics`` key off it) disables
+        the IMAP and ICS fallbacks that were working.
+
+        Written to the vault when one is available, otherwise to the
+        ``~/.feral/first_party_clients.json`` overlay — both are places
+        :meth:`_load_providers` already reads. Providers are reloaded so
+        the change takes effect without a restart.
+        """
+        provider = self._providers.get(provider_id)
+        if provider is None:
+            raise ValueError(f"Unknown OAuth provider: {provider_id}")
+        if provider.auth_type != "oauth2":
+            raise ValueError(
+                f"Provider {provider_id} uses {provider.auth_type} auth and "
+                "has no OAuth client credentials"
+            )
+        client_id = (client_id or "").strip()
+        if not client_id:
+            raise ValueError("client_id is required")
+        client_secret = (client_secret or "").strip()
+
+        vault_keys = _VAULT_CREDENTIAL_KEYS.get(provider_id)
+        if self._vault is not None and vault_keys is not None:
+            id_key, secret_key = vault_keys
+            self._vault.store(id_key, client_id, stored_by="oauth_manager")
+            self._vault.store(secret_key, client_secret,
+                              stored_by="oauth_manager")
+        else:
+            self._write_client_overlay(provider_id, client_id, client_secret)
+
+        self.reload_providers()
+        # An env var (layer 4) outranks the vault (layer 3). Say so
+        # rather than letting the operator watch a successful save have
+        # no effect.
+        effective = self._providers[provider_id].client_id
+        if effective != client_id:
+            logger.warning(
+                "oauth: %s client credentials saved but a higher-priority "
+                "source (env var or ~/.feral/oauth_providers.json) still "
+                "wins — the live client_id is unchanged", provider_id,
+            )
+        else:
+            logger.info("oauth: %s client credentials stored by operator",
+                        provider_id)
+
+    @staticmethod
+    def _write_client_overlay(provider_id: str, client_id: str,
+                              client_secret: str) -> None:
+        """Vault-less fallback for :meth:`store_client_credentials`."""
+        path = _first_party_overlay_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        blob: dict = json.loads(path.read_text()) if path.exists() else {}
+        blob[provider_id] = {
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+        path.write_text(json.dumps(blob, indent=2))
+        os.chmod(path, 0o600)
+
     def store_api_token(self, provider_id: str, token: str):
-        """Store a long-lived API token (e.g., Home Assistant)."""
+        """Store a long-lived API token (e.g., Home Assistant).
+
+        Refuses OAuth2 providers: the only credential an operator has to
+        paste for those is a *client* secret, and storing it here writes
+        it into the ``access_token`` slot with a 30-year expiry. Use
+        :meth:`store_client_credentials` instead.
+        """
+        provider = self._providers.get(provider_id)
+        if provider is not None and provider.auth_type == "oauth2":
+            raise ValueError(
+                f"Provider {provider_id} uses oauth2 auth — a client secret "
+                "is not an access token. Store client credentials via "
+                "store_client_credentials() and complete the authorize "
+                "flow instead."
+            )
         self._save_token(provider_id, {
             "access_token": token,
             "token_type": "bearer",

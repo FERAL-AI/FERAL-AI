@@ -14,6 +14,8 @@ from typing import Any, Optional
 
 import httpx
 
+from integrations._http_errors import http_error_detail
+
 logger = logging.getLogger("feral.integrations.google_drive")
 
 DRIVE_API = "https://www.googleapis.com/drive/v3"
@@ -96,7 +98,7 @@ class GoogleDriveIntegration:
                 },
             }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def search_files(self, query: str = "", max_results: int = 20, **_kw: Any) -> dict[str, Any]:
         headers = await self._headers()
@@ -116,7 +118,7 @@ class GoogleDriveIntegration:
             resp.raise_for_status()
             return {"success": True, "data": {"files": resp.json().get("files", []), "query": query}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def download_file(self, file_id: str = "", **_kw: Any) -> dict[str, Any]:
         headers = await self._headers()
@@ -149,7 +151,7 @@ class GoogleDriveIntegration:
                 },
             }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def upload_file(
         self, name: str = "", content_b64: str = "", mime_type: str = "", folder_id: str = "", **_kw: Any
@@ -199,7 +201,7 @@ class GoogleDriveIntegration:
             resp.raise_for_status()
             return {"success": True, "data": resp.json()}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def create_folder(self, name: str = "", parent_id: str = "", **_kw: Any) -> dict[str, Any]:
         headers = await self._headers()
@@ -221,7 +223,7 @@ class GoogleDriveIntegration:
             resp.raise_for_status()
             return {"success": True, "data": resp.json()}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def close(self):
         await self._http.aclose()

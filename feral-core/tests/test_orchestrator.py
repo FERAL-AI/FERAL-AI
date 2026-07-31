@@ -73,12 +73,24 @@ class TestRoutingAndContext:
         assert out == [WEATHER_SKILL]
         orchestrator.skills.find_skills_for_query.assert_called()
 
-    def test_compact_context_truncates_long_history(self, orchestrator: Orchestrator) -> None:
-        """History longer than 15 messages keeps only the tail."""
-        long_hist = [{"role": "user", "content": f"m{i}"} for i in range(20)]
+    def test_compact_context_keeps_recent_turns(self, orchestrator: Orchestrator) -> None:
+        """Compaction windows by TURN, not raw row count.
+
+        The window used to be 15 raw rows, so one assistant turn with
+        six parallel tool calls evicted the rest of the session. It is
+        now the newest ``max_turns`` user turns, whole, and it never
+        cuts away the last assistant message.
+        """
+        long_hist: list[dict] = []
+        for i in range(20):
+            long_hist.append({"role": "user", "content": f"u{i}"})
+            long_hist.append({"role": "assistant", "content": f"a{i}"})
         compact = orchestrator._compact_context(long_hist)
-        assert len(compact) == 15
-        assert compact[-1]["content"] == "m19"
+        assert len(compact) == 24  # 12 user turns x (user + assistant)
+        assert compact[0]["content"] == "u8"
+        assert compact[-1]["content"] == "a19"
+        roles = [m["role"] for m in compact]
+        assert not any(a == b == "user" for a, b in zip(roles, roles[1:]))
 
     async def test_build_system_prompt_includes_identity_and_skills(
         self, orchestrator: Orchestrator

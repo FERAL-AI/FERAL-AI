@@ -61,7 +61,8 @@
         }
       ],
       "returns_description": "{items, count}",
-      "ui_hint": "list"
+      "ui_hint": "list",
+      "emit_result_preview": true
     },
     {
       "id": "complete",

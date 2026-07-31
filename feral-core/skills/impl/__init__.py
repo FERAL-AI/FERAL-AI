@@ -35,11 +35,6 @@ except ImportError:
     pass
 
 try:
-    import skills.impl.computer_use
-except ImportError:
-    pass
-
-try:
     import skills.impl.image_gen
 except ImportError:
     pass
@@ -145,10 +140,23 @@ except ImportError:
     pass
 
 try:
-    import skills.impl.cutebot_skill
+    import skills.impl.cutebot_skill  # noqa: F401 (imported for @register_skill side effect)
 except ImportError:
     pass
 
 
-# robot_action uses WS_EXECUTE method — handled natively by SkillExecutor via daemon WebSocket
-# The RobotActionSkill bridge in robot_action.py is available for direct HUP use if needed
+# robot_action uses WS_EXECUTE — handled natively by SkillExecutor via the
+# daemon WebSocket, which is the only path that reaches real hardware and
+# which correctly errors "No connected daemon" when nothing is attached.
+#
+# There is deliberately no RobotActionSkill bridge here. The old
+# robot_action.py built a RobotArmAdapter() with no serial port and returned
+# status="success" with a fabricated joint array for every call, and its
+# _map_endpoint sent robot_move to the adapter's `move_joints`, which reads
+# `joints`/`speed_pct` — so the manifest's `direction` was silently dropped
+# and the arm "moved" to all-zeros. Because SkillExecutor.execute checks
+# Python backing implementations BEFORE WS_EXECUTE, merely importing that
+# module would have shadowed the working daemon path with the fabricating
+# one. The manifest's `direction`/`speed` and `action` params match what the
+# node SDK's robot daemon actually consumes (feral-nodes/python-node-sdk/
+# robot_template.py), so nothing else needs to change.

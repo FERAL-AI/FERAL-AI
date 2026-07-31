@@ -2663,16 +2663,29 @@ class BrainState:
         even though chat worked. With this step in place, the operator's
         single labeled-active key reaches every surface.
         """
-        env_keys = [
-            "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
-            "GROQ_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY",
+        # LLM-provider env vars are DERIVED from the security layer's
+        # canonical table rather than restated here. This list had
+        # drifted before: a provider added to
+        # ``security.vault_keys._PROVIDER_ENV_KEYS`` but not to the
+        # literal below would have its labeled-active key stranded in
+        # the vault, and every env-reading surface (voice probe,
+        # realtime proxy, whisper/TTS) would report ``unauthorized``
+        # while chat worked — the exact v2026.5.46 bug this method's
+        # docstring describes, one registry further out.
+        from security.vault_keys import _PROVIDER_ENV_KEYS
+
+        # Non-LLM credentials (search, git, cloud) have no provider-id
+        # table to derive from, so they stay enumerated.
+        _NON_LLM_ENV_KEYS = [
             "TOGETHER_API_KEY", "FIREWORKS_API_KEY",
-            "MOONSHOT_API_KEY", "DASHSCOPE_API_KEY",
             "TAVILY_API_KEY", "BRAVE_API_KEY", "EXA_API_KEY",
             "SERPER_API_KEY", "GITHUB_TOKEN", "SPOTIFY_CLIENT_ID",
             "PERPLEXITY_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CSE_ID",
             "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
         ]
+        env_keys = list(
+            dict.fromkeys(list(_PROVIDER_ENV_KEYS.values()) + _NON_LLM_ENV_KEYS)
+        )
         loaded: list[str] = []
 
         # Read credentials.json INTO MEMORY before constructing any

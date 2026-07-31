@@ -1,10 +1,16 @@
 name: Provider Research
 
 # Refreshes feral-core/providers/model_catalog.json by polling every
-# provider's /v1/models endpoint. If the catalog changed, opens a PR
-# for review. Keeps FERAL aware of new LLM releases (Claude, Kimi, GPT,
-# Gemini, Groq, DeepSeek, xAI, Together, OpenRouter) without a human
+# provider's model-discovery endpoint. If the catalog changed, opens a
+# PR for review. Keeps FERAL aware of new LLM releases without a human
 # having to track release blogs.
+#
+# Pollable (script refreshes models, and pricing/capabilities where the
+# provider publishes them): Anthropic, OpenAI, Gemini, Groq, DeepSeek,
+# Moonshot, Mistral, Qwen, Together, OpenRouter.
+# Curated (hand-maintained, never touched here): xAI, MiniMax, Z.ai,
+# Fireworks, Bedrock, Ollama, LM Studio. See CURATED_ONLY in
+# scripts/research_providers.py for the per-provider reason.
 #
 # 2026-04-24 (Roadmap §3.5 P0): the daily cron was OFF since
 # 2026.4.18-dev because most adapters were still stubs. The user-visible
@@ -43,17 +49,30 @@ jobs:
         with:
           python-version: "3.11"
 
+      # --require-keys is NOT optional here. Between 2026-04-26 and
+      # 2026-07-30 this job ran green every day while doing nothing:
+      # none of the PROVIDER_RESEARCH_* secrets below had ever been
+      # created, every refresher swallowed the missing key and returned
+      # None, and the script printed "no provider model lists changed"
+      # and exited 0. Three months of provider releases and price
+      # changes never landed, and cost/pricing.py — the single source
+      # of truth for every budget cap — kept serving April rates.
+      #
+      # OPERATOR ACTION REQUIRED: create these repository secrets.
+      # Until they exist this job fails loudly, which is the point.
       - name: Run research script
         env:
           OPENAI_API_KEY: ${{ secrets.PROVIDER_RESEARCH_OPENAI_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.PROVIDER_RESEARCH_ANTHROPIC_KEY }}
           GROQ_API_KEY: ${{ secrets.PROVIDER_RESEARCH_GROQ_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.PROVIDER_RESEARCH_DEEPSEEK_KEY }}
-          XAI_API_KEY: ${{ secrets.PROVIDER_RESEARCH_XAI_KEY }}
           MOONSHOT_API_KEY: ${{ secrets.PROVIDER_RESEARCH_MOONSHOT_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.PROVIDER_RESEARCH_MISTRAL_KEY }}
+          DASHSCOPE_API_KEY: ${{ secrets.PROVIDER_RESEARCH_DASHSCOPE_KEY }}
           TOGETHER_API_KEY: ${{ secrets.PROVIDER_RESEARCH_TOGETHER_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.PROVIDER_RESEARCH_OPENROUTER_KEY }}
           GEMINI_API_KEY: ${{ secrets.PROVIDER_RESEARCH_GEMINI_KEY }}
-        run: python scripts/research_providers.py
+        run: python scripts/research_providers.py --require-keys
 
       - name: Create PR on change
         uses: peter-evans/create-pull-request@v7

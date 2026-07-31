@@ -132,24 +132,78 @@ class RobotArmAdapter:
         )
 
     async def connect(self) -> bool:
+        # There is no "simulation mode". connect() used to return True with
+        # self._serial still None whenever the port was unset or pyserial was
+        # missing, and every subsequent execute() then reported success for
+        # movements that never happened — the LLM had a tool named "move the
+        # robot" that always said it worked. An adapter with no transport is
+        # not connected, and says so.
         if not self.serial_port:
-            logger.info("No serial port configured; running in simulation mode")
-            return True
+            logger.error(
+                "Robot arm %s has no serial port configured — not connected. "
+                "Construct it as RobotArmAdapter(serial_port='/dev/ttyUSB0') "
+                "so actuation has somewhere to go.",
+                self.device_id,
+            )
+            return False
         try:
             import serial as pyserial
+        except ImportError:
+            logger.error(
+                "Robot arm %s cannot connect: pyserial is not installed. "
+                "Install it with `pip install pyserial`.",
+                self.device_id,
+            )
+            return False
+        try:
             self._serial = pyserial.Serial(self.serial_port, 115200, timeout=1)
             logger.info("Connected to robot arm on %s", self.serial_port)
-            return True
-        except ImportError:
-            logger.info("pyserial not installed; running in simulation mode")
             return True
         except Exception as e:
             logger.error("Serial connection failed: %s", e)
             return False
 
+    #: Capability ids this adapter implements. Kept next to the transport
+    #: guard so an unknown id still gets "Unknown capability" rather than
+    #: "not connected".
+    _CAPABILITY_IDS = frozenset({
+        "move_joints", "move_cartesian", "gripper",
+        "home", "estop", "read_position",
+    })
+
+    def _no_transport_error(self) -> str:
+        """Operator-facing reason why nothing can be actuated right now."""
+        if not self.serial_port:
+            return (
+                f"Robot arm {self.device_id} is not connected: no serial port "
+                f"configured. Nothing was actuated. Configure a serial port "
+                f"(e.g. /dev/ttyUSB0) and reconnect."
+            )
+        return (
+            f"Robot arm {self.device_id} is not connected on "
+            f"{self.serial_port}. Nothing was actuated. Call connect() and "
+            f"check the cable, permissions, and that pyserial is installed."
+        )
+
     async def execute(self, action: HUPAction) -> HUPResult:
         cap_id = action.capability_id
         params = action.parameters or {}
+
+        # Refuse every KNOWN capability while there is no serial transport.
+        # This covers reads as well as writes: `read_position` would
+        # otherwise report self._position, which is the adapter's own
+        # bookkeeping, not where the arm actually is. Unknown ids fall
+        # through to the "Unknown capability" answer below, which is the
+        # more specific and more useful error.
+        if self._serial is None and cap_id in self._CAPABILITY_IDS:
+            logger.error(
+                "Refusing %s on %s — %s", cap_id, self.device_id,
+                self._no_transport_error(),
+            )
+            return HUPResult(
+                action_id=action.action_id, device_id=self.device_id,
+                status="failure", error=self._no_transport_error(),
+            )
 
         if self._estop and cap_id != "estop":
             return HUPResult(
@@ -214,11 +268,18 @@ class RobotArmAdapter:
         return HUPResult(action_id=action.action_id, device_id=self.device_id, status="failure", error=f"Unknown capability: {cap_id}")
 
     async def _send_gcode(self, command: str):
-        """Send a G-code command via serial. Simulates if no serial port."""
-        if self._serial:
-            self._serial.write(f"{command}\n".encode())
-            await asyncio.sleep(0.01)
-            response = self._serial.readline().decode().strip()
-            logger.debug("G-code response: %s", response)
-        else:
-            logger.debug("Simulated G-code: %s", command)
+        """Send a G-code command via serial.
+
+        Raises RuntimeError when there is no serial transport. The old
+        ``else: logger.debug("Simulated G-code")`` branch is what let
+        ``execute()`` return success for movements that never left the
+        process. execute() already refuses when ``_serial`` is None; this
+        raise is the backstop so no future caller can reintroduce a silent
+        no-op path.
+        """
+        if self._serial is None:
+            raise RuntimeError(self._no_transport_error())
+        self._serial.write(f"{command}\n".encode())
+        await asyncio.sleep(0.01)
+        response = self._serial.readline().decode().strip()
+        logger.debug("G-code response: %s", response)

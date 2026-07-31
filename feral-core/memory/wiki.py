@@ -1,4 +1,15 @@
-"""Memory Wiki helpers. Async-native since v2026.5.33."""
+"""Memory Wiki helpers. Async-native since v2026.5.33.
+
+Connection discipline (incident, v2026.7.x): every function here takes
+its connection from ``MemoryStore``'s pool via ``store._conn()`` and
+MUST hand it back with ``await store._release(conn)``. Four of them
+called ``await conn.close()`` instead. The pool is filled exactly once
+and never refills (``store.py`` ``_conn``), so each such call
+permanently destroyed one of the four connections; the fifth call to
+any wiki read blocked forever inside ``self._pool.get()``, with no
+timeout and no error, taking the entire memory subsystem with it. Closing a
+pooled connection is never correct.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +19,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import aiosqlite
-
 from config.loader import feral_home
+from memory.fts_query import fts5_match_query
 
 
 def wiki_slug(value: str) -> str:
@@ -29,9 +39,14 @@ async def wiki_upsert_page(
 ) -> dict:
     now = time.time()
     refs = source_refs or []
-    conn = await aiosqlite.connect(store.db_path)
+    # Pooled, like every other function in this module. This used to
+    # open its own ``aiosqlite.connect`` per call, which cost a fresh
+    # connection + worker thread + WAL pragma for each of the ~800
+    # pages ``wiki_compile`` writes in one pass, and left the module
+    # with two different connection lifecycles, the ambiguity that
+    # produced the pool-exhaustion incident below.
+    conn = await store._conn()
     try:
-        await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute(
             """
             INSERT INTO wiki_pages (id, title, kind, body_markdown, source_refs, created_at, updated_at)
@@ -47,7 +62,7 @@ async def wiki_upsert_page(
         )
         await conn.commit()
     finally:
-        await conn.close()
+        await store._release(conn)
     return {
         "id": page_id,
         "title": title,
@@ -66,7 +81,7 @@ async def wiki_get_page(store, page_id: str) -> Optional[dict]:
         ) as cur:
             row = await cur.fetchone()
     finally:
-        await conn.close()
+        await store._release(conn)
     if not row:
         return None
     return {
@@ -82,10 +97,16 @@ async def wiki_get_page(store, page_id: str) -> Optional[dict]:
 
 async def wiki_list_pages(store, *, query: str = "", kind: str = "", limit: int = 50) -> list[dict]:
     lim = max(1, min(limit, 200))
+    # Same FTS5 quoting as the episode/note search paths. This one had
+    # no guard at all, so "GET /api/wiki/pages?q=don't" propagated a raw
+    # sqlite3.OperationalError out of the route as a 500. An empty
+    # expression means the query held no indexable term, in which case
+    # we fall through to the unfiltered listing below.
+    match_expr = fts5_match_query(query)
     conn = await store._conn()
     try:
         rows = []
-        if query.strip():
+        if match_expr:
             if kind:
                 async with conn.execute(
                     """
@@ -96,7 +117,7 @@ async def wiki_list_pages(store, *, query: str = "", kind: str = "", limit: int 
                     ORDER BY rank, w.updated_at DESC
                     LIMIT ?
                     """,
-                    (query.strip(), kind, lim),
+                    (match_expr, kind, lim),
                 ) as cur:
                     rows = await cur.fetchall()
             else:
@@ -109,7 +130,7 @@ async def wiki_list_pages(store, *, query: str = "", kind: str = "", limit: int 
                     ORDER BY rank, w.updated_at DESC
                     LIMIT ?
                     """,
-                    (query.strip(), lim),
+                    (match_expr, lim),
                 ) as cur:
                     rows = await cur.fetchall()
         elif kind:
@@ -136,7 +157,7 @@ async def wiki_list_pages(store, *, query: str = "", kind: str = "", limit: int 
             ) as cur:
                 rows = await cur.fetchall()
     finally:
-        await conn.close()
+        await store._release(conn)
     return [
         {
             "id": row["id"],
@@ -159,7 +180,7 @@ async def wiki_stats(store) -> dict:
         ) as cur:
             kinds = await cur.fetchall()
     finally:
-        await conn.close()
+        await store._release(conn)
     return {
         "pages": total,
         "kinds": [{"kind": row["kind"], "count": row["count"]} for row in kinds],
@@ -239,7 +260,10 @@ async def wiki_compile(
             ) as cur:
                 triples = await cur.fetchall()
     finally:
-        await conn.close()
+        # Released before the upsert loop below: ``wiki_upsert_page``
+        # takes its own pooled connection, and holding this one across
+        # hundreds of upserts would starve the pool.
+        await store._release(conn)
 
     note_pages = 0
     for row in notes:

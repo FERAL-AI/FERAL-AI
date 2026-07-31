@@ -39,11 +39,21 @@ class ChannelAdapter:
 ### Setup
 
 1. Create a bot via [@BotFather](https://t.me/BotFather) and get the token.
-2. Store the token in the vault:
+2. Store the token in the vault. The channels step of the setup wizard
+   prompts for it, verifies it against Telegram's `getMe`, and stores it
+   under the `FERAL_TELEGRAM_BOT_TOKEN` name the runtime reads:
 
 ```bash
-feral key add --provider telegram --label bot_token --value "123456:ABC-..."
+feral setup --from-step channels
 ```
+
+   The web UI's Settings → Channels card writes the same credential.
+
+   <Note>
+   `feral key add --provider telegram` is **not** the right command here.
+   It stores labeled keys for LLM providers under a namespace the channel
+   loader and the Telegram probe never read.
+   </Note>
 
 3. Enable the channel in config:
 
@@ -85,8 +95,7 @@ feral key add --provider telegram --label bot_token --value "123456:ABC-..."
 3. Store tokens:
 
 ```bash
-feral key add --provider slack --label bot_token --value "xoxb-..."
-feral key add --provider slack --label app_token --value "xapp-..."
+feral setup --from-step channels   # prompts for both tokens, probes auth.test
 ```
 
 4. Configure:
@@ -115,7 +124,7 @@ FERAL maintains session continuity per Slack thread. A new thread starts a new s
 3. Invite the bot to your server with `Send Messages` + `Read Message History` permissions.
 
 ```bash
-feral key add --provider discord --label bot_token --value "MTIz..."
+feral setup --from-step channels   # prompts for the token, probes users/@me
 ```
 
 ```yaml

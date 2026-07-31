@@ -232,10 +232,53 @@ _PROVIDER_REGISTRY: dict[str, tuple[str, str]] = {
     # hit ``api.deepseek.com/chat/completions`` (404) while the
     # primary path worked. See findings/13-llm-core.md fix #3.
     "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
-    "kimi": ("https://api.moonshot.cn/v1", "MOONSHOT_API_KEY"),
-    "qwen": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY"),
+    # The Moonshot API host is api.moonshot.**ai**. The DOCS host moved
+    # to platform.kimi.ai but the API host did NOT — and the previous
+    # value here (api.moonshot.**cn**) was a different, older estate.
+    "kimi": ("https://api.moonshot.ai/v1", "MOONSHOT_API_KEY"),
+    # Qwen's OpenAI-compatible host is now WORKSPACE-SCOPED. The literal
+    # below is the documented template, not a dialable host —
+    # ``_resolve_workspace_base_url`` substitutes {WorkspaceId} from
+    # DASHSCOPE_WORKSPACE_ID at connect time. The old
+    # dashscope.aliyuncs.com/compatible-mode/v1 endpoint this replaced
+    # is no longer the documented path.
+    "qwen": (
+        "https://[{WorkspaceId}].ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        "DASHSCOPE_API_KEY",
+    ),
+    # xai had catalog data but no runtime binding — the catalog
+    # advertised Grok models the brain could not actually dispatch to.
+    # Its API is OpenAI-compatible, so the binding is one line.
+    "xai": ("https://api.x.ai/v1", "XAI_API_KEY"),
+    "zai": ("https://api.z.ai/api/paas/v4", "ZAI_API_KEY"),
+    "minimax": ("https://api.minimax.io/v1", "MINIMAX_API_KEY"),
+    "mistral": ("https://api.mistral.ai/v1", "MISTRAL_API_KEY"),
     "lmstudio": ("http://localhost:1234/v1", ""),
 }
+
+
+def _resolve_workspace_base_url(base_url: str) -> str:
+    """Substitute ``{WorkspaceId}`` in a workspace-scoped base URL.
+
+    Alibaba moved Qwen's OpenAI-compatible endpoint to a per-workspace
+    host. The registry stores the documented template; the operator's
+    workspace id comes from ``DASHSCOPE_WORKSPACE_ID`` (or
+    ``QWEN_WORKSPACE_ID``). When neither is set the template is returned
+    unchanged so the caller surfaces an honest "unresolved base URL"
+    error instead of dialling a host literally named ``{WorkspaceId}``.
+    """
+    if "{WorkspaceId}" not in (base_url or ""):
+        return base_url
+    workspace = (
+        os.environ.get("DASHSCOPE_WORKSPACE_ID")
+        or os.environ.get("QWEN_WORKSPACE_ID")
+        or ""
+    ).strip()
+    if not workspace:
+        return base_url
+    return base_url.replace("[{WorkspaceId}]", workspace).replace(
+        "{WorkspaceId}", workspace
+    )
 
 
 # Catalog id ↔ legacy llm_provider id. The catalog only knows
@@ -245,6 +288,27 @@ _PROVIDER_REGISTRY: dict[str, tuple[str, str]] = {
 _CATALOG_PROVIDER_MAP: dict[str, str] = {
     "kimi": "moonshot",
 }
+
+# Reverse of the above: catalog id -> runtime id. Needed by any caller that
+# starts from a ``ProviderDescriptor`` (the setup wizard picker, the v2
+# /setup page) and wants to know whether the runtime can dial it.
+_RUNTIME_PROVIDER_MAP: dict[str, str] = {
+    catalog_id: runtime_id for runtime_id, catalog_id in _CATALOG_PROVIDER_MAP.items()
+}
+
+
+def is_supported_catalog_provider(catalog_id: str) -> bool:
+    """``is_supported_runtime_provider`` keyed by a *catalog* provider id.
+
+    The catalog and the runtime do not always agree on a provider's key:
+    the catalog calls Moonshot ``moonshot`` while the runtime binding is
+    ``kimi``. Calling ``is_supported_runtime_provider("moonshot")`` therefore
+    returns False for a provider that works perfectly, which made the setup
+    wizard hide Kimi from the picker entirely. Resolve through the map first.
+    """
+    return is_supported_runtime_provider(
+        _RUNTIME_PROVIDER_MAP.get(catalog_id, catalog_id)
+    )
 
 
 # Canonical set of provider ids the runtime can actually execute chat
@@ -274,6 +338,41 @@ def is_supported_runtime_provider(provider_name: str) -> bool:
     False keeps the runtime from silently dialling OpenAI for them.
     """
     return (provider_name or "") in SUPPORTED_RUNTIME_PROVIDERS
+
+
+# Model classes that cannot serve a chat-completions call. ``chat``,
+# ``reasoning`` and ``vision`` obviously can; ``unknown`` is deliberately
+# treated as chat-capable, matching the documented policy on
+# ``providers.model_classes.classify`` -- a newly released frontier id that
+# no rule matches yet must not be silently excluded until the next catalog
+# refresh. ``realtime`` is excluded because the Realtime API is a separate
+# WebSocket surface, not /v1/chat/completions.
+_NON_CHAT_MODEL_CLASSES: frozenset[str] = frozenset({
+    "embedding", "audio", "image", "completion-only", "realtime", "video",
+})
+
+
+def _chat_capability_of(provider_name: str, model_id: str) -> tuple[bool, str]:
+    """Return ``(is_chat_capable, model_class)`` for a failover candidate.
+
+    Pure and cheap: ``classify`` does no IO. Used to drop a candidate
+    before the wire call rather than paying a round trip to learn the same
+    fact from a 404. Failures to classify resolve to chat-capable, because
+    refusing to dial on an inconclusive signal would be worse than the 404
+    it is trying to avoid.
+
+    Imported lazily to match the existing ``classify_endpoint`` call sites
+    in this module.
+    """
+    if not model_id:
+        return True, "unknown"
+    try:
+        from providers.model_classes import classify
+        model_class = str(classify(provider_name, model_id))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("model-class lookup failed for %s/%s: %s", provider_name, model_id, exc)
+        return True, "unknown"
+    return model_class not in _NON_CHAT_MODEL_CLASSES, model_class
 
 
 def _default_model_for(provider_name: str) -> str:
@@ -441,14 +540,6 @@ class LLMProvider:
             self.base_url = self.base_url or "https://api.deepseek.com/v1"
             self.api_key = os.getenv("DEEPSEEK_API_KEY", self.api_key)
             self.model = self.model or _default_model_for("deepseek")
-        elif self.provider == "kimi":
-            self.base_url = self.base_url or "https://api.moonshot.cn/v1"
-            self.api_key = os.getenv("MOONSHOT_API_KEY", self.api_key)
-            self.model = self.model or _default_model_for("kimi")
-        elif self.provider == "qwen":
-            self.base_url = self.base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1"
-            self.api_key = os.getenv("DASHSCOPE_API_KEY", self.api_key)
-            self.model = self.model or _default_model_for("qwen")
         elif self.provider == "lmstudio":
             self.base_url = self.base_url or "http://localhost:1234/v1"
             self.api_key = "lm-studio"
@@ -462,6 +553,29 @@ class LLMProvider:
             self.base_url = self.base_url or "https://api.openai.com/v1"
             self.api_key = os.getenv("OPENAI_API_KEY", self.api_key)
             self.model = self.model or _default_model_for("openai")
+        elif self.provider in _PROVIDER_REGISTRY:
+            # Registry-driven branch for every remaining OpenAI-compatible
+            # provider (kimi, qwen, xai, zai, minimax, mistral). These used
+            # to need a hand-written ``elif`` apiece, which is how kimi and
+            # qwen ended up with base URLs that had drifted from the
+            # registry tuple sitting a few hundred lines above. Reading the
+            # registry directly makes that drift structurally impossible:
+            # adding a provider is now a one-line registry edit.
+            registry_base, registry_env = _PROVIDER_REGISTRY[self.provider]
+            self.base_url = self.base_url or _resolve_workspace_base_url(registry_base)
+            if registry_env:
+                self.api_key = os.getenv(registry_env, self.api_key)
+            self.model = self.model or _default_model_for(self.provider)
+            if "{" in (self.base_url or ""):
+                # Workspace-scoped host with no workspace id supplied.
+                # Fail visibly rather than dial a literal "{WorkspaceId}".
+                logger.warning(
+                    "%s base URL is still a template (%s) — set "
+                    "DASHSCOPE_WORKSPACE_ID. Marking provider unavailable.",
+                    self.provider,
+                    self.base_url,
+                )
+                self.available = False
         else:
             # Unknown provider id. Previously this branch silently
             # defaulted to ``https://api.openai.com/v1`` with the
@@ -921,13 +1035,32 @@ class LLMProvider:
                 return True, ""
             return False, narrow_reason
 
-        # Anthropic, DeepSeek, Groq all support vision on their
-        # frontier chat models; the provider registry already carries
-        # that signal in the bundled ``_capabilities`` set. If we
-        # ever ship a text-only Anthropic build the per-model hook
-        # ``_capabilities_for_model`` narrows this.
-        if self.provider in ("anthropic", "deepseek", "groq"):
+        # Anthropic and Groq support vision on their frontier chat models;
+        # the provider registry carries that signal in the bundled
+        # ``_capabilities`` set. If we ever ship a text-only Anthropic
+        # build the per-model hook ``_capabilities_for_model`` narrows it.
+        if self.provider in ("anthropic", "groq"):
             return True, ""
+
+        # DeepSeek was listed above on the assumption that every frontier
+        # chat model takes images. It does not: the chat-completions API
+        # rejects an ``image_url`` content block outright with
+        # HTTP 400 ``invalid_request_error`` --
+        #   "Failed to deserialize the JSON body into the target type:
+        #    messages[0]: unknown variant `image_url`, expected `text`"
+        # -- observed live on 2026-07-30 against ``deepseek-v4-pro``. Because
+        # this returned True, the vision guard let the request through, so a
+        # DeepSeek hop in the failover chain 400'd on any turn carrying a
+        # screen frame or an attached image instead of degrading to text.
+        # Returning False here makes the caller strip the image blocks and
+        # send the text, which is a usable answer rather than an exhausted
+        # chain.
+        if self.provider == "deepseek":
+            return (
+                False,
+                "DeepSeek chat models are text-only and reject image content "
+                "blocks. Images will be dropped for this hop.",
+            )
 
         if self.provider == "ollama":
             model_lower = (self.model or "").lower()
@@ -1846,7 +1979,35 @@ class LLMProvider:
                 elif event_type == "response.completed":
                     for tc in tool_calls.values():
                         yield {"type": "tool_call_delta", "tool_call": _finalise_tool_call(tc)}
-                    yield {"type": "done"}
+                    # The Responses API reports token usage inside the
+                    # terminal event's ``response`` object, with no opt-in
+                    # required (unlike chat-completions, which needs
+                    # ``stream_options.include_usage`` — see the note in
+                    # ``_extract_usage``). It was arriving here and being
+                    # discarded, which had two consequences: the UI could
+                    # never show per-turn tokens, and ``_budget_record``
+                    # billed every streamed turn at ZERO tokens, so the
+                    # operator's cost caps silently under-counted the
+                    # default code path.
+                    _resp = chunk.get("response") or {}
+                    _done: dict = {"type": "done"}
+                    _u = _resp.get("usage")
+                    if isinstance(_u, dict):
+                        # Responses names these input_/output_tokens; keep the
+                        # provider's own keys AND the normalised pair so
+                        # downstream readers don't need to know the shape.
+                        _in = _u.get("input_tokens") or _u.get("prompt_tokens") or 0
+                        _out = _u.get("output_tokens") or _u.get("completion_tokens") or 0
+                        _done["usage"] = {
+                            "input_tokens": int(_in),
+                            "output_tokens": int(_out),
+                            "total_tokens": int(_u.get("total_tokens") or (_in + _out)),
+                        }
+                    if _resp.get("model"):
+                        # The model that actually answered, which can differ
+                        # from the configured one after failover.
+                        _done["model"] = str(_resp["model"])
+                    yield _done
                     return
                 elif event_type == "response.failed":
                     err = chunk.get("response", {}).get("error") or chunk.get("error")
@@ -2031,6 +2192,30 @@ class LLMProvider:
                         # picks up after the generator finishes.
                         yield event
                         return
+                    if event.get("type") == "done" and event.get("usage"):
+                        # Record the turn against the operator's cost caps.
+                        # ``_budget_record`` is otherwise only reached from
+                        # the NON-streaming paths (``chat`` at :806/:932 and
+                        # ``chat_with_failover`` at :4102), so every streamed
+                        # turn was being billed at ZERO tokens and the
+                        # per-call-site caps in settings.json never moved for
+                        # it. Note this is the opt-in path, not the default:
+                        # ``features.streaming`` defaults to False, so a fresh
+                        # profile serves chat from ``_handle_command_impl``.
+                        # Both paths have to record, and now both do.
+                        #
+                        # ``_extract_usage`` already accepts the
+                        # ``{usage: {input_tokens, output_tokens}}`` shape the
+                        # Responses terminal event carries, so the dict goes
+                        # straight in. Bill against the model that ANSWERED
+                        # (present on the event after failover), not the one
+                        # configured. ``_budget_record`` is best-effort and
+                        # never raises.
+                        await self._budget_record(
+                            call_site,
+                            str(event.get("model") or self.model),
+                            event,
+                        )
                     yield event
                 if streamed_anything:
                     return
@@ -2755,18 +2940,26 @@ class LLMProvider:
     # enable by default — the cheap tier never leaves the provider the
     # operator already has a key for; it only swaps to a cheaper model.
     # Operators wanting cross-provider tiers set ``settings.llm.tier_map``.
+    # Refreshed 2026-07-30 against the catalog. Entries whose cheap SKU
+    # could not be verified were REMOVED rather than left pointing at a
+    # retired id: ``_cheap_sibling_model`` returning None simply disables
+    # cheap-tier routing for that provider, whereas a stale literal
+    # routes real traffic at a model that 404s. ``xai`` lost its
+    # ``grok-3-mini`` entry for exactly that reason — grok-3-mini is
+    # retired and the current line (grok-4.5 / grok-4.3 / grok-build-0.1)
+    # has no confirmed cheap tier.
     _CHEAP_SIBLING: dict[str, str] = {
-        "openai": "gpt-4o-mini",
+        "openai": "gpt-5-nano",
         "anthropic": "claude-haiku-4-5",
-        "google": "gemini-2.5-flash",
-        "gemini": "gemini-2.5-flash",
+        "google": "gemini-3.5-flash-lite",
+        "gemini": "gemini-3.5-flash-lite",
         "deepseek": "deepseek-v4-flash",
-        "openrouter": "openai/gpt-4o-mini",
+        "openrouter": "openai/gpt-5-nano",
         "groq": "llama-3.1-8b-instant",
         "together": "meta-llama/Llama-3.1-8B-Instruct-Turbo",
         "fireworks": "accounts/fireworks/models/llama-v3p1-8b-instruct",
-        "mistral": "mistral-small-latest",
-        "xai": "grok-3-mini",
+        "mistral": "mistral-small-2603",
+        "kimi": "kimi-k2.5",
     }
 
     def _cheap_sibling_model(self, provider: str, current_model: str) -> Optional[str]:
@@ -3847,6 +4040,33 @@ class LLMProvider:
             retry_kwargs["_retry_delays"] = _FAILOVER_FAST_DELAYS
 
         for provider_name, config in candidates:
+            candidate_model = config.get("model") or self.model
+            chat_capable, candidate_class = _chat_capability_of(provider_name, candidate_model)
+            if not chat_capable:
+                # The model exists but is not a chat model, so the hop can
+                # only ever 404. Observed live on 2026-07-30: the ``openai``
+                # fallback resolved to a non-chat id and every turn burned a
+                # hop on
+                #   HTTP 404 invalid_request_error, param=model: "This is not
+                #   a chat model and thus not supported in the
+                #   v1/chat/completions endpoint. Did you mean to use
+                #   v1/completions?"
+                # before falling through to the next candidate. Classifying
+                # it here costs nothing and keeps the chain honest; the wire
+                # call is the expensive way to learn the same fact.
+                logger.info(
+                    "Skipping %r in failover chain: model %r is not chat-capable (%s)",
+                    provider_name, candidate_model, candidate_class,
+                )
+                last_error = last_error or RuntimeError(
+                    f"Model {candidate_model!r} on provider {provider_name!r} "
+                    "is not a chat model"
+                )
+                failed_candidates.append({
+                    "provider": provider_name,
+                    "reason": FailoverReason.MODEL_NOT_FOUND.value,
+                })
+                continue
             if not config.get("supported", True):
                 # Skip catalog-only providers with no runtime adapter.
                 # No cooldown — the problem isn't transient, it's that

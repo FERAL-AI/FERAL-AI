@@ -34,7 +34,14 @@ DEFAULT_SETTINGS = {
     "version": "0.4.0",
     "llm": {
         "provider": "openai",
-        "model": "gpt-4o-mini",
+        # Empty on purpose: ``LLMProvider.__init__`` falls through to
+        # ``_default_model_for`` which reads the live model catalog. A
+        # literal here pins every new install to whatever was current
+        # when it was written -- this shipped ``gpt-4o-mini``, whose
+        # Oct-2023 training cutoff made it fabricate 2023 dates for
+        # "schedule X at 10am" on a 2026 machine. Roadmap 3.5 P0 bans
+        # hardcoded model literals for exactly this reason.
+        "model": "",
         # Lane U1 — multi-model favorites. ``llm.model`` stays the
         # active scalar choice (back-compat for every caller that
         # reads it). ``llm.models`` is the additive favorites list
@@ -544,11 +551,50 @@ class ConfigLoader:
                 self._credentials.setdefault("skill_keys", {})
                 self._credentials["skill_keys"][skill_id] = str(value).strip()
 
+    @staticmethod
+    def _drop_unrunnable_providers(providers: list[str], *, source: str) -> list[str]:
+        """Filter a failover chain down to providers the runtime can actually dial.
+
+        ``SUPPORTED_RUNTIME_PROVIDERS`` is the set with a real adapter in
+        ``agents.llm_provider``. Anything else -- an operator-written
+        ``settings.json`` naming ``bedrock``, or a ``_KEY_MAP`` entry like
+        ``cohere`` / ``mistral`` that has a credential but no adapter --
+        used to enter the chain unchecked and burn a failover hop per turn
+        logging "Provider 'x' has no runtime adapter". On a live brain this
+        showed up as every chain ending in ``chat_with_failover exhausted``
+        (operator report 2026-07: 14 exhausted chains, 1 successful call).
+
+        Dropping them here rather than at dial time means the chain the
+        orchestrator sees is honest. The drop is logged, never silent, so a
+        typo'd or aspirational provider id is visible instead of mysterious.
+
+        Imported lazily: ``agents.llm_provider`` imports this module at
+        module scope, so a top-level import here would be a cycle.
+        """
+        if not providers:
+            return []
+        try:
+            from agents.llm_provider import is_supported_runtime_provider
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("runtime-provider filter unavailable (%s); passing chain through", exc)
+            return providers
+
+        kept, dropped = [], []
+        for prov in providers:
+            (kept if is_supported_runtime_provider(prov) else dropped).append(prov)
+        if dropped:
+            logger.warning(
+                "Dropping %s from the LLM failover chain (%s): no runtime adapter. "
+                "Kept: %s",
+                ", ".join(dropped), source, ", ".join(kept) or "(none)",
+            )
+        return kept
+
     def _derive_fallback_providers(self) -> list[str]:
         """Auto-populate fallback_providers from providers that have stored keys."""
         existing = self._merged.get("llm", {}).get("fallback_providers") or []
         if existing:
-            return existing
+            return self._drop_unrunnable_providers(existing, source="settings.json")
 
         _KEY_MAP = {
             "openai": "OPENAI_API_KEY",
@@ -574,7 +620,11 @@ class ConfigLoader:
                 key = self._credentials.get(key_name, "").strip() if isinstance(self._credentials.get(key_name), str) else ""
             if key:
                 providers.append(prov)
-        return providers
+        # ``_KEY_MAP`` above lists credentials we know how to *read*, which is
+        # a wider set than the providers we can *dial* (cohere, mistral and
+        # xai have no adapter today), so the derived chain needs the same
+        # filter as the operator-supplied one.
+        return self._drop_unrunnable_providers(providers, source="derived from stored keys")
 
     def _check_setup_complete(self) -> bool:
         """Check if the full setup has been done (LLM key + identity)."""
@@ -806,7 +856,7 @@ class ConfigLoader:
         env = {}
         llm = self._merged.get("llm", {})
         env["FERAL_LLM_PROVIDER"] = llm.get("provider", "openai")
-        env["FERAL_LLM_MODEL"] = llm.get("model", "gpt-4o-mini")
+        env["FERAL_LLM_MODEL"] = llm.get("model", "")
         if llm.get("base_url"):
             env["FERAL_LLM_BASE_URL"] = llm["base_url"]
 
@@ -835,6 +885,23 @@ class ConfigLoader:
         vision_on = bool(vision.get("enabled", False)) or bool(features.get("vision", False))
         env["FERAL_VISION_ENABLED"] = str(vision_on).lower()
         env["FERAL_VISION_MAX_FRAME_KB"] = str(vision.get("max_frame_kb", 512))
+        # ``SceneAnalyzer.__init__`` resolves its VLM ONLY from these env vars
+        # (perception/scene.py). Before this, ``settings.vision.provider`` and
+        # ``settings.vision.model`` were written by the operator, stored on
+        # disk, and read by nothing: ``_vlm_client`` stayed None, and every
+        # screen frame fell through ``_call_vlm`` to ``_call_default_llm``,
+        # billing the shared paid chat model.
+        #
+        # An operator who had explicitly selected free local vision
+        # (provider=ollama, model=llava) was being charged roughly
+        # $0.55-$1.12/hour for an idle machine, because the switch they set
+        # was never wired to anything. Export it.
+        if vision.get("provider"):
+            env["FERAL_VLM_PROVIDER"] = str(vision["provider"])
+        if vision.get("model"):
+            env["FERAL_VLM_MODEL"] = str(vision["model"])
+        if vision.get("base_url"):
+            env["FERAL_VLM_BASE_URL"] = str(vision["base_url"])
 
         env["FERAL_STREAMING"] = str(features.get("streaming", False)).lower()
         env["FERAL_PROACTIVE"] = str(features.get("proactive", False)).lower()

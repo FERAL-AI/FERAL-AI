@@ -93,6 +93,12 @@ EXEMPT_DIR_PREFIXES: tuple[str, ...] = (
     # and never reaches the public repo; locally-tracked walkers
     # would otherwise trip the linter on internal artifact names.
     "AUDIT-r14/",
+    # Agent worktrees (.gitignore:108). These are full working copies of
+    # the repo, so scanning them reports every hit a second time, once per
+    # worktree, attributed to a path that ships nowhere. A developer who
+    # has ever run an agent swarm would otherwise see this linter fail on
+    # someone else's checkout of the same files.
+    ".claude/worktrees/",
 )
 
 

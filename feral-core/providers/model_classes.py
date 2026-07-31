@@ -132,9 +132,20 @@ _OPENAI_RULES: tuple[tuple[re.Pattern[str], ModelClass], ...] = (
     (re.compile(r"^.*-instruct(-.+)?$"), "completion-only"),
     (re.compile(r"^gpt-3\.5-turbo-instruct(-.*)?$"), "completion-only"),
     (re.compile(r"^text-davinci-.+$"), "completion-only"),
-    # Reasoning family. gpt-5, gpt-5.4+, gpt-5.5 are reasoning; o1 / o3 /
-    # o4 are pure reasoning. gpt-4o is NOT reasoning (it's omni-chat).
-    (re.compile(r"^gpt-5(\.[0-9]+)?(-(pro|nano|mini))?(-\d{4}-\d{2}-\d{2})?$"), "reasoning"),
+    # Reasoning family. gpt-5, gpt-5.4+, gpt-5.5, gpt-5.6 are reasoning;
+    # o1 / o3 / o4 are pure reasoning. gpt-4o is NOT reasoning (it's
+    # omni-chat).
+    #
+    # The gpt-5.6 generation names its tiers ``sol`` / ``terra`` /
+    # ``luna`` instead of pro/mini/nano. Without them in this alternation
+    # ``gpt-5.6-sol`` classified as "unknown", which meant
+    # ``_apply_openai_reasoning_fork`` never fired for it and the
+    # outbound body kept ``max_tokens`` — a guaranteed 400 on a
+    # reasoning SKU.
+    (re.compile(
+        r"^gpt-5(\.[0-9]+)?(-(pro|nano|mini|sol|terra|luna))?"
+        r"(-(pro|nano|mini))?(-\d{4}-\d{2}-\d{2})?$"
+    ), "reasoning"),
     (re.compile(r"^o[134](-.*)?$"), "reasoning"),
     # Chat (gpt-4o / gpt-4.1 / gpt-4-turbo / gpt-4 / gpt-3.5-turbo).
     (re.compile(r"^gpt-4o(-.+)?$"), "chat"),
@@ -147,10 +158,26 @@ _OPENAI_RULES: tuple[tuple[re.Pattern[str], ModelClass], ...] = (
 
 
 _ANTHROPIC_RULES: tuple[tuple[re.Pattern[str], ModelClass], ...] = (
+    # Claude 5 generation (2026-07): opus / sonnet / fable / mythos. Ids
+    # are DATELESS — since the 4.6 generation the bare id is itself a
+    # pinned snapshot and appending a date 404s — so the optional
+    # ``-\d{8}`` tail exists only to keep a hypothetical dated form from
+    # falling through to "unknown".
+    #
+    # These MUST classify as reasoning. The whole Anthropic param fork
+    # (``agents/llm_reasoning._apply_anthropic_reasoning_fork``) is gated
+    # on ``classify(...) == "reasoning"``, and that fork is what strips
+    # ``temperature`` / ``top_p`` / ``top_k`` — all three of which return
+    # HTTP 400 on Claude 4.7 and later. Without these rules every Claude
+    # 5 id landed in "unknown", the fork never ran, and any turn carrying
+    # a temperature 400'd.
+    (re.compile(r"^claude-(opus|sonnet|haiku)-5(-\d{8})?$"), "reasoning"),
+    (re.compile(r"^claude-(fable|mythos)-5(-\d{8})?$"), "reasoning"),
+    (re.compile(r"^claude-mythos-preview$"), "reasoning"),
     # Every claude 4-family model is chat. The thinking-capable ones are
-    # flagged reasoning. Per 2026-04-26 docs, Opus 4.7 uses ADAPTIVE
-    # thinking (not extended), but from the "does this model benefit from
-    # the reasoning param fork?" angle, it still counts as reasoning.
+    # flagged reasoning. Opus 4.7 and later use ADAPTIVE thinking (not
+    # extended), but from the "does this model benefit from the reasoning
+    # param fork?" angle, they still count as reasoning.
     (re.compile(r"^claude-opus-4-[5-9](-\d{8})?$"), "reasoning"),
     (re.compile(r"^claude-sonnet-4-[4-9](-\d{8})?$"), "reasoning"),
     (re.compile(r"^claude-haiku-4-[4-9](-\d{8})?$"), "reasoning"),
@@ -441,8 +468,28 @@ __all__ = [
 import re as _re_endpoint
 
 _RESPONSES_ONLY_OPENAI: tuple[_re_endpoint.Pattern[str], ...] = (
-    # gpt-5-pro / gpt-5.4-pro / gpt-5.5-pro and dated snapshots.
-    _re_endpoint.compile(r"^gpt-5(\.[0-9]+)?-pro(-\d{4}-\d{2}-\d{2})?$"),
+    # gpt-5-pro / gpt-5.4-pro / gpt-5.5-pro and dated snapshots. The
+    # gpt-5.6 generation names its tiers sol / terra / luna, so the Pro
+    # variants are ``gpt-5.6-sol-pro`` etc.
+    _re_endpoint.compile(
+        r"^gpt-5(\.[0-9]+)?(-(sol|terra|luna))?-pro(-\d{4}-\d{2}-\d{2})?$"
+    ),
+    # The whole gpt-5.6 line, not just its Pro variants. These are reasoning
+    # models, and /v1/chat/completions rejects them outright when a request
+    # carries BOTH function tools and reasoning_effort:
+    #   400 invalid_request_error, param=reasoning_effort: "Function tools
+    #   with reasoning_effort are not supported for gpt-5.6-sol in
+    #   /v1/chat/completions. To use function tools, use /v1/responses or
+    #   set reasoning_effort to 'none'."
+    # FERAL sends tools on essentially every turn, so on chat_completions
+    # this model family cannot complete a single agentic turn. Observed on a
+    # clean 2026.7.31 install the moment the stale gpt-4o-mini default was
+    # removed and the catalog resolved gpt-5.6-sol. Routing to /v1/responses
+    # is what OpenAI's own error text prescribes, and keeps reasoning on
+    # rather than degrading it to 'none'.
+    _re_endpoint.compile(
+        r"^gpt-5\.6(-(sol|terra|luna))?(-\d{4}-\d{2}-\d{2})?$"
+    ),
     # o-series reasoning Pro variants (o3-pro etc).
     _re_endpoint.compile(r"^o[134]-pro(-.*)?$"),
     # Deep research models (responses-only per OpenAI docs).

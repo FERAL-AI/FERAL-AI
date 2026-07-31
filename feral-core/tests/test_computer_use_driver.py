@@ -10,7 +10,7 @@ We cover:
   through `gui_computer_use.execute` exactly once (no double DPI scaling
   inside the agentic loop).
 * The shell allowlist still rejects free-form commands and points at
-  `computer_use__bash` — preserving PR2's truthful refusal.
+  `coding_tools__bash`, preserving PR2's truthful refusal.
 * DPI scaling is applied by the primitive (gui_computer_use), not by
   the agentic loop.
 * `desktop_automation` is now a shim that delegates to gui_computer_use
@@ -279,7 +279,7 @@ async def test_agentic_unknown_action_does_not_call_gui(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_agentic_shell_allowlist_unchanged_after_routing(monkeypatch):
-    """PR2's allowlist + 'route through computer_use__bash' message must
+    """PR2's allowlist + 'route through coding_tools__bash' message must
     survive the driver refactor — preserving the truthful refusal."""
     from skills.impl.agentic_computer_use import AgenticComputerUseSkill
 
@@ -287,7 +287,7 @@ async def test_agentic_shell_allowlist_unchanged_after_routing(monkeypatch):
     # Free-form commands stay refused.
     msg = await skill._execute_action({"action": "shell", "command": "rm -rf /"})
     assert "blocked" in msg.lower()
-    assert "computer_use__bash" in msg
+    assert "coding_tools__bash" in msg
 
 
 @pytest.mark.asyncio

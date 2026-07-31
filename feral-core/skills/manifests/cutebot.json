@@ -9,7 +9,7 @@
     "logo_url": "https://img.icons8.com/ios-filled/50/22C55E/robot-2.png",
     "icon_set": "sf_symbols"
   },
-  "description": "Control the QtBot/CuteBot desk robot (Elecfreaks Smart Cutebot on micro:bit V2) over USB. Use for line-following on the black-on-white track, table exploration with built-in edge and obstacle reflexes, emergency stop, manual wheel drive, robot LED headlight/underglow (`set_lights` — the ONLY tool for robot light/color/off commands in text AND voice), and telemetry reads. Motion commands are CLOSED-LOOP: every result includes 'verified' (read back from robot telemetry). NEVER tell the user a motion command worked unless verified=true. If verified=false, call cutebot__status to diagnose, retry once if it makes sense, and otherwise report the concrete blocker (battery switch, robot lifted, USB link) honestly. For scheduled/recurring motion (e.g. 'nightly spin'), use `feral_routines__create` with `auto_confirm: true` — chat-time confirmation does NOT mean FERAL cannot schedule the action.",
+  "description": "Control the QtBot/CuteBot desk robot (Elecfreaks Smart Cutebot on micro:bit V2) over USB. Use for line-following on the black-on-white track, table exploration with built-in edge and obstacle reflexes, emergency stop, manual wheel drive, robot LED headlight/underglow (`set_lights` \u2014 the ONLY tool for robot light/color/off commands in text AND voice), and telemetry reads. Motion commands are CLOSED-LOOP: every result includes 'verified' (read back from robot telemetry). NEVER tell the user a motion command worked unless verified=true. If verified=false, call cutebot__status to diagnose, retry once if it makes sense, and otherwise report the concrete blocker (battery switch, robot lifted, USB link) honestly. For scheduled/recurring motion (e.g. 'nightly spin'), use `feral_routines__create` with `auto_confirm: true` \u2014 chat-time confirmation does NOT mean FERAL cannot schedule the action.",
   "trigger_phrases": [
     "start line following",
     "follow the line",
@@ -29,7 +29,11 @@
     "qtbot",
     "cutebot"
   ],
-  "categories": ["hardware", "robotics", "iot"],
+  "categories": [
+    "hardware",
+    "robotics",
+    "iot"
+  ],
   "auth": {
     "type": "none"
   },
@@ -38,7 +42,7 @@
       "id": "follow_line",
       "method": "PYTHON",
       "url": "python://cutebot/follow_line",
-      "description": "Start autonomous line following on the QtBot/CuteBot desk robot. The robot follows a black line on a white track; firmware handles obstacle reflexes. Requires user confirmation before motion starts. The result is VERIFIED against robot telemetry: only claim line-following started if verified=true. If verified=false the robot did NOT start — use the error text and cutebot__status to diagnose, then report the real blocker.",
+      "description": "Start autonomous line following on the QtBot/CuteBot desk robot. The robot follows a black line on a white track; firmware handles obstacle reflexes. Requires user confirmation before motion starts. The result is VERIFIED against robot telemetry: only claim line-following started if verified=true. If verified=false the robot did NOT start \u2014 use the error text and cutebot__status to diagnose, then report the real blocker.",
       "params": [],
       "returns_description": "{ok, command, verified, mode, telemetry}",
       "ui_hint": "card",
@@ -49,7 +53,7 @@
       "id": "explore",
       "method": "PYTHON",
       "url": "python://cutebot/explore",
-      "description": "Start table exploration on the QtBot/CuteBot desk robot. The robot roams an open surface with built-in edge detection and obstacle avoidance reflexes. Requires user confirmation before motion starts. The result is VERIFIED against robot telemetry: only claim exploration started if verified=true. If verified=false the robot did NOT start — use the error text and cutebot__status to diagnose, then report the real blocker.",
+      "description": "Start table exploration on the QtBot/CuteBot desk robot. The robot roams an open surface with built-in edge detection and obstacle avoidance reflexes. Requires user confirmation before motion starts. The result is VERIFIED against robot telemetry: only claim exploration started if verified=true. If verified=false the robot did NOT start \u2014 use the error text and cutebot__status to diagnose, then report the real blocker.",
       "params": [],
       "returns_description": "{ok, command, verified, mode, telemetry}",
       "ui_hint": "card",
@@ -60,7 +64,7 @@
       "id": "drive",
       "method": "PYTHON",
       "url": "python://cutebot/drive",
-      "description": "Manually drive the QtBot/CuteBot desk robot wheels. Set left and right motor speeds from -100 to 100 (negative = reverse). Dangerous — requires confirmation; speeds above 80 are denied. Firmware auto-reverts to autonomous mode after 1.5s without drive commands, so drive is a transient pulse: the result reports post-action telemetry and a 'stopped' state afterwards is normal, not a failure.",
+      "description": "Manually drive the QtBot/CuteBot desk robot wheels. Set left and right motor speeds from -100 to 100 (negative = reverse). Dangerous \u2014 requires confirmation; speeds above 80 are denied. Firmware auto-reverts to autonomous mode after 1.5s without drive commands, so drive is a transient pulse: the result reports post-action telemetry and a 'stopped' state afterwards is normal, not a failure.",
       "params": [
         {
           "name": "left",
@@ -84,7 +88,7 @@
       "id": "halt",
       "method": "PYTHON",
       "url": "python://cutebot/halt",
-      "description": "Emergency stop for the QtBot/CuteBot desk robot. Stops motors immediately and keeps them stopped. Always allowed without approval — use when the user says stop or when a behavior must be cancelled. The result is VERIFIED against telemetry; if it ever reports failure the robot may STILL BE MOVING — re-issue halt and warn the user immediately.",
+      "description": "Emergency stop for the QtBot/CuteBot desk robot. Stops motors immediately and keeps them stopped. Always allowed without approval \u2014 use when the user says stop or when a behavior must be cancelled. The result is VERIFIED against telemetry; if it ever reports failure the robot may STILL BE MOVING \u2014 re-issue halt and warn the user immediately.",
       "params": [],
       "returns_description": "{ok, command, verified, observed_mode, telemetry}",
       "ui_hint": "card",
@@ -94,7 +98,7 @@
       "id": "set_lights",
       "method": "PYTHON",
       "url": "python://cutebot/set_lights",
-      "description": "Set the QtBot/CuteBot headlight and underglow color (RGB, each 0-255) for expression or signaling — e.g. green when confident/ready, red when it failed or is blocked, blue while working, (0,0,0) to turn off. THE tool for ALL robot LED commands in text chat and voice — never route robot light/color/off requests to smart_home_hue. Lights only: no motion, runs on USB power, no battery or confirmation needed. Use this to give the robot visible body language that matches what you tell the user.",
+      "description": "Set the QtBot/CuteBot headlight and underglow color (RGB, each 0-255) for expression or signaling \u2014 e.g. green when confident/ready, red when it failed or is blocked, blue while working, (0,0,0) to turn off. THE tool for ALL robot LED commands in text chat and voice \u2014 never route robot light/color/off requests to smart_home_hue. Lights only: no motion, runs on USB power, no battery or confirmation needed. Use this to give the robot visible body language that matches what you tell the user.",
       "params": [
         {
           "name": "r",
@@ -128,12 +132,16 @@
       "returns_description": "{online, mode, state, sonar_cm, line_left, line_right, light, pitch_mg, battery}",
       "ui_hint": "detail_card",
       "safety_tier": "safe",
-      "read_only_hint": true
+      "read_only_hint": true,
+      "emit_result_preview": true
     }
   ],
   "flows": [],
   "crons": [],
   "triggers": [],
-  "permissions": ["hardware", "robotics"],
+  "permissions": [
+    "hardware",
+    "robotics"
+  ],
   "requires_daemon": false
 }

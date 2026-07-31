@@ -465,6 +465,92 @@ def select(
     return _fallback_select(message, choices, default=default)
 
 
+_MULTI_INSTRUCTION = "↑/↓ navigate · space to toggle · enter to confirm"
+
+
+def multi_select(
+    message: str,
+    choices: Sequence[ChoiceLike],
+    *,
+    instruction: str = _MULTI_INSTRUCTION,
+) -> list:
+    """Toggle any number of options; returns the marked values.
+
+    ``select`` looks like a multi-select but validates down to exactly
+    one pick. This is the real thing, for genuinely independent flags
+    (the setup wizard's capability toggles). Pre-marked rows come from
+    each choice's own ``enabled`` key, so callers express "currently
+    on" per row rather than through a separate defaults argument.
+
+    Off-TTY the fallback prints a numbered list and accepts a
+    comma-separated set of indices, so a scripted run can still answer.
+    """
+    if _INQUIRER_AVAILABLE and _is_interactive():
+        try:
+
+            def _build():
+                return inquirer.checkbox(  # type: ignore[union-attr]
+                    message=message,
+                    choices=list(choices),
+                    instruction=instruction,
+                    qmark=BRAND_EMOJI,
+                    amark=BRAND_EMOJI,
+                    pointer="❯",
+                    enabled_symbol="[*]",
+                    disabled_symbol="[ ]",
+                ).execute()
+
+            picked = _run_inquirer_safely(_build)
+            return list(picked) if isinstance(picked, list) else []
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("ui_kit.multi_select InquirerPy path failed: %r", exc)
+
+    return _fallback_multi_select(message, choices)
+
+
+def _fallback_multi_select(message: str, choices: Sequence[ChoiceLike]) -> list:
+    """Numbered typed multi-pick for non-TTY shells."""
+    rows = [_choice_parts(c) for c in choices]
+    sys.stdout.write(f"{message}\n")
+    for i, (name, _value, enabled) in enumerate(rows, start=1):
+        mark = "*" if enabled else " "
+        sys.stdout.write(f"  [{mark}] {i}. {name}\n")
+    sys.stdout.write(
+        "  Enter numbers to toggle, comma-separated (blank keeps current): "
+    )
+    sys.stdout.flush()
+    try:
+        raw = sys.stdin.readline()
+    except (EOFError, KeyboardInterrupt):
+        raw = ""
+    toggled = set()
+    for token in (raw or "").strip().replace(" ", "").split(","):
+        token = token.strip()
+        if token.isdigit():
+            idx = int(token) - 1
+            if 0 <= idx < len(rows):
+                toggled.add(idx)
+    out = []
+    for i, (_name, value, enabled) in enumerate(rows):
+        on = (not enabled) if i in toggled else enabled
+        if on:
+            out.append(value)
+    return out
+
+
+def _choice_parts(choice: ChoiceLike) -> tuple[str, Any, bool]:
+    """Normalise a choice into ``(name, value, enabled)``."""
+    if isinstance(choice, dict):
+        value = choice.get("value", choice.get("name"))
+        return str(choice.get("name", value)), value, bool(choice.get("enabled"))
+    name = getattr(choice, "name", None)
+    value = getattr(choice, "value", choice)
+    enabled = bool(getattr(choice, "enabled", False))
+    return str(name if name is not None else choice), value, enabled
+
+
 def fuzzy_select(
     message: str,
     choices: Sequence[ChoiceLike],

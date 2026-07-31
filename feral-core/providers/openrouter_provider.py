@@ -16,6 +16,7 @@ from typing import Any, Optional
 import httpx
 
 from .base import BaseProvider, ChatMessage, ChatResponse
+from .catalog_data import bundled_models
 
 logger = logging.getLogger("feral.providers.openrouter")
 
@@ -32,26 +33,15 @@ class OpenRouterProvider(BaseProvider):
     provider_id = "openrouter"
     display_name = "OpenRouter"
 
-    # Seeded with live-router-verified IDs as of 2026-04-26. The earlier
-    # 2026-04-24 seeds (``anthropic/claude-3.7-sonnet`` etc) all 404'd
-    # on today's router — removed. The refresh path hits the public
-    # ``/api/v1/models`` endpoint without a key and overwrites this set
-    # on first list_models, so the bundled list is a first-run-only
-    # backstop, not the long-term source of truth.
-    _models = [
-        "anthropic/claude-opus-4-7",
-        "anthropic/claude-sonnet-4-6",
-        "anthropic/claude-haiku-4-5",
-        "openai/gpt-5.5",
-        "openai/gpt-5.4",
-        "openai/gpt-5.4-mini",
-        "deepseek/deepseek-v4-pro",
-        "deepseek/deepseek-v4-flash",
-        "google/gemini-3.1-pro",
-        "google/gemini-3-flash",
-        "meta-llama/llama-4-400b-instruct",
-        "mistralai/mistral-large-2-2026",
-    ]
+    # Bundled fallback model list, read from
+    # ``providers/model_catalog.json`` rather than hardcoded here.
+    # A literal list goes stale the moment the provider ships a new
+    # frontier name (roadmap §3.5 P0) — and because
+    # ``ProviderCatalog.default_model_for`` falls back to this list when
+    # no live refresh has run, a stale literal here silently became the
+    # provider's DEFAULT model. Instances replace it with the live
+    # ``/v1/models`` response in :meth:`refresh_models`.
+    _models = bundled_models("openrouter")
     _pricing: dict[str, dict[str, float]] = {}
     # Vision is in the superset because OpenRouter routes vision
     # requests to vision-capable downstreams. Per-model narrowing runs

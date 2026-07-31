@@ -12,6 +12,8 @@ from typing import Any, Optional
 
 import httpx
 
+from integrations._http_errors import http_error_detail
+
 logger = logging.getLogger("feral.integrations.google_contacts")
 
 PEOPLE_API = "https://people.googleapis.com/v1"
@@ -106,7 +108,7 @@ class GoogleContactsIntegration:
             contacts = [_parse_person(r.get("person", {})) for r in results]
             return {"success": True, "data": {"contacts": contacts, "query": query}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def get_contact(self, resource_name: str = "", **_kw: Any) -> dict[str, Any]:
         """Get a single contact by resource name (e.g., 'people/c1234')."""
@@ -123,7 +125,7 @@ class GoogleContactsIntegration:
             contact = _parse_person(resp.json())
             return {"success": True, "data": contact}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def list_contacts(self, page_size: int = 20, page_token: str = "", **_kw: Any) -> dict[str, Any]:
         """List the user's contacts (connections)."""
@@ -156,7 +158,7 @@ class GoogleContactsIntegration:
                 },
             }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def close(self):
         await self._http.aclose()

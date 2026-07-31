@@ -99,3 +99,10 @@ docs/WAVE5_HARDENING_PROMPT.md
 
 # Local editor / agent config — not part of the shipped product.
 .cursor/
+
+# Regression-test scratch home: holds a real api_key, oauth state, and
+# paired-device DB. Must never be committed.
+.regress_home/
+
+# Agent worktree scaffolding (transient git worktrees)
+.claude/worktrees/

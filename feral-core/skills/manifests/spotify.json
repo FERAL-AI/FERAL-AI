@@ -1,152 +1,202 @@
 {
-    "skill_id": "spotify_music",
-    "version": "2.0.0",
-    "author": "feral-core",
-    "brand": {
-        "name": "Spotify",
-        "primary_color": "#1DB954",
-        "secondary_color": "#191414",
-        "logo_url": "",
-        "icon_set": "sf_symbols"
+  "skill_id": "spotify_music",
+  "version": "2.0.0",
+  "author": "feral-core",
+  "brand": {
+    "name": "Spotify",
+    "primary_color": "#1DB954",
+    "secondary_color": "#191414",
+    "logo_url": "",
+    "icon_set": "sf_symbols"
+  },
+  "description": "Control Spotify playback (play/pause, skip forward/back, queue, set volume, play playlist), search the catalog, and list the user's playlists. Backend: SpotifyIntegration (Spotify Web API via OAuth2 PKCE).",
+  "trigger_phrases": [
+    "play music",
+    "play some music",
+    "what's playing",
+    "skip this song",
+    "pause music",
+    "next song",
+    "previous song",
+    "go back a song",
+    "search for a song",
+    "my playlists",
+    "play my playlist",
+    "queue this song",
+    "set the volume",
+    "currently playing"
+  ],
+  "categories": [
+    "music",
+    "entertainment",
+    "media"
+  ],
+  "auth": {
+    "type": "bearer",
+    "scopes": [
+      "user-read-playback-state",
+      "user-modify-playback-state",
+      "user-read-currently-playing",
+      "playlist-read-private"
+    ]
+  },
+  "endpoints": [
+    {
+      "id": "now_playing",
+      "method": "PYTHON",
+      "url": "python://spotify_music/now_playing",
+      "description": "Return the currently playing track on the user's active Spotify device. Returns playing flag, track, artist, album, progress_ms, duration_ms.",
+      "params": [],
+      "returns_description": "{playing, track, artist, album, progress_ms, duration_ms}",
+      "ui_hint": "detail_card",
+      "read_only_hint": true,
+      "emit_result_preview": true
     },
-    "description": "Control Spotify playback (play/pause, skip forward/back, queue, set volume, play playlist), search the catalog, and list the user's playlists. Backend: SpotifyIntegration (Spotify Web API via OAuth2 PKCE).",
-    "trigger_phrases": [
-        "play music",
-        "play some music",
-        "what's playing",
-        "skip this song",
-        "pause music",
-        "next song",
-        "previous song",
-        "go back a song",
-        "search for a song",
-        "my playlists",
-        "play my playlist",
-        "queue this song",
-        "set the volume",
-        "currently playing"
-    ],
-    "categories": ["music", "entertainment", "media"],
-    "auth": {
-        "type": "bearer",
-        "scopes": [
-            "user-read-playback-state",
-            "user-modify-playback-state",
-            "user-read-currently-playing",
-            "playlist-read-private"
-        ]
+    {
+      "id": "play_pause",
+      "method": "PYTHON",
+      "url": "python://spotify_music/play_pause",
+      "description": "Toggle Spotify playback on the user's active device (pause if playing, play if paused).",
+      "params": [],
+      "returns_description": "{action: 'playing' | 'paused'}",
+      "ui_hint": null
     },
-    "endpoints": [
+    {
+      "id": "pause",
+      "method": "PYTHON",
+      "url": "python://spotify_music/pause",
+      "description": "Pause Spotify playback on the user's active device.",
+      "params": [],
+      "returns_description": "{action: 'paused'}",
+      "ui_hint": null
+    },
+    {
+      "id": "next_track",
+      "method": "PYTHON",
+      "url": "python://spotify_music/next_track",
+      "description": "Skip to the next track on the user's active Spotify device.",
+      "params": [],
+      "returns_description": "{action: 'skipped_to_next'}",
+      "ui_hint": null
+    },
+    {
+      "id": "previous_track",
+      "method": "PYTHON",
+      "url": "python://spotify_music/previous_track",
+      "description": "Go back to the previous track on the user's active Spotify device.",
+      "params": [],
+      "returns_description": "{action: 'skipped_to_previous'}",
+      "ui_hint": null
+    },
+    {
+      "id": "search",
+      "method": "PYTHON",
+      "url": "python://spotify_music/search",
+      "description": "Search Spotify for tracks, artists, albums, or playlists matching a free-text query.",
+      "params": [
         {
-            "id": "now_playing",
-            "method": "PYTHON",
-            "url": "python://spotify_music/now_playing",
-            "description": "Return the currently playing track on the user's active Spotify device. Returns playing flag, track, artist, album, progress_ms, duration_ms.",
-            "params": [],
-            "returns_description": "{playing, track, artist, album, progress_ms, duration_ms}",
-            "ui_hint": "detail_card",
-            "read_only_hint": true
+          "name": "query",
+          "type": "string",
+          "required": true,
+          "description": "Free-text search query."
         },
         {
-            "id": "play_pause",
-            "method": "PYTHON",
-            "url": "python://spotify_music/play_pause",
-            "description": "Toggle Spotify playback on the user's active device (pause if playing, play if paused).",
-            "params": [],
-            "returns_description": "{action: 'playing' | 'paused'}",
-            "ui_hint": null
+          "name": "type",
+          "type": "string",
+          "required": false,
+          "default": "track",
+          "description": "Result kind to fetch.",
+          "enum": [
+            "track",
+            "artist",
+            "album",
+            "playlist"
+          ]
         },
         {
-            "id": "pause",
-            "method": "PYTHON",
-            "url": "python://spotify_music/pause",
-            "description": "Pause Spotify playback on the user's active device.",
-            "params": [],
-            "returns_description": "{action: 'paused'}",
-            "ui_hint": null
-        },
-        {
-            "id": "next_track",
-            "method": "PYTHON",
-            "url": "python://spotify_music/next_track",
-            "description": "Skip to the next track on the user's active Spotify device.",
-            "params": [],
-            "returns_description": "{action: 'skipped_to_next'}",
-            "ui_hint": null
-        },
-        {
-            "id": "previous_track",
-            "method": "PYTHON",
-            "url": "python://spotify_music/previous_track",
-            "description": "Go back to the previous track on the user's active Spotify device.",
-            "params": [],
-            "returns_description": "{action: 'skipped_to_previous'}",
-            "ui_hint": null
-        },
-        {
-            "id": "search",
-            "method": "PYTHON",
-            "url": "python://spotify_music/search",
-            "description": "Search Spotify for tracks, artists, albums, or playlists matching a free-text query.",
-            "params": [
-                {"name": "query", "type": "string", "required": true, "description": "Free-text search query."},
-                {"name": "type", "type": "string", "required": false, "default": "track", "description": "Result kind to fetch.", "enum": ["track", "artist", "album", "playlist"]},
-                {"name": "limit", "type": "integer", "required": false, "default": "5", "description": "Max number of results to return (1-50)."}
-            ],
-            "returns_description": "{results: [{name, uri, artist?, album?}], query}",
-            "ui_hint": "grid_cards",
-            "read_only_hint": true
-        },
-        {
-            "id": "queue_track",
-            "method": "PYTHON",
-            "url": "python://spotify_music/queue_track",
-            "description": "Add a track to the user's Spotify play queue by Spotify URI.",
-            "params": [
-                {"name": "uri", "type": "string", "required": true, "description": "Spotify track URI (e.g. 'spotify:track:6rqhFgbbKwnb9MLmUQDhG6')."}
-            ],
-            "returns_description": "{queued}",
-            "ui_hint": null
-        },
-        {
-            "id": "get_playlists",
-            "method": "PYTHON",
-            "url": "python://spotify_music/get_playlists",
-            "description": "List the user's Spotify playlists. Read-only.",
-            "params": [
-                {"name": "limit", "type": "integer", "required": false, "default": "10", "description": "Max number of playlists to return (1-50)."}
-            ],
-            "returns_description": "{playlists: [{name, uri, tracks}]}",
-            "ui_hint": "grid_cards",
-            "read_only_hint": true
-        },
-        {
-            "id": "play_playlist",
-            "method": "PYTHON",
-            "url": "python://spotify_music/play_playlist",
-            "description": "Start playback of a Spotify playlist (or any context URI such as an album) on the user's active device.",
-            "params": [
-                {"name": "uri", "type": "string", "required": true, "description": "Spotify playlist or album context URI (e.g. 'spotify:playlist:37i9dQZF1DXcBWIGoYBM5M')."}
-            ],
-            "returns_description": "{playing_playlist}",
-            "ui_hint": null
-        },
-        {
-            "id": "set_volume",
-            "method": "PYTHON",
-            "url": "python://spotify_music/set_volume",
-            "description": "Set the playback volume (0-100) on the user's active Spotify device.",
-            "params": [
-                {"name": "volume_percent", "type": "integer", "required": true, "description": "Volume percent 0-100. Clamped server-side."}
-            ],
-            "returns_description": "{volume}",
-            "ui_hint": null
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "default": "5",
+          "description": "Max number of results to return (1-50)."
         }
-    ],
-    "flows": [],
-    "crons": [],
-    "triggers": [],
-    "permissions": [],
-    "requires_daemon": false,
-    "max_calls_per_hour": 1000
+      ],
+      "returns_description": "{results: [{name, uri, artist?, album?}], query}",
+      "ui_hint": "grid_cards",
+      "read_only_hint": true,
+      "emit_result_preview": true
+    },
+    {
+      "id": "queue_track",
+      "method": "PYTHON",
+      "url": "python://spotify_music/queue_track",
+      "description": "Add a track to the user's Spotify play queue by Spotify URI.",
+      "params": [
+        {
+          "name": "uri",
+          "type": "string",
+          "required": true,
+          "description": "Spotify track URI (e.g. 'spotify:track:6rqhFgbbKwnb9MLmUQDhG6')."
+        }
+      ],
+      "returns_description": "{queued}",
+      "ui_hint": null
+    },
+    {
+      "id": "get_playlists",
+      "method": "PYTHON",
+      "url": "python://spotify_music/get_playlists",
+      "description": "List the user's Spotify playlists. Read-only.",
+      "params": [
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "default": "10",
+          "description": "Max number of playlists to return (1-50)."
+        }
+      ],
+      "returns_description": "{playlists: [{name, uri, tracks}]}",
+      "ui_hint": "grid_cards",
+      "read_only_hint": true
+    },
+    {
+      "id": "play_playlist",
+      "method": "PYTHON",
+      "url": "python://spotify_music/play_playlist",
+      "description": "Start playback of a Spotify playlist (or any context URI such as an album) on the user's active device.",
+      "params": [
+        {
+          "name": "uri",
+          "type": "string",
+          "required": true,
+          "description": "Spotify playlist or album context URI (e.g. 'spotify:playlist:37i9dQZF1DXcBWIGoYBM5M')."
+        }
+      ],
+      "returns_description": "{playing_playlist}",
+      "ui_hint": null
+    },
+    {
+      "id": "set_volume",
+      "method": "PYTHON",
+      "url": "python://spotify_music/set_volume",
+      "description": "Set the playback volume (0-100) on the user's active Spotify device.",
+      "params": [
+        {
+          "name": "volume_percent",
+          "type": "integer",
+          "required": true,
+          "description": "Volume percent 0-100. Clamped server-side."
+        }
+      ],
+      "returns_description": "{volume}",
+      "ui_hint": null
+    }
+  ],
+  "flows": [],
+  "crons": [],
+  "triggers": [],
+  "permissions": [],
+  "requires_daemon": false,
+  "max_calls_per_hour": 1000
 }

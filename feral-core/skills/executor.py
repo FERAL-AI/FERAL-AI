@@ -8,8 +8,8 @@ The LLM NEVER sees API keys or OAuth tokens.
 
 from __future__ import annotations
 import asyncio
+import dataclasses
 import os
-import json
 import logging
 import uuid
 from typing import Optional
@@ -18,6 +18,15 @@ import httpx
 
 from config.loader import feral_home
 from models.skill_manifest import SkillManifest, SkillEndpoint
+from security.exec_mode import MODE_DOCKER, MODE_REFUSED, NEEDS_DOCKER
+from skills.result_budget import (
+    DEFAULT_TIER,
+    ResultBudget,
+    TruncationReport,
+    budget_for,
+    clamp,
+    get_budget,
+)
 from skills.sandbox_ports import SandboxPort, default_sandbox_port
 
 logger = logging.getLogger("feral.executor")
@@ -174,15 +183,25 @@ class SkillExecutor:
         if sandbox_required:
             sandbox_ok, sandbox_reason = self._sandbox_requirement_status(skill, endpoint)
             if not sandbox_ok:
+                # Name the execution mode that was required. A bare "sandbox
+                # unavailable" 503 left the operator with nothing to act on;
+                # ``needs`` distinguishes "start Docker" from "grant a folder"
+                # (the workspace-scoped host mode in security/exec_mode.py).
                 msg = (
                     f"Sandbox required for '{skill.skill_id}__{endpoint.id}' "
-                    f"but unavailable: {sandbox_reason}"
+                    f"but unavailable: {sandbox_reason}. This endpoint runs "
+                    f"generated code, so the '{MODE_DOCKER}' execution mode is "
+                    f"mandatory (a workspace grant does not substitute)."
                 )
                 logger.warning(msg)
                 return {
                     "success": False,
                     "status_code": 503,
-                    "data": None,
+                    "data": {
+                        "execution_mode": MODE_REFUSED,
+                        "needs": NEEDS_DOCKER,
+                        "required_mode": MODE_DOCKER,
+                    },
                     "error": msg,
                 }
 
@@ -204,26 +223,35 @@ class SkillExecutor:
                 exec_args["_feral_require_sandbox"] = True
             try:
                 result = await impl.execute(endpoint.id, exec_args, self._vault)
+                # The budget is declared by the manifest for THIS endpoint
+                # (see skills/result_budget.py). Before v2026.7.30 a single
+                # global 2 000-char / 20-item clamp ran here, which meant
+                # coding_tools__read_file returned ~30 lines of source no
+                # matter what `limit` the model passed and grep_search
+                # returned 20 of the 250 matches it had already computed.
+                budget = budget_for(skill.skill_id, endpoint.id, skill)
                 if isinstance(result, dict) and "success" in result:
-                    return {
+                    payload, note = self._sanitize_with_note(result.get("data"), budget)
+                    envelope = {
                         "success": result["success"],
                         "status_code": result.get("status_code", 200),
-                        "data": self._sanitize_response(
-                            result.get("data"),
-                            max_list_len=self._email_sanitize_list_limit(skill.skill_id, endpoint.id),
-                        ),
-                        "error": result.get("error")
+                        "data": payload,
+                        "error": result.get("error"),
                     }
                 else:
-                    return {
+                    payload, note = self._sanitize_with_note(result, budget)
+                    envelope = {
                         "success": True,
                         "status_code": 200,
-                        "data": self._sanitize_response(
-                            result,
-                            max_list_len=self._email_sanitize_list_limit(skill.skill_id, endpoint.id),
-                        ),
-                        "error": None
+                        "data": payload,
+                        "error": None,
                     }
+                if note:
+                    # Say so out loud. A silent cut is the worst outcome:
+                    # the model assumes it read the whole file and answers
+                    # confidently about code it never saw.
+                    envelope["_truncation_note"] = note
+                return envelope
             except Exception as e:
                 logger.error(f"Python Skill error: {e}", exc_info=True)
                 return {"success": False, "status_code": 500, "data": None, "error": str(e)}
@@ -310,14 +338,27 @@ class SkillExecutor:
         are rejected outright, and ``execution.allow_shell_commands`` must
         be enabled. We always exec with ``shell=False`` on the parsed argv
         list — no free-form string ever reaches an interpreter.
+
+        AppleScript execution is gated by
+        ``SandboxPolicy.validate_applescript``. Before that landed, this
+        branch ran ``osascript -e <command>`` with no validation at all
+        while its sibling ``shell`` branch below was fully validated, and
+        since AppleScript can invoke a shell (``do shell script``),
+        the unvalidated path defeated the validated one.
         """
         import subprocess
         import shlex
+
+        from security.sandbox_policy import SandboxPolicy
 
         if not command:
             return {"success": False, "status_code": 400, "data": None, "error": "No command or script provided"}
 
         if path == "applescript":
+            policy = SandboxPolicy.load_default()
+            ok, reason = policy.validate_applescript(command)
+            if not ok:
+                return {"success": False, "status_code": 403, "data": None, "error": reason}
             try:
                 proc = await asyncio.to_thread(
                     subprocess.run,
@@ -335,7 +376,6 @@ class SkillExecutor:
             # policy validator. The validator enforces argv[0] allowlist and
             # rejects shell metacharacters; we then exec the parsed argv with
             # ``shell=False`` so no interpreter can re-expand the string.
-            from security.sandbox_policy import SandboxPolicy
             policy = SandboxPolicy.load_default()
             ok, reason = policy.validate_shell_command(command)
             if not ok:
@@ -477,39 +517,55 @@ class SkillExecutor:
             future.set_result(result)
 
     @staticmethod
-    def _email_sanitize_list_limit(skill_id: str, endpoint_id: str) -> int:
-        """Allow email feed endpoints to return more rows without widening all skills."""
-        if skill_id == "email" and endpoint_id in ("search", "read_email", "list_inbox"):
-            return 50
-        return 20
+    def _sanitize_with_note(data, budget: ResultBudget):
+        """Bound ``data`` to ``budget`` and report what (if anything) was cut.
+
+        Returns ``(payload, note)`` where ``note`` is "" when nothing was
+        removed. Callers put the note on the result envelope, next to
+        ``data`` rather than inside it, so the payload keeps the shape the
+        skill's ``returns_description`` promised.
+        """
+        report = TruncationReport()
+        payload = clamp(data, budget, report)
+        return payload, (report.summary() if report else "")
 
     def _sanitize_response(
         self,
         data,
-        max_depth: int = 5,
-        max_str_len: int = 2000,
-        max_list_len: int = 20,
+        max_depth: Optional[int] = None,
+        max_str_len: Optional[int] = None,
+        max_list_len: Optional[int] = None,
+        budget: Optional[ResultBudget] = None,
     ) -> any:
         """
-        Sanitize API response data before feeding back to the LLM.
+        Sanitize a skill response before feeding it back to the LLM.
         Prevents:
         - Prompt injection via response content
         - Excessive data that would overflow context
-        """
-        if max_depth <= 0:
-            return "[truncated]"
+        - Unbounded / adversarial payload shapes (depth, dict width)
 
-        if isinstance(data, dict):
-            return {k: self._sanitize_response(v, max_depth - 1, max_str_len, max_list_len) for k, v in list(data.items())[:50]}
-        elif isinstance(data, list):
-            return [self._sanitize_response(item, max_depth - 1, max_str_len, max_list_len) for item in data[:max_list_len]]
-        elif isinstance(data, str):
-            # Truncate long strings
-            if len(data) > max_str_len:
-                return data[:max_str_len] + "...[truncated]"
-            return data
-        else:
-            return data
+        The numbers now come from a ``ResultBudget`` (skills/result_budget.py)
+        rather than from literals baked into this signature. Callers that
+        pass no budget get ``DEFAULT_TIER`` — the historical 2 000-char /
+        20-item bound — which is deliberately what every third-party HTTP
+        response, WASM result and daemon payload keeps getting. Only skills
+        whose built-in manifest declares a wider tier are widened, and the
+        widening is per endpoint.
+
+        The explicit ``max_*`` keyword arguments remain supported so a
+        caller can pin one axis without constructing a budget.
+        """
+        effective = budget or get_budget(DEFAULT_TIER)
+        overrides = {}
+        if max_depth is not None:
+            overrides["max_depth"] = max_depth
+        if max_str_len is not None:
+            overrides["max_str_len"] = max_str_len
+        if max_list_len is not None:
+            overrides["max_list_len"] = max_list_len
+        if overrides:
+            effective = dataclasses.replace(effective, **overrides)
+        return clamp(data, effective)
 
     async def close(self):
         await self.client.aclose()

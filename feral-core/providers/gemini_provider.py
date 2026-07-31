@@ -8,6 +8,7 @@ from typing import Any, Optional
 import httpx
 
 from .base import BaseProvider, ChatMessage, ChatResponse
+from .catalog_data import bundled_models
 from .model_classes import classify
 
 logger = logging.getLogger("feral.providers.gemini")
@@ -17,25 +18,15 @@ class GeminiProvider(BaseProvider):
     provider_id = "gemini"
     display_name = "Google Gemini"
 
-    # Verified 2026-04-24 frontier IDs. The 2.x lineage was retired
-    # March 2026 (gemini-3-pro-preview also shut down that month) and
-    # /v1beta/models now lists only the 3.x preview series until the
-    # GA flip. Mirrors gemini.models in
-    # feral-core/providers/model_catalog.json.
-    # Verified 2026-04-26 against /v1beta/models. The ``-preview``
-    # suffix is retained until the 3.x pro/flash/flash-lite families
-    # flip to GA; ``-thinking`` variants are research builds. The
-    # bundled ``model_catalog.json`` pins the same set so the v2
-    # picker's "Refresh models" button sees zero drift against the
-    # bundled seed on a keyless host.
-    _models = [
-        "gemini-3.1-pro-preview",
-        "gemini-3-flash-preview",
-        "gemini-3.1-flash-lite-preview",
-        "gemini-3.1-pro-thinking",
-        "gemini-3.1-flash-image-preview",
-        "gemini-3-pro-image-preview",
-    ]
+    # Bundled fallback model list, read from
+    # ``providers/model_catalog.json`` rather than hardcoded here.
+    # A literal list goes stale the moment the provider ships a new
+    # frontier name (roadmap §3.5 P0) — and because
+    # ``ProviderCatalog.default_model_for`` falls back to this list when
+    # no live refresh has run, a stale literal here silently became the
+    # provider's DEFAULT model. Instances replace it with the live
+    # ``/v1/models`` response in :meth:`refresh_models`.
+    _models = bundled_models("gemini")
     # Pricing lives in providers/model_catalog.json — see
     # findings/13-llm-core.md fix #4.
     _pricing: dict[str, dict[str, float]] = {}

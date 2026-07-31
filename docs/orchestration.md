@@ -100,6 +100,41 @@ the slowest tool. Now it completes in `max(tool_i)` wall-clock, bounded
 only by `FERAL_MAX_PARALLEL_TOOLS` (default 6). Set it to `1` to
 restore strict sequential behaviour for debugging.
 
+## Transcript write-back
+
+`conversation_history[session_id]` holds the **full transcript** for a
+session, bounded only by `_conversation_max_per_session` (200 rows).
+The window the LLM sees is a *view*: `ContextManager.compact` recomputes
+it on every request and it is never stored back. An earlier version
+assigned the compacted window over the stored list, which made
+truncation permanent and cumulative.
+
+Every turn opens a record in `_begin_turn` and closes it from a
+`finally` in `_finalize_turn`, so no early return — refusal fallback,
+cost cap, LLM exception, multi-agent hand-off, stream error — can skip
+the assistant row. `_send_text` records the prose it emits against the
+in-flight turn, so a path that answers without reaching the LLM loop
+still records what it said.
+
+Live voice bypasses `handle_command` entirely, so
+`note_voice_user_turn` and `note_voice_assistant_turn` write the two
+sides of a spoken exchange into that same transcript, under the same
+per-session lock. F2 auto-compaction takes the lock too.
+
+The invariant all of this protects: **the model must never receive two
+consecutive user messages.** Anthropic's Messages API is stateless and
+expects alternating turns; handed `user, user` the model correctly
+concludes it never spoke and says so. `ContextManager` coalesces any
+consecutive user rows that still reach it, as a last line of defence.
+
+The window is measured in **turns**, not raw rows: the newest
+`max_turns` (12) user turns, whole tool round-trips included, shrunk
+oldest-first when they exceed the token budget
+(`FERAL_CONTEXT_WINDOW_TOKENS`, default 128000). It never starts after
+the newest assistant message. The old 15-raw-row window meant one
+assistant turn carrying six parallel tool calls consumed seven slots,
+so a tool-heavy session retained two turns out of six.
+
 ## Spawning subagents
 
 The agent can still spin parallel subagents on demand via the

@@ -38,6 +38,7 @@ from models.protocol import (
 from models.skill_manifest import SkillManifest
 from skills.registry import SkillRegistry
 from skills.executor import SkillExecutor
+from skills.result_budget import serialize_tool_result
 from agents.llm_provider import LLMProvider
 from agents import llm_router
 from agents.genui_generator import GenUIGenerator
@@ -66,6 +67,10 @@ from agents.response_delivery import (
     send_text as helper_send_text,
     try_genui_for_result as helper_try_genui_for_result,
     try_send_sdui as helper_try_send_sdui,
+)
+from agents.turn_attribution import (
+    accumulate_turn_usage as _accumulate_turn_usage,
+    model_of_llm_response as _model_of_llm_response,
 )
 
 if TYPE_CHECKING:
@@ -98,9 +103,15 @@ class Orchestrator:
 
     # Class-level constants kept on Orchestrator for backward compat
     ALWAYS_INCLUDE_SKILLS = {
-        # Core OS / desktop surface
+        # Core OS / desktop surface.
+        # ``coding_tools`` replaced ``computer_use`` here: the two skills
+        # exposed identical endpoints with identical trigger phrases, so the
+        # model saw two indistinguishable ``bash`` tools and picked
+        # arbitrarily. ``coding_tools`` is the better implementation
+        # (paginated grep/glob, workspace-relative output) and is now the
+        # single canonical shell + filesystem surface.
         "desktop_control",
-        "computer_use",
+        "coding_tools",
         "browser",
         "desktop_automation",
         "screen_capture",
@@ -169,6 +180,10 @@ class Orchestrator:
 
         # State
         self.biometric_state: dict[str, dict] = {}
+        # The FULL transcript per session, bounded only by
+        # ``_conversation_max_per_session``. The window the LLM sees is
+        # derived from this per request by ``_compact_context`` and is
+        # never written back — see ``_finalize_turn``.
         self.conversation_history: dict[str, list[dict]] = {}
         self._conversation_max_per_session = 200
         self._conversation_max_sessions = 500
@@ -177,6 +192,10 @@ class Orchestrator:
         # ordering. Different sessions still run fully parallel — only
         # turns on the same session are serialised.
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # Per-session stack of in-flight turn records. See the
+        # "Turn write-back" block below. Stacked because the stream
+        # path can delegate to the non-stream path mid-turn.
+        self._active_turns: dict[str, list[dict]] = {}
         # CI-flake fix: track every fire-and-forget background task the
         # orchestrator schedules (episode_save, temporal-timeline
         # side-channel, etc.) so tests can drain them deterministically
@@ -557,15 +576,24 @@ class Orchestrator:
         async def _run() -> None:
             self._compaction_inflight[session_id] = True
             try:
-                history = list(self.conversation_history.get(session_id, []))
-                if not history:
-                    return
-                result = await self.memory.compact_session(
-                    session_id, history, llm=self.llm,
-                )
-                if result.get("compacted") and result.get("history"):
-                    self.conversation_history[session_id] = result["history"]
-                self._turns_since_compaction[session_id] = 0
+                # Under the session lock. The body awaits a multi-second
+                # LLM summarization and then REPLACES
+                # ``conversation_history[session_id]``; unlocked it
+                # raced the turn write-back in both directions and
+                # could drop a whole turn. The lock is taken here (not
+                # by the scheduling turn) because ``_run`` is a
+                # separate task — the scheduling turn has released it
+                # by the time this body runs.
+                async with self._get_session_lock(session_id):
+                    history = list(self.conversation_history.get(session_id, []))
+                    if not history:
+                        return
+                    result = await self.memory.compact_session(
+                        session_id, history, llm=self.llm,
+                    )
+                    if result.get("compacted") and result.get("history"):
+                        self.conversation_history[session_id] = result["history"]
+                    self._turns_since_compaction[session_id] = 0
                 logger.info(
                     "F2 auto-compact: session=%s episode_id=%s entities=%s",
                     session_id,
@@ -1118,18 +1146,47 @@ class Orchestrator:
             err = ""
             if isinstance(result_data, dict):
                 err = str(result_data.get("error") or "")[:240]
+            tool_name = str(tool_call.get("name", "tool"))
+            # UI result excerpt, opt-in per endpoint. See
+            # skills/result_budget.preview_enabled_for for why this is
+            # opt-in and how the marketplace trust clamp applies.
+            preview, preview_truncated = "", False
+            try:
+                from skills.result_budget import (
+                    build_result_preview,
+                    preview_enabled_for_tool,
+                )
+                if preview_enabled_for_tool(tool_name, self.skills):
+                    preview, preview_truncated = build_result_preview(result_data)
+            except Exception:
+                logger.debug("result preview build failed (non-fatal)", exc_info=True)
             await self.send(session_id, FeralMessage(
                 session_id=session_id, hop="brain", type="tool_result",
                 payload=ToolResultPayload(
-                    tool=str(tool_call.get("name", "tool")),
+                    tool=tool_name,
                     call_id=str(tool_call.get("id", "")),
                     success=success,
                     error=err,
                     latency_ms=float(latency_ms or 0.0),
+                    result_preview=preview,
+                    result_preview_truncated=preview_truncated,
                 ).model_dump(),
             ))
         except Exception:
-            pass
+            # This used to be a bare `pass`, which made a failed emit
+            # invisible: the client never got `tool_result`, so the WebUI
+            # tool chip spun forever with nothing in the logs or the UI to
+            # explain it. `tool_result` is the frame that *closes* the chip,
+            # so losing it is a user-visible hang — warning, not debug, and
+            # with the traceback so the cause is diagnosable. The three
+            # sibling handlers in this function stay at debug because their
+            # frames are enrichment; this one is the terminator.
+            logger.warning(
+                "tool_result frame emit failed — the UI tool chip for %r "
+                "will not resolve",
+                str(tool_call.get("name", "tool")),
+                exc_info=True,
+            )
 
         # S1 closer (cut-list item #8): the fused-timeline tool returns
         # a structured {entries, summary, window, sources_queried,
@@ -1476,6 +1533,135 @@ class Orchestrator:
             lock = asyncio.Lock()
             self._session_locks[session_id] = lock
         return lock
+
+    # ─────────────────────────────────────────────
+    # Turn write-back
+    # ─────────────────────────────────────────────
+    #
+    # The assistant side of a turn used to be written back by exactly
+    # ONE statement, at the very bottom of the single-agent text loop.
+    # Every early return above it — refusal fallback, budget cap, LLM
+    # exception, multi-agent hand-off, stream error — recorded the user
+    # row and then jumped over the assistant row. The next turn handed
+    # the model two consecutive user messages, and the model correctly
+    # answered that it had never spoken ("looks like we got cut off").
+    #
+    # Fix: every turn opens a record and closes it from a ``finally``,
+    # so the write-back cannot be skipped. The record also carries the
+    # prose ``_send_text`` actually emitted, so a turn that replied
+    # without ever reaching the LLM loop still records what it said.
+    #
+    # Second invariant: ``conversation_history`` is the FULL transcript.
+    # The old code assigned the compacted 15-row window back over it,
+    # making truncation permanent and cumulative and rendering
+    # ``_conversation_max_per_session`` dead. ``_finalize_turn`` appends
+    # this turn's new rows instead.
+
+    def _begin_turn(self, session_id: str, text: str) -> dict:
+        """Open a turn record and push it on the session's turn stack."""
+        turn = {
+            "text": text,
+            # True once the body has appended this turn's user row to
+            # ``conversation_history``; when False and the turn still
+            # produced a reply we record both rows.
+            "user_recorded": False,
+            # The per-request compacted window plus every row the loop
+            # appended to it. ``base_len`` marks the boundary.
+            "working": None,
+            "base_len": 0,
+            # Prose handed to ``_send_text`` during this turn.
+            "outbound": [],
+            # Explicit final reply for branches that answer without
+            # going through the tool loop (multi-agent).
+            "reply_text": "",
+            # Set when this turn handed the whole exchange to a nested
+            # turn, which owns the write-back and the epilogue.
+            "delegated": False,
+        }
+        self._active_turns.setdefault(session_id, []).append(turn)
+        return turn
+
+    def _note_outbound_text(self, session_id: str, text: str) -> None:
+        """Record prose ``_send_text`` is about to emit against the
+        innermost in-flight turn.
+
+        Recorded before the send rather than after: a downstream socket
+        failure must not leave the transcript ending on a user row.
+        No-op outside a turn — proactive pushes, UI-event replies and
+        daemon results are not part of a user/assistant exchange.
+        """
+        if not text:
+            return
+        stack = self._active_turns.get(session_id)
+        if stack:
+            stack[-1]["outbound"].append(text)
+
+    def _turn_rows(self, turn: dict) -> list[dict]:
+        """The rows this turn adds to the transcript."""
+        working = turn.get("working") or []
+        rows = [
+            row for row in working[turn.get("base_len", 0):]
+            if isinstance(row, dict)
+        ]
+        spoke = any(
+            row.get("role") == "assistant" and row.get("content")
+            for row in rows
+        )
+        if not spoke:
+            reply = turn.get("reply_text") or "\n".join(
+                t for t in turn.get("outbound", []) if t
+            ).strip()
+            if reply:
+                rows.append({"role": "assistant", "content": reply})
+        if rows and not turn.get("user_recorded"):
+            rows.insert(0, {"role": "user", "content": turn.get("text", "")})
+        return rows
+
+    def _finalize_turn(self, session_id: str, turn: dict) -> None:
+        """Commit the turn's rows and run the post-turn epilogue.
+
+        Called from a ``finally`` in both command paths, so an early
+        return or a raised exception can no longer drop the assistant
+        row or skip the snapshot / compaction bookkeeping.
+        """
+        stack = self._active_turns.get(session_id)
+        if stack:
+            if turn in stack:
+                stack.remove(turn)
+            if not stack:
+                self._active_turns.pop(session_id, None)
+        if turn.get("delegated"):
+            return
+
+        rows = self._turn_rows(turn)
+        if rows:
+            history = self.conversation_history.setdefault(session_id, [])
+            history.extend(rows)
+            if len(history) > self._conversation_max_per_session:
+                self.conversation_history[session_id] = history[
+                    -self._conversation_max_per_session:
+                ]
+        elif turn.get("user_recorded"):
+            # The turn stored the user's words and produced nothing at
+            # all. Loud, because the next request will need the
+            # coalescer in ``ContextManager`` to stay well-formed.
+            logger.warning(
+                "[%s] turn produced no assistant row; transcript ends on a user message",
+                session_id[:8],
+            )
+
+        self._evict_stale_sessions()
+        if self.learner:
+            asyncio.ensure_future(
+                self.learner.on_message(session_id, "user", turn.get("text", ""))
+            )
+        # Phase 3 (audit-r10) — persist primary thread snapshot so the
+        # operator's last 50 turns survive brain restart.
+        self._maybe_snapshot_primary(session_id)
+        # F2 — fire compaction when this session crosses
+        # ``turns_threshold`` since its last compaction (async, no
+        # block).
+        self._maybe_auto_compact(session_id)
 
     # ─────────────────────────────────────────────
     # Background-task bookkeeping (CI flake fix)
@@ -1952,7 +2138,27 @@ class Orchestrator:
         return surface
 
     async def _handle_command_impl(self, session_id: str, text: str, context: Optional[dict] = None):
-        """Real body of handle_command. Guarded by the session lock above."""
+        """Real body of handle_command. Guarded by the session lock above.
+
+        Wraps ``_handle_command_body`` so ``_finalize_turn`` runs on
+        EVERY exit path — return, early return, or exception. See the
+        "Turn write-back" block for why that matters.
+        """
+        turn = self._begin_turn(session_id, text)
+        try:
+            return await self._handle_command_body(session_id, text, context, turn)
+        finally:
+            self._finalize_turn(session_id, turn)
+
+    async def _handle_command_body(
+        self,
+        session_id: str,
+        text: str,
+        context: Optional[dict],
+        turn: dict,
+    ):
+        """Single-agent pipeline for one turn. Never writes the turn
+        back itself — ``_finalize_turn`` owns that."""
         logger.info(f"[{session_id[:8]}] Command: {text}")
         self._session_finalized.discard(session_id)
         self._stamp_session_surface(session_id, context)
@@ -2022,15 +2228,30 @@ class Orchestrator:
                 try:
                     response_text = await self._multi_agent.run(session_id, text, context)
                     if response_text:
-                        await self._try_send_sdui(session_id, response_text)
+                        # Attribution for the multi-agent turn. This branch
+                        # runs BEFORE the single-agent loop and returns, so
+                        # without this the default profile (multi_agent
+                        # defaults on) would show no model and no tokens at
+                        # all: the loop that records them never executes.
+                        _model, _usage = self._pop_multi_agent_attribution(session_id)
+                        await self._try_send_sdui(
+                            session_id, response_text,
+                            model=_model, usage=_usage,
+                        )
                         if self.memory:
                             # Full text, not [:300] — the phone's chat_response
                             # falls back to working memory and must not get a
                             # truncated stub (working_context_string slices to
                             # [:200] itself, so prompt size is unaffected).
                             self.memory.working_push(session_id, {"role": "assistant", "text": response_text})
-                        if self.learner:
-                            asyncio.ensure_future(self.learner.on_message(session_id, "user", text))
+                        # The multi-agent hand-off never touches
+                        # ``conversation_history``; hand both rows to
+                        # ``_finalize_turn`` so the next turn sees this
+                        # exchange instead of a gap. (``_try_send_sdui``
+                        # is not ``_send_text``, so nothing else records
+                        # the reply.) The learner call moved to the
+                        # epilogue with it.
+                        turn["reply_text"] = response_text
                         # Return the full final text so callers (api/server.py
                         # chat_request handler) can carry it in chat_response
                         # instead of relying on the working-memory fallback.
@@ -2134,18 +2355,43 @@ class Orchestrator:
         )
         user_message = {"role": "user", "content": user_content}
         self.conversation_history[session_id].append(user_message)
+        turn["user_recorded"] = True
 
+        # Per-request VIEW of the transcript. ``history`` is a working
+        # copy: the loop appends this turn's assistant / tool rows to it
+        # and ``_finalize_turn`` commits everything past ``base_len``.
+        # The compacted window itself is never stored back.
         history = self._compact_context(self.conversation_history[session_id].copy())
+        turn["working"] = history
+        turn["base_len"] = len(history)
 
-        from agents.iteration_budget import IterationBudget, NO_PROGRESS_GUIDANCE
+        from agents.iteration_budget import (
+            GUARD_STOP,
+            GUARD_WARN,
+            IterationBudget,
+            NO_PROGRESS_GUIDANCE,
+            NO_PROGRESS_WARNING,
+        )
         budget = IterationBudget(self._max_iterations, self._tool_loop_max_seconds)
-        # Set by the no-progress guard: tools are withdrawn and the model
-        # gets exactly one more round to produce an honest final answer.
+        # Set only by the guard's STOP level: tools are withdrawn and the
+        # model gets exactly one more round to produce an honest final
+        # answer. The WARN level below deliberately does NOT set this.
         final_answer_only = False
+        no_progress_warned = False
         refusal_retry_used = False
         reasoning_retry_count = 0
         empty_retry_used = False
         pending_retry_addition: Optional[str] = None
+        # Per-turn attribution, accumulated ACROSS ROUNDS. One user turn
+        # can drive several LLM calls (each tool round, plus refusal and
+        # empty-response retries, plus a tier escalation), and the user is
+        # billed for every one of them. Reporting only the last round
+        # would understate a tool-heavy turn by most of its real cost,
+        # which is the opposite of the point. ``turn_model`` tracks the
+        # model that produced the FINAL answer, since that is the one the
+        # user is looking at when they read the label.
+        turn_usage: dict[str, int] = {}
+        turn_model = ""
         # Never-stall: if the user turn is a short ack, inject the fast-path
         # instruction into the very first call (before the model replies).
         if self.refusal_handler.is_ack_execution(text):
@@ -2228,6 +2474,15 @@ class Orchestrator:
                         budget=response["budget_exceeded"],
                     )
                     return
+
+                # Accumulate this round's cost before any of the branches
+                # below can ``continue``/``break`` past it. A refusal retry
+                # or a tier escalation still burned real tokens, so it has
+                # to count even though its output is discarded.
+                _accumulate_turn_usage(turn_usage, response)
+                _round_model = _model_of_llm_response(response)
+                if _round_model:
+                    turn_model = _round_model
 
                 text_content, tool_calls = self.llm.extract_response(response)
 
@@ -2397,12 +2652,29 @@ class Orchestrator:
                         "role": "tool",
                         "tool_call_id": tc["id"],
                         "name": tc["name"],
-                        "content": json.dumps(result_data, default=str)[:2000]
+                        # Budgeted per tool (skills/result_budget.py). This
+                        # used to be json.dumps(...)[:2000] — a blind byte
+                        # slice that cut mid-token, so the model was
+                        # routinely handed JSON that does not parse, with
+                        # nothing saying anything had been removed.
+                        "content": serialize_tool_result(
+                            tc["name"], result_data, registry=self.skills,
+                        ),
                     })
-                    if budget.observe_tool(
+                    guard_level = budget.observe_tool(
                         tc["name"], tc.get("args", {}), tool_success, result_data
-                    ):
+                    )
+                    if guard_level == GUARD_STOP:
                         final_answer_only = True
+                    elif guard_level == GUARD_WARN and not no_progress_warned:
+                        # Warn once, keep every other tool available. The
+                        # old code withdrew the WHOLE toolset here after
+                        # two identical failures, so a single unavailable
+                        # tool disarmed an agent mid-task.
+                        no_progress_warned = True
+                        history.append(
+                            {"role": "system", "content": NO_PROGRESS_WARNING}
+                        )
                     anti_loop_guidance = result_data.get("_anti_loop_guidance")
                     if anti_loop_guidance:
                         history.append({"role": "system", "content": anti_loop_guidance})
@@ -2436,7 +2708,10 @@ class Orchestrator:
                     self.memory.working_push(session_id, {"role": "assistant", "text": text_content})
                     await self._emit_brain_event(session_id, "memory_write", {"type": "episodic"})
 
-                await self._send_text(session_id, text_content)
+                await self._send_text(
+                    session_id, text_content,
+                    model=turn_model, usage=turn_usage,
+                )
                 sent_response = True
                 final_response_text = text_content
                 break
@@ -2446,19 +2721,9 @@ class Orchestrator:
         if not sent_response:
             await self._send_text(session_id, "I processed your request but have nothing to report.")
 
-        self.conversation_history[session_id] = history[-self._conversation_max_per_session:]
-        self._evict_stale_sessions()
-
-        if self.learner:
-            asyncio.ensure_future(self.learner.on_message(session_id, "user", text))
-
-        # Phase 3 (audit-r10) — persist primary thread snapshot so the
-        # operator's last 50 turns survive brain restart.
-        self._maybe_snapshot_primary(session_id)
-        # F2 — fire compaction when this session crosses
-        # ``turns_threshold`` since its last compaction (async, no
-        # block).
-        self._maybe_auto_compact(session_id)
+        # Write-back, session eviction, snapshot and F2 compaction all
+        # live in ``_finalize_turn`` now, which the caller runs from a
+        # ``finally`` so the early returns above cannot skip them.
 
         # Return the final assistant text so synchronous callers
         # (phone chat_request → chat_response) get the FULL reply
@@ -2475,6 +2740,24 @@ class Orchestrator:
             self._w17_cancel_subsessions_nowait(session_id)
 
     async def _handle_command_stream_impl(self, session_id: str, text: str, context: Optional[dict] = None):
+        """Streaming variant of handle_command. Guarded by the session
+        lock above, and wrapped so ``_finalize_turn`` runs on every exit
+        path — see ``_handle_command_impl``."""
+        turn = self._begin_turn(session_id, text)
+        try:
+            return await self._handle_command_stream_body(
+                session_id, text, context, turn,
+            )
+        finally:
+            self._finalize_turn(session_id, turn)
+
+    async def _handle_command_stream_body(
+        self,
+        session_id: str,
+        text: str,
+        context: Optional[dict],
+        turn: dict,
+    ):
         """
         Streaming variant of handle_command. Sends text deltas in real-time
         so the client gets token-by-token output.
@@ -2485,7 +2768,12 @@ class Orchestrator:
             return
 
         if not self._streaming_enabled or not self.llm.available:
-            await self.handle_command(session_id, text, context)
+            # ``_handle_command_impl`` directly, NOT ``handle_command``:
+            # we already hold this session's lock and asyncio.Lock is
+            # not reentrant, so re-entering the wrapper deadlocks the
+            # turn. The nested turn owns the write-back and epilogue.
+            turn["delegated"] = True
+            await self._handle_command_impl(session_id, text, context)
             return
 
         if self._somatic_engine:
@@ -2528,7 +2816,12 @@ class Orchestrator:
             try:
                 response_text = await self._multi_agent.run(session_id, text, context)
                 if response_text:
-                    await self._try_send_sdui(session_id, response_text)
+                    # Same as the non-stream multi-agent branch above.
+                    _model, _usage = self._pop_multi_agent_attribution(session_id)
+                    await self._try_send_sdui(
+                        session_id, response_text,
+                        model=_model, usage=_usage,
+                    )
                     if self.memory:
                         # Full text (no [:300]) — see the non-stream
                         # multi-agent branch for rationale.
@@ -2626,7 +2919,12 @@ class Orchestrator:
             user_content, context=context, session_id=session_id,
         )
         self.conversation_history[session_id].append({"role": "user", "content": user_content})
+        turn["user_recorded"] = True
+        # Per-request view; see the matching comment in the non-stream
+        # body. ``_finalize_turn`` commits everything past ``base_len``.
         history = self._compact_context(self.conversation_history[session_id].copy())
+        turn["working"] = history
+        turn["base_len"] = len(history)
         from models.protocol import StreamDeltaPayload
 
         got_final_text = False
@@ -2636,9 +2934,18 @@ class Orchestrator:
         pending_retry_addition: Optional[str] = None
         if self.refusal_handler.is_ack_execution(text):
             pending_retry_addition = self.refusal_handler.ACK_EXECUTION_FAST_PATH_INSTRUCTION
-        from agents.iteration_budget import IterationBudget, NO_PROGRESS_GUIDANCE
+        from agents.iteration_budget import (
+            GUARD_STOP,
+            GUARD_WARN,
+            IterationBudget,
+            NO_PROGRESS_GUIDANCE,
+            NO_PROGRESS_WARNING,
+        )
         budget = IterationBudget(self._max_iterations, self._tool_loop_max_seconds)
+        # Only the guard's STOP level withdraws tools; see the
+        # non-streaming path and agents/iteration_budget.py.
         final_answer_only = False
+        no_progress_warned = False
         while budget.start_iteration():
             effective_system_prompt = system_prompt
             if pending_retry_addition:
@@ -2737,10 +3044,21 @@ class Orchestrator:
                         # Flush any buffered prose before the terminal frame.
                         await _flush_stream_prose()
                         if streamed_text:
+                            # Carry per-turn attribution on the terminal frame
+                            # so the UI can show which model answered and what
+                            # the turn cost. The provider reports both on its
+                            # own done event; before this they were dropped
+                            # here, so the client had no way to distinguish
+                            # "answered by the configured model" from
+                            # "answered by hop 4 of the failover chain".
+                            # Absent keys stay absent rather than rendering
+                            # a fabricated zero.
                             await self.send(session_id, FeralMessage(
                                 session_id=session_id, hop="brain", type="stream_delta",
                                 payload=StreamDeltaPayload(
                                     delta="", stream_id=stream_id, is_final=True,
+                                    model=str(delta.get("model") or ""),
+                                    usage=delta.get("usage") or {},
                                 ).model_dump(),
                             ))
                     elif delta["type"] == "budget_exceeded":
@@ -2762,17 +3080,20 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"Streaming failed, falling back: {e}")
                 # The stream path already appended this turn's user
-                # row to ``conversation_history``. ``handle_command``
+                # row to ``conversation_history``. The non-stream body
                 # will append it again, duplicating the turn. Drop
-                # the trailing user row here so the non-stream
-                # fallback re-adds exactly one copy.
-                try:
-                    hist = self.conversation_history.get(session_id) or []
-                    if hist and hist[-1].get("role") == "user":
-                        hist.pop()
-                except Exception:
-                    pass
-                await self.handle_command(session_id, text, context)
+                # the trailing user row here so the fallback re-adds
+                # exactly one copy.
+                hist = self.conversation_history.get(session_id) or []
+                if hist and hist[-1].get("role") == "user":
+                    hist.pop()
+                    turn["user_recorded"] = False
+                # ``_handle_command_impl``, not ``handle_command``: the
+                # session lock is already held by our caller and
+                # asyncio.Lock is not reentrant. The nested turn owns
+                # the write-back and the epilogue.
+                turn["delegated"] = True
+                await self._handle_command_impl(session_id, text, context)
                 return
 
             normalized_tool_calls = [
@@ -2917,12 +3238,24 @@ class Orchestrator:
                         "role": "tool",
                         "tool_call_id": tc.get("id", str(uuid4())[:8]),
                         "name": tc["name"],
-                        "content": json.dumps(result_data, default=str)[:2000],
+                        # Same per-tool budget as the non-streaming path;
+                        # see the comment there.
+                        "content": serialize_tool_result(
+                            tc["name"], result_data, registry=self.skills,
+                        ),
                     })
-                    if budget.observe_tool(
+                    guard_level = budget.observe_tool(
                         tc["name"], tc.get("args", {}), stream_tool_success, result_data
-                    ):
+                    )
+                    if guard_level == GUARD_STOP:
                         final_answer_only = True
+                    elif guard_level == GUARD_WARN and not no_progress_warned:
+                        # Warn once and leave the toolset intact; see the
+                        # non-streaming path.
+                        no_progress_warned = True
+                        history.append(
+                            {"role": "system", "content": NO_PROGRESS_WARNING}
+                        )
                     anti_loop_guidance = result_data.get("_anti_loop_guidance")
                     if anti_loop_guidance:
                         history.append({"role": "system", "content": anti_loop_guidance})
@@ -2971,15 +3304,9 @@ class Orchestrator:
             # canned "no text response" bubble would be noise.
             await self._send_text(session_id, "I processed your request but have no text response.")
 
-        self.conversation_history[session_id] = history[-self._conversation_max_per_session:]
-        self._evict_stale_sessions()
-        if self.learner:
-            asyncio.ensure_future(self.learner.on_message(session_id, "user", text))
-
-        # Phase 3 (audit-r10) — stream path snapshot, symmetric with
-        # the non-stream `_handle_command_impl` epilogue.
-        self._maybe_snapshot_primary(session_id)
-        self._maybe_auto_compact(session_id)
+        # Write-back, eviction, snapshot and F2 compaction live in
+        # ``_finalize_turn``, run from a ``finally`` by the caller —
+        # symmetric with the non-stream body.
 
         # Symmetric with `_handle_command_impl`: hand the full final
         # text back to synchronous callers (phone chat_request).
@@ -3797,15 +4124,10 @@ class Orchestrator:
         # 1. Conversation-history append (so follow-up routing / recall
         # scans the voice utterance too). Cap matches the text path
         # so a long-running voice session can't unbounded-grow memory.
-        try:
-            hist = self.conversation_history.setdefault(session_id, [])
-            hist.append({"role": "user", "content": clean, "source": "voice_realtime"})
-            if len(hist) > self._conversation_max_per_session:
-                self.conversation_history[session_id] = hist[
-                    -self._conversation_max_per_session:
-                ]
-        except Exception:
-            logger.debug("note_voice_user_turn: history append skipped", exc_info=True)
+        # Under the session lock: this used to mutate the list while a
+        # concurrent text turn held a snapshot of it, and the turn's
+        # write-back then destroyed the voice row.
+        await self._append_voice_row(session_id, "user", clean)
 
         # 2 + 3. Coref-resolution + active-subject tracking. Reuses the
         # exact same helper the text path uses so behaviour stays in
@@ -3870,6 +4192,51 @@ class Orchestrator:
             )
 
         return out
+
+    async def _append_voice_row(self, session_id: str, role: str, text: str) -> None:
+        """Append one live-voice row to the full transcript.
+
+        Serialised on the per-session lock, the same lock
+        ``handle_command`` / ``handle_command_stream`` hold. Without it a
+        transcript landing mid-turn was written into a list the text
+        turn had already snapshotted, and the turn's write-back then
+        overwrote it.
+        """
+        async with self._get_session_lock(session_id):
+            history = self.conversation_history.setdefault(session_id, [])
+            if (
+                history
+                and history[-1].get("role") == role
+                and history[-1].get("content") == text
+            ):
+                # Providers re-emit the same final transcript on
+                # reconnect; one utterance is one row.
+                return
+            history.append({"role": role, "content": text, "source": "voice_realtime"})
+            if len(history) > self._conversation_max_per_session:
+                self.conversation_history[session_id] = history[
+                    -self._conversation_max_per_session:
+                ]
+
+    async def note_voice_assistant_turn(self, session_id: str, text: str) -> None:
+        """Record a live-voice ASSISTANT turn in ``conversation_history``.
+
+        Counterpart to :meth:`note_voice_user_turn`, and the fix for the
+        headline amnesia bug. ``openai_realtime`` / ``gemini_live``
+        stream the model's audio straight to the client, so the
+        assistant's final transcript only ever reached working memory
+        and the durable ``voice:<sid>`` thread — never the array the
+        next text turn is built from. The model was then handed two
+        consecutive user messages and correctly answered that it had
+        never spoken.
+
+        Safe to call on every final assistant transcript: duplicate
+        consecutive rows are collapsed.
+        """
+        clean = (text or "").strip()
+        if not session_id or not clean:
+            return
+        await self._append_voice_row(session_id, "assistant", clean)
 
     # Max user turns scanned for a pending routine intent. Two is enough
     # to cover "request → clarification → answer" (the typical
@@ -4302,11 +4669,63 @@ class Orchestrator:
     # Response Helpers
     # ─────────────────────────────────────────────
 
-    async def _send_text(self, session_id: str, text: str):
-        await helper_send_text(self, session_id=session_id, text=text)
+    async def _send_text(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        model: str = "",
+        usage: dict | None = None,
+    ):
+        # Record first: every path that sends text must record what it
+        # sent, including the ones that return before the tool loop.
+        self._note_outbound_text(session_id, text)
+        # ``model``/``usage`` are supplied only by the main tool loop,
+        # which is the only caller that knows what the turn actually cost.
+        # The many status/error/ack sends keep the empty default, so the
+        # UI attributes an answer and stays quiet about everything else.
+        await helper_send_text(
+            self, session_id=session_id, text=text, model=model, usage=usage,
+        )
 
-    async def _try_send_sdui(self, session_id: str, text: str):
-        await helper_try_send_sdui(self, session_id=session_id, text=text)
+    def _pop_multi_agent_attribution(self, session_id: str) -> tuple[str, dict]:
+        """Attribution for the multi-agent turn that just finished.
+
+        Every failure mode returns "unknown" rather than raising. A token
+        label is cosmetic; a turn whose answer never reaches the user
+        because the label could not be computed is a real outage. The
+        multi-agent orchestrator is also swappable (``_init_multi_agent``
+        falls back, and tests inject doubles), so neither the method nor
+        the shape of what it returns can be assumed.
+        """
+        fn = getattr(self._multi_agent, "pop_turn_attribution", None)
+        if not callable(fn):
+            return "", {}
+        try:
+            attr = fn(session_id)
+        except Exception:
+            logger.debug("multi-agent attribution unavailable", exc_info=True)
+            return "", {}
+        if not isinstance(attr, dict):
+            return "", {}
+        model = attr.get("model")
+        usage = attr.get("usage")
+        return (
+            model if isinstance(model, str) else "",
+            usage if isinstance(usage, dict) else {},
+        )
+
+    async def _try_send_sdui(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        model: str = "",
+        usage: dict | None = None,
+    ):
+        await helper_try_send_sdui(
+            self, session_id=session_id, text=text, model=model, usage=usage,
+        )
 
     async def _try_genui_for_result(self, session_id: str, tool_call: dict, result_data: dict):
         await helper_try_genui_for_result(self, session_id=session_id, tool_call=tool_call, result_data=result_data)

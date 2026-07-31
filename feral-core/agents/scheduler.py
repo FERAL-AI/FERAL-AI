@@ -106,6 +106,115 @@ def _default_db_path() -> str:
     return str(base / "scheduled_jobs.db")
 
 
+_SUPPORTED_CRON_FORMS = (
+    "'every Nm' (e.g. 'every 30m'), 'every Nh' (e.g. 'every 2h'), "
+    "'daily HH:MM' (e.g. 'daily 21:00'), a 5-field cron subset "
+    "('*/N * * * *', '0 */N * * *', 'M H * * *'), or a macro "
+    "(@hourly, @daily, @midnight, @weekly, @monthly, @yearly, @annually)"
+)
+
+
+class UnparseableCronExpression(ValueError):
+    """Raised when a schedule string matches none of the supported forms.
+
+    Deliberately a hard error rather than a default. ``_compute_next_run``
+    used to end in ``return from_time + 60.0``, so any expression the parser
+    did not recognise silently became "run every 60 seconds". Two routines
+    written as ``"nightly at 9pm"`` matched no pattern and therefore fired
+    4,170 and 4,130 times, each driving a full multi-agent orchestrator turn
+    at ~20k prompt tokens, which pinned ``chat`` at $9.99 in a single hour
+    against a $10 cap. A schedule we cannot parse is a schedule we must not
+    guess at.
+    """
+
+    def __init__(self, cron_expr: str):
+        self.cron_expr = cron_expr
+        super().__init__(
+            f"Unrecognised schedule {cron_expr!r}. Supported forms: "
+            f"{_SUPPORTED_CRON_FORMS}."
+        )
+
+
+def _cron_field_values(spec: str, vmin: int, vmax: int) -> Optional[list[int]]:
+    """Expand one cron field to the values it matches.
+
+    Supports ``*``, ``*/N``, a plain integer, and comma lists of integers.
+    Returns None (not an empty list) when the field is unparseable or any
+    value is out of range, so ``60 25 * * *`` is rejected rather than
+    quietly matching nothing.
+    """
+    if spec == "*":
+        return list(range(vmin, vmax + 1))
+    if spec.startswith("*/"):
+        step_raw = spec[2:]
+        if not step_raw.isdigit() or int(step_raw) < 1:
+            return None
+        return list(range(vmin, vmax + 1, int(step_raw)))
+    values: list[int] = []
+    for part in spec.split(","):
+        if not part.isdigit():
+            return None
+        value = int(part)
+        if not (vmin <= value <= vmax):
+            return None
+        values.append(value)
+    return sorted(set(values)) or None
+
+
+# A yearly schedule needs at most ~366 day-steps; the extra margin covers
+# leap-day-only expressions such as `0 0 29 2 *`.
+_CRON_SCAN_DAYS = 366 * 5
+
+
+def _scan_5field_cron(
+    minute: str, hour: str, dom: str, month: str, dow: str,
+    from_time: float, tz: timezone | ZoneInfo,
+) -> Optional[float]:
+    """Next matching minute strictly after *from_time*, or None if the
+    expression is unparseable or matches nothing within the scan window.
+
+    Day-by-day scan: date fields are checked once per day and the
+    hour/minute lists are walked only on days that match, so a yearly
+    expression costs ~365 cheap iterations.
+    """
+    minutes = _cron_field_values(minute, 0, 59)
+    hours = _cron_field_values(hour, 0, 23)
+    doms = _cron_field_values(dom, 1, 31)
+    months = _cron_field_values(month, 1, 12)
+    dows = _cron_field_values(dow, 0, 7)
+    if minutes is None or hours is None or doms is None or months is None or dows is None:
+        return None
+
+    # cron day-of-week: 0 and 7 both mean Sunday.
+    dow_set = {d % 7 for d in dows}
+    dom_restricted = dom != "*"
+    dow_restricted = dow != "*"
+
+    day = datetime.fromtimestamp(from_time, tz=tz).date()
+    for _ in range(_CRON_SCAN_DAYS):
+        midnight = datetime(day.year, day.month, day.day, tzinfo=tz)
+        if midnight.month in months:
+            # Standard cron: when BOTH day-of-month and day-of-week are
+            # restricted, a day matches if EITHER does.
+            cron_dow = (midnight.weekday() + 1) % 7
+            if dom_restricted and dow_restricted:
+                day_matches = midnight.day in doms or cron_dow in dow_set
+            elif dom_restricted:
+                day_matches = midnight.day in doms
+            elif dow_restricted:
+                day_matches = cron_dow in dow_set
+            else:
+                day_matches = True
+            if day_matches:
+                for hh in hours:
+                    for mm in minutes:
+                        candidate = midnight.replace(hour=hh, minute=mm)
+                        if candidate.timestamp() > from_time:
+                            return candidate.timestamp()
+        day = day + timedelta(days=1)
+    return None
+
+
 def _compute_next_run(cron_expr: str, from_time: float, tz: timezone | ZoneInfo | None = None) -> float:
     """
     Compute the next run timestamp (epoch seconds) strictly after *from_time*.
@@ -119,13 +228,17 @@ def _compute_next_run(cron_expr: str, from_time: float, tz: timezone | ZoneInfo 
     - "every Nh" / "every N h" — every N hours
     - "daily HH:MM" — once per day at HH:MM
     - 5-field cron (subset): */N * * * *, M H * * *, etc.
+
+    Raises:
+        UnparseableCronExpression: the expression matches none of the above.
+            Callers must disable the job — never re-arm on a guess.
     """
     if tz is None:
         tz = timezone.utc
 
     raw = cron_expr.strip()
     if not raw:
-        return from_time + 60.0
+        raise UnparseableCronExpression(cron_expr)
 
     # Cron macros
     _macros = {
@@ -208,8 +321,25 @@ def _compute_next_run(cron_expr: str, from_time: float, tz: timezone | ZoneInfo 
                     target = target + timedelta(days=1)
                 return target.timestamp()
 
-    # Fallback: 1 minute after from_time
-    return from_time + 60.0
+        # Everything else 5-field: scan forward for the next matching
+        # minute. Needed because the special cases above only cover
+        # `* * *` in the date fields and a fully-specified H:M — so
+        # `0 * * * *` (hourly on the hour), `0 0 * * 0` (weekly),
+        # `0 0 1 * *` (monthly) and `0 0 1 1 *` (yearly) all fell through
+        # to the old 60-second catch-all and fired once a minute forever.
+        # That includes the @hourly/@weekly/@monthly/@yearly macros, which
+        # this module has advertised in its docstring the whole time. The
+        # old macro tests passed only because both sides of the comparison
+        # returned the same wrong +60s.
+        scanned = _scan_5field_cron(minute, hour, dom, month, dow, from_time, tz)
+        if scanned is not None:
+            return scanned
+
+    # No fallback by design. This used to `return from_time + 60.0`, which
+    # turned every typo into a once-a-minute job (see
+    # UnparseableCronExpression for the incident). Refusing to guess is the
+    # only safe answer: callers disable the job and tell the operator.
+    raise UnparseableCronExpression(cron_expr)
 
 
 class CronService:
@@ -354,6 +484,10 @@ class CronService:
         tz_name = tz_name or str(self._timezone)
         tz = ZoneInfo(tz_name)
         now = time.time()
+        # Validate at write time. A bad expression should be rejected when the
+        # routine is created — by the operator, in the UI, immediately — not
+        # discovered later from the bill. Propagates
+        # UnparseableCronExpression to the caller.
         nxt = CronService._compute_next_run(cron_expr, now, tz=tz)
         payload_json = json.dumps(payload)
         with self._lock:
@@ -445,7 +579,31 @@ class CronService:
                     tz = ZoneInfo(row["tz_name"] or "UTC")
                 except (KeyError, IndexError):
                     tz = self._timezone
-                nxt = CronService._compute_next_run(cron, now, tz=tz)
+                try:
+                    nxt = CronService._compute_next_run(cron, now, tz=tz)
+                except UnparseableCronExpression:
+                    # The runaway path. Re-arming on a guess here is what
+                    # turned "nightly at 9pm" into 4,170 orchestrator turns.
+                    # Disable the job instead so it costs nothing more, and
+                    # shout — the operator has to fix the expression.
+                    conn.execute(
+                        """
+                        UPDATE scheduled_jobs
+                        SET last_run = ?, run_count = run_count + 1, enabled = 0
+                        WHERE id = ?
+                        """,
+                        (now, job_id),
+                    )
+                    conn.commit()
+                    logger.critical(
+                        "feral.scheduler.disabled_unparseable_cron: job %d "
+                        "(%r) has schedule %r, which matches no supported "
+                        "form. The job has been DISABLED after this run so it "
+                        "cannot re-fire every 60s. Edit the routine to use "
+                        "%s, then re-enable it.",
+                        job_id, row["description"], cron, _SUPPORTED_CRON_FORMS,
+                    )
+                    return
                 conn.execute(
                     """
                     UPDATE scheduled_jobs
@@ -486,7 +644,18 @@ class CronService:
                 tz = ZoneInfo(row["tz_name"] or "UTC")
             except (KeyError, IndexError):
                 tz = self._timezone
-            nxt = CronService._compute_next_run(row["cron_expr"], now, tz=tz)
+            try:
+                nxt = CronService._compute_next_run(row["cron_expr"], now, tz=tz)
+            except UnparseableCronExpression:
+                # Refuse to resume rather than resume-at-60s. The job stays
+                # disabled until the expression is fixed.
+                logger.error(
+                    "feral.scheduler.resume_refused_unparseable_cron: job %d "
+                    "has schedule %r, which matches no supported form. It "
+                    "stays disabled. Edit the routine to use %s.",
+                    job_id, row["cron_expr"], _SUPPORTED_CRON_FORMS,
+                )
+                return False
             self._conn.execute(
                 "UPDATE scheduled_jobs SET enabled = 1, next_run = ? WHERE id = ?",
                 (nxt, job_id),

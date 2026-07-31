@@ -42,7 +42,8 @@
             "returns_description": "{messages: [{id, from, subject, snippet, date}], source: 'gmail' | 'imap'}",
             "safety_tier": "safe",
             "read_only_hint": true,
-            "ui_hint": "feed"
+            "ui_hint": "feed",
+            "result_budget": "feed"
         },
         {
             "id": "read_email",
@@ -55,7 +56,8 @@
             "returns_description": "{id, from, to, subject, body, html, date, headers}",
             "safety_tier": "safe",
             "read_only_hint": true,
-            "ui_hint": "detail_card"
+            "ui_hint": "detail_card",
+            "result_budget": "feed"
         },
         {
             "id": "search",
@@ -76,7 +78,8 @@
             "returns_description": "{messages: [{id, thread_id?, from, subject, date, snippet, has_attachments?}], source: 'gmail' | 'imap', query_used: string, next_page_token?: string}",
             "safety_tier": "safe",
             "read_only_hint": true,
-            "ui_hint": "feed"
+            "ui_hint": "feed",
+            "result_budget": "feed"
         },
         {
             "id": "send_email",

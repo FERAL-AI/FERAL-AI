@@ -104,7 +104,7 @@ class WizardState:
         # run) — never downgrade to False here. Only the finish step
         # via :meth:`mark_complete` flips this flag to True.
         self.settings.setdefault("meta", {})
-        _write_json(self.home / "settings.json", self.settings)
+        self._flush_settings()
         _persist_credentials(self.home, self.credentials)
         if self.identity:
             _write_json(self.home / "identity.json", self.identity)
@@ -118,7 +118,7 @@ class WizardState:
         self.home.mkdir(parents=True, exist_ok=True)
         self.settings.setdefault("meta", {})
         self.settings["meta"]["setup_complete"] = True
-        _write_json(self.home / "settings.json", self.settings)
+        self._flush_settings()
         # Best-effort cleanup of the resume sidecar.
         sidecar = self.home / "setup_state.json"
         try:
@@ -127,8 +127,32 @@ class WizardState:
         except OSError:
             pass
 
+    def _flush_settings(self) -> None:
+        """Deep-merge the in-memory settings onto the on-disk file.
+
+        The wizard is NOT the only writer of ``settings.json`` during a
+        single ``feral setup`` run: the network step calls into
+        :mod:`cli.setup.network`, which persists ``access.*`` and
+        ``network.bind_host`` straight to disk (the same code path
+        ``feral access remote-up`` uses, so the persistence rules live
+        in one place). Writing ``self.settings`` wholesale here would
+        replay a snapshot captured at wizard start over the top of
+        those writes and silently delete them — picking Tailscale in
+        the wizard used to leave zero trace in ``settings.json``.
+
+        Re-reading the file and merging key-by-key makes the wizard a
+        cooperative writer instead of a last-writer-wins one. The
+        merged result is written back into ``self.settings`` so the
+        in-memory view (used by the finish summary) matches disk.
+        """
+        path = self.home / "settings.json"
+        merged = _deep_merge(_read_json(path), self.settings)
+        _write_json(path, merged)
+        self.settings.clear()
+        self.settings.update(merged)
+
     # ------------------------------------------------------------------
-    # Resume sidecar (~/.feral/setup_state.json) — Lane 07 
+    # Resume sidecar (~/.feral/setup_state.json) — Lane 07
     # ------------------------------------------------------------------
 
     def write_setup_state(self, *, last_step: str, completed_steps: list[str]) -> None:
@@ -182,6 +206,23 @@ class WizardState:
 
     def has_credential(self, key: str) -> bool:
         return bool(self.credentials.get(key))
+
+
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Return ``base`` with ``overlay`` merged in, nested dicts included.
+
+    Scalars and lists in ``overlay`` win outright; nested dicts recurse
+    so writing ``{"network": {"bind_host": ...}}`` never drops a sibling
+    ``network.port`` another writer put there. Never mutates ``overlay``.
+    """
+    out = dict(base)
+    for key, value in overlay.items():
+        existing = out.get(key)
+        if isinstance(value, dict) and isinstance(existing, dict):
+            out[key] = _deep_merge(existing, value)
+        else:
+            out[key] = value
+    return out
 
 
 def _read_json(path: Path) -> dict:

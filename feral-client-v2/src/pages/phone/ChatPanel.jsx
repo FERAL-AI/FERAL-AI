@@ -20,6 +20,7 @@ import { unlockSharedAudioContext } from '../../lib/audioContext';
 import { VoiceFullscreen } from './VoiceFullscreen';
 import MarkdownMessage from '../../lib/markdown.jsx';
 import BudgetExceededBanner from '../../components/BudgetExceededBanner';
+import ChatNotice from '../../components/ChatNotice';
 
 const LONG_PRESS_MS = 400;
 
@@ -134,6 +135,32 @@ export default function ChatPanel({ shell: shellProp }) {
         setStreamingText('');
         const finalText = streamed && streamed.length > text.length ? streamed : text;
         setMessages((prev) => [...prev, { id: newId(), role: 'assistant', text: finalText }]);
+        return;
+      }
+      if (type === 'refusal' || type === 'error') {
+        // Mirror the desktop surface: a declined or failed turn has to
+        // land as a readable row. Previously the phone dropped both
+        // frame types on the floor and the user just saw nothing.
+        const p = frame.payload || frame || {};
+        streamBufferRef.current = '';
+        setStreamingText('');
+        setMessages((prev) => [...prev, {
+          id: newId(),
+          role: 'assistant',
+          type: 'notice',
+          notice: type === 'refusal'
+            ? {
+              kind: 'refusal',
+              message: p.reason || 'The request was declined.',
+              hint: p.retry_hint || '',
+              code: p.source ? String(p.source) : '',
+            }
+            : {
+              kind: 'error',
+              message: p.message || p.detail || p.reason || 'The brain reported an error.',
+              code: p.code ? String(p.code) : '',
+            },
+        }]);
         return;
       }
       if (type === 'budget_exceeded') {
@@ -288,11 +315,17 @@ export default function ChatPanel({ shell: shellProp }) {
           </p>
         ) : (
           messages.map((m) => (
-            <div key={m.id} className={`phone-chat-row phone-chat-row--${m.role}`}>
-              <div className="phone-chat-bubble">
-                {m.role === 'assistant' ? <MarkdownMessage text={m.text} className="v2-md--inline" /> : m.text}
+            m.type === 'notice' ? (
+              <div key={m.id} className="phone-chat-row phone-chat-row--assistant">
+                <ChatNotice {...(m.notice || {})} />
               </div>
-            </div>
+            ) : (
+              <div key={m.id} className={`phone-chat-row phone-chat-row--${m.role}`}>
+                <div className="phone-chat-bubble">
+                  {m.role === 'assistant' ? <MarkdownMessage text={m.text} className="v2-md--inline" /> : m.text}
+                </div>
+              </div>
+            )
           ))
         )}
         {Object.values(budgetBanners).map((b) => (

@@ -7,6 +7,7 @@ voice path never applied ``_force_tool_for_query`` from the orchestrator.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,6 +20,15 @@ from agents.tool_list import (
     tool_name_from_def,
 )
 from voice.realtime_proxy import RealtimeProxy, RealtimeSession
+
+
+async def _drain_background_tasks() -> None:
+    """Await every task the code under test scheduled with create_task."""
+    pending = [
+        t for t in asyncio.all_tasks() if t is not asyncio.current_task()
+    ]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 def _tool(name: str) -> dict:
@@ -103,7 +113,17 @@ async def test_realtime_configure_pins_routines_before_truncation():
 
 @pytest.mark.asyncio
 async def test_realtime_force_tool_for_turn_updates_tool_choice():
-    rs = RealtimeSession(session_id="s", node_id="n", api_key="sk")
+    # The forced name must be IN the session's tool list — forcing now
+    # runs through ``resolve_forced_tool_choice`` like the configure
+    # path does. Pre-fix this test passed with an empty tool list,
+    # which is exactly the payload OpenAI rejects with an `error`
+    # event (see test_realtime_force_tool_absent_degrades_to_auto).
+    rs = RealtimeSession(
+        session_id="s",
+        node_id="n",
+        api_key="sk",
+        tools=[_tool("feral_routines__create")],
+    )
     rs._ws = AsyncMock()
     rs._connected = True
     sent: list[dict] = []
@@ -160,6 +180,9 @@ async def test_note_voice_user_turn_returns_forced_routine_tool():
     orch = Orchestrator.__new__(Orchestrator)
     orch.refusal_handler = RefusalHandler(MagicMock())
     orch.conversation_history = {}
+    # note_voice_user_turn now appends under the per-session lock.
+    orch._session_locks = {}
+    orch._conversation_max_per_session = 200
 
     tools = [_tool("feral_routines__create"), _tool("feral_reminders__create")]
     out = await orch.note_voice_user_turn(
@@ -200,5 +223,9 @@ async def test_voice_transcript_hook_triggers_force_tool_for_turn():
         "[user] spin the robot every night at 9pm",
         is_final=True,
     )
+    # The orchestrator hooks now run off the hot transcript path (so the
+    # wire emit is not serialized behind them), so drain the background
+    # task before asserting.
+    await _drain_background_tasks()
 
     rs.force_tool_for_turn.assert_awaited_once_with("feral_routines__create")

@@ -19,7 +19,9 @@ export function friendlyToolLabel(payload = {}) {
 
   if (HUMAN_LABELS[skill]) return HUMAN_LABELS[skill];
   if (skill === 'browser') return endpoint ? `Browser: ${humanize(endpoint)}` : 'Use browser';
-  if (skill === 'computer_use') {
+  // computer_use was consolidated into coding_tools; accept both so the
+  // real shipped ids get the intended labels.
+  if (skill === 'coding_tools' || skill === 'computer_use') {
     if (endpoint === 'bash') return 'Run local command';
     if (endpoint === 'write_file') return 'Write file';
     if (endpoint === 'read_file') return 'Read file';

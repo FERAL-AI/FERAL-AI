@@ -2091,9 +2091,12 @@ function PolicySub() {
 //      with a copy-button, links to the vendor's create-app docs
 //      from the brain's `setup_doc_url`, takes client_id +
 //      client_secret in two fields, persists via
-//      `/api/integrations/token` with `{client_id, client_secret}`,
-//      then opens the OAuth popup. Existing Lane 10 OAuthManager
-//      handles the rest.
+//      `/api/integrations/oauth/client` with `{client_id,
+//      client_secret}`, then opens the OAuth popup. Existing Lane 10
+//      OAuthManager handles the rest. These are *client* credentials,
+//      not a token: `/api/integrations/token` now refuses oauth2
+//      providers because it used to store the client secret as the
+//      access token.
 //
 //   3. Home Assistant = long-lived token paste field, exactly the
 //      same `/api/integrations/token` POST.
@@ -2263,11 +2266,14 @@ function OAuthSelfServeCard({ provider, onSaved, onDisconnect, connected }) {
     setErr('');
     setMsg('');
     try {
-      const r = await apiFetch('/api/integrations/token', {
+      // OAuth *client* credentials, not a token. /api/integrations/token
+      // ignored client_id and stored the secret in the access_token
+      // slot, which faked a permanent connection and disabled the
+      // working IMAP/ICS fallbacks.
+      const r = await apiFetch('/api/integrations/oauth/client', {
         method: 'POST',
         body: JSON.stringify({
           provider_id: pid,
-          token: clientSecret.trim(),
           client_id: clientId.trim(),
           client_secret: clientSecret.trim(),
         }),

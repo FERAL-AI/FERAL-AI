@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Control the local computer: open any app, create/read/write files, run shell commands, take screenshots, adjust volume, and get system info. Always available on the user's machine.",
+    "description": "Control the local computer's UI: open any app, take screenshots, adjust volume, and read system info. Runs one allowlisted program at a time with no shell metacharacters, so it cannot create, read, or edit files. Use coding_tools__write_file / read_file / edit_file / bash for anything touching the filesystem or running a program.",
     "trigger_phrases": [
         "open chrome",
         "open safari",
@@ -34,15 +34,6 @@
         "dark mode",
         "what apps are running",
         "close this app",
-        "create a file",
-        "create a note on my desktop",
-        "write a file",
-        "make a file",
-        "save a file",
-        "create a text file",
-        "write to desktop",
-        "create note on desktop",
-        "write hello",
         "system info",
         "cpu usage",
         "disk space",
@@ -58,46 +49,51 @@
             "id": "open_app",
             "method": "POST",
             "url": "daemon://local/applescript",
-            "description": "Open ANY application on the user's Mac using AppleScript. Use this whenever the user asks to open, launch, or start an app (Music, Safari, Chrome, Spotify, Notes, Terminal, Finder, etc.). The script parameter should be AppleScript like: tell application \"AppName\" to activate",
+            "description": "Open ANY application on the user's Mac using AppleScript. Use this whenever the user asks to open, launch, or start an app (Music, Safari, Chrome, Spotify, Notes, Terminal, Finder, etc.). The script parameter should be AppleScript like: tell application \"AppName\" to activate. AppleScript that reaches a shell or another interpreter (`do shell script`, `do script`, `run script`, `use framework`) is rejected.",
             "params": [
                 {"name": "script", "type": "string", "required": true, "description": "AppleScript to execute. MUST use format: tell application \"AppName\" to activate. Examples: tell application \"Music\" to activate, tell application \"Safari\" to activate, tell application \"Notes\" to activate"}
             ],
             "returns_description": "{output, exit_code}",
-            "ui_hint": null
+            "ui_hint": null,
+            "safety_tier": "confirm"
         },
         {
             "id": "shell_command",
             "method": "POST",
             "url": "daemon://local/shell",
-            "description": "Run any shell command on the user's Mac. Use for: creating files (echo/cat/touch), reading files, listing directories, volume control, screenshots, system tasks. When user says 'create a note/file on my desktop', use: echo 'content' > ~/Desktop/filename.txt",
+            "description": "Run one allowlisted program on the user's Mac. The command must be a single program from the daemon shell allowlist (open, osascript, screencapture, say, pbcopy, pbpaste, defaults, system_profiler, sw_vers, caffeinate, mdfind, date, uname) with plain arguments. Shell metacharacters ($ ` | & ; > < \\) are rejected, so pipes, redirects, command substitution and chaining do NOT work here. To create or edit a file, use coding_tools__write_file. To run git, tests, or any other program, use coding_tools__bash.",
             "params": [
-                {"name": "command", "type": "string", "required": true, "description": "Shell command to execute. Examples: echo 'hello' > ~/Desktop/note.txt, ls ~/Desktop, cat ~/Desktop/file.txt, screencapture -x /tmp/screenshot.png"},
+                {"name": "command", "type": "string", "required": true, "description": "One allowlisted program with arguments, no metacharacters. Examples: open -a Safari, screencapture -x /tmp/screenshot.png, pbpaste, sw_vers, mdfind kMDItemDisplayName=='notes.txt'"},
                 {"name": "timeout_seconds", "type": "number", "required": false, "default": "10", "description": "Max execution time"}
             ],
             "returns_description": "{output, exit_code}",
-            "ui_hint": null
+            "ui_hint": null,
+            "safety_tier": "confirm"
         },
         {
             "id": "screenshot",
             "method": "POST",
             "url": "daemon://local/shell",
-            "description": "Capture a screenshot of the user's screen.",
+            "description": "Capture a screenshot of the user's screen to /tmp/feral_screenshot.png.",
             "params": [
-                {"name": "command", "type": "string", "required": false, "default": "screencapture -x /tmp/feral_screenshot.png && echo 'Screenshot saved to /tmp/feral_screenshot.png'", "description": "Screenshot command"}
+                {"name": "command", "type": "string", "required": false, "default": "screencapture -x /tmp/feral_screenshot.png", "description": "Screenshot command. Must stay a single allowlisted program with no metacharacters."}
             ],
             "returns_description": "{output, exit_code}",
-            "ui_hint": null
+            "ui_hint": null,
+            "safety_tier": "safe"
         },
         {
             "id": "system_info",
             "method": "POST",
             "url": "daemon://local/shell",
-            "description": "Get system information: CPU usage, memory, disk space, battery level.",
+            "description": "Get hardware and OS information for this Mac (model, chip, memory, OS version).",
             "params": [
-                {"name": "command", "type": "string", "required": false, "default": "echo '{\"cpu\":\"'$(top -l 1 | grep 'CPU usage' | awk '{print $3}')'\"}'", "description": "System info command"}
+                {"name": "command", "type": "string", "required": false, "default": "system_profiler SPHardwareDataType", "description": "System info command. Must stay a single allowlisted program with no metacharacters."}
             ],
-            "returns_description": "{cpu_usage, memory_used, disk_free, battery_percent}",
-            "ui_hint": "metric"
+            "returns_description": "{output, exit_code}: the system_profiler hardware report as text",
+            "ui_hint": "metric",
+            "safety_tier": "safe",
+            "read_only_hint": true
         },
         {
             "id": "set_volume",
@@ -108,7 +104,8 @@
                 {"name": "command", "type": "string", "required": true, "description": "osascript command for volume. Example: osascript -e 'set volume output volume 50'"}
             ],
             "returns_description": "{output, exit_code}",
-            "ui_hint": null
+            "ui_hint": null,
+            "safety_tier": "confirm"
         }
     ],
     "flows": [

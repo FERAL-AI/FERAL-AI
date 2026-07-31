@@ -151,6 +151,7 @@ async def test_handle_audio_from_node_openai_starts_session(monkeypatch):
     rs.send_audio = AsyncMock()
     rt = MagicMock(available=True)
     rt.get_session.return_value = None
+    rt.evict_dead_session = AsyncMock(return_value=False)
     rt.start_session = AsyncMock(return_value=rs)
 
     r = VoiceRouter(realtime_proxy=rt, audio_pipeline=MagicMock())
@@ -380,14 +381,25 @@ async def test_handle_tool_call_skill_not_found():
 
 @pytest.mark.asyncio
 async def test_handle_event_error_invokes_on_error():
+    """A SESSION-FATAL error event still reaches ``on_error``.
+
+    Updated with the fatal/non-fatal split: the old fixture used
+    ``"rate limited"``, which is now classified as a recoverable
+    per-event rejection (see
+    ``tests/test_voice_nonfatal_errors.py``). Only the credential /
+    expiry class fails a session over, so the fixture uses one.
+    """
     errors: list[tuple[str, str]] = []
 
     async def on_err(sid: str, msg: str):
         errors.append((sid, msg))
 
     rs = RealtimeSession("sid", "nid", api_key="k", on_error=on_err)
-    await rs._handle_event({"type": "error", "error": {"message": "rate limited"}})
-    assert errors and "rate" in errors[0][1].lower()
+    await rs._handle_event({
+        "type": "error",
+        "error": {"code": "insufficient_quota", "message": "quota exhausted"},
+    })
+    assert errors and "quota" in errors[0][1].lower()
 
 
 @pytest.mark.asyncio
@@ -495,6 +507,7 @@ async def test_handle_audio_from_client_openai_starts_session_and_sends(monkeypa
     rs.send_audio = AsyncMock()
     rt = MagicMock(available=True)
     rt.get_session.return_value = None
+    rt.evict_dead_session = AsyncMock(return_value=False)
     rt.start_session = AsyncMock(return_value=rs)
 
     r = VoiceRouter(realtime_proxy=rt, audio_pipeline=MagicMock())
@@ -671,18 +684,34 @@ async def test_handle_text_from_node_openai_connected(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handle_audio_from_node_openai_no_send_when_not_connected(monkeypatch):
+async def test_handle_audio_from_node_openai_evicts_dead_session(monkeypatch):
+    """A disconnected session is reaped and re-opened, not written to.
+
+    This test used to assert the audio chunk was simply dropped
+    (``send_audio.assert_not_called()``) — which pinned the zombie bug:
+    the dead handle stayed in the proxy maps forever, so EVERY later
+    chunk hit the same gate and the session never recovered. The
+    contract now: evict, re-open, and deliver on the fresh session.
+    """
     monkeypatch.delenv(_ENV_VOICE_PROVIDER, raising=False)
-    rs = MagicMock(connected=False)
-    rs.send_audio = AsyncMock()
+    dead = MagicMock(connected=False)
+    dead.send_audio = AsyncMock()
+    fresh = MagicMock(connected=True)
+    fresh.send_audio = AsyncMock()
     rt = MagicMock(available=True)
-    rt.get_session.return_value = rs
+    # Model the real proxy: once evicted, the lookup misses.
+    rt.get_session = MagicMock(return_value=None)
+    rt.evict_dead_session = AsyncMock(return_value=True)
+    rt.start_session = AsyncMock(return_value=fresh)
 
     r = VoiceRouter(realtime_proxy=rt, audio_pipeline=MagicMock())
     r.register_voice_config("n1", {"voice_provider": "openai"})
 
     await r.handle_audio_from_node("n1", "sid", "YWFh")
-    rs.send_audio.assert_not_called()
+
+    rt.evict_dead_session.assert_awaited_once_with("n1")
+    dead.send_audio.assert_not_called()
+    fresh.send_audio.assert_awaited_once_with("YWFh")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -894,7 +923,7 @@ async def test_realtime_session_send_ws_error_marks_disconnected(monkeypatch):
 async def test_handle_event_transcript_deltas(monkeypatch):
     calls: list[tuple[str, str, bool]] = []
 
-    async def on_tr(sid: str, text: str, final: bool):
+    async def on_tr(sid: str, text: str, final: bool, **_ordering):
         calls.append((sid, text, final))
 
     rs = RealtimeSession("sid", "nid", api_key="k", on_transcript=on_tr)
@@ -911,7 +940,7 @@ async def test_handle_event_transcript_deltas(monkeypatch):
 async def test_handle_event_input_transcription_completed(monkeypatch):
     calls: list[str] = []
 
-    async def on_tr(sid: str, text: str, final: bool):
+    async def on_tr(sid: str, text: str, final: bool, **_ordering):
         calls.append(text)
 
     rs = RealtimeSession("sid", "nid", api_key="k", on_transcript=on_tr)
@@ -932,3 +961,61 @@ async def test_handle_event_speech_started_invokes_callback():
     rs = RealtimeSession("sid", "nid", api_key="k", on_speech_started=on_sp)
     await rs._handle_event({"type": "input_audio_buffer.speech_started"})
     assert started == ["sid"]
+
+
+# ----------------------------------------------------------------------
+# audio.realtime_primary — the wizard's realtime pick reaching the router
+# ----------------------------------------------------------------------
+#
+# ``feral setup``'s voice preflight has always written
+# ``audio.realtime_primary``, but nothing read it: the router only ever
+# consulted FERAL_VOICE_PROVIDER. An operator who picked Gemini Live in
+# the wizard still got OpenAI Realtime on every call.
+
+
+def _write_audio_settings(tmp_path, monkeypatch, audio: dict) -> None:
+    import json
+
+    monkeypatch.setenv("FERAL_HOME", str(tmp_path))
+    (tmp_path / "settings.json").write_text(json.dumps({"audio": audio}))
+
+
+def test_preferred_realtime_provider_reads_settings(tmp_path, monkeypatch):
+    monkeypatch.delenv(_ENV_VOICE_PROVIDER, raising=False)
+    _write_audio_settings(tmp_path, monkeypatch, {"realtime_primary": "gemini_live"})
+    assert VoiceRouter._preferred_realtime_provider() == "gemini"
+
+
+def test_preferred_realtime_provider_env_wins(tmp_path, monkeypatch):
+    _write_audio_settings(tmp_path, monkeypatch, {"realtime_primary": "gemini_live"})
+    monkeypatch.setenv(_ENV_VOICE_PROVIDER, "openai")
+    assert VoiceRouter._preferred_realtime_provider() == "openai"
+
+
+def test_preferred_realtime_provider_empty_when_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv(_ENV_VOICE_PROVIDER, raising=False)
+    _write_audio_settings(tmp_path, monkeypatch, {})
+    assert VoiceRouter._preferred_realtime_provider() == ""
+
+
+def test_session_routes_to_gemini_from_settings(tmp_path, monkeypatch):
+    monkeypatch.delenv(_ENV_VOICE_PROVIDER, raising=False)
+    _write_audio_settings(tmp_path, monkeypatch, {"realtime_primary": "gemini_live"})
+    gem = MagicMock(available=True)
+    rt = MagicMock(available=True)
+    r = VoiceRouter(realtime_proxy=rt, audio_pipeline=MagicMock())
+    r.set_gemini_proxy(gem)
+    r.set_session_voice_mode("sess-cfg", "realtime")
+    assert r._resolve_session_provider("sess-cfg") == "gemini"
+
+
+def test_settings_pick_does_not_override_an_unavailable_proxy(tmp_path, monkeypatch):
+    """Picking Gemini in the wizard must not route to a proxy that
+    isn't up — the router still falls back to OpenAI Realtime."""
+    monkeypatch.delenv(_ENV_VOICE_PROVIDER, raising=False)
+    _write_audio_settings(tmp_path, monkeypatch, {"realtime_primary": "gemini_live"})
+    rt = MagicMock(available=True)
+    r = VoiceRouter(realtime_proxy=rt, audio_pipeline=MagicMock())
+    r.set_gemini_proxy(MagicMock(available=False))
+    r.set_session_voice_mode("sess-down", "realtime")
+    assert r._resolve_session_provider("sess-down") == "openai"

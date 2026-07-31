@@ -12,6 +12,7 @@ import collections
 import logging
 import os
 import re
+import secrets
 import time
 from collections.abc import Awaitable  # noqa: F401 — used by quoted return annotations in WS9 task spawners
 from pathlib import Path
@@ -1705,6 +1706,24 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
             remaining_attachments = state.detach_session(session_id)
         except Exception:
             remaining_attachments = 0
+        # Voice teardown BEFORE the session de-registration below.
+        # Pre-fix no disconnect handler touched the voice router at
+        # all: a tab close / network blip / backgrounded app left the
+        # OpenAI Realtime WebSocket open and billing, and left a stale
+        # `_node_to_session` entry so the NEXT voice_session_start
+        # handed the user a dead handle.
+        #
+        # Identity-checked on purpose: when the same session_id has
+        # already reconnected on a NEW socket, `state.sessions` points
+        # at that newer ws and the voice session belongs to it. Tearing
+        # down here would kill the live call the reconnect just
+        # established. Only the socket still registered for this
+        # session may stop its voice.
+        if state.voice_router and state.sessions.get(session_id) is ws:
+            try:
+                await state.voice_router.stop_session_voice(session_id)
+            except Exception as voice_exc:
+                logger.warning(f"Voice teardown on disconnect failed: {voice_exc}")
         should_clear = state.should_clear_on_disconnect(session_id)
         if remaining_attachments == 0 and should_clear:
             if state.orchestrator:
@@ -1722,12 +1741,30 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                     )
                 except Exception as e:
                     logger.debug(f"Identity maintenance skipped: {e}")
-        state.sessions.pop(session_id, None)
-        state.audio.clear_session(session_id)
-        # Perception buffers are surface-local (one fusion frame per
-        # active socket); clear unconditionally so a stale frame from
-        # a closed tab doesn't leak into the next session.
-        state.perception.clear(session_id)
+        # Identity-checked de-registration. ``state.sessions`` holds ONE
+        # WebSocket per session_id, and every web tab that connects
+        # without ``?session_id=`` resolves to ``primary_session_id`` —
+        # so a second surface (another browser tab, the iOS app)
+        # overwrites the slot at line 1422 on connect. Popping
+        # unconditionally here meant the *older* handler's disconnect
+        # de-registered the *newer*, still-live socket. After that
+        # ``BrainState.send_to_session`` misses the key and silently
+        # returns, so every stream_delta / text_response for the turn
+        # goes nowhere while the client socket stays open and healthy:
+        # the composer spins on "thinking" forever with no error, no
+        # toast, and no reconnect. Operator report 2026-07 ("say hi,
+        # switch to another tab, it stops replying").
+        #
+        # Only tear down the shared per-session state when the socket in
+        # the slot is still ours; if a newer surface owns it, that
+        # surface owns its audio and perception buffers too.
+        if state.sessions.get(session_id) is ws:
+            state.sessions.pop(session_id, None)
+            state.audio.clear_session(session_id)
+            # Perception buffers are surface-local (one fusion frame per
+            # active socket); clear so a stale frame from a closed tab
+            # doesn't leak into the next session.
+            state.perception.clear(session_id)
         # Working memory + orchestrator history persist while ANY
         # surface remains AND for the primary session always. The
         # snapshot store handles cold-boot durability.
@@ -1743,10 +1780,29 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                 logger.debug(f"Primary snapshot on disconnect failed: {snap_exc}")
     except Exception as exc:
         logger.error(f"Unexpected error in session {session_id[:8]}: {exc}", exc_info=True)
-        state.sessions.pop(session_id, None)
-        state.audio.clear_session(session_id)
-        state.perception.clear(session_id)
-        state.memory.working_clear(session_id)
+        # Same identity check as the WebSocketDisconnect path above, for the
+        # same reason. This sibling handler was missed when that one was
+        # fixed, so the original bug survived here in a narrower window: an
+        # exception raised inside the OLDER socket's own cleanup lands in
+        # this block and de-registers the NEWER, still-live surface, after
+        # which send_to_session silently drops every reply to it.
+        #
+        # It was additionally worse than the disconnect path: working memory
+        # was cleared unconditionally, where that path gates the same call
+        # behind ``remaining_attachments == 0 and should_clear``. On the
+        # shared primary session that wiped state out from under every other
+        # attached surface. Mirror the guard rather than re-deriving it.
+        if state.sessions.get(session_id) is ws:
+            state.sessions.pop(session_id, None)
+            state.audio.clear_session(session_id)
+            state.perception.clear(session_id)
+            try:
+                remaining = state.detach_session(session_id)
+            except Exception:
+                logger.debug("detach_session failed on the error path", exc_info=True)
+                remaining = 0
+            if remaining == 0 and state.should_clear_on_disconnect(session_id):
+                state.memory.working_clear(session_id)
 
 
 # ─────────────────────────────────────────────
@@ -1834,10 +1890,39 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
             "sunset=2026.7.0"
         )
 
-    if paired_device_id is None and credential != NODE_API_KEY:
-        logger.warning("Unauthorized daemon connection attempt rejected")
-        await ws.close(code=4003, reason="Unauthorized Edge Node API Key")
-        return
+    # An unset NODE_API_KEY used to mean "allow everyone": the gate was a
+    # single `credential != NODE_API_KEY`, so a node that presented no
+    # credential at all compared `"" != ""` — False — and was admitted with
+    # full capabilities. An auditor registered a node called `attacker-node`
+    # this way and got back a complete `node_ack`; from there a node can
+    # inject `text_command` (LLM spend), `telemetry`/`device_event` (poisons
+    # baselines and health answers), and `device_announce` (writes the
+    # knowledge graph). Unconfigured must mean CLOSED, never open, so the
+    # empty-key case is refused explicitly BEFORE any comparison can make an
+    # absent credential look valid. Pairing tokens and phone bearers
+    # (`_verify_credential`) are checked first and are unaffected, so
+    # legitimately paired devices keep connecting with no key configured.
+    if paired_device_id is None:
+        if not NODE_API_KEY:
+            logger.error(
+                "feral.security.node_api_key_unset: refused an unpaired "
+                "/v1/node connection because NODE_API_KEY is not configured. "
+                "An empty key NEVER grants access. Fix: set NODE_API_KEY in "
+                "the brain's environment (or security.node_api_key in "
+                "config.yaml) and give every daemon the same value, or pair "
+                "the device so it presents a pairing token instead."
+            )
+            await ws.close(
+                code=4003,
+                reason="Edge Node API Key not configured on brain",
+            )
+            return
+        # Constant-time compare: the credential is attacker-supplied and a
+        # naive `!=` leaks key length/prefix through response timing.
+        if not secrets.compare_digest(credential, NODE_API_KEY):
+            logger.warning("Unauthorized daemon connection attempt rejected")
+            await ws.close(code=4003, reason="Unauthorized Edge Node API Key")
+            return
     node_id = None
     logger.info(
         "Daemon connecting (device_id=%s bearer_kind=%s auth_source=%s)...",
@@ -2511,6 +2596,15 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     )
                     continue
 
+                # A barge-in cancels the ASSISTANT'S CURRENT RESPONSE.
+                # It must never be able to end the session: pre-fix,
+                # when `get_session` missed (which a zombie session
+                # guarantees), this fell through to `stop_session` on
+                # the realtime AND gemini proxies — so speaking over
+                # the assistant killed the call, and with no
+                # `voice_status` emitted the client kept rendering
+                # "listening" at a socket that no longer existed.
+                # Cancel-only now; a miss is reported as a no-op.
                 cancelled = False
                 try:
                     realtime = getattr(state.voice_router, "_realtime", None)
@@ -2521,15 +2615,16 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                             cancelled = True
                     gemini = getattr(state.voice_router, "_gemini", None)
                     if gemini and not cancelled:
-                        sid = getattr(gemini, "_node_to_session", {}).get(node_id)
-                        if sid:
-                            await gemini.stop_session(sid)
+                        gs = gemini.get_session(node_id)
+                        if gs and hasattr(gs, "cancel_response"):
+                            await gs.cancel_response()
                             cancelled = True
-                    if not cancelled and realtime:
-                        sid = getattr(realtime, "_node_to_session", {}).get(node_id)
-                        if sid:
-                            await realtime.stop_session(sid)
-                            cancelled = True
+                    if not cancelled:
+                        logger.info(
+                            "voice_interrupt for node=%s found no live session "
+                            "to cancel — ignoring (barge-in never tears a "
+                            "session down)", node_id,
+                        )
                 except Exception as exc:
                     _record_phone_envelope(
                         "error",
@@ -3000,6 +3095,22 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
         if node_id:
             logger.info(f"Daemon disconnected: {node_id}")
             state.daemons.pop(node_id, None)
+            # Same leak as the web handler: audio/perception/mesh state
+            # was cleared here but the voice router never was, so a
+            # phone that dropped LTE or went to background kept a live
+            # (billing) OpenAI Realtime socket and a stale
+            # node->session entry that poisoned its next
+            # voice_session_start. `stop_node_voice` is the
+            # node-shaped teardown — `stop_session_voice` only ever
+            # finds web sessions, whose node id is the synthetic
+            # `webclient_<sid>`.
+            if state.voice_router:
+                try:
+                    await state.voice_router.stop_node_voice(node_id)
+                except Exception as voice_exc:
+                    logger.warning(
+                        f"Voice teardown for node {node_id} failed: {voice_exc}"
+                    )
             if state.skill_executor:
                 state.skill_executor.unregister_daemon(node_id)
             if state.hardware_mesh:

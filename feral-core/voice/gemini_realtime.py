@@ -485,6 +485,13 @@ class GeminiRealtimeProxy:
         gs = self._sessions.get(session_id)
         if not gs:
             return
+        # Gemini Live exposes no per-item identity, so ``seq`` is the
+        # only ordering signal the client gets on this provider.
+        from voice.transcript_order import TRANSCRIPT_ORDER
+        payload = {
+            "text": text, "role": "assistant", "is_partial": False,
+            "seq": TRANSCRIPT_ORDER.next_seq(session_id),
+        }
         if gs.node_id.startswith("webclient_") and self._send_to_session:
             from models.protocol import FeralMessage
 
@@ -492,14 +499,14 @@ class GeminiRealtimeProxy:
                 session_id=session_id,
                 hop="brain",
                 type="transcript",
-                payload={"text": text, "role": "assistant", "is_partial": False},
+                payload=payload,
             )
             await self._send_to_session(session_id, msg)
             return
         if self._send_to_node:
             await self._send_to_node(gs.node_id, {
                 "type": "transcript",
-                "payload": {"text": text, "role": "assistant", "is_partial": False},
+                "payload": payload,
             })
 
     async def _handle_audio_delta(self, session_id: str, audio_b64: str, is_done: bool):
@@ -535,6 +542,19 @@ class GeminiRealtimeProxy:
                     )
             except Exception as exc:
                 logger.debug("gemini voice persistence skipped: %s", exc)
+
+        # Assistant-side counterpart of the ``note_voice_user_turn``
+        # hook in ``_handle_input_transcript``. Gemini Live has the same
+        # asymmetry the OpenAI Realtime path had: only the user side
+        # reached ``conversation_history``, so the next text turn saw
+        # two consecutive user rows and the model denied having spoken.
+        if not is_partial and text and self._orchestrator is not None:
+            try:
+                await self._orchestrator.note_voice_assistant_turn(session_id, text)
+            except Exception:
+                logger.exception(
+                    "gemini: note_voice_assistant_turn failed (non-fatal)"
+                )
 
     async def _handle_input_transcript(self, session_id: str, text: str):
         """Handle user-speech transcription returned by Gemini."""
@@ -609,7 +629,11 @@ class GeminiRealtimeProxy:
         gs = self._sessions.get(session_id)
         if not gs:
             return
-        payload = {"text": text, "role": "user", "is_partial": False}
+        from voice.transcript_order import TRANSCRIPT_ORDER
+        payload = {
+            "text": text, "role": "user", "is_partial": False,
+            "seq": TRANSCRIPT_ORDER.next_seq(session_id),
+        }
         if gs.node_id.startswith("webclient_") and self._send_to_session:
             from models.protocol import FeralMessage
             msg = FeralMessage(

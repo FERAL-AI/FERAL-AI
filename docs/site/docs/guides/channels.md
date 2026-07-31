@@ -41,7 +41,7 @@ class ChannelAdapter:
 2. Store the token in the vault:
 
 ```bash
-feral key add --provider telegram --label bot_token --value "123456:ABC-..."
+feral setup --from-step channels   # prompts for the token, probes getMe
 ```
 
 3. Enable the channel in config:
@@ -84,8 +84,7 @@ feral key add --provider telegram --label bot_token --value "123456:ABC-..."
 3. Store tokens:
 
 ```bash
-feral key add --provider slack --label bot_token --value "xoxb-..."
-feral key add --provider slack --label app_token --value "xapp-..."
+feral setup --from-step channels   # prompts for both tokens, probes auth.test
 ```
 
 4. Configure:
@@ -114,7 +113,7 @@ FERAL maintains session continuity per Slack thread. A new thread starts a new s
 3. Invite the bot to your server with `Send Messages` + `Read Message History` permissions.
 
 ```bash
-feral key add --provider discord --label bot_token --value "MTIz..."
+feral setup --from-step channels   # prompts for the token, probes users/@me
 ```
 
 ```yaml

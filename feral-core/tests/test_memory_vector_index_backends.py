@@ -185,6 +185,15 @@ async def test_memory_store_uses_injected_backend(tmp_path):
     vec = np.ones(384, dtype=np.float32)
     await store._vec_index.upsert("chunk-id-1", vec)
     assert fake.upserts and fake.upserts[0][0] == "chunk-id-1"
+    # ``stats()`` serves rapid polls from a short-TTL cache
+    # (``_STATS_CACHE_TTL_S``, 15s) so dashboard polling cannot starve the
+    # writer pool. This test drives the backend directly via
+    # ``store._vec_index``, deliberately bypassing ``MemoryStore``, so
+    # nothing can invalidate that cache on its behalf and the second call
+    # would otherwise replay the first one's zero. Expire it explicitly:
+    # the assertion is about the injected backend being the source of
+    # truth, not about cache timing.
+    store._stats_cache_at = 0.0
     assert (await store.stats())["vec_index_count"] == 1
 
 

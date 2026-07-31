@@ -8,11 +8,9 @@ fallback paths when the LLM won't cooperate.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import shlex
-import time
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -327,7 +325,7 @@ class RefusalHandler:
                 "print(f'Created {p}')"
             )
             return {
-                "name": "computer_use__bash",
+                "name": "coding_tools__bash",
                 "args": {"command": f"python3 -c {shlex.quote(python_code)}"},
                 "_intent": "create desktop note",
             }

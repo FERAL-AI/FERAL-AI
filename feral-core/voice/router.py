@@ -16,6 +16,23 @@ logger = logging.getLogger("feral.voice.router")
 
 _ENV_VOICE_PROVIDER = "FERAL_VOICE_PROVIDER"
 
+# ``_try_chained_morph`` abort tags. Only the credential one changes
+# what the caller emits; the rest are plain "couldn't morph, use the
+# legacy degrade".
+_MORPH_ABORT_NONE = ""
+_MORPH_ABORT_NOT_WIRED = "pipeline_not_wired"
+_MORPH_ABORT_MISSING_KEYS = "missing_keys"
+_MORPH_ABORT_FAILED_CREDENTIAL = "failed_credential"
+_MORPH_ABORT_OPEN_FAILED = "open_failed"
+
+# Failure reasons that mean the OpenAI credential itself is the
+# problem. Substituting OpenAI STT/TTS into the chained fallback for
+# these is handing the pipeline the exact key that just failed.
+_OPENAI_CREDENTIAL_FAILURES = frozenset({
+    "openai_realtime_quota",
+    "openai_realtime_auth",
+})
+
 
 def _resolve_provider_key(provider_id: str, env_key: str) -> str:
     """Resolve an API key for *provider_id* for the voice hot path.
@@ -149,6 +166,28 @@ class VoiceRouter:
     # Provider selection helpers
     # ------------------------------------------------------------------
 
+    @classmethod
+    def _preferred_realtime_provider(cls) -> str:
+        """Operator's realtime preference: 'gemini', 'openai', or ''.
+
+        ``FERAL_VOICE_PROVIDER`` wins so an env override still beats
+        persisted settings. Falling back to ``audio.realtime_primary``
+        is what makes the setup wizard's realtime pick mean something:
+        the wizard has always written that key, but nothing read it, so
+        an operator who chose Gemini Live in ``feral setup`` still got
+        OpenAI Realtime on every call.
+        """
+        env_provider = os.getenv(_ENV_VOICE_PROVIDER, "").strip().lower()
+        if env_provider:
+            return env_provider
+        primary = str(cls._load_audio_settings().get("realtime_primary") or "")
+        return {
+            "gemini_live": "gemini",
+            "gemini": "gemini",
+            "openai_realtime": "openai",
+            "openai": "openai",
+        }.get(primary.strip().lower(), "")
+
     def _resolve_provider(self, node_id: str) -> str:
         """Return 'gemini', 'openai', 'chained', or 'whisper' for a given node."""
         cfg = self._node_voice_config.get(node_id, {})
@@ -175,8 +214,8 @@ class VoiceRouter:
             if self._realtime and self._realtime.available:
                 return "openai"
 
-        env_provider = os.getenv(_ENV_VOICE_PROVIDER, "").lower()
-        if env_provider == "gemini" and self._gemini and self._gemini.available:
+        preferred = self._preferred_realtime_provider()
+        if preferred == "gemini" and self._gemini and self._gemini.available:
             return "gemini"
 
         if cfg.get("supports_realtime") is True:
@@ -195,8 +234,8 @@ class VoiceRouter:
         if mode != "realtime":
             return "whisper"
 
-        env_provider = os.getenv(_ENV_VOICE_PROVIDER, "").lower()
-        if env_provider == "gemini" and self._gemini and self._gemini.available:
+        preferred = self._preferred_realtime_provider()
+        if preferred == "gemini" and self._gemini and self._gemini.available:
             return "gemini"
 
         if self._realtime and self._realtime.available:
@@ -259,7 +298,7 @@ class VoiceRouter:
             return
 
         if provider == "openai":
-            rs = self._realtime.get_session(node_id)
+            rs = await self._live_realtime_session(node_id)
             if not rs:
                 rs = await self._realtime.start_session(
                     session_id,
@@ -294,6 +333,26 @@ class VoiceRouter:
             source_node_id=node_id,
         )
 
+    async def _live_realtime_session(self, node_id: str):
+        """Return ``node_id``'s realtime session, evicting it if dead.
+
+        Zombie-session fix (voice-collapse audit, 2026-07). Both audio
+        entry points used to do a bare ``get_session`` and, because a
+        dead session is still *present* in ``RealtimeProxy._sessions``,
+        skipped the re-open and then dropped every chunk on the
+        ``rs.connected`` gate below. Symptom: the user talks, the orb
+        says "listening", and not one byte reaches OpenAI — forever,
+        because nothing ever removes the corpse.
+
+        A disconnected handle is now torn down (closing the leaked
+        OpenAI socket) and reported as absent, so the caller opens a
+        fresh session with the very chunk that found the zombie.
+        """
+        if not self._realtime:
+            return None
+        await self._realtime.evict_dead_session(node_id)
+        return self._realtime.get_session(node_id)
+
     # ------------------------------------------------------------------
     # Audio from web clients
     # ------------------------------------------------------------------
@@ -315,7 +374,7 @@ class VoiceRouter:
             return
 
         if provider == "openai":
-            rs = self._realtime.get_session(client_node)
+            rs = await self._live_realtime_session(client_node)
             if not rs:
                 rs = await self._realtime.start_session(
                     session_id,
@@ -418,17 +477,37 @@ class VoiceRouter:
             return
 
         from models.protocol import FeralMessage, TranscriptPayload
+        from voice.transcript_order import TRANSCRIPT_ORDER
+
+        # ``transcript`` is the output of ``process_audio_chunk`` — it is
+        # the USER's speech, unambiguously. The web branch used to omit
+        # ``role`` entirely and ``TranscriptPayload`` defaults it to
+        # ``"assistant"``, so the web client left-aligned the user's own
+        # words as if the assistant had said them, while the node branch
+        # three lines below tagged the same text ``"user"`` correctly.
+        # Both branches now build one payload so they cannot drift again.
+        #
+        # This path has no provider item ids (whisper is batch STT with
+        # no conversation-item concept), so ordering rests on the
+        # brain-assigned ``seq``.
+        payload = TranscriptPayload(
+            text=transcript,
+            role="user",
+            is_partial=False,
+            seq=TRANSCRIPT_ORDER.next_seq(session_id),
+        ).model_dump()
+
         if self._send_to_session:
             msg = FeralMessage(
                 session_id=session_id, hop="brain", type="transcript",
-                payload=TranscriptPayload(text=transcript, is_partial=False).model_dump(),
+                payload=payload,
             )
             await self._send_to_session(session_id, msg)
 
         if source_node_id and self._send_to_node:
             await self._send_to_node(source_node_id, {
                 "type": "transcript",
-                "payload": {"text": transcript, "role": "user", "is_partial": False},
+                "payload": payload,
             })
 
         if self._memory:
@@ -589,15 +668,36 @@ class VoiceRouter:
             return  # already on the legacy whisper path
 
         audio_cfg = self._load_audio_settings()
-        fallback_mode = str(audio_cfg.get("fallback_mode") or "whisper").lower()
+        # Default MUST match ``config/loader.py`` (``"chained"``).
+        # It said ``"whisper"`` here, so every test that stubs
+        # ``load_settings`` without an explicit ``fallback_mode`` — and
+        # any operator whose settings.json predates the key — silently
+        # exercised the legacy branch. That divergence is why the
+        # chained pipeline's dead-end bugs went unnoticed for so long.
+        fallback_mode = str(audio_cfg.get("fallback_mode") or "chained").lower()
 
-        if fallback_mode == "chained" and await self._try_chained_morph(
-            session_id,
-            audio_cfg=audio_cfg,
-            reason=reason,
-            detail=detail,
-            provider=provider,
-        ):
+        morphed = False
+        abort = ""
+        if fallback_mode == "chained":
+            morphed, abort = await self._try_chained_morph(
+                session_id,
+                audio_cfg=audio_cfg,
+                reason=reason,
+                detail=detail,
+                provider=provider,
+            )
+        if morphed:
+            return
+
+        if abort == _MORPH_ABORT_FAILED_CREDENTIAL:
+            # The only chained pair we could have built runs on the
+            # OpenAI key that just failed, and so does the whisper
+            # fallback (`AudioPipeline.synthesize_speech` -> OpenAI
+            # /audio/speech). Claiming "degraded, falling back to
+            # whisper" here would be a banner promising audio that
+            # cannot arrive. Say unavailable and let the user go fix
+            # the key.
+            await self.emit_unavailable(session_id, reason=reason, detail=detail)
             return
 
         fallback_provider = self._pick_fallback_provider()
@@ -635,12 +735,26 @@ class VoiceRouter:
         reason: str,
         detail: str,
         provider: str,
-    ) -> bool:
-        """Attempt the S4 chained-pipeline morph. Returns True iff
-        the morph completed (voice_status emitted, session flipped).
-        Falls back to whisper degrade on missing keys / missing
-        chained pipeline / open_chained_session failure.
+    ) -> tuple[bool, str]:
+        """Attempt the S4 chained-pipeline morph.
+
+        Returns ``(morphed, abort_tag)``. ``morphed`` is True iff the
+        morph completed (voice_status emitted, session flipped).
+        ``abort_tag`` is one of the ``_MORPH_ABORT_*`` constants and
+        tells the caller WHY we bailed — it only needs to distinguish
+        ``failed_credential`` (the honest-banner case) from the rest,
+        which all fall through to the legacy whisper degrade.
         """
+        # Structural check first: without a wired pipeline no morph can
+        # happen regardless of keys, and the caller must not read
+        # anything into the abort tag in that case.
+        if not getattr(self, "_chained", None):
+            logger.warning(
+                "Chained morph for %s aborted — pipeline not wired",
+                session_id[:8],
+            )
+            return False, _MORPH_ABORT_NOT_WIRED
+
         chained_cfg = audio_cfg.get("chained_fallback") or {}
         stt_name = str(chained_cfg.get("stt_provider") or "deepgram")
         tts_name = str(chained_cfg.get("tts_provider") or "elevenlabs")
@@ -677,6 +791,25 @@ class VoiceRouter:
         # use OpenAI Whisper STT + OpenAI TTS so a chat-key-only operator
         # still gets a working full-duplex chained pipeline instead of
         # degrading to a dead half-duplex (TTS-only) session.
+        #
+        # NOT when the OpenAI credential is what failed. A quota/auth
+        # close means that exact key is dead: substituting it here
+        # built a "recovered" session whose STT 401s and whose TTS
+        # never returns a byte, and the user got a green banner over
+        # total silence. Refuse, and tag the abort so the caller emits
+        # ``unavailable`` instead of promising whisper (which runs on
+        # the same dead key).
+        if (
+            missing
+            and reason in _OPENAI_CREDENTIAL_FAILURES
+            and _resolve_provider_key("openai", "OPENAI_API_KEY")
+        ):
+            logger.warning(
+                "Chained morph for %s aborted — %s unavailable and the OpenAI "
+                "credential is what failed (%s); refusing to substitute it.",
+                session_id[:8], ",".join(missing), reason,
+            )
+            return False, _MORPH_ABORT_FAILED_CREDENTIAL
         if missing and _resolve_provider_key("openai", "OPENAI_API_KEY"):
             logger.info(
                 "Chained morph for %s: %s unavailable — falling back to OpenAI "
@@ -692,14 +825,7 @@ class VoiceRouter:
                 "Chained morph for %s aborted — missing vault keys: %s",
                 session_id[:8], ",".join(sorted(missing)),
             )
-            return False
-
-        if not getattr(self, "_chained", None):
-            logger.warning(
-                "Chained morph for %s aborted — pipeline not wired",
-                session_id[:8],
-            )
-            return False
+            return False, _MORPH_ABORT_MISSING_KEYS
 
         # Stop the dead realtime / gemini session before retargeting
         # so we don't race with a final on_error landing while the
@@ -748,7 +874,7 @@ class VoiceRouter:
             session = None
 
         if session is None:
-            return False
+            return False, _MORPH_ABORT_OPEN_FAILED
 
         # open_chained_session already flips _session_voice_mode but
         # set it defensively in case a test stubs the method.
@@ -766,7 +892,42 @@ class VoiceRouter:
             session_id[:8], reason, provider, stt_name, tts_name,
         )
         await self._emit_voice_status(session_id, meta)
-        return True
+        return True, _MORPH_ABORT_NONE
+
+    async def emit_voice_notice(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        detail: str = "",
+    ) -> None:
+        """Publish a non-fatal voice notice for a session that is still up.
+
+        Emitted when OpenAI Realtime rejects a single client event
+        (``RealtimeProxy._handle_notice``). ``state="available"``
+        because that is the truth — the socket is open and the call is
+        continuing — while ``reason``/``detail`` keep the refusal on
+        the wire for the client log. Never touches
+        ``_session_degraded``: a notice must not clear or fake the
+        fallback bookkeeping.
+        """
+        if session_id in self._session_degraded:
+            # Already flying a degraded/unavailable banner — an
+            # ``available`` frame here would wrongly clear it.
+            return
+        if self._session_voice_mode.get(session_id) == "chained":
+            return
+        logger.info(
+            "Voice notice session=%s reason=%s detail=%s",
+            session_id[:8], reason, str(detail)[:120],
+        )
+        await self._emit_voice_status(session_id, {
+            "state": "available",
+            "reason": reason,
+            "provider": "openai",
+            "fallback_provider": "",
+            "detail": detail,
+        })
 
     async def emit_unavailable(
         self,
@@ -936,6 +1097,51 @@ class VoiceRouter:
         self._session_voice_mode.pop(session_id, None)
         self._session_degraded.pop(session_id, None)
         logger.info(f"Voice stopped for session {session_id[:8]}")
+
+    async def stop_node_voice(self, node_id: str):
+        """Stop voice for a daemon/phone node that just disconnected.
+
+        Node-shaped counterpart to :meth:`stop_session_voice`, which
+        can only find web sessions (it derives the synthetic
+        ``webclient_<sid>`` node name). Daemon nodes register under
+        their real node id, so the web helper could never reach them.
+
+        Pre-fix NOTHING called either helper from a disconnect
+        handler: a tab close, a dropped LTE connection, or the phone
+        app going to background left the OpenAI Realtime WebSocket
+        open and billing, and left a stale ``_node_to_session`` entry
+        that made the next ``voice_session_start`` hand back a dead
+        handle.
+        """
+        if not node_id:
+            return
+        session_id = self._node_session_map.get(node_id, "")
+
+        if self._gemini:
+            gsid = getattr(self._gemini, "_node_to_session", {}).get(node_id)
+            if gsid:
+                await self._gemini.stop_session(gsid)
+
+        if self._realtime:
+            rsid = getattr(self._realtime, "_node_to_session", {}).get(node_id)
+            if rsid:
+                await self._realtime.stop_session(rsid)
+
+        # The chained pipeline is keyed by session, not node, so only
+        # close it when this node was the session's audio source — and
+        # only then drop the session-scoped bookkeeping. A session can
+        # still have a live web surface attached; clearing its voice
+        # mode unconditionally would knock that surface off its
+        # provider.
+        if session_id and getattr(self, "_chained", None):
+            if self._chained.get_session(session_id) is not None:
+                await self._chained.close_session(session_id)
+                self._session_voice_mode.pop(session_id, None)
+                self._session_degraded.pop(session_id, None)
+
+        self._node_voice_config.pop(node_id, None)
+        self._node_session_map.pop(node_id, None)
+        logger.info("Voice stopped for node %s", node_id)
 
     # --- Subagent A (realtime GA) + Subagent B (chained pipeline) integration ---
     #

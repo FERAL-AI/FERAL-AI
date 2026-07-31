@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable
@@ -32,6 +33,26 @@ from voice.transcript_filter import should_commit_user_transcript
 from voice.tts_providers import TTSProvider
 
 logger = logging.getLogger("feral.voice.chained_pipeline")
+
+# Seconds of inbound-audio silence that end an utterance when the STT
+# provider gives us no end-of-speech signal of its own.
+#
+# The pipeline used to flush ONLY on ``is_final=True`` from the client.
+# No client ever sets it — ``feral-client-v2/src/lib/voiceRealtime.js``
+# hardcodes ``is_final: false`` and the brain forwards what it got — so
+# after a fallback morph the session accepted audio forever and emitted
+# nothing. Two server-side drivers replace that flag now:
+#
+#   * streaming providers (Deepgram) flush on their own ``speech_final``
+#     fragment, consumed by the per-session STT task;
+#   * buffered providers (Whisper/Groq) produce nothing until someone
+#     calls ``flush()``, so this timer calls it after the phone stops
+#     sending audio.
+#
+# 0.8s matches the Realtime server-VAD ``silence_duration_ms`` band
+# (1000ms) closely enough to feel the same to a speaker while leaving
+# room for jittery uplinks.
+SILENCE_FLUSH_SECONDS = 0.8
 
 
 class VoiceState(str, Enum):
@@ -52,7 +73,20 @@ class ChainedSession:
     state: VoiceState = VoiceState.IDLE
     send_frame: Callable[[str, dict], Awaitable[None]] | None = None
     _audio_buffer: bytearray = field(default_factory=bytearray)
+    # Consumes ``stt_provider.open_stream()``. Was declared but never
+    # assigned (only ever cancelled), which meant ``open_stream`` was
+    # never called at all — for Deepgram that is the call that opens
+    # the WebSocket, so ``send_audio`` no-op'd on a None ``_ws`` and
+    # the fallback pipeline could not transcribe a single word.
     _stt_task: asyncio.Task | None = field(default=None, repr=False)
+    # Fires the end-of-utterance flush when the client stops sending
+    # audio and the provider has no end-of-speech signal of its own.
+    _silence_task: asyncio.Task | None = field(default=None, repr=False)
+    _last_audio_ts: float = 0.0
+    # Final transcript text handed over by the STT consumer task,
+    # waiting to be picked up by the next flush.
+    _pending_finals: list[str] = field(default_factory=list)
+    _flushing: bool = False
     _last_transcript: str = ""
     _chunk_count: int = 0
 
@@ -65,8 +99,9 @@ class ChainedVoicePipeline:
     ``open_session``.
     """
 
-    def __init__(self):
+    def __init__(self, *, silence_flush_seconds: float = SILENCE_FLUSH_SECONDS):
         self._sessions: dict[str, ChainedSession] = {}
+        self._silence_flush_seconds = float(silence_flush_seconds)
 
     async def open_session(
         self,
@@ -98,6 +133,13 @@ class ChainedVoicePipeline:
             send_frame=send_frame,
         )
         self._sessions[session_id] = session
+        # Start consuming the provider's recognition stream. For
+        # streaming providers this is the call that actually opens the
+        # upstream socket (Deepgram connects inside ``open_stream`` and
+        # starts its receive loop there) — without it ``send_audio``
+        # silently returned on a None ``_ws``. For buffered providers
+        # it just parks on the result queue until ``flush()`` fills it.
+        session._stt_task = asyncio.create_task(self._consume_stt(session))
         await self._set_state(session, VoiceState.IDLE)
         logger.info("Chained voice session opened: %s", session_id[:8])
         return session
@@ -114,8 +156,12 @@ class ChainedVoicePipeline:
     ) -> None:
         """Accept an audio chunk from the phone.
 
-        When ``is_final=True``, flushes accumulated audio through
-        STT → LLM → TTS and streams results back.
+        ``is_final`` is treated as a HINT, not the driver: it forces an
+        immediate flush when a client does send it, but the utterance
+        ends on the STT provider's own end-of-speech signal or on the
+        silence timer either way. No shipped client sets the flag, and
+        making it load-bearing is what left the fallback pipeline
+        listening forever without ever answering.
         """
         session = self._sessions.get(session_id)
         if not session:
@@ -130,11 +176,94 @@ class ChainedVoicePipeline:
 
         await session.stt_provider.send_audio(audio_bytes)
 
+        session._last_audio_ts = time.monotonic()
+        if session._silence_task is None or session._silence_task.done():
+            session._silence_task = asyncio.create_task(self._silence_timer(session))
+
         if is_final:
             await self._flush_pipeline(session)
 
+    async def _consume_stt(self, session: ChainedSession) -> None:
+        """Drain the STT provider's recognition stream for one session.
+
+        Sole owner of the provider's fragments: it publishes partials
+        to the client for latency feedback, parks final text in
+        ``_pending_finals`` for the next flush, and — crucially —
+        starts the flush itself when the provider says the speaker
+        stopped (Deepgram's ``speech_final``; buffered providers set it
+        on their single post-``flush()`` fragment).
+        """
+        try:
+            async for fragment in session.stt_provider.open_stream():
+                await self._on_stt_fragment(session, fragment)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Surface it: a dead recognition stream means the session
+            # can hear nothing, and silently swallowing that is the
+            # exact failure mode this whole change exists to remove.
+            logger.exception(
+                "STT stream failed for session %s", session.session_id[:8],
+            )
+            await self._set_state(session, VoiceState.ERROR, error=str(exc))
+            await self._set_state(session, VoiceState.IDLE)
+
+    async def _on_stt_fragment(
+        self, session: ChainedSession, fragment: TranscriptFragment,
+    ) -> None:
+        """Handle one transcript fragment from the recognition stream."""
+        text = (fragment.text or "").strip()
+        if not text:
+            return
+
+        is_final = fragment.is_final or not fragment.is_partial
+        await self._emit_transcript(session, text, is_partial=not is_final)
+        if not is_final:
+            return
+
+        session._pending_finals.append(text)
+        if fragment.speech_final:
+            await self._flush_pipeline(session)
+
+    async def _silence_timer(self, session: ChainedSession) -> None:
+        """Flush the utterance once inbound audio has stopped.
+
+        Self-extending: each new chunk pushes ``_last_audio_ts``
+        forward and this re-sleeps the remainder, so one task covers a
+        whole utterance instead of one per chunk.
+        """
+        while True:
+            remaining = (
+                self._silence_flush_seconds
+                - (time.monotonic() - session._last_audio_ts)
+            )
+            if remaining <= 0:
+                break
+            await asyncio.sleep(remaining)
+        logger.debug(
+            "chained: silence flush for session %s after %.2fs",
+            session.session_id[:8], self._silence_flush_seconds,
+        )
+        await self._flush_pipeline(session)
+
+    def _cancel_silence_timer(self, session: ChainedSession) -> None:
+        """Disarm the silence timer (no-op when it is the caller)."""
+        task = session._silence_task
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        task.cancel()
+        session._silence_task = None
+
     async def _flush_pipeline(self, session: ChainedSession) -> None:
         """Run the full STT → LLM → TTS chain for accumulated audio."""
+        if session._flushing:
+            # Two drivers (provider end-of-speech + silence timer +
+            # an explicit is_final) can land on the same utterance.
+            # First one through owns it; the others must not start a
+            # second LLM turn on the same words.
+            return
+        session._flushing = True
+        self._cancel_silence_timer(session)
         try:
             await self._set_state(session, VoiceState.PROCESSING)
 
@@ -164,8 +293,6 @@ class ChainedVoicePipeline:
 
             session._last_transcript = transcript
 
-            await self._emit_transcript(session, transcript, is_partial=False)
-
             response_text = await self._run_llm(session, transcript)
 
             if response_text:
@@ -178,40 +305,46 @@ class ChainedVoicePipeline:
             logger.exception("Chained pipeline error for session %s", session.session_id[:8])
             await self._set_state(session, VoiceState.ERROR, error=str(exc))
             await self._set_state(session, VoiceState.IDLE)
+        finally:
+            session._flushing = False
 
     async def _collect_transcript(self, session: ChainedSession) -> str:
-        """Drain any pending transcript fragments from the STT provider.
+        """Return the finalised text for the utterance being flushed.
 
-        For buffered providers (Whisper, Groq), ``flush()`` populates the
-        result queue.  For streaming providers (Deepgram), fragments arrive
-        via the open_stream iterator — but since we drive the pipeline
-        synchronously after ``is_final``, we collect whatever is queued.
+        Fragments are owned by ``_consume_stt``; this only picks up
+        what that task has already parked in ``_pending_finals``. It
+        also drains the provider queues directly, because
+        ``stt_provider.flush()`` (buffered providers) may have enqueued
+        a fragment microseconds ago that the consumer task has not been
+        scheduled to read yet — whichever side gets it first, the text
+        is used exactly once.
+
+        Returns ``""`` when there is nothing new. It used to fall back
+        to ``session._last_transcript``, which meant a second flush on
+        an already-consumed utterance re-ran the PREVIOUS turn through
+        the LLM — a duplicate command from a silence timer that fired
+        just behind an end-of-speech flush.
         """
-        fragments: list[str] = []
+        fragments: list[str] = list(session._pending_finals)
+        session._pending_finals.clear()
 
-        if hasattr(session.stt_provider, "_result_queue"):
-            queue = session.stt_provider._result_queue
+        for attr in ("_result_queue", "_transcript_queue"):
+            queue = getattr(session.stt_provider, attr, None)
+            if queue is None:
+                continue
             while not queue.empty():
                 frag = queue.get_nowait()
-                if frag is not None:
-                    fragments.append(frag.text)
-                    if not frag.is_partial:
-                        await self._emit_transcript(session, frag.text, is_partial=False)
-                    else:
-                        await self._emit_transcript(session, frag.text, is_partial=True)
+                if frag is None:
+                    continue
+                text = (frag.text or "").strip()
+                if not text:
+                    continue
+                fragments.append(text)
+                await self._emit_transcript(
+                    session, text, is_partial=frag.is_partial and not frag.is_final,
+                )
 
-        if hasattr(session.stt_provider, "_transcript_queue"):
-            queue = session.stt_provider._transcript_queue
-            while not queue.empty():
-                frag = queue.get_nowait()
-                if frag is not None:
-                    fragments.append(frag.text)
-                    if frag.is_final:
-                        await self._emit_transcript(session, frag.text, is_partial=False)
-                    else:
-                        await self._emit_transcript(session, frag.text, is_partial=True)
-
-        return " ".join(fragments) if fragments else session._last_transcript
+        return " ".join(fragments)
 
     async def _run_llm(self, session: ChainedSession, transcript: str) -> str:
         """Send transcript to the brain's orchestrator and capture the response."""
@@ -358,6 +491,10 @@ class ChainedVoicePipeline:
         if not session:
             return
 
+        # Disarm the timer first so it can't fire a flush against a
+        # provider we are about to close.
+        self._cancel_silence_timer(session)
+
         try:
             await session.stt_provider.close()
         except Exception:
@@ -368,8 +505,17 @@ class ChainedVoicePipeline:
         except Exception:
             logger.debug("TTS provider close error", exc_info=True)
 
-        if session._stt_task and not session._stt_task.done():
-            session._stt_task.cancel()
+        # ``close()`` ends the recognition stream, so the consumer task
+        # normally finishes on its own; cancel + await covers providers
+        # that block instead, and stops the task leaking past the
+        # session it belongs to.
+        for task in (session._stt_task, session._silence_task):
+            if task is None or task.done() or task is asyncio.current_task():
+                continue
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        session._stt_task = None
+        session._silence_task = None
 
         logger.info("Chained voice session closed: %s", session_id[:8])
 

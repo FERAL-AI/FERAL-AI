@@ -16,10 +16,9 @@ Policy file: ~/.feral/policies/default.yaml (or per-device)
 from __future__ import annotations
 import json
 import logging
-import os
 import time
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional
 
 from config.loader import feral_home
 
@@ -187,6 +186,33 @@ class SandboxPolicy:
                         "uname",          # system info (read-only)
                     ],
                 },
+                # ``osascript`` sits on the shell allowlist above, and
+                # ``daemon://local/applescript`` ran ``osascript -e <command>``
+                # with no validation at all while its sibling
+                # ``daemon://local/shell`` 15 lines below was fully validated.
+                # AppleScript can invoke a shell (``do shell script "…"``),
+                # load another script, or reach into ObjC and spawn an
+                # ``NSTask``, so the unvalidated path simply defeated the
+                # validated one: ``osascript -e 'do shell script "rm -rf ~"'``
+                # contains none of the rejected metacharacters and argv[0] is
+                # allowlisted. These phrases are matched case-insensitively
+                # against the whitespace-collapsed script, so ``do  shell
+                # script`` and ``DO SHELL SCRIPT`` are caught too.
+                "applescript": {
+                    "max_length": 4000,
+                    "denied_phrases": [
+                        "do shell script",   # direct shell escape
+                        "do script",         # Terminal.app / Script Editor exec
+                        "run script",        # evaluate another script body
+                        "load script",       # load a compiled script from disk
+                        "osascript",         # nested re-entry
+                        "use framework",     # ObjC bridge (NSTask, NSAppleScript)
+                        "current application's",  # ObjC bridge accessor
+                        "nstask",            # process spawn via ObjC
+                        "system attribute",  # environment/secret read-out
+                        "open location",     # arbitrary URL-scheme handler
+                    ],
+                },
             },
 
             "wasm": {
@@ -302,6 +328,45 @@ class SandboxPolicy:
             except ValueError:
                 continue
         return False
+
+    def resolve_workspace(self, raw_path: str) -> tuple[Optional[str], str]:
+        """Return ``(workspace_root, source)`` for ``raw_path``.
+
+        ``source`` is ``"grant"`` when an operator grant in
+        ``~/.feral/workspace_grants.json`` covers the path,
+        ``"policy_write_path"`` / ``"policy_read_path"`` when only the
+        policy's own declared paths do, ``"blocked"`` when the path is on
+        ``blocked_paths``, and ``""`` when nothing covers it.
+
+        ``can_read_path`` answers "may I read this?" with a bare bool.
+        ``security/exec_mode.py`` needs to know *which* scope authorised
+        the path, because a host shell in an explicitly granted project
+        folder is a different proposition from a host shell in
+        ``~/.feral/``. Strict autonomy accepts only the former.
+        """
+        target = self._resolve(raw_path)
+        fs = self._data.get("filesystem", {})
+        if self._path_in_list(target, fs.get("blocked_paths", [])):
+            return None, "blocked"
+
+        for folder in self._load_grants():
+            root = self._resolve(folder)
+            try:
+                target.relative_to(root)
+                return str(root), "grant"
+            except ValueError:
+                continue
+
+        for key, source in (("write_paths", "policy_write_path"), ("read_paths", "policy_read_path")):
+            for pattern in fs.get(key, []):
+                root = self._resolve(pattern)
+                try:
+                    target.relative_to(root)
+                    return str(root), source
+                except ValueError:
+                    continue
+
+        return None, ""
 
     def can_write_path(self, raw_path: str) -> bool:
         target = self._resolve(raw_path)
@@ -493,7 +558,7 @@ class SandboxPolicy:
                 return False, (
                     f"shell metacharacter {ch!r} not permitted on "
                     f"daemon://local/shell — chain via separate calls "
-                    f"or route to ``computer_use__bash`` (sandboxed)"
+                    f"or route to ``coding_tools__bash`` (workspace-scoped)"
                 )
 
         try:
@@ -519,6 +584,116 @@ class SandboxPolicy:
                 "daemon shell is disabled by policy "
                 "(execution.allow_shell_commands=false)"
             )
+
+        # ``osascript`` is allowlisted above, which means the shell path can
+        # hand a whole AppleScript program to an interpreter without anyone
+        # looking at it. Validate the payload with the same rules the
+        # ``daemon://local/applescript`` path now uses, otherwise the
+        # allowlist is decorative for this one binary.
+        if head == "osascript":
+            return self._validate_osascript_argv(parts)
+
+        return True, ""
+
+    # ─────────────────────────────────────────
+    # AppleScript validation
+    # ─────────────────────────────────────────
+
+    def applescript_denied_phrases(self) -> list[str]:
+        """Phrases that disqualify an AppleScript payload."""
+        raw = (
+            self._data.get("daemon", {})
+            .get("applescript", {})
+            .get("denied_phrases", [])
+        )
+        if not isinstance(raw, list):
+            return []
+        return [str(p).strip().lower() for p in raw if str(p).strip()]
+
+    def applescript_max_length(self) -> int:
+        raw = (
+            self._data.get("daemon", {})
+            .get("applescript", {})
+            .get("max_length", 4000)
+        )
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return 4000
+
+    def validate_applescript(self, script: str) -> tuple[bool, str]:
+        """Decide whether an AppleScript payload is safe to run.
+
+        Returns ``(ok, reason)``. The rules mirror
+        :meth:`validate_shell_command`'s intent: the caller may drive an
+        application (``tell application "Music" to activate``, ``set volume
+        output volume 50``) but may not use AppleScript as a general
+        interpreter to reach a shell, another script, or the ObjC runtime.
+
+        Matching is done on the whitespace-collapsed, lower-cased script so
+        ``do  shell   script`` and ``DO SHELL SCRIPT`` are caught alongside
+        the literal phrase.
+        """
+        if not isinstance(script, str):
+            return False, "AppleScript must be a string"
+        stripped = script.strip()
+        if not stripped:
+            return False, "empty AppleScript"
+
+        max_len = self.applescript_max_length()
+        if len(stripped) > max_len:
+            return False, (
+                f"AppleScript exceeds the {max_len}-character policy limit "
+                f"({len(stripped)} chars)"
+            )
+
+        if "\x00" in stripped:
+            return False, "AppleScript contains a NUL byte; reject"
+
+        normalized = " ".join(stripped.lower().split())
+        for phrase in self.applescript_denied_phrases():
+            if phrase in normalized:
+                return False, (
+                    f"AppleScript phrase {phrase!r} is not permitted; it can "
+                    f"invoke a shell or another interpreter and would bypass "
+                    f"the daemon shell allowlist "
+                    f"({', '.join(self.daemon_shell_allowlist()) or '(empty)'})"
+                )
+
+        return True, ""
+
+    def _validate_osascript_argv(self, parts: list[str]) -> tuple[bool, str]:
+        """Validate an ``osascript`` invocation from the shell allowlist.
+
+        Only the ``-e <script>`` form is accepted. A script *file* argument
+        is rejected because its contents are not visible to this validator,
+        and ``-l <language>`` is rejected because JXA reaches the ObjC
+        runtime directly. Every ``-e`` payload goes through
+        :meth:`validate_applescript`.
+        """
+        scripts: list[str] = []
+        index = 1
+        while index < len(parts):
+            token = parts[index]
+            if token == "-e":
+                if index + 1 >= len(parts):
+                    return False, "osascript -e is missing its script argument"
+                scripts.append(parts[index + 1])
+                index += 2
+                continue
+            return False, (
+                f"osascript argument {token!r} is not permitted; only the "
+                f"'-e <script>' form is validated; script files and '-l' "
+                f"language selection are rejected"
+            )
+
+        if not scripts:
+            return False, "osascript requires at least one '-e <script>' argument"
+
+        for script in scripts:
+            ok, reason = self.validate_applescript(script)
+            if not ok:
+                return False, reason
         return True, ""
 
     # ─────────────────────────────────────────

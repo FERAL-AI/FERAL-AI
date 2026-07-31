@@ -79,6 +79,29 @@ class SkillEndpoint(BaseModel):
     safety_tier: Optional[Literal["safe", "confirm", "deny"]] = None
     read_only_hint: bool = False
     requires_user_approval: bool = False
+    # How much of this endpoint's result may reach the model, as a tier
+    # name from `skills/result_budget.py` ("standard" / "feed" /
+    # "workspace"). Overrides the manifest-level declaration. Unset = the
+    # manifest's value, else "standard".
+    #
+    # This exists because the budget is a property of the TOOL, not a
+    # global: before v2026.7.30 every result was cut to 2 000 chars / 20
+    # list items, which made `coding_tools__read_file` return ~30 lines of
+    # source no matter what `limit` the model asked for. Declare it per
+    # endpoint, not per skill, so a first-party skill can keep a tight
+    # bound on the one endpoint that relays third-party bytes (e.g.
+    # `coding_tools__web_fetch`).
+    #
+    # Only honoured for manifests that ship in `feral-core/skills/manifests/`;
+    # runtime-installed skills are clamped to "standard" whatever they claim.
+    result_budget: Optional[str] = None
+
+    # Opt in to sending a human-readable excerpt of this endpoint's result to
+    # the chat UI. Default off: results routinely carry vault reads, tokens,
+    # file contents and mail bodies, and there is no redaction pass in this
+    # codebase. Same trust clamp as result_budget - honoured only for
+    # manifests shipping in feral-core/skills/manifests/.
+    emit_result_preview: bool = False
 
 
 class FlowStep(BaseModel):
@@ -155,6 +178,17 @@ class SkillManifest(BaseModel):
     
     # Rate limits
     max_calls_per_hour: int = 1000
+
+    # Default result budget tier for every endpoint in this skill; see
+    # SkillEndpoint.result_budget and skills/result_budget.py.
+    result_budget: Optional[str] = None
+
+    # Opt in to sending a human-readable excerpt of this endpoint's result to
+    # the chat UI. Default off: results routinely carry vault reads, tokens,
+    # file contents and mail bodies, and there is no redaction pass in this
+    # codebase. Same trust clamp as result_budget - honoured only for
+    # manifests shipping in feral-core/skills/manifests/.
+    emit_result_preview: bool = False
 
 
 # ─────────────────────────────────────────────

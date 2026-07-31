@@ -471,6 +471,14 @@ _PROVIDER_ENV_KEYS: dict[str, str] = {
     "deepseek": "DEEPSEEK_API_KEY",
     "kimi": "MOONSHOT_API_KEY",
     "qwen": "DASHSCOPE_API_KEY",
+    # Added 2026-07-30 alongside the matching _PROVIDER_REGISTRY entries.
+    # tests/test_provider_env_keys_in_sync.py locks the two tables
+    # together, so a provider added to one without the other is a red
+    # build rather than a silent get_active_key() -> "" at runtime.
+    "xai": "XAI_API_KEY",
+    "zai": "ZAI_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
 }
 
 

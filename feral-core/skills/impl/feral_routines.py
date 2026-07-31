@@ -138,7 +138,7 @@ class FeralRoutinesSkill(BaseSkill):
         return {"success": False, "status_code": 404, "data": None, "error": f"Unknown endpoint: {endpoint_id}"}
 
     def _create(self, scheduler, args: Dict[str, Any]) -> Dict[str, Any]:
-        from agents.scheduler import JobType
+        from agents.scheduler import JobType, UnparseableCronExpression
 
         raw_cron = _arg_value(args, "cron_expr", "schedule", "cron")
         cron_expr = _normalize_cron(str(raw_cron or "").strip())
@@ -197,6 +197,19 @@ class FeralRoutinesSkill(BaseSkill):
                 recurring=recurring,
                 tz_name=tz_name,
             )
+        except UnparseableCronExpression as exc:
+            # A schedule we cannot parse is the caller's mistake, not a
+            # server fault — 400, with the supported forms in the message so
+            # the LLM can retry with a valid expression instead of the user
+            # ending up with a routine that fires every 60 seconds.
+            return {
+                "success": False,
+                "status_code": 400,
+                "data": None,
+                "error": str(exc),
+                "reason": "unparseable_schedule",
+                "field": "cron_expr",
+            }
         except Exception as exc:
             return {"success": False, "status_code": 500, "data": None, "error": str(exc)}
 

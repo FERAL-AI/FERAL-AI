@@ -15,6 +15,8 @@ from typing import Any, Optional
 
 import httpx
 
+from integrations._http_errors import http_error_detail
+
 logger = logging.getLogger("feral.integrations.calendar")
 
 GCAL_API = "https://www.googleapis.com/calendar/v3"
@@ -100,7 +102,13 @@ class CalendarIntegration:
     # ── ICS helpers ────────────────────────────────────────────────
 
     async def _fetch_ics_events(self) -> list[dict[str, Any]]:
-        """Parse VEVENT blocks from a remote ICS URL using regex only."""
+        """Parse VEVENT blocks from a remote ICS URL using regex only.
+
+        Fetch failures propagate. Swallowing them and returning ``[]``
+        made a 404, a DNS failure, or a timeout indistinguishable from
+        a genuinely empty calendar — every caller turned that into
+        ``success: True`` and told the user they had no events.
+        """
         if not self._ics_url:
             return []
         try:
@@ -108,9 +116,12 @@ class CalendarIntegration:
                 resp = await client.get(self._ics_url)
                 resp.raise_for_status()
                 text = resp.text
-        except Exception as e:
-            logger.warning("ICS fetch failed: %s", e)
-            return []
+        except Exception:
+            # Log with the feed URL, which the caller's error string
+            # does not carry, then re-raise — the caller turns this into
+            # success: False.
+            logger.warning("ICS fetch failed for %s", self._ics_url)
+            raise
 
         events: list[dict[str, Any]] = []
         blocks = re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", text, re.DOTALL)
@@ -133,11 +144,38 @@ class CalendarIntegration:
 
     @staticmethod
     def _ics_dt(raw: str) -> Optional[datetime]:
-        """Best-effort parse of an ICS datetime string."""
-        raw = raw.replace("Z", "+00:00")
-        for fmt in ("%Y%m%dT%H%M%S%z", "%Y%m%dT%H%M%S", "%Y%m%d"):
+        """Best-effort parse of an ICS datetime string.
+
+        RFC 5545 stamps come in three shapes: UTC (``20990101T090000Z``),
+        floating local (``20990101T090000``), and date-only (``20990101``).
+
+        This previously did ``raw.replace("Z", "+00:00")`` and then sliced
+        ``raw[:len(fmt) + 4]``. Both halves were wrong:
+
+        * ``%z`` has accepted a bare ``Z`` since Python 3.7, so the replace
+          was unnecessary, and it *lengthened* the string past the slice.
+        * ``len(fmt) + 4`` assumes format-code width tracks data width. It
+          does not: ``%Y`` is 2 characters of format for 4 of data, ``%z``
+          is 2 for 6. For the UTC shape the slice cut 21 characters down to
+          19 (``20990101T090000+00:``), and all three formats then failed.
+
+        The result was ``None`` for every UTC stamp, and since effectively
+        every real feed publishes UTC, ``_fetch_ics_events`` filtered out
+        every event and the ICS fallback reported an empty calendar.
+
+        Parse the whole string instead; the bounded prefixes below are the
+        real data widths, kept only to tolerate trailing junk.
+        """
+        raw = (raw or "").strip()
+        if not raw:
+            return None
+        for value, fmt in (
+            (raw, "%Y%m%dT%H%M%S%z"),
+            (raw[:15], "%Y%m%dT%H%M%S"),
+            (raw[:8], "%Y%m%d"),
+        ):
             try:
-                return datetime.strptime(raw[:len(fmt) + 4], fmt)
+                return datetime.strptime(value, fmt)
             except (ValueError, IndexError):
                 continue
         return None
@@ -175,7 +213,7 @@ class CalendarIntegration:
                 filtered.sort(key=lambda e: e["start"])
                 return {"success": True, "data": {"events": filtered, "source": "ics"}}
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
 
         headers = await self._headers()
         if not headers:
@@ -197,7 +235,7 @@ class CalendarIntegration:
             events = [self._parse_gcal_event(e) for e in items]
             return {"success": True, "data": {"events": events, "source": "google"}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def get_today(self, **kwargs) -> dict:
         now = datetime.now(timezone.utc)
@@ -215,7 +253,7 @@ class CalendarIntegration:
                 today.sort(key=lambda e: e["start"])
                 return {"success": True, "data": {"events": today, "date": now.strftime("%Y-%m-%d"), "source": "ics"}}
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
 
         headers = await self._headers()
         if not headers:
@@ -236,7 +274,7 @@ class CalendarIntegration:
             events = [self._parse_gcal_event(e) for e in items]
             return {"success": True, "data": {"events": events, "date": now.strftime("%Y-%m-%d"), "source": "google"}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def create_event(self, title: str = "", start: str = "", end: str = "", description: str = "", **kwargs) -> dict:
         if self._use_ics:
@@ -262,7 +300,7 @@ class CalendarIntegration:
             created = resp.json()
             return {"success": True, "data": self._parse_gcal_event(created)}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def next_event(self, **kwargs) -> dict:
         """Nearest upcoming event — optimised for ambient strip display."""
@@ -283,7 +321,7 @@ class CalendarIntegration:
                     return {"success": True, "data": nearest}
                 return {"success": True, "data": {"message": "No upcoming events"}}
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
 
         headers = await self._headers()
         if not headers:
@@ -305,7 +343,7 @@ class CalendarIntegration:
                 return {"success": True, "data": self._parse_gcal_event(items[0])}
             return {"success": True, "data": {"message": "No upcoming events"}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def search_events(self, query: str = "", days_back: int = 30, **kwargs) -> dict:
         if self._use_ics:
@@ -315,7 +353,7 @@ class CalendarIntegration:
                 matched = [e for e in all_events if q in e.get("summary", "").lower() or q in e.get("description", "").lower()]
                 return {"success": True, "data": {"events": matched, "query": query, "source": "ics"}}
             except Exception as e:
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": http_error_detail(e)}
 
         headers = await self._headers()
         if not headers:
@@ -339,7 +377,7 @@ class CalendarIntegration:
             events = [self._parse_gcal_event(e) for e in items]
             return {"success": True, "data": {"events": events, "query": query, "source": "google"}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def delete_event(self, event_id: str = "", **kwargs) -> dict:
         if self._use_ics:
@@ -356,7 +394,7 @@ class CalendarIntegration:
             resp.raise_for_status()
             return {"success": True, "data": {"deleted": event_id}}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": http_error_detail(e)}
 
     async def close(self):
         await self._http.aclose()

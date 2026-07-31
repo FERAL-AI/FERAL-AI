@@ -17,6 +17,7 @@ from uuid import uuid4
 import aiosqlite
 
 from memory.embeddings import blob_to_vec, chunk_text, cosine_similarity
+from memory.fts_query import fts5_match_query
 
 logger = logging.getLogger("feral.memory.notes_legacy")
 
@@ -246,11 +247,18 @@ async def search_notes(store, query: str, limit: int = 10) -> list[dict]:
         # ── FTS leg ─────────────────────────────────────────────────
         fts_results: dict[str, dict] = {}
         try:
+            # Quoted, not raw: an unquoted "don't" / "C++" / "AI/ML"
+            # raises an FTS5 syntax error, which dropped this leg
+            # entirely and silently demoted the search to the LIKE
+            # fallback further down.
+            match_expr = fts5_match_query(query)
+            if not match_expr:
+                raise ValueError("no indexable term in query")
             async with conn.execute(
                 """SELECT n.id, n.content, n.tags, n.importance, n.created_at, rank
                    FROM notes_fts f JOIN notes n ON f.rowid = n.rowid
                    WHERE notes_fts MATCH ? ORDER BY rank LIMIT ?""",
-                (query, limit * 3),
+                (match_expr, limit * 3),
             ) as cur:
                 rows = await cur.fetchall()
             for r in rows:
@@ -358,7 +366,11 @@ async def list_recent_notes(store, limit: int = 10) -> list[dict]:
         ) as cur:
             rows = await cur.fetchall()
     finally:
-        await conn.close()
+        # ``_release``, never ``close``: this connection belongs to the
+        # pool. Closing it here destroyed one of the four pooled
+        # connections per call, and since ``list_recent`` is on an
+        # ordinary read path the brain deadlocked after four listings.
+        await store._release(conn)
     return [
         {
             "id": row["id"],

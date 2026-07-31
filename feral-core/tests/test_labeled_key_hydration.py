@@ -118,6 +118,13 @@ def test_boot_hydrates_each_provider_in_env_keys_map(fake_keychain, monkeypatch)
         "deepseek": ("DEEPSEEK_API_KEY", "ds-l"),
         "kimi": ("MOONSHOT_API_KEY", "moon-l"),
         "qwen": ("DASHSCOPE_API_KEY", "dash-l"),
+        # Added 2026-07-30 with the matching _PROVIDER_REGISTRY /
+        # _PROVIDER_ENV_KEYS entries. The drift guard below is what
+        # flagged these as missing.
+        "xai": ("XAI_API_KEY", "xai-l"),
+        "zai": ("ZAI_API_KEY", "zai-l"),
+        "minimax": ("MINIMAX_API_KEY", "mm-l"),
+        "mistral": ("MISTRAL_API_KEY", "mis-l"),
     }
     # Regression guard: if a new provider lands in ``_PROVIDER_ENV_KEYS``
     # without a fixture here, this test should fail so we remember to

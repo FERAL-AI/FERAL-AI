@@ -71,6 +71,11 @@ export function useVoiceMode() {
         case 'speech_started':
           if (engine?.handleSpeechStarted) engine.handleSpeechStarted();
           break;
+        case 'transcript':
+          // `handleTranscript` had zero callers, so `voice.transcript`
+          // never populated and VoiceOverlay's caption stayed empty.
+          if (engine?.handleTranscript) engine.handleTranscript(msg.payload || {});
+          break;
         case 'voice_status': {
           const payload = msg.payload || {};
           if ((payload.state || 'available') === 'available') {
@@ -103,7 +108,12 @@ export function useVoiceMode() {
     try {
       const engine = new RealtimeVoiceEngine(socket.ws, {
         onStateChange: (s) => setState(s === 'active' ? 'active' : s),
-        onTranscript: (text) => setTranscript(text || ''),
+        // `transcript` is documented as the latest USER utterance
+        // snippet (the overlay caption); assistant transcripts belong
+        // in the chat log, not the caption.
+        onTranscript: (text, _isPartial, role) => {
+          if (role === 'user') setTranscript(text || '');
+        },
         onError: () => {},
       });
       engineRef.current = engine;

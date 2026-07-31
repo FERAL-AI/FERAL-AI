@@ -1,76 +1,82 @@
 {
-    "skill_id": "perception_query",
-    "version": "1.0.0",
-    "author": "feral-core",
-    "brand": {
-        "name": "Perception Query",
-        "primary_color": "#7C3AED",
-        "secondary_color": "#5B21B6",
-        "logo_url": "",
-        "icon_set": "sf_symbols"
-    },
-    "description": "Ask FERAL what it sees through any connected camera — browser share, iOS CameraPermissionAdapter, W610 glasses, or any HUP daemon that advertises a camera capability. Picks the best camera automatically. Always asks the user for permission before capturing, matching the 'with your permission' contract.",
-    "trigger_phrases": [
-        "what do i see",
-        "what am i looking at",
-        "what is in front of me",
-        "look at this",
-        "describe what you see",
-        "what's on camera",
-        "show me what the camera sees",
-        "can you see what i'm pointing at"
-    ],
-    "categories": ["vision", "camera", "assistive", "autonomy:user_confirm"],
-    "auth": {
-        "type": "none"
-    },
-    "endpoints": [
+  "skill_id": "perception_query",
+  "version": "1.0.0",
+  "author": "feral-core",
+  "brand": {
+    "name": "Perception Query",
+    "primary_color": "#7C3AED",
+    "secondary_color": "#5B21B6",
+    "logo_url": "",
+    "icon_set": "sf_symbols"
+  },
+  "description": "Ask FERAL what it sees through any connected camera \u2014 browser share, iOS CameraPermissionAdapter, W610 glasses, or any HUP daemon that advertises a camera capability. Picks the best camera automatically. Always asks the user for permission before capturing, matching the 'with your permission' contract.",
+  "trigger_phrases": [
+    "what do i see",
+    "what am i looking at",
+    "what is in front of me",
+    "look at this",
+    "describe what you see",
+    "what's on camera",
+    "show me what the camera sees",
+    "can you see what i'm pointing at"
+  ],
+  "categories": [
+    "vision",
+    "camera",
+    "assistive",
+    "autonomy:user_confirm"
+  ],
+  "auth": {
+    "type": "none"
+  },
+  "endpoints": [
+    {
+      "id": "what_do_i_see",
+      "method": "PYTHON",
+      "url": "",
+      "description": "Capture a frame from the best available camera daemon and describe what it contains. Requires user confirmation before the camera actually fires.",
+      "params": [
         {
-            "id": "what_do_i_see",
-            "method": "PYTHON",
-            "url": "",
-            "description": "Capture a frame from the best available camera daemon and describe what it contains. Requires user confirmation before the camera actually fires.",
-            "params": [
-                {
-                    "name": "resolution",
-                    "type": "string",
-                    "required": false,
-                    "description": "Frame resolution WIDTHxHEIGHT. Defaults to 640x480.",
-                    "default": "640x480"
-                },
-                {
-                    "name": "quality",
-                    "type": "integer",
-                    "required": false,
-                    "description": "JPEG quality 1-100. Defaults to 70.",
-                    "default": "70"
-                },
-                {
-                    "name": "reason",
-                    "type": "string",
-                    "required": false,
-                    "description": "Human-readable reason the agent needs a frame (shown in the permission prompt)."
-                },
-                {
-                    "name": "node_id",
-                    "type": "string",
-                    "required": false,
-                    "description": "Override the best-camera picker. Must match a connected HUP daemon node_id."
-                }
-            ],
-            "returns_description": "Object with frame_id, resolution, data_b64 (JPEG), encoding, and scene_description (natural-language summary).",
-            "ui_hint": "detail_card"
+          "name": "resolution",
+          "type": "string",
+          "required": false,
+          "description": "Frame resolution WIDTHxHEIGHT. Defaults to 640x480.",
+          "default": "640x480"
+        },
+        {
+          "name": "quality",
+          "type": "integer",
+          "required": false,
+          "description": "JPEG quality 1-100. Defaults to 70.",
+          "default": "70"
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false,
+          "description": "Human-readable reason the agent needs a frame (shown in the permission prompt)."
+        },
+        {
+          "name": "node_id",
+          "type": "string",
+          "required": false,
+          "description": "Override the best-camera picker. Must match a connected HUP daemon node_id."
         }
-    ],
-    "flows": [],
-    "crons": [],
-    "triggers": [],
-    "permissions": [
-        "camera",
-        "vision",
-        "autonomy:user_confirm"
-    ],
-    "requires_daemon": true,
-    "daemon_node_type": null,
-    "max_calls_per_hour": 600
+      ],
+      "returns_description": "Object with frame_id, resolution, data_b64 (JPEG), encoding, and scene_description (natural-language summary).",
+      "ui_hint": "detail_card",
+      "emit_result_preview": true
+    }
+  ],
+  "flows": [],
+  "crons": [],
+  "triggers": [],
+  "permissions": [
+    "camera",
+    "vision",
+    "autonomy:user_confirm"
+  ],
+  "requires_daemon": true,
+  "daemon_node_type": null,
+  "max_calls_per_hour": 600
 }
