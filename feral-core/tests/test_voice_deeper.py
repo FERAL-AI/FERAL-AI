@@ -923,7 +923,7 @@ async def test_realtime_session_send_ws_error_marks_disconnected(monkeypatch):
 async def test_handle_event_transcript_deltas(monkeypatch):
     calls: list[tuple[str, str, bool]] = []
 
-    async def on_tr(sid: str, text: str, final: bool):
+    async def on_tr(sid: str, text: str, final: bool, **_ordering):
         calls.append((sid, text, final))
 
     rs = RealtimeSession("sid", "nid", api_key="k", on_transcript=on_tr)
@@ -940,7 +940,7 @@ async def test_handle_event_transcript_deltas(monkeypatch):
 async def test_handle_event_input_transcription_completed(monkeypatch):
     calls: list[str] = []
 
-    async def on_tr(sid: str, text: str, final: bool):
+    async def on_tr(sid: str, text: str, final: bool, **_ordering):
         calls.append(text)
 
     rs = RealtimeSession("sid", "nid", api_key="k", on_transcript=on_tr)

@@ -28,6 +28,7 @@ vi.mock('../../lib/voiceRealtime', () => {
     handleAudioResponse: vi.fn(),
     handleTtsChunk: vi.fn().mockResolvedValue(undefined),
     handleSpeechStarted: vi.fn(),
+    handleTranscript: vi.fn(),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn(),
   };
@@ -72,6 +73,7 @@ beforeEach(() => {
   h.handleAudioResponse.mockClear();
   h.handleTtsChunk.mockClear();
   h.handleSpeechStarted.mockClear();
+  h.handleTranscript.mockClear();
   h.start.mockClear();
   h.stop.mockClear();
 });
@@ -130,6 +132,21 @@ describe('useVoiceMode brain-frame dispatch', () => {
       fakeSocket._dispatch({ type: 'speech_started', payload: {} });
     });
     expect(voiceRealtimeModule.__engineHandlers.handleSpeechStarted).toHaveBeenCalled();
+  });
+
+  it('dispatches transcript to engine.handleTranscript', async () => {
+    // `handleTranscript` had zero callers, so `voice.transcript` never
+    // populated and the VoiceOverlay caption stayed permanently empty.
+    const { result } = renderHook(() => useVoiceMode());
+    await act(async () => { await result.current.start(); });
+    act(() => {
+      fakeSocket._dispatch({
+        type: 'transcript',
+        payload: { text: 'hello brain', role: 'user', is_partial: false },
+      });
+    });
+    expect(voiceRealtimeModule.__engineHandlers.handleTranscript)
+      .toHaveBeenCalledWith({ text: 'hello brain', role: 'user', is_partial: false });
   });
 
   it('updates voiceStatus when brain emits voice_status state=degraded', () => {
