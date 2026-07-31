@@ -35,6 +35,7 @@ from agents.tool_list import (
     resolve_forced_tool_choice,
 )
 from voice.transcript_filter import should_commit_user_transcript
+from voice.transcript_order import TRANSCRIPT_ORDER
 
 logger = logging.getLogger("feral.voice.openai")
 
@@ -151,7 +152,8 @@ class RealtimeSession:
         system_prompt: str = "",
         tools: list[dict] | None = None,
         on_audio_delta: Callable[[str, str, bool], Awaitable[None]] | None = None,
-        on_transcript: Callable[[str, str, bool], Awaitable[None]] | None = None,
+        # Called as (session_id, text, is_final, *, item_id, previous_item_id).
+        on_transcript: Callable[..., Awaitable[None]] | None = None,
         on_tool_call: Callable[[str, str, str, str], Awaitable[str]] | None = None,
         on_speech_started: Callable[[str], Awaitable[None]] | None = None,
         on_error: Callable[[str, str], Awaitable[None]] | None = None,
@@ -160,6 +162,8 @@ class RealtimeSession:
     ):
         self.session_id = session_id
         self.node_id = node_id
+        # Provider item graph for this session (see transcript_order.py).
+        self._order = TRANSCRIPT_ORDER
         self._api_key = api_key or _resolve_openai_key()
         self._model = model
         self._voice = voice
@@ -554,6 +558,23 @@ class RealtimeSession:
                 except Exception:
                     logger.exception("Realtime on_error callback failed")
 
+    async def _emit_transcript(self, event: dict, text: str, is_final: bool):
+        """Forward a transcript with the ordering metadata OpenAI gave us.
+
+        Every transcript event family carries ``item_id``; the proxy
+        used to read only the text and drop it, leaving the client with
+        nothing but arrival order to sort by. Pair it with the
+        ``previous_item_id`` recorded from the conversation-item events
+        so a transcript that arrives out of order can still be placed
+        correctly. See ``voice/transcript_order.py``.
+        """
+        item_id = event.get("item_id", "") or ""
+        await self._on_transcript(
+            self.session_id, text, is_final,
+            item_id=item_id,
+            previous_item_id=self._order.previous_of(self.session_id, item_id),
+        )
+
     async def _handle_event(self, event: dict):
         event_type = event.get("type", "")
 
@@ -575,34 +596,57 @@ class RealtimeSession:
         elif event_type == "response.output_audio_transcript.delta":
             text = event.get("delta", "")
             if text and self._on_transcript:
-                await self._on_transcript(self.session_id, text, False)
+                await self._emit_transcript(event, text, False)
 
         elif event_type == "response.output_audio_transcript.done":
             text = event.get("transcript", "")
             if text and self._on_transcript:
-                await self._on_transcript(self.session_id, text, True)
+                await self._emit_transcript(event, text, True)
 
         elif event_type == "response.output_text.delta":
             text = event.get("delta", "")
             if text and self._on_transcript:
-                await self._on_transcript(self.session_id, text, False)
+                await self._emit_transcript(event, text, False)
 
         elif event_type == "response.output_text.done":
             text = event.get("text", "")
             if text and self._on_transcript:
-                await self._on_transcript(self.session_id, text, True)
+                await self._emit_transcript(event, text, True)
 
         # --- Conversation item events (GA) ---
 
         elif event_type == "conversation.item.added":
             item = event.get("item", {})
+            # ``previous_item_id`` is the ordering signal OpenAI
+            # documents as "used to maintain ordering when items are
+            # inserted". Record the link before anything downstream
+            # needs to resolve it — the transcript for this item can
+            # arrive in the very next frame.
+            self._order.note_item(
+                self.session_id, item.get("id", ""),
+                event.get("previous_item_id", "") or "",
+            )
             if self._on_conversation_item:
                 await self._on_conversation_item(self.session_id, {"action": "added", "item": item})
 
         elif event_type == "conversation.item.done":
             item = event.get("item", {})
+            self._order.note_item(
+                self.session_id, item.get("id", ""),
+                event.get("previous_item_id", "") or "",
+            )
             if self._on_conversation_item:
                 await self._on_conversation_item(self.session_id, {"action": "done", "item": item})
+
+        elif event_type == "input_audio_buffer.committed":
+            # The user's audio turn gets its conversation item here,
+            # carrying both ``item_id`` and ``previous_item_id``. This
+            # is what lets the user bubble be placed correctly even
+            # though its transcript lands later, out of order.
+            self._order.note_item(
+                self.session_id, event.get("item_id", "") or "",
+                event.get("previous_item_id", "") or "",
+            )
 
         # --- Input audio transcription (unchanged) ---
 
@@ -621,7 +665,7 @@ class RealtimeSession:
                 )
                 return
             if text and self._on_transcript:
-                await self._on_transcript(self.session_id, f"[user] {text}", True)
+                await self._emit_transcript(event, f"[user] {text}", True)
 
         elif event_type == "input_audio_buffer.speech_started":
             self._turn_tools_executed.clear()
@@ -923,6 +967,7 @@ class RealtimeProxy:
             node_id = rs.node_id
             await rs.disconnect()
             self._node_to_session.pop(node_id, None)
+            TRANSCRIPT_ORDER.forget(session_id)
 
             try:
                 from api.state import state
@@ -1038,27 +1083,31 @@ class RealtimeProxy:
         if not rs:
             return
 
-        if rs.node_id.startswith("webclient_") and self._send_to_session:
-            from models.protocol import FeralMessage, TranscriptPayload
+        from models.protocol import FeralMessage, TranscriptPayload
 
-            msg = FeralMessage(
-                session_id=session_id,
-                hop="brain",
-                type="transcript",
-                payload=TranscriptPayload(
-                    text=text,
-                    role="assistant",
-                    is_partial=False,
-                ).model_dump(),
-            )
+        # Tool feedback is a transcript frame like any other, so it
+        # takes a ``seq`` from the same counter — otherwise the client
+        # would have nothing to order it by and would fall back to
+        # appending it, which can land it ahead of an earlier turn
+        # whose transcript is still in flight.
+        msg = FeralMessage(
+            session_id=session_id,
+            hop="brain",
+            type="transcript",
+            payload=TranscriptPayload(
+                text=text,
+                role="assistant",
+                is_partial=False,
+                seq=TRANSCRIPT_ORDER.next_seq(session_id),
+            ).model_dump(),
+        )
+
+        if rs.node_id.startswith("webclient_") and self._send_to_session:
             await self._send_to_session(session_id, msg)
             return
 
         if self._send_to_node:
-            await self._send_to_node(rs.node_id, {
-                "type": "transcript",
-                "payload": {"text": text, "role": "assistant", "is_partial": False},
-            })
+            await self._send_to_node(rs.node_id, msg.model_dump(mode="json"))
 
     async def _handle_audio_delta(self, session_id: str, audio_b64: str, is_done: bool):
         """Forward audio from OpenAI back to the connected client (web or daemon node)."""
@@ -1104,8 +1153,17 @@ class RealtimeProxy:
             )
             await self.stop_session(session_id)
 
-    async def _handle_transcript(self, session_id: str, text: str, is_final: bool):
-        """Store transcripts in memory and forward to both client sessions and daemon nodes."""
+    async def _handle_transcript(
+        self, session_id: str, text: str, is_final: bool,
+        *, item_id: str = "", previous_item_id: str = "",
+    ):
+        """Store transcripts in memory and forward to client sessions or daemon nodes.
+
+        ``item_id`` / ``previous_item_id`` are the provider's ordering
+        metadata, forwarded to the client so it can place a transcript
+        that arrived out of order. Both default to blank: the fallback
+        ``seq`` stamped in ``_forward_transcript`` is always present.
+        """
         if is_final and text and self._memory:
             if text.startswith("[user] "):
                 self._memory.working_push(session_id, {
@@ -1134,162 +1192,194 @@ class RealtimeProxy:
             except Exception as exc:
                 logger.debug("voice transcript persistence skipped: %s", exc)
 
+        # Wire emit runs BEFORE the orchestrator hooks below. Those
+        # hooks await SQLite reads, tool-forcing session.update
+        # round-trips and context injection; keeping them upstream of
+        # the emit meant the user's own bubble waited on all of that
+        # while the assistant's reply — which takes none of that path —
+        # sailed past it. That latency is what let the transcript race
+        # become visible (operator report 2026-07-28). The emit is
+        # cheap and depends on nothing the hooks produce, so it goes
+        # first.
+        if is_final and text:
+            await self._forward_transcript(
+                session_id, text, is_final,
+                item_id=item_id, previous_item_id=previous_item_id,
+            )
+
         # Bug 1 + Bug 2(B) hook: hand the final USER transcript to the
         # orchestrator so coref tracking, conversation_history, and
         # temporal-recall side-channels stay in sync with the text
         # path — the audio path bypasses ``handle_command_stream`` so
         # this is the only seam where voice can touch that state.
-        #
-        # Realtime timing caveat: by the time we receive this event,
-        # server VAD has likely already triggered ``response.create`` on
-        # the OpenAI side, so the model is mid-generation when we
-        # inject ``context_hint``. We still attempt the inject for the
-        # CURRENT turn (it's a no-op if the response has already
-        # completed) and the active-subject tracker IS authoritative
-        # for the NEXT turn either way — so the "what about now"
-        # follow-up resolves correctly from turn N+1 onward, and
-        # opportunistically from turn N when the response is still
-        # in flight.
         if (
             is_final
             and text
             and text.startswith("[user] ")
             and self._orchestrator is not None
         ):
-            clean = text[len("[user] "):]
-            voice_tools = self._get_tools()
-            try:
-                hook_out = await self._orchestrator.note_voice_user_turn(
-                    session_id, clean, emit_temporal_timeline=True,
-                    tools=voice_tools,
-                )
-            except Exception:
-                logger.exception(
-                    "realtime: note_voice_user_turn failed (non-fatal)"
-                )
-                hook_out = {}
+            # Off the hot path, same rationale as the memory refresh
+            # inside the hook body: none of this feeds the wire emit
+            # above, and the receive loop is strictly serial, so an
+            # await here stalls every subsequent OpenAI event for the
+            # session.
+            asyncio.create_task(
+                self._apply_voice_turn_hooks(session_id, text[len("[user] "):])
+            )
 
-            forced_tool = (hook_out or {}).get("forced_tool") or ""
-            if forced_tool:
-                rs_for_force = self._sessions.get(session_id)
-                if rs_for_force is not None:
-                    try:
-                        await rs_for_force.force_tool_for_turn(forced_tool)
-                        logger.info(
-                            "realtime: forced %s for schedule intent session=%s",
-                            forced_tool, session_id,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "realtime: force_tool_for_turn failed (non-fatal)"
-                        )
+    async def _apply_voice_turn_hooks(self, session_id: str, clean: str) -> None:
+        """Run the orchestrator side-channels for a final user turn.
 
-            context_hint = (hook_out or {}).get("context_hint") or ""
-            if context_hint:
-                rs = self._sessions.get(session_id)
-                if rs is not None:
-                    try:
-                        await rs.inject_context(context_hint)
-                    except Exception:
-                        logger.debug(
-                            "realtime: inject_context for active-subject hint failed",
-                            exc_info=True,
-                        )
+        Background-only; never raises into the caller. Split out of
+        ``_handle_transcript`` so the transcript wire emit is not
+        serialized behind these awaits.
 
-            # Bug 2(B) — voice recall parity: when the utterance is a
-            # memory / temporal-recall query, the system prompt's
-            # ``[Memory Context]`` block was built ONCE at session
-            # start with no query, so episodes from earlier in the
-            # session never surface. Refresh per-turn via
-            # ``build_context_for_llm(session_id, query=clean)`` and
-            # inject the (cheap) result so the model has the relevant
-            # episodes when it generates the next reply.
-            #
-            # Fire-and-forget on a background task — the build is
-            # async-safe but pulls from SQLite + vec index, so we don't
-            # want it on the hot transcript path. Realtime timing:
-            # this lands as a second ``conversation.item.create`` after
-            # the user's transcript is already in flight, so the
-            # *current* turn is best-effort; the NEXT turn is
-            # authoritative. Same caveat as the active-subject hint.
-            try:
-                from agents.orchestrator import Orchestrator as _Orch
-                if _Orch._R_MEMORY.search(clean) and self._memory:
-                    asyncio.create_task(
-                        self._refresh_memory_context(session_id, clean)
+        Realtime timing caveat: by the time we receive the transcript
+        event, server VAD has likely already triggered
+        ``response.create`` on the OpenAI side, so the model is
+        mid-generation when we inject ``context_hint``. We still
+        attempt the inject for the CURRENT turn (it's a no-op if the
+        response has already completed) and the active-subject tracker
+        IS authoritative for the NEXT turn either way — so the "what
+        about now" follow-up resolves correctly from turn N+1 onward,
+        and opportunistically from turn N when the response is still
+        in flight.
+        """
+        voice_tools = self._get_tools()
+        try:
+            hook_out = await self._orchestrator.note_voice_user_turn(
+                session_id, clean, emit_temporal_timeline=True,
+                tools=voice_tools,
+            )
+        except Exception:
+            logger.exception(
+                "realtime: note_voice_user_turn failed (non-fatal)"
+            )
+            hook_out = {}
+
+        forced_tool = (hook_out or {}).get("forced_tool") or ""
+        if forced_tool:
+            rs_for_force = self._sessions.get(session_id)
+            if rs_for_force is not None:
+                try:
+                    await rs_for_force.force_tool_for_turn(forced_tool)
+                    logger.info(
+                        "realtime: forced %s for schedule intent session=%s",
+                        forced_tool, session_id,
                     )
-            except Exception:
-                logger.debug(
-                    "realtime: per-turn memory refresh schedule failed",
-                    exc_info=True,
-                )
+                except Exception:
+                    logger.exception(
+                        "realtime: force_tool_for_turn failed (non-fatal)"
+                    )
 
-        if is_final and text:
+        context_hint = (hook_out or {}).get("context_hint") or ""
+        if context_hint:
             rs = self._sessions.get(session_id)
-
-            # The ``[user] `` prefix is an INTERNAL sentinel set by the
-            # ``input_audio_transcription.completed`` handler so this
-            # callback can disambiguate user-spoken vs assistant-spoken
-            # transcripts (OpenAI's Realtime SDK funnels both into the
-            # same ``response.output_audio_transcript.*`` event family
-            # this code path forwards). The sentinel must be stripped
-            # before any wire emit, otherwise iOS / web render
-            # ``"[user] Hello"`` as visible bubble text. Pinned by
-            # tests/test_voice_transcript_role_wire.py.
-            is_user = text.startswith("[user] ")
-            clean_text = text[len("[user] "):] if is_user else text
-            wire_role = "user" if is_user else "assistant"
-
-            # Routing contract (operator report 2026-05-09: every
-            # voice turn rendered TWICE in the iOS chat). The fan-out
-            # is web-OR-node, NOT both — same shape as
-            # ``_handle_audio_delta``. iPhone is a daemon node so it
-            # gets ``_send_to_node``; web clients get
-            # ``_send_to_session``. The prior code fired both branches
-            # unconditionally and the iPhone received each transcript
-            # via two parallel WS paths (session + node), then the
-            # ChatStore polling-mirror ingested both copies.
-            #
-            # Same post-disconnect guard as ``_handle_audio_delta`` —
-            # a transcript can land after the phone has closed its WS
-            # (response.output_audio_transcript.done arrives later than
-            # the audio deltas), and writing into a closed
-            # WebSocket raises ``RuntimeError`` from starlette.
-            try:
-                is_web_client = bool(rs and rs.node_id.startswith("webclient_"))
-                if is_web_client and self._send_to_session:
-                    from models.protocol import FeralMessage, TranscriptPayload
-                    msg = FeralMessage(
-                        session_id=session_id, hop="brain", type="transcript",
-                        payload=TranscriptPayload(
-                            text=clean_text,
-                            role=wire_role,
-                            is_partial=not is_final,
-                        ).model_dump(),
+            if rs is not None:
+                try:
+                    await rs.inject_context(context_hint)
+                except Exception:
+                    logger.debug(
+                        "realtime: inject_context for active-subject hint failed",
+                        exc_info=True,
                     )
-                    await self._send_to_session(session_id, msg)
-                elif rs and self._send_to_node:
-                    # Audit-r8 brief #08 HIGH fix: node path was
-                    # hardcoding `is_partial: False`, contradicting the
-                    # web path which used `not is_final`. Asymmetry
-                    # meant iOS clients always rendered the final
-                    # variant even on partial deltas; partial text was
-                    # treated as committed. Match the web path.
-                    await self._send_to_node(rs.node_id, {
-                        "type": "transcript",
-                        "payload": {
-                            "text": clean_text,
-                            "role": wire_role,
-                            "is_partial": not is_final,
-                        },
-                    })
-            except (RuntimeError, ConnectionError) as exc:
-                logger.warning(
-                    "voice_transcript_forward dropped: downstream WS closed for "
-                    "session=%s err=%s — closing realtime session.",
-                    session_id, exc,
+
+        # Bug 2(B) — voice recall parity: when the utterance is a
+        # memory / temporal-recall query, the system prompt's
+        # ``[Memory Context]`` block was built ONCE at session
+        # start with no query, so episodes from earlier in the
+        # session never surface. Refresh per-turn via
+        # ``build_context_for_llm(session_id, query=clean)`` and
+        # inject the (cheap) result so the model has the relevant
+        # episodes when it generates the next reply.
+        #
+        # Realtime timing: this lands as a second
+        # ``conversation.item.create`` after the user's transcript is
+        # already in flight, so the *current* turn is best-effort; the
+        # NEXT turn is authoritative. Same caveat as the
+        # active-subject hint.
+        try:
+            from agents.orchestrator import Orchestrator as _Orch
+            if _Orch._R_MEMORY.search(clean) and self._memory:
+                await self._refresh_memory_context(session_id, clean)
+        except Exception:
+            logger.debug(
+                "realtime: per-turn memory refresh failed",
+                exc_info=True,
+            )
+
+    async def _forward_transcript(
+        self, session_id: str, text: str, is_final: bool,
+        *, item_id: str = "", previous_item_id: str = "",
+    ) -> None:
+        """Emit one transcript frame to the web session or the daemon node."""
+        rs = self._sessions.get(session_id)
+
+        # The ``[user] `` prefix is an INTERNAL sentinel set by the
+        # ``input_audio_transcription.completed`` handler so this
+        # callback can disambiguate user-spoken vs assistant-spoken
+        # transcripts (OpenAI's Realtime SDK funnels both into the
+        # same ``response.output_audio_transcript.*`` event family
+        # this code path forwards). The sentinel must be stripped
+        # before any wire emit, otherwise iOS / web render
+        # ``"[user] Hello"`` as visible bubble text. Pinned by
+        # tests/test_voice_transcript_role_wire.py.
+        is_user = text.startswith("[user] ")
+        clean_text = text[len("[user] "):] if is_user else text
+        wire_role = "user" if is_user else "assistant"
+
+        from models.protocol import FeralMessage, TranscriptPayload
+        payload = TranscriptPayload(
+            text=clean_text,
+            role=wire_role,
+            is_partial=not is_final,
+            item_id=item_id or None,
+            previous_item_id=previous_item_id or None,
+            seq=TRANSCRIPT_ORDER.next_seq(session_id),
+        ).model_dump()
+
+        # Routing contract (operator report 2026-05-09: every
+        # voice turn rendered TWICE in the iOS chat). The fan-out
+        # is web-OR-node, NOT both — same shape as
+        # ``_handle_audio_delta``. iPhone is a daemon node so it
+        # gets ``_send_to_node``; web clients get
+        # ``_send_to_session``. The prior code fired both branches
+        # unconditionally and the iPhone received each transcript
+        # via two parallel WS paths (session + node), then the
+        # ChatStore polling-mirror ingested both copies.
+        #
+        # Same post-disconnect guard as ``_handle_audio_delta`` —
+        # a transcript can land after the phone has closed its WS
+        # (response.output_audio_transcript.done arrives later than
+        # the audio deltas), and writing into a closed
+        # WebSocket raises ``RuntimeError`` from starlette.
+        try:
+            is_web_client = bool(rs and rs.node_id.startswith("webclient_"))
+            if is_web_client and self._send_to_session:
+                msg = FeralMessage(
+                    session_id=session_id, hop="brain", type="transcript",
+                    payload=payload,
                 )
-                await self.stop_session(session_id)
+                await self._send_to_session(session_id, msg)
+            elif rs and self._send_to_node:
+                # Node path now ships the same ``FeralMessage`` envelope
+                # the web path uses, serialized to a dict. It used to
+                # hand-roll a bare ``{"type", "payload"}`` dict, which
+                # dropped ``timestamp_ms`` and every ordering field —
+                # so iOS had strictly less to order by than the web
+                # client did, for the same conversation.
+                msg = FeralMessage(
+                    session_id=session_id, hop="brain", type="transcript",
+                    payload=payload,
+                )
+                await self._send_to_node(rs.node_id, msg.model_dump(mode="json"))
+        except (RuntimeError, ConnectionError) as exc:
+            logger.warning(
+                "voice_transcript_forward dropped: downstream WS closed for "
+                "session=%s err=%s — closing realtime session.",
+                session_id, exc,
+            )
+            await self.stop_session(session_id)
 
     async def _refresh_memory_context(self, session_id: str, query: str) -> None:
         """Pull the freshest memory context relevant to ``query`` and
@@ -1545,7 +1635,13 @@ class RealtimeProxy:
             })
 
     async def _handle_conversation_item(self, session_id: str, item_event: dict):
-        """Handle GA conversation.item.added / conversation.item.done events."""
+        """Handle GA conversation.item.added / conversation.item.done events.
+
+        Ordering is NOT derived here: ``RealtimeSession._handle_event``
+        records the ``previous_item_id`` link before invoking this
+        callback, because a transcript for the same item can arrive in
+        the very next frame.
+        """
         action = item_event.get("action", "")
         item = item_event.get("item", {})
         logger.debug("Conversation item %s in session %s: role=%s type=%s",

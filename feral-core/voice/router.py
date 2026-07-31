@@ -477,17 +477,37 @@ class VoiceRouter:
             return
 
         from models.protocol import FeralMessage, TranscriptPayload
+        from voice.transcript_order import TRANSCRIPT_ORDER
+
+        # ``transcript`` is the output of ``process_audio_chunk`` — it is
+        # the USER's speech, unambiguously. The web branch used to omit
+        # ``role`` entirely and ``TranscriptPayload`` defaults it to
+        # ``"assistant"``, so the web client left-aligned the user's own
+        # words as if the assistant had said them, while the node branch
+        # three lines below tagged the same text ``"user"`` correctly.
+        # Both branches now build one payload so they cannot drift again.
+        #
+        # This path has no provider item ids (whisper is batch STT with
+        # no conversation-item concept), so ordering rests on the
+        # brain-assigned ``seq``.
+        payload = TranscriptPayload(
+            text=transcript,
+            role="user",
+            is_partial=False,
+            seq=TRANSCRIPT_ORDER.next_seq(session_id),
+        ).model_dump()
+
         if self._send_to_session:
             msg = FeralMessage(
                 session_id=session_id, hop="brain", type="transcript",
-                payload=TranscriptPayload(text=transcript, is_partial=False).model_dump(),
+                payload=payload,
             )
             await self._send_to_session(session_id, msg)
 
         if source_node_id and self._send_to_node:
             await self._send_to_node(source_node_id, {
                 "type": "transcript",
-                "payload": {"text": transcript, "role": "user", "is_partial": False},
+                "payload": payload,
             })
 
         if self._memory:

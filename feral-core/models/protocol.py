@@ -308,11 +308,41 @@ class TranscriptPayload(BaseModel):
     Defaults to ``"assistant"`` because in practice the brain emits
     role-tagged frames everywhere; an unset role on the wire is
     almost always an assistant transcript.
+
+    Ordering fields (``item_id`` / ``previous_item_id`` / ``seq``)
+    exist because transcript frames do NOT arrive in conversation
+    order. OpenAI's Realtime docs say
+    ``conversation.item.input_audio_transcription.completed`` "runs
+    asynchronously with Response creation, so this event may come
+    before or after the Response events" — the user's own words can
+    land after the assistant reply that answered them. A client that
+    appends by arrival time renders the turn inverted (operator
+    report 2026-07-28). Clients must order by this metadata, not by
+    arrival:
+
+      * ``item_id`` — provider-stable identity for the conversation
+        item. Also the replace key: a late final with the same
+        ``item_id`` as an earlier partial supersedes it in place
+        rather than appending a duplicate bubble.
+      * ``previous_item_id`` — the item this one follows. OpenAI
+        supplies it on ``conversation.item.added`` and
+        ``input_audio_buffer.committed``; chained together the links
+        form the provider's canonical order.
+      * ``seq`` — brain-assigned per-session monotonic counter, the
+        provider-agnostic fallback for Gemini Live and the chained
+        whisper path, which supply no item identity at all.
+
+    All three are optional: older brains omit them and older clients
+    ignore them, so the wire stays backward compatible in both
+    directions.
     """
     text: str
     is_partial: bool = False
     confidence: float = 1.0
     role: Optional[str] = "assistant"
+    item_id: Optional[str] = None
+    previous_item_id: Optional[str] = None
+    seq: Optional[int] = None
 
 
 class SDUIPayload(BaseModel):

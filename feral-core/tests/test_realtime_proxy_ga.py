@@ -256,7 +256,9 @@ async def test_output_audio_transcript_delta(session):
         "type": "response.output_audio_transcript.delta",
         "delta": "Hello",
     })
-    cb.assert_awaited_once_with("sess-ga-1", "Hello", False)
+    cb.assert_awaited_once_with(
+        "sess-ga-1", "Hello", False, item_id="", previous_item_id="",
+    )
 
 
 @pytest.mark.asyncio
@@ -269,7 +271,9 @@ async def test_output_audio_transcript_done(session):
         "type": "response.output_audio_transcript.done",
         "transcript": "Hello, world!",
     })
-    cb.assert_awaited_once_with("sess-ga-1", "Hello, world!", True)
+    cb.assert_awaited_once_with(
+        "sess-ga-1", "Hello, world!", True, item_id="", previous_item_id="",
+    )
 
 
 @pytest.mark.asyncio
@@ -282,7 +286,9 @@ async def test_output_text_delta(session):
         "type": "response.output_text.delta",
         "delta": "some text",
     })
-    cb.assert_awaited_once_with("sess-ga-1", "some text", False)
+    cb.assert_awaited_once_with(
+        "sess-ga-1", "some text", False, item_id="", previous_item_id="",
+    )
 
 
 @pytest.mark.asyncio
@@ -295,7 +301,9 @@ async def test_output_text_done(session):
         "type": "response.output_text.done",
         "text": "full text",
     })
-    cb.assert_awaited_once_with("sess-ga-1", "full text", True)
+    cb.assert_awaited_once_with(
+        "sess-ga-1", "full text", True, item_id="", previous_item_id="",
+    )
 
 
 # ─────────────────────────────────────────────

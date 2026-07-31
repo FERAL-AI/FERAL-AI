@@ -7,6 +7,7 @@ voice path never applied ``_force_tool_for_query`` from the orchestrator.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,6 +20,15 @@ from agents.tool_list import (
     tool_name_from_def,
 )
 from voice.realtime_proxy import RealtimeProxy, RealtimeSession
+
+
+async def _drain_background_tasks() -> None:
+    """Await every task the code under test scheduled with create_task."""
+    pending = [
+        t for t in asyncio.all_tasks() if t is not asyncio.current_task()
+    ]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 def _tool(name: str) -> dict:
@@ -210,5 +220,9 @@ async def test_voice_transcript_hook_triggers_force_tool_for_turn():
         "[user] spin the robot every night at 9pm",
         is_final=True,
     )
+    # The orchestrator hooks now run off the hot transcript path (so the
+    # wire emit is not serialized behind them), so drain the background
+    # task before asserting.
+    await _drain_background_tasks()
 
     rs.force_tool_for_turn.assert_awaited_once_with("feral_routines__create")

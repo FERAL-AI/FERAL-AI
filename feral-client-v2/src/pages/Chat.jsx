@@ -10,6 +10,7 @@ import { useConnectionStatus } from '../hooks/useConnectionStatus';
 import { apiJson, apiFetch } from '../lib/api';
 import { unlockSharedAudioContext } from '../lib/audioContext';
 import { friendlyToolLabel } from '../lib/toolDisplay';
+import { insertTranscriptMessage, transcriptRowFromPayload } from '../lib/transcriptOrder';
 import { useChatThread } from '../shell/Shell';
 import { useVoice } from '../shell/VoiceContext';
 import MarkdownMessage from '../lib/markdown.jsx';
@@ -323,6 +324,11 @@ export default function Chat() {
         'tool_start', 'tool_call', 'skill_start', 'tool_end',
         'tool_result', 'reasoning', 'budget_exceeded', 'skill_proposal',
         'refusal', 'error',
+        // `transcript` belongs here too: voice frames are session-scoped
+        // like every other chat frame, and without it a transcript from
+        // a voice session started on thread A rendered into whichever
+        // thread happened to be open.
+        'transcript',
       ]);
       if (
         frameSession
@@ -540,13 +546,18 @@ export default function Chat() {
           return [...prev, card];
         });
       } else if (type === 'transcript') {
+        // Voice transcripts arrive out of conversation order — the
+        // user's own transcription can land after the assistant reply
+        // that answered it. Insert by the brain's ordering metadata
+        // instead of appending by arrival. See lib/transcriptOrder.js.
         const p = msg.payload || {};
-        if (p.is_partial) return;
-        const role = p.role || (p.text?.startsWith('[user] ') ? 'user' : 'assistant');
-        const text = role === 'user' && p.text?.startsWith('[user] ')
-          ? p.text.slice(7) : (p.text || '');
-        if (!text) return;
-        setMessages((prev) => [...prev, { id: newId(), role, text, source: 'voice' }]);
+        const row = transcriptRowFromPayload(p, newId());
+        if (!row) return;
+        // Partials still insert, keyed by item_id, so the user's bubble
+        // can appear while they are still speaking; the final replaces
+        // it in place rather than stacking a second bubble.
+        if (p.is_partial && !row.itemId) return;
+        setMessages((prev) => insertTranscriptMessage(prev, row));
       } else if (type === 'sdui') {
         // Brain-emitted SDUI payload. Append as its own message so the
         // recursive renderer can mount the tree inline in the chat log.

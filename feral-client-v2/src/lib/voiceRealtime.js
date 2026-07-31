@@ -69,6 +69,9 @@ export class RealtimeVoiceEngine {
     this._workletNode = null;
     this._source = null;
     this._playbackCtx = null;
+    // Buffer sources currently scheduled on the playback timeline, so a
+    // barge-in can stop them without tearing down the AudioContext.
+    this._activeSources = new Set();
     this._isPlaying = false;
     this._active = false;
     this._nextPlayTime = 0;
@@ -307,6 +310,7 @@ export class RealtimeVoiceEngine {
       this._playbackCtx.close().catch(() => {});
       this._playbackCtx = null;
     }
+    this._activeSources.clear();
     this._isPlaying = false;
     this._nextPlayTime = 0;
     if (this.onStateChange) this.onStateChange('off');
@@ -322,15 +326,7 @@ export class RealtimeVoiceEngine {
 
       const buffer = this._playbackCtx.createBuffer(1, float32.length, TARGET_SAMPLE_RATE);
       buffer.getChannelData(0).set(float32);
-
-      const source = this._playbackCtx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(this._playbackCtx.destination);
-
-      const now = this._playbackCtx.currentTime;
-      const startTime = Math.max(now, this._nextPlayTime);
-      source.start(startTime);
-      this._nextPlayTime = startTime + buffer.duration;
+      this._schedule(buffer);
     } catch (e) {
       if (this.onError) this.onError('playback', e.message);
     }
@@ -349,20 +345,47 @@ export class RealtimeVoiceEngine {
   }
 
   handleSpeechStarted() {
+    // Barge-in: drop whatever the assistant still has queued.
+    //
+    // This used to close the playback AudioContext and construct a new
+    // one on every barge-in. Stopping the scheduled source nodes has
+    // the same audible effect without tearing down the output stream.
+    // The teardown mattered because the browser's echo canceller keys
+    // its reference signal off the output render stream and has to
+    // re-converge its delay estimate whenever that stream is
+    // re-acquired — i.e. the canceller was at its weakest immediately
+    // after every barge-in, which is exactly when the assistant
+    // resumes speaking into an open mic. Uncancelled speaker bleed
+    // gets transcribed as user speech and renders as a right-aligned
+    // bubble containing the assistant's own words.
     this._nextPlayTime = 0;
-    if (this._playbackCtx) {
-      this._playbackCtx.close().catch(() => {});
-      this._playbackCtx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
-      // Same gesture-handoff issue described in `start()`; the
-      // freshly re-created context must be resumed before the next
-      // `audio_response` arrives.
-      if (this._playbackCtx.state === 'suspended') {
-        this._playbackCtx.resume().catch(() => {});
-      }
+    for (const source of this._activeSources) {
+      try { source.stop(); } catch { /* already ended */ }
+    }
+    this._activeSources.clear();
+    if (this._playbackCtx && this._playbackCtx.state === 'suspended') {
+      // Same gesture-handoff issue described in `start()`.
+      this._playbackCtx.resume().catch(() => {});
     }
     if (this.onSpeechStarted) {
       this.onSpeechStarted();
     }
+  }
+
+  /** Schedule a decoded buffer on the shared playback timeline. */
+  _schedule(buffer) {
+    const source = this._playbackCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this._playbackCtx.destination);
+    // Track the node so a barge-in can stop it; drop it again once it
+    // has played out so the set does not grow across a long session.
+    this._activeSources.add(source);
+    source.onended = () => this._activeSources.delete(source);
+
+    const now = this._playbackCtx.currentTime;
+    const startTime = Math.max(now, this._nextPlayTime);
+    source.start(startTime);
+    this._nextPlayTime = startTime + buffer.duration;
   }
 
   /**
@@ -402,14 +425,7 @@ export class RealtimeVoiceEngine {
         } catch (e) { reject(e); }
       });
 
-      const source = this._playbackCtx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(this._playbackCtx.destination);
-
-      const now = this._playbackCtx.currentTime;
-      const startTime = Math.max(now, this._nextPlayTime);
-      source.start(startTime);
-      this._nextPlayTime = startTime + audioBuffer.duration;
+      this._schedule(audioBuffer);
     } catch (e) {
       if (this.onError) this.onError('playback', e?.message || String(e));
     }
