@@ -1152,7 +1152,20 @@ class Orchestrator:
                 ).model_dump(),
             ))
         except Exception:
-            pass
+            # This used to be a bare `pass`, which made a failed emit
+            # invisible: the client never got `tool_result`, so the WebUI
+            # tool chip spun forever with nothing in the logs or the UI to
+            # explain it. `tool_result` is the frame that *closes* the chip,
+            # so losing it is a user-visible hang — warning, not debug, and
+            # with the traceback so the cause is diagnosable. The three
+            # sibling handlers in this function stay at debug because their
+            # frames are enrichment; this one is the terminator.
+            logger.warning(
+                "tool_result frame emit failed — the UI tool chip for %r "
+                "will not resolve",
+                str(tool_call.get("name", "tool")),
+                exc_info=True,
+            )
 
         # S1 closer (cut-list item #8): the fused-timeline tool returns
         # a structured {entries, summary, window, sources_queried,

@@ -114,6 +114,8 @@ All daemons connect via WebSocket to `wss://{brain_host}:{brain_port}/v1/node?ap
 
 The `api_key` query parameter authenticates the daemon. Set via the `NODE_API_KEY` environment variable (no default — must be configured before deployment).
 
+This is enforced, not just documented: if `NODE_API_KEY` is unset or empty, the brain **refuses every unpaired `/v1/node` connection** with close code `4003` and logs `feral.security.node_api_key_unset`. An empty key never grants access. Devices that have completed pairing authenticate with their pairing token instead and are unaffected by an unset `NODE_API_KEY`.
+
 ### Layer 2: Device Manifest
 
 On connection, every daemon sends a registration message declaring its identity, type, and capabilities.

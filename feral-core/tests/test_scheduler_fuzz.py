@@ -10,6 +10,7 @@ from agents.scheduler import (
     CronService,
     JobType,
     FileLock,
+    UnparseableCronExpression,
     _compute_next_run,
 )
 
@@ -60,11 +61,17 @@ class TestCronFuzz:
         assert nxt > now, f"Expected next_run > now for cron={cron!r}"
 
     @pytest.mark.parametrize("cron", _INVALID_CRONS)
-    def test_invalid_cron_falls_back(self, cron):
-        """Invalid crons should return a fallback (now + 60s), never crash."""
+    def test_invalid_cron_is_refused(self, cron):
+        """Unparseable crons must raise, never silently re-arm.
+
+        This test used to assert the opposite — that a bad expression
+        "falls back" to now + 60s. That fallback is what made two routines
+        written as "nightly at 9pm" fire 4,170 and 4,130 times, each a full
+        orchestrator turn, pinning chat spend at the $10 cap in an hour.
+        """
         now = time.time()
-        nxt = _compute_next_run(cron, now)
-        assert nxt >= now, f"Fallback should be >= now for cron={cron!r}"
+        with pytest.raises(UnparseableCronExpression):
+            _compute_next_run(cron, now)
 
     def test_cron_macros_resolve(self):
         now = time.time()
