@@ -1979,7 +1979,35 @@ class LLMProvider:
                 elif event_type == "response.completed":
                     for tc in tool_calls.values():
                         yield {"type": "tool_call_delta", "tool_call": _finalise_tool_call(tc)}
-                    yield {"type": "done"}
+                    # The Responses API reports token usage inside the
+                    # terminal event's ``response`` object, with no opt-in
+                    # required (unlike chat-completions, which needs
+                    # ``stream_options.include_usage`` — see the note in
+                    # ``_extract_usage``). It was arriving here and being
+                    # discarded, which had two consequences: the UI could
+                    # never show per-turn tokens, and ``_budget_record``
+                    # billed every streamed turn at ZERO tokens, so the
+                    # operator's cost caps silently under-counted the
+                    # default code path.
+                    _resp = chunk.get("response") or {}
+                    _done: dict = {"type": "done"}
+                    _u = _resp.get("usage")
+                    if isinstance(_u, dict):
+                        # Responses names these input_/output_tokens; keep the
+                        # provider's own keys AND the normalised pair so
+                        # downstream readers don't need to know the shape.
+                        _in = _u.get("input_tokens") or _u.get("prompt_tokens") or 0
+                        _out = _u.get("output_tokens") or _u.get("completion_tokens") or 0
+                        _done["usage"] = {
+                            "input_tokens": int(_in),
+                            "output_tokens": int(_out),
+                            "total_tokens": int(_u.get("total_tokens") or (_in + _out)),
+                        }
+                    if _resp.get("model"):
+                        # The model that actually answered, which can differ
+                        # from the configured one after failover.
+                        _done["model"] = str(_resp["model"])
+                    yield _done
                     return
                 elif event_type == "response.failed":
                     err = chunk.get("response", {}).get("error") or chunk.get("error")
