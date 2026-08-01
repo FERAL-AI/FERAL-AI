@@ -60,10 +60,21 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
-def _disable_api_key_middleware_for_tests(monkeypatch):
+def _disable_api_key_middleware_for_tests(monkeypatch, isolate_feral_home):
     """Starlette TestClient reports client host as 'testclient'; accept that as localhost
     for tests so the auth middleware bypasses without every test needing to send a header.
     Real production hosts never report 'testclient'.
+
+    Depends on ``isolate_feral_home`` on purpose, and the dependency is
+    load-bearing rather than cosmetic. This fixture imports ``api.server``,
+    which imports ``api.state``, which instantiates ``BrainState()`` at
+    module scope (``api/state.py``) and pushes ``export_as_env()`` into
+    ``os.environ``. That import happens exactly once per process, so
+    whichever test runs first decides which home the whole session reads.
+    Ordered by definition alone this fixture ran first and that home was
+    the developer's real ``~/.feral``, leaking ``FERAL_LLM_PROVIDER``,
+    ``FERAL_STREAMING`` and friends process-wide. Naming the fixture as a
+    parameter makes pytest resolve it first regardless of definition order.
     """
     from security import session_auth as _sa
     orig_is_localhost = _sa.is_localhost
