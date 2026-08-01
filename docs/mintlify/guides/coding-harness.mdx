@@ -1,0 +1,453 @@
+---
+title: "Coding Harness Reliability"
+sidebarTitle: "Coding Harness"
+description: "Edit fallback matching, read-before-edit staleness checks, per-turn checkpoints, and post-edit diagnostics."
+---
+
+> **Status: Beta.** Every behaviour on this page is covered by unit tests in
+> `feral-core/tests/` (`test_edit_matchers.py`, `test_file_state.py`,
+> `test_checkpoints_cli_and_api.py`, `test_post_edit_diagnostics.py`,
+> `test_coding_tools_reliability.py`). It has not been exercised against a
+> long-running multi-agent workload outside those tests, and the platform
+> notes below say which parts were verified on which operating system.
+
+The `coding_tools` skill is the surface an agent uses to read, search, edit and
+run things in your working tree. Four subsystems sit under it, and each exists
+because a specific failure mode was costing turns.
+
+## 1. Edit fallback matching
+
+`coding_tools__edit_file` used to be a single byte-exact
+`content.replace(old_text, new_text, 1)`. Frontier models can reproduce a file
+byte for byte, so that was enough for them. Local Qwen-class models cannot: they
+normalise indentation, drop trailing whitespace, re-wrap, and over-escape. Exact
+match failed, the model guessed again, and the turn burned out in a retry loop.
+
+Matching is now a chain of six strategies. Each is a pure function
+`(content, old_text) -> list[MatchCandidate]` that proposes spans which
+literally exist in the file. Strategies only propose. The arbiter,
+`find_edit_match` in `feral-core/skills/edit_matchers.py`, decides.
+
+### The six strategies, in order
+
+| Order | `match_strategy` | What it relaxes |
+|:--|:--|:--|
+| 1 | `exact` | Nothing, beyond normalising the needle's line endings to the file's dominant ending |
+| 2 | `indentation_flexible` | The common leading indentation on both sides. Relative indentation inside the block must still agree |
+| 3 | `line_trimmed` | Leading and trailing whitespace on every line |
+| 4 | `whitespace_normalized` | Every internal whitespace run, collapsed to one space (tabs versus spaces, re-aligned columns) |
+| 5 | `escape_normalized` | Over-escaping in the needle: a literal two-character `\n` where the file has a newline, `\"` where the file has a quote. Only runs when decoding actually changes the needle |
+| 6 | `block_anchor` | The interior. Matches on the first and last line only and takes what is between them on trust |
+
+### Why the order is load-bearing
+
+Two invariants carry the design:
+
+1. **The first strategy that produces any candidate decides the outcome.** There
+   is no cross-strategy scoring, and a looser strategy never overrules a
+   stricter one that has already spoken.
+2. **More than one candidate is a hard failure.** Ambiguity is never resolved by
+   falling through to a looser strategy.
+
+Given invariant 1, running the chain strictest-first is what makes the middle
+strategies reachable at all. The match sets nest:
+`exact` is a subset of `indentation_flexible`, which is a subset of
+`line_trimmed`, which is a subset of `whitespace_normalized`. Trimming both ends
+of every line is weaker than preserving relative indentation, so anything
+`indentation_flexible` accepts, `line_trimmed` also accepts. Put `line_trimmed`
+first and `indentation_flexible` could never propose a span the previous
+strategy had not already proposed, and under first-strategy-wins it would never
+be consulted again.
+
+The ordering is also the only one consistent with invariant 2: relaxing
+constraints must not increase confidence.
+
+`escape_normalized` sits after the comparison-based strategies because it is
+orthogonal, it transforms the needle rather than the comparison.
+`block_anchor` is last because it is the only strategy that can replace text the
+model never saw.
+
+### Ambiguity never falls through
+
+When the deciding strategy finds more than one candidate and `replace_all` is
+not set, the call fails with `error_code: "ambiguous"` and HTTP 409. It does not
+retry under a looser strategy, and it does not pick one. The error names the
+strategy and the first ten matching line numbers, and tells the model to add
+surrounding context or pass `replace_all`.
+
+There is deliberately no `fuzzy` toggle on the endpoint. A model that can opt
+into looser matching always will, on the very call where it should have re-read
+the file instead.
+
+### Two other hard refusals
+
+- **`oversized_span`.** A matched span may legitimately be longer than
+  `old_text` (recovered indentation, CRLF, whitespace the model dropped) but not
+  carry dramatically more *content*. The check is on whitespace-stripped length,
+  so a block the model wrote flush-left is not penalised for the indentation the
+  file puts back. The limit is `1.5x` the needle's significant length plus 24
+  characters. It exists mostly to bound `block_anchor`.
+- **`unexpected_replacement_count`.** Pass `expected_replacements` and a count
+  that does not match is fatal even under `replace_all`.
+
+### Reading `match_strategy` and `requires_review`
+
+Every successful edit result carries `match_strategy`, plus `matched_lines` as
+`[start_line, end_line]` pairs:
+
+```json
+{
+  "success": true,
+  "data": {
+    "path": "/repo/src/app.py",
+    "replacements": 1,
+    "match_strategy": "line_trimmed",
+    "matched_lines": [[142, 148]]
+  }
+}
+```
+
+How to read it:
+
+- **`exact`** means the edit landed byte-for-byte where you asked. Nothing to
+  check.
+- **`indentation_flexible`, `line_trimmed`, `whitespace_normalized`,
+  `escape_normalized`** mean the whole block was compared, line for line, under
+  a relaxed comparison. The content that got replaced is the content you named,
+  modulo whitespace. Worth noticing if you see it repeatedly, because it means
+  the model's copy of the file is drifting from disk.
+- **`block_anchor`** is the one to actually check. The result carries
+  `requires_review: true` and a `review_note` saying so. Only the first and last
+  line were verified; the interior was replaced sight-unseen. `requires_review`
+  appears on no other strategy.
+
+A failed match returns `closest_match` where it can: the nearest real block of
+file text, with its line range and a similarity score, so the model can correct
+against what the file actually contains rather than guess again from the same
+stale memory.
+
+### Size guard
+
+The sliding-window strategies are `O(file_lines x needle_lines)`. Above
+`coding.edit_max_content_lines` (default 4000) or `coding.edit_max_needle_lines`
+(default 400), only `exact` runs. A not-found result in that case carries
+`note` explaining that only exact matching ran, so "not found" is never confused
+with "no fallback was attempted".
+
+### Line endings
+
+`splice` rewrites the replacement to the file's dominant line ending and
+re-indents it by the difference between the matched span's indentation and the
+needle's. Without the first, editing a CRLF file with LF-only content produces a
+mixed-ending file and every later exact match against it fails for reasons
+nothing in the tool output explains. Without the second, a needle the model
+wrote flush-left silently de-indents the block it replaces.
+
+## 2. Read-before-edit and staleness
+
+`feral-core/skills/file_state.py` records what the agent has actually looked at,
+per session, and checks it before every write.
+
+Two failure modes this closes: the model writes a file it never read and
+silently reverts somebody else's work; or the model reads a file, thinks for
+four tool calls, and edits against the version it remembers while the file has
+changed underneath it.
+
+### Verdicts
+
+| Verdict | Meaning |
+|:--|:--|
+| `ok` | The file matches what this session last observed, or it does not exist yet (creating a new file has nothing to have read) |
+| `never_read` | The file exists and this session has never read it |
+| `stale` | The file changed since this session read it |
+| `gone` | This session read the file and it no longer exists |
+
+There is deliberately **no `partial` verdict.** The model legitimately reads a
+large file through an `offset`/`limit` window and then edits a line outside that
+window, which is correct behaviour. Refusing it is a false positive that trains
+the model to re-read whole files defensively and burns the context window doing
+it. The flag is recorded on the observation (and surfaced as `read_was_partial`)
+so it can be measured, but it never changes the verdict.
+
+### Why content hashing, not mtime alone
+
+The observation is the triple `(mtime_ns, size, content_hash)`. Editors restore
+mtime on save-in-place, some sync tools preserve it outright, and FERAL's own
+writes routinely land inside the same clock second as the read that preceded
+them. The SHA-256 hash is authoritative; `mtime_ns` and `size` are cheap fields
+that short-circuit it. Files over 8 MiB are fingerprinted by `(mtime_ns, size)`
+only, which is a safety valve rather than a normal path (the read tool already
+caps at 2 MB).
+
+### `warn` versus `enforce`
+
+`coding.read_before_edit` (env: `FERAL_READ_BEFORE_EDIT`) takes `off`, `warn` or
+`enforce`.
+
+**`warn` is the shipped default.** The write proceeds and the result carries a
+`read_before_edit` block plus a `warning` string. That gives telemetry on how
+often the guard would fire before it starts failing real work.
+
+Under `enforce` the same verdicts refuse the write with HTTP 409 and the
+`read_before_edit` block is in the error payload instead. `off` disables the
+check entirely.
+
+The warning is carried onto match failures too. A stale file that also fails to
+match is the case where "this file changed under you" is the single most useful
+thing the tool can say, and dropping it would leave the model retrying the match
+instead of re-reading.
+
+### Shell invalidates everything
+
+Any `coding_tools__bash` call that is not provably read-only drops every
+observation for the session. FERAL does not try to work out which paths a shell
+command touched: shell is a full programming language, path extraction is
+unsound, and a guard that is wrong in the unsafe direction is worse than one
+that is merely conservative. The read-only classifier is a short allowlist of
+`argv[0]` values plus a list of read-only `git` subcommands, and any redirect or
+`tee` in the command disqualifies it outright.
+
+### Concurrency
+
+`ToolRunner.spawn_subagents` runs up to six workers concurrently, all with full
+`coding_tools` access, so check-then-write is a real TOCTOU window.
+`FileStateTracker.lock_for(path)` hands out a per-path `asyncio.Lock` that the
+write path holds across the whole check-capture-write sequence. Post-edit
+diagnostics deliberately run *outside* that lock.
+
+## 3. Checkpoints and revert
+
+Every `coding_tools__write_file` and `coding_tools__edit_file` stashes the
+file's pre-write bytes in a content-addressed blob store and records a row keyed
+by `turn_id`. `revert_turn` puts the files back the way they were before that
+user message was answered.
+
+### Storage layout
+
+```
+$FERAL_HOME/checkpoints/index.db
+$FERAL_HOME/checkpoints/blobs/<first-2-hex-of-sha256>/<sha256>
+```
+
+`index.db` is SQLite with one row per write: `checkpoint_id`, `turn_id`,
+`session_id`, `surface`, `tool_name`, `call_id`, `path`, `created_at`,
+`existed`, and the before/after hash and size. Connections are short-lived and
+per-operation rather than pooled, because the store is touched from the event
+loop, from the REST route, and from `feral checkpoints` in a separate process,
+and SQLite's own file locking is the only coordination that works across all
+three.
+
+`FERAL_CHECKPOINT_DIR` (`coding.checkpoint_dir`) overrides the root outright.
+Retention defaults to 14 days; the prune runs at most hourly, deletes expired
+rows, and then deletes any blob no surviving row references.
+
+Files larger than `coding.checkpoint_max_blob_bytes` (8 MiB) are recorded but
+not blobbed. The row still shows the write happened, and a revert reports the
+path as `unrecoverable` instead of pretending.
+
+### Git is never invoked
+
+`git stash` and `git add` mutate the user's index and working tree. An agent
+that quietly stages or stashes in-progress work is a worse problem than the one
+being solved, and it is not recoverable from inside the agent once it has
+happened. FERAL also writes routinely outside any repository (scratch dirs,
+config under the user's home, files on a mounted volume), where git has nothing
+to say at all. Content addressing behaves identically with or without a
+repository, so the no-repo case needs no special handling and there is no second
+code path to keep correct.
+
+### Refuse on drift
+
+This is the safety property that matters. Before restoring anything, the plan
+compares each file's current hash against the hash recorded *after* the agent
+wrote it:
+
+| Status | Meaning | Default action |
+|:--|:--|:--|
+| `restorable` | Current content is exactly what the agent left | restore, or delete for a file the turn created |
+| `drifted` | Current content differs, or no post-write fingerprint was ever recorded | skipped |
+| `already_reverted` | File already matches its pre-turn content, or never existed and still does not | skipped |
+| `unrecoverable` | Pre-write content was not stored, or its blob is missing | skipped |
+
+If any file is `drifted` and `force` is not set, the whole revert refuses,
+returns `success: false`, and hands back the plan. Something or somebody else
+edited that file after the agent did, and restoring the pre-agent bytes would
+destroy that work. `force` overrides, and the error text says the newer content
+will be lost.
+
+### `bash` changes are not covered
+
+**Shell commands are not checkpointed.** There is no sound way to know what a
+shell command touched, so pretending otherwise would produce a revert that
+claims a completeness it does not have. Anything `coding_tools__bash` changed
+in a turn (shell redirects, `sed -i`, formatters, package installs, git
+commands) is not reverted and is not tracked.
+
+Every response from the checkpoint layer says so out loud, on success as well as
+failure: `bash_not_covered: true` plus a `note` field. That is deliberate.
+A partial revert that reads as complete is worse than no revert at all.
+
+### The CLI
+
+```bash
+feral checkpoints list [--session SESSION_ID] [--limit 20]
+feral checkpoints show [TURN_ID]
+feral checkpoints revert [TURN_ID] [--force] [--dry-run]
+```
+
+`TURN_ID` defaults to the most recent checkpointed turn. `show` prints the
+revert plan without touching a file; `revert --dry-run` does the same through
+the revert path. Without `--force`, a drifted file refuses the revert.
+
+The CLI reads `$FERAL_HOME/checkpoints/index.db` directly rather than calling
+the brain's REST API. That is deliberate: the moment you most want to undo what
+the agent wrote is the moment the brain is wedged, mid-restart, or answering
+nothing at all. A recovery tool that depends on the thing you are recovering
+from is not a recovery tool.
+
+### The REST routes
+
+| Method | Path | Description |
+|:--|:--|:--|
+| `GET` | `/api/checkpoints/turns` | Turns that wrote at least one file, most recent first. Query: `session_id`, `limit` (1 to 200, default 20) |
+| `GET` | `/api/checkpoints/turns/{turn_id}` | Per-write rows for one turn, plus the revert plan. 404 when the turn has no checkpoints |
+| `POST` | `/api/checkpoints/revert` | Revert a turn. Body: `{turn_id?, session_id?, force?, dry_run?}` |
+
+Omit `turn_id` on the revert and the most recent checkpointed turn for
+`session_id` is used. Every response carries `bash_not_covered` and `note`.
+
+### The tool
+
+`coding_tools__revert_turn` is the same thing exposed to the model, declared
+`safety_tier: "confirm"` so the operator's autonomy mode governs it. See
+[Autonomy Levels](/guides/autonomy).
+
+### What turns a `turn_id`
+
+`turn_id` is minted per user message and shared by every tool call made while
+answering it, including calls made by spawned subagents. It travels
+out-of-band in a `contextvars.ContextVar` (`feral-core/skills/call_context.py`)
+because threading it through would change `BaseSkill.execute`'s signature and
+every third-party skill with it.
+
+That context is **fail-open by design**. Callers that never bind it (cron,
+taskflows, the REST tool surface, the voice proxies) get an unbound context with
+an empty `session_id`, which means no checkpoint is captured for those writes
+and the staleness check passes trivially. It is a correctness aid, not a
+security boundary: the boundary is `security/sandbox_policy.py` plus the
+approval flow, and any guard keyed off this context is bypassable through
+`coding_tools__bash` running `sed` anyway. Failing closed would break
+cron-driven and taskflow writes for no security gain.
+
+## 4. Post-edit diagnostics
+
+After a write or edit, `feral-core/skills/diagnostics.py` runs whatever cheap
+checker that file's extension has and folds the findings into the same tool
+result. The point is to close the loop inside the same turn. Without it, the
+model writes a file with a syntax error, moves on, and discovers the problem
+three tool calls later when a test run fails, if at all.
+
+### Checkers by extension
+
+| Extension | Checker | Notes |
+|:--|:--|:--|
+| `.py` | `ruff check` when `ruff` is on `PATH`, otherwise `ast.parse` | `ruff` is not a declared dependency of `feral-core`, so the `python-ast` fallback is the common case. It still catches the failure that matters after a bad edit: the file no longer parses |
+| `.js`, `.mjs`, `.cjs`, `.jsx` | `node --check` when `node` is on `PATH` | Nothing runs when node is absent |
+| `.json` | `json.loads` | In-process |
+| `.yaml`, `.yml` | `yaml.safe_load` | Only when PyYAML is importable |
+| `.sh`, `.bash` | `bash -n` when `bash` is on `PATH` | |
+| `.ts`, `.tsx`, `.mts`, `.cts` | none, deliberately | See below |
+| anything else | none | |
+
+### Baseline diffing is the feature
+
+Reporting every finding in the file means that editing one line of a legacy
+module dumps a few hundred pre-existing warnings into the context, and the
+model, which has no way to know they are not its fault, starts "fixing" them.
+
+So each checker runs twice: once against the pre-write content and once against
+the content just written, and only findings that are new relative to the
+baseline are reported. `new_count` carries the total; the `findings` array is
+capped at 10 items, errors before warnings, and `truncated: true` appears when
+it was cut.
+
+The diff is keyed on `(code, message)` and not on line number. An edit shifts
+every line below it, so a line-sensitive diff would report the whole tail of the
+file as new. Interpreter chatter that varies between two runs of the same input
+(a `(node:97599)` process id) is stripped for the same reason.
+
+When no pre-write content was available, `baseline: "unavailable"` appears on
+the block, meaning the findings are all findings in the file rather than
+necessarily ones this write introduced.
+
+### Nothing is ever written to disk
+
+Both the baseline and the after check feed their content to the checker on
+**stdin**. An earlier version wrote the pre-write content to a hidden sibling
+file so config-resolving checkers would resolve the same config. That was
+correct but unacceptable: a stray `.feral-baseline-*` survives a SIGKILL (a
+`finally` block does not), shows up in `git status`, and trips file watchers and
+test runners. It ran on every single edit.
+
+Per checker:
+
+- **ruff** takes `--stdin-filename`, so it resolves `pyproject.toml` /
+  `ruff.toml` by walking up from *that* path while reading source from stdin.
+  Verified against ruff 0.15: a `ruff.toml` selecting only `E501` suppresses
+  `F401` for a stdin-filename inside its directory and not for one outside it,
+  regardless of cwd. `--no-cache` is also passed, so no `.ruff_cache/` can
+  appear in the user's source tree.
+- **`bash -n`** resolves no configuration from the script's location. Verified
+  that a file and the same bytes on stdin produce the same exit code and
+  message, and that neither cwd nor `BASH_ENV` changes the verdict.
+- **`node --check`** reads stdin but has no `--stdin-filename` equivalent, so it
+  cannot resolve the nearest `package.json`. That is a known and accepted
+  limitation: module type is location-dependent, so the same `import` statement
+  passes inside a `"type": "module"` package and fails inside a
+  `"type": "commonjs"` one (verified on node 25). This checker misses that one
+  class of error. Because baseline and after are evaluated through the identical
+  channel, the *diff* stays sound: it can under-report, never over-report, and a
+  false "you broke this" is far more expensive than a miss.
+
+### An absent checker omits the block entirely
+
+When nothing ran, the tool result has **no `diagnostics` key at all**. It is not
+an empty `findings` list.
+
+That distinction is the whole contract. `"findings": []` reads to the model as
+"checked, and clean", which is a much stronger claim than "there was nothing
+installed to check with". No tooling is the common case, and a model that trusts
+a fabricated all-clear will skip the verification it should have done.
+
+The block is omitted for every reason nothing ran: unknown extension, checker
+not installed, file over 2 MB, subprocess timeout (`coding.diagnostics_timeout`,
+default 5 s, floored at 0.5), or any exception at all. Everything here is
+advisory. The write already happened by the time a checker runs, so a checker
+failure never fails the tool call.
+
+Set `coding.post_edit_diagnostics` (env `FERAL_POST_EDIT_DIAGNOSTICS`) to `off`
+to disable the pass.
+
+### TypeScript is deliberately skipped
+
+`tsc --noEmit` on a single file without the project's `tsconfig.json` reports a
+flood of phantom errors: every import unresolved, every ambient type missing.
+With the project tsconfig it type-checks the whole program and blows any timeout
+worth having on a post-write hook. Half-checking TypeScript is worse than not
+checking it, so `.ts`, `.tsx`, `.mts` and `.cts` return nothing and the
+`diagnostics` key is omitted, exactly as it is for an extension with no checker.
+
+## Settings
+
+All of the above is configured under the `coding` section of
+`~/.feral/settings.json`, with an environment variable mirror for each key. See
+[Configuration](/getting-started/configuration#the-coding-section) and the
+[Environment reference](/reference/environment#coding-harness). The environment
+variable is the higher-priority source in every case.
+
+<Warning>
+One exception worth knowing: **`coding.tool_call_context` /
+`FERAL_TOOL_CALL_CONTEXT` is currently inert.** Its only reader is
+`skills/call_context.py::context_enabled()`, and nothing calls that function, so
+setting it to `off` changes no behaviour. Every other key in the section is live.
+</Warning>

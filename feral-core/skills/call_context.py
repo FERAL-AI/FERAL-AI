@@ -79,8 +79,11 @@ class ToolCallContext:
         calls made by spawned subagents. This is the grouping key
         ``skills/checkpoints.py`` reverts by.
     ``plan_mode``
-        Reserved. FERAL has no plan mode today; the field is here so the
-        wire shape does not change when one lands.
+        Whether the calling session is in plan mode. Informational only
+        on this object: the enforcement point is
+        ``ToolRunner.enforce_plan_mode``, which asks
+        ``PlanModeState.is_active`` directly rather than reading this
+        field. See ``agents/plan_mode.py``.
     """
 
     session_id: str = ""
@@ -173,11 +176,22 @@ def bind_context(
 
 
 def context_enabled() -> bool:
-    """Escape hatch for operators: ``FERAL_TOOL_CALL_CONTEXT=off`` makes
+    """Intended escape hatch: ``FERAL_TOOL_CALL_CONTEXT=off`` would make
     every consumer behave as if nothing were ever bound.
 
-    Defaults to on. Documented here rather than in ``config/loader.py``
-    because another lane owns the settings loader this wave.
+    **Nothing calls this function.** No consumer consults it, so the
+    variable (and its ``coding.tool_call_context`` mirror) currently
+    changes no behaviour. Wiring it means calling this from
+    :func:`current_context` / :func:`require_context` so they return
+    :data:`UNBOUND` when it is off, which is the only place that would
+    make the switch mean what its name says. Documented rather than
+    quietly removed because the settings key and the env var are both
+    published.
+
+    Note this is also why the key survives
+    ``tests/test_settings_keys_have_readers.py``: the gate sees the env
+    var read on the line below and cannot tell that the enclosing
+    function is dead.
     """
     return os.environ.get("FERAL_TOOL_CALL_CONTEXT", "on").strip().lower() not in (
         "off", "0", "false", "no",

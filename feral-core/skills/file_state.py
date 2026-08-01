@@ -34,9 +34,13 @@ Enforcement
 ``FERAL_READ_BEFORE_EDIT`` selects ``off`` / ``warn`` / ``enforce``,
 defaulting to **warn**: the write proceeds and the result carries a
 warning field. That gives telemetry on how often the guard would fire
-before it starts failing real work. (Environment rather than
-``settings.json`` because ``config/loader.py`` belongs to another lane
-this wave; the settings mirror lands after merge.)
+before it starts failing real work.
+
+The environment variable is the only source this module reads.
+``coding.read_before_edit`` in ``settings.json`` mirrors it:
+``config/loader.py`` merges the variable into that key on load and
+``export_as_env`` re-emits it verbatim, so a shell export still wins
+over the persisted setting.
 
 Concurrency
 -----------

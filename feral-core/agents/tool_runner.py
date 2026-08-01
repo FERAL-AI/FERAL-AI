@@ -239,12 +239,16 @@ class ToolRunner:
         tool it was never given, and the voice surfaces assemble their
         tool list from ``SkillRegistry.get_all_tools()`` on a completely
         separate path that the orchestrator filter never touches. Every
-        LLM-originated call funnels through here, so here is where the
-        mode becomes true rather than merely suggested.
+        call that reaches ``ToolRunner`` funnels through here, so here is
+        where the mode becomes true rather than merely suggested.
 
         Placed ABOVE the MCP, subagent and daemon branches on purpose:
         none of those carry manifest safety metadata, and all three would
         otherwise be a hole straight through the mode.
+
+        Known gap: the OpenAI Realtime and Gemini Live proxies call
+        ``SkillExecutor.execute`` directly and never reach ``ToolRunner``,
+        so this gate does not cover them. See ``agents/plan_mode.py``.
         """
         if not self.plan_mode.is_active(session_id):
             return None

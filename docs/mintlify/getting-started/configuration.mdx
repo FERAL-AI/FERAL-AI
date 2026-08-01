@@ -58,10 +58,8 @@ FERAL merges configuration from four sources, each overriding the previous:
     "wake_word": "hey feral",
     "provider": "openai_realtime"
   },
-  "autonomy": {
-    "mode": "hybrid",
-    "safe_categories": ["information", "media", "smart_home"],
-    "risky_categories": ["email", "file_delete", "purchase"]
+  "security": {
+    "autonomy_mode": "hybrid"
   },
   "coding": {
     "read_before_edit": "warn",
@@ -70,9 +68,9 @@ FERAL merges configuration from four sources, each overriding the previous:
     "checkpoint_retention_days": 14,
     "turn_idle_seconds": 180
   },
-  "brain": {
+  "network": {
     "port": 9090,
-    "host": "127.0.0.1"
+    "bind_host": "127.0.0.1"
   },
   "access": {
     "pairing_mode": "localhost"
@@ -133,15 +131,48 @@ export OPENROUTER_API_KEY=sk-or-...
 |-------------|------|---------|-------------|
 | `llm.provider` | string | `"ollama"` | LLM backend: `anthropic`, `openai`, `openrouter`, `ollama`, `gemini` |
 | `llm.model` | string | `"llama3"` | Model identifier for the chosen provider |
-| `autonomy.mode` | string | `"hybrid"` | `strict`, `hybrid`, or `loose` |
+| `security.autonomy_mode` | string | `"hybrid"` | `strict`, `hybrid`, or `loose`. See [Autonomy](/guides/autonomy) |
 | `voice.enabled` | bool | `true` | Enable voice pipeline |
 | `voice.wake_word` | string | `"hey feral"` | Trigger phrase for hands-free activation |
-| `brain.port` | int | `9090` | Brain WebSocket/API port |
-| `brain.host` | string | `"127.0.0.1"` | Bind host (`0.0.0.0` if you need LAN phone reachability) |
+| `network.port` | int | `9090` | Brain WebSocket/API port. `FERAL_PORT` and `FERAL_BRAIN_PORT` both override it |
+| `network.bind_host` | string | `"127.0.0.1"` | Bind host (`0.0.0.0` if you need LAN phone reachability). `FERAL_HOST` and `FERAL_BIND_HOST` both override it |
 | `access.pairing_mode` | string | `"localhost"` | `localhost`, `local`, or `remote` |
-| `ui.theme` | string | `"dark"` | Web dashboard theme (`dark` or `light`) |
-| `memory.backend` | string | `"sqlite"` | Storage backend for episodic memory |
+| `memory.backend` | string | `"sqlite_vec"` | Storage backend for episodic memory |
 | `hardware.ble_enabled` | bool | `true` | Enable Bluetooth device scanning |
+
+## The `coding` Section
+
+Knobs for the [coding harness](/guides/coding-harness). Each one shipped as an
+environment variable only, so it was configurable per process but not
+persistable: an operator who wanted read-before-edit enforced had to re-export
+the variable on every launch. They are mirrored into `settings.json` so the
+choice survives a restart.
+
+| Setting Path | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `coding.read_before_edit` | string | `"warn"` | `off`, `warn`, or `enforce`. Whether writing a file this session never read is ignored, warned about, or refused |
+| `coding.tool_call_context` | string | `"on"` | **Currently inert.** Intended as an off switch for the per-call session/turn context. `call_context.context_enabled()` reads it and nothing calls that function, so setting it to `off` changes no behaviour today. The key passes the reader gate on the env-var read inside that unused function; see the [known limit](/contributing#the-settings-reader-gate) |
+| `coding.edit_max_content_lines` | int | `4000` | Above this file size only the exact edit matcher runs |
+| `coding.edit_max_needle_lines` | int | `400` | Above this `old_text` size only the exact edit matcher runs |
+| `coding.checkpoint_dir` | string | `""` | Empty means `$FERAL_HOME/checkpoints`. Any non-empty value overrides that outright |
+| `coding.checkpoint_retention_days` | int | `14` | Days a checkpoint row is kept before pruning. Blobs no surviving row references are deleted with it |
+| `coding.checkpoint_max_blob_bytes` | int | `8388608` | 8 MiB. A larger file is recorded but not blobbed, and reverts report it as unrecoverable rather than pretending |
+| `coding.post_edit_diagnostics` | string | `"on"` | `off` skips the post-write checker pass |
+| `coding.diagnostics_timeout` | int | `5` | Seconds allowed for that pass. Floored at 0.5 |
+| `coding.turn_idle_seconds` | int | `180` | Seconds a turn may sit idle before the tool loop gives up |
+
+<Note>
+**Precedence here is env-first, unlike the general rule above, and it is
+deliberate.** Each of these is read from the process environment by its
+subsystem and from nowhere else. The environment variable is merged into the
+`coding` section on load and then re-emitted verbatim by `export_as_env`, so a
+shell that exports `FERAL_READ_BEFORE_EDIT=enforce` still beats `settings.json`.
+The defaults above are copied from each reader's own default, so an install that
+never touches this section behaves exactly as it did before the section existed.
+</Note>
+
+The environment variable names are in the
+[Environment reference](/reference/environment#coding-harness).
 
 ## Example: Minimal Cloud Config
 
@@ -151,7 +182,7 @@ export OPENROUTER_API_KEY=sk-or-...
     "provider": "anthropic",
     "model": "claude-sonnet-4-20250514"
   },
-  "autonomy": { "mode": "strict" }
+  "security": { "autonomy_mode": "strict" }
 }
 ```
 
@@ -166,6 +197,6 @@ export OPENROUTER_API_KEY=sk-or-...
   "voice": {
     "provider": "whisper_local"
   },
-  "autonomy": { "mode": "loose" }
+  "security": { "autonomy_mode": "loose" }
 }
 ```

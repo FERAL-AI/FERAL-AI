@@ -25,8 +25,12 @@ Best for: first-time setup, untrusted environments, auditing all agent behavior.
 
 ```json
 // ~/.feral/settings.json
-{ "autonomy": { "mode": "strict" } }
+{ "security": { "autonomy_mode": "strict" } }
 ```
+
+Strict additionally requires an **explicit operator grant** for any host shell
+command. A folder covered only by the sandbox policy's default roots is not
+enough; see [The two gates](#the-two-gates) below.
 
 ## Hybrid Mode
 
@@ -40,8 +44,9 @@ Agent: The cheapest is $450 on ANA. I need approval to book. Approve? [✓ / ✗
 
 This is the **default** mode. Most users stay here — the agent handles research and information retrieval instantly, but pauses before actions with real-world consequences.
 
-```yaml
-autonomy: hybrid
+```json
+// ~/.feral/settings.json
+{ "security": { "autonomy_mode": "hybrid" } }
 ```
 
 ### What Auto-Executes in Hybrid
@@ -72,9 +77,64 @@ Agent: [auto] Moving 47 files to trash... done.
 `dangerous` tools still require approval even in loose mode. See [Security Model](/guides/security) for the hard-coded deny list.
 </Note>
 
-```yaml
-autonomy: loose
+```json
+// ~/.feral/settings.json
+{ "security": { "autonomy_mode": "loose" } }
 ```
+
+## The two gates
+
+The autonomy mode is consulted at two separate points. Until recently the
+persisted setting only reached one of them.
+
+**Gate 1: the approval gate** (`ToolRunner.enforce_safety`). This is the one the
+tables above describe. It decides whether a tool call executes, raises a pending
+approval, or is denied outright:
+
+- **strict:** anything not resolved as read-only needs approval.
+- **hybrid:** only calls resolved at the `CONFIRM` safety level need approval.
+- **loose:** nothing needs approval. A `CONFIRM`-level call is logged and
+  auto-executed. Hard-denied tools are still denied; loose does not reach them.
+
+**Gate 2: the shell execution-mode gate**
+(`security/exec_mode.resolve_execution_mode`). This decides whether a shell
+command runs on the host, runs in the container, or is refused, as a function of
+*(command, resolved path, autonomy mode, grant state)*. Under **strict**, a host
+shell requires an explicit operator grant for the working directory: a path
+covered only by the sandbox policy's own roots is refused, naming the policy
+source that did cover it. `hybrid` and `loose` accept a policy-covered path.
+
+### Why it needed fixing
+
+Both gates resolve the mode from the `FERAL_AUTONOMY` environment variable and
+nothing else. The setup wizard wrote `security.autonomy_mode` to
+`settings.json`, and `api/state.py` applied the persisted value to the
+`ToolRunner` at boot, but nothing exported it. So the approval gate honoured
+your pick and the shell gate stayed on `hybrid`. Picking "strict" silently ran
+strict approvals against a hybrid shell policy.
+
+`ConfigLoader.export_as_env()` now emits `FERAL_AUTONOMY` from
+`security.autonomy_mode`, normalising anything outside strict / hybrid / loose
+to `hybrid`, and `BrainState.__init__` applies the export to `os.environ` before
+anything reads it. Both gates now see the same value.
+
+<Note>
+`POST /api/autonomy` updates the running `ToolRunner` and persists the choice to
+`settings.json`, but it does **not** rewrite `os.environ["FERAL_AUTONOMY"]`. So
+a live toggle changes the approval gate immediately and the shell gate only on
+the next restart. Restart the brain if you are switching to or from `strict` and
+care about the shell policy.
+</Note>
+
+### `coding_tools__revert_turn` is governed by it
+
+Undoing the file writes a turn made is declared `safety_tier: "confirm"` in the
+`coding_tools` manifest, so it lands on gate 1 like any other confirm-tier tool:
+**strict and hybrid ask you, loose runs it.** That is deliberately the
+operator's call rather than the tool's. See
+[Coding Harness](/guides/coding-harness#3-checkpoints-and-revert) for what a
+revert covers, and in particular for what it does not
+(`coding_tools__bash` changes are never checkpointed).
 
 ## Configuration
 
@@ -84,31 +144,37 @@ autonomy: loose
 export FERAL_AUTONOMY=hybrid   # strict | hybrid | loose
 ```
 
-The env var takes precedence over the config file, useful for per-session overrides:
+The env var takes precedence over the config file, useful for per-session
+overrides:
 
 ```bash
 FERAL_AUTONOMY=strict feral start
 ```
 
+Precedence works by round trip rather than by special-casing: an
+explicitly-set `FERAL_AUTONOMY` is merged into `security.autonomy_mode` by
+`_apply_env_overrides`, and `export_as_env` then re-emits it verbatim.
+
 ### Config File
 
 ```json
 // ~/.feral/settings.json
-{ "autonomy": { "mode": "hybrid" } }
+{ "security": { "autonomy_mode": "hybrid" } }
 ```
 
-### Per-Session Override
+### Live toggle
 
-Clients can request an autonomy level during session initialization:
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/autonomy` | Current tier, read off the running `ToolRunner` |
+| `POST` | `/api/autonomy` | `{"mode": "strict"}`. Applies live and persists to `settings.json`. Responds with `persisted: false` when the disk write failed, rather than rolling back the live change |
 
-```python
-from feral_sdk import FeralClient
+### Plan mode is a separate axis
 
-async with FeralClient("http://localhost:9090") as client:
-    session = await client.create_session(autonomy="strict")
-```
-
-The server enforces that a session cannot escalate beyond the server-level setting. If the server is `hybrid`, a session can request `strict` (more restrictive) but not `loose` (less restrictive).
+Do not reach for autonomy modes to stop an agent changing things during a
+research turn. [Plan mode](/guides/plan-mode) is per-session and ephemeral, and
+refuses every mutating call at dispatch regardless of tier. The two are kept in
+separate state and never read each other.
 
 ## ApprovalManager
 

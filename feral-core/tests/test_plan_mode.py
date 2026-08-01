@@ -12,6 +12,15 @@ independently:
    tool name it was never given, and the voice surface builds its own list
    from ``get_all_tools()`` on a path the orchestrator filter never touches.
 2. Dispatch (``ToolRunner``) is the real gate.
+
+What these tests do NOT cover: the OpenAI Realtime and Gemini Live proxies
+call ``SkillExecutor.execute`` directly rather than going through
+``ToolRunner``, so the dispatch gate never runs for them.
+``test_catches_a_tool_the_voice_path_would_have_exposed`` drives
+``execute_tool_call_for_llm`` with ``surface="voice"``, which is the shape of
+the CHAINED voice path (it routes through ``handle_command_stream``), not the
+realtime one. Do not read a green run here as proof that plan mode holds on a
+live realtime session; it does not.
 """
 
 from __future__ import annotations

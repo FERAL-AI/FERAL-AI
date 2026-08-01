@@ -17,10 +17,10 @@ Not the same thing as ``agents/coding_run.py``
 ``CodingRun`` has a ``CodingRunPhase.PLAN`` and a ``Planner`` protocol,
 but it is a plan-then-apply loop with no human in the middle, and it is
 unwired (only ``cli/main.py``'s doctor check constructs its store). Its
-module docstring also claims writes go through the ``coding_tools``
-skill surface so SandboxPolicy gates them; the edit phase in fact calls
-``target.write_text(...)`` directly. Neither the phase nor the planner is
-reused here.
+edit phase also calls ``target.write_text(...)`` directly rather than
+going through the ``coding_tools`` skill surface, so SandboxPolicy never
+sees those writes; see that module's docstring. Neither the phase nor
+the planner is reused here.
 
 Two enforcement points
 ----------------------
@@ -32,8 +32,18 @@ Two enforcement points
 2. **Dispatch** (``ToolRunner``, using :func:`is_plan_safe_tool` and
    :func:`plan_mode_refusal`). This is the gate that actually holds. It
    sits above the MCP branch, the subagent branch and the daemon branch,
-   so every LLM-originated call passes through it whatever surface
-   assembled the tool list.
+   so every call that reaches ``ToolRunner`` passes through it whatever
+   surface assembled the tool list.
+
+   **Known gap.** "Every call that reaches ``ToolRunner``" is not the
+   same as "every call". The chained voice pipeline routes through
+   ``Orchestrator.handle_command_stream`` and is therefore gated, but the
+   two live realtime proxies are not: ``voice/realtime_proxy.py``
+   ``_handle_tool_call`` and ``voice/gemini_realtime.py`` both call
+   ``self._skill_executor.execute(...)`` directly, bypassing
+   ``ToolRunner`` entirely. A session in plan mode can still mutate state
+   through either of those. Closing it means routing those two call sites
+   through ``ToolRunner``, not adding a third check here.
 
 Plan-safe means DECLARED safe
 -----------------------------
@@ -97,10 +107,11 @@ PLAN_MODE_ALWAYS_BLOCKED = frozenset({"subagent__spawn_subagent"})
 # ``f"{parent_session_id}:sub:{ordinal}:{rand}"``.
 _SUBSESSION_SEP = ":sub:"
 
-# Documented env default. ``config/loader.py`` is owned by another lane
-# this wave, so the setting is read from the environment here and the
-# settings.json key ``security.plan_mode_default`` can mirror it later
-# without changing this module's contract.
+# Documented env default. There is deliberately no settings.json key yet:
+# ``security.plan_mode_default`` is the intended mirror but does NOT exist
+# in ``DEFAULT_SETTINGS``, so adding it without a reader would trip
+# ``tests/test_settings_keys_have_readers.py``. Wire the reader and the key
+# together; until then this variable is the only switch.
 _ENV_DEFAULT = "FERAL_PLAN_MODE_DEFAULT"
 
 

@@ -1651,11 +1651,31 @@ function VoiceSection() {
   // status. The Settings panel groups them into three pickers
   // (realtime / chained STT / chained TTS) and persists the operator's
   // choice into `audio.realtime_providers` / `audio.chained_providers`
-  // via `/api/config/update` (the same lists the audio router reads
-  // on every voice session).
+  // via `/api/config/update`.
   //
-  // Phone Settings → Voice mirrors this exact shape via SettingsPanel.jsx
-  // so a user pairing from iPhone sees identical labels and status.
+  // NEITHER LIST IS READ BY THE AUDIO ROUTER. An earlier version of this
+  // comment claimed they were "the same lists the audio router reads on
+  // every voice session"; nothing read either one, then or now.
+  //   - `audio.realtime_providers`: `voice/router.py`
+  //     `_preferred_realtime_provider()` resolves a SINGLE provider from
+  //     `FERAL_VOICE_PROVIDER` and then the scalar
+  //     `audio.realtime_primary`, and never walks this list. The key is
+  //     kept, and allowlisted in `tests/test_settings_keys_have_readers.py`
+  //     with that reason, only so this page has preselected entries.
+  //   - `audio.chained_providers`: no Python reader at all. The chained
+  //     pair is resolved by `VoiceRouter._resolve_chained_config` from
+  //     per-session `provider_opts`, then `voice.chained.*` (what the
+  //     phone Settings panel writes), then `audio.chained_fallback.*`
+  //     (what the setup wizard writes), then the shipped defaults. It is
+  //     outside the reader gate because it has no `DEFAULT_SETTINGS`
+  //     entry for the gate to walk.
+  //
+  // So the pickers below record a preference and render it back. Changing
+  // the operator-visible behaviour means writing `audio.realtime_primary`
+  // or `voice.chained.*`, which is what the phone panel does.
+  //
+  // Phone Settings → Voice mirrors this shape via SettingsPanel.jsx so a
+  // user pairing from iPhone sees identical labels and status.
   const [status, setStatus] = useState(null);
   const [config, setConfig] = useState(null);
   const [providers, setProviders] = useState([]);

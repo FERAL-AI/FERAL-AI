@@ -160,7 +160,7 @@ environment variable stays the higher-priority source: set it and it wins over
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FERAL_READ_BEFORE_EDIT` | `warn` | `off`, `warn`, or `enforce`. Whether editing a file the session has not read is refused, warned about, or ignored |
-| `FERAL_TOOL_CALL_CONTEXT` | `on` | `off` disables per-call tool context |
+| `FERAL_TOOL_CALL_CONTEXT` | `on` | Intended as an off switch for the per-call tool context. **Currently inert:** the only reader is `skills/call_context.py::context_enabled()`, which nothing calls, so setting it to `off` changes no behaviour |
 | `FERAL_EDIT_MAX_CONTENT_LINES` | `4000` | Above this file size only the exact edit matcher runs |
 | `FERAL_EDIT_MAX_NEEDLE_LINES` | `400` | Above this needle size only the exact edit matcher runs |
 | `FERAL_CHECKPOINT_DIR` | `$FERAL_HOME/checkpoints` | Overrides the checkpoint store location outright |
