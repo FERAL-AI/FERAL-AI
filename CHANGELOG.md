@@ -6,6 +6,46 @@ All notable changes to FERAL are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **feat(bridges): drive external coding agents over ACP.** New
+  [`feral-core/bridges/`](feral-core/bridges/) spawns a coding agent as a
+  subprocess and speaks Agent Client Protocol (JSON-RPC 2.0 over
+  newline-delimited JSON on stdio). Verified against real opencode 1.18.10
+  driving a local model: 1026 streamed `session/update` events in one run, a
+  real tool call, `session/request_permission` answered both `allow_once` and
+  `reject_once` with the rejection actually preventing the write, two
+  sequential permission requests inside one turn, and a file written through
+  our own `fs/write_text_file` handler.
+
+  Neither Claude Code nor Codex speaks ACP: `claude` 2.1.220 has no `acp`
+  subcommand and Codex has an open request for one. Both are reached through
+  Zed-maintained Node shims (`@zed-industries/claude-code-acp`,
+  `@agentclientprotocol/codex-acp`), which are themselves the ACP agent, so
+  the bridge drives them unchanged. opencode is the only one FERAL installs,
+  because it is a single binary needing no Node runtime.
+
+  Deliberately **no dependency on the `agent-client-protocol` PyPI package**.
+  It is at 0.11.1 while the TypeScript SDK the real agents build against is at
+  1.3.x, and a typed model layer that lags the protocol turns an unknown field
+  into a validation error rather than an unread dict key. The JSON-RPC peer is
+  about 330 lines and payloads stay plain dicts; method names come from the
+  ACP schema rather than from memory.
+
+  The real session found a defect a mock suite could not have: after a human
+  grants an edit, opencode calls `fs/write_text_file` **on the client**
+  regardless of what the client advertised. Refusing that killed the turn
+  *after* the user had already said yes. The bridge now declares the fs
+  capabilities and gates every agent-driven write through symlink-resolving
+  workspace containment, which makes FERAL the write gate rather than a
+  bystander.
+
+  Permissions map onto the existing `ApprovalManager` rather than a parallel
+  store, namespaced `external_agent:<tool>` so an external agent's `bash` can
+  never grant FERAL's `bash`. Every failure path (no broker, broker raised,
+  timeout, no allow-shaped option, cancelled session) resolves to rejection;
+  there is no auto-allow.
+
 ## [2026.8.1] - 2026-08-01 - setup correctness, coding-harness reliability, voice rebuild, plan mode
 
 ### Added

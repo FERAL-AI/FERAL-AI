@@ -149,6 +149,11 @@ try:
 except ImportError:
     pass
 
+try:
+    import skills.impl.external_agent  # noqa: F401 (drives opencode / Claude Code / Codex over ACP)
+except ImportError:
+    pass
+
 
 # robot_action uses WS_EXECUTE — handled natively by SkillExecutor via the
 # daemon WebSocket, which is the only path that reaches real hardware and
