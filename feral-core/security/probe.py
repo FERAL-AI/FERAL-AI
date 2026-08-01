@@ -264,7 +264,18 @@ async def _http_probe(
     ok_statuses: tuple[int, ...] = (200,),
     no_key_reason: str = "no_key",
     had_key: bool = True,
+    body_check: Optional[Callable[[Any], Optional[str]]] = None,
 ) -> ProbeResult:
+    """HTTP probe with an optional body validator.
+
+    ``body_check`` exists because a status code is not a verdict for every
+    provider. Slack answers ``auth.test`` with HTTP 200 and a body of
+    ``{"ok": false, "error": "invalid_auth"}`` for a revoked token, so a
+    status-only probe reports a dead credential as healthy. The callable
+    receives the parsed JSON body and returns an error string when the
+    body says the call failed, or None when it is genuinely fine. Any
+    provider that reports auth failures in a 200 body needs one.
+    """
     started = time.monotonic()
     probed_at = time.time()
     if not had_key:
@@ -307,7 +318,21 @@ async def _http_probe(
     latency_ms = (time.monotonic() - started) * 1000.0
     status = response.status_code
     ok = status in ok_statuses
-    if ok:
+    body_error: Optional[str] = None
+    if ok and body_check is not None:
+        try:
+            body_error = body_check(response.json())
+        except Exception:
+            # A provider that answered 200 with an unparseable body has
+            # not demonstrated a working credential either, but it has
+            # also not demonstrated a broken one. Leave the status
+            # verdict alone rather than inventing a failure.
+            body_error = None
+    if ok and body_error:
+        ok = False
+        reason = "unauthorized"
+        detail = body_error[:200]
+    elif ok:
         reason = "ok"
         detail = response.reason_phrase or "ok"
     elif status == 401:
@@ -642,10 +667,25 @@ async def _probe_home_assistant(*, vault=None, **_kwargs: Any) -> ProbeResult:
     ).strip()
     if not token:
         token = _resolve_oauth_access_token(vault, "home_assistant") or ""
-    if os.environ.get("SUPERVISOR_TOKEN"):
-        base = os.environ.get("FERAL_HA_URL", "http://supervisor/core")
-    else:
-        base = os.environ.get("HA_URL", "http://homeassistant.local:8123")
+    # Resolve the base URL the same way the integration does, rather than
+    # re-deriving it from env. The integration now accepts a URL from the
+    # Settings card and stores it in the vault, so an env-only lookup here
+    # would probe the default host while real traffic went somewhere else
+    # and report a working connection as unreachable. Falls back to the
+    # old env resolution when the integration is unavailable, so this can
+    # only agree more often than it did.
+    base = ""
+    try:
+        from integrations.home_assistant import resolve_base_url
+
+        base = (resolve_base_url(vault=vault) or "").strip()
+    except Exception:
+        logger.debug("probe: HA base-url resolution fell back to env", exc_info=True)
+    if not base:
+        if os.environ.get("SUPERVISOR_TOKEN"):
+            base = os.environ.get("FERAL_HA_URL", "http://supervisor/core")
+        else:
+            base = os.environ.get("HA_URL", "http://homeassistant.local:8123")
     headers = {"Authorization": f"Bearer {token}"} if token else None
     return await _http_probe(
         "home_assistant",
@@ -679,6 +719,13 @@ async def _probe_telegram(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 
 @register_probe("slack")
+def _slack_body_error(body: Any) -> Optional[str]:
+    """Slack reports auth failures in a 200 body, not in the status."""
+    if isinstance(body, dict) and body.get("ok") is False:
+        return f"slack: {body.get('error') or 'auth.test reported ok=false'}"
+    return None
+
+
 async def _probe_slack(*, vault=None, **_kwargs: Any) -> ProbeResult:
     token = _resolve_env_or_vault(vault, ("FERAL_SLACK_BOT_TOKEN",))
     headers = {"Authorization": f"Bearer {token}"} if token else None
@@ -688,6 +735,7 @@ async def _probe_slack(*, vault=None, **_kwargs: Any) -> ProbeResult:
         url="https://slack.com/api/auth.test",
         headers=headers,
         had_key=bool(token),
+        body_check=_slack_body_error,
     )
 
 
