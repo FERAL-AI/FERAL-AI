@@ -36,6 +36,36 @@ GITHUB_INDEX_URL = os.getenv(
 )
 
 
+def _safe_extract_zip(zf, dest: str) -> None:
+    """Extract a zip, refusing any member that escapes ``dest``.
+
+    ``ZipFile.extractall`` does sanitize absolute paths and ``..`` on its
+    own, but it is silent about it and it does not check symlinks, whose
+    target is stored in the member data rather than the name. A skill
+    archive is untrusted input downloaded from a registry or a GitHub
+    index, so a member that resolves outside the destination is treated
+    as hostile and fails the whole install rather than being quietly
+    dropped. ``tarfile`` gets the equivalent via ``filter="data"``, which
+    is Python 3.14's default and not 3.11's.
+    """
+    root = Path(dest).resolve()
+    for member in zf.infolist():
+        target = (root / member.filename).resolve()
+        if target != root and root not in target.parents:
+            raise ValueError(
+                f"refusing archive member that escapes the extract directory: "
+                f"{member.filename!r}"
+            )
+        # 0xA000 is S_IFLNK in the high 16 bits of external_attr, which is
+        # how zip stores a symlink. Its target lives in the file body, so
+        # the name check above cannot see where it points.
+        if (member.external_attr >> 16) & 0xF000 == 0xA000:
+            raise ValueError(
+                f"refusing symlink in skill archive: {member.filename!r}"
+            )
+    zf.extractall(dest)
+
+
 class MarketplaceClient:
     """HTTP client for skill discovery and installation."""
 
@@ -164,10 +194,15 @@ class MarketplaceClient:
             try:
                 if archive_bytes[:2] == b"PK":
                     with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
-                        zf.extractall(tmpdir)
+                        _safe_extract_zip(zf, tmpdir)
                 else:
                     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:*") as tf:
-                        tf.extractall(tmpdir)
+                        # ``filter="data"`` rejects absolute paths, parent
+                        # traversal, device nodes, symlinks pointing outside
+                        # the destination, and setuid bits. It is the
+                        # default from Python 3.14; we are on 3.11 where the
+                        # unfiltered call is the CVE-2007-4559 behaviour.
+                        tf.extractall(tmpdir, filter="data")
 
                 # Find the manifest
                 tmp_path = Path(tmpdir)
