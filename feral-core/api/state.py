@@ -1606,12 +1606,16 @@ class BrainState:
             # ``get_tts_provider("cartesia")`` resolve at session-open
             # time without further wiring.
             from voice.chained_pipeline import ChainedVoicePipeline
-            import voice.stt_providers.deepgram  # noqa: F401  registers stt
-            import voice.stt_providers.openai_whisper  # noqa: F401
-            import voice.stt_providers.groq_whisper  # noqa: F401
-            import voice.tts_providers.openai_tts  # noqa: F401
-            import voice.tts_providers.elevenlabs  # noqa: F401
-            import voice.tts_providers.cartesia  # noqa: F401  Lane 05 
+            from voice.provider_registry import register_voice_providers
+
+            # Registration moved behind this helper when the local engines
+            # landed. The previous six bare imports were unguarded, so a
+            # single optional wheel that fails to load (a native build
+            # mismatch, a missing model runtime) would raise here and take
+            # brain boot down with it. The helper records per-module
+            # failures and keeps going, so a broken local engine costs you
+            # that engine rather than the whole voice subsystem.
+            register_voice_providers()
             self.chained_voice_pipeline = ChainedVoicePipeline()
             if self.voice_router:
                 self.voice_router.set_chained_pipeline(self.chained_voice_pipeline)

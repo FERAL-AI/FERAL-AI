@@ -2621,6 +2621,17 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         if gs and hasattr(gs, "cancel_response"):
                             await gs.cancel_response()
                             cancelled = True
+                    # Chained mode had no barge-in at all: the two branches
+                    # above only reach the realtime and Gemini proxies, so
+                    # speaking over the assistant on a chained session did
+                    # nothing. Note the key differs, realtime and Gemini are
+                    # keyed by node_id while chained sessions are keyed by
+                    # session_id. Safe on unknown or idle sessions and on a
+                    # router with no pipeline wired, so no mode check.
+                    if not cancelled:
+                        cancelled = await state.voice_router.cancel_chained_response(
+                            session_id
+                        )
                     if not cancelled:
                         logger.info(
                             "voice_interrupt for node=%s found no live session "
