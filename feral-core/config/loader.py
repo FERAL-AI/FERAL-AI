@@ -89,20 +89,23 @@ DEFAULT_SETTINGS = {
         "tts_provider": "openai",
         "tts_model": "tts-1",
         "tts_voice": "nova",
-        # Operator's preferred order of realtime providers, written by
+        # Operator's preferred ORDER of realtime providers, written by
         # the WebUI Settings page (``feral-client-v2``
         # ``src/pages/Settings.jsx``).
         #
-        # NOT READ BY THE ROUTER. The previous comment here claimed the
-        # router tries these in order before flipping to chunked TTS;
-        # that was never true. ``voice/router.py``
-        # ``_preferred_realtime_provider()`` resolves a SINGLE provider
-        # from ``FERAL_VOICE_PROVIDER`` and then the scalar
-        # ``audio.realtime_primary``, and never consults this list. The
-        # key is kept (and allowlisted in
-        # ``tests/test_settings_keys_have_readers.py``) only so the
-        # Settings page has preselected entries; it is inert until the
-        # router learns to walk it.
+        # Read by ``voice/router.py`` ``_configured_realtime_chain()``,
+        # which walks it as an ordered fallback chain: the first entry
+        # that is actually up serves the session, and the chain
+        # terminates at the chained STT->LLM->TTS pipeline (local
+        # engines included) rather than at failure. An explicit pick in
+        # ``audio.realtime_primary`` (or ``FERAL_VOICE_PROVIDER``) leads
+        # the chain; this list is the fallthrough behind it.
+        #
+        # Ordering realtime providers is a separate question from
+        # whether realtime should be tried before the local pipeline at
+        # all -- that one is answered per surface (see
+        # ``VoiceRouter.realtime_chain_for_surface``: phones and glasses
+        # lead with realtime for latency, desktops lead with local).
         "realtime_providers": ["openai", "gemini"],
         # OpenAI Realtime model id passed to the RealtimeProxy when
         # opening a session. Operator-overridable via

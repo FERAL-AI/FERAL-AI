@@ -1000,6 +1000,23 @@ def _openai_realtime_models() -> list[str]:
 _DATE_TAIL = re.compile(r"-\d{4}-\d{2}-\d{2}$")
 
 
+def _voice_engine_caveats() -> dict[str, str]:
+    """Known limits on what a green probe proves, per provider id.
+
+    Lives in ``voice/diagnostics.py`` (the module whose job is being
+    honest about failure) and is imported lazily here so ``security``
+    keeps no hard dependency on ``voice``. A missing module degrades to
+    "no caveats", never to a fabricated one.
+    """
+    try:
+        from voice.diagnostics import ENGINE_CAVEATS
+
+        return dict(ENGINE_CAVEATS)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("voice engine caveats unavailable", exc_info=True)
+        return {}
+
+
 def voice_provider_catalogue() -> list[dict[str, Any]]:
     """Return the structured catalogue of voice providers the brain
     knows about (regardless of whether they're configured / probed
@@ -1019,6 +1036,15 @@ def voice_provider_catalogue() -> list[dict[str, Any]]:
         # downloaded", not "credential accepted", so a UI does not
         # offer an API-key prompt for an engine that has no account.
         entry["local"] = pid in LOCAL_VOICE_PROVIDERS
+        # ``caveat`` is what a green probe does NOT prove. For a local
+        # engine, ``ok`` means "importable and the weights are on disk",
+        # which is a weaker claim than "works" -- and for three of the
+        # engines here it is the ONLY claim anyone has ever checked.
+        # Carrying the caveat on the catalogue entry means every
+        # consumer (the REST surface, the setup wizard, the voice
+        # diagnostic) inherits the honesty instead of each one deciding
+        # for itself. Empty string means "nothing to qualify".
+        entry["caveat"] = _voice_engine_caveats().get(pid, "")
         if pid == "openai_realtime":
             entry["models"] = _openai_realtime_models()
             entry["default_model"] = OPENAI_REALTIME_DEFAULT_MODEL
