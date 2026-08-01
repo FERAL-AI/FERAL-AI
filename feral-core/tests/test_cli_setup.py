@@ -390,9 +390,29 @@ class TestAudioStep:
         assert state.get_setting("audio", "stt_provider") is None
         assert state.get_setting("audio", "tts_provider") is None
 
-    def test_local_preset_picks_whisper_and_piper(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        "system, expect_stt, expect_tts",
+        [
+            ("Darwin", "whispercpp", "macos_say"),
+            ("Linux", "faster-whisper", "piper"),
+        ],
+    )
+    def test_local_preset_picks_the_right_engines_for_the_platform(
+        self, tmp_path, monkeypatch, system, expect_stt, expect_tts,
+    ):
+        """The fully-local preset is platform-dependent, and measurably so.
+
+        It used to write faster-whisper plus Piper everywhere. On macOS
+        both are wrong: whisper.cpp binds Metal and decoded a 4.87s clip
+        in 0.110s warm against faster-whisper's 0.241s on CPU, and
+        ``say`` is built in, free of the GPL-3.0 question, and does not
+        abort the process the way the piper-tts 1.5/1.6 arm64 wheels do.
+        """
+        import platform as platform_mod
+
         from cli.setup.steps import audio as audio_step
 
+        monkeypatch.setattr(platform_mod, "system", lambda: system)
         state = WizardState.load(tmp_path / "feral")
         # Pretend faster-whisper + piper are both installed.
         monkeypatch.setattr(
@@ -407,9 +427,12 @@ class TestAudioStep:
         answers = iter([True, True])
         monkeypatch.setattr(audio_step, "confirm", lambda *a, **kw: next(answers))
         asyncio.run(audio_step.run(state))
-        assert state.get_setting("audio", "stt_provider") == "faster-whisper"
-        assert state.get_setting("audio", "tts_provider") == "piper"
-        assert state.get_setting("audio", "tts_voice") == "en_US-lessac-medium"
+        assert state.get_setting("audio", "stt_provider") == expect_stt
+        assert state.get_setting("audio", "tts_provider") == expect_tts
+        # Whichever engine was picked, the voice must be one it knows.
+        assert state.get_setting("audio", "tts_voice") == (
+            "Samantha" if system == "Darwin" else "en_US-lessac-medium"
+        )
 
     def test_cloud_path_writes_openai(self, tmp_path, monkeypatch):
         from cli.setup.steps import audio as audio_step
