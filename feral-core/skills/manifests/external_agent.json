@@ -1,160 +1,243 @@
 {
-  "skill_id": "external_agent",
-  "version": "1.0.0",
-  "author": "feral-core",
-  "brand": {
-    "name": "External Coding Agent",
-    "primary_color": "#0EA5E9",
-    "secondary_color": "#0369A1",
-    "logo_url": "",
-    "icon_set": "sf_symbols"
+ "skill_id": "external_agent",
+ "version": "1.0.0",
+ "author": "feral-core",
+ "brand": {
+  "name": "External Coding Agent",
+  "primary_color": "#0EA5E9",
+  "secondary_color": "#0369A1",
+  "logo_url": "",
+  "icon_set": "sf_symbols"
+ },
+ "description": "Hand a coding task to an external coding agent (opencode, Claude Code, Codex) running as a subprocess and driven over ACP, the Agent Client Protocol. Use this for multi-file refactors, whole-feature implementations and long autonomous coding runs inside a specific repository, where a dedicated coding agent with its own planning loop does better than FERAL's own file tools. The external agent runs with real filesystem and shell access, so every action it wants to take that its own policy marks dangerous comes back as a permission request that you must answer explicitly with respond_permission. Nothing is ever auto-approved.",
+ "trigger_phrases": [
+  "use opencode",
+  "run claude code on this",
+  "hand this to a coding agent",
+  "spawn a coding agent",
+  "delegate this refactor",
+  "have codex do it",
+  "external coding agent",
+  "what did the coding agent do",
+  "what did opencode change",
+  "brief me on the coding agents",
+  "what have the agents been doing",
+  "recap the agent runs"
+ ],
+ "categories": [
+  "coding",
+  "agents",
+  "developer_tools",
+  "autonomy:user_confirm"
+ ],
+ "auth": {
+  "type": "none"
+ },
+ "endpoints": [
+  {
+   "id": "list_agents",
+   "method": "PYTHON",
+   "url": "python://external_agent/list_agents",
+   "description": "List the external coding agents FERAL can drive, whether each one is actually installed on this machine, and how to install the missing ones. Also reports any live sessions and whether hermes is present. Call this before run_task when you are not sure which agents exist.",
+   "params": [],
+   "returns_description": "Object with default_agent, agents[] (agent_id, display_name, available, native_acp, binary_path, install_hint, reason), hermes detection, and live_sessions[].",
+   "ui_hint": "list",
+   "safety_tier": "safe",
+   "read_only_hint": true,
+   "emit_result_preview": true
   },
-  "description": "Hand a coding task to an external coding agent (opencode, Claude Code, Codex) running as a subprocess and driven over ACP, the Agent Client Protocol. Use this for multi-file refactors, whole-feature implementations and long autonomous coding runs inside a specific repository, where a dedicated coding agent with its own planning loop does better than FERAL's own file tools. The external agent runs with real filesystem and shell access, so every action it wants to take that its own policy marks dangerous comes back as a permission request that you must answer explicitly with respond_permission. Nothing is ever auto-approved.",
-  "trigger_phrases": [
-    "use opencode",
-    "run claude code on this",
-    "hand this to a coding agent",
-    "spawn a coding agent",
-    "delegate this refactor",
-    "have codex do it",
-    "external coding agent"
-  ],
-  "categories": [
-    "coding",
-    "agents",
-    "developer_tools",
-    "autonomy:user_confirm"
-  ],
-  "auth": {
-    "type": "none"
-  },
-  "endpoints": [
+  {
+   "id": "run_task",
+   "method": "PYTHON",
+   "url": "python://external_agent/run_task",
+   "description": "Send a coding task to an external agent and stream its work back. Continues an existing session when session_handle names one, and otherwise resumes the last session this agent had in this workspace so a follow-up does not start the agent cold. Returns when the turn finishes, when the agent asks permission to do something, or when wait_seconds elapses, whichever comes first. Check the returned status: 'completed' means the turn is done, 'awaiting_permission' means you must call respond_permission before anything else happens, 'running' means call run_task again on the same session_handle with an empty follow-up or just wait, and 'failed' carries the error and the agent's stderr. The 'continuity' object says whether this turn reattached to an earlier session and by which mechanism; when it says the agent was restarted, tell the user the agent itself does not remember the earlier work. Every finished turn is written to FERAL's memory, so you can recall it later with recall_activity.",
+   "params": [
     {
-      "id": "list_agents",
-      "method": "PYTHON",
-      "url": "python://external_agent/list_agents",
-      "description": "List the external coding agents FERAL can drive, whether each one is actually installed on this machine, and how to install the missing ones. Also reports any live sessions and whether hermes is present. Call this before run_task when you are not sure which agents exist.",
-      "params": [],
-      "returns_description": "Object with default_agent, agents[] (agent_id, display_name, available, native_acp, binary_path, install_hint, reason), hermes detection, and live_sessions[].",
-      "ui_hint": "list",
-      "safety_tier": "safe",
-      "read_only_hint": true,
-      "emit_result_preview": true
+     "name": "prompt",
+     "type": "string",
+     "required": true,
+     "description": "The coding task, written as you would write it to a human engineer. Be specific about files and acceptance criteria; the external agent cannot see this conversation."
     },
     {
-      "id": "run_task",
-      "method": "PYTHON",
-      "url": "python://external_agent/run_task",
-      "description": "Send a coding task to an external agent and stream its work back. Starts a new session in workspace_dir unless session_handle names an existing one. Returns when the turn finishes, when the agent asks permission to do something, or when wait_seconds elapses, whichever comes first. Check the returned status: 'completed' means the turn is done, 'awaiting_permission' means you must call respond_permission before anything else happens, 'running' means call run_task again on the same session_handle with an empty follow-up or just wait, and 'failed' carries the error and the agent's stderr.",
-      "params": [
-        {
-          "name": "prompt",
-          "type": "string",
-          "required": true,
-          "description": "The coding task, written as you would write it to a human engineer. Be specific about files and acceptance criteria; the external agent cannot see this conversation."
-        },
-        {
-          "name": "agent_id",
-          "type": "string",
-          "required": false,
-          "description": "Which agent to use. Defaults to the configured external_agents.default_agent.",
-          "enum": ["opencode", "claude_code", "codex"]
-        },
-        {
-          "name": "workspace_dir",
-          "type": "string",
-          "required": false,
-          "description": "Absolute path to the repository the agent should work in. Defaults to the current working directory. Ignored when session_handle is given."
-        },
-        {
-          "name": "session_handle",
-          "type": "string",
-          "required": false,
-          "description": "Continue an existing session instead of starting a new one. Use the session_handle returned by an earlier run_task."
-        },
-        {
-          "name": "wait_seconds",
-          "type": "number",
-          "required": false,
-          "description": "How long to wait before reporting back. 1 to 600, default 90.",
-          "default": "90"
-        }
-      ],
-      "returns_description": "Object with status, session_handle, agent_id, workspace_dir, events[], tool_calls[], text, stop_reason and pending_permissions[].",
-      "ui_hint": "detail_card",
-      "safety_tier": "confirm",
-      "requires_user_approval": true,
-      "result_budget": "workspace",
-      "emit_result_preview": true
+     "name": "agent_id",
+     "type": "string",
+     "required": false,
+     "description": "Which agent to use. Defaults to the configured external_agents.default_agent.",
+     "enum": [
+      "opencode",
+      "claude_code",
+      "codex"
+     ]
     },
     {
-      "id": "respond_permission",
-      "method": "PYTHON",
-      "url": "python://external_agent/respond_permission",
-      "description": "Answer a permission request that an external agent raised mid-task. Ask the user what they want before calling this: the agent is asking to touch their real files or run a real shell command. allow_always remembers the answer for the rest of the session, so only use it when the user says so explicitly. After answering, this waits for the turn the same way run_task does and returns the same shape.",
-      "params": [
-        {
-          "name": "request_id",
-          "type": "string",
-          "required": true,
-          "description": "The request_id from pending_permissions[] in a run_task result."
-        },
-        {
-          "name": "decision",
-          "type": "string",
-          "required": true,
-          "description": "What the user decided.",
-          "enum": ["allow_once", "allow_always", "reject_once", "reject_always"]
-        },
-        {
-          "name": "wait_seconds",
-          "type": "number",
-          "required": false,
-          "description": "How long to wait for the resumed turn before reporting back. 1 to 600, default 90.",
-          "default": "90"
-        }
-      ],
-      "returns_description": "The same turn payload as run_task, plus an 'answered' object recording the request_id and decision.",
-      "ui_hint": "detail_card",
-      "safety_tier": "confirm",
-      "requires_user_approval": true,
-      "result_budget": "workspace",
-      "emit_result_preview": true
+     "name": "workspace_dir",
+     "type": "string",
+     "required": false,
+     "description": "Absolute path to the repository the agent should work in. Defaults to the current working directory. Ignored when session_handle is given."
     },
     {
-      "id": "close_session",
-      "method": "PYTHON",
-      "url": "python://external_agent/close_session",
-      "description": "End an external agent session and kill its subprocess. Call this when the task is done or the user wants to stop. Set cancel_first to interrupt a turn that is still running before closing.",
-      "params": [
-        {
-          "name": "session_handle",
-          "type": "string",
-          "required": true,
-          "description": "The session_handle returned by run_task."
-        },
-        {
-          "name": "cancel_first",
-          "type": "boolean",
-          "required": false,
-          "description": "Cancel the in-flight turn before closing. Defaults to false.",
-          "default": "false"
-        }
-      ],
-      "returns_description": "Object with handle and closed.",
-      "ui_hint": "detail_card",
-      "safety_tier": "safe"
+     "name": "session_handle",
+     "type": "string",
+     "required": false,
+     "description": "Continue an existing session instead of starting a new one. Use the session_handle returned by an earlier run_task."
+    },
+    {
+     "name": "wait_seconds",
+     "type": "number",
+     "required": false,
+     "description": "How long to wait before reporting back. 1 to 600, default 90.",
+     "default": "90"
+    },
+    {
+     "name": "conversation_id",
+     "type": "string",
+     "required": false,
+     "description": "Optional id tying this agent session to the current FERAL conversation, so a follow-up in the same conversation resumes the same agent session. Omit it and FERAL falls back to matching on agent plus workspace."
+    },
+    {
+     "name": "fresh_session",
+     "type": "boolean",
+     "required": false,
+     "description": "Force a brand new agent session instead of resuming the last one in this workspace. Use when the user is starting an unrelated task in a repository the agent has worked in before.",
+     "default": "false"
     }
-  ],
-  "flows": [],
-  "crons": [],
-  "triggers": [],
-  "permissions": [
-    "filesystem",
-    "process_spawn",
-    "autonomy:user_confirm"
-  ],
-  "requires_daemon": false,
-  "daemon_node_type": null,
-  "max_calls_per_hour": 200
+   ],
+   "returns_description": "Object with status, session_handle, agent_id, workspace_dir, events[] (most recent only, with events_total and events_omitted), tool_calls[], text, stop_reason, pending_permissions[], a continuity object, and a memory object holding the digest that was saved.",
+   "ui_hint": "detail_card",
+   "safety_tier": "confirm",
+   "requires_user_approval": true,
+   "result_budget": "workspace",
+   "emit_result_preview": true
+  },
+  {
+   "id": "respond_permission",
+   "method": "PYTHON",
+   "url": "python://external_agent/respond_permission",
+   "description": "Answer a permission request that an external agent raised mid-task. Ask the user what they want before calling this: the agent is asking to touch their real files or run a real shell command. allow_always remembers the answer for the rest of the session, so only use it when the user says so explicitly. After answering, this waits for the turn the same way run_task does and returns the same shape.",
+   "params": [
+    {
+     "name": "request_id",
+     "type": "string",
+     "required": true,
+     "description": "The request_id from pending_permissions[] in a run_task result."
+    },
+    {
+     "name": "decision",
+     "type": "string",
+     "required": true,
+     "description": "What the user decided.",
+     "enum": [
+      "allow_once",
+      "allow_always",
+      "reject_once",
+      "reject_always"
+     ]
+    },
+    {
+     "name": "wait_seconds",
+     "type": "number",
+     "required": false,
+     "description": "How long to wait for the resumed turn before reporting back. 1 to 600, default 90.",
+     "default": "90"
+    }
+   ],
+   "returns_description": "The same turn payload as run_task, plus an 'answered' object recording the request_id and decision.",
+   "ui_hint": "detail_card",
+   "safety_tier": "confirm",
+   "requires_user_approval": true,
+   "result_budget": "workspace",
+   "emit_result_preview": true
+  },
+  {
+   "id": "close_session",
+   "method": "PYTHON",
+   "url": "python://external_agent/close_session",
+   "description": "End an external agent session and kill its subprocess. Call this when the task is done or the user wants to stop, because it also drops the saved pointer so a later task does not silently resume this session. Set cancel_first to interrupt a turn that is still running before closing; the work it did so far is still written to memory.",
+   "params": [
+    {
+     "name": "session_handle",
+     "type": "string",
+     "required": true,
+     "description": "The session_handle returned by run_task."
+    },
+    {
+     "name": "cancel_first",
+     "type": "boolean",
+     "required": false,
+     "description": "Cancel the in-flight turn before closing. Defaults to false.",
+     "default": "false"
+    }
+   ],
+   "returns_description": "Object with handle, closed, was_live and the memory record written for an interrupted turn.",
+   "ui_hint": "detail_card",
+   "safety_tier": "safe"
+  },
+  {
+   "id": "recall_activity",
+   "method": "PYTHON",
+   "url": "python://external_agent/recall_activity",
+   "description": "Report what the external coding agents have done, across all of them at once. Use this for questions like 'what did the coding agent change yesterday', 'what has opencode been doing in this repo', or 'brief me on the agent runs'. Each result is one agent turn: which agent, which repository, what was asked, which files were touched, which permissions were refused, and whether it finished. Reads the same episodic memory the rest of FERAL reads, so it agrees with the fused timeline rather than competing with it. It also lists sessions that are still live and sessions that can be resumed.",
+   "params": [
+    {
+     "name": "window_label",
+     "type": "string",
+     "required": false,
+     "description": "Natural time window: today, yesterday, this_morning, this_afternoon, this_evening, last_week, last_month, or last_tuesday and friends. Defaults to yesterday."
+    },
+    {
+     "name": "query",
+     "type": "string",
+     "required": false,
+     "description": "Optional search text when the user describes the work rather than the time, for example 'the refactor that broke the tests'."
+    },
+    {
+     "name": "workspace_dir",
+     "type": "string",
+     "required": false,
+     "description": "Restrict to one repository, given as an absolute path. Omit to cover every workspace."
+    },
+    {
+     "name": "agent_id",
+     "type": "string",
+     "required": false,
+     "description": "Restrict to one agent. Omit to cover all of them, which is usually what the user wants."
+    },
+    {
+     "name": "from_ts",
+     "type": "number",
+     "required": false,
+     "description": "Explicit window start as a unix timestamp. Wins over window_label."
+    },
+    {
+     "name": "to_ts",
+     "type": "number",
+     "required": false,
+     "description": "Explicit window end as a unix timestamp. Wins over window_label."
+    },
+    {
+     "name": "limit",
+     "type": "number",
+     "required": false,
+     "description": "Maximum turns to return, newest first. Default 20.",
+     "default": "20"
+    }
+   ],
+   "returns_description": "Object with sessions[] (episode_id, agent_id, workspace_dir, session_handle, at, summary, detail), by_agent grouping the same entries, agents[], workspaces[], the resolved window, live_sessions[] and resumable_sessions[].",
+   "ui_hint": "list",
+   "safety_tier": "safe",
+   "read_only_hint": true,
+   "emit_result_preview": true
+  }
+ ],
+ "flows": [],
+ "crons": [],
+ "triggers": [],
+ "permissions": [
+  "filesystem",
+  "process_spawn",
+  "autonomy:user_confirm"
+ ],
+ "requires_daemon": false,
+ "daemon_node_type": null,
+ "max_calls_per_hour": 200
 }

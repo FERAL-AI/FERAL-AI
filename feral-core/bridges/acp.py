@@ -90,6 +90,30 @@ M_SESSION_PROMPT = "session/prompt"
 M_SESSION_CANCEL = "session/cancel"
 M_SESSION_CLOSE = "session/close"
 
+# Continuity methods. Not guessed either: these three names are the ones
+# opencode's own ACP tests drive, in
+# packages/opencode/test/cli/acp/lifecycle.test.ts lines 56, 78 and 107.
+#
+# The two are NOT interchangeable, and which one a client wants depends
+# on what it is doing:
+#
+# * ``session/load`` replays the whole prior conversation back at the
+#   client as ``session/update`` notifications before it returns
+#   (opencode packages/opencode/src/acp/service.ts line 232,
+#   ``replayMessages``). That is what an editor wants when it is
+#   repainting a transcript. For FERAL it is pure cost: the replay would
+#   land in ``AcpSession.transcript`` and the next turn's digest would
+#   describe the previous turn's work as if it had just happened.
+# * ``session/resume`` reloads the agent-side session without the replay
+#   (same file, line 290: it reads at most 20 messages purely to restore
+#   the model, variant and mode). That is what FERAL wants.
+#
+# So resume is preferred and load is the fallback, which is the opposite
+# of the order the capability names suggest.
+M_SESSION_LOAD = "session/load"
+M_SESSION_RESUME = "session/resume"
+M_SESSION_LIST = "session/list"
+
 
 class AcpProtocolError(RuntimeError):
     """The agent did something the protocol does not allow, or died."""
@@ -216,6 +240,12 @@ class AcpSession:
         self.cwd = cwd
         self.events: asyncio.Queue = asyncio.Queue()
         self.transcript: list[AcpEvent] = []
+        # Every path FERAL itself wrote on this agent's behalf, in order.
+        # This is the authoritative answer to "which files did it touch":
+        # a tool call's ``locations[]`` is the agent's claim, whereas an
+        # entry here is a write this process actually performed through
+        # ``AcpAgentProcess._fs_write``.
+        self.written_paths: list[str] = []
         self._closed = False
 
     def _record(self, event: AcpEvent) -> None:
@@ -495,6 +525,11 @@ class AcpAgentProcess:
         except OSError as exc:
             raise JsonRpcError(INTERNAL_ERROR, f"cannot write {path}: {exc}") from exc
         logger.info("external agent wrote %s (%d bytes)", path, len(content))
+        # Recorded only after the write succeeded, so a refused or failed
+        # write never shows up later as a file the agent changed.
+        session = self.sessions.get(str(params.get("sessionId") or ""))
+        if session is not None and path not in session.written_paths:
+            session.written_paths.append(path)
         return {}
 
     async def _handle_permission(self, params: dict) -> dict[str, Any]:
@@ -584,6 +619,114 @@ class AcpAgentProcess:
         session = AcpSession(self, str(result["sessionId"]), absolute)
         self.sessions[session.session_id] = session
         return session
+
+    # ------------------------------------------------------------------
+    # Continuity
+    # ------------------------------------------------------------------
+
+    @property
+    def session_capabilities(self) -> dict[str, Any]:
+        """The ``sessionCapabilities`` block from ``initialize``.
+
+        Present on both reference agents (opencode
+        ``src/acp/service.ts`` line 122 advertises close, fork, list and
+        resume; hermes ``acp_adapter/server.py`` line 1069 advertises
+        fork, list and resume). Absent on an older agent, which is why
+        this returns an empty dict rather than raising.
+        """
+        caps = self.agent_capabilities.get("sessionCapabilities")
+        return caps if isinstance(caps, dict) else {}
+
+    def can_resume(self) -> bool:
+        """Whether reattaching to a prior session is worth attempting.
+
+        ``loadSession: true`` counts, because ``session/load`` is the v1
+        way to reattach and predates ``sessionCapabilities`` entirely.
+        """
+        if "resume" in self.session_capabilities:
+            return True
+        return bool(self.agent_capabilities.get("loadSession"))
+
+    async def reattach_session(
+        self,
+        session_id: str,
+        cwd: str,
+        *,
+        mcp_servers: Optional[list[dict]] = None,
+        timeout: float = 60.0,
+    ) -> tuple[AcpSession, str]:
+        """Reattach to an agent-side session that outlived its process.
+
+        Returns the session and the mechanism that produced it, one of
+        ``"resume"``, ``"load"`` or ``"new"``.
+
+        A caveat that a client cannot detect and must therefore not
+        pretend to: hermes' ``resume_session`` logs a warning and creates
+        a brand new session when the id is unknown, then returns success
+        (``acp_adapter/server.py`` lines 1413 to 1416). So a ``"resume"``
+        result means the agent accepted the id, NOT that any history came
+        back. The mechanism is reported upward for exactly that reason,
+        and callers surface it to the user rather than claiming
+        continuity they cannot prove.
+        """
+        absolute = os.path.abspath(cwd)
+        params = {
+            "sessionId": session_id,
+            "cwd": absolute,
+            "mcpServers": mcp_servers or [],
+        }
+
+        attempts: list[tuple[str, str]] = []
+        if "resume" in self.session_capabilities:
+            attempts.append(("resume", M_SESSION_RESUME))
+        if self.agent_capabilities.get("loadSession"):
+            # Second, never first: load replays the entire prior
+            # conversation as session/update notifications, which would
+            # pollute the next turn's transcript slice.
+            attempts.append(("load", M_SESSION_LOAD))
+
+        for mechanism, method in attempts:
+            try:
+                await self.peer.request(method, params, timeout=timeout)
+            except Exception as exc:
+                logger.info(
+                    "%s of session %s failed (%s); trying the next mechanism",
+                    method,
+                    session_id,
+                    exc,
+                )
+                continue
+            session = AcpSession(self, session_id, absolute)
+            self.sessions[session_id] = session
+            # A load replays history into the transcript. Drop it: the
+            # digest slices the transcript per turn, and replayed frames
+            # would be attributed to the turn that has not run yet.
+            if mechanism == "load":
+                session.transcript.clear()
+                while not session.events.empty():
+                    session.events.get_nowait()
+            return session, mechanism
+
+        return await self.new_session(absolute, mcp_servers=mcp_servers), "new"
+
+    async def list_sessions(
+        self, cwd: str = "", *, timeout: float = 30.0
+    ) -> list[dict[str, Any]]:
+        """Sessions the agent itself remembers. Empty when unsupported."""
+        if "list" not in self.session_capabilities:
+            return []
+        params: dict[str, Any] = {}
+        if cwd:
+            params["cwd"] = os.path.abspath(cwd)
+        try:
+            result = await self.peer.request(M_SESSION_LIST, params, timeout=timeout)
+        except Exception as exc:
+            logger.info("session/list failed: %s", exc)
+            return []
+        if not isinstance(result, dict):
+            return []
+        sessions = result.get("sessions")
+        return [s for s in sessions if isinstance(s, dict)] if isinstance(sessions, list) else []
 
     # ------------------------------------------------------------------
     # Teardown
