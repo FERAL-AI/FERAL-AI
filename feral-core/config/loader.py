@@ -89,11 +89,20 @@ DEFAULT_SETTINGS = {
         "tts_provider": "openai",
         "tts_model": "tts-1",
         "tts_voice": "nova",
-        # Ordered list of voice realtime providers the router tries
-        # before flipping to chunked TTS. ``openai`` resolves to
-        # ``RealtimeProxy`` (OpenAI Realtime API), ``gemini`` to
-        # ``GeminiRealtimeProxy``. Override per install via
-        # ``~/.feral/settings.json``.
+        # Operator's preferred order of realtime providers, written by
+        # the WebUI Settings page (``feral-client-v2``
+        # ``src/pages/Settings.jsx``).
+        #
+        # NOT READ BY THE ROUTER. The previous comment here claimed the
+        # router tries these in order before flipping to chunked TTS;
+        # that was never true. ``voice/router.py``
+        # ``_preferred_realtime_provider()`` resolves a SINGLE provider
+        # from ``FERAL_VOICE_PROVIDER`` and then the scalar
+        # ``audio.realtime_primary``, and never consults this list. The
+        # key is kept (and allowlisted in
+        # ``tests/test_settings_keys_have_readers.py``) only so the
+        # Settings page has preselected entries; it is inert until the
+        # router learns to walk it.
         "realtime_providers": ["openai", "gemini"],
         # OpenAI Realtime model id passed to the RealtimeProxy when
         # opening a session. Operator-overridable via
@@ -277,16 +286,53 @@ DEFAULT_SETTINGS = {
         "tool_loop_max_seconds": 900,
     },
     "skills": {
-        "enabled": [],
-        "disabled": [],
+        # ``skills.enabled`` / ``skills.disabled`` used to live here.
+        # Nothing ever wrote them (no route, no wizard step, no client)
+        # and nothing ever read them: skill availability comes from the
+        # manifests discovered by ``discover_skills_directories`` plus
+        # ``security/sandbox_policy.py``'s ``blocked_skill_ids``. They
+        # were removed rather than wired, because two competing sources
+        # of truth for "is this skill on" is how the vision-flag drift
+        # happened (see ``_unify_feature_flags``).
         "external_directories": [],
     },
-    "nodes": {
-        "auto_connect": True,
-    },
-    "ui": {
-        "theme": "dark",
-        "show_debug": False,
+    # Coding-harness knobs. Each of these shipped as an env var only, so
+    # they were configurable per-process but not persistable: an operator
+    # who wanted read-before-edit enforced had to re-export the variable
+    # on every launch. Mirroring them into settings makes the choice
+    # survive a restart.
+    #
+    # Precedence is unchanged and deliberately env-first. The env var
+    # lands in this section via ``_apply_env_overrides`` and is then
+    # re-exported verbatim by ``export_as_env``, so a shell that sets
+    # ``FERAL_READ_BEFORE_EDIT=enforce`` still beats settings.json. The
+    # defaults below are copied from the readers, so an install that
+    # never touches this section behaves exactly as before.
+    "coding": {
+        # off | warn | enforce. ``skills/file_state.py`` (MODE_WARN).
+        "read_before_edit": "warn",
+        # on | off. ``skills/call_context.py``.
+        "tool_call_context": "on",
+        # Cost guard for the fallback edit matchers, which are
+        # O(file_lines x needle_lines). ``skills/impl/coding_tools.py``
+        # via ``skills/edit_matchers.py`` DEFAULT_MAX_CONTENT_LINES /
+        # DEFAULT_MAX_NEEDLE_LINES.
+        "edit_max_content_lines": 4000,
+        "edit_max_needle_lines": 400,
+        # Empty means "$FERAL_HOME/checkpoints"; only a non-empty value
+        # is exported, because ``skills/checkpoints.py::checkpoint_root``
+        # treats any truthy value as an outright override.
+        "checkpoint_dir": "",
+        "checkpoint_retention_days": 14,
+        # 8 MiB, matching ``skills/checkpoints.py``.
+        "checkpoint_max_blob_bytes": 8388608,
+        # on | off. ``skills/diagnostics.py``.
+        "post_edit_diagnostics": "on",
+        # Seconds. ``skills/diagnostics.py`` floors this at 0.5.
+        "diagnostics_timeout": 5,
+        # Seconds a turn may sit idle before the tool loop gives up.
+        # ``agents/tool_runner.py``.
+        "turn_idle_seconds": 180,
     },
     # Pairing access mode (Mode A LAN / Mode B localhost / Mode C remote).
     # Default is "localhost" to preserve the historical loopback-only
@@ -294,9 +340,16 @@ DEFAULT_SETTINGS = {
     # to pick LAN or remote (Tailscale) explicitly.
     "access": {
         "pairing_mode": "localhost",
-        "remote_provider": None,
+        # ``remote_provider`` used to sit here and had no reader. Three
+        # sites still write it as provenance (``cli/setup/network.py``,
+        # ``cli/setup/steps/network.py``, ``api/routes/access.py``);
+        # those writes are unaffected, the key just no longer poses as a
+        # configurable default.
         "tailscale": {
-            "funnel": True,
+            # ``funnel`` used to sit here defaulting to True and was
+            # never written OR read: the remote-up flow calls
+            # ``tailscale.funnel_enable()`` unconditionally, so the flag
+            # gated nothing.
             "tailnet_url": "",
         },
     },
@@ -513,6 +566,15 @@ class ConfigLoader:
             "FERAL_STREAMING": ("features", "streaming"),
             "FERAL_PROACTIVE": ("features", "proactive"),
             "FERAL_MULTI_AGENT": ("features", "multi_agent"),
+            # ``agents/learner.py`` resolves self-learning ONLY from
+            # ``FERAL_SELF_LEARNING``, and only ``api/routes/config.py``
+            # ever set that variable, at toggle time. So switching
+            # self-learning off in Settings held until the next restart
+            # and then silently reverted to on, because nothing exported
+            # ``features.self_learning`` at boot. Same defect as the
+            # autonomy tier below; same fix, both halves of the round
+            # trip so an explicit env var still wins.
+            "FERAL_SELF_LEARNING": ("features", "self_learning"),
             "FERAL_SCENE_COOLDOWN": ("vision", "scene_cooldown"),
             "FERAL_STT_PROVIDER": ("audio", "stt_provider"),
             "FERAL_STT_MODEL": ("audio", "stt_model"),
@@ -525,6 +587,20 @@ class ConfigLoader:
             # re-exported verbatim, so an operator's FERAL_AUTONOMY
             # still wins over settings.json.
             "FERAL_AUTONOMY": ("security", "autonomy_mode"),
+            # Coding harness. Env stays the override: the value lands in
+            # ``coding.*`` here and ``export_as_env`` puts it straight
+            # back, so an operator's shell export still wins over
+            # settings.json.
+            "FERAL_READ_BEFORE_EDIT": ("coding", "read_before_edit"),
+            "FERAL_TOOL_CALL_CONTEXT": ("coding", "tool_call_context"),
+            "FERAL_EDIT_MAX_CONTENT_LINES": ("coding", "edit_max_content_lines"),
+            "FERAL_EDIT_MAX_NEEDLE_LINES": ("coding", "edit_max_needle_lines"),
+            "FERAL_CHECKPOINT_DIR": ("coding", "checkpoint_dir"),
+            "FERAL_CHECKPOINT_RETENTION_DAYS": ("coding", "checkpoint_retention_days"),
+            "FERAL_CHECKPOINT_MAX_BLOB_BYTES": ("coding", "checkpoint_max_blob_bytes"),
+            "FERAL_POST_EDIT_DIAGNOSTICS": ("coding", "post_edit_diagnostics"),
+            "FERAL_DIAGNOSTICS_TIMEOUT": ("coding", "diagnostics_timeout"),
+            "FERAL_TURN_IDLE_SECONDS": ("coding", "turn_idle_seconds"),
         }
 
         for env_key, config_path in env_map.items():
@@ -1032,6 +1108,14 @@ class ConfigLoader:
         env["FERAL_STREAMING"] = str(features.get("streaming", False)).lower()
         env["FERAL_PROACTIVE"] = str(features.get("proactive", False)).lower()
         env["FERAL_MULTI_AGENT"] = str(features.get("multi_agent", True)).lower()
+        # ``agents/learner.py::_self_learning_enabled`` reads
+        # ``FERAL_SELF_LEARNING`` and nothing else, defaulting to true
+        # when unset. Without this export the Settings toggle only held
+        # for the life of the process that handled the click: the next
+        # boot left the variable unset and self-learning came back on,
+        # burning LLM calls on extract + summarize for an operator who
+        # had explicitly turned it off.
+        env["FERAL_SELF_LEARNING"] = str(features.get("self_learning", True)).lower()
 
         security = self._merged.get("security", {}) or {}
         env["NODE_API_KEY"] = security.get("node_api_key", "")
@@ -1048,6 +1132,38 @@ class ConfigLoader:
         env["FERAL_AUTONOMY"] = (
             raw_autonomy if raw_autonomy in ("strict", "hybrid", "loose") else "hybrid"
         )
+
+        # Coding harness. Every one of these is read from the process
+        # environment by its subsystem and from nowhere else, so the
+        # export is what makes the settings section mean anything. The
+        # fallbacks repeat each reader's own default so an install with
+        # no ``coding`` block in settings.json exports exactly the values
+        # the readers would have chosen for themselves.
+        coding = self._merged.get("coding", {}) or {}
+        env["FERAL_READ_BEFORE_EDIT"] = str(coding.get("read_before_edit", "warn"))
+        env["FERAL_TOOL_CALL_CONTEXT"] = str(coding.get("tool_call_context", "on"))
+        env["FERAL_EDIT_MAX_CONTENT_LINES"] = str(
+            coding.get("edit_max_content_lines", 4000)
+        )
+        env["FERAL_EDIT_MAX_NEEDLE_LINES"] = str(
+            coding.get("edit_max_needle_lines", 400)
+        )
+        # ``checkpoints.checkpoint_root`` treats ANY truthy value as an
+        # outright override of ``$FERAL_HOME/checkpoints``, so an empty
+        # setting must not be exported as an empty string.
+        if coding.get("checkpoint_dir"):
+            env["FERAL_CHECKPOINT_DIR"] = str(coding["checkpoint_dir"])
+        env["FERAL_CHECKPOINT_RETENTION_DAYS"] = str(
+            coding.get("checkpoint_retention_days", 14)
+        )
+        env["FERAL_CHECKPOINT_MAX_BLOB_BYTES"] = str(
+            coding.get("checkpoint_max_blob_bytes", 8388608)
+        )
+        env["FERAL_POST_EDIT_DIAGNOSTICS"] = str(
+            coding.get("post_edit_diagnostics", "on")
+        )
+        env["FERAL_DIAGNOSTICS_TIMEOUT"] = str(coding.get("diagnostics_timeout", 5))
+        env["FERAL_TURN_IDLE_SECONDS"] = str(coding.get("turn_idle_seconds", 180))
 
         # Credentials — LLMs + messaging channels
         credential_env_keys = (
