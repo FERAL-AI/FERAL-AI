@@ -552,9 +552,18 @@ async def _offer_stt_download(
                 "  faster-whisper is not installed: pip install 'feral-ai[stt]'"
             )
             return
+        # This used to claim the model downloads on first use. It does
+        # not: nothing passes allow_download=True, there is no
+        # ensure_faster_whisper_model(), and the provider constructor
+        # refuses when the weights are absent. A fresh install that
+        # picked faster-whisper therefore refused every session while
+        # the wizard had promised it would sort itself out.
         console.print(
-            "  faster-whisper downloads its model on first use "
-            "(~150MB for base.en)."
+            "  faster-whisper will NOT fetch its model automatically. "
+            "Nothing in the runtime passes allow_download, so a session "
+            "that picks it fails until the weights are fetched by hand. "
+            "Prefer whispercpp, which is also the only Whisper build "
+            "with Metal acceleration on Apple silicon."
         )
 
 

@@ -21,7 +21,6 @@ from agents.skill_generator import SkillGenerator
 from agents.taskflow import TaskFlowRuntime
 from skills.registry import SkillRegistry
 from memory.store import MemoryStore
-from memory.ingest import MemoryIngestor
 from memory.node_subdevices import NodeSubdeviceStore
 from memory.session_snapshot import SessionSnapshotStore
 from memory.capability_registry import CapabilityRegistry
@@ -30,12 +29,11 @@ from perception.audio_pipeline import AudioPipeline
 from perception.scene import SceneAnalyzer
 from perception.change_detector import ChangeDetector
 from config.loader import ConfigLoader, feral_home, feral_data_home
-from config.runtime import brain_bind_host, brain_port, brain_public_base_url, ollama_base_url
-from security.vault import BlindVault, PermissionTier, ExecutionSandbox
+from security.vault import BlindVault, ExecutionSandbox
 from security.sandbox_policy import SandboxPolicy
-from hardware.protocol import DeviceRegistry, DeviceManifest, HUPAction, HUPActionType, FERAL_GLASSES_MANIFEST
+from hardware.protocol import DeviceRegistry
 from mcp.server import FeralMCPServer
-from mcp.client import MCPClientManager, MCPServerConnection
+from mcp.client import MCPClientManager
 from channels.base import ChannelManager, ChannelMessage, ChannelResponse
 from voice.realtime_proxy import RealtimeProxy
 from voice.gemini_realtime import GeminiRealtimeProxy
@@ -58,7 +56,7 @@ from integrations.google_drive import GoogleDriveIntegration
 from integrations.google_contacts import GoogleContactsIntegration
 from integrations.microsoft365 import Microsoft365Integration
 from skills.marketplace import MarketplaceClient
-from gateway.protocol import MethodRegistry, GatewaySession, register_core_methods
+from gateway.protocol import MethodRegistry, register_core_methods
 from hardware.mesh import HardwareMesh
 from identity.workspace import IdentityWorkspace
 from genui.generator import GenUIEngine, ServiceProviderRegistry
@@ -935,7 +933,6 @@ class BrainState:
             # tests/test_llm_model_self_heal.py.
             try:
                 from providers.model_classes import classify
-                from providers.recommended import recommended_for
                 _model = (_shared_llm.model or "").strip()
                 _provider = _shared_llm.provider
                 _cls = classify(_provider, _model) if _model else "unknown"
@@ -1553,6 +1550,13 @@ class BrainState:
                 send_to_session=self.send_to_session,
                 send_to_node=self._send_dict_to_node,
             )
+            # Surface-aware realtime ordering needs to know what kind of
+            # device is asking. `node_type` only arrives in the HUP
+            # `node_register` payload, which the router never sees, but
+            # the capability registry already records it for every
+            # connected node. Without this line the surface policy is
+            # inert and every caller gets the realtime-first default.
+            self.voice_router.set_capability_registry(self.capability_registry)
             # Wire the realtime proxy back into the router so OpenAI
             # Realtime failures (WS 1013 insufficient_quota, 429,
             # invalid_api_key, etc.) trigger

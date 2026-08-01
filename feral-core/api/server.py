@@ -1528,6 +1528,14 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                         )
                     )
 
+                elif msg.type == "voice_mute":
+                    if state.voice_router:
+                        await state.voice_router.set_session_muted(
+                            session_id,
+                            bool(raw.get("payload", {}).get("muted")),
+                            source="web",
+                        )
+
                 elif msg.type == "voice_config":
                     vcfg = raw.get("payload", {})
                     mode = vcfg.get("mode", "realtime")
@@ -2036,6 +2044,12 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # `payload.skills` is the Phase 4 wire field; legacy
                 # nodes (v2026.5.x and earlier) don't set it and the
                 # registry happily records an empty list.
+                # Belt-and-braces with the capability registry the router
+                # also reads: surface-aware realtime ordering needs to know
+                # what kind of device is asking, and `node_type` arrives
+                # only here.
+                if state.voice_router:
+                    state.voice_router.set_node_surface(node_id, payload.node_type)
                 state.capability_registry.register_node(
                     node_id,
                     node_type=payload.node_type,
@@ -2677,6 +2691,28 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     "allowed" if cancelled else "denied",
                     "voice_interrupt",
                     detail={"stream_id": stream_id, "cancelled": cancelled},
+                    payload_for_hash=payload_dict,
+                )
+
+            elif msg.type == "voice_mute":
+                payload_dict = raw.get("payload", {})
+                if not node_id or not state.voice_router:
+                    _record_phone_envelope(
+                        "denied", "voice_mute",
+                        detail={"reason": "missing_node_or_voice_router"},
+                        payload_for_hash=payload_dict,
+                    )
+                    continue
+                # Same key derivation the session-start branch uses, so a
+                # live chained session resolves to the same id.
+                mute_sid = payload_dict.get("stream_id", "") or f"voice-{node_id}"
+                muted = bool(payload_dict.get("muted"))
+                changed = await state.voice_router.set_session_muted(
+                    mute_sid, muted, source="client",
+                )
+                _record_phone_envelope(
+                    "allowed", "voice_mute",
+                    detail={"session_id": mute_sid, "muted": muted, "changed": changed},
                     payload_for_hash=payload_dict,
                 )
 
