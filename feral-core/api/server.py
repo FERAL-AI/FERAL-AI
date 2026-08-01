@@ -1073,6 +1073,24 @@ async def startup():
         asyncio.create_task(_provider_catalog_refresher(), name="feral-provider-catalog-refresher")
     )
 
+    # Integration probes were only ever written once, right after a token
+    # exchange, with a 60s cache. After that the "connected" badge fell
+    # back to "a token string exists", which is not the same claim and
+    # was not what the UI said. The sweeper is what makes the badge true.
+    #
+    # Started at boot rather than lazily on the first /api/integrations
+    # request, or a brain nobody has opened Settings on keeps cold badges
+    # and a revoked credential reads as healthy until someone looks.
+    try:
+        from integrations import probe_sweeper
+
+        probe_sweeper.ensure_started(
+            vault=getattr(state, "vault", None),
+            register=state.register_background_task,
+        )
+    except Exception as exc:
+        logger.debug("probe sweeper did not start: %s", exc)
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
