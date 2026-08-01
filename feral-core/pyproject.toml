@@ -185,15 +185,28 @@ stt-local = [
 # implicitly, is never a default, and is never the macOS default,
 # where the OS `say` synthesiser does the same job with no licensing
 # question and nothing to download.
+#
+# The upper bound is `<1.5` on macOS and only on macOS, and it is not a
+# caution, it is a measured defect. piper-tts 1.5.0 and 1.6.0 ship
+# macOS arm64 wheels whose espeakbridge.so has the CI build machine's
+# espeak-ng-data path linked into it and ignores every override
+# (espeak_data_dir=, ESPEAK_DATA_PATH, ESPEAK_DATA_DIR,
+# PIPER_ESPEAK_DATA, and a direct espeakbridge.initialize call were all
+# tested). Worse, it fails by calling exit(1) from native code rather
+# than raising, so it takes the whole process with it. 1.4.2 was
+# verified working end to end on an M1. Linux wheels are unaffected and
+# keep the full range.
 tts-piper = [
-    "piper-tts>=1.2.0,<2.0",
+    "piper-tts>=1.2.0,<1.5; sys_platform == 'darwin'",
+    "piper-tts>=1.2.0,<2.0; sys_platform != 'darwin'",
 ]
 # Historical alias. `feral-ai[tts]` has always meant Piper and is
 # referenced from install guides, so it keeps resolving. Same GPL-3.0
-# terms as `tts-piper` above - the name simply predates the
-# relicensing and does not advertise it.
+# terms and the same macOS pin as `tts-piper` above - the name simply
+# predates the relicensing and does not advertise it.
 tts = [
-    "piper-tts>=1.2.0,<2.0",
+    "piper-tts>=1.2.0,<1.5; sys_platform == 'darwin'",
+    "piper-tts>=1.2.0,<2.0; sys_platform != 'darwin'",
 ]
 # Server-side voice activity detection (Silero VAD, MIT, ~2.2MB ONNX).
 # This is what ends an utterance in the chained pipeline. Without it

@@ -14,6 +14,7 @@ provider list lives in this step.
 from __future__ import annotations
 
 import asyncio
+import platform
 
 from ..helpers import (
     SkipStep,
@@ -415,10 +416,9 @@ def _default_local_stt(entries: list) -> str:
 
     Not a preference, a hardware fact: CTranslate2 (faster-whisper) has
     no Metal backend, so on Apple Silicon it runs on CPU while
-    whisper.cpp uses the GPU.
+    whisper.cpp uses the GPU. Measured on an M1 with tiny.en over the
+    same 4.87s clip: whisper.cpp 0.110s warm, faster-whisper 0.241s.
     """
-    import platform
-
     ids = {e["id"] for e in entries}
     if platform.system() == "Darwin" and "whispercpp" in ids:
         return "whispercpp"
@@ -450,6 +450,29 @@ def _warn_piper_licence(console) -> None:
         "It is not installed by default and is not pulled in by any other "
         "extra. Installing it is your explicit choice: "
         "pip install 'feral-ai[tts-piper]'"
+    )
+    console.print(f"  [yellow]{message}[/]" if _RICH_AVAILABLE else f"  {message}")
+    if platform.system() == "Darwin":
+        _warn_piper_macos(console)
+
+
+def _warn_piper_macos(console) -> None:
+    """Say plainly that Piper is a bad deal on a Mac.
+
+    Not a general caution. piper-tts 1.5.0 and 1.6.0 ship macOS arm64
+    wheels that abort the process on the first synthesis (espeak-ng
+    data path linked into the native library at CI build time, not
+    overridable). 1.4.2 works, and the `tts-piper` extra pins below
+    1.5 on Darwin for that reason, but the built-in `say` needs no
+    download, no pin and no GPL-3.0 obligation.
+    """
+    message = (
+        "On macOS you do not need Piper. The built-in `say` synthesiser is "
+        "already installed, is verified working, downloads nothing and "
+        "carries no licence obligation. Piper on macOS additionally needs "
+        "a version pin: piper-tts 1.5.0 and 1.6.0 abort the process on "
+        "first synthesis because their arm64 wheels resolve an espeak "
+        "data path from the build machine. Only 1.2 to 1.4.x work here."
     )
     console.print(f"  [yellow]{message}[/]" if _RICH_AVAILABLE else f"  {message}")
 

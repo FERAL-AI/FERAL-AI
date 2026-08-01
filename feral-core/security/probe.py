@@ -950,9 +950,17 @@ async def _probe_macos_say(**_kwargs: Any) -> ProbeResult:
 async def _probe_piper(**_kwargs: Any) -> ProbeResult:
     started = time.perf_counter()
     try:
+        import asyncio
+
         from voice.tts_providers.piper import piper_available
 
-        ready, reason = piper_available()
+        # Off-thread, unlike its neighbours. ``piper_available`` spawns
+        # a child process and synthesises a word in it, because the
+        # macOS espeak failure is an exit(1) from native code that an
+        # in-process probe cannot survive. That is a second or two of
+        # blocking work, and every other probe in this file is running
+        # concurrently on this event loop.
+        ready, reason = await asyncio.to_thread(piper_available)
     except Exception as exc:
         ready, reason = False, f"{exc.__class__.__name__}: {exc}"
     return _local_result("piper", ready, reason, started)
