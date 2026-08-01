@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import statistics
 import time
@@ -106,6 +107,23 @@ class BaselineEngine:
     # week") questions while keeping the table bounded. Mirrors the
     # retention philosophy of memory/decay.py:MemoryDecayService.
     SAMPLE_RETENTION_DAYS: float = 35.0
+
+    # Cloud-wearable mirrors (Whoop, Oura) are a different workload from
+    # a live BLE sensor and need a different horizon. A streaming PPG
+    # source writes roughly one row a second, so 35 days is what keeps
+    # the table bounded; a cloud wearable writes about ten rows a day of
+    # daily-aggregate scores, so the same 35 days would throw away the
+    # entire reason to persist it ("my recovery over six months") while
+    # saving a few kilobytes. These sources therefore get their own,
+    # longer horizon.
+    #
+    # This does NOT change retention for any existing data: rows whose
+    # ``source`` is not in ``CLOUD_SAMPLE_SOURCES`` are still deleted at
+    # exactly ``SAMPLE_RETENTION_DAYS``, and an explicit
+    # ``prune_samples(retention_days=N)`` still applies N to every row
+    # as before.
+    CLOUD_SAMPLE_SOURCES: tuple[str, ...] = ("whoop", "oura")
+    CLOUD_SAMPLE_RETENTION_DAYS: float = 400.0
 
     # Run the retention sweep at most once every N inserts so a busy
     # streaming wearable (≈1 sample/sec) doesn't issue a DELETE on
@@ -339,21 +357,71 @@ class BaselineEngine:
             self.prune_samples(retention_days)
         self._conn.commit()
 
+    def cloud_retention_days(self) -> float:
+        """Retention horizon for cloud-wearable samples, in days.
+
+        Env override: ``FERAL_HEALTH_CLOUD_RETENTION_DAYS``. Default
+        ``CLOUD_SAMPLE_RETENTION_DAYS`` (400 days, so "this month last
+        year" is answerable). Read per call so an operator can widen or
+        narrow it without a restart, and so tests can set it.
+        """
+        raw = os.environ.get("FERAL_HEALTH_CLOUD_RETENTION_DAYS")
+        if raw is None or not str(raw).strip():
+            return float(self.CLOUD_SAMPLE_RETENTION_DAYS)
+        try:
+            value = float(str(raw).strip())
+        except (TypeError, ValueError):
+            logger.warning(
+                "FERAL_HEALTH_CLOUD_RETENTION_DAYS=%r is not a number; "
+                "using %s", raw, self.CLOUD_SAMPLE_RETENTION_DAYS,
+            )
+            return float(self.CLOUD_SAMPLE_RETENTION_DAYS)
+        # Never shorter than the live-sensor horizon: a cloud mirror
+        # outliving the raw stream is the whole point.
+        return max(value, float(self.SAMPLE_RETENTION_DAYS))
+
     def prune_samples(self, retention_days: float | None = None) -> int:
         """Delete samples older than the retention horizon. Returns the
         number of rows removed. Keeps the time-series bounded so it can
-        never grow without limit on a long-running brain."""
-        rd = (
-            retention_days
-            if retention_days is not None
-            else self.SAMPLE_RETENTION_DAYS
-        )
-        cutoff = time.time() - (float(rd) * 86400.0)
+        never grow without limit on a long-running brain.
+
+        Passing *retention_days* applies that one horizon to every row,
+        which is the pre-existing behaviour and what callers that want a
+        hard sweep expect. With no argument, live-sensor sources are
+        pruned at ``SAMPLE_RETENTION_DAYS`` (unchanged) and cloud
+        wearable mirrors at the longer ``cloud_retention_days()``.
+        """
+        if retention_days is not None:
+            cutoff = time.time() - (float(retention_days) * 86400.0)
+            cur = self._conn.execute(
+                "DELETE FROM biometric_samples WHERE ts < ?", (cutoff,)
+            )
+            self._conn.commit()
+            return cur.rowcount or 0
+
+        cloud = tuple(self.CLOUD_SAMPLE_SOURCES)
+        placeholders = ", ".join("?" for _ in cloud)
+        now = time.time()
+        removed = 0
+
+        live_cutoff = now - (float(self.SAMPLE_RETENTION_DAYS) * 86400.0)
         cur = self._conn.execute(
-            "DELETE FROM biometric_samples WHERE ts < ?", (cutoff,)
+            f"DELETE FROM biometric_samples WHERE ts < ? "
+            f"AND lower(source) NOT IN ({placeholders})",
+            (live_cutoff, *cloud),
         )
+        removed += cur.rowcount or 0
+
+        cloud_cutoff = now - (self.cloud_retention_days() * 86400.0)
+        cur = self._conn.execute(
+            f"DELETE FROM biometric_samples WHERE ts < ? "
+            f"AND lower(source) IN ({placeholders})",
+            (cloud_cutoff, *cloud),
+        )
+        removed += cur.rowcount or 0
+
         self._conn.commit()
-        return cur.rowcount or 0
+        return removed
 
     def get_samples(
         self,

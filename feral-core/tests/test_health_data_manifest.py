@@ -38,6 +38,7 @@ def test_manifest_loads_and_is_valid_pydantic():
     endpoint_ids = {ep.id for ep in manifest.endpoints}
     assert endpoint_ids == {
         "health_summary", "sleep_trend", "recovery_trend", "vitals_trend",
+        "health_history",
     }
 
 
@@ -46,6 +47,7 @@ def test_manifest_endpoints_match_health_aggregator_dispatch():
     validator = ToolDispatchValidator()
     for endpoint_id in (
         "health_summary", "sleep_trend", "recovery_trend", "vitals_trend",
+        "health_history",
     ):
         violations = validator.contract_violations("health_data", endpoint_id)
         assert not violations, (

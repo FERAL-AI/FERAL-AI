@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
@@ -19,6 +20,24 @@ logger = logging.getLogger("feral.integrations.health")
 
 WHOOP_API = "https://api.prod.whoop.com/developer/v1"
 OURA_API = "https://api.ouraring.com/v2/usercollection"
+
+# ``get_health_summary``'s flat snapshot field -> canonical metric name
+# (``integrations/health_canonical.py``). The snapshot dict is one of
+# the five pre-existing health-reading shapes; this map is how it
+# projects onto the canonical one for the wire, so the frame never
+# invents a field name the summary does not already have.
+_SUMMARY_TO_CANONICAL: dict[str, str] = {
+    "sleep_hours": "sleep_hours",
+    "sleep_quality": "sleep_score",
+    "recovery_score": "recovery_score",
+    "resting_hr": "resting_hr",
+    "hrv": "hrv",
+    "readiness": "readiness",
+    "activity_score": "activity_score",
+    "strain": "strain",
+    "current_hr": "hr",
+    "current_spo2": "spo2",
+}
 
 
 class WhoopClient:
@@ -373,6 +392,7 @@ class HealthAggregator:
         oura: Optional[OuraClient] = None,
         live_wearable_provider: Optional[Callable[[], Optional[dict[str, Any]]]] = None,
         biometric_history_provider: Optional[Callable[[], Any]] = None,
+        sync_provider: Optional[Callable[[], Any]] = None,
     ):
         self._whoop = whoop
         self._oura = oura
@@ -403,6 +423,19 @@ class HealthAggregator:
         # hot-path free of an ``api.state`` import and let tests inject
         # an in-memory ``BaselineEngine``.
         self._biometric_history_provider = biometric_history_provider
+        # Pluggable accessor for the durable Whoop mirror
+        # (``integrations.health_sync.WhoopDurableSync``). Pre-fix,
+        # Whoop was fetched on demand inside ``get_health_summary`` and
+        # thrown away, so nothing about Whoop survived the request and
+        # "my recovery over six months" was unanswerable. The sync
+        # service writes Whoop's daily records into the same durable
+        # ``biometric_samples`` store the glasses use. Consulted here so
+        # the mirror stays warm on the paths the user actually
+        # exercises (chat's ``health_summary`` tool, the manifest's
+        # 07:00 ``morning_briefing`` cron, ``GET /api/health-summary``)
+        # in addition to the service's own background loop. Callable and
+        # rate-limited, so with no Whoop connected it costs nothing.
+        self._sync_provider = sync_provider
 
     @property
     def sources(self) -> list[str]:
@@ -561,8 +594,182 @@ class HealthAggregator:
             }
         return trend
 
+    async def _maybe_sync_durable(self) -> None:
+        """Give the Whoop mirror a chance to refresh before answering.
+
+        Rate-limited inside the sync service, guarded here, and a no-op
+        when no service is wired or Whoop is disconnected. A failure to
+        mirror must never fail the summary the user asked for.
+        """
+        if self._sync_provider is None:
+            return
+        try:
+            service = self._sync_provider()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("HealthAggregator sync_provider raised: %s", exc)
+            return
+        if service is None or not hasattr(service, "maybe_sync"):
+            return
+        try:
+            await service.maybe_sync()
+        except Exception as exc:
+            logger.warning("Whoop durable sync failed: %s", exc)
+
+    async def get_health_history(
+        self,
+        days: int = 180,
+        metric: str | None = None,
+    ) -> dict[str, Any]:
+        """Long-window history straight out of durable storage.
+
+        This is the endpoint that answers "how has my recovery been over
+        the last six months". It reads ``biometric_samples`` only, never
+        the vendor APIs, so it works offline, covers windows far longer
+        than any vendor query in this file, and returns whatever was
+        mirrored regardless of whether Whoop is reachable right now.
+
+        Every entry is a canonical reading, the same shape the
+        ``health_update`` frame carries.
+        """
+        from integrations.health_canonical import (
+            CANONICAL_METRICS, build_reading,
+        )
+
+        window = max(int(days or 0), 1)
+        store = self._biometric_history()
+        if store is None:
+            return {
+                "window_days": window,
+                "metrics": [],
+                "sources": [],
+                "series": {},
+                "note": (
+                    "No durable biometric store is wired, so there is no "
+                    "health history to read."
+                ),
+            }
+
+        if metric:
+            wanted = [str(metric)] if str(metric) in CANONICAL_METRICS else []
+        else:
+            try:
+                wanted = [
+                    m for m in store.sample_metrics(days=window)
+                    if m in CANONICAL_METRICS
+                ]
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("health history sample_metrics failed: %s", exc)
+                wanted = []
+
+        since = time.time() - (float(window) * 86400.0)
+        series: dict[str, list[dict[str, Any]]] = {}
+        sources: set[str] = set()
+        for name in wanted:
+            try:
+                rows = store.get_samples(name, since=since)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("health history get_samples(%s) failed: %s", name, exc)
+                continue
+            entries = []
+            for row in rows or []:
+                reading = build_reading(
+                    name, row.get("value"),
+                    source=row.get("source", ""), ts=row.get("ts"),
+                )
+                if reading is None:
+                    continue
+                entries.append(reading)
+                if reading["source"]:
+                    sources.add(reading["source"])
+            if entries:
+                series[name] = entries
+
+        total = sum(len(v) for v in series.values())
+        return {
+            "window_days": window,
+            "metrics": sorted(series),
+            "sources": sorted(sources),
+            "sample_count": total,
+            "series": series,
+            "note": (
+                f"{total} durable readings across {len(series)} metrics over "
+                f"{window}d, from {', '.join(sorted(sources)) or 'no source'}."
+                if total
+                else (
+                    f"No durable health readings in the last {window} days. "
+                    "Connect Whoop or stream a wearable to build history."
+                )
+            ),
+        }
+
+    async def build_health_update(
+        self,
+        event_type: str = "health_summary",
+        days: int = 7,
+        node_id: str = "",
+    ) -> dict[str, Any]:
+        """Build the brain-to-node ``health_update`` frame.
+
+        ``health_summary`` carries current values as canonical readings;
+        ``vitals_trend`` carries dated per-metric series. Both use the
+        same reading shape so one iOS renderer handles both.
+        """
+        from integrations.health_canonical import (
+            HEALTH_EVENT_SUMMARY,
+            HEALTH_EVENT_TREND,
+            build_health_update_frame,
+            build_reading,
+            build_series,
+        )
+
+        if str(event_type) == HEALTH_EVENT_TREND:
+            history = await self.get_health_history(days=days)
+            series = []
+            for name in history.get("metrics", []):
+                entries = history["series"].get(name) or []
+                built = build_series(
+                    name,
+                    [{"ts": e["ts"], "value": e["value"]} for e in entries],
+                    source=entries[0]["source"] if entries else "",
+                )
+                if built:
+                    series.append(built)
+            return build_health_update_frame(
+                event_type=HEALTH_EVENT_TREND,
+                series=series,
+                sources=history.get("sources") or [],
+                node_id=node_id,
+                window_days=int(history.get("window_days") or days),
+                note=str(history.get("note") or ""),
+            )
+
+        summary = await self.get_health_summary()
+        now = time.time()
+        readings: list[dict[str, Any]] = []
+        for field, canonical in _SUMMARY_TO_CANONICAL.items():
+            value = summary.get(field)
+            if value is None:
+                continue
+            source = ""
+            if field in ("current_hr", "current_spo2"):
+                source = str(summary.get(f"{field}_source") or "")
+            if not source:
+                srcs = summary.get("sources") or []
+                source = str(srcs[0]) if srcs else ""
+            reading = build_reading(canonical, value, source=source, ts=now)
+            if reading:
+                readings.append(reading)
+        return build_health_update_frame(
+            event_type=HEALTH_EVENT_SUMMARY,
+            readings=readings,
+            sources=[str(s) for s in (summary.get("sources") or [])],
+            node_id=node_id,
+            window_days=0,
+        )
+
     async def get_health_summary(self) -> dict[str, Any]:
         """Merge data from all connected platforms into a unified dict."""
+        await self._maybe_sync_durable()
         summary: dict[str, Any] = {
             "sleep_hours": None,
             "sleep_quality": None,
@@ -783,6 +990,7 @@ class HealthAggregator:
             "sleep_trend": self.get_sleep_trend,
             "recovery_trend": self.get_recovery_trend,
             "vitals_trend": self.get_vitals_trend,
+            "health_history": self.get_health_history,
         }
         fn = dispatch.get(endpoint_id)
         if not fn:

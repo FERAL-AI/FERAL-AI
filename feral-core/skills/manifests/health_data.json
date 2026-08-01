@@ -29,6 +29,11 @@
     "how were my vitals over the last week",
     "my heart rate this week",
     "my vitals trend",
+    "my recovery over the last six months",
+    "my recovery over the last year",
+    "my sleep this year",
+    "my health history",
+    "how has my resting heart rate changed",
     "my whoop",
     "my oura",
     "healthkit"
@@ -107,6 +112,31 @@
         }
       ],
       "returns_description": "{window_days, sources, primary_source, hr_sample_count, spo2_sample_count, resting_hr_trend: [{date, resting_hr, avg_hr, max_hr, samples}], hr_range: {min,max,avg}, spo2_avg, spo2_min, resting_hr_estimate, note}",
+      "ui_hint": "list",
+      "read_only_hint": true,
+      "emit_result_preview": true
+    },
+    {
+      "id": "health_history",
+      "method": "PYTHON",
+      "url": "python://health_data/health_history",
+      "description": "Long-window health history read straight out of the brain's durable biometric store, NOT from a vendor API. This is the endpoint for questions that span months: 'my recovery over the last six months', 'how has my resting heart rate changed since spring', 'my sleep this year'. Whoop's daily records (recovery, resting HR, HRV, sleep hours/score/efficiency/REM/deep, respiratory rate, strain, avg and max HR, energy) are mirrored into that store on a schedule, so this works even while Whoop is unreachable and it reaches far further back than sleep_trend or recovery_trend, which only query the vendor's last N days. Live wearable samples (W300 glasses, BLE wristbands) are in the same store. Every entry is tagged with the source that produced it. Read-only.",
+      "params": [
+        {
+          "name": "days",
+          "type": "integer",
+          "required": false,
+          "description": "How many days back from today to include (default 180).",
+          "default": "180"
+        },
+        {
+          "name": "metric",
+          "type": "string",
+          "required": false,
+          "description": "Restrict to one canonical metric: recovery_score, resting_hr, hrv, sleep_hours, sleep_score, sleep_efficiency, rem_hours, deep_hours, respiratory_rate, strain, avg_hr, max_hr, calories_kj, spo2_avg, skin_temp_avg, hr, spo2, skin_temp, steps. Omit for every metric with data in the window."
+        }
+      ],
+      "returns_description": "{window_days, metrics: [...], sources: [...], sample_count, series: {metric: [{metric, label, value, unit, precision, category, source, ts}]}, note}",
       "ui_hint": "list",
       "read_only_hint": true,
       "emit_result_preview": true

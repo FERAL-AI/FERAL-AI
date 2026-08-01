@@ -591,3 +591,87 @@ async def ingest_health_samples(request: Request):
             skipped += 1
 
     return {"persisted": persisted, "skipped": skipped}
+
+
+# ── Health frame (brain → node) ─────────────────────────────────────
+# Companion to the ingest route above, running the other direction.
+# Health data previously only reached the Theora iOS app as English
+# prose inside a ``chat_response``, because the app's HUP parser had no
+# health frame to decode. ``health_update`` (models/protocol.py) is that
+# frame; its envelope mirrors the daemon → brain ``device_event``
+# convention exactly (``{node_id, event_type, data, ts}``).
+#
+# This route both RETURNS the frame over HTTP and PUSHES it to every
+# connected HUP node, so an app gets it either by asking or by being
+# told. Fetching is also what keeps the durable Whoop mirror warm, since
+# ``get_health_summary`` consults the sync service.
+
+async def _push_health_update(frame: dict) -> int:
+    """Fan a ``health_update`` frame out to connected HUP nodes.
+
+    Each node gets its own copy stamped with its own ``node_id``,
+    matching the ``device_event`` convention where ``node_id`` names the
+    node the frame belongs to. Returns how many nodes were reached; a
+    dead socket is skipped, never fatal.
+    """
+    daemons = getattr(state, "daemons", None) or {}
+    delivered = 0
+    for node_id, ws in list(daemons.items()):
+        try:
+            payload = dict(frame.get("payload") or {})
+            payload["node_id"] = str(node_id)
+            await ws.send_json({**frame, "payload": payload})
+            delivered += 1
+        except Exception as exc:
+            logger.debug("health_update push to %s failed: %s", node_id, exc)
+    return delivered
+
+
+@router.get("/api/health/frame")
+async def health_frame(request: Request):
+    """Return (and broadcast) the canonical ``health_update`` frame.
+
+    Query args:
+        ``event_type``: ``health_summary`` (default) or ``vitals_trend``.
+        ``days``: window for ``vitals_trend`` (default 7).
+        ``push``: ``0`` to skip the broadcast to connected nodes.
+    """
+    from integrations.health_canonical import (
+        HEALTH_EVENT_SUMMARY,
+        HEALTH_EVENT_TYPES,
+        build_health_update_frame,
+    )
+
+    aggregator = getattr(state, "health_aggregator", None)
+    if aggregator is None or not hasattr(aggregator, "build_health_update"):
+        return build_health_update_frame(
+            event_type=HEALTH_EVENT_SUMMARY,
+            note="Health aggregator is not initialized.",
+        )
+
+    params = request.query_params
+    event_type = params.get("event_type") or HEALTH_EVENT_SUMMARY
+    if event_type not in HEALTH_EVENT_TYPES:
+        return JSONResponse(
+            {"error": f"event_type must be one of {list(HEALTH_EVENT_TYPES)}"},
+            status_code=400,
+        )
+    try:
+        days = int(params.get("days") or 7)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "days must be an integer"}, status_code=400)
+
+    try:
+        frame = await aggregator.build_health_update(
+            event_type=event_type, days=max(days, 1),
+        )
+    except Exception as exc:
+        logger.warning("health_frame build failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    if (params.get("push") or "1") not in ("0", "false", "no"):
+        try:
+            await _push_health_update(frame)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("health_update broadcast failed: %s", exc)
+    return frame

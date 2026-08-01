@@ -861,6 +861,73 @@ class DeviceAnnouncePayload(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+class HealthReadingModel(BaseModel):
+    """One canonical health reading.
+
+    This is ``BaselineEngine.biometric_samples``' durable row
+    ``(ts, source, metric, value)`` plus render metadata that is a pure
+    function of ``metric`` (see
+    ``integrations/health_canonical.py::CANONICAL_METRICS``). It is not
+    a new reading shape: it is the existing durable one, made
+    renderable.
+
+    ``source`` is carried verbatim from whatever produced the sample
+    (``whoop``, ``oura``, ``jw_health_glasses``). No source id is
+    translated on this wire.
+    """
+    metric: str
+    value: float
+    unit: str = ""
+    label: str = ""
+    precision: int = 0
+    category: str = "vitals"
+    source: str = ""
+    ts: float = Field(default_factory=time)
+
+
+class HealthSeriesModel(BaseModel):
+    """A dated series of one metric, for a chart."""
+    metric: str
+    label: str = ""
+    unit: str = ""
+    precision: int = 0
+    category: str = "vitals"
+    source: str = ""
+    points: list[dict] = Field(default_factory=list)
+
+
+class HealthUpdateDataModel(BaseModel):
+    """``health_update.payload.data``."""
+    sources: list[str] = Field(default_factory=list)
+    window_days: int = 0
+    note: str = ""
+    readings: list[HealthReadingModel] = Field(default_factory=list)
+    series: list[HealthSeriesModel] = Field(default_factory=list)
+
+
+class HealthUpdatePayload(BaseModel):
+    """Brain → node health frame (HUP v1.3.0).
+
+    Theora's iOS HUP client decoded exactly ``node_ack``,
+    ``hup_action_request``, ``error``, ``node_bye``, ``chat_response``,
+    ``text_response``, ``transcript``, ``audio_response`` and
+    ``voice_status``. There was no health frame at all, so the only way
+    Whoop / glasses data reached the app was as English prose inside a
+    chat reply, which an app cannot render as a card or a chart.
+
+    The envelope is the exact mirror of the daemon → brain
+    ``device_event`` (HUP_SPEC 5.4): ``{node_id, event_type, data, ts}``.
+    Same vocabulary, opposite direction. ``event_type`` is
+    ``health_summary`` (current values) or ``vitals_trend`` (dated
+    series); both carry the same canonical reading shape so one renderer
+    handles both.
+    """
+    node_id: str = ""
+    event_type: Literal["health_summary", "vitals_trend"] = "health_summary"
+    ts: float = Field(default_factory=time)
+    data: HealthUpdateDataModel = Field(default_factory=HealthUpdateDataModel)
+
+
 MESSAGE_TYPES = {
     # Client → Brain
     "audio_chunk": AudioChunkPayload,
@@ -912,6 +979,9 @@ MESSAGE_TYPES = {
 
     # Hardware mesh (peripheral discovery — HUP v1.3.0)
     "device_announce": DeviceAnnouncePayload,
+
+    # Health (brain → node; mirrors device_event conventions)
+    "health_update": HealthUpdatePayload,
 
     # Phone Bridge
     "sensor_telemetry": SensorTelemetryPayload,
