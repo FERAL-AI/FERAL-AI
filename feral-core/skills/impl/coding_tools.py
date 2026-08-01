@@ -409,7 +409,7 @@ class CodingToolsSkill(BaseSkill):
             if count == 0:
                 return {"success": False, "status_code": 404, "data": None, "error": "old_text not found in file"}
             if count > 1:
-                return {"success": False, "status_code": 409, "data": None, "error": f"old_text matches {count} locations — provide more context to be unique"}
+                return {"success": False, "status_code": 409, "data": None, "error": f"old_text matches {count} locations, provide more context to be unique"}
 
             path.write_text(content.replace(old_text, new_text, 1))
             return None

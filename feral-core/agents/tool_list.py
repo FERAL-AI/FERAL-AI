@@ -1,5 +1,5 @@
 """
-OpenAI tool-list helpers — pinning + hard-cap retention.
+OpenAI tool-list helpers: pinning + hard-cap retention.
 
 OpenAI chat/completions and Realtime both reject payloads with more than
 128 tools. FERAL installs can expose 200+ skill endpoints; naive
@@ -122,7 +122,7 @@ def resolve_forced_tool_choice(
         return wire_fn(force_tool)
     if force_tool:
         logger.warning(
-            "resolve_forced_tool_choice: %r not in capped tool list — "
+            "resolve_forced_tool_choice: %r not in capped tool list, "
             "degrading to auto",
             force_tool,
         )
