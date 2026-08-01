@@ -133,9 +133,15 @@ export function VoiceFullscreen({
     setPartialTranscript('');
     setBrainText('');
     setErrorMessage('');
-    setIsMuted(false);
     setAudioLevel(0);
-  }, [open, initialMode]);
+    // Mute is NOT reset here. It used to be, which meant reopening the
+    // panel on a session the brain still considers muted painted a live
+    // microphone over a muted one. Adopt whatever the node is actually
+    // doing; the brain's next `voice_status` frame confirms or corrects
+    // it.
+    const nodeMuted = shell?.node?.isMicMuted?.();
+    setIsMuted(nodeMuted === true);
+  }, [open, initialMode, shell]);
 
   useEffect(() => {
     const prev = prevStateRef.current;
@@ -340,6 +346,15 @@ export function VoiceFullscreen({
         // a banner above the orb so the user knows why audio is
         // muted instead of guessing at a connection issue.
         const st = (payload.state || 'available');
+        // The brain is the authority on mute: it stamps the live state
+        // onto every voice_status frame, which is how a mute applied
+        // from another surface, or one that survived a reconnect,
+        // reaches this UI. A frame that OMITS the field is an older
+        // brain, not an unmute, so absence is ignored rather than
+        // treated as false.
+        if (typeof payload.muted === 'boolean') {
+          setIsMuted(payload.muted);
+        }
         if (st === 'available') {
           setVoiceStatus(null);
         } else {
@@ -349,6 +364,10 @@ export function VoiceFullscreen({
             provider: payload.provider || '',
             fallbackProvider: payload.fallback_provider || '',
             detail: payload.detail || '',
+            cause: payload.cause || '',
+            summary: payload.summary || '',
+            recommendation: payload.recommendation || '',
+            privacyDowngrade: payload.privacy_downgrade === true,
           });
         }
       }
@@ -474,10 +493,19 @@ export function VoiceFullscreen({
   const handleMuteToggle = useCallback(() => {
     setIsMuted((m) => {
       const next = !m;
+      // Stop capture at the source FIRST. Telling the brain and
+      // leaving the microphone running is what the pre-fix button did:
+      // the envelope went out, nothing handled it, and the worklet kept
+      // streaming PCM to whichever cloud provider was live. The node
+      // call is what makes the button's promise true even if the frame
+      // never lands.
+      if (typeof shell?.node?.setMicMuted === 'function') {
+        shell.node.setMicMuted(next);
+      }
       sendEnvelope('voice_mute', { muted: next });
       return next;
     });
-  }, [sendEnvelope]);
+  }, [sendEnvelope, shell]);
 
   const handleClose = useCallback(() => {
     sendEnvelope('voice_interrupt', {});
@@ -565,8 +593,17 @@ export function VoiceFullscreen({
               {providerLabel(voiceMode)}
             </div>
           )}
-          <div style={{ opacity: 0.9, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <div
+            data-testid="voice-status-line"
+            style={{ opacity: 0.9, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+          >
+            {/* Mute outranks every other state here. The brain is not
+                reading this microphone, so "Listening…" would be a
+                claim about the system that is simply false. Speaking
+                still wins, because mute is an input control and the
+                assistant's reply keeps playing. */}
             {voiceState === 'speaking' ? (brainText || 'Speaking…') :
+              isMuted ? 'Muted' :
               voiceState === 'processing' ? 'Thinking…' :
               voiceState === 'listening' ? (partialTranscript || transcript || 'Listening…') :
               voiceState === 'error' ? (errorMessage || 'Voice error') :
@@ -769,8 +806,19 @@ export function VoiceFullscreen({
         </div>
       )}
 
+      {/* Mute takes the status line. "Tap to speak" over a microphone
+          the brain is refusing to read is an invitation to talk to
+          nothing. */}
+      {isMuted && voiceState !== 'speaking' && (
+        <p
+          data-testid="muted-hint"
+          style={{ opacity: 0.75, fontSize: 14, margin: 0, paddingBottom: 8 }}
+        >
+          Muted (microphone off)
+        </p>
+      )}
       {/* Idle hint */}
-      {voiceState === 'idle' && (
+      {!isMuted && voiceState === 'idle' && (
         <p style={{ opacity: 0.4, fontSize: 14, margin: 0, paddingBottom: 8 }}>Tap to speak</p>
       )}
 

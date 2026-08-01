@@ -17,8 +17,10 @@ Confirmed instances:
   so a Groq Whisper plus ElevenLabs pick still ran Deepgram.
 * ``security.autonomy_mode`` was written by the wizard and read by
   nothing, so picking "strict" silently ran "hybrid".
-* ``audio.realtime_providers`` is written by the WebUI Settings page and
-  read by nothing (see ``UNREAD_KEY_ALLOWLIST``).
+* ``audio.realtime_providers`` was written by the WebUI Settings page
+  and read by nothing, so reordering the Realtime group changed no
+  routing at all. Fixed: ``voice/router.py`` walks it as an ordered
+  fallback chain, and its allowlist entry is gone.
 
 Each was found by hand, months apart. This module turns that audit into
 a test so the fifth instance fails CI instead of shipping.
@@ -48,8 +50,9 @@ Deliberate scoping decisions:
 
 * Readers must live in ``feral-core``. A JS client reading a key back
   purely to render its own toggle is not a consumer, it is the write
-  path round-tripping. ``audio.realtime_providers`` is read that way in
-  ``feral-client-v2/src/pages/Settings.jsx`` and is still dead.
+  path round-tripping. ``audio.realtime_providers`` was read that way in
+  ``feral-client-v2/src/pages/Settings.jsx`` for months and stayed dead
+  the whole time.
 * Tests are not readers. A key whose only reader is the test pinning it
   is still dead in production.
 * ``config/loader.py`` IS a reader (``brain_id``, ``access_remote_url``
@@ -129,17 +132,6 @@ UNREAD_KEY_ALLOWLIST: dict[str, str] = {
         "which layout a file on disk was written with, and it is pinned "
         "by TestConfigDiscovery::test_default_settings_returned_when_no_files "
         "in tests/test_config.py."
-    ),
-    "audio.realtime_providers": (
-        "Genuinely unread, kept deliberately pending a wiring change "
-        "that lands outside this lane's ownership. voice/router.py "
-        "resolves the realtime provider from the scalar "
-        "audio.realtime_primary via _preferred_realtime_provider(); the "
-        "ordered list here is written by feral-client-v2 "
-        "src/pages/Settings.jsx and consumed by nobody. Removing the "
-        "default would leave that page's Realtime group with no "
-        "preselected providers, so the key stays until router.py learns "
-        "to walk the list. Remove this entry the moment it does."
     ),
 }
 

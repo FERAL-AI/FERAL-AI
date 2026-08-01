@@ -718,6 +718,23 @@ class VoiceStatusPayload(BaseModel):
     provider: str = ""
     fallback_provider: str = ""
     detail: str = ""
+    #: Live microphone mute state for the session, stamped onto EVERY
+    #: voice_status frame by ``VoiceRouter._emit_voice_status``. Clients
+    #: reconcile their mic indicator from the newest frame, so a status
+    #: frame that omitted this would flip the UI back to "listening"
+    #: over a microphone the brain is still refusing to read.
+    muted: bool = False
+    #: Human-facing failure diagnosis (``voice/diagnostics.py``).
+    #: ``cause`` is a machine tag, ``summary`` says what is wrong and
+    #: ``recommendation`` says what to do about it. All three are empty
+    #: when there is nothing to diagnose, and ``cause="unknown"`` when
+    #: the cause genuinely could not be determined -- never a guess.
+    cause: str = ""
+    summary: str = ""
+    recommendation: str = ""
+    #: True when a user who chose local/private voice would be served
+    #: by a cloud provider instead. Never reported as success.
+    privacy_downgrade: bool = False
 
 class VisionQueryPayload(BaseModel):
     """User explicitly asks about what the camera sees."""
