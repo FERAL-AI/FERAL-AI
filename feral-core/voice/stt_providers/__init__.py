@@ -1,8 +1,12 @@
 """
 STT Provider abstraction for the chained voice pipeline.
 
-Each provider implements ``STTProvider`` and is selected at runtime via
-``voice.chained.stt_provider`` in settings.  Two integration patterns exist:
+Each provider implements ``STTProvider`` and is selected at runtime by
+``VoiceRouter._resolve_chained_config``: per-session ``provider_opts``
+win, then ``voice.chained.stt_provider`` (what the phone Settings panel
+writes), then ``audio.chained_fallback.stt_provider`` (what ``feral
+setup`` writes and ``config/loader.py`` defaults).  Two integration
+patterns exist:
 
 * **Streaming** (e.g. Deepgram): audio chunks are forwarded in real-time and
   partial/final transcripts arrive asynchronously.
@@ -14,7 +18,7 @@ from __future__ import annotations
 
 import abc
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import AsyncIterator
 
 logger = logging.getLogger("feral.voice.stt")
