@@ -17,7 +17,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from security.env_jail import PASSTHROUGH, build_child_env, env_jail
+from security.env_jail import (
+    CODING_AGENT_ALLOW,
+    PASSTHROUGH,
+    build_child_env,
+    build_coding_agent_env,
+    env_jail,
+)
 
 
 FAKE_PARENT = {
@@ -239,5 +245,58 @@ def test_real_environ_is_the_default_source():
     try:
         assert jail.env.get("PATH") == os.environ.get("PATH", jail.env["PATH"])
         assert jail.env["HOME"] != os.environ.get("HOME")
+    finally:
+        jail.cleanup()
+
+
+# ── the coding-agent profile ──────────────────────────────────────
+#
+# ``build_child_env`` is the general jail; ``build_coding_agent_env`` is
+# what ``AcpAgentProcess.spawn`` actually uses, and it has to answer
+# "does the agent still work". The line it draws: reaching a model is
+# in, everything else is out.
+
+
+def test_a_coding_agent_keeps_its_model_keys():
+    """An agent that cannot call a model is not an agent."""
+    jail = build_coding_agent_env(source=FAKE_PARENT)
+    try:
+        assert jail.env["ANTHROPIC_API_KEY"] == "sk-ant-secret"
+        assert jail.env["OPENAI_API_KEY"] == "sk-openai-secret"
+    finally:
+        jail.cleanup()
+
+
+def test_a_coding_agent_still_loses_its_home_and_everything_else():
+    """The profile widens the allowlist. It does not weaken the jail."""
+    jail = build_coding_agent_env(source=FAKE_PARENT)
+    try:
+        assert jail.env["HOME"] != FAKE_PARENT["HOME"]
+        for name in ("GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "SSH_AUTH_SOCK",
+                     "HTTPS_PROXY", "NODE_OPTIONS", "CLAUDE_CONFIG_DIR",
+                     "USER", "LOGNAME"):
+            assert name not in jail.env, f"{name} leaked to the coding agent"
+    finally:
+        jail.cleanup()
+
+
+def test_the_coding_allowlist_is_only_model_access():
+    """A review tripwire on scope creep.
+
+    If something lands here that is not a model endpoint or its key, the
+    jail has quietly become a passthrough. Widen via
+    ``FERAL_ENV_JAIL_ALLOW`` instead.
+    """
+    for name in CODING_AGENT_ALLOW:
+        assert name.endswith(("_API_KEY", "_AUTH_TOKEN", "_BASE_URL")), name
+    assert "GITHUB_TOKEN" not in CODING_AGENT_ALLOW
+    assert "SSH_AUTH_SOCK" not in CODING_AGENT_ALLOW
+
+
+def test_the_coding_profile_composes_with_an_extra_allow():
+    jail = build_coding_agent_env(source=FAKE_PARENT, allow=("GITHUB_TOKEN",))
+    try:
+        assert jail.env["GITHUB_TOKEN"] == "ghp_secret"
+        assert jail.env["ANTHROPIC_API_KEY"] == "sk-ant-secret"
     finally:
         jail.cleanup()

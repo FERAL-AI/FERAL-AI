@@ -195,7 +195,12 @@ class ExternalAgentSkill(BaseSkill):
                     agent_id=agent_id,
                     command=resolved.command,
                     cwd=workspace,
-                    env=dict(os.environ),
+                    # No ``env``: the registry jails the child by
+                    # default. This used to pass ``dict(os.environ)``,
+                    # which handed an external coding agent the
+                    # operator's HOME and every exported API key. The
+                    # opt-out is ``external_agents.env_jail``, applied in
+                    # ``bridges/sessions.py``, not here.
                     permission_timeout=conf["permission_timeout_seconds"],
                     approval_manager=_approval_manager(),
                     conversation_id=conversation_id,

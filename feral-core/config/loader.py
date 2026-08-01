@@ -404,6 +404,14 @@ DEFAULT_SETTINGS = {
         # unanswered before ``bridges/permissions.py`` rejects it. Floored
         # at 5; there is no value meaning "allow".
         "permission_timeout_seconds": 120,
+        # Spawn external agents in ``security/env_jail.py`` (a throwaway
+        # HOME plus a model-key allowlist) instead of the operator's own
+        # environment. On by default: an unjailed agent can read
+        # ``~/.claude``, ``~/.codex`` and ``~/.ssh`` for free. Turn it off
+        # only if the agent authenticates by subscription login rather
+        # than an API key, since that login lives in the real HOME.
+        # ``bridges/catalog.py::external_agent_settings`` reads it.
+        "env_jail": True,
     },
     # Pairing access mode (Mode A LAN / Mode B localhost / Mode C remote).
     # Default is "localhost" to preserve the historical loopback-only

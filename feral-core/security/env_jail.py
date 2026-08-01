@@ -14,11 +14,13 @@ that is the child's business, and a prompt-injected agent reading
 ``~/.claude/settings.json`` to discover which MCP servers and
 credentials exist is a realistic first move.
 
-``bridges/acp.py`` already accepts a full environment replacement
+``bridges/acp.py`` already accepted a full environment replacement
 (``AcpAgentProcess.spawn(..., env=...)``, which replaces rather than
-merges, and inherits everything when omitted); what was missing was a
-sensible thing to pass. This module is that default. It is a helper, not
-a policy: nothing here is applied automatically, and callers opt in.
+merges); what was missing was a sensible thing to pass. This module is
+that default, and since v2026.8 ``spawn`` applies it: omitting ``env``
+now builds a coding-agent jail instead of inheriting ``os.environ``.
+Passing ``env`` explicitly still replaces the environment verbatim, so a
+caller that genuinely wants inheritance asks for it by name.
 
 What this DOES contain
 ======================
@@ -61,6 +63,25 @@ Specifically:
   boundary.
 * Nothing here restricts network, CPU, or filesystem writes.
 
+What the jail breaks
+====================
+Worth knowing before turning it on, because these are not bugs:
+
+* **Subscription and OAuth logins stop working.** Claude Code stores its
+  login under ``~/.claude``, Codex under ``~/.codex``, opencode under
+  ``~/.local/share/opencode``. A replaced ``HOME`` means none of them
+  are found, so a jailed agent must be authenticated by API key (see
+  :data:`CODING_AGENT_ALLOW`). An operator on a Max or Pro plan with no
+  key in the environment gets an auth failure on the first turn.
+* **``git commit`` inside the agent fails on identity.** ``~/.gitconfig``
+  is out of reach, so ``user.name`` and ``user.email`` are unset. That is
+  arguably right, since an agent committing under the operator's name is
+  its own problem, but it is a behaviour change. Name ``GIT_AUTHOR_NAME``
+  and friends in ``FERAL_ENV_JAIL_ALLOW`` to restore it.
+* **Per-agent caches are cold every session** and the download they
+  trigger happens inside the throwaway ``HOME``, so it happens again
+  next time.
+
 Environment overrides
 =====================
 ``FERAL_ENV_JAIL_ALLOW``: comma-separated extra names to pass through,
@@ -81,9 +102,11 @@ from typing import Final, Iterable, Iterator, Mapping, Optional
 logger = logging.getLogger("feral.security.env_jail")
 
 __all__ = [
+    "CODING_AGENT_ALLOW",
     "PASSTHROUGH",
     "EnvJail",
     "build_child_env",
+    "build_coding_agent_env",
     "env_jail",
 ]
 
@@ -114,6 +137,48 @@ PASSTHROUGH: Final[tuple[str, ...]] = (
 # Used when the operator's PATH is itself absent, so a jailed child can
 # still find the standard tools.
 _FALLBACK_PATH: Final[str] = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+# What a *coding agent* additionally needs. This list is the answer to
+# "the jail is on, does the agent still work", and it is one thing only:
+# a way to reach a model. opencode, Zed's claude-code-acp and
+# agentclientprotocol's codex-acp are all model clients before they are
+# anything else, and a jailed one with no key does not fail usefully, it
+# fails at the first turn with an auth error.
+#
+# Base URLs travel with their keys because a self-hosted or proxied
+# endpoint is useless without both, and an operator running a local
+# model has no key at all, only a URL.
+#
+# Everything else stays out, including the credentials a coding agent
+# might plausibly want:
+#
+# * ``GITHUB_TOKEN`` / ``GH_TOKEN`` / ``SSH_AUTH_SOCK``. Editing a
+#   checkout does not require the ability to push it, and agent
+#   forwarding is a live credential, not a value.
+# * ``AWS_*``, ``GOOGLE_APPLICATION_CREDENTIALS`` and every other cloud
+#   credential. Not needed to write code.
+# * ``NODE_OPTIONS``, ``PYTHONSTARTUP`` and friends: arbitrary-code
+#   injection into the child, which is a channel *inward*, the exact
+#   thing the jail exists to close.
+# * ``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``, ``XDG_*`` from the parent.
+#   Every one of them points a shim back at the operator's real config
+#   directory and undoes the replaced HOME in a single variable.
+#
+# An operator whose toolchain needs something not here names it in
+# ``FERAL_ENV_JAIL_ALLOW`` rather than editing this tuple.
+CODING_AGENT_ALLOW: Final[tuple[str, ...]] = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENROUTER_API_KEY",
+    "GEMINI_API_KEY",
+    "GROQ_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "XAI_API_KEY",
+)
 
 
 def _operator_allowlist() -> tuple[str, ...]:
@@ -209,6 +274,30 @@ def build_child_env(
         jail_home,
     )
     return EnvJail(env=env, home=jail_home, dropped=dropped)
+
+
+def build_coding_agent_env(
+    *,
+    allow: Iterable[str] = (),
+    extra: Optional[Mapping[str, str]] = None,
+    source: Optional[Mapping[str, str]] = None,
+) -> EnvJail:
+    """:func:`build_child_env` plus :data:`CODING_AGENT_ALLOW`.
+
+    The default environment for an ACP agent spawned by
+    ``bridges/acp.py``. It is a separate function rather than a flag so
+    that the reasoning about which credentials a coding agent needs lives
+    next to the jail, and so a caller reading the spawn site can see that
+    model keys travel and nothing else does.
+
+    Read the module docstring's "What the jail breaks" section before
+    assuming an agent that worked unjailed will work here.
+    """
+    return build_child_env(
+        allow=tuple(CODING_AGENT_ALLOW) + tuple(allow),
+        extra=extra,
+        source=source,
+    )
 
 
 @contextlib.contextmanager

@@ -561,6 +561,12 @@ def agent_factory(tmp_path, monkeypatch):
 
         monkeypatch.setattr(catalog, "resolve", fake_resolve)
         monkeypatch.setenv("ACP_MARKER", str(marker))
+        # Spawned agents run in ``security.env_jail`` now, which drops
+        # everything not on its allowlist, ``ACP_MARKER`` included. The
+        # fake agent records what it was asked to do through that file,
+        # so widen the jail the way an operator would rather than
+        # disabling it and testing a path production does not take.
+        monkeypatch.setenv("FERAL_ENV_JAIL_ALLOW", "ACP_MARKER")
         return marker
 
     return build

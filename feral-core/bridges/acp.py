@@ -69,6 +69,7 @@ from bridges.permissions import (
     PermissionDecision,
     parse_permission_request,
 )
+from security.env_jail import EnvJail, build_coding_agent_env
 
 logger = logging.getLogger("feral.bridges.acp")
 
@@ -348,6 +349,9 @@ class AcpAgentProcess:
         self._stderr_tail: list[str] = []
         self._stderr_task: Optional[asyncio.Task] = None
         self._closed = False
+        # The throwaway HOME behind this child, when ``spawn`` built one.
+        # None when the caller supplied its own environment.
+        self._jail: Optional[EnvJail] = None
 
     # ------------------------------------------------------------------
     # Spawn
@@ -368,11 +372,37 @@ class AcpAgentProcess:
         ``env`` fully replaces the environment when given. Callers that
         want the ambient environment plus overrides should build that
         dict themselves; silently merging would make it impossible to
-        run an agent in a deliberately stripped environment, which is how
-        the tests keep an agent out of the user's real config directory.
+        run an agent in a deliberately stripped environment.
+
+        **Omitting ``env`` jails the child.** It used to mean "inherit
+        ``os.environ``", which handed an external coding agent the
+        operator's real ``HOME`` and with it ``~/.claude``, ``~/.codex``,
+        ``~/.ssh``, ``~/.aws`` and every exported API key. Reading
+        ``~/.claude/settings.json`` to enumerate an operator's MCP servers
+        is a cheap first move for a prompt-injected agent, and nothing
+        stopped it. The default is now
+        ``security.env_jail.build_coding_agent_env()``: a fresh throwaway
+        ``HOME`` plus a small allowlist, with model API keys passed
+        through because an agent that cannot reach a model is not an
+        agent. Read that module on what the jail does not cover, in
+        particular that it is not credential isolation and does not stop
+        the child reading an absolute path.
+
+        The throwaway ``HOME`` is owned by this process object and
+        removed by :meth:`close`, so it lives exactly as long as the
+        child does.
         """
         if not command:
             raise ValueError("command must not be empty")
+
+        jail = None
+        if env is None:
+            jail = build_coding_agent_env()
+            env = jail.env
+            logger.debug(
+                "spawning %s in an env jail (HOME=%s, %d names dropped)",
+                os.path.basename(command[0]), jail.home, len(jail.dropped),
+            )
 
         argv = list(command)
         try:
@@ -386,11 +416,14 @@ class AcpAgentProcess:
                 limit=stream_limit,
             )
         except FileNotFoundError as exc:
+            if jail is not None:
+                jail.cleanup()
             raise AcpProtocolError(
                 f"agent binary not found: {shlex.join(argv)}"
             ) from exc
 
         self = cls(proc, peer=None, command=argv, broker=broker or DenyAllBroker())  # type: ignore[arg-type]
+        self._jail = jail
         self.peer = NdjsonRpcPeer(
             proc.stdout,
             proc.stdin,
@@ -733,7 +766,13 @@ class AcpAgentProcess:
     # ------------------------------------------------------------------
 
     async def close(self, *, grace: float = 5.0) -> None:
-        """Close every session, drop the connection, then end the child."""
+        """Close every session, drop the connection, end the child, and
+        delete the env jail's throwaway ``HOME``.
+
+        The jail directory is removed last, after the process is
+        confirmed dead, because a still-running child holding an open
+        file under it would otherwise see it vanish mid-write.
+        """
         if self._closed:
             return
         self._closed = True
@@ -761,3 +800,8 @@ class AcpAgentProcess:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._stderr_task
             self._stderr_task = None
+
+        if self._jail is not None:
+            with contextlib.suppress(Exception):
+                self._jail.cleanup()
+            self._jail = None
