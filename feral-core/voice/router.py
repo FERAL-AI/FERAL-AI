@@ -641,8 +641,10 @@ class VoiceRouter:
           3. Retarget every bound node's voice config to
              ``mode="chained"`` so subsequent ``audio_chunk`` frames
              land on the chained pipeline.
-          4. ``open_chained_session`` with the providers configured
-             under ``audio.chained_fallback``.
+          4. ``open_chained_session`` with the providers the operator
+             configured under ``voice.chained`` (phone Settings panel),
+             falling back to ``audio.chained_fallback`` (setup wizard
+             and shipped defaults). See ``_resolve_chained_config``.
           5. Emit ``voice_status state=degraded
              fallback_provider="chained"`` so the UI banner switches.
           6. Do NOT populate ``_session_degraded`` — the chained
@@ -727,6 +729,66 @@ class VoiceRouter:
         except Exception:
             return {}
 
+    @staticmethod
+    def _load_voice_settings() -> dict:
+        """Return the ``voice`` settings block, tolerant of missing
+        ``config.loader`` (narrow unit tests).
+
+        This is the block the phone Settings panel writes
+        (``feral-client-v2/src/pages/phone/SettingsPanel.jsx``) and the
+        one ``api/server.py`` already reads ``voice.mode`` from.
+        """
+        try:
+            from config.loader import load_settings
+            cfg = load_settings() or {}
+            return dict((cfg.get("voice") or {}))
+        except Exception:
+            return {}
+
+    def _resolve_chained_config(self, audio_cfg: dict | None = None) -> dict:
+        """Resolve the chained STT/TTS pick an operator actually made.
+
+        Two settings blocks can carry that pick and both are real:
+
+        * ``voice.chained.*`` is what the phone Settings panel writes.
+          It is the choice a user makes in the UI, so it wins.
+        * ``audio.chained_fallback.*`` is what the setup wizard writes
+          (``cli/setup/steps/voice_preflight.py``) and what
+          ``config/loader.py`` ships defaults for. It is the headless
+          operator pick and applies whenever the UI block is silent.
+
+        Before this fix nothing anywhere read ``voice.chained.*``, so a
+        user who picked Groq Whisper plus ElevenLabs in the phone UI
+        still got Deepgram plus ElevenLabs on every chained session.
+        Keys absent from both blocks fall through to the shipped
+        provider defaults (empty string means "let the provider decide",
+        which keeps each provider's own default model in play instead of
+        forcing Deepgram's ``nova-3`` onto Whisper).
+
+        ``audio_cfg`` may be passed by callers that already loaded the
+        ``audio`` block so we do not read settings twice.
+        """
+        voice_chained = dict((self._load_voice_settings().get("chained") or {}))
+        if audio_cfg is None:
+            audio_cfg = self._load_audio_settings()
+        audio_chained = dict((audio_cfg.get("chained_fallback") or {}))
+
+        def _pick(key: str, default: str = "") -> str:
+            for block in (voice_chained, audio_chained):
+                value = block.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return default
+
+        return {
+            "stt_provider": _pick("stt_provider", "deepgram"),
+            "tts_provider": _pick("tts_provider", "elevenlabs"),
+            "stt_model": _pick("stt_model"),
+            "tts_model": _pick("tts_model"),
+            "tts_voice": _pick("tts_voice"),
+            "tts_voice_id": _pick("tts_voice_id"),
+        }
+
     async def _try_chained_morph(
         self,
         session_id: str,
@@ -755,9 +817,10 @@ class VoiceRouter:
             )
             return False, _MORPH_ABORT_NOT_WIRED
 
-        chained_cfg = audio_cfg.get("chained_fallback") or {}
-        stt_name = str(chained_cfg.get("stt_provider") or "deepgram")
-        tts_name = str(chained_cfg.get("tts_provider") or "elevenlabs")
+        chained_cfg = self._resolve_chained_config(audio_cfg)
+        stt_name = chained_cfg["stt_provider"]
+        tts_name = chained_cfg["tts_provider"]
+        substituted_stt_model = False
 
         # Vault preflight — every chained TTS / STT we ship needs a
         # key, but only deepgram + elevenlabs are wired as the S4
@@ -820,6 +883,11 @@ class VoiceRouter:
             stt_pid, stt_env = provider_env["openai_whisper"]
             tts_pid, tts_env = provider_env["openai"]
             missing = _missing_keys([(stt_pid, stt_env), (tts_pid, tts_env)])
+            # The configured STT model belongs to the provider we just
+            # walked away from (a Deepgram ``nova-*`` id is not a valid
+            # Whisper model). Blank it so ``open_chained_session`` lets
+            # the substituted provider use its own default.
+            substituted_stt_model = True
         if missing:
             logger.warning(
                 "Chained morph for %s aborted — missing vault keys: %s",
@@ -864,6 +932,8 @@ class VoiceRouter:
         }
         if bound_sample_rate:
             provider_opts["sample_rate"] = bound_sample_rate
+        if substituted_stt_model:
+            provider_opts["stt_model"] = ""
 
         try:
             session = await self.open_chained_session(session_id, provider_opts)
@@ -1227,9 +1297,11 @@ class VoiceRouter:
         """Create a chained STT→LLM→TTS session with configured providers.
 
         Called when ``mode="chained"`` is received in a
-        ``voice_session_start`` envelope.  Reads provider choices from
-        ``provider_opts`` (falls back to settings keys
-        ``voice.chained.stt_provider``, ``voice.chained.tts_provider``).
+        ``voice_session_start`` envelope.  Per-session ``provider_opts``
+        win; anything they leave unset comes from
+        :meth:`_resolve_chained_config`, i.e. ``voice.chained.*`` (the
+        phone Settings panel) first and ``audio.chained_fallback.*``
+        (the setup wizard and the shipped defaults) second.
         """
         if not hasattr(self, "_chained") or self._chained is None:
             logger.warning("Chained pipeline not available")
@@ -1240,15 +1312,26 @@ class VoiceRouter:
         from voice.stt_providers import get_stt_provider
         from voice.tts_providers import get_tts_provider
 
-        chained_cfg = self._load_audio_settings().get("chained_fallback") or {}
-        default_stt = str(chained_cfg.get("stt_provider") or "deepgram")
-        default_tts = str(chained_cfg.get("tts_provider") or "elevenlabs")
+        chained_cfg = self._resolve_chained_config()
 
-        stt_name = opts.get("stt_provider", default_stt)
-        tts_name = opts.get("tts_provider", default_tts)
-        stt_model = opts.get("stt_model", "nova-3")
-        tts_model = opts.get("tts_model", "gpt-4o-mini-tts")
-        tts_voice = opts.get("tts_voice", "alloy")
+        stt_name = opts.get("stt_provider") or chained_cfg["stt_provider"]
+        tts_name = opts.get("tts_provider") or chained_cfg["tts_provider"]
+        # An unset STT model means "use the provider's own default".
+        # Hardcoding Deepgram's ``nova-3`` here used to be harmless
+        # because Deepgram was the only reachable STT; now that the
+        # phone picker can actually select Whisper, forwarding
+        # ``nova-3`` to Groq or OpenAI would be an invalid model id.
+        stt_model = (
+            opts["stt_model"] if "stt_model" in opts else chained_cfg["stt_model"]
+        )
+        stt_model = (stt_model or "").strip()
+        # ``tts_model_raw`` is the operator's literal pick (empty when
+        # unset). Only the OpenAI branch may substitute an OpenAI model
+        # id for it; Cartesia has its own ``sonic-*`` ids.
+        tts_model_raw = opts.get("tts_model") or chained_cfg["tts_model"]
+        tts_model = tts_model_raw or "gpt-4o-mini-tts"
+        tts_voice = opts.get("tts_voice") or chained_cfg["tts_voice"] or "alloy"
+        tts_voice_id = opts.get("tts_voice_id") or chained_cfg["tts_voice_id"]
         # STT sample rate MUST match the source audio. The iOS HFP /
         # glasses path streams 24 kHz mono PCM16 (AVAudioConverter on
         # the iOS side feeds the brain), and the live audio routers
@@ -1282,31 +1365,35 @@ class VoiceRouter:
             "cartesia": _resolve_provider_key("cartesia", "CARTESIA_API_KEY"),
         }
 
-        stt_provider = get_stt_provider(
-            stt_name,
-            api_key=stt_keys.get(stt_name, ""),
-            model=stt_model,
-            sample_rate=stt_sample_rate,
-        )
+        stt_kwargs = {
+            "api_key": stt_keys.get(stt_name, ""),
+            "sample_rate": stt_sample_rate,
+        }
+        if stt_model:
+            stt_kwargs["model"] = stt_model
+        stt_provider = get_stt_provider(stt_name, **stt_kwargs)
         tts_kwargs = {"api_key": tts_keys.get(tts_name, "")}
         if tts_name == "openai":
             tts_kwargs["model"] = tts_model
             tts_kwargs["voice"] = tts_voice
         elif tts_name == "elevenlabs":
-            if opts.get("tts_voice_id"):
-                tts_kwargs["voice_id"] = opts["tts_voice_id"]
+            # ElevenLabs addresses voices by opaque id, never by the
+            # friendly name the phone picker used to write into
+            # ``tts_voice``. Only ``tts_voice_id`` is meaningful here.
+            if tts_voice_id:
+                tts_kwargs["voice_id"] = tts_voice_id
         elif tts_name == "cartesia":
             # Cartesia uses its own voice catalogue (Sonic-2 voice
             # ids are stable UUIDs); operators pin one via settings
             # `voice.chained.tts_voice_id` or per-session opts.
-            if opts.get("tts_voice_id"):
-                tts_kwargs["voice_id"] = opts["tts_voice_id"]
+            if tts_voice_id:
+                tts_kwargs["voice_id"] = tts_voice_id
             if opts.get("tts_websocket"):
                 tts_kwargs["websocket"] = bool(opts["tts_websocket"])
             # Use the operator-configured Sonic model id when set;
             # default sonic-2 is fine for everyone else.
-            if opts.get("tts_model"):
-                tts_kwargs["model_id"] = opts["tts_model"]
+            if tts_model_raw:
+                tts_kwargs["model_id"] = tts_model_raw
 
         tts_provider_inst = get_tts_provider(tts_name, **tts_kwargs)
 
