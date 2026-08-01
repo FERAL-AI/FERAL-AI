@@ -552,19 +552,45 @@ async def _offer_stt_download(
                 "  faster-whisper is not installed: pip install 'feral-ai[stt]'"
             )
             return
-        # This used to claim the model downloads on first use. It does
-        # not: nothing passes allow_download=True, there is no
-        # ensure_faster_whisper_model(), and the provider constructor
-        # refuses when the weights are absent. A fresh install that
-        # picked faster-whisper therefore refused every session while
-        # the wizard had promised it would sort itself out.
-        console.print(
-            "  faster-whisper will NOT fetch its model automatically. "
-            "Nothing in the runtime passes allow_download, so a session "
-            "that picks it fails until the weights are fetched by hand. "
-            "Prefer whispercpp, which is also the only Whisper build "
-            "with Metal acceleration on Apple silicon."
-        )
+        # Downloads happen here, in the wizard, and nowhere else at
+        # runtime. This is the same rule the rest of the local stack
+        # follows: a voice turn that discovers missing weights fails
+        # loudly rather than stalling for a multi-hundred-megabyte
+        # fetch that is indistinguishable from a hang, and an operator
+        # who chose local engines for privacy is told when bytes leave
+        # the machine.
+        model = state.get_setting("audio", "chained_stt_model") or "base.en"
+        if local_models.faster_whisper_model_present(model):
+            console.print(
+                f"  [green]OK[/] faster-whisper model {model} already present"
+                if _RICH_AVAILABLE else
+                f"  OK faster-whisper model {model} already present"
+            )
+            _set_voice_chained(state, "stt_model", model)
+            return
+        size = local_models.faster_whisper_model_size_mb(model)
+        suffix = f" (~{size}MB)" if size else ""
+        if not confirm(
+            f"  Download the faster-whisper {model} model now{suffix}?",
+            default=True,
+        ):
+            console.print(
+                "  Skipped. faster-whisper will refuse to open a session "
+                "until the weights are on disk. Fetch them later with "
+                f"`python -m voice.local_models fetch-faster-whisper {model}`."
+            )
+            return
+        try:
+            path = await asyncio.to_thread(
+                local_models.ensure_faster_whisper_model, model,
+                allow_download=True,
+            )
+            console.print(f"  Downloaded {path}")
+            _set_voice_chained(state, "stt_model", model)
+        except Exception as exc:
+            console.print(f"  [red]Download failed:[/] {exc}" if _RICH_AVAILABLE
+                          else f"  Download failed: {exc}")
+        return
 
 
 async def _offer_piper_download(console, state: WizardState) -> None:
