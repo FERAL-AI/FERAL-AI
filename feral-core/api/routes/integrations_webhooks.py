@@ -397,7 +397,7 @@ async def refresh_integration_status(body: dict | None = None):
 
     Body (optional): ``{"provider_id": "spotify"}`` to refresh one
     provider; omit it to sweep every provider with a registered probe.
-    Bypasses the cache TTL — the point of pressing the button is to
+    Bypasses the cache TTL, the point of pressing the button is to
     distrust the cached answer.
 
     ``results`` maps provider id to ``true`` / ``false`` / ``null``,

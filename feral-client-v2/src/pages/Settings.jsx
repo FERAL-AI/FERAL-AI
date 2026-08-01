@@ -1645,34 +1645,40 @@ function AutonomySection() {
 
 // ── Voice ─────────────────────────────────────────────────────
 
+// Catalogue id -> the name `voice/tts_providers` and `voice/stt_providers`
+// register. Only TTS OpenAI differs (`openai_tts` in the catalogue,
+// `openai` in the registry); persisting the catalogue id would store a
+// provider the chained pipeline cannot instantiate.
+const CHAINED_ID_ALIASES = { openai_tts: 'openai' };
+const CHAINED_PROVIDER_ID = (catalogueId) => CHAINED_ID_ALIASES[catalogueId] || catalogueId;
+
 function VoiceSection() {
-  // Lane 05 Wave 2 surface — `/api/voice/providers` returns an 8-entry
-  // catalogue keyed by `kind` (realtime | stt | tts) with cached probe
-  // status. The Settings panel groups them into three pickers
-  // (realtime / chained STT / chained TTS) and persists the operator's
-  // choice into `audio.realtime_providers` / `audio.chained_providers`
-  // via `/api/config/update`.
+  // Lane 05 Wave 2 surface, `/api/voice/providers` returns a catalogue
+  // keyed by `kind` (realtime | stt | tts) with cached probe status. The
+  // panel groups it into three pickers: realtime, chained STT, chained
+  // TTS.
   //
-  // NEITHER LIST IS READ BY THE AUDIO ROUTER. An earlier version of this
-  // comment claimed they were "the same lists the audio router reads on
-  // every voice session"; nothing read either one, then or now.
-  //   - `audio.realtime_providers`: `voice/router.py`
-  //     `_preferred_realtime_provider()` resolves a SINGLE provider from
-  //     `FERAL_VOICE_PROVIDER` and then the scalar
-  //     `audio.realtime_primary`, and never walks this list. The key is
-  //     kept, and allowlisted in `tests/test_settings_keys_have_readers.py`
-  //     with that reason, only so this page has preselected entries.
-  //   - `audio.chained_providers`: no Python reader at all. The chained
-  //     pair is resolved by `VoiceRouter._resolve_chained_config` from
-  //     per-session `provider_opts`, then `voice.chained.*` (what the
-  //     phone Settings panel writes), then `audio.chained_fallback.*`
-  //     (what the setup wizard writes), then the shipped defaults. It is
-  //     outside the reader gate because it has no `DEFAULT_SETTINGS`
-  //     entry for the gate to walk.
+  // Where each picker writes, and who reads it:
+  //   - Realtime -> `audio.realtime_providers` (ordered list).
+  //     `voice/router.py::_configured_realtime_chain` walks it as the
+  //     realtime segment of the fallback chain, so reordering here
+  //     changes which provider is tried first.
+  //   - Chained STT -> `voice.chained.stt_provider` (single provider).
+  //   - Chained TTS -> `voice.chained.tts_provider` (single provider).
+  //     `VoiceRouter._resolve_chained_config` reads both, ahead of the
+  //     wizard's `audio.chained_fallback.*` and the shipped defaults.
   //
-  // So the pickers below record a preference and render it back. Changing
-  // the operator-visible behaviour means writing `audio.realtime_primary`
-  // or `voice.chained.*`, which is what the phone panel does.
+  // Both chained pickers used to write the SAME key,
+  // `audio.chained_providers`: picking an STT engine wiped the TTS
+  // choice and vice versa, and the key had no Python reader at all, so
+  // neither pick ever reached a voice session. The scalar
+  // `voice.chained.*` keys are the ones the router actually resolves,
+  // which is also what the phone Settings panel writes.
+  //
+  // Catalogue ids are not all registry ids: the TTS entry `openai_tts`
+  // is registered as `openai` in `voice/tts_providers`. CHAINED_PROVIDER_ID
+  // maps between them, because writing the catalogue id would persist a
+  // provider name the pipeline cannot resolve.
   //
   // Phone Settings → Voice mirrors this shape via SettingsPanel.jsx so a
   // user pairing from iPhone sees identical labels and status.
@@ -1700,11 +1706,11 @@ function VoiceSection() {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const updateAudio = async (key, value) => {
-    setBusy(key);
+  const updateSetting = async (section, key, value, busyTag) => {
+    setBusy(busyTag || key);
     setErr('');
     try {
-      const r = await apiFetch('/api/config/update', { method: 'POST', body: JSON.stringify({ section: 'audio', key, value }) });
+      const r = await apiFetch('/api/config/update', { method: 'POST', body: JSON.stringify({ section, key, value }) });
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
         throw new Error(formatApiDetail(body, `failed to update ${key}`));
@@ -1714,6 +1720,19 @@ function VoiceSection() {
       setErr(e?.message || `update ${key} failed`);
     } finally { setBusy(''); }
   };
+
+  const updateAudio = (key, value) => updateSetting('audio', key, value);
+
+  // `voice.chained` is a nested block, and `/api/config/update` replaces
+  // whatever value it is handed, so merge the existing pair before
+  // writing or setting the STT provider would delete the TTS one. That
+  // clobber is the bug this replaces, in a different shape.
+  const updateChained = (key, value) => updateSetting(
+    'voice',
+    'chained',
+    { ...(config?.voice?.chained || {}), [key]: value },
+    `chained:${key}`,
+  );
 
   const toggleWake = async () => {
     const next = !wakeWord.enabled;
@@ -1749,12 +1768,12 @@ function VoiceSection() {
 
   if (!status || !config) return <EmptyState title="Loading voice status…" />;
   const audio = config.audio || {};
+  const chained = config.voice?.chained || {};
   const realtimeList = Array.isArray(audio.realtime_providers) && audio.realtime_providers.length
     ? audio.realtime_providers
     : (audio.realtime_provider ? [audio.realtime_provider] : []);
-  const chainedList = Array.isArray(audio.chained_providers) && audio.chained_providers.length
-    ? audio.chained_providers
-    : [];
+  const sttPick = chained.stt_provider || audio.chained_fallback?.stt_provider || '';
+  const ttsPick = chained.tts_provider || audio.chained_fallback?.tts_provider || '';
 
   const byKind = { realtime: [], stt: [], tts: [] };
   for (const p of providers) {
@@ -1768,14 +1787,14 @@ function VoiceSection() {
     await updateAudio(key, next);
   };
 
-  const renderGroup = (kind, title, listKey, currentList) => {
+  const renderGroup = (kind, title, { isActive, onToggle, busyTag, activeLabel }) => {
     const rows = byKind[kind] || [];
     return (
       <div className="v2-voice-group" data-testid={`voice-group-${kind}`}>
         <div className="v2-voice-group__title">{title}</div>
         {rows.length === 0 && <EmptyState title="No providers in catalogue" />}
         {rows.map((p) => {
-          const active = currentList.includes(p.id);
+          const active = isActive(p.id);
           const status = p.probe_status || (p.configured ? 'ok' : 'no_key');
           const tone = status === 'ok' ? 'v2-keylist__probe--ok'
             : status === 'no_key' || status === 'not_configured' ? 'v2-keylist__probe--warn'
@@ -1827,10 +1846,11 @@ function VoiceSection() {
               <button
                 type="button"
                 className={`v2-btn ${active ? '' : 'v2-btn--primary'}`}
-                onClick={() => toggleInList(listKey, currentList, p.id)}
-                disabled={busy === listKey}
+                onClick={() => onToggle(p.id)}
+                disabled={busy === busyTag}
+                data-testid={`voice-use-${p.id}`}
               >
-                {active ? 'Remove' : 'Use'}
+                {active ? (activeLabel || 'Remove') : 'Use'}
               </button>
             </div>
           );
@@ -1852,13 +1872,28 @@ function VoiceSection() {
 
       <Glass level={0} radius="md" padding="md" data-testid="voice-pickers">
         <p className="v2-p v2-p--muted v2-p--tiny" style={{ marginBottom: 6 }}>
-          Pick providers per pipeline. Realtime is a single full-duplex endpoint (OpenAI Realtime / Gemini Live).
-          Chained pipelines compose Speech-to-Text → LLM → Text-to-Speech; the audio router walks the lists in
-          order and falls back automatically if one provider returns no_key or unauthorized.
+          Realtime is a single full-duplex endpoint (OpenAI Realtime / Gemini Live); the router tries this list in
+          order and falls through to the chained pipeline when none of them can serve. The chained pipeline composes
+          Speech-to-Text → LLM → Text-to-Speech and takes exactly one engine on each side, so picking a new one
+          replaces the old.
         </p>
-        {renderGroup('realtime', 'Realtime', 'realtime_providers', realtimeList)}
-        {renderGroup('stt', 'Chained — Speech-to-Text', 'chained_providers', chainedList)}
-        {renderGroup('tts', 'Chained — Text-to-Speech', 'chained_providers', chainedList)}
+        {renderGroup('realtime', 'Realtime', {
+          isActive: (id) => realtimeList.includes(id),
+          onToggle: (id) => toggleInList('realtime_providers', realtimeList, id),
+          busyTag: 'realtime_providers',
+        })}
+        {renderGroup('stt', 'Chained, Speech-to-Text', {
+          isActive: (id) => sttPick === CHAINED_PROVIDER_ID(id),
+          onToggle: (id) => updateChained('stt_provider', CHAINED_PROVIDER_ID(id)),
+          busyTag: 'chained:stt_provider',
+          activeLabel: 'In use',
+        })}
+        {renderGroup('tts', 'Chained, Text-to-Speech', {
+          isActive: (id) => ttsPick === CHAINED_PROVIDER_ID(id),
+          onToggle: (id) => updateChained('tts_provider', CHAINED_PROVIDER_ID(id)),
+          busyTag: 'chained:tts_provider',
+          activeLabel: 'In use',
+        })}
       </Glass>
 
       <Row label="TTS voice" hint="Default voice name passed to the active TTS provider (provider-specific).">
@@ -2118,10 +2153,25 @@ function PolicySub() {
 //      providers because it used to store the client secret as the
 //      access token.
 //
-//   3. Home Assistant = long-lived token paste field, exactly the
-//      same `/api/integrations/token` POST.
+//   3. Home Assistant = URL + long-lived token, exactly the same
+//      `/api/integrations/token` POST. The URL field is not optional
+//      dressing: without it the brain assumed
+//      `http://homeassistant.local:8123` and the only override was an
+//      env var plus a restart, so a Home Assistant anywhere else could
+//      not be connected from this page at all.
 //
-// Probe-based `connected` comes from `/api/integrations` (Lane 10).
+//   4. Skill API keys = one row per registered manifest declaring
+//      api_key / bearer auth, via `/api/skills/keys`. There was no
+//      surface for these in this UI; the v1 page's `skill_keys` POST
+//      wrote somewhere nothing read.
+//
+// `connected` comes from `/api/integrations`, which re-probes providers
+// whose cached verdict has expired before answering, and `probe_verified`
+// says whether the badge is backed by that probe or is only "we hold a
+// credential". Refresh status (`POST /api/integrations/refresh`) forces a
+// sweep past the cache. Before those existed nothing in the brain ran the
+// probes, so this page's old claim that status "comes from a real backend
+// probe" was false for every provider.
 // Disconnect revokes vault entries via `/api/integrations/disconnect`.
 
 const GMAIL_STEPS = [
@@ -2266,7 +2316,7 @@ function GmailWalkthrough({ provider, onSaved, onDisconnect, connected }) {
   );
 }
 
-function OAuthSelfServeCard({ provider, onSaved, onDisconnect, connected }) {
+function OAuthSelfServeCard({ provider, onSaved, onDisconnect, connected, verified }) {
   const pid = provider.id || provider.provider_id;
   const [expanded, setExpanded] = useState(false);
   const [clientId, setClientId] = useState(provider.client_id || '');
@@ -2322,9 +2372,19 @@ function OAuthSelfServeCard({ provider, onSaved, onDisconnect, connected }) {
     <Glass level={0} radius="md" padding="md" data-testid={`oauth-card-${pid}`}>
       <div className="v2-flow-card-head" style={{ marginBottom: 6 }}>
         <strong>{provider.name || pid}</strong>
-        <Status tone={connected ? 'live' : (hasClientId ? 'warn' : 'off')}>
-          {connected ? 'connected' : (hasClientId ? 'configured' : 'needs-setup')}
+        {/* `connected` alone cannot tell "the provider answered a probe
+            just now" from "we hold a token nobody has ever checked".
+            The backend now reports which one it is, and rendering both
+            as the same green dot is how a revoked token looked healthy
+            for months. */}
+        <Status tone={connected && verified ? 'live' : (connected || hasClientId ? 'warn' : 'off')}>
+          {connected
+            ? (verified ? 'connected' : 'stored, unverified')
+            : (hasClientId ? 'configured' : 'needs-setup')}
         </Status>
+        {connected && !verified && provider.probe_reason && (
+          <span className="v2-p v2-p--muted v2-p--tiny">{provider.probe_reason}</span>
+        )}
         {connected ? (
           <button type="button" className="v2-btn" onClick={onDisconnect}>Disconnect</button>
         ) : hasClientId ? (
@@ -2397,26 +2457,54 @@ function OAuthSelfServeCard({ provider, onSaved, onDisconnect, connected }) {
   );
 }
 
-function HomeAssistantCard({ provider, onSaved, onDisconnect, connected }) {
+// The brain's default when nobody has said where Home Assistant lives.
+// Mirrors `integrations/home_assistant.py::DEFAULT_BASE_URL`.
+const HA_DEFAULT_URL = 'http://homeassistant.local:8123';
+
+function HomeAssistantCard({ provider, onSaved, onDisconnect, connected, currentUrl }) {
   const pid = HA_PROVIDER_ID;
   const [token, setToken] = useState('');
+  const [url, setUrl] = useState(currentUrl || '');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [msg, setMsg] = useState('');
 
+  // The card used to take a token and nothing else, so a Home Assistant
+  // on a static LAN IP, a non-default port, or behind a reverse proxy
+  // could not be connected from here at all: the brain assumed
+  // homeassistant.local:8123 and the only override was an env var plus a
+  // restart. The URL field is the missing half of the pair the setup
+  // text has always described.
+  useEffect(() => { setUrl(currentUrl || ''); }, [currentUrl]);
+
   const save = async () => {
-    if (!token.trim()) { setErr('Long-lived token is required.'); return; }
+    if (!token.trim() && !url.trim()) {
+      setErr('Paste a long-lived token, a URL, or both.');
+      return;
+    }
     setBusy(true);
     setErr('');
     setMsg('');
     try {
+      const payload = { provider_id: pid };
+      if (token.trim()) payload.token = token.trim();
+      if (url.trim()) payload.url = url.trim();
       const r = await apiFetch('/api/integrations/token', {
         method: 'POST',
-        body: JSON.stringify({ provider_id: pid, token: token.trim() }),
+        body: JSON.stringify(payload),
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok || body?.error) throw new Error(formatApiDetail(body, `save failed (${r.status})`));
-      setMsg('Saved. Probing Home Assistant…');
+      // The backend probes before answering, so report the verdict
+      // rather than a hopeful "saved": reachable and stored are
+      // different claims and only one of them is what the user wanted.
+      const where = body?.base_url || url.trim() || HA_DEFAULT_URL;
+      if (body?.connected) {
+        setMsg(`Connected to ${where}.`);
+      } else {
+        const why = body?.probe?.reason ? ` (${body.probe.reason})` : '';
+        setErr(`Saved, but ${where} did not answer${why}. Check the URL and the token.`);
+      }
       setToken('');
       await onSaved();
     } catch (e) {
@@ -2435,8 +2523,20 @@ function HomeAssistantCard({ provider, onSaved, onDisconnect, connected }) {
       </div>
       <p className="v2-p v2-p--muted v2-p--tiny" style={{ marginBottom: 8 }}>
         In Home Assistant: <strong>Profile → Security → Long-lived access tokens → Create token</strong> →
-        paste it below. No OAuth.
+        paste it below along with the address you use to reach Home Assistant. No OAuth.
       </p>
+      <Row label="Home Assistant URL" hint={`Leave blank for ${HA_DEFAULT_URL}. Include the port.`}>
+        <input
+          type="text"
+          className="v2-input"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder={HA_DEFAULT_URL}
+          autoComplete="off"
+          spellCheck={false}
+          data-testid="ha-url"
+        />
+      </Row>
       <Row label="Long-lived token">
         <input
           type="password"
@@ -2461,7 +2561,9 @@ function HomeAssistantCard({ provider, onSaved, onDisconnect, connected }) {
 
 function IntegrationsSection() {
   const [providers, setProviders] = useState([]);
+  const [haUrl, setHaUrl] = useState('');
   const [loading, setLoading] = useState(true);
+  const [probing, setProbing] = useState(false);
   const [err, setErr] = useState('');
 
   const refresh = useCallback(async () => {
@@ -2473,12 +2575,34 @@ function IntegrationsSection() {
       // (`spotify_connected`, etc.); normalise into proper rows so
       // every tile renders the right card.
       setProviders(Array.isArray(rows) ? rows : []);
+      setHaUrl(d.home_assistant_url || '');
     } catch (e) {
       setErr(e?.message || 'failed to load integrations');
     } finally { setLoading(false); }
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // Re-probe every provider, bypassing the brain's status cache, then
+  // re-read the list. Until this button existed nothing in the brain ran
+  // the probes at all: `probe_all` and every integration's
+  // `probe_connected` had no caller, so a badge went stale 60s after an
+  // OAuth callback and reverted to "a token string exists" forever.
+  const reprobe = async () => {
+    setProbing(true);
+    setErr('');
+    try {
+      await apiFetch('/api/integrations/refresh', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      await refresh();
+    } catch (e) {
+      setErr(e?.message || 'refresh failed');
+    } finally {
+      setProbing(false);
+    }
+  };
 
   const disconnect = async (id) => {
     if (!window.confirm(`Disconnect ${id}? Vault credentials will be revoked.`)) return;
@@ -2514,14 +2638,33 @@ function IntegrationsSection() {
     return false;
   });
 
+  const unverified = all.filter((p) => p.connected && p.probe_verified === false).length;
+
   return (
     <div className="v2-setting-stack">
       {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
       <p className="v2-p v2-p--muted v2-p--tiny">
-        Each integration's connection status comes from a real backend probe (Lane 10). Gmail uses an App Password
-        (no OAuth); every other provider uses your own OAuth app — paste your client_id + client_secret once and
-        FERAL handles the rest.
+        A <strong>connected</strong> badge means the provider answered a live probe. A{' '}
+        <strong>stored, unverified</strong> badge means FERAL holds a credential it has not checked yet, press
+        Refresh status to find out. Gmail uses an App Password (no OAuth); every other provider uses your own
+        OAuth app, paste your client_id + client_secret once and FERAL handles the rest.
       </p>
+      <div className="v2-forge-actions" style={{ marginBottom: 8 }}>
+        <button
+          type="button"
+          className="v2-btn"
+          onClick={reprobe}
+          disabled={probing}
+          data-testid="integrations-refresh"
+        >
+          {probing ? 'Probing…' : 'Refresh status'}
+        </button>
+        {unverified > 0 && (
+          <span className="v2-p v2-p--muted v2-p--tiny" style={{ marginLeft: 8 }}>
+            {unverified} credential{unverified === 1 ? '' : 's'} not verified yet.
+          </span>
+        )}
+      </div>
 
       <GmailWalkthrough
         provider={gmail}
@@ -2536,6 +2679,7 @@ function IntegrationsSection() {
           key={p.id || p.provider_id}
           provider={p}
           connected={!!p.connected}
+          verified={!!p.probe_verified}
           onSaved={refresh}
           onDisconnect={() => disconnect(p.id || p.provider_id)}
         />
@@ -2544,10 +2688,145 @@ function IntegrationsSection() {
       <HomeAssistantCard
         provider={ha}
         connected={!!ha.connected}
+        currentUrl={haUrl}
         onSaved={refresh}
         onDisconnect={() => disconnect(HA_PROVIDER_ID)}
       />
+
+      <SkillKeysCard />
     </div>
+  );
+}
+
+// ── Skill API keys ────────────────────────────────────────────
+//
+// This panel did not exist. The only surface for a skill API key was the
+// v1 Settings page POSTing `{skill_keys: {...}}` to
+// /api/config/credentials, and that write landed in
+// `ConfigLoader._credentials` where nothing on the execution path read
+// it. The single working method was exporting `FERAL_KEY_<SKILL_ID>` and
+// restarting the brain, which is documented nowhere.
+//
+// `/api/skills/keys` lists every registered manifest declaring api_key or
+// bearer auth, so the operator picks a row instead of having to know
+// skill ids. POST writes through to the running SkillExecutor (encrypted
+// vault + live cache), so the key works on the next tool call.
+
+function SkillKeyRow({ row, onSaved }) {
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState('');
+  const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+
+  const save = async () => {
+    if (!value.trim()) { setErr('Paste the key first.'); return; }
+    setBusy('save');
+    setErr('');
+    setMsg('');
+    try {
+      const body = await apiJson(`/api/skills/${encodeURIComponent(row.skill_id)}/key`, {
+        method: 'POST',
+        body: JSON.stringify({ key: value.trim() }),
+      });
+      if (!body?.ok) throw new Error(formatApiDetail(body, 'save failed'));
+      // `persisted: false` means the brain is running without a vault:
+      // the key works now and is gone after a restart. Saying so beats a
+      // green tick that turns out to be a lie tomorrow.
+      setMsg(body.persisted ? 'Saved.' : 'Active for this session only (no vault attached).');
+      setValue('');
+      await onSaved();
+    } catch (e) {
+      setErr(e?.message || 'save failed');
+    } finally { setBusy(''); }
+  };
+
+  const clear = async () => {
+    setBusy('clear');
+    setErr('');
+    setMsg('');
+    try {
+      await apiJson(`/api/skills/${encodeURIComponent(row.skill_id)}/key`, { method: 'DELETE' });
+      await onSaved();
+    } catch (e) {
+      setErr(e?.message || 'remove failed');
+    } finally { setBusy(''); }
+  };
+
+  return (
+    <div data-testid={`skill-key-${row.skill_id}`} style={{ marginBottom: 10 }}>
+      <Row
+        label={row.name || row.skill_id}
+        hint={row.has_key ? 'Key stored. Paste a new one to replace it.' : `No key yet, ${row.auth_type}`}
+      >
+        <input
+          type="password"
+          className="v2-input"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={row.has_key ? '•••••••• (stored)' : 'paste API key'}
+          autoComplete="off"
+          data-testid={`skill-key-input-${row.skill_id}`}
+        />
+      </Row>
+      <div className="v2-forge-actions">
+        <button
+          type="button"
+          className="v2-btn v2-btn--primary"
+          onClick={save}
+          disabled={busy === 'save'}
+          data-testid={`skill-key-save-${row.skill_id}`}
+        >
+          {busy === 'save' ? 'Saving…' : 'Save key'}
+        </button>
+        {row.has_key && (
+          <button type="button" className="v2-btn" onClick={clear} disabled={busy === 'clear'}>
+            Remove
+          </button>
+        )}
+      </div>
+      {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
+      {msg && <div className="v2-chip v2-chip--live">{msg}</div>}
+    </div>
+  );
+}
+
+function SkillKeysCard() {
+  const [rows, setRows] = useState([]);
+  const [ready, setReady] = useState(false);
+  const [err, setErr] = useState('');
+
+  const refresh = useCallback(async () => {
+    try {
+      const d = await apiJson('/api/skills/keys');
+      setRows(Array.isArray(d?.needs_key) ? d.needs_key : []);
+      if (d && d.ok === false) setErr(d.error || 'skill keys unavailable');
+      else setErr('');
+    } catch (e) {
+      setErr(e?.message || 'failed to load skill keys');
+    } finally { setReady(true); }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  if (!ready) return null;
+
+  return (
+    <Glass level={0} radius="md" padding="md" data-testid="skill-keys-card">
+      <div className="v2-flow-card-head" style={{ marginBottom: 6 }}>
+        <strong>Skill API keys</strong>
+      </div>
+      <p className="v2-p v2-p--muted v2-p--tiny" style={{ marginBottom: 8 }}>
+        Keys for skills that call an external API with your own account. Saved keys are encrypted, take effect on
+        the next tool call, and never reach the model.
+      </p>
+      {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
+      {rows.length === 0 && !err && (
+        <EmptyState title="No skills need a key" hint="Skills declaring api_key or bearer auth appear here." />
+      )}
+      {rows.map((row) => (
+        <SkillKeyRow key={row.skill_id} row={row} onSaved={refresh} />
+      ))}
+    </Glass>
   );
 }
 

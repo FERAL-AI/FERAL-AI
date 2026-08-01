@@ -9,7 +9,7 @@ land in. Nothing connected the two. Grep for ``probe_all`` or
 task and you find no caller: the only in-brain writer of the cache was
 ``OAuthManager`` firing once after a token exchange. With a 60 second
 TTL on that entry, every integration's ``connected`` property fell back
-to "a token string exists" forever after — including for a token the
+to "a token string exists" forever after, including for a token the
 provider had already revoked.
 
 So the badge said connected, the docstring in ``_probe_status`` claimed
@@ -20,10 +20,10 @@ callback and never again.
 
 This module is the missing runner. Two entry points:
 
-* :func:`sweep_once` — probe providers now and write the results into
+* :func:`sweep_once`, probe providers now and write the results into
   the cache. ``/api/integrations`` awaits it for providers whose entry
   has gone stale, and ``POST /api/integrations/refresh`` forces it.
-* :func:`ensure_started` — a periodic loop so the cache stays warm for
+* :func:`ensure_started`, a periodic loop so the cache stays warm for
   readers that never go through those routes (the dashboard endpoint,
   the orchestrator's tool-availability check). The interval defaults to
   under the cache TTL, because a sweep slower than the TTL leaves gaps
@@ -80,12 +80,12 @@ def known_provider_ids() -> list[str]:
     """Provider ids with a registered probe, or ``[]`` when unavailable."""
     try:
         from security.probe import registered_probe_ids
-    except Exception as exc:  # pragma: no cover — import-time failure
+    except Exception as exc:  # pragma: no cover, import-time failure
         logger.debug("probe registry unavailable: %s", exc)
         return []
     try:
         return list(registered_probe_ids())
-    except Exception as exc:  # pragma: no cover — defensive
+    except Exception as exc:  # pragma: no cover, defensive
         logger.warning("registered_probe_ids() raised: %s", exc)
         return []
 
@@ -120,7 +120,7 @@ async def sweep_once(
                 return provider_id, await _probe_status.refresh(
                     provider_id, vault=vault,
                 )
-            except Exception as exc:  # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover, defensive
                 logger.warning("probe sweep for %s raised: %s", provider_id, exc)
                 return provider_id, None
 
@@ -142,7 +142,7 @@ async def _loop(vault) -> None:
                 await sweep_once(vault=vault)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover, defensive
                 logger.warning("probe sweep failed: %s", exc)
     except asyncio.CancelledError:
         logger.info("Probe sweeper stopped")
@@ -191,5 +191,5 @@ async def stop() -> None:
         await task
     except asyncio.CancelledError:
         pass
-    except Exception as exc:  # pragma: no cover — defensive
+    except Exception as exc:  # pragma: no cover, defensive
         logger.debug("probe sweeper shutdown raised: %s", exc)

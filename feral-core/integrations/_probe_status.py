@@ -13,9 +13,9 @@ per provider. Readers (integrations' ``connected`` property) call
 
 Writers, all of which exist:
 
-* ``integrations.probe_sweeper`` — the periodic sweep and the on-read
+* ``integrations.probe_sweeper``, the periodic sweep and the on-read
   refresh behind ``GET /api/integrations``.
-* ``POST /api/integrations/refresh`` — the operator-initiated "Refresh
+* ``POST /api/integrations/refresh``, the operator-initiated "Refresh
   status" action. This docstring described that action for months
   before any route implemented it; it does now.
 * ``OAuthManager`` after a successful token exchange.

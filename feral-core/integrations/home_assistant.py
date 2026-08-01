@@ -78,7 +78,7 @@ def resolve_base_url(vault=None) -> str:
 
     1. Add-on mode (``SUPERVISOR_TOKEN`` present): ``FERAL_HA_URL`` or
        the Supervisor proxy. The add-on knows where Core is.
-    2. ``FERAL_HA_URL`` / ``HA_URL`` — an operator env override outranks
+    2. ``FERAL_HA_URL`` / ``HA_URL``, an operator env override outranks
        stored state, same as everywhere else in FERAL.
     3. The URL saved from Settings (vault ``integration_config``).
     4. :data:`DEFAULT_BASE_URL`.
@@ -157,7 +157,7 @@ class HomeAssistantIntegration:
         resolved = normalize_base_url(url)
         if self._is_addon:
             logger.warning(
-                "Ignoring Home Assistant URL %s — running as an add-on, where "
+                "Ignoring Home Assistant URL %s, running as an add-on, where "
                 "Core is reached through the Supervisor proxy.", resolved,
             )
             return self._base_url
@@ -173,7 +173,7 @@ class HomeAssistantIntegration:
             putter = getattr(vault, "put", None) if vault is not None else None
             if putter is None:
                 logger.warning(
-                    "Home Assistant URL set to %s for this process only — no "
+                    "Home Assistant URL set to %s for this process only, no "
                     "vault attached, so it will not survive a restart.",
                     resolved,
                 )

@@ -149,7 +149,7 @@ async def set_skill_key(skill_id: str, body: dict):
     executor's in-process cache (no restart needed).
 
     ``persisted`` is False when the brain is running without a vault: the
-    key still works for this process, and saying so is the point — a
+    key still works for this process, and saying so is the point, a
     silent "ok" would send the operator away believing it was durable.
     """
     executor = getattr(state, "skill_executor", None)
@@ -160,7 +160,7 @@ async def set_skill_key(skill_id: str, body: dict):
         persisted = executor.store_key(skill_id, key)
     except ValueError as exc:
         return {"ok": False, "skill_id": skill_id, "error": str(exc)}
-    except Exception as exc:  # pragma: no cover — defensive
+    except Exception as exc:  # pragma: no cover, defensive
         logger.warning("set_skill_key(%s) failed: %s", skill_id, exc)
         return {"ok": False, "skill_id": skill_id, "error": str(exc)}
     return {

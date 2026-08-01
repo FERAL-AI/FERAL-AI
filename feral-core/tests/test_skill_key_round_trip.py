@@ -9,7 +9,7 @@ execution path:
   ``/api/config/credentials``. The route handed it to
   ``ConfigLoader.save_credentials``, which parked it in
   ``ConfigLoader._credentials["skill_keys"]``. The only reader of that
-  dict is ``ConfigLoader.get_skill_key`` — called by no production code,
+  dict is ``ConfigLoader.get_skill_key``, called by no production code,
   only by two tests.
 * the default (v2) UI had no surface at all.
 

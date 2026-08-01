@@ -312,7 +312,7 @@ def _apply_skill_keys(skill_keys: dict) -> tuple[list[str], list[str]]:
 
     Returns ``(saved_skill_ids, rejected_skill_ids)``. Values are never
     echoed back. Rejection means the id or the value was empty, or the
-    executor is not up yet — in either case the caller must not report
+    executor is not up yet, in either case the caller must not report
     the key as saved.
     """
     saved: list[str] = []

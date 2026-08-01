@@ -129,7 +129,7 @@ class SkillExecutor:
                 persisted = True
             except Exception as exc:
                 logger.warning(
-                    "store_key: vault write failed for skill '%s': %s — the key "
+                    "store_key: vault write failed for skill '%s': %s, the key "
                     "is live in this process but will not survive a restart.",
                     skill_id, exc,
                 )
@@ -165,7 +165,7 @@ class SkillExecutor:
     def key_ids(self) -> list[str]:
         """Skill ids that currently have a key, for status surfaces.
 
-        Never returns the values — the UI only needs to know which rows
+        Never returns the values, the UI only needs to know which rows
         are configured.
         """
         ids = set(self._vault.keys())
@@ -249,9 +249,9 @@ class SkillExecutor:
 
         Order, most specific first:
 
-        1. The vault's ``skill_keys`` namespace — what the Settings UI
+        1. The vault's ``skill_keys`` namespace, what the Settings UI
            writes through :meth:`store_key`.
-        2. The vault's flat default namespace — where builds before this
+        2. The vault's flat default namespace, where builds before this
            change put anything a caller passed to ``vault.store``.
         3. The in-process cache, populated by ``FERAL_KEY_<SKILL_ID>``
            env vars at construction and by :meth:`set_key` /
