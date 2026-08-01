@@ -149,6 +149,27 @@ These tune the runtime flags applied to every container started by `security/doc
 | `FERAL_WHOOP_CLIENT_SECRET` | — | Whoop API client secret |
 | `FERAL_OURA_PAT` | — | Oura Ring personal access token |
 
+## Coding Harness
+
+Each of these also has a `settings.json` mirror under the `coding` section
+(`FERAL_READ_BEFORE_EDIT` mirrors `coding.read_before_edit`, and so on), so a
+choice can be persisted instead of re-exported on every launch. The
+environment variable stays the higher-priority source: set it and it wins over
+`settings.json`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FERAL_READ_BEFORE_EDIT` | `warn` | `off`, `warn`, or `enforce`. Whether editing a file the session has not read is refused, warned about, or ignored |
+| `FERAL_TOOL_CALL_CONTEXT` | `on` | `off` disables per-call tool context |
+| `FERAL_EDIT_MAX_CONTENT_LINES` | `4000` | Above this file size only the exact edit matcher runs |
+| `FERAL_EDIT_MAX_NEEDLE_LINES` | `400` | Above this needle size only the exact edit matcher runs |
+| `FERAL_CHECKPOINT_DIR` | `$FERAL_HOME/checkpoints` | Overrides the checkpoint store location outright |
+| `FERAL_CHECKPOINT_RETENTION_DAYS` | `14` | Days a checkpoint is kept before pruning |
+| `FERAL_CHECKPOINT_MAX_BLOB_BYTES` | `8388608` | 8 MiB cap on a single checkpointed file |
+| `FERAL_POST_EDIT_DIAGNOSTICS` | `on` | `off` skips the diagnostics pass after an edit |
+| `FERAL_DIAGNOSTICS_TIMEOUT` | `5` | Seconds allowed for that diagnostics pass (floored at 0.5) |
+| `FERAL_TURN_IDLE_SECONDS` | `180` | Seconds a turn may sit idle before the tool loop gives up |
+
 ## Feature Flags
 
 | Variable | Default | Description |

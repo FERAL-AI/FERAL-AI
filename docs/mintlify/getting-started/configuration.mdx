@@ -63,9 +63,12 @@ FERAL merges configuration from four sources, each overriding the previous:
     "safe_categories": ["information", "media", "smart_home"],
     "risky_categories": ["email", "file_delete", "purchase"]
   },
-  "ui": {
-    "theme": "dark",
-    "show_debug": false
+  "coding": {
+    "read_before_edit": "warn",
+    "tool_call_context": "on",
+    "post_edit_diagnostics": "on",
+    "checkpoint_retention_days": 14,
+    "turn_idle_seconds": 180
   },
   "brain": {
     "port": 9090,
