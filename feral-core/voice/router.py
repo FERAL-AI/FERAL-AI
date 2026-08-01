@@ -1535,6 +1535,35 @@ class VoiceRouter:
             )
             return None
 
+    async def cancel_chained_response(self, session_id: str) -> bool:
+        """Barge-in for the chained pipeline. Returns True if a turn was cut.
+
+        The counterpart to ``RealtimeSession.cancel_response`` /
+        ``GeminiSession.cancel_response``, which is what
+        ``api/server.py``'s ``voice_interrupt`` handler already calls
+        for the two realtime providers. The chained path had no
+        equivalent, so speaking over a chained reply did nothing at all
+        and the user had to listen to the whole wrong answer.
+
+        Note the key: realtime sessions are keyed by ``node_id``,
+        chained sessions by ``session_id``. The handler has both.
+
+        Safe on an unknown or idle session, so the caller does not have
+        to know which voice mode is live. That is what lets the server
+        side be a single unconditional line.
+        """
+        chained = getattr(self, "_chained", None)
+        if chained is None:
+            return False
+        try:
+            return bool(await chained.cancel(session_id, reason="user_interrupt"))
+        except Exception:
+            logger.warning(
+                "Chained barge-in failed for session %s", session_id[:8],
+                exc_info=True,
+            )
+            return False
+
     async def handle_chained_audio(
         self,
         session_id: str,

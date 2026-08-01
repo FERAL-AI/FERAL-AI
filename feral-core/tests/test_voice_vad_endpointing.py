@@ -290,3 +290,57 @@ async def test_barge_in_can_be_disabled():
 
     await pipeline.handle_audio("sess-vad", SILENCE)
     assert session.state == VoiceState.SPEAKING
+
+
+# --- the surface api/server.py's voice_interrupt handler calls ----------
+
+
+@pytest.mark.asyncio
+async def test_router_cancel_chained_response_cuts_the_turn():
+    """``api/server.py:2587`` cancels realtime and Gemini sessions only.
+
+    This is the chained equivalent it needs to call. It is deliberately
+    safe on an unknown session and on a router with no chained
+    pipeline wired, so the server side stays a single unconditional
+    line rather than a mode check.
+    """
+    from voice.router import VoiceRouter
+
+    router = VoiceRouter()
+    # No pipeline wired at all.
+    assert await router.cancel_chained_response("nope") is False
+
+    started = asyncio.Event()
+
+    class SlowTTS(FakeTTS):
+        async def synthesize(self, text: str):
+            self.calls.append(text)
+            started.set()
+            await asyncio.sleep(5)
+            yield b"\x00\x01"
+
+    pipeline = ChainedVoicePipeline(vad_enabled=False, silence_flush_seconds=30.0)
+    router.set_chained_pipeline(pipeline)
+    frames: list[dict] = []
+
+    async def capture(_sid, frame):
+        frames.append(frame)
+
+    await pipeline.open_session(
+        session_id="sess-vad",
+        stt_provider=BufferedSTT(),
+        tts_provider=SlowTTS(),
+        llm_handle=FakeLLM(),
+        send_frame=capture,
+    )
+    # An unknown session id must not raise.
+    assert await router.cancel_chained_response("some-other-session") is False
+
+    turn = asyncio.create_task(
+        pipeline.handle_audio("sess-vad", SILENCE, is_final=True)
+    )
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+
+    assert await router.cancel_chained_response("sess-vad") is True
+    await asyncio.wait({turn})
+    assert any(f["type"] == "voice_cancel" for f in frames)
