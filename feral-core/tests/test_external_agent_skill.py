@@ -19,6 +19,7 @@ CORE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(CORE))
 
 from bridges import catalog  # noqa: E402
+from bridges.continuity import SessionIndex  # noqa: E402
 from bridges.sessions import SessionRegistry  # noqa: E402
 from config.loader import DEFAULT_SETTINGS  # noqa: E402
 from skills.impl.external_agent import ExternalAgentSkill  # noqa: E402
@@ -34,14 +35,25 @@ def skill():
 
 
 @pytest.fixture
-def isolated_registry(monkeypatch):
-    """A registry per test, so no session leaks between them."""
-    registry = SessionRegistry()
+def isolated_registry(monkeypatch, tmp_path):
+    """A registry per test, so no session leaks between them.
+
+    The continuity index is pointed at ``tmp_path``. Without that, merely
+    opening a session in a test would write into the operator's real
+    ``~/.feral``, which is exactly the kind of side effect a unit test
+    must not have.
+    """
+    registry = SessionRegistry(
+        index=SessionIndex(tmp_path / "sessions.json")
+    )
     monkeypatch.setattr(
         "skills.impl.external_agent._registry", lambda: registry
     )
     monkeypatch.setattr(
         "skills.impl.external_agent._approval_manager", lambda: None
+    )
+    monkeypatch.setattr(
+        "skills.impl.external_agent._memory", lambda: None
     )
     yield registry
 
@@ -73,7 +85,8 @@ class TestManifest:
         manifest = json.loads(MANIFEST.read_text())
         declared = {ep["id"] for ep in manifest["endpoints"]}
         assert declared == {
-            "list_agents", "run_task", "respond_permission", "close_session"
+            "list_agents", "run_task", "respond_permission", "close_session",
+            "recall_activity",
         }
 
     def test_the_skill_is_not_pinned_into_every_turn(self):

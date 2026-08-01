@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from bridges.acp import AcpAgentProcess, AcpSession
+from bridges.continuity import SessionIndex, SessionRecord, index as default_index
 from bridges.permissions import (
     ApprovalManagerBroker,
     PermissionBroker,
@@ -48,6 +49,22 @@ class ManagedSession:
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
     turns: int = 0
+    # Which FERAL conversation this belongs to, when the calling surface
+    # knows. Skills are not handed one today, so this is best-effort and
+    # continuity falls back to (agent, workspace); see
+    # ``bridges.continuity.SessionIndex.find``.
+    conversation_id: str = ""
+    # How this session came to exist: "new", "resume" or "load" for a
+    # session reattached after its process died. Reported to the user
+    # because a reattach is not proof that history survived.
+    origin: str = "new"
+    # State for the digest that gets written to episodic memory when a
+    # turn ends. Held here because a turn spans several skill calls.
+    turn_prompt: str = ""
+    turn_started_at: float = 0.0
+    turn_started_writes: int = 0
+    turn_recorded: bool = False
+    answered_permissions: list[dict] = field(default_factory=list)
     # The in-flight ``session/prompt``. A turn outlives the skill call
     # that started it, because a permission question has to be answered
     # by a *different* tool call: the FERAL tool loop is one call at a
@@ -68,6 +85,11 @@ class ManagedSession:
         if self.turn_running:
             raise RuntimeError("a turn is already running on this session")
         self.turn_started_events = len(self.session.transcript)
+        self.turn_started_writes = len(self.session.written_paths)
+        self.turn_prompt = prompt
+        self.turn_started_at = time.time()
+        self.turn_recorded = False
+        self.answered_permissions = []
         self.turns += 1
         self.touch()
         self.turn = asyncio.ensure_future(
@@ -77,6 +99,30 @@ class ManagedSession:
     def turn_events(self) -> list:
         """Everything streamed since the current turn began."""
         return self.session.transcript[self.turn_started_events:]
+
+    def turn_written_paths(self) -> list[str]:
+        """Files FERAL wrote on the agent's behalf during this turn."""
+        return self.session.written_paths[self.turn_started_writes:]
+
+    def note_permission_answer(
+        self, request: PermissionRequest, decision: str, allowed: bool
+    ) -> None:
+        """Remember a permission question and its verdict for the digest.
+
+        Recorded even when the answer was no. A refusal is the most
+        useful thing to be able to recall later, and it is the one thing
+        the event stream does not contain: the agent narrates what it
+        did, never what it was stopped from doing.
+        """
+        self.answered_permissions.append(
+            {
+                "request_id": request.request_id,
+                "tool_name": request.tool_name,
+                "title": request.title,
+                "decision": decision,
+                "allowed": allowed,
+            }
+        )
 
     async def wait_for_turn(self, wait_seconds: float) -> str:
         """Wait for the turn to end, a permission to arrive, or a timeout.
@@ -114,6 +160,8 @@ class ManagedSession:
             "acp_session_id": self.session.session_id,
             "alive": self.alive,
             "turns": self.turns,
+            "conversation_id": self.conversation_id,
+            "origin": self.origin,
             "created_at": self.created_at,
             "last_active": self.last_active,
             "pending_permissions": [
@@ -121,14 +169,34 @@ class ManagedSession:
             ],
         }
 
+    def to_record(self) -> SessionRecord:
+        return SessionRecord(
+            handle=self.handle,
+            agent_id=self.agent_id,
+            cwd=self.cwd,
+            acp_session_id=self.session.session_id,
+            conversation_id=self.conversation_id,
+            created_at=self.created_at,
+            last_active=self.last_active,
+            turns=self.turns,
+        )
+
 
 class SessionRegistry:
     """Holds every live external-agent session in this process."""
 
-    def __init__(self, idle_timeout: float = DEFAULT_IDLE_TIMEOUT):
+    def __init__(
+        self,
+        idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
+        *,
+        index: Optional[SessionIndex] = None,
+    ):
         self._sessions: dict[str, ManagedSession] = {}
         self._lock = asyncio.Lock()
         self.idle_timeout = idle_timeout
+        # Injectable so a test never writes into the operator's real
+        # FERAL home just by opening a session.
+        self.index: SessionIndex = index if index is not None else default_index()
 
     def get(self, handle: str) -> Optional[ManagedSession]:
         return self._sessions.get(handle)
@@ -143,6 +211,17 @@ class SessionRegistry:
                     return managed
         return None
 
+    def find_persisted(
+        self, *, conversation_id: str = "", agent_id: str = "", cwd: str = ""
+    ) -> Optional[SessionRecord]:
+        """A session this process no longer holds but could reattach to."""
+        record = self.index.find(
+            conversation_id=conversation_id, agent_id=agent_id, cwd=cwd
+        )
+        if record is not None and record.handle in self._sessions:
+            return None
+        return record
+
     async def open(
         self,
         *,
@@ -152,6 +231,8 @@ class SessionRegistry:
         env: Optional[dict[str, str]] = None,
         permission_timeout: float = 120.0,
         approval_manager: Any = None,
+        conversation_id: str = "",
+        resume: Optional[SessionRecord] = None,
     ) -> ManagedSession:
         """Spawn an agent, initialize, and open one session.
 
@@ -161,6 +242,13 @@ class SessionRegistry:
         ``allow_always`` answer is persisted back into it. Without one,
         every permission still has to be answered by a human through
         :meth:`answer_permission`; nothing is auto-allowed either way.
+
+        ``resume`` names a session from a previous process. The handle it
+        carries is reused, so an LLM holding a handle from an hour ago
+        keeps a working one across an agent crash, an idle sweep or a
+        FERAL restart. Whether the agent actually restored any history is
+        reported as :attr:`ManagedSession.origin` rather than assumed:
+        see :meth:`bridges.acp.AcpAgentProcess.reattach_session`.
         """
         queueing = QueueingBroker(timeout_seconds=permission_timeout)
         # ``queueing`` is always the innermost broker, because it is the
@@ -178,27 +266,42 @@ class SessionRegistry:
         process = await AcpAgentProcess.spawn(
             command, cwd=cwd, env=env, broker=broker
         )
+        origin = "new"
         try:
             await process.initialize()
-            session = await process.new_session(cwd)
+            if resume is not None and resume.acp_session_id and process.can_resume():
+                session, origin = await process.reattach_session(
+                    resume.acp_session_id, cwd
+                )
+            else:
+                session = await process.new_session(cwd)
         except Exception:
             await process.close()
             raise
 
         managed = ManagedSession(
-            handle=f"ext-{uuid.uuid4().hex[:12]}",
+            handle=(
+                resume.handle if resume is not None else f"ext-{uuid.uuid4().hex[:12]}"
+            ),
             agent_id=agent_id,
             cwd=session.cwd,
             process=process,
             session=session,
             broker=queueing,
+            conversation_id=conversation_id or (
+                resume.conversation_id if resume is not None else ""
+            ),
+            origin=origin,
+            turns=resume.turns if resume is not None else 0,
         )
         async with self._lock:
             self._sessions[managed.handle] = managed
+        self.index.remember(managed.to_record())
         logger.info(
-            "opened external agent session %s (%s) in %s",
+            "opened external agent session %s (%s, origin=%s) in %s",
             managed.handle,
             agent_id,
+            origin,
             session.cwd,
         )
         return managed
@@ -219,7 +322,16 @@ class SessionRegistry:
         await managed.session.cancel()
         return True
 
-    async def close(self, handle: str) -> bool:
+    async def close(self, handle: str, *, forget: bool = True) -> bool:
+        """Tear down a session.
+
+        ``forget`` drops the persisted pointer as well, which is right
+        for an explicit close: the user said they were done, so a later
+        follow-up should not silently resurrect a session they closed. It
+        is wrong for the sweeper, which reaps a session the user never
+        asked to end, so :meth:`sweep` passes ``forget=False`` and leaves
+        the pointer behind for a resume.
+        """
         async with self._lock:
             managed = self._sessions.pop(handle, None)
         if managed is None:
@@ -228,12 +340,18 @@ class SessionRegistry:
         if managed.turn is not None and not managed.turn.done():
             managed.turn.cancel()
         await managed.process.close()
-        logger.info("closed external agent session %s", handle)
+        if forget:
+            self.index.forget(handle)
+        else:
+            self.index.touch(handle, turns=managed.turns)
+        logger.info("closed external agent session %s (forget=%s)", handle, forget)
         return True
 
     async def close_all(self) -> None:
+        # Shutdown is not the user saying "done", so the pointers stay
+        # and every session is resumable when FERAL comes back up.
         for handle in list(self._sessions):
-            await self.close(handle)
+            await self.close(handle, forget=False)
 
     async def sweep(self, now: Optional[float] = None) -> list[str]:
         """Close sessions whose process died or which have gone idle."""
@@ -244,7 +362,7 @@ class SessionRegistry:
             if not managed.alive or (now - managed.last_active) > self.idle_timeout
         ]
         for handle in doomed:
-            await self.close(handle)
+            await self.close(handle, forget=False)
         return doomed
 
 
