@@ -26,6 +26,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 from uuid import uuid4
 
 logger = logging.getLogger("feral.config")
@@ -88,18 +89,39 @@ DEFAULT_SETTINGS = {
         "tts_provider": "openai",
         "tts_model": "tts-1",
         "tts_voice": "nova",
-        # Ordered list of voice realtime providers the router tries
-        # before flipping to chunked TTS. ``openai`` resolves to
-        # ``RealtimeProxy`` (OpenAI Realtime API), ``gemini`` to
-        # ``GeminiRealtimeProxy``. Override per install via
-        # ``~/.feral/settings.json``.
+        # Operator's preferred ORDER of realtime providers, written by
+        # the WebUI Settings page (``feral-client-v2``
+        # ``src/pages/Settings.jsx``).
+        #
+        # Read by ``voice/router.py`` ``_configured_realtime_chain()``,
+        # which walks it as an ordered fallback chain: the first entry
+        # that is actually up serves the session, and the chain
+        # terminates at the chained STT->LLM->TTS pipeline (local
+        # engines included) rather than at failure. An explicit pick in
+        # ``audio.realtime_primary`` (or ``FERAL_VOICE_PROVIDER``) leads
+        # the chain; this list is the fallthrough behind it.
+        #
+        # Ordering realtime providers is a separate question from
+        # whether realtime should be tried before the local pipeline at
+        # all -- that one is answered per surface (see
+        # ``VoiceRouter.realtime_chain_for_surface``: phones and glasses
+        # lead with realtime for latency, desktops lead with local).
         "realtime_providers": ["openai", "gemini"],
         # OpenAI Realtime model id passed to the RealtimeProxy when
         # opening a session. Operator-overridable via
         # ``feral setup`` (voice preflight) or the WebUI Voice card;
         # the runtime falls back to ``RealtimeProxy.DEFAULT_MODEL``
         # when this key is unset (Lane U2).
-        "realtime_model": "gpt-realtime",
+        # Defaults to the mini tier on cost. Realtime audio is billed per
+        # audio token in both directions and the full model is roughly 3x
+        # the mini on both, so a default of the full model quietly makes
+        # every voice turn three times more expensive than it needs to be
+        # for most usage. An operator who wants the full model sets this
+        # key; the picker lists both.
+        #
+        # Name taken from providers/model_catalog.json, which is refreshed
+        # from the live provider endpoint, rather than from documentation.
+        "realtime_model": "gpt-realtime-mini",
         # Ordered list of fallback TTS providers consulted when the
         # primary realtime provider fails (OpenAI 1013
         # insufficient_quota, 429, invalid_api_key). The router walks
@@ -133,6 +155,50 @@ DEFAULT_SETTINGS = {
         "chained_fallback": {
             "stt_provider": "deepgram",
             "tts_provider": "elevenlabs",
+        },
+    },
+    # Voice-mode settings the phone Settings panel writes. The chained
+    # picks here WIN over ``audio.chained_fallback`` (see
+    # ``voice/router.py::_resolve_chained_config``): that block is the
+    # headless / wizard default, this one is an explicit UI choice.
+    "voice": {
+        # Empty strings mean "not chosen here" so the resolver falls
+        # through to ``audio.chained_fallback`` and then to the shipped
+        # provider defaults. Writing real values here would silently
+        # override a wizard pick on every install.
+        "chained": {
+            "stt_provider": "",
+            "tts_provider": "",
+            "stt_model": "",
+            "tts_model": "",
+            "tts_voice": "",
+            "tts_voice_id": "",
+        },
+        # Server-side voice activity detection (Silero, see
+        # ``voice/vad.py``). This is what ends an utterance; before it
+        # existed the pipeline waited for the client to stop sending
+        # and then waited again, roughly 2.3s of dead air per turn.
+        #
+        # Turning it off is supported and costs latency, not
+        # correctness: the packet-absence silence timer takes over.
+        "vad": {
+            "enabled": True,
+            # Speech starts above ``threshold`` and stops below
+            # ``neg_threshold``. The gap is hysteresis so one quiet
+            # frame mid-word does not read as end-of-utterance.
+            "threshold": 0.5,
+            "neg_threshold": 0.35,
+            # Continuous silence that ends the utterance. Under about
+            # 200ms, ordinary pauses between words start cutting
+            # people off; over about 500ms the reply feels sluggish.
+            "min_silence_ms": 300,
+            # Ignore blips shorter than this so a cough does not open
+            # an utterance that then has to be transcribed to nothing.
+            "min_speech_ms": 96,
+            # Speech detected while the assistant is talking cancels
+            # the turn. Requires the client's echo cancellation to be
+            # on, or the assistant's own voice re-triggers it.
+            "barge_in": True,
         },
     },
     "vision": {
@@ -213,6 +279,15 @@ DEFAULT_SETTINGS = {
     },
     "security": {
         "node_api_key": "",
+        # Tool-approval tier the operator picks in `feral setup`
+        # (capabilities step) or the timeline API. Exported to
+        # ``FERAL_AUTONOMY`` by ``export_as_env`` because that env var
+        # is the single source both ``agents/tool_runner.py`` and
+        # ``security/exec_mode.current_autonomy_mode()`` read. Before
+        # the export existed this key was written by the wizard and
+        # read by nothing, so picking "strict" still ran "hybrid".
+        # Valid: strict | hybrid | loose.
+        "autonomy_mode": "hybrid",
     },
     # Agent tool-loop budget (v2026.6.11). 0 = unlimited iterations — the
     # loop is governed by the no-progress guard (identical failing tool
@@ -223,16 +298,53 @@ DEFAULT_SETTINGS = {
         "tool_loop_max_seconds": 900,
     },
     "skills": {
-        "enabled": [],
-        "disabled": [],
+        # ``skills.enabled`` / ``skills.disabled`` used to live here.
+        # Nothing ever wrote them (no route, no wizard step, no client)
+        # and nothing ever read them: skill availability comes from the
+        # manifests discovered by ``discover_skills_directories`` plus
+        # ``security/sandbox_policy.py``'s ``blocked_skill_ids``. They
+        # were removed rather than wired, because two competing sources
+        # of truth for "is this skill on" is how the vision-flag drift
+        # happened (see ``_unify_feature_flags``).
         "external_directories": [],
     },
-    "nodes": {
-        "auto_connect": True,
-    },
-    "ui": {
-        "theme": "dark",
-        "show_debug": False,
+    # Coding-harness knobs. Each of these shipped as an env var only, so
+    # they were configurable per-process but not persistable: an operator
+    # who wanted read-before-edit enforced had to re-export the variable
+    # on every launch. Mirroring them into settings makes the choice
+    # survive a restart.
+    #
+    # Precedence is unchanged and deliberately env-first. The env var
+    # lands in this section via ``_apply_env_overrides`` and is then
+    # re-exported verbatim by ``export_as_env``, so a shell that sets
+    # ``FERAL_READ_BEFORE_EDIT=enforce`` still beats settings.json. The
+    # defaults below are copied from the readers, so an install that
+    # never touches this section behaves exactly as before.
+    "coding": {
+        # off | warn | enforce. ``skills/file_state.py`` (MODE_WARN).
+        "read_before_edit": "warn",
+        # on | off. ``skills/call_context.py``.
+        "tool_call_context": "on",
+        # Cost guard for the fallback edit matchers, which are
+        # O(file_lines x needle_lines). ``skills/impl/coding_tools.py``
+        # via ``skills/edit_matchers.py`` DEFAULT_MAX_CONTENT_LINES /
+        # DEFAULT_MAX_NEEDLE_LINES.
+        "edit_max_content_lines": 4000,
+        "edit_max_needle_lines": 400,
+        # Empty means "$FERAL_HOME/checkpoints"; only a non-empty value
+        # is exported, because ``skills/checkpoints.py::checkpoint_root``
+        # treats any truthy value as an outright override.
+        "checkpoint_dir": "",
+        "checkpoint_retention_days": 14,
+        # 8 MiB, matching ``skills/checkpoints.py``.
+        "checkpoint_max_blob_bytes": 8388608,
+        # on | off. ``skills/diagnostics.py``.
+        "post_edit_diagnostics": "on",
+        # Seconds. ``skills/diagnostics.py`` floors this at 0.5.
+        "diagnostics_timeout": 5,
+        # Seconds a turn may sit idle before the tool loop gives up.
+        # ``agents/tool_runner.py``.
+        "turn_idle_seconds": 180,
     },
     # Pairing access mode (Mode A LAN / Mode B localhost / Mode C remote).
     # Default is "localhost" to preserve the historical loopback-only
@@ -240,9 +352,16 @@ DEFAULT_SETTINGS = {
     # to pick LAN or remote (Tailscale) explicitly.
     "access": {
         "pairing_mode": "localhost",
-        "remote_provider": None,
+        # ``remote_provider`` used to sit here and had no reader. Three
+        # sites still write it as provenance (``cli/setup/network.py``,
+        # ``cli/setup/steps/network.py``, ``api/routes/access.py``);
+        # those writes are unaffected, the key just no longer poses as a
+        # configurable default.
         "tailscale": {
-            "funnel": True,
+            # ``funnel`` used to sit here defaulting to True and was
+            # never written OR read: the remote-up flow calls
+            # ``tailscale.funnel_enable()`` unconditionally, so the flag
+            # gated nothing.
             "tailnet_url": "",
         },
     },
@@ -271,7 +390,19 @@ def feral_home() -> Path:
 
 
 def feral_data_home() -> Path:
-    """Resolve the FERAL data directory (XDG-compliant on Linux)."""
+    """Resolve the FERAL data directory (XDG-compliant on Linux).
+
+    ``FERAL_HOME`` wins here exactly as it does in :func:`feral_home`.
+    It did not before, which gave an operator who relocated their
+    install a split brain: settings and vault under the new root,
+    databases still under ``~/.feral``. It was also a test-isolation
+    hazard, since setting ``FERAL_HOME`` alone left data writes
+    pointing at the real home directory.
+    """
+    env_home = os.environ.get("FERAL_HOME")
+    if env_home:
+        return Path(env_home)
+
     xdg_data = os.environ.get("XDG_DATA_HOME")
     if xdg_data:
         return Path(xdg_data) / "feral"
@@ -387,6 +518,12 @@ class ConfigLoader:
         # Layer 4: Environment variable overrides
         self._apply_env_overrides()
 
+        # Repair an ``llm.base_url`` a previous setup run persisted
+        # without the OpenAI-compat path suffix (see
+        # ``_repair_local_base_url``). Runs after the env layer so an
+        # explicit ``FERAL_LLM_BASE_URL`` is repaired too.
+        self._repair_local_base_url()
+
         # Unify vision flag: the settings UI historically wrote to
         # ``features.vision`` while the env/export path read from
         # ``vision.enabled``. Treat either being truthy as "on" and mirror
@@ -441,6 +578,15 @@ class ConfigLoader:
             "FERAL_STREAMING": ("features", "streaming"),
             "FERAL_PROACTIVE": ("features", "proactive"),
             "FERAL_MULTI_AGENT": ("features", "multi_agent"),
+            # ``agents/learner.py`` resolves self-learning ONLY from
+            # ``FERAL_SELF_LEARNING``, and only ``api/routes/config.py``
+            # ever set that variable, at toggle time. So switching
+            # self-learning off in Settings held until the next restart
+            # and then silently reverted to on, because nothing exported
+            # ``features.self_learning`` at boot. Same defect as the
+            # autonomy tier below; same fix, both halves of the round
+            # trip so an explicit env var still wins.
+            "FERAL_SELF_LEARNING": ("features", "self_learning"),
             "FERAL_SCENE_COOLDOWN": ("vision", "scene_cooldown"),
             "FERAL_STT_PROVIDER": ("audio", "stt_provider"),
             "FERAL_STT_MODEL": ("audio", "stt_model"),
@@ -448,6 +594,25 @@ class ConfigLoader:
             "FERAL_TTS_MODEL": ("audio", "tts_model"),
             "FERAL_TTS_VOICE": ("audio", "tts_voice"),
             "NODE_API_KEY": ("security", "node_api_key"),
+            # Keeps env > settings precedence for the autonomy tier:
+            # the value lands in ``security.autonomy_mode`` here and is
+            # re-exported verbatim, so an operator's FERAL_AUTONOMY
+            # still wins over settings.json.
+            "FERAL_AUTONOMY": ("security", "autonomy_mode"),
+            # Coding harness. Env stays the override: the value lands in
+            # ``coding.*`` here and ``export_as_env`` puts it straight
+            # back, so an operator's shell export still wins over
+            # settings.json.
+            "FERAL_READ_BEFORE_EDIT": ("coding", "read_before_edit"),
+            "FERAL_TOOL_CALL_CONTEXT": ("coding", "tool_call_context"),
+            "FERAL_EDIT_MAX_CONTENT_LINES": ("coding", "edit_max_content_lines"),
+            "FERAL_EDIT_MAX_NEEDLE_LINES": ("coding", "edit_max_needle_lines"),
+            "FERAL_CHECKPOINT_DIR": ("coding", "checkpoint_dir"),
+            "FERAL_CHECKPOINT_RETENTION_DAYS": ("coding", "checkpoint_retention_days"),
+            "FERAL_CHECKPOINT_MAX_BLOB_BYTES": ("coding", "checkpoint_max_blob_bytes"),
+            "FERAL_POST_EDIT_DIAGNOSTICS": ("coding", "post_edit_diagnostics"),
+            "FERAL_DIAGNOSTICS_TIMEOUT": ("coding", "diagnostics_timeout"),
+            "FERAL_TURN_IDLE_SECONDS": ("coding", "turn_idle_seconds"),
         }
 
         for env_key, config_path in env_map.items():
@@ -467,6 +632,55 @@ class ConfigLoader:
                     pass
             else:
                 self._merged[section][key] = value
+
+    # Local OpenAI-compatible providers whose base URL MUST carry the
+    # ``/v1`` path prefix, because the LLM client posts the relative
+    # path ``/chat/completions`` against it.
+    _OPENAI_COMPAT_LOCAL_PROVIDERS = ("ollama", "lmstudio")
+
+    def _repair_local_base_url(self):
+        """Re-add the ``/v1`` suffix a bare local ``llm.base_url`` is missing.
+
+        Setup wizards up to v2026.7.31 copied the provider catalog's
+        Ollama descriptor into ``llm.base_url`` verbatim, and that
+        descriptor carried ``http://localhost:11434`` with no path. The
+        LLM client posts the relative path ``/chat/completions`` against
+        whatever base it is handed and only substitutes its own default
+        when the slot is EMPTY, so the bare URL won: the brain booted
+        clean, reported ``LLM: ready``, and 404'd on every chat turn.
+
+        The catalog now ships the ``/v1`` form, but installs created
+        before that fix already have the broken value persisted in
+        ``~/.feral/settings.json``. Repair it on read so an existing
+        install starts working again without the operator re-running
+        setup or hand-editing JSON.
+
+        Only a base URL with an empty path is touched. Anything that
+        already names a path (``/v1``, ``/v1beta``, a gateway prefix)
+        is the operator's deliberate choice and is left alone.
+        """
+        llm = self._merged.get("llm") or {}
+        provider = str(llm.get("provider") or "").strip().lower()
+        if provider not in self._OPENAI_COMPAT_LOCAL_PROVIDERS:
+            return
+        base_url = str(llm.get("base_url") or "").strip()
+        if not base_url:
+            return
+        try:
+            parsed = urlparse(base_url)
+        except Exception:
+            return
+        if not parsed.scheme or not parsed.netloc:
+            return
+        if parsed.path.strip("/"):
+            return
+        repaired = f"{parsed.scheme}://{parsed.netloc}/v1"
+        self._merged.setdefault("llm", {})["base_url"] = repaired
+        logger.info(
+            "config: repaired %s llm.base_url %s -> %s (missing OpenAI-compat "
+            "/v1 path; every chat request would have 404'd)",
+            provider, base_url, repaired,
+        )
 
     def _unify_feature_flags(self):
         """Coalesce ``features.vision`` and ``vision.enabled`` into one truth.
@@ -906,8 +1120,62 @@ class ConfigLoader:
         env["FERAL_STREAMING"] = str(features.get("streaming", False)).lower()
         env["FERAL_PROACTIVE"] = str(features.get("proactive", False)).lower()
         env["FERAL_MULTI_AGENT"] = str(features.get("multi_agent", True)).lower()
+        # ``agents/learner.py::_self_learning_enabled`` reads
+        # ``FERAL_SELF_LEARNING`` and nothing else, defaulting to true
+        # when unset. Without this export the Settings toggle only held
+        # for the life of the process that handled the click: the next
+        # boot left the variable unset and self-learning came back on,
+        # burning LLM calls on extract + summarize for an operator who
+        # had explicitly turned it off.
+        env["FERAL_SELF_LEARNING"] = str(features.get("self_learning", True)).lower()
 
-        env["NODE_API_KEY"] = self._merged.get("security", {}).get("node_api_key", "")
+        security = self._merged.get("security", {}) or {}
+        env["NODE_API_KEY"] = security.get("node_api_key", "")
+
+        # Tool-approval tier. ``agents/tool_runner.py`` and
+        # ``security/exec_mode.current_autonomy_mode()`` both resolve
+        # this ONLY from ``FERAL_AUTONOMY``; nothing reads
+        # ``settings.security.autonomy_mode`` directly. Without this
+        # export the wizard's autonomy question was a dead write and an
+        # operator who picked "strict" silently ran "hybrid". Unknown
+        # values fall back to the same default both readers use, so a
+        # hand-edited settings file cannot widen the tier by accident.
+        raw_autonomy = str(security.get("autonomy_mode", "") or "").strip().lower()
+        env["FERAL_AUTONOMY"] = (
+            raw_autonomy if raw_autonomy in ("strict", "hybrid", "loose") else "hybrid"
+        )
+
+        # Coding harness. Every one of these is read from the process
+        # environment by its subsystem and from nowhere else, so the
+        # export is what makes the settings section mean anything. The
+        # fallbacks repeat each reader's own default so an install with
+        # no ``coding`` block in settings.json exports exactly the values
+        # the readers would have chosen for themselves.
+        coding = self._merged.get("coding", {}) or {}
+        env["FERAL_READ_BEFORE_EDIT"] = str(coding.get("read_before_edit", "warn"))
+        env["FERAL_TOOL_CALL_CONTEXT"] = str(coding.get("tool_call_context", "on"))
+        env["FERAL_EDIT_MAX_CONTENT_LINES"] = str(
+            coding.get("edit_max_content_lines", 4000)
+        )
+        env["FERAL_EDIT_MAX_NEEDLE_LINES"] = str(
+            coding.get("edit_max_needle_lines", 400)
+        )
+        # ``checkpoints.checkpoint_root`` treats ANY truthy value as an
+        # outright override of ``$FERAL_HOME/checkpoints``, so an empty
+        # setting must not be exported as an empty string.
+        if coding.get("checkpoint_dir"):
+            env["FERAL_CHECKPOINT_DIR"] = str(coding["checkpoint_dir"])
+        env["FERAL_CHECKPOINT_RETENTION_DAYS"] = str(
+            coding.get("checkpoint_retention_days", 14)
+        )
+        env["FERAL_CHECKPOINT_MAX_BLOB_BYTES"] = str(
+            coding.get("checkpoint_max_blob_bytes", 8388608)
+        )
+        env["FERAL_POST_EDIT_DIAGNOSTICS"] = str(
+            coding.get("post_edit_diagnostics", "on")
+        )
+        env["FERAL_DIAGNOSTICS_TIMEOUT"] = str(coding.get("diagnostics_timeout", 5))
+        env["FERAL_TURN_IDLE_SECONDS"] = str(coding.get("turn_idle_seconds", 180))
 
         # Credentials — LLMs + messaging channels
         credential_env_keys = (

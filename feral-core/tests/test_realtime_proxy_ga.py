@@ -394,9 +394,19 @@ async def test_tool_call_invokes_callback(session):
 # 7. Proxy-level tests
 # ─────────────────────────────────────────────
 
-def test_default_model_is_ga():
-    """DEFAULT_MODEL should be the GA model identifier."""
-    assert DEFAULT_MODEL == "gpt-realtime"
+def test_default_model_is_a_ga_realtime_id():
+    """DEFAULT_MODEL must be a GA realtime identifier, not a preview one.
+
+    Deliberately not pinned to an exact string. The default is a cost
+    decision (the mini tier is roughly a third of the full model per
+    audio token) and it has moved once already. What must stay true is
+    that it is a GA id, since preview snapshots get retired and rejected
+    with 4004 model_not_found. The exact value is pinned separately, and
+    against the refreshed provider catalog rather than a literal, in
+    tests/test_realtime_model_cost_default.py.
+    """
+    assert DEFAULT_MODEL.startswith("gpt-realtime")
+    assert "preview" not in DEFAULT_MODEL
 
 
 def test_proxy_available_with_key(proxy):
@@ -511,7 +521,10 @@ async def test_voice_router_dispatches_openai_realtime():
     mock_proxy.start_session.assert_awaited_once()
     call_kwargs = mock_proxy.start_session.call_args
     assert call_kwargs[1]["voice"] == "cedar"
-    assert call_kwargs[1]["model"] == "gpt-realtime"
+    # The router passes the configured default through; asserted against
+    # DEFAULT_MODEL so a deliberate default change does not read as a
+    # routing regression.
+    assert call_kwargs[1]["model"] == DEFAULT_MODEL
 
 
 @pytest.mark.asyncio

@@ -93,6 +93,7 @@ from api.routes.capabilities import router as capabilities_router  # Phase 5
 from api.routes.system_permissions import router as system_permissions_router  # Phase 11
 from api.routes.discovery import router as discovery_router  # Phase 13
 from api.routes.approvals import router as approvals_router
+from api.routes.checkpoints import router as checkpoints_router
 # --- Subagent A (realtime GA) additions ---
 from api.routes.realtime_client_secret import router as realtime_client_secret_router
 
@@ -619,6 +620,7 @@ app.include_router(channels_router)
 app.include_router(conversations_router)
 app.include_router(devices_router)
 app.include_router(access_router)
+app.include_router(checkpoints_router)
 
 # Optional demo routes — mounted only when feral-demo-data is installed
 # AND FERAL_DEV_DEMO=1. Discovery is via the `feral.plugins` entry
@@ -1526,6 +1528,14 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                         )
                     )
 
+                elif msg.type == "voice_mute":
+                    if state.voice_router:
+                        await state.voice_router.set_session_muted(
+                            session_id,
+                            bool(raw.get("payload", {}).get("muted")),
+                            source="web",
+                        )
+
                 elif msg.type == "voice_config":
                     vcfg = raw.get("payload", {})
                     mode = vcfg.get("mode", "realtime")
@@ -2034,6 +2044,12 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # `payload.skills` is the Phase 4 wire field; legacy
                 # nodes (v2026.5.x and earlier) don't set it and the
                 # registry happily records an empty list.
+                # Belt-and-braces with the capability registry the router
+                # also reads: surface-aware realtime ordering needs to know
+                # what kind of device is asking, and `node_type` arrives
+                # only here.
+                if state.voice_router:
+                    state.voice_router.set_node_surface(node_id, payload.node_type)
                 state.capability_registry.register_node(
                     node_id,
                     node_type=payload.node_type,
@@ -2619,6 +2635,43 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         if gs and hasattr(gs, "cancel_response"):
                             await gs.cancel_response()
                             cancelled = True
+                    # Chained mode had no barge-in at all: the two branches
+                    # above only reach the realtime and Gemini proxies, so
+                    # speaking over the assistant on a chained session did
+                    # nothing. Note the key differs, realtime and Gemini are
+                    # keyed by node_id while chained sessions are keyed by
+                    # session_id. Safe on unknown or idle sessions and on a
+                    # router with no pipeline wired, so no mode check.
+                    # Guarded the same way as the two branches above. A
+                    # router without the method (or a test double) must
+                    # not raise here, because the except clause below
+                    # reports "interrupt_failed" and that would replace
+                    # the honest "nothing to cancel" no-op with an error.
+                    if not cancelled:
+                        # Derived here rather than reused from the
+                        # `voice_session_start` branch: that branch binds a
+                        # local `session_id` (see the assignment near the
+                        # top of this loop), so it only exists on this
+                        # connection if a start actually arrived first. A
+                        # barge-in on a socket that never started a session
+                        # would otherwise raise NameError into the except
+                        # clause below and report "interrupt_failed" where
+                        # the honest answer is "nothing to cancel". Same
+                        # derivation the start branch uses, so a live
+                        # chained session resolves to the same key.
+                        chained_session_id = stream_id or f"voice-{node_id}"
+                        cancel_chained = getattr(
+                            state.voice_router, "cancel_chained_response", None
+                        )
+                        if callable(cancel_chained):
+                            _result = cancel_chained(chained_session_id)
+                            # A router returning something non-awaitable (an
+                            # older router, or a test double whose attributes
+                            # are auto-created) must not raise here either.
+                            if asyncio.iscoroutine(_result) or isinstance(
+                                _result, asyncio.Future
+                            ):
+                                cancelled = bool(await _result)
                     if not cancelled:
                         logger.info(
                             "voice_interrupt for node=%s found no live session "
@@ -2638,6 +2691,28 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     "allowed" if cancelled else "denied",
                     "voice_interrupt",
                     detail={"stream_id": stream_id, "cancelled": cancelled},
+                    payload_for_hash=payload_dict,
+                )
+
+            elif msg.type == "voice_mute":
+                payload_dict = raw.get("payload", {})
+                if not node_id or not state.voice_router:
+                    _record_phone_envelope(
+                        "denied", "voice_mute",
+                        detail={"reason": "missing_node_or_voice_router"},
+                        payload_for_hash=payload_dict,
+                    )
+                    continue
+                # Same key derivation the session-start branch uses, so a
+                # live chained session resolves to the same id.
+                mute_sid = payload_dict.get("stream_id", "") or f"voice-{node_id}"
+                muted = bool(payload_dict.get("muted"))
+                changed = await state.voice_router.set_session_muted(
+                    mute_sid, muted, source="client",
+                )
+                _record_phone_envelope(
+                    "allowed", "voice_mute",
+                    detail={"session_id": mute_sid, "muted": muted, "changed": changed},
                     payload_for_hash=payload_dict,
                 )
 

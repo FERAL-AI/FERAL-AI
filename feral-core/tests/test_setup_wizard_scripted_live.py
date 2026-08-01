@@ -176,12 +176,16 @@ def test_scripted_happy_path_chat_then_voice_reuse_then_jumpback(
     answers = iter([
         Option(id="openai", label="OpenAI"),
         Option(id="keep", label="Keep current key"),
+        # The voice step now opens with "how should voice run?"
+        # (cloud / fully local / skip) before any provider picker.
+        Option(id="cloud", label="Cloud providers"),
         Option(id="openai_realtime", label="OpenAI Realtime"),
         Option(id="gpt-realtime", label="gpt-realtime"),
         Option(id="__none__", label="(skip STT)"),
         Option(id="__none__", label="(skip TTS)"),
         Option(id="openai", label="OpenAI"),
         Option(id="keep", label="Keep current key"),
+        Option(id="cloud", label="Cloud providers"),
         Option(id="openai_realtime", label="OpenAI Realtime"),
         Option(id="gpt-realtime", label="gpt-realtime"),
         Option(id="__none__", label="(skip STT)"),
@@ -297,6 +301,9 @@ def test_scripted_voice_warns_when_existing_key_rejected(
     from cli.setup.state import WizardState
 
     answers = iter([
+        # The voice step now opens with "how should voice run?"
+        # (cloud / fully local / skip) before any provider picker.
+        Option(id="cloud", label="Cloud providers"),
         Option(id="openai_realtime", label="OpenAI Realtime"),
         Option(id="replace", label="Replace it now"),
         Option(id="gpt-realtime", label="gpt-realtime"),

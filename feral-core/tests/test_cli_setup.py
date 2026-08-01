@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -12,7 +11,6 @@ from cli.setup.helpers import (
     Option,
     STATUS_NEEDS_KEY,
     STATUS_READY,
-    STATUS_UNREACHABLE,
     resolve_option,
     BackNavigation,
     QuitNavigation,
@@ -374,13 +372,23 @@ class TestLLMStep:
 
 
 class TestAudioStep:
-    def test_skip_step_keeps_defaults(self, tmp_path, monkeypatch):
+    def test_skip_step_writes_nothing(self, tmp_path, monkeypatch):
+        """Declining voice must leave ``audio.*`` untouched.
+
+        The skip path used to materialise ``stt_provider`` /
+        ``tts_provider`` as "openai", so an install with no OpenAI key
+        ended up with a settings file explicitly asserting the OpenAI
+        speech providers and the finish summary printing "STT: openai ·
+        ?". The values matched DEFAULT_SETTINGS, so the write bought
+        nothing and destroyed the distinction between "operator chose
+        OpenAI" and "operator skipped voice"."""
         from cli.setup.steps import audio as audio_step
 
         state = WizardState.load(tmp_path / "feral")
         monkeypatch.setattr(audio_step, "confirm", lambda *a, **kw: False)
         asyncio.run(audio_step.run(state))
-        assert state.get_setting("audio", "stt_provider") == "openai"
+        assert state.get_setting("audio", "stt_provider") is None
+        assert state.get_setting("audio", "tts_provider") is None
 
     def test_local_preset_picks_whisper_and_piper(self, tmp_path, monkeypatch):
         from cli.setup.steps import audio as audio_step

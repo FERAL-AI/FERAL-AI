@@ -13,16 +13,37 @@ Design constraints (from the recovery plan):
   until the verify phase actually passes. If the test command exits
   non-zero we say so and store the exit code, the stdout/stderr tail,
   and the failing-file hint we parsed out.
-* **No silent escalation.** Writes through this loop go through the
-  ``computer_use``/``coding_tools`` skill surface so the existing
-  SandboxPolicy + workspace_grants gate every edit. If a write hits a
-  ``permission_needed`` response the run pauses in ``waiting_grant``
-  instead of pretending to succeed.
 * **No destructive git.** This module never shells out to ``git
   reset --hard`` / ``git push -f`` / ``rm -rf`` / ``gh pr create``.
   The user can resolve commits and PRs themselves.
 * **No vendor lock.** The loop accepts a pluggable ``Planner`` so
   tests use a deterministic planner and production wires an LLM.
+
+.. warning::
+
+   **This module is unwired and its write path is NOT policy-gated.**
+
+   Nothing constructs a ``CodingRun`` in production; the only caller is
+   ``cli/main.py``'s doctor check, which constructs the store. Do not
+   treat the design constraints above as properties the running system
+   has.
+
+   In particular, an earlier version of this docstring claimed writes
+   "go through the ``computer_use``/``coding_tools`` skill surface so
+   the existing SandboxPolicy + workspace_grants gate every edit", and
+   that a ``permission_needed`` response parks the run in
+   ``waiting_grant``. Neither is true. ``_run_edit_phase`` calls
+   ``target.write_text(...)`` directly (see the EDIT phase below), so
+   SandboxPolicy never sees the write, no grant is consulted, and the
+   ``WAITING_GRANT`` status is unreachable from the edit path.
+   :func:`_ensure_inside_workspace` is the only check that actually
+   runs, and it only proves the path is under ``workspace_root``.
+
+   The reliability layer that IS wired, and that does go through the
+   skill surface (read-before-edit, per-turn checkpoints, post-edit
+   diagnostics, fallback matching), lives in ``skills/impl/coding_tools.py``
+   and the modules under ``skills/``. Anything reused from here should
+   be routed through that instead of this loop's direct write.
 
 The schema (`coding_runs` table) intentionally mirrors `taskflows` so
 operators can reason about both with the same mental model.
@@ -431,10 +452,14 @@ that belongs in the test runner's own teardown."""
 def _ensure_inside_workspace(workspace_root: Path, target: Path) -> None:
     """Raise PermissionError if `target` escapes `workspace_root`.
 
-    We resolve both sides so symlinks don't smuggle writes out. This
-    is FERAL's *defense in depth*: the SandboxPolicy stops the skill
-    too, but CodingRun owns the workspace concept and should reject
-    the edit before invoking the skill so logs are clean."""
+    We resolve both sides so symlinks don't smuggle writes out.
+
+    This was written as defense in depth on the assumption that the
+    SandboxPolicy would stop the skill too. It does not, because the
+    edit phase never invokes a skill: it calls ``target.write_text``
+    directly. So this containment check is the ONLY thing standing
+    between a planner's proposed path and the filesystem on this code
+    path. See the module docstring."""
     root = workspace_root.resolve()
     abs_target = target.resolve()
     try:

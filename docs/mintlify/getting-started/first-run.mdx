@@ -45,9 +45,51 @@ If it fails, run this once in a terminal:
 feral access remote-up
 ```
 
+Choosing "back (change network mode)" at the pairing step now lands on the
+**network** step. It used to be a plain back-navigation, which is
+`index -= 1`, so it landed on "Messaging channels" and the network mode was
+unreachable from there.
+
 ### 6) Finish
 
 Setup writes config and returns you to the main dashboard.
+
+## Pressing Enter through every prompt
+
+The all-defaults run now completes. It previously did not, and the install it
+produced when you did get through it reported `LLM: ready` and then returned 404
+on every chat turn. Three separate things caused that, all fixed:
+
+- **Credential prompts were inescapable.** Every secret prompt was
+  `allow_empty=False`, and both prompt helpers loop forever on an empty value,
+  so pressing Enter re-asked the same question indefinitely with no way out.
+  Empty is now accepted as "skip", and the prompt says so.
+- **The voice preflight preselected a keyless provider.** When nothing probed
+  ready it still offered the first catalogue entry, so the default was OpenAI
+  Realtime with no key. The default is now "none".
+- **The model picker could loop.** The retry loop was unbounded with "pick a
+  different model?" defaulting to yes, and it reported failure for a provider
+  with no key, which retyping the model id cannot fix. It is bounded now, and
+  the missing-credential case is no longer reported as a bad model.
+
+<Note>
+**If you selected Ollama before this fix**, your `~/.feral/settings.json`
+contains `"llm": {"base_url": "http://localhost:11434"}` without the
+OpenAI-compatible `/v1` suffix. The provider catalogue shipped the descriptor
+that way while every other provider carried a path, the wizard copied it
+verbatim, and the LLM client only substitutes its own default when the slot is
+*empty*, so the bare URL won and every request went to `/chat/completions`,
+which Ollama does not serve.
+
+You do not need to re-run setup or hand-edit JSON. The loader repairs the value
+on read and logs when it does. Only a base URL with an **empty path** is
+touched: anything that already names a path (`/v1`, `/v1beta`, a gateway prefix)
+is treated as your deliberate choice and left alone.
+</Note>
+
+Also fixed in the same pass: **changing your LLM provider now clears the base
+URL** the previous provider owned. Picking Ollama, going back, then picking
+OpenAI used to send OpenAI requests to `localhost:11434`.
 
 ## Pairing after setup
 

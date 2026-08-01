@@ -34,6 +34,12 @@ from ..helpers import (
 from ..state import WizardState
 
 
+# How many times the model prompt may be re-asked after a failed smoke
+# test before the step keeps whatever was typed and moves on. A wizard
+# prompt must always terminate.
+_MAX_MODEL_ATTEMPTS = 3
+
+
 def _selectable_providers(catalog: ProviderCatalog) -> list:
     """Catalog descriptors the runtime can actually dial.
 
@@ -99,7 +105,8 @@ async def run_provider_step(state: WizardState) -> None:
     if not (ui_kit.is_inquirer_available() and ui_kit.is_interactive()):
         render_provider_table("Available providers", options, extra_columns=extra_notes)
 
-    default_id = state.get_setting("llm", "provider") or _default_choice(options)
+    previous_id = state.get_setting("llm", "provider") or ""
+    default_id = previous_id or _default_choice(options)
     chosen = ask_choice("Choose a provider", options, default=default_id)
     state.set_setting("llm", "provider", chosen.id)
 
@@ -107,8 +114,7 @@ async def run_provider_step(state: WizardState) -> None:
     if desc is None:
         return
 
-    if desc.default_base_url and not state.get_setting("llm", "base_url"):
-        state.set_setting("llm", "base_url", desc.default_base_url)
+    _apply_base_url(state, desc, provider_changed=(chosen.id != previous_id))
 
     # Cloud providers: detect any existing key (labeled vault entry,
     # legacy default-namespace entry, or process env var) so we can
@@ -155,6 +161,51 @@ async def run_provider_step(state: WizardState) -> None:
                 _show_lmstudio_no_model(console)
 
 
+def _apply_base_url(state: WizardState, desc, *, provider_changed: bool) -> None:
+    """Own ``llm.base_url`` for the chosen provider.
+
+    The old rule was "write the descriptor default only when the slot
+    is empty", which made the value sticky across provider changes. Pick
+    Ollama (base_url becomes localhost:11434/v1), navigate back, pick
+    OpenAI, and the OpenAI branch of ``agents/llm_provider`` does
+    ``self.base_url = self.base_url or <default>``, so the stale local URL
+    survives and every OpenAI request is sent to the Ollama daemon. The
+    same thing happens re-running ``feral setup`` on an install that
+    previously used a local provider.
+
+    So: when the provider changed, the new provider owns the slot
+    outright, and a provider with no descriptor default clears it (an
+    empty slot is what lets the runtime fill in its own default).
+    When the provider did NOT change we leave any operator-customised
+    value alone and only fill an empty slot.
+    """
+    if provider_changed:
+        state.set_setting("llm", "base_url", desc.default_base_url or "")
+        return
+    if desc.default_base_url and not state.get_setting("llm", "base_url"):
+        state.set_setting("llm", "base_url", desc.default_base_url)
+
+
+def _demote_hosted_local_models(provider_id: str, models: list[str]) -> list[str]:
+    """Sink Ollama Cloud (``:cloud``) model ids below the local ones.
+
+    ``ollama list`` reports Ollama Cloud models alongside genuinely
+    local ones, and the picker defaults to the first entry. On a
+    machine where a ``:cloud`` id sorted first, the wizard's own
+    default selected a model that needs an ollama.com key: the LLM step
+    never prompts for one (the provider is marked
+    ``requires_api_key=False``) and the smoke test exempts local
+    providers, so setup completed clean and the first chat turn came
+    back 403. Local models are what "Ollama (local)" promises, so they
+    lead. Order within each group is preserved.
+    """
+    if provider_id != "ollama":
+        return list(models)
+    local = [m for m in models if not str(m).endswith(":cloud")]
+    hosted = [m for m in models if str(m).endswith(":cloud")]
+    return local + hosted
+
+
 async def run_model_step(state: WizardState) -> None:
     console = get_console()
     catalog = _catalog(state)
@@ -185,7 +236,7 @@ async def run_model_step(state: WizardState) -> None:
     except Exception:
         chat_models = raw_models
         responses_models = []
-    models = chat_models
+    models = _demote_hosted_local_models(provider_id, chat_models)
 
     # Header is owned by the state-machine step indicator now; we just
     # surface the discovered-count summary.
@@ -252,7 +303,7 @@ async def run_model_step(state: WizardState) -> None:
                 allow_empty=False,
             )
         state.set_setting("llm", "model", picked)
-        await _smoke_test_model(catalog, provider_id, picked, console)
+        await _smoke_test_model(catalog, provider_id, picked, console, state)
         return
 
     # Typed fallback path — also the path pytest exercises (the suite
@@ -269,7 +320,12 @@ async def run_model_step(state: WizardState) -> None:
             "  (Could not fetch a live list — type the exact model name for this provider.)"
         )
 
-    while True:
+    # Bounded. This loop used to be ``while True``: when the smoke test
+    # failed for a reason retyping the model id can never fix (no API
+    # key configured for the provider), "Pick a different model?"
+    # defaulted to yes and the enter-through-defaults path re-asked
+    # forever until stdin ran out. Setup must always terminate.
+    for attempt in range(_MAX_MODEL_ATTEMPTS):
         raw = ask_text(
             "Which model? (paste the id or pick a number above)",
             default=default,
@@ -283,10 +339,19 @@ async def run_model_step(state: WizardState) -> None:
                 console.print("  number out of range")
                 continue
         state.set_setting("llm", "model", raw)
-        if await _smoke_test_model(catalog, provider_id, raw, console):
-            break
+        if await _smoke_test_model(catalog, provider_id, raw, console, state):
+            return
+        if attempt == _MAX_MODEL_ATTEMPTS - 1:
+            console.print(
+                "  [yellow]Keeping the model as typed.[/] Re-run it later "
+                "with `feral setup --from-step llm_model`."
+                if _RICH_AVAILABLE else
+                "  Keeping the model as typed. Re-run it later with "
+                "`feral setup --from-step llm_model`."
+            )
+            return
         if not confirm("  Pick a different model?", default=True):
-            break
+            return
 
 
 async def _smoke_test_model(
@@ -294,6 +359,7 @@ async def _smoke_test_model(
     provider_id: str,
     model: str,
     console,
+    state: "WizardState | None" = None,
 ) -> bool:
     """Send one throwaway token through provider+model. Returns ok.
 
@@ -306,10 +372,32 @@ async def _smoke_test_model(
     Local providers are exempt: pulling a model into Ollama can be a
     multi-GB download that the LLM step already walked the operator
     through, and a cold model here would stall the wizard.
+
+    A key-requiring provider with NO key configured is exempt too, and
+    reports as passing. The test can only distinguish a good model id
+    from a bad one when it can authenticate; without a key every id
+    fails identically with "provider has no api_key configured". The
+    caller treats a failure as "retype the model id", which cannot fix
+    a missing key, so reporting failure here re-asked the operator a
+    question no answer of theirs could satisfy.
     """
     desc = catalog.get_descriptor(provider_id)
     if desc is not None and getattr(desc, "supports_local", False):
         return True
+
+    if desc is not None and getattr(desc, "requires_api_key", False):
+        secret, _source, _labels = existing_provider_key(
+            provider_id, getattr(desc, "credential_env_var", "") or "", state,
+        )
+        if not secret:
+            console.print(
+                f"  [dim]No {provider_id} key configured, so the model id "
+                f"cannot be verified from here. Add one with `feral key add "
+                f"--provider {provider_id}`.[/]" if _RICH_AVAILABLE else
+                f"  No {provider_id} key configured, so the model id cannot "
+                f"be verified from here."
+            )
+            return True
 
     adapter = catalog.get_adapter(provider_id)
     chat = getattr(adapter, "chat", None) if adapter is not None else None
@@ -354,6 +442,22 @@ async def _smoke_test_model(
 # ----------------------------------------------------------------------
 
 
+def _warn_key_skipped(display_name: str, provider_id: str, console) -> None:
+    """Tell the operator what skipping the key prompt costs them.
+
+    Setup still completes, which is the point: an unfinishable wizard is
+    worse than one that finishes with a provider that needs a key added
+    later. The message names the command that adds it.
+    """
+    console.print(
+        f"  [yellow]No {display_name} key stored.[/] Chat will not work "
+        f"until you add one: [bold]feral key add --provider {provider_id}[/]"
+        if _RICH_AVAILABLE else
+        f"  No {display_name} key stored. Chat will not work until you run "
+        f"`feral key add --provider {provider_id}`."
+    )
+
+
 async def _configure_provider_key(
     *,
     state: WizardState,
@@ -382,12 +486,23 @@ async def _configure_provider_key(
     secret, source, labels = existing_provider_key(provider_id, env_var, state)
 
     if not secret:
-        # No key anywhere → original free-text prompt path.
+        # No key anywhere → free-text prompt.
+        #
+        # This MUST accept an empty answer. It used to be
+        # ``allow_empty=False``, and both ``helpers._ask_secret`` and
+        # ``ui_kit.password`` loop forever on an empty value, so an
+        # operator who reached this prompt with no key to hand had no
+        # way out but Ctrl+C. On a keyless machine the picker's own
+        # default provider lands here, which means pressing enter
+        # through the wizard could never finish it.
         key = ask_text(
-            f"  Enter your {display_name} API key",
-            allow_empty=False,
+            f"  Enter your {display_name} API key (leave blank to skip)",
+            allow_empty=True,
             secret=True,
         )
+        if not (key or "").strip():
+            _warn_key_skipped(display_name, provider_id, console)
+            return
         _persist_new_key(
             state=state, catalog=catalog,
             provider_id=provider_id, env_var=env_var, key=key,
@@ -465,10 +580,13 @@ async def _configure_provider_key(
             allow_empty=False,
         )
     new_key = ask_text(
-        f"  Enter your {display_name} API key",
-        allow_empty=False,
+        f"  Enter your {display_name} API key (leave blank to skip)",
+        allow_empty=True,
         secret=True,
     )
+    if not (new_key or "").strip():
+        _warn_key_skipped(display_name, provider_id, console)
+        return
     _persist_new_key(
         state=state, catalog=catalog,
         provider_id=provider_id, env_var=env_var,

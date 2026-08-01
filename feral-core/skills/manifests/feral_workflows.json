@@ -133,6 +133,35 @@
       "safety_tier": "safe"
     },
     {
+      "id": "todo_write",
+      "method": "POST",
+      "url": "python://feral_workflows/todo_write",
+      "description": "Track YOUR OWN task list for the current conversation. Use this for multi-step work you are doing right now: write the complete list when you start, and rewrite it whenever anything changes so the user can see where you are. This is NOT feral_reminders (that is the user's own time-anchored reminders), NOT feral_routines (recurring schedules), NOT the create endpoint above (that queues a workflow the brain executes in the background), and NOT background_task (long-running autonomous runs). Nothing here is executed for you; it is a visible scratchpad. Always send the COMPLETE list, since every call replaces the previous one. Exactly one item may be 'in_progress' at a time, and the call is rejected if more than one is: mark the item you are actually working on now, leave the rest 'pending', and flip finished items to 'completed' rather than deleting them mid-task.",
+      "params": [
+        {
+          "name": "todos",
+          "type": "array",
+          "required": true,
+          "description": "The COMPLETE todo list, replacing whatever was stored before. Each item is {\"id\":\"short-stable-id\",\"content\":\"what to do\",\"status\":\"pending|in_progress|completed\"}. id is optional and is generated when omitted; status defaults to pending. At most 40 items, and at most one may be in_progress.",
+          "items": {
+            "type": "object"
+          }
+        },
+        {
+          "name": "session_id",
+          "type": "string",
+          "required": false,
+          "description": "Session the list belongs to. Leave unset; the runtime fills it from the call context.",
+          "default": ""
+        }
+      ],
+      "returns_description": "{todos: [{id, content, status}], counts: {pending, in_progress, completed, total}, session_id}",
+      "ui_hint": "list",
+      "safety_tier": "safe",
+      "result_budget": "feed",
+      "emit_result_preview": true
+    },
+    {
       "id": "instantiate_pack",
       "method": "POST",
       "url": "python://feral_workflows/instantiate_pack",

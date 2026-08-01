@@ -140,6 +140,11 @@ except ImportError:
     pass
 
 try:
+    import skills.impl.plan
+except ImportError:
+    pass
+
+try:
     import skills.impl.cutebot_skill  # noqa: F401 (imported for @register_skill side effect)
 except ImportError:
     pass

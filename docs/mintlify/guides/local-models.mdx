@@ -17,23 +17,44 @@ after setup.
 | Disk | 10 GB free | 25 GB free |
 | OS | macOS 13+, Ubuntu 22.04+, Windows 11 | Apple Silicon or CUDA GPU |
 
-## Tested Combinations
+## Combinations
 
-These combos are regularly tested by the team. Mix and match to fit your
-hardware budget.
+Mix and match to fit your hardware budget.
 
-| Component | Provider | Model | RAM | Speed |
+| Component | Provider | Model | RAM | Notes |
 |-----------|----------|-------|-----|-------|
 | LLM | Ollama | llama3:8b | 6 GB | Good |
 | LLM | Ollama | qwen2:7b | 5 GB | Good |
 | Vision | Ollama | llava:7b | 5 GB | OK |
-| STT | faster-whisper | base | 1 GB | Fast |
-| STT | faster-whisper | small | 2 GB | Good |
-| TTS | Piper | en_US-lessac-medium | 50 MB | Fast |
+| STT | whisper.cpp | base.en | ~1 GB | Default on macOS. The only Whisper family member with real Apple Silicon GPU acceleration |
+| STT | faster-whisper | base / small | 1 to 2 GB | The right choice on Linux and NVIDIA. Wrong on macOS: CTranslate2 has no Metal backend, so it runs on CPU |
+| TTS | macOS `say` | (system voice) | none | Zero install, zero download, no licence question |
+| TTS | Piper | en_US-lessac-medium | ~50 MB | GPL-3.0-or-later, behind the `feral-ai[tts-piper]` extra |
 
 <Note>
   RAM figures are approximate peak usage. When running LLM + STT + TTS
   simultaneously, add the individual figures together.
+</Note>
+
+<Warning>
+The voice engines above are not all equally verified. macOS `say` is the only
+local TTS with a real synthesis test in this repository; Piper's synthesis path
+has never produced audio here because the macOS arm64 wheels abort on a
+hardcoded CI espeak path; and neither local STT engine has ever run a real
+transcription in this repository (only their refusal paths are tested). The
+per-engine detail is in [Local Voice](/guides/local-voice#verification-status).
+Read it before you commit to a stack.
+</Warning>
+
+The audio side of a local voice stack is documented in full at
+[Local Voice](/guides/local-voice): engine tiers, what downloads when and how
+big it is, the measured endpointing improvement, and why local mode fails loudly
+rather than falling back to a cloud provider.
+
+<Note>
+"Fully local voice" means the **audio**, not the conversation. A local voice
+stack transcribes on your machine and then sends the *text* to whatever LLM you
+configured. Pair it with Ollama (below) to keep the whole turn local.
 </Note>
 
 ## Setup
@@ -76,16 +97,32 @@ ollama pull llava:7b
 
 ### Install FERAL with local extras
 
-The `stt` and `tts` extras pull in faster-whisper and Piper respectively:
+On macOS, one extra covers the whole local audio stack (endpointing plus
+whisper.cpp STT; local TTS is the built-in `say`, so there is nothing to
+install):
 
 ```bash
-pip install "feral-ai[stt,tts]"
+pip install "feral-ai[voice-local]"
 ```
+
+On Linux or with an NVIDIA GPU, take faster-whisper and Piper instead:
+
+```bash
+pip install "feral-ai[vad,stt,tts-piper]"
+```
+
+<Note>
+`feral-ai[tts]` and `feral-ai[tts-piper]` are the same package: **`piper-tts`,
+which is GPL-3.0-or-later.** FERAL is Apache-2.0, so Piper is never installed
+implicitly and is never a default. `tts` is a historical alias kept resolving
+because install guides reference it; the name predates the relicensing and does
+not advertise it.
+</Note>
 
 If you also want local vision:
 
 ```bash
-pip install "feral-ai[stt,tts,vision]"
+pip install "feral-ai[voice-local,vision]"
 ```
 
 ### Configure environment
@@ -96,8 +133,12 @@ Set these environment variables (or add them to `~/.feral/config.env`):
 export FERAL_LLM_PROVIDER=ollama
 export FERAL_LLM_MODEL=llama3:8b
 
-export FERAL_STT_PROVIDER=local
-export FERAL_TTS_PROVIDER=local
+# Provider names are the registry names, not "local". macOS:
+export FERAL_STT_PROVIDER=whispercpp
+export FERAL_TTS_PROVIDER=macos_say
+# Linux / NVIDIA:
+# export FERAL_STT_PROVIDER=faster_whisper
+# export FERAL_TTS_PROVIDER=piper
 
 # Optional — vision
 export FERAL_VISION_PROVIDER=ollama
@@ -118,9 +159,13 @@ You can verify the providers in the startup banner:
 
 ```
 [FERAL] LLM provider : ollama (llama3:8b)
-[FERAL] STT provider : local (faster-whisper base)
-[FERAL] TTS provider : local (piper en_US-lessac-medium)
+[FERAL] STT provider : whispercpp (base.en)
+[FERAL] TTS provider : macos_say
 ```
+
+The boot summary also reports which provider modules registered and which were
+unavailable, so a missing optional wheel shows up at startup rather than
+mid-conversation.
 
 </Steps>
 
@@ -170,10 +215,10 @@ export FERAL_STT_DEVICE=1
 
 **Choose models based on your hardware:**
 
-- **8 GB RAM (no GPU):** `qwen2:7b` + `faster-whisper base` + Piper — expect
-  2–4 s response times.
-- **16 GB RAM (no GPU):** `llama3:8b` + `faster-whisper small` + Piper —
-  expect 1–3 s response times.
+- **8 GB RAM (no GPU):** `qwen2:7b` + `faster-whisper base` + Piper. The LLM
+  dominates the turn; the endpointing and TTS costs are documented in
+  [Local Voice](/guides/local-voice#latency-endpointing-and-streaming-tts).
+- **16 GB RAM (no GPU):** `llama3:8b` + `faster-whisper small` + Piper.
 - **Apple Silicon (M1+):** Ollama uses Metal acceleration automatically.
   `llama3:8b` runs at ~30 tokens/s on M2.
 - **NVIDIA GPU (8 GB+ VRAM):** Ollama detects CUDA automatically. Expect
@@ -182,8 +227,11 @@ export FERAL_STT_DEVICE=1
 **General tips:**
 
 - Keep Ollama running between sessions to avoid cold-start latency.
-- Use `faster-whisper base` unless you need higher accuracy — `small` is 2×
+- Use the `base` model unless you need higher accuracy; `small` is meaningfully
   slower for a modest accuracy gain.
-- Piper TTS is CPU-only and extremely fast; it won't bottleneck your setup.
-- If you run FERAL on a headless server, disable TTS with
-  `FERAL_TTS_PROVIDER=none` to save resources.
+- On macOS, prefer `whispercpp` over `faster-whisper`. CTranslate2 has no Metal
+  backend, so faster-whisper runs on CPU there while every log line claims local
+  acceleration.
+- Piper TTS is CPU-only. Its throughput has not been measured in this
+  repository, because its synthesis path has never run here; see
+  [Local Voice](/guides/local-voice#verification-status).

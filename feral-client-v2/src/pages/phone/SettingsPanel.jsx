@@ -19,11 +19,19 @@ const STT_MODELS = {
   groq_whisper: [{ value: 'whisper-large-v3', label: 'Whisper Large v3' }],
 };
 
+// Must stay in sync with the brain's TTS registry
+// (feral-core/voice/tts_providers/__init__.py): openai, elevenlabs,
+// cartesia. Offering an id the registry does not know makes
+// get_tts_provider raise and the chained session fail to open.
 const TTS_PROVIDERS = [
   { value: 'openai', label: 'OpenAI' },
   { value: 'elevenlabs', label: 'ElevenLabs' },
+  { value: 'cartesia', label: 'Cartesia' },
 ];
 
+// Only OpenAI addresses voices by name. ElevenLabs and Cartesia take an
+// opaque voice id, so those providers get a free-text id field instead
+// of a dropdown (the brain exposes no voice catalogue to populate one).
 const TTS_VOICES = {
   openai: [
     { value: 'alloy', label: 'Alloy' },
@@ -33,10 +41,14 @@ const TTS_VOICES = {
     { value: 'nova', label: 'Nova' },
     { value: 'shimmer', label: 'Shimmer' },
   ],
-  elevenlabs: [
-    { value: 'rachel', label: 'Rachel' },
-    { value: 'adam', label: 'Adam' },
-  ],
+};
+
+const VOICE_ID_PROVIDERS = {
+  // Defaults the brain falls back to when tts_voice_id is blank, shown
+  // as placeholder text so the field is never a mystery.
+  // (voice/tts_providers/elevenlabs.py, voice/tts_providers/cartesia.py)
+  elevenlabs: '21m00Tcm4TlvDq8ikWAM',
+  cartesia: '5345cf08-6f37-424d-a5d9-8ae1101b9377',
 };
 
 const OPENAI_VOICES = [
@@ -70,8 +82,19 @@ const OPENAI_REALTIME_MODELS = [
 const DEFAULT_VOICE_CONFIG = {
   mode: 'openai_realtime',
   realtime: { openai_voice: 'marin', openai_model: 'gpt-realtime', gemini_model: 'gemini-2.0-flash-exp' },
-  chained: { stt_provider: 'deepgram', stt_model: 'nova-3', tts_provider: 'openai', tts_voice: 'alloy' },
+  chained: {
+    stt_provider: 'deepgram',
+    stt_model: 'nova-3',
+    tts_provider: 'openai',
+    tts_voice: 'alloy',
+    tts_voice_id: '',
+  },
 };
+
+// Top-level keys of the `voice` settings section this panel owns. Each
+// is persisted as its own settings[voice][key] entry so the brain finds
+// them at `voice.mode` / `voice.realtime` / `voice.chained`.
+const VOICE_SECTION_KEYS = ['mode', 'realtime', 'chained'];
 
 export default function SettingsPanel({ initialConfig }) {
   const [voiceConfig, setVoiceConfig] = useState(null);
@@ -82,7 +105,11 @@ export default function SettingsPanel({ initialConfig }) {
 
   const loadConfig = useCallback(async () => {
     try {
-      const data = initialConfig || await apiJson('/api/config/settings').catch(() => apiJson('/api/config'));
+      // `silent: true` because the brain currently only serves
+      // GET /api/config; the /settings probe is a forward-compat
+      // attempt and its 404 must not raise a global error toast.
+      const data = initialConfig
+        || await apiJson('/api/config/settings', { silent: true }).catch(() => apiJson('/api/config'));
       const voice = data?.voice || data?.settings?.voice || DEFAULT_VOICE_CONFIG;
       setVoiceConfig({
         mode: voice.mode || DEFAULT_VOICE_CONFIG.mode,
@@ -112,11 +139,21 @@ export default function SettingsPanel({ initialConfig }) {
         const res = await apiFetch('/api/config/settings', {
           method: 'PATCH',
           body: JSON.stringify({ voice: nextVoice }),
+          silent: true,
         }).catch(() =>
-          apiFetch('/api/config/update', {
-            method: 'POST',
-            body: JSON.stringify({ section: 'voice', key: 'voice', value: nextVoice }),
-          })
+          // POST /api/config/update stores value at settings[section][key].
+          // The old fallback sent {section:'voice', key:'voice'}, which
+          // persisted `voice.voice.{mode,realtime,chained}`, a level too
+          // deep for every reader: the brain reads `voice.mode`
+          // (api/server.py) and `voice.chained.*` (voice/router.py).
+          // Write one call per top-level key so the keys land where they
+          // are read.
+          Promise.all(
+            VOICE_SECTION_KEYS.map((key) => apiFetch('/api/config/update', {
+              method: 'POST',
+              body: JSON.stringify({ section: 'voice', key, value: nextVoice[key] }),
+            }))
+          ).then((results) => results[results.length - 1])
         );
         if (res.ok) {
           setSaved(true);
@@ -233,14 +270,24 @@ export default function SettingsPanel({ initialConfig }) {
                 {TTS_PROVIDERS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
               </select>
             </div>
-            <div className="phone-settings-row">
-              <label htmlFor="tts-voice-select">TTS Voice</label>
-              <select id="tts-voice-select" value={voiceConfig.chained?.tts_voice || ''}
-                onChange={(e) => updateVoice((prev) => ({ ...prev, chained: { ...prev.chained, tts_voice: e.target.value } }))}
-                data-testid="tts-voice-picker">
-                {(TTS_VOICES[voiceConfig.chained?.tts_provider] || []).map((v) => <option key={v.value} value={v.value}>{v.label}</option>)}
-              </select>
-            </div>
+            {VOICE_ID_PROVIDERS[voiceConfig.chained?.tts_provider] ? (
+              <div className="phone-settings-row">
+                <label htmlFor="tts-voice-id-input">TTS Voice ID</label>
+                <input id="tts-voice-id-input" type="text" value={voiceConfig.chained?.tts_voice_id || ''}
+                  placeholder={VOICE_ID_PROVIDERS[voiceConfig.chained?.tts_provider]}
+                  onChange={(e) => updateVoice((prev) => ({ ...prev, chained: { ...prev.chained, tts_voice_id: e.target.value } }))}
+                  data-testid="tts-voice-id-input" />
+              </div>
+            ) : (
+              <div className="phone-settings-row">
+                <label htmlFor="tts-voice-select">TTS Voice</label>
+                <select id="tts-voice-select" value={voiceConfig.chained?.tts_voice || ''}
+                  onChange={(e) => updateVoice((prev) => ({ ...prev, chained: { ...prev.chained, tts_voice: e.target.value } }))}
+                  data-testid="tts-voice-picker">
+                  {(TTS_VOICES[voiceConfig.chained?.tts_provider] || []).map((v) => <option key={v.value} value={v.value}>{v.label}</option>)}
+                </select>
+              </div>
+            )}
           </div>
         )}
       </section>

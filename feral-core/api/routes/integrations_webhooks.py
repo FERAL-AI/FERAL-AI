@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+from html import escape as html_escape
 
 from fastapi import APIRouter, Query, Request, Response
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from api.state import state
 
@@ -42,30 +44,113 @@ async def list_integrations():
 
 
 @router.get("/api/oauth/authorize/{provider_id}")
-async def oauth_authorize(provider_id: str):
-    """Start an OAuth2 flow — returns the authorization URL.
+async def oauth_authorize(provider_id: str, redirect: bool = False):
+    """Start an OAuth2 flow.
 
-    When the provider hasn't been set up yet (no client_id baked in
-    and operator hasn't supplied one) we surface
-    ``setup_status=provider_setup_required`` plus the doc URL so the
-    UI can render a "Configure your own Google/Notion/Spotify app"
-    panel instead of a misleading error toast.
+    Returns the authorization URL as JSON by default, which is what a
+    fetch-then-open caller wants. Pass ``?redirect=1`` to get a 302 to
+    the provider instead, which is what a plain ``window.open`` needs.
+
+    Without that parameter a browser pointed straight at this route
+    renders raw JSON and the user is stuck: the Settings card did
+    exactly that, so clicking Authorize showed a popup full of
+    ``{"success": true, "url": ...}`` rather than the provider's
+    consent screen. The JSON form is kept because the v1 wizard reads
+    it and because an error needs a body a UI can render.
+
+    When the provider has no client_id (none baked in and the operator
+    has not supplied one) the response carries
+    ``setup_status=provider_setup_required`` plus the doc URL, so the
+    UI can render a "configure your own app" panel rather than a
+    misleading error toast. That case never redirects.
     """
     if not state.oauth:
         return {
             "error": "OAuth manager not initialized",
             "reason": "oauth_unavailable",
         }
-    return state.oauth.build_authorize_response(provider_id)
+    result = state.oauth.build_authorize_response(provider_id)
+    if redirect and result.get("success") and result.get("url"):
+        return RedirectResponse(url=result["url"], status_code=302)
+    return result
+
+
+def _callback_page(ok: bool, provider: str, detail: str) -> HTMLResponse:
+    """Human-readable end of the OAuth round trip.
+
+    The provider redirects a real browser here, so returning a dict
+    left the user staring at ``{"success": true, "provider": "whoop"}``
+    with no idea whether it worked or what to do next, and the Settings
+    tab that opened the popup never learned the flow had finished.
+
+    ``postMessage`` lets the opener refresh itself. It is sent to "*"
+    because the brain is reached on many origins (localhost, a LAN IP,
+    a tailnet name) and the message carries no secret, only the fact
+    that a provider finished.
+    """
+    title = "Connected" if ok else "Connection failed"
+    colour = "#16a34a" if ok else "#dc2626"
+    safe_provider = html_escape(provider or "provider")
+    safe_detail = html_escape(detail or "")
+    body = f"""<!doctype html>
+<meta charset="utf-8">
+<title>FERAL {title}</title>
+<style>
+  body {{ font: 15px/1.5 -apple-system, system-ui, sans-serif;
+         display: grid; place-items: center; height: 100vh; margin: 0;
+         color: #111; background: #fafafa; }}
+  .card {{ text-align: center; max-width: 30rem; padding: 2rem; }}
+  h1 {{ font-size: 1.25rem; margin: 0 0 .5rem; color: {colour}; }}
+  p {{ margin: .25rem 0; color: #444; }}
+  .hint {{ color: #777; font-size: 13px; margin-top: 1rem; }}
+</style>
+<div class="card">
+  <h1>{title}</h1>
+  <p><strong>{safe_provider}</strong></p>
+  <p>{safe_detail}</p>
+  <p class="hint">You can close this window and return to FERAL.</p>
+</div>
+<script>
+  try {{
+    if (window.opener) {{
+      window.opener.postMessage(
+        {{ type: "feral:oauth", ok: {str(ok).lower()},
+           provider: {safe_provider!r} }}, "*");
+    }}
+  }} catch (e) {{}}
+</script>"""
+    return HTMLResponse(body, status_code=200 if ok else 400)
 
 
 @router.get("/api/oauth/callback")
-async def oauth_callback(state_param: str = Query(alias="state", default=""), code: str = ""):
-    """Handle OAuth2 callback from provider."""
+async def oauth_callback(
+    state_param: str = Query(alias="state", default=""),
+    code: str = "",
+    format: str = "",
+):
+    """Handle the OAuth2 callback from a provider.
+
+    Renders HTML by default, because the thing that lands here is a
+    real browser following a redirect, not a fetch. Pass ``?format=json``
+    for the old machine-readable shape.
+    """
     if not state.oauth:
-        return {"error": "OAuth manager not initialized"}
+        if format == "json":
+            return {"error": "OAuth manager not initialized"}
+        return _callback_page(False, "", "OAuth manager not initialized.")
+
     result = await state.oauth.handle_callback(state_param, code)
-    return result
+    if format == "json":
+        return result
+
+    ok = bool(result.get("success"))
+    provider = str(result.get("provider") or "")
+    detail = (
+        "FERAL can now use this account."
+        if ok
+        else str(result.get("error") or "The provider did not return a usable token.")
+    )
+    return _callback_page(ok, provider, detail)
 
 
 @router.post("/api/integrations/token")

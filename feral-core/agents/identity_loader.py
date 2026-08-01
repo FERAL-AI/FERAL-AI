@@ -111,6 +111,28 @@ class IdentityLoader:
         self.calendar = calendar
         self.somatic_engine: SomaticEngine | None = somatic_engine
 
+    @staticmethod
+    def _agent_name_from_settings() -> str:
+        """Agent name persisted at ``settings.identity.agent_name``, if any.
+
+        Only consulted when no IDENTITY.yaml exists. Best-effort: a
+        missing or unreadable settings file yields an empty string and
+        the caller keeps the shipped default name.
+        """
+        try:
+            import json
+
+            path = feral_home() / "settings.json"
+            if not path.is_file():
+                return ""
+            data = json.loads(path.read_text())
+            if not isinstance(data, dict):
+                return ""
+            name = ((data.get("identity") or {}) or {}).get("agent_name") or ""
+            return str(name).strip()
+        except Exception:
+            return ""
+
     def load_identity(self) -> str:
         """Load agent identity from ~/.feral/ files: IDENTITY.yaml, USER.md, SOUL.md, MEMORY.md."""
         home = feral_home()
@@ -143,11 +165,19 @@ class IdentityLoader:
                     logger.warning(f"Failed to load identity: {e}")
 
         if not parts:
+            # No IDENTITY.yaml. Installs set up by the modular wizard
+            # before v2026.7.31 only ever recorded the operator's chosen
+            # agent name at ``settings.identity.agent_name``, which
+            # nothing read: naming the agent Jarvis still produced "You
+            # are FERAL". The wizard now writes IDENTITY.yaml, but
+            # existing installs already have the name only in settings,
+            # so honour it here rather than making them re-run setup.
+            name = self._agent_name_from_settings() or "FERAL"
             parts.append(
-                "You are FERAL, a personal AI operating system.\n"
-                "You run locally on the user's devices — phone, laptop, wearables, smart home.\n"
+                f"You are {name}, a personal AI operating system.\n"
+                "You run locally on the user's devices (phone, laptop, wearables, smart home).\n"
                 "You are warm, helpful, and genuinely interested in making the user's life easier.\n"
-                "You're privacy-first — everything stays on-device unless the user says otherwise.\n"
+                "You're privacy-first: everything stays on-device unless the user says otherwise.\n"
                 "You learn the user's preferences over time and get better at anticipating their needs.\n"
                 "You have personality: you can be witty, ask thoughtful questions, and suggest creative ideas.\n"
                 "When given a task, you think about related things the user might want and offer them proactively."
@@ -219,6 +249,7 @@ class IdentityLoader:
         full_catalog: list["SkillManifest"] | None = None,
         memory_filter: str = "",
         query: str = "",
+        plan_mode: bool = False,
     ) -> str:
         """Assemble the full system prompt for an LLM conversation turn.
 
@@ -234,8 +265,25 @@ class IdentityLoader:
                 context builder so knowledge-graph + episode search fire per
                 turn. Empty string = legacy behaviour (working memory + recent
                 episodes only).
+            plan_mode: True while the session is in plan mode. Adds the
+                plan-mode block near the top of the prompt. Callers are
+                expected to have already pruned ``skills`` / ``full_catalog``
+                to their plan-safe endpoints; this flag only controls the
+                prose, it does not filter anything itself.
         """
         identity = identity_text if identity_text is not None else self.load_identity()
+
+        # Plan mode goes FIRST, ahead of the tool-selection block, because
+        # that block is an aggressive "if a tool exists, call it" instruction
+        # and would otherwise read as a licence to act. This one says the
+        # opposite for this turn, so it has to win.
+        plan_mode_header = ""
+        if plan_mode:
+            try:
+                from agents.plan_mode import plan_mode_prompt_block
+                plan_mode_header = plan_mode_prompt_block() + "\n"
+            except Exception:
+                logger.debug("plan-mode prompt block unavailable", exc_info=True)
 
         # The static header is structured so the most-violated disciplines
         # (tool-selection, grounded recall, honest execution) land BEFORE
@@ -243,7 +291,7 @@ class IdentityLoader:
         # signals at the top of the prompt; budget-priced models honour
         # the last instruction. Putting these blocks first AND echoing the
         # critical ones near the end (Execution Bias) covers both shapes.
-        prompt = (
+        prompt = plan_mode_header + (
             "## Tool-Selection Discipline\n"
             "Tools are FERAL's senses and hands. Calling the right tool beats parametric\n"
             "guessing every time. Before answering, ask: is there a tool that would\n"

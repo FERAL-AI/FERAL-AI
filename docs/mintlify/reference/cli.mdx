@@ -325,6 +325,35 @@ feral twin revoke
 feral twin pending
 ```
 
+### `feral checkpoints`
+
+Inspect or undo the file writes FERAL made, grouped by the user message
+(the "turn") that caused them.
+
+```bash
+feral checkpoints list [--session SESSION_ID] [--limit 20]
+feral checkpoints show [TURN_ID]
+feral checkpoints revert [TURN_ID] [--force] [--dry-run]
+```
+
+`TURN_ID` defaults to the most recent checkpointed turn. `show` prints the
+revert plan without touching a file.
+
+A file whose current content no longer matches what FERAL left there is reported
+as `drifted` and the revert refuses outright. `--force` overrides that and
+discards the newer content.
+
+<Warning>
+Checkpoints cover `coding_tools__write_file` and `coding_tools__edit_file` only.
+Anything `coding_tools__bash` changed (shell redirects, `sed -i`, formatters,
+package installs, git commands) is **not** reverted and is not tracked. Every
+command here prints that caveat on every invocation.
+</Warning>
+
+This command reads `$FERAL_HOME/checkpoints/index.db` directly and never calls
+the brain's REST API, because the moment you most need an undo is the moment the
+brain is wedged. See [Coding Harness](/guides/coding-harness#3-checkpoints-and-revert).
+
 ### `feral memory`
 
 Memory backend, decay, and query management.
