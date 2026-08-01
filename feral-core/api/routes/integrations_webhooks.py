@@ -55,7 +55,10 @@ async def list_integrations(refresh: bool = True):
         vault = getattr(state, "vault", None)
         try:
             await probe_sweeper.sweep_once(vault=vault, only_stale=True)
-            probe_sweeper.ensure_started(vault=vault)
+            probe_sweeper.ensure_started(
+                vault=vault,
+                register=getattr(state, "register_background_task", None),
+            )
         except Exception as exc:
             # A probe sweep must never be able to take the settings page
             # down; a stale badge beats a 500.
@@ -426,7 +429,10 @@ async def refresh_integration_status(body: dict | None = None):
     else:
         results = await probe_sweeper.sweep_once(vault=vault)
 
-    probe_sweeper.ensure_started(vault=vault)
+    probe_sweeper.ensure_started(
+        vault=vault,
+        register=getattr(state, "register_background_task", None),
+    )
     return {
         "ok": True,
         "results": results,

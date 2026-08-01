@@ -149,12 +149,16 @@ async def _loop(vault) -> None:
         raise
 
 
-def ensure_started(*, vault=None) -> bool:
+def ensure_started(*, vault=None, register=None) -> bool:
     """Start the periodic sweep if it is not already running.
 
     Idempotent, and safe to call from a request handler: the first caller
     starts the loop, everyone else is a no-op. Returns True when a loop
     is running afterwards.
+
+    ``register`` is the brain's background-task registry
+    (``BrainState.register_background_task``) so shutdown can cancel the
+    loop instead of leaving a pending task behind.
 
     Callable from a route because there is no boot hook this module is
     allowed to touch; ``api/server.py`` should start it at brain startup
@@ -173,6 +177,11 @@ def ensure_started(*, vault=None) -> bool:
         logger.debug("ensure_started called with no running loop; skipping")
         return False
     _task = loop.create_task(_loop(vault))
+    if register is not None:
+        try:
+            register(_task)
+        except Exception as exc:  # pragma: no cover, defensive
+            logger.debug("probe sweeper task registration failed: %s", exc)
     return True
 
 
