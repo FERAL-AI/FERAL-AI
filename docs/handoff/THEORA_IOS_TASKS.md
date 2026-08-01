@@ -276,3 +276,103 @@ Revisit only if video from the glasses becomes a requirement.
   Gemini Live client). Worth reading before building anything similar. It also
   contains **two live API keys in `Config.swift:23,29`**; that directory is
   untracked so they are not in git history, unlike P0-1.
+
+---
+
+# Coding-agent picker (added 2026-08-01)
+
+FERAL can now drive external coding agents. This section is what the Theora
+app needs to put a picker in the chat UI next to Wellness / Claude Code /
+FERAL Brain. Everything below is read from the shipped code.
+
+## What exists brain-side
+
+`feral-core/bridges/` spawns a coding agent as a subprocess and speaks ACP
+(Agent Client Protocol, JSON-RPC 2.0 over newline-delimited JSON on stdio).
+Verified against real opencode 1.18.10: 1026 streamed events in one run, a real
+tool call, permission requests answered both ways, and a file written through
+FERAL's own handler.
+
+Four agents, from `bridges/catalog.py:61-92`:
+
+| `agent_id` | `native_acp` | Needs |
+|---|---|---|
+| `opencode` | true | nothing, single binary, FERAL can install it |
+| `claude_code` | false | Node + `@zed-industries/claude-code-acp` |
+| `codex` | false | Node + `@agentclientprotocol/codex-acp` |
+| `hermes` | true | an existing source checkout, FERAL will not install it |
+
+**Neither Claude Code nor Codex speaks ACP natively.** Verified locally:
+`claude` 2.1.220 has no `acp` subcommand, and Codex has an open request for one.
+Both are driven through Zed-maintained Node shims, which are themselves the ACP
+agent, so the bridge drives them unchanged. That is why `native_acp` is on the
+wire: the picker should show whether an agent is a one-step or two-step install.
+
+## The skill surface
+
+Skill id `external_agent`, four endpoints. These are ordinary FERAL tools, so
+they reach the phone through the existing `chat_request` / `chat_response`
+path. **No new HUP frame is required for v1.**
+
+```
+list_agents()
+  -> { default_agent, agents: [ { agent_id, display_name, available,
+                                  native_acp, binary, install_hint } ] }
+
+run_task(prompt, agent_id?, workspace_dir?, session_handle?, wait_seconds?)
+  -> { status, session_handle, agent_id, workspace_dir,
+       events[], tool_calls[], text, permission_request? }
+
+respond_permission(request_id, decision, wait_seconds?)
+  -> same shape as run_task, plus { answered: { request_id, decision } }
+
+close_session(session_handle, cancel_first?)
+  -> { handle, closed }
+```
+
+`list_agents` populates the picker. `available` is a real check (binary on PATH
+or at the recorded absolute path), so an agent the user has not installed
+renders greyed with `install_hint` rather than failing on first use.
+
+## The one behaviour that will surprise you
+
+**`run_task` returns on the first permission question, not at the end of the
+turn.** FERAL's tool loop is one call at a time, so a blocking `run_task` could
+never be unblocked by the `respond_permission` that unblocks it. The flow is:
+
+1. `run_task` -> `status` indicates a pending permission, `permission_request`
+   carries the id and the options
+2. UI shows the question, user picks
+3. `respond_permission(request_id, decision)` -> the turn continues and returns
+   the same shape
+4. Repeat if another arrives. Real runs produced **two sequential permission
+   requests inside one turn**, so do not assume one.
+
+Decisions use ACP's own vocabulary: `allow_once`, `allow_always`,
+`reject_once`. There is no auto-allow anywhere: no broker, broker raised,
+timeout, no allow-shaped option, and cancelled session all resolve to
+rejection. Grants are namespaced `external_agent:<tool>` so an external
+agent's `bash` can never grant FERAL's `bash`.
+
+## What the picker should probably do
+
+- Call `list_agents` on open, render `display_name`, grey out `available:false`
+  with `install_hint`.
+- Keep `session_handle` per conversation so follow-up turns continue the same
+  agent session instead of starting cold.
+- Render `tool_calls[]` as they stream, the same way the existing tool chips do.
+- Treat a permission question as a blocking modal. The user must answer before
+  the turn finishes, and rejecting is a normal outcome, not an error.
+- `close_session` on thread switch or when the user picks a different agent.
+
+## Not built yet, do not design against it
+
+- **No HTTP route for permissions.** The approve/deny path today is the
+  `respond_permission` tool. If the picker wants a REST button instead, that
+  route needs adding brain-side first; say so and it will be.
+- **Cross-agent memory is not done.** Each agent session is independent. FERAL
+  does not yet summarize what an agent did into its own memory, so asking FERAL
+  "what did Claude change earlier" will not work. That work is next; this
+  section will be updated when it lands rather than promised here.
+- **hermes is untested.** Its code path exists and it speaks ACP, but only
+  opencode was exercised against a real binary.
