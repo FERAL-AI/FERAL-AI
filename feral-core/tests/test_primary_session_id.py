@@ -25,7 +25,6 @@ These tests pin:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -44,9 +43,13 @@ def _make_state_class():
 
 def test_primary_session_id_minted_and_persisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """First boot mints + persists; second boot reads back the same id."""
-    # `feral_data_home()` honors `XDG_DATA_HOME`, NOT `FERAL_HOME`
-    # (which is only consulted by `feral_home()`). Set both for
-    # safety in case future refactors unify them.
+    # `feral_data_home()` now honors `FERAL_HOME` first, exactly as
+    # `feral_home()` does. Before that, relocating an install split the
+    # brain (settings under the new root, databases still under
+    # `~/.feral`) and setting `FERAL_HOME` alone in a test left data
+    # writes pointing at the developer's real home directory.
+    # `XDG_DATA_HOME` is still set here so the assertion below stays
+    # unambiguous about which of the two won.
     monkeypatch.setenv("FERAL_HOME", str(tmp_path))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     monkeypatch.delenv("FERAL_PRIMARY_SESSION_ID", raising=False)
@@ -57,8 +60,12 @@ def test_primary_session_id_minted_and_persisted(tmp_path: Path, monkeypatch: py
     assert sid_1, "primary_session_id must be minted on first boot"
     assert sid_1.startswith("primary-"), f"unexpected format: {sid_1}"
 
-    # `feral_data_home()` returns `XDG_DATA_HOME / "feral"`.
-    persisted = tmp_path / "feral" / "primary_session_id"
+    # `FERAL_HOME` wins, so the file lands directly under it rather
+    # than under the `XDG_DATA_HOME / "feral"` layout.
+    persisted = tmp_path / "primary_session_id"
+    assert not (tmp_path / "feral" / "primary_session_id").exists(), (
+        "FERAL_HOME must take precedence over XDG_DATA_HOME"
+    )
     assert persisted.is_file(), (
         f"primary_session_id must be persisted on disk; expected at {persisted}"
     )
