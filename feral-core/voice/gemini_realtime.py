@@ -672,6 +672,24 @@ class GeminiRealtimeProxy:
                 exc_info=True,
             )
 
+    def _plan_mode_refusal(self, tool_name: str, session_id: str) -> Optional[dict]:
+        """Return a refusal envelope when plan mode blocks ``tool_name``.
+
+        Delegates to ``ToolRunner.enforce_plan_mode`` so this surface and
+        the chat surface share one definition of plan-safe. Returns None
+        when plan mode is off, when the tool is plan-safe, or when no
+        orchestrator is wired.
+        """
+        runner = getattr(self._orchestrator, "tool_runner", None)
+        enforce = getattr(runner, "enforce_plan_mode", None)
+        if not callable(enforce):
+            return None
+        try:
+            return enforce(tool_name, session_id)
+        except Exception:
+            logger.exception("plan-mode check failed for gemini voice tool %s", tool_name)
+            return None
+
     async def _handle_tool_call(self, session_id: str, call_id: str, name: str, arguments: str) -> str:
         if not self._skill_executor or not self._skill_registry:
             return json.dumps({"error": "No skill executor"})
@@ -701,7 +719,16 @@ class GeminiRealtimeProxy:
             except Exception:
                 logger.exception("gemini voice tool_start emit failed")
 
-        result = await self._skill_executor.execute(name, args, skill, endpoint)
+        # Same re-check as the OpenAI realtime proxy: this path calls
+        # SkillExecutor directly and never reaches ToolRunner, so the
+        # plan-mode gate there does not see it. Without this a session
+        # in plan mode could mutate state through a live Gemini voice
+        # call, which is exactly what the mode promises it cannot do.
+        _refusal = self._plan_mode_refusal(name, session_id)
+        if _refusal is not None:
+            result = _refusal
+        else:
+            result = await self._skill_executor.execute(name, args, skill, endpoint)
 
         if self._orchestrator is not None:
             latency_ms = (time.time() - t0) * 1000.0

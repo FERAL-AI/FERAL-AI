@@ -255,6 +255,64 @@ async def post_spawn_subsession(session_id: str, body: dict | None = None):
 
 
 # ────────────────────────────────────────────────────────────────────
+# Plan mode
+# ────────────────────────────────────────────────────────────────────
+#
+# Plan mode is a per-session, ephemeral posture in which the agent
+# researches and proposes but cannot mutate state. It is a separate axis
+# from ``security.autonomy_mode``, which is persisted and global, so
+# these routes deliberately live on the SESSION resource and never touch
+# the autonomy setting.
+#
+# Entry is explicit only: this route or the ``/plan`` chat meta-command,
+# never a heuristic on the user's prose. Exit is user-only, which is why
+# the exit route hard-codes ``actor="user"``: it is reachable by the
+# operator, not by the model, and the orchestrator refuses any other
+# actor. Approving a plan records the user's acceptance and grants
+# nothing; the individual steps still go through the normal approval
+# flow afterwards.
+
+
+def _require_orchestrator():
+    orch = getattr(state, "orchestrator", None)
+    if orch is None or not hasattr(orch, "plan_mode"):
+        raise HTTPException(status_code=503, detail="Orchestrator not initialised")
+    return orch
+
+
+@router.get("/api/sessions/{session_id}/plan_mode")
+async def get_plan_mode(session_id: str):
+    """Current plan-mode posture for *session_id*."""
+    return _require_orchestrator().plan_mode.describe(session_id)
+
+
+@router.post("/api/sessions/{session_id}/plan_mode")
+async def post_plan_mode(session_id: str, body: dict | None = None):
+    """Enter or leave plan mode for *session_id*.
+
+    Body: ``{"enabled": bool, "reason"?: str, "approved"?: bool}``.
+    ``approved`` is recorded for the UI only and confers no privilege.
+    """
+    body = body or {}
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="'enabled' (bool) is required")
+
+    orch = _require_orchestrator()
+    if enabled:
+        return await orch.enter_plan_mode(
+            session_id,
+            reason=str(body.get("reason") or ""),
+            entered_by="api",
+        )
+    return await orch.exit_plan_mode(
+        session_id,
+        approved=bool(body.get("approved")),
+        actor="user",
+    )
+
+
+# ────────────────────────────────────────────────────────────────────
 # PR 7: List / cancel / steer for live  subsessions
 # ────────────────────────────────────────────────────────────────────
 

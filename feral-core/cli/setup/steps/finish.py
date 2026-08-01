@@ -14,6 +14,25 @@ from ..helpers import get_console, _RICH_AVAILABLE
 from ..state import WizardState
 
 
+def _settings_url(state: WizardState) -> str:
+    """Resolve the web-settings URL to print in the summary.
+
+    Uses the port the brain will actually bind (``FERAL_PORT`` env >
+    ``network.port`` > 9090) instead of a hardcoded 9090. The host stays
+    ``localhost`` because this line is read on the machine that just ran
+    setup, and loopback reaches the brain under every bind mode; the
+    pairing step is the one that hands out a LAN-reachable URL.
+    """
+    del state  # bind host is deliberately not used, see docstring
+    try:
+        from config.runtime import brain_port
+
+        port = brain_port()
+    except Exception:
+        port = 9090
+    return f"http://localhost:{port}/settings"
+
+
 def run(state: WizardState) -> None:
     console = get_console()
     llm = state.settings.get("llm", {}) or {}
@@ -39,11 +58,18 @@ def run(state: WizardState) -> None:
     # The wizard configures a subset of what the CLI can reach. Naming
     # only `feral start` / `feral setup` here left ~30 shipped
     # capabilities undiscoverable unless the operator read `--help`.
+    # The settings URL used to be a hardcoded ``localhost:9090``, which
+    # contradicted the "Access: local" line printed three lines above it
+    # whenever the operator picked LAN / Tailscale, and ignored
+    # ``FERAL_PORT`` / ``network.port``. This is the last thing the
+    # operator reads, so resolve it the same way the network and
+    # pairing steps do.
+    settings_url = _settings_url(state)
     summary_lines += [
         "",
         "Start here:",
         "  feral start                    launch the brain + chat",
-        "  http://localhost:9090/settings web settings UI",
+        f"  {settings_url:<30} web settings UI",
         "",
         "Add more, any time:",
         "  feral key add                  add or rotate a provider API key",

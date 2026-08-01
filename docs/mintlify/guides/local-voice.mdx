@@ -1,0 +1,338 @@
+---
+title: "Local Voice"
+sidebarTitle: "Local Voice"
+description: "Fully local speech-to-text and text-to-speech: engine tiers, what downloads when, measured latency, and exactly which parts have been verified."
+---
+
+> **Status: Alpha, with uneven verification.** Read the
+> [Verification status](#verification-status) table before relying on any engine
+> here. One local TTS engine has been verified end to end with real synthesis;
+> the other has never produced audio on this machine, and neither local STT
+> engine has ever run a real transcription in this repository. Those are
+> statements about what has been tested, not predictions about what will fail.
+
+"Fully local voice" means the **audio** never leaves the machine. The
+conversation still goes wherever your LLM lives. If you configured OpenAI as
+your LLM provider, a local voice stack transcribes locally and then sends the
+*text* to OpenAI. To keep the whole turn local, pair local voice with a local
+LLM: see [Local Models](/guides/local-models). The setup wizard says this in
+prose before it offers the local stack, deliberately.
+
+Local engines run on the **chained pipeline** only. The realtime paths (OpenAI
+Realtime, Gemini Live) are a bidirectional audio socket to a vendor; there is no
+local equivalent, so the wizard does not offer one.
+
+## Engine tiers
+
+### TTS: macOS `say` (tier 0 on macOS)
+
+Part of the OS. Nothing to install, nothing to download, nothing to license, and
+it already has whatever voice you picked in System Settings, including Apple's
+downloadable Enhanced and Premium neural voices. It emits exactly the format the
+pipeline wants (mono PCM16 at 24 kHz), so no resampling sits between the engine
+and the speaker.
+
+Measured on an Apple M1 with 186 installed voices:
+
+| Text | Wall time | Audio produced | Ratio |
+|:--|--:|--:|--:|
+| "Yes." | 1.070 s | 0.52 s | 2.06 |
+| 5 words | 1.085 s | 1.29 s | 0.84 |
+| 12 words | 1.104 s | 3.11 s | 0.36 |
+| 23 words | 1.119 s | 6.57 s | 0.17 |
+
+and for the same 5-word line by voice: default Premium 1.076 s, Alex 0.865 s,
+Samantha 0.805 s, Daniel 0.547 s.
+
+The shape of that table is the whole design constraint. Cost is almost entirely
+**fixed per invocation** (0.55 s to 1.08 s of process start plus voice load) and
+almost nothing per word. So splitting the reply finely loses: synthesising
+"Yes." on its own takes twice as long as the audio it produces, and the listener
+hears a gap. The provider therefore declares `min_chunk_chars = 80`, which the
+sentence splitter reads to decide how much text to accumulate before asking for
+audio.
+
+This contradicts the intuition that per-sentence streaming always wins. For a
+network TTS with a low fixed cost and a per-token stream it does. For `say` it
+wins only on time-to-first-audio, and only if the chunks stay big enough to keep
+the speaker fed.
+
+### TTS: Piper (tier 1, cross-platform)
+
+Small ONNX models, dozens of languages, runs on a Raspberry Pi. It is the right
+default anywhere `say` is not available.
+
+**Piper is GPL-3.0-or-later.** It relicensed away from MIT with the `piper1-gpl`
+rewrite. FERAL is Apache-2.0, and Apache-2.0 code that must be combined with
+GPL-3.0 code to function creates an obligation the rest of the project does not
+carry. So it lives behind its own extra, `feral-ai[tts-piper]`, nothing installs
+it implicitly, and it is never the default on macOS where `say` does the same
+job with no licensing question. The wizard prints the licence warning before
+offering the download.
+
+The voice weights are a separate matter: the `piper-voices` models on
+HuggingFace carry permissive per-voice licences.
+
+### STT: whisper.cpp (default local STT on macOS)
+
+`pywhispercpp` is MIT and ships prebuilt wheels for macOS arm64 and manylinux,
+so it installs without a toolchain. It is the only member of the Whisper family
+with real Apple Silicon GPU acceleration.
+
+The provider loads its model once and caches it process-wide, and kicks off
+warm-up at session open rather than at first flush, because a cold load inside a
+voice turn is indistinguishable from a hang. Decoding is serialised behind a
+lock (whisper.cpp is not re-entrant per context).
+
+### STT: faster-whisper (Linux and NVIDIA)
+
+CTranslate2's int8 kernels beat whisper.cpp's CPU path comfortably on Linux and
+anywhere with a CUDA GPU.
+
+On macOS it is the wrong choice and the provider says so. CTranslate2 has no
+Metal backend. `device="mps"` is not a supported value and the provider refuses
+it explicitly rather than letting CTranslate2 raise something confusing;
+`device="auto"` silently resolves to CPU, which is how a Mac ends up running the
+"fast" engine at a fraction of whisper.cpp's throughput while every log line
+claims local acceleration. `faster_whisper_available()` returns a warning on
+Darwin, and the setup wizard defaults Macs to whisper.cpp.
+
+## Verification status
+
+This table is the point of the page. It records what has actually been observed
+in this repository, not what the engines are expected to do.
+
+| Engine | Status |
+|:--|:--|
+| macOS `say` (TTS) | **Verified with real synthesis.** `test_voice_local_engines.py::test_macos_say_produces_headerless_pcm16_at_the_requested_rate` runs the real binary on Darwin and asserts headerless PCM16 at the requested rate. The latency table above is a real measurement on an M1 |
+| Piper (TTS) | **Synthesis has never been verified.** Verified: the voice download path (`en_US-amy-low`, 63 MB), the package metadata (`piper-tts` 1.6.0, GPL-3.0-or-later), and the 1.6 Python API shape. Not verified: producing audio. The macOS arm64 wheels for both 1.4.2 and 1.6.0 abort on a hardcoded CI espeak data path (`/Users/runner/work/piper1-gpl/.../espeak-ng-data/phontab`). The wheel bundles a complete `espeak-ng-data` directory, but the native library resolves the build machine's absolute path instead, and neither the `espeak_data_dir` argument nor `ESPEAK_DATA_PATH` overrides it. That is an upstream packaging defect on this platform. The synthesis code in `voice/tts_providers/piper.py` is written against the documented API rather than an observed one |
+| whisper.cpp (STT) | **Has never run a real transcription in this repository.** Only the refusal paths are tested: import guard, missing-weights refusal, no-credential-required, and the "does not silently fall back to cloud" contract. The measured load and transcribe timings in the module docstring were taken by hand on an Apple M1 and are not reproduced by any checked-in test |
+| faster-whisper (STT) | **Has never run a real transcription in this repository.** Only the refusal paths are tested, including the explicit Metal refusal |
+| Silero VAD | Endpointing behaviour is covered by `test_voice_vad_endpointing.py` and `test_voice_vad_model.py` |
+
+Piper's availability probe runs a **real phonemisation**, not an import check,
+precisely because of the row above: the package imports cleanly and the weights
+are present, and synthesis still fails. Reporting "ready" on importability alone
+would push that failure into the middle of a conversation.
+
+## What downloads, and when
+
+**Weights are never downloaded mid-session.** A voice turn that discovers a
+missing model fails loudly and tells you which command to run. Downloads happen
+in `feral setup` or from an explicit `ensure_*(allow_download=True)` call, and
+nowhere else.
+
+The reason is latency honesty. A first-run download inside `synthesize()` turns
+one turn into a 90-second stall that looks identical to a hang, and a
+privacy-motivated operator who picked local engines deserves to know when bytes
+leave the machine.
+
+Everything lands under `$FERAL_HOME/models/<family>`:
+
+| Artefact | Size | Fetched by | Source |
+|:--|--:|:--|:--|
+| Silero VAD (`models/vad/silero_vad.onnx`) | ~2.2 MB | `feral setup` local voice step (defaults to yes), or `python -m voice.local_models fetch-vad` | Pinned to the `v5.1.2` tag |
+| Piper voice (`models/piper/<voice>.onnx` + `.onnx.json`) | tens of MB per voice | `feral setup`, or `python -m voice.local_models fetch-piper <voice>` | `huggingface.co/rhasspy/piper-voices` |
+| whisper.cpp model (`models/whispercpp/ggml-<model>.bin`) | 75 MB (tiny) to 3.1 GB (large-v3) | `feral setup`, delegated to `pywhispercpp.utils.download_model` with the destination pinned to FERAL's store | GGML weights |
+| faster-whisper model | ~150 MB for `base.en` | **not fetched by the wizard**, see below | `Systran/faster-whisper-<model>` via the HuggingFace hub cache |
+
+The wizard shows the approximate size and asks before it downloads, so "install
+local STT" is never a surprise several hundred megabytes.
+
+<Warning>
+**faster-whisper is the one engine the wizard does not pre-download.** It prints
+"faster-whisper downloads its model on first use (~150 MB for base.en)" and
+moves on. But the runtime never passes `allow_download=True` (nothing in
+`voice/router.py` or the API routes does), and the provider's constructor
+refuses outright when the model is not already materialised. So on a fresh
+install, picking faster-whisper gives you a provider that refuses every session
+until the weights arrive by some other route, rather than one that downloads
+them on first use.
+
+Fetch them yourself before the first session, for example by constructing a
+`faster_whisper.WhisperModel("base.en", download_root=...)` once pointed at
+`$FERAL_HOME/models/faster_whisper`, or prefer whisper.cpp, which the wizard
+does download.
+</Warning>
+
+The Silero URL is pinned to a tag rather than `master` because the ONNX input
+signature differs between v4 (separate `h`/`c` LSTM state) and v5 (a single
+fused `state`). Silently swapping one for the other would break inference at
+runtime rather than at install time. The runtime supports both shapes so an
+operator with an older cached file is not mis-inferred.
+
+Downloads are atomic: written to a temp file in the destination directory and
+renamed on success, so an interrupted fetch cannot leave a half-written file
+that the presence check would report as ready. A response smaller than the
+artefact's `min_bytes` is refused rather than installed, which is what catches a
+captive-portal HTML page being written as if it were weights.
+
+whisper.cpp presence checks FERAL's own store *and* `pywhispercpp`'s default
+cache, so an operator who already ran pywhispercpp elsewhere on the machine is
+not made to download the same weights twice.
+
+## Local mode fails loudly, never silently
+
+Every local engine constructor raises when its dependency or weights are absent,
+with a message that names the fix and states the policy outright:
+
+```
+Local Piper TTS is unavailable: piper-tts not installed
+(pip install 'feral-ai[tts-piper]'). Run `feral setup` and choose local voice
+to install it. FERAL will not silently fall back to a cloud provider.
+```
+
+`ModelUnavailable` carries the exact remedy command and is raised, never
+swallowed. `test_local_engines_refuse_rather_than_falling_back_to_cloud` pins
+the contract.
+
+**Why this matters if you chose local for privacy.** A silent fallback would be
+the worst possible failure here. The operator's reason for choosing a local
+engine is that audio must not leave the machine; a fallback that quietly routes
+the same audio to Deepgram or ElevenLabs violates exactly the property the
+choice was made to obtain, and does it invisibly, on a machine that is otherwise
+working. A loud failure costs one turn. A silent fallback costs the guarantee,
+and you find out from a vendor's dashboard rather than from FERAL.
+
+A related fix in the same area: the router used to answer "does this provider
+need an API key?" with a dict lookup that fell through to Deepgram for anything
+it did not recognise, so choosing a local STT engine aborted the session
+demanding a `DEEPGRAM_API_KEY` that nothing would ever use.
+`provider_registry.requires_credential` now returns `False` for every local
+engine by name, and `is_local_provider` reads the provider class's own
+`is_local` flag rather than a hardcoded name list, so a community provider that
+sets the flag is treated correctly without a change to FERAL.
+
+Provider registration itself is import-guarded. Each provider module is imported
+in isolation and failures are recorded and logged rather than raised, because
+`pywhispercpp`, `faster-whisper` and `piper-tts` are native wheels that can fail
+to import for reasons that have nothing to do with FERAL (an ABI mismatch, a
+missing `libstdc++`, a Rosetta install). An unguarded import at boot would turn
+"the operator did not install the optional extra" into "the brain does not
+start".
+
+## Latency: endpointing and streaming TTS
+
+Two changes shortened the dead air after you stop speaking.
+
+**Server-side VAD.** Before it, the pipeline decided an utterance had ended by
+watching for the *absence of packets*. That needed the browser to stop sending,
+which it only did after its own energy gate counted 15 quiet 100 ms frames, and
+then the server waited another silence interval on top: two independent timers
+stacked in series on every turn.
+
+Neither could be shortened alone. Drop the client gate and the server's timer
+never fires, because every arriving frame pushes the last-audio timestamp
+forward, silence or not, so a continuously streaming client would be listened to
+forever. Drop the server timer and buffered providers never flush. The pair only
+comes apart if the server can tell speech from silence in the bytes themselves,
+which is what Silero does, in well under a millisecond per frame on CPU.
+
+**Sentence-boundary TTS streaming.** The pipeline used to wait for the whole LLM
+answer and then hand it to TTS in one piece, serialising two of the three
+slowest stages. Splitting the stream on sentence boundaries overlaps them.
+
+The splitting rules are deliberately boring, because a wrong split is audible:
+only `.`, `!`, `?` and newline end a chunk (never a comma, which produces the
+wrong prosody at the seam); a period in an abbreviation, a decimal, an ellipsis
+or an initial does not end a chunk; a chunk under `min_chars` keeps growing past
+a boundary; and once the buffer passes `max_chars` with no boundary in sight it
+cuts at the last space anyway, so an unpunctuated paragraph cannot defeat
+streaming entirely.
+
+### The measured numbers
+
+Medians over 5 runs, macOS, driving the real `ChainedVoicePipeline` through its
+public API:
+
+| Metric | Before | After |
+|:--|--:|--:|
+| Endpointing (speech end to `processing`) | 2217 ms | 309 ms |
+| First audio (speech end to first audio frame carrying bytes) | 5010 ms | 1744 ms |
+
+(`feral-core/pyproject.toml` records the endpointing pair as 2218 ms to 309 ms
+for the same measurement. The one-millisecond difference is run-to-run noise in
+the "before" median, not two different experiments.)
+
+<Warning>
+**STT, LLM and TTS costs in that benchmark are fixed stubs, not measurements.**
+The bench (`feral-core/tests/perf/voice_chained_latency_bench.py`) replaces the
+providers with fakes that sleep for fixed budgets: 0.40 s STT flush, 0.40 s LLM
+time-to-first-token, 30 tokens/s, 0.25 s TTS time-to-first-byte, 0.04 s per
+word. Those are inputs held constant across runs so the delta between two runs
+is attributable to the pipeline and not to a provider having a good day. They
+say nothing about what any real engine costs. Real engine costs are measured
+separately, and only for macOS `say` (see the table above).
+
+The raw benchmark output is not checked into the repository. The bench itself
+is, and it takes `--runs` and `--json`, so the numbers can be reproduced:
+`python3 -m tests.perf.voice_chained_latency_bench --runs 5` from `feral-core/`.
+</Warning>
+
+One detail worth knowing if you re-run it: the bench drives the pipeline with
+**real speech** produced by macOS `say`, not a synthetic tone. Silero is trained
+on speech and scores a 440 Hz square wave near zero, so a bench driven by tones
+measures the fallback timer no matter what the VAD is doing. The first cut of
+that file made exactly that mistake and reported the VAD as a no-op. On a host
+without `say` the bench falls back to silence and prints
+`SILENCE ONLY - no VAD signal` so you know the run is not measuring the VAD.
+
+## Install extras
+
+| Extra | Pulls in | For |
+|:--|:--|:--|
+| `feral-ai[voice-local]` | `onnxruntime` + `pywhispercpp` | The whole local stack on macOS. Local TTS is the built-in `say`, so there is nothing to install for it |
+| `feral-ai[vad]` | `onnxruntime` | Server-side endpointing on its own |
+| `feral-ai[stt-local]` | `pywhispercpp` | whisper.cpp STT |
+| `feral-ai[stt]` | `faster-whisper` | faster-whisper STT (Linux, NVIDIA) |
+| `feral-ai[tts-piper]` | `piper-tts` | Piper TTS. **GPL-3.0-or-later**, see above |
+| `feral-ai[tts]` | `piper-tts` | Historical alias for `tts-piper`, kept resolving because install guides reference it. Same GPL-3.0 terms; the name predates the relicensing and does not advertise it |
+
+None of these is installed implicitly, and `voice-local` deliberately does not
+cover the LLM. Installing it gives you local audio, not a local conversation.
+
+## Settings
+
+```json
+{
+  "voice": {
+    "chained": {
+      "stt_provider": "whispercpp",
+      "tts_provider": "macos_say",
+      "stt_model": "",
+      "tts_model": "",
+      "tts_voice": "",
+      "tts_voice_id": ""
+    },
+    "vad": {
+      "enabled": true,
+      "threshold": 0.5,
+      "neg_threshold": 0.35,
+      "min_silence_ms": 300,
+      "min_speech_ms": 96,
+      "barge_in": true
+    }
+  }
+}
+```
+
+`voice.chained.*` defaults to empty strings meaning "not chosen here", so the
+resolver falls through to `audio.chained_fallback.*` (what the setup wizard
+writes) and then to the shipped provider defaults. Writing real values there
+would silently override a wizard pick on every install. Precedence, highest
+first: per-session `provider_opts`, then `voice.chained.*`, then
+`audio.chained_fallback.*`, then the shipped Deepgram plus ElevenLabs pair.
+
+On the VAD block: `threshold` and `neg_threshold` are hysteresis, so a single
+frame dipping below 0.5 mid-word does not read as end-of-utterance. Below about
+200 ms of `min_silence_ms`, ordinary pauses between words start cutting people
+off; above about 500 ms the reply feels sluggish. `barge_in` requires the
+client's echo cancellation to be on, or the assistant's own voice re-triggers
+it.
+
+Turning the VAD off is supported and costs latency, not correctness: the
+packet-absence silence timer takes over. The same is true when `onnxruntime` is
+missing or the weights are not downloaded, which is why `load_endpointer`
+returns `None` rather than raising. VAD is a latency optimisation, never a hard
+dependency, and a machine that cannot run it must still be able to hold a
+conversation.

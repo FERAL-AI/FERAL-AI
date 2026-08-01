@@ -24,10 +24,16 @@ from security.safety_resolver import (
     is_read_only,
     resolve_policy,
 )
+from agents.plan_mode import (
+    PlanModeState,
+    is_plan_safe_tool,
+    plan_mode_refusal,
+)
 from agents.tool_dispatch_validator import (
     ToolDispatchValidator,
     make_tool_error_envelope,
 )
+from skills.call_context import bind_context, new_turn_id
 from skills.result_budget import serialize_tool_result
 
 MAX_LLM_TOOLS = 64
@@ -101,14 +107,34 @@ class ToolRunner:
         # to local construction.
         self._approval_mgr = approval_manager or ApprovalManager()
         self._dispatch_validator: Optional[ToolDispatchValidator] = None
+        # Fallback turn ids for dispatch paths with no orchestrator turn
+        # record behind them (cron, taskflows). See `_turn_id_for`.
+        self._synthetic_turns: dict[str, tuple[str, float]] = {}
+        # Plan mode lives HERE, not on the orchestrator, because the
+        # dispatch gate is the enforcement point that actually holds and
+        # it has to work even on paths that never went through the
+        # orchestrator's tool-list filter (voice builds its list from
+        # `get_all_tools()`). The orchestrator exposes it as
+        # `Orchestrator.plan_mode`; there is exactly one instance.
+        self.plan_mode = PlanModeState()
 
         raw_mode = os.environ.get("FERAL_AUTONOMY", "").strip().lower() or autonomy_mode
         self._autonomy_mode = raw_mode if raw_mode in VALID_AUTONOMY_MODES else "hybrid"
         logger.info(f"ToolRunner autonomy_mode={self._autonomy_mode}")
 
     def _get_dispatch_validator(self) -> ToolDispatchValidator:
+        """Memoised validator, refreshed when the skill registry changes.
+
+        Building the validator precomputes a schema per endpoint, so it is
+        cached. It used to be cached forever, which hard-blocked every skill
+        registered after the first tool call at ``execute_tool_call_for_llm``
+        below. ``refresh_if_stale()`` rebuilds only when
+        ``SkillRegistry.generation`` has moved.
+        """
         if self._dispatch_validator is None:
             self._dispatch_validator = ToolDispatchValidator(registry=self._skill_registry())
+        else:
+            self._dispatch_validator.refresh_if_stale()
         return self._dispatch_validator
 
     @staticmethod
@@ -153,6 +179,45 @@ class ToolRunner:
         return tools or []
 
     # ─────────────────────────────────────────────
+    # Instrumentation: which tools actually get used
+    # ─────────────────────────────────────────────
+
+    @staticmethod
+    def _metric_safe(name: str) -> str:
+        """Coerce a tool name into a Prometheus-legal metric name suffix."""
+        return "".join(c if (c.isalnum() or c == "_") else "_" for c in name)
+
+    def _record_tool_invocation(self, tool_name: str, session_id: str, surface: str) -> None:
+        """Count a real tool invocation, per tool.
+
+        ``ALWAYS_INCLUDE_SKILLS`` puts 59 tools in front of the model on
+        every turn and the chat path applies no cap at all
+        (``MAX_LLM_TOOLS`` binds only inside ``_run_subagent_task``). We want
+        to trim that surface on evidence rather than guesswork, so record
+        what the model actually reaches for.
+
+        Two counters are emitted deliberately. ``increment`` drops
+        ``attributes`` entirely on the in-process fallback path (the one
+        ``/metrics`` scrapes when OpenTelemetry is not configured), so the
+        dimensional counter alone would collapse to a single opaque total.
+        The per-tool counter name keeps the tool identity in that case.
+        """
+        try:
+            from observability.metrics import increment
+
+            increment(
+                "feral_tool_invocations_total",
+                attributes={
+                    "tool": tool_name,
+                    "session": session_id or "",
+                    "surface": surface or "",
+                },
+            )
+            increment(f"feral_tool_invocations_total_{self._metric_safe(tool_name)}")
+        except Exception as exc:  # instrumentation must never break dispatch
+            logger.debug("tool invocation metric failed for %s: %s", tool_name, exc)
+
+    # ─────────────────────────────────────────────
     # Safety: Graduated Permission System
     # ─────────────────────────────────────────────
 
@@ -161,6 +226,46 @@ class ToolRunner:
         manifest-aware resolver. Returns ``None`` if the orchestrator is
         not wired (rare; mostly happens in unit tests using mocks)."""
         return getattr(self._orch, "skills", None)
+
+    # ─────────────────────────────────────────────
+    # Plan mode: hard dispatch gate
+    # ─────────────────────────────────────────────
+
+    def enforce_plan_mode(self, tool_name: str, session_id: str) -> Optional[dict]:
+        """Refuse any non-plan-safe call while the session is in plan mode.
+
+        This is the enforcement point that matters. Filtering the exposed
+        tool list in the orchestrator is advisory: the model can name a
+        tool it was never given, and the voice surfaces assemble their
+        tool list from ``SkillRegistry.get_all_tools()`` on a completely
+        separate path that the orchestrator filter never touches. Every
+        call that reaches ``ToolRunner`` funnels through here, so here is
+        where the mode becomes true rather than merely suggested.
+
+        Placed ABOVE the MCP, subagent and daemon branches on purpose:
+        none of those carry manifest safety metadata, and all three would
+        otherwise be a hole straight through the mode.
+
+        Known gap: the OpenAI Realtime and Gemini Live proxies call
+        ``SkillExecutor.execute`` directly and never reach ``ToolRunner``,
+        so this gate does not cover them. See ``agents/plan_mode.py``.
+        """
+        if not self.plan_mode.is_active(session_id):
+            return None
+        if is_plan_safe_tool(tool_name, self._skill_registry()):
+            return None
+        logger.warning(
+            "plan mode blocked %r for session %s", tool_name, (session_id or "")[:8],
+        )
+        try:
+            from observability.metrics import increment
+            increment(
+                "feral_plan_mode_blocked_total",
+                attributes={"tool": tool_name or "", "session": session_id or ""},
+            )
+        except Exception:  # instrumentation must never break the gate
+            logger.debug("plan-mode block metric failed", exc_info=True)
+        return plan_mode_refusal(tool_name, session_id=session_id)
 
     def classify_safety(self, tool_name: str, args: dict) -> str:
         """Manifest-aware safety classification.
@@ -373,6 +478,63 @@ class ToolRunner:
                 return value
         return "websocket"
 
+    # ─── Turn identity ───
+
+    def _turn_id_for(self, session_id: str) -> str:
+        """Stable id for the user message this tool call is answering.
+
+        ``turn_id`` does not exist anywhere in FERAL today, and
+        ``skills/checkpoints.py`` needs one to group "everything the agent
+        wrote while answering this message" so a revert undoes a coherent
+        unit rather than one arbitrary file write.
+
+        Minting it here rather than in the orchestrator (which this lane
+        must not touch) works because the orchestrator already opens one
+        record per user message in ``Orchestrator._begin_turn`` and pushes
+        it on ``_active_turns[session_id]``. We read the innermost record
+        and stamp an id into it the first time we see it. That is an
+        additive key on a dict the orchestrator only ever reads named
+        fields from, so it changes no existing behaviour, and the id is a
+        genuine per-user-message identity rather than a heuristic.
+
+        Subagent sessions (``<parent>:sub:<n>:<rand>``) resolve to the
+        parent's turn, so the six workers ``spawn_subagents`` runs in
+        parallel all check point into the turn that spawned them. That is
+        what makes "revert that" undo the whole fan-out.
+
+        Paths with no orchestrator turn behind them at all (cron,
+        taskflows, the REST tool surface) fall back to a per-session id
+        that rotates after an idle gap. That fallback IS a heuristic and
+        is only used where the alternative is no grouping at all.
+        """
+        base = session_id.split(":sub:")[0]
+        stack = getattr(self._orch, "_active_turns", None)
+        if isinstance(stack, dict):
+            records = stack.get(base) or stack.get(session_id)
+            if records:
+                turn = records[-1]
+                if isinstance(turn, dict):
+                    turn_id = turn.get("_feral_turn_id")
+                    if not turn_id:
+                        turn_id = new_turn_id()
+                        turn["_feral_turn_id"] = turn_id
+                    return str(turn_id)
+        return self._synthetic_turn_id(base)
+
+    def _synthetic_turn_id(self, session_id: str) -> str:
+        try:
+            idle_after = float(os.environ.get("FERAL_TURN_IDLE_SECONDS", "180"))
+        except ValueError:
+            idle_after = 180.0
+        now = time.time()
+        existing = self._synthetic_turns.get(session_id)
+        if existing and (now - existing[1]) <= idle_after:
+            self._synthetic_turns[session_id] = (existing[0], now)
+            return existing[0]
+        turn_id = new_turn_id()
+        self._synthetic_turns[session_id] = (turn_id, now)
+        return turn_id
+
     def set_autonomy_mode(self, mode: str) -> str:
         """Runtime toggle for autonomy mode. Returns the effective mode."""
         mode = mode.strip().lower()
@@ -438,6 +600,10 @@ class ToolRunner:
     def clear_session(self, session_id: str):
         """Remove anti-loop state for a disconnected session."""
         self._tool_repeat_state.pop(session_id, None)
+        # Plan mode is per-session and ephemeral by design, so it dies with
+        # the session rather than outliving a disconnect the user can no
+        # longer see.
+        self.plan_mode.clear_session(session_id)
 
     # ─────────────────────────────────────────────
     # Daemon Command Execution
@@ -770,10 +936,49 @@ class ToolRunner:
         *,
         surface: Optional[str] = None,
     ) -> dict:
+        """Bind tool-call identity, then run the call.
+
+        This is the last layer that still knows the session:
+        ``SkillExecutor.execute`` takes only (tool_name, args, skill,
+        endpoint) and ``BaseSkill.execute`` takes even less. The bind
+        publishes the identity on a contextvar so implementations can read
+        it without a signature change. See ``skills/call_context.py``.
+        """
+        effective_surface = surface or self._resolve_surface_for_session(session_id)
+        # Wave 1's per-tool instrumentation. It lived at the top of the
+        # body this method was split out of, so it stays here: once per
+        # call, after surface resolution, before any dispatch.
+        self._record_tool_invocation(
+            str(tool_call.get("name") or ""), session_id, effective_surface,
+        )
+        with bind_context(
+            session_id=session_id,
+            surface=effective_surface,
+            tool_name=str(tool_call.get("name") or ""),
+            call_id=str(tool_call.get("id") or ""),
+            turn_id=self._turn_id_for(session_id),
+        ):
+            return await self._execute_tool_call_for_llm_inner(
+                session_id, tool_call, available_skills,
+                effective_surface=effective_surface,
+            )
+
+    async def _execute_tool_call_for_llm_inner(
+        self,
+        session_id: str,
+        tool_call: dict,
+        available_skills,
+        *,
+        effective_surface: str,
+    ) -> dict:
         tool_name = tool_call["name"]
         args = tool_call["args"]
         logger.info(f"  LLM Tool call: {tool_name}({json.dumps(args)[:200]})")
-        effective_surface = surface or self._resolve_surface_for_session(session_id)
+
+        # Plan mode, before every other branch. See `enforce_plan_mode`.
+        plan_refusal = self.enforce_plan_mode(tool_name, session_id)
+        if plan_refusal is not None:
+            return plan_refusal
 
         mcp_client = self._orch._mcp_client
         if tool_name.startswith("mcp_") and mcp_client:
@@ -940,12 +1145,44 @@ class ToolRunner:
         *,
         surface: Optional[str] = None,
     ):
+        effective_surface = surface or self._resolve_surface_for_session(session_id)
+        self._record_tool_invocation(
+            str(tool_call.get("name") or ""), session_id, effective_surface,
+        )
+        with bind_context(
+            session_id=session_id,
+            surface=effective_surface,
+            tool_name=str(tool_call.get("name") or ""),
+            call_id=str(tool_call.get("id") or ""),
+            turn_id=self._turn_id_for(session_id),
+        ):
+            return await self._execute_tool_call_inner(
+                session_id, tool_call, available_skills,
+                effective_surface=effective_surface,
+            )
+
+    async def _execute_tool_call_inner(
+        self,
+        session_id: str,
+        tool_call: dict,
+        available_skills,
+        *,
+        effective_surface: str,
+    ):
         from models.protocol import FeralMessage, SDUIPayload
 
         tool_name = tool_call["name"]
         args = tool_call["args"]
         logger.info(f"  Tool call: {tool_name}({json.dumps(args)[:200]})")
-        effective_surface = surface or self._resolve_surface_for_session(session_id)
+
+        # The UI-event / action-intent dispatch path reaches the executor
+        # without passing through `_execute_tool_call_for_llm_inner`, so it
+        # needs its own gate. Plan mode means this session mutates nothing,
+        # regardless of which dispatch lane the call arrived on.
+        plan_refusal = self.enforce_plan_mode(tool_name, session_id)
+        if plan_refusal is not None:
+            await self._orch._send_text(session_id, plan_refusal["reason"])
+            return
 
         parts = tool_name.split("__", 1)
         if len(parts) != 2:
@@ -1010,6 +1247,16 @@ class ToolRunner:
 
     async def spawn_subagents(self, session_id: str, args: dict) -> dict:
         """Run multiple sub-tasks in parallel with isolated subagent contexts."""
+        # Defence in depth. `_execute_tool_call_for_llm_inner` already
+        # refuses `subagent__spawn_subagent` in plan mode, but this method
+        # is public and is also reachable via
+        # `Orchestrator._spawn_subagents_for_task`. Without the second
+        # check plan mode would leak wholesale: subagents run through the
+        # same dispatch gate but under `_run_subagent_task`'s
+        # `{parent}:sub:{n}:{rand}` session id.
+        if self.plan_mode.is_active(session_id):
+            return plan_mode_refusal("subagent__spawn_subagent", session_id=session_id)
+
         tasks_arg = args.get("tasks")
         if isinstance(tasks_arg, str):
             tasks = [tasks_arg]

@@ -246,6 +246,80 @@ curl -X POST "http://localhost:9090/api/approvals/apr_01HXYZ.../reject" \
 | `409` | `session_mismatch` — supplied `session_id` does not match the pending request. |
 | `503` | Orchestrator or tool runner not initialised yet. |
 
+## Checkpoints (undo file writes)
+
+Every `coding_tools__write_file` and `coding_tools__edit_file` stashes the
+file's pre-write bytes in a content-addressed store keyed by `turn_id`, the id
+shared by every tool call made while answering one user message. Git is never
+invoked. See [Coding Harness](/guides/coding-harness#3-checkpoints-and-revert).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/checkpoints/turns` | Turns that wrote at least one file, most recent first. Query: `session_id`, `limit` (1 to 200, default 20) |
+| `GET` | `/api/checkpoints/turns/{turn_id}` | Per-write rows for one turn, plus the revert plan. `404` when the turn has no checkpoints |
+| `POST` | `/api/checkpoints/revert` | Revert a turn. Body: `{turn_id?, session_id?, force?, dry_run?}` |
+
+Omit `turn_id` on the revert and the most recent checkpointed turn for
+`session_id` is used. `503` when the checkpoint store cannot be opened.
+
+Without `force`, any file whose current content no longer matches what FERAL
+left there is listed under `drifted` and the whole revert refuses with
+`success: false`. That refusal is the point of the endpoint: a revert that
+silently discards somebody else's newer edit is worse than no revert at all.
+
+<Warning>
+Every response carries `bash_not_covered: true` and a `note` saying so, on
+success as well as failure. Shell commands are not checkpointed, so anything
+`coding_tools__bash` changed in the turn is not reverted. A partial revert that
+reads as complete is worse than none.
+</Warning>
+
+```json
+{
+  "success": true,
+  "turn_id": "turn_9f2c1a77d0e45b13",
+  "dry_run": false,
+  "forced": false,
+  "reverted": ["/repo/src/app.py"],
+  "reverted_count": 1,
+  "skipped": [],
+  "drifted": [],
+  "files": [
+    { "path": "/repo/src/app.py", "status": "restorable", "action": "restore", "detail": "" }
+  ],
+  "bash_not_covered": true,
+  "note": "Checkpoints cover coding_tools__write_file and coding_tools__edit_file only. ..."
+}
+```
+
+`feral checkpoints` in the CLI deliberately does **not** go through these
+routes; it reads the same SQLite index directly, because the case you most need
+a revert in is the one where the brain is not answering.
+
+## Plan Mode
+
+A per-session posture in which the agent researches and proposes but cannot
+mutate state. These routes live on the **session** resource and never touch
+`security.autonomy_mode`, which is a separate, persisted, global axis. See
+[Plan Mode](/guides/plan-mode).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/sessions/{session_id}/plan_mode` | Current posture: `plan_mode`, `entered_at`, `reason`, `entered_by`, `plan_count`, `latest_plan` |
+| `POST` | `/api/sessions/{session_id}/plan_mode` | Body `{"enabled": bool, "reason"?: str, "approved"?: bool}`. `400` when `enabled` is missing or not a bool |
+
+The exit route hard-codes `actor="user"`: it is reachable by the operator, not
+by the model, and the orchestrator refuses any other actor. `approved` is
+recorded for the UI and **confers no privilege**; every mutating call in the
+turns that follow still goes through the session's autonomy mode.
+
+## Autonomy
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/autonomy` | Current tier, read off the running tool runner |
+| `POST` | `/api/autonomy` | `{"mode": "strict" \| "hybrid" \| "loose"}`. Applies live and persists to `security.autonomy_mode`. Responds `{"success": true, "mode": ..., "persisted": bool}`; `persisted: false` means the disk write failed and the live change was kept anyway |
+
 ## Channels
 
 | Method | Path | Description |

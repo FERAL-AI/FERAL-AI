@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from voice.realtime_proxy import DEFAULT_MODEL
 from voice.router import VoiceRouter
 
 
@@ -50,10 +51,15 @@ async def test_router_honors_audio_realtime_model_setting(feral_home):
 
 
 async def test_router_falls_back_to_proxy_default_when_setting_blank(feral_home):
-    """A blank / missing ``audio.realtime_model`` must yield the
-    proxy's GA default (``gpt-realtime``) — not crash, not a literal
-    empty string. The fallback path is what existing installs that
-    never touched the new setting will hit."""
+    """A blank or missing ``audio.realtime_model`` must yield the proxy's
+    own default, not a crash and not a literal empty string. This is the
+    path existing installs that never touched the setting will hit.
+
+    Asserted against ``DEFAULT_MODEL`` rather than a hardcoded name: the
+    default is a cost decision (the mini tier runs roughly a third of the
+    full model per audio token) and may move again. What this test exists
+    to pin is that the fallback resolves to the proxy default at all.
+    """
     _write_settings(feral_home, realtime_model="")
 
     mock_realtime = MagicMock()
@@ -64,7 +70,7 @@ async def test_router_falls_back_to_proxy_default_when_setting_blank(feral_home)
     await router.open_session("sess-xyz", "openai_realtime", provider_opts={})
 
     kwargs = mock_realtime.start_session.await_args.kwargs
-    assert kwargs["model"] == "gpt-realtime"
+    assert kwargs["model"] == DEFAULT_MODEL
 
 
 async def test_router_remaps_retired_preview_model_to_ga(feral_home):
@@ -83,6 +89,10 @@ async def test_router_remaps_retired_preview_model_to_ga(feral_home):
     await router.open_session("sess-dep", "openai_realtime", provider_opts={})
 
     kwargs = mock_realtime.start_session.await_args.kwargs
+    # Deliberately the GA alias, not DEFAULT_MODEL. The operator pinned a
+    # full-tier preview model, so the closest correct replacement is the
+    # full-tier GA alias. Remapping them onto the cheaper mini default
+    # would quietly change quality on a path they never asked to change.
     assert kwargs["model"] == "gpt-realtime"
 
 

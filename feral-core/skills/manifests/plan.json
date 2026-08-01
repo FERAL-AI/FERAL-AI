@@ -1,0 +1,87 @@
+{
+  "skill_id": "plan",
+  "version": "1.0.0",
+  "author": "feral-core",
+  "brand": {
+    "name": "FERAL Plan",
+    "primary_color": "#6366F1",
+    "secondary_color": "#4F46E5",
+    "logo_url": "",
+    "icon_set": "sf_symbols"
+  },
+  "description": "Submit a proposed plan for the user to review while the session is in plan mode. Plan mode is entered explicitly by the user (the /plan command or the plan-mode API) and is the only situation in which this skill is useful: in plan mode every mutating tool is refused at dispatch, so the way to make progress is to research with read-only tools and then submit the plan here. Submitting a plan does NOT start the work and does NOT pre-approve anything; the user approves or discards, and each step is still subject to the normal approval flow afterwards.",
+  "trigger_phrases": [
+    "submit the plan",
+    "propose a plan",
+    "plan mode"
+  ],
+  "categories": [
+    "productivity",
+    "planning"
+  ],
+  "auth": {
+    "type": "none"
+  },
+  "endpoints": [
+    {
+      "id": "submit",
+      "method": "PYTHON",
+      "url": "python://plan/submit",
+      "description": "Submit the plan you are proposing for this session. Give a one-paragraph summary and an ordered list of steps; each step should say what it does and which tools it needs. Use open_questions for anything you could not determine with read-only tools, and risks for what could go wrong. This records the proposal and shows it to the user. It does not execute anything, it does not leave plan mode, and it grants no tool approvals. Only the user can leave plan mode.",
+      "params": [
+        {
+          "name": "summary",
+          "type": "string",
+          "required": true,
+          "description": "One-paragraph summary of what you propose to do and why."
+        },
+        {
+          "name": "steps",
+          "type": "array",
+          "required": true,
+          "description": "Ordered steps. Each item is either a plain string or an object such as {\"title\":\"...\",\"detail\":\"...\",\"tools\":[\"coding_tools__edit_file\"]}.",
+          "items": {
+            "type": "object"
+          }
+        },
+        {
+          "name": "open_questions",
+          "type": "array",
+          "required": false,
+          "description": "Things you could not resolve with read-only tools and need the user to answer.",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "risks",
+          "type": "array",
+          "required": false,
+          "description": "What could go wrong, and anything destructive or irreversible in the plan.",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "session_id",
+          "type": "string",
+          "required": false,
+          "description": "Session the plan belongs to. Leave unset; the runtime fills it from the call context.",
+          "default": ""
+        }
+      ],
+      "returns_description": "{plan: {summary, steps, open_questions, risks, submitted_at}, plan_mode: true, awaiting: \"user_review\"}",
+      "ui_hint": "detail_card",
+      "read_only_hint": true,
+      "safety_tier": "safe",
+      "result_budget": "feed",
+      "emit_result_preview": true
+    }
+  ],
+  "flows": [],
+  "crons": [],
+  "triggers": [],
+  "permissions": [],
+  "requires_daemon": false,
+  "max_calls_per_hour": 1000
+}

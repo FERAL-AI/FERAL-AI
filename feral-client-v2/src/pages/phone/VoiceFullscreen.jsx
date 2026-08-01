@@ -121,6 +121,10 @@ export function VoiceFullscreen({
   const playbackCtxRef = useRef(null);
   const nextPlaybackTimeRef = useRef(0);
   const playbackQueueRef = useRef(Promise.resolve());
+  // Buffer sources currently scheduled on the playback timeline. Held
+  // so barge-in can stop them; an AudioBufferSourceNode cannot be
+  // un-scheduled any other way once `start()` has been called.
+  const activeSourcesRef = useRef(new Set());
 
   useEffect(() => {
     if (!open) return;
@@ -129,9 +133,15 @@ export function VoiceFullscreen({
     setPartialTranscript('');
     setBrainText('');
     setErrorMessage('');
-    setIsMuted(false);
     setAudioLevel(0);
-  }, [open, initialMode]);
+    // Mute is NOT reset here. It used to be, which meant reopening the
+    // panel on a session the brain still considers muted painted a live
+    // microphone over a muted one. Adopt whatever the node is actually
+    // doing; the brain's next `voice_status` frame confirms or corrects
+    // it.
+    const nodeMuted = shell?.node?.isMicMuted?.();
+    setIsMuted(nodeMuted === true);
+  }, [open, initialMode, shell]);
 
   useEffect(() => {
     const prev = prevStateRef.current;
@@ -197,6 +207,8 @@ export function VoiceFullscreen({
     source.connect(ctx.destination);
     const now = ctx.currentTime;
     const startTime = Math.max(now, nextPlaybackTimeRef.current);
+    activeSourcesRef.current.add(source);
+    source.onended = () => activeSourcesRef.current.delete(source);
     source.start(startTime);
     nextPlaybackTimeRef.current = startTime + buffer.duration;
   }, [ensurePlaybackContext]);
@@ -211,6 +223,8 @@ export function VoiceFullscreen({
     source.connect(ctx.destination);
     const now = ctx.currentTime;
     const startTime = Math.max(now, nextPlaybackTimeRef.current);
+    activeSourcesRef.current.add(source);
+    source.onended = () => activeSourcesRef.current.delete(source);
     source.start(startTime);
     nextPlaybackTimeRef.current = startTime + decoded.duration;
   }, [ensurePlaybackContext]);
@@ -220,16 +234,55 @@ export function VoiceFullscreen({
     const encoding = (payload.encoding || '').toLowerCase();
     playbackQueueRef.current = playbackQueueRef.current
       .then(async () => {
-        if (encoding === 'mp3' || type === 'audio_chunk') {
+        // Route on the ENCODING, never on the frame type.
+        //
+        // This used to read `if (encoding === 'mp3' || type ===
+        // 'audio_chunk')`, and the second half of that condition ate
+        // the first: the chained pipeline sends its audio as
+        // `audio_chunk` whatever the codec, so raw PCM arriving on an
+        // `audio_chunk` frame went to `decodeAudioData`, which cannot
+        // parse headerless samples and threw `EncodingError` into a
+        // .catch that swallowed it. Silent assistant, no console error.
+        //
+        // That mattered the moment the pipeline started emitting PCM
+        // incrementally, which is what lets playback start on the
+        // first 100ms rather than after the last byte of the reply.
+        if (encoding === 'pcm16' || encoding === 'pcm' || encoding === 'linear16') {
+          await queuePcm16Playback(payload);
+          return;
+        }
+        if (encoding === 'mp3' || encoding === 'opus' || encoding === 'wav') {
           await queueEncodedPlayback(payload);
           return;
         }
-        await queuePcm16Playback(payload);
+        // No encoding declared. `tts_chunk` has always been PCM;
+        // anything else is assumed to be a self-contained encoded file.
+        if (type === 'tts_chunk') {
+          await queuePcm16Playback(payload);
+          return;
+        }
+        await queueEncodedPlayback(payload);
       })
       .catch(() => {
         // Keep queue healthy after transient decode/playback failures.
       });
   }, [queueEncodedPlayback, queuePcm16Playback]);
+
+  // Barge-in. The brain cancels the turn the moment its VAD hears the
+  // user start talking over the reply, and sends `voice_cancel`. The
+  // audio the client has already buffered has to go too: without this,
+  // the user keeps hearing the answer they interrupted for as long as
+  // playback was scheduled ahead, which is the whole experience
+  // barge-in exists to remove.
+  const cancelPlayback = useCallback(() => {
+    for (const source of activeSourcesRef.current) {
+      try { source.stop(); } catch (_err) { /* already ended */ }
+    }
+    activeSourcesRef.current.clear();
+    nextPlaybackTimeRef.current = 0;
+    // Drop anything still queued behind the current decode.
+    playbackQueueRef.current = Promise.resolve();
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -276,6 +329,10 @@ export function VoiceFullscreen({
         if (payload.speaking && voiceStateRef.current !== 'listening') {
           setVoiceState('listening');
         }
+      } else if (type === 'voice_cancel') {
+        // Barge-in from the brain's server-side VAD.
+        cancelPlayback();
+        setVoiceState('listening');
       } else if (type === 'speech_started') {
         nextPlaybackTimeRef.current = 0;
       } else if (type === 'voice_error') {
@@ -289,6 +346,15 @@ export function VoiceFullscreen({
         // a banner above the orb so the user knows why audio is
         // muted instead of guessing at a connection issue.
         const st = (payload.state || 'available');
+        // The brain is the authority on mute: it stamps the live state
+        // onto every voice_status frame, which is how a mute applied
+        // from another surface, or one that survived a reconnect,
+        // reaches this UI. A frame that OMITS the field is an older
+        // brain, not an unmute, so absence is ignored rather than
+        // treated as false.
+        if (typeof payload.muted === 'boolean') {
+          setIsMuted(payload.muted);
+        }
         if (st === 'available') {
           setVoiceStatus(null);
         } else {
@@ -298,13 +364,17 @@ export function VoiceFullscreen({
             provider: payload.provider || '',
             fallbackProvider: payload.fallback_provider || '',
             detail: payload.detail || '',
+            cause: payload.cause || '',
+            summary: payload.summary || '',
+            recommendation: payload.recommendation || '',
+            privacyDowngrade: payload.privacy_downgrade === true,
           });
         }
       }
     });
 
     return unsub;
-  }, [open, queueAudioPlayback, shell]);
+  }, [open, queueAudioPlayback, cancelPlayback, shell]);
 
   useEffect(() => {
     if (!open) return;
@@ -423,10 +493,19 @@ export function VoiceFullscreen({
   const handleMuteToggle = useCallback(() => {
     setIsMuted((m) => {
       const next = !m;
+      // Stop capture at the source FIRST. Telling the brain and
+      // leaving the microphone running is what the pre-fix button did:
+      // the envelope went out, nothing handled it, and the worklet kept
+      // streaming PCM to whichever cloud provider was live. The node
+      // call is what makes the button's promise true even if the frame
+      // never lands.
+      if (typeof shell?.node?.setMicMuted === 'function') {
+        shell.node.setMicMuted(next);
+      }
       sendEnvelope('voice_mute', { muted: next });
       return next;
     });
-  }, [sendEnvelope]);
+  }, [sendEnvelope, shell]);
 
   const handleClose = useCallback(() => {
     sendEnvelope('voice_interrupt', {});
@@ -514,8 +593,17 @@ export function VoiceFullscreen({
               {providerLabel(voiceMode)}
             </div>
           )}
-          <div style={{ opacity: 0.9, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <div
+            data-testid="voice-status-line"
+            style={{ opacity: 0.9, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+          >
+            {/* Mute outranks every other state here. The brain is not
+                reading this microphone, so "Listening…" would be a
+                claim about the system that is simply false. Speaking
+                still wins, because mute is an input control and the
+                assistant's reply keeps playing. */}
             {voiceState === 'speaking' ? (brainText || 'Speaking…') :
+              isMuted ? 'Muted' :
               voiceState === 'processing' ? 'Thinking…' :
               voiceState === 'listening' ? (partialTranscript || transcript || 'Listening…') :
               voiceState === 'error' ? (errorMessage || 'Voice error') :
@@ -718,8 +806,19 @@ export function VoiceFullscreen({
         </div>
       )}
 
+      {/* Mute takes the status line. "Tap to speak" over a microphone
+          the brain is refusing to read is an invitation to talk to
+          nothing. */}
+      {isMuted && voiceState !== 'speaking' && (
+        <p
+          data-testid="muted-hint"
+          style={{ opacity: 0.75, fontSize: 14, margin: 0, paddingBottom: 8 }}
+        >
+          Muted (microphone off)
+        </p>
+      )}
       {/* Idle hint */}
-      {voiceState === 'idle' && (
+      {!isMuted && voiceState === 'idle' && (
         <p style={{ opacity: 0.4, fontSize: 14, margin: 0, paddingBottom: 8 }}>Tap to speak</p>
       )}
 

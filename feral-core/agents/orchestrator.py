@@ -101,8 +101,18 @@ class Orchestrator:
       - IdentityLoader   – ~/.feral/ identity files → system prompt
     """
 
-    # Class-level constants kept on Orchestrator for backward compat
-    ALWAYS_INCLUDE_SKILLS = {
+    # Class-level constants kept on Orchestrator for backward compat.
+    #
+    # This is a tuple, not a set, on purpose. ``_ensure_core_skills`` appends
+    # in iteration order, and a set iterates in hash order, which varies with
+    # PYTHONHASHSEED across processes. That made the tail of the tool list
+    # (and therefore whatever any future cap would drop) differ from boot to
+    # boot. A tuple pins a single deterministic priority order.
+    #
+    # ``"browser"`` used to sit in here and matched no registered manifest,
+    # so it was a silent no-op swallowed by the ``in self.skills.skills``
+    # guard in ``_ensure_core_skills``. Removed.
+    ALWAYS_INCLUDE_SKILLS = (
         # Core OS / desktop surface.
         # ``coding_tools`` replaced ``computer_use`` here: the two skills
         # exposed identical endpoints with identical trigger phrases, so the
@@ -110,14 +120,13 @@ class Orchestrator:
         # arbitrarily. ``coding_tools`` is the better implementation
         # (paginated grep/glob, workspace-relative output) and is now the
         # single canonical shell + filesystem surface.
-        "desktop_control",
         "coding_tools",
-        "browser",
+        "desktop_control",
         "desktop_automation",
         "screen_capture",
         "system_settings",
         "agentic_computer_use",
-        # Messaging / comms — always reachable so the agent never claims it "can't send"
+        # Messaging / comms, always reachable so the agent never claims it "can't send"
         "messaging_channels",
         # Never-say-no escape hatches + self-knowledge
         "workspace_scripts",
@@ -125,12 +134,12 @@ class Orchestrator:
         # Memory + search
         "notes_memory",
         "web_search",
-        # Smart loops — recurring routines + multi-step workflows as
+        # Smart loops: recurring routines + multi-step workflows as
         # first-class tools (gated by FERAL_SMART_LOOPS, default on, via
         # _ensure_core_skills below).
         "feral_routines",
         "feral_workflows",
-    }
+    )
 
     # Smart-loops skill ids whose *exposure* can be killed with
     # ``FERAL_SMART_LOOPS=0`` without touching the rest of the always-include
@@ -733,6 +742,15 @@ class Orchestrator:
             full_catalog = list(self.skills.skills.values())
         except Exception:
             pass
+        plan_mode = self.plan_mode.is_active(session_id)
+        if plan_mode:
+            # Same prune as the active list. Without it the "Available
+            # (full catalog)" block re-advertises every mutating endpoint
+            # in the install, one paragraph after we said they are off.
+            from agents.plan_mode import filter_skills_for_plan_mode
+            full_catalog = filter_skills_for_plan_mode(
+                full_catalog, registry=self.skills,
+            )
         return await self.identity_loader.build_system_prompt(
             frame,
             skills,
@@ -741,6 +759,7 @@ class Orchestrator:
             full_catalog=full_catalog,
             memory_filter=memory_filter,
             query=query,
+            plan_mode=plan_mode,
         )
 
     def _load_identity(self) -> str:
@@ -1198,6 +1217,15 @@ class Orchestrator:
         except Exception:
             logger.debug("timeline frame emit failed (non-fatal)", exc_info=True)
 
+        # Same pattern for the agent's todo list. The panel is pinned and
+        # rewritten in place rather than appended as a card per write,
+        # because the model rewrites the whole list constantly and a card
+        # per write buries the conversation.
+        try:
+            await self._maybe_emit_todo_frame(session_id, tool_call, result_data)
+        except Exception:
+            logger.debug("todo frame emit failed (non-fatal)", exc_info=True)
+
         # Persist what the robot actually DID (not just what the user
         # asked) so temporal recall can answer "what did my robot do
         # today?" with grounded entries. Fire-and-forget; never blocks
@@ -1217,6 +1245,40 @@ class Orchestrator:
             logger.debug(
                 "device-action episode log failed (non-fatal)", exc_info=True
             )
+
+    # The one tool whose results the client renders as a pinned panel
+    # instead of a ToolCallCard. See `_maybe_emit_todo_frame`.
+    TODO_WRITE_TOOL = "feral_workflows__todo_write"
+
+    async def _maybe_emit_todo_frame(
+        self,
+        session_id: str,
+        tool_call: dict,
+        result_data: dict,
+    ) -> None:
+        """Emit a ``todo_update`` frame iff the call was a todo write.
+
+        Field-tolerant like its timeline sibling: a malformed payload
+        falls through silently rather than blocking the response loop.
+        """
+        if str(tool_call.get("name") or "") != self.TODO_WRITE_TOOL:
+            return
+        if not isinstance(result_data, dict) or not result_data.get("success"):
+            return
+        data = result_data.get("data")
+        if not isinstance(data, dict):
+            return
+        todos = data.get("todos")
+        if not isinstance(todos, list):
+            return
+        await self.send(session_id, FeralMessage(
+            session_id=session_id, hop="brain", type="todo_update",
+            payload={
+                "session_id": session_id,
+                "todos": todos,
+                "counts": data.get("counts") or {},
+            },
+        ))
 
     async def _maybe_emit_timeline_frame(
         self,
@@ -2125,6 +2187,218 @@ class Orchestrator:
             # Lock release stays synchronous; cancellation is fire-and-forget.
             self._w17_cancel_subsessions_nowait(session_id)
 
+    # ─────────────────────────────────────────────
+    # Plan mode
+    # ─────────────────────────────────────────────
+    #
+    # A per-session, ephemeral posture in which the agent researches and
+    # proposes but cannot mutate state. It is a SEPARATE AXIS from
+    # ``security.autonomy_mode``: that setting is persisted and global,
+    # this one dies with the session. Nothing below reads or writes the
+    # autonomy mode.
+    #
+    # There are two enforcement points and both are required. The tool-list
+    # filter applied at the two chat sites below is ADVISORY: a model can
+    # emit a tool name it was never given, and the voice surfaces build
+    # their tool list from ``SkillRegistry.get_all_tools()`` on a path this
+    # filter never touches. The gate that actually holds is
+    # ``ToolRunner.enforce_plan_mode``. See ``agents/plan_mode.py``.
+
+    @property
+    def plan_mode(self):
+        """The single :class:`~agents.plan_mode.PlanModeState`.
+
+        It lives on the ToolRunner because that is where the dispatch gate
+        is; this property exists so API routes and the client-facing code
+        do not have to reach through ``orchestrator.tool_runner``.
+        """
+        return self.tool_runner.plan_mode
+
+    async def enter_plan_mode(
+        self,
+        session_id: str,
+        *,
+        reason: str = "",
+        entered_by: str = "user",
+    ) -> dict:
+        """Explicit entry point, shared by the ``/plan`` meta-command and
+        the REST route. There is deliberately no heuristic entry: a mode
+        the user did not ask for and cannot see is worse than no mode."""
+        state = self.plan_mode.enter(session_id, reason=reason, entered_by=entered_by)
+        await self._emit_plan_mode_frame(session_id, state)
+        return state
+
+    async def exit_plan_mode(
+        self,
+        session_id: str,
+        *,
+        approved: bool = False,
+        actor: str = "user",
+    ) -> dict:
+        """Leave plan mode. ``actor`` must be ``"user"``.
+
+        ``approved=True`` records that the user accepted the plan. It
+        grants NOTHING: no standing tool approval is created, so every
+        mutating call in the following turns still goes through the
+        session's autonomy mode. Blanket approval on plan approval would
+        be a real security regression, so the flag stays purely
+        informational.
+        """
+        plan = self.plan_mode.latest_plan(session_id)
+        self.plan_mode.exit(session_id, approved=approved, actor=actor)
+        state = self.plan_mode.describe(session_id)
+        state["approved"] = bool(approved)
+        state["latest_plan"] = plan
+        await self._emit_plan_mode_frame(session_id, state)
+        return state
+
+    _PLAN_SKILL_ID = "plan"
+
+    def _inject_plan_skill(
+        self,
+        tools: list[dict],
+        skills: list["SkillManifest"],
+    ) -> tuple[list[dict], list["SkillManifest"]]:
+        """Add ``plan__submit`` to this turn if it is not already there."""
+        try:
+            manifest = self.skills.skills.get(self._PLAN_SKILL_ID)
+        except Exception:
+            manifest = None
+        if manifest is None:
+            logger.warning(
+                "plan mode is active but the 'plan' skill is not registered; "
+                "the model has no way to submit a plan",
+            )
+            return tools, skills
+
+        out_skills = list(skills or [])
+        if not any(
+            getattr(s, "skill_id", "") == self._PLAN_SKILL_ID for s in out_skills
+        ):
+            out_skills.append(manifest)
+
+        out_tools = list(tools or [])
+        have = {
+            (t.get("function") or {}).get("name")
+            for t in out_tools if isinstance(t, dict)
+        }
+        for tool in self.skills.get_tools_for_skills([manifest]):
+            if (tool.get("function") or {}).get("name") not in have:
+                out_tools.append(tool)
+        return out_tools, out_skills
+
+    def _apply_plan_mode_filter(
+        self,
+        session_id: str,
+        tools: list[dict],
+        relevant_skills: list["SkillManifest"],
+    ) -> tuple[list[dict], list["SkillManifest"]]:
+        """Narrow this turn's tool array and prompt view to plan-safe only.
+
+        No-op outside plan mode. Inside it, both halves matter: the array
+        is what the model is offered, the manifest list is what
+        ``build_tooling_catalog`` enumerates as "Active this turn".
+        Filtering only one of them produces a model that is told it has a
+        tool and then refused when it uses it.
+        """
+        if not self.plan_mode.is_active(session_id):
+            return tools, relevant_skills
+        from agents.plan_mode import (
+            filter_skills_for_plan_mode,
+            filter_tools_for_plan_mode,
+        )
+        filtered_tools = filter_tools_for_plan_mode(tools, registry=self.skills)
+        filtered_skills = filter_skills_for_plan_mode(
+            relevant_skills, registry=self.skills,
+        )
+        # The `plan` skill is deliberately NOT in ALWAYS_INCLUDE_SKILLS,
+        # which already puts ~59 tools in front of the model every turn on
+        # a chat path with no tool cap. It is injected here instead, only
+        # for the turns that can actually use it, so plan mode costs one
+        # extra tool while it is on and zero the rest of the time.
+        filtered_tools, filtered_skills = self._inject_plan_skill(
+            filtered_tools, filtered_skills,
+        )
+        logger.info(
+            "[%s] plan mode: %d/%d tools exposed",
+            session_id[:8], len(filtered_tools), len(tools or []),
+        )
+        return filtered_tools, filtered_skills
+
+    async def _emit_plan_mode_frame(self, session_id: str, state: dict) -> None:
+        """Push the current plan-mode posture to the client."""
+        try:
+            await self.send(session_id, FeralMessage(
+                session_id=session_id, hop="brain", type="plan_mode",
+                payload=dict(state),
+            ))
+        except Exception:
+            logger.debug("plan_mode frame emit failed (non-fatal)", exc_info=True)
+
+    async def _maybe_handle_plan_meta_command(self, session_id: str, text: str) -> bool:
+        """Handle ``/plan``-family meta-commands. Returns True when handled.
+
+        Matching is an exact first-token check on ``/plan`` so that prose
+        about planning never enters the mode. Intercepted before
+        ``_route_prompt``, which would otherwise treat ``/plan`` as the
+        explicit ``/skill`` prefix form for the ``plan`` skill.
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return False
+        parts = raw.split()
+        if parts[0].lower() != "/plan":
+            return False
+        arg = parts[1].lower() if len(parts) > 1 else ""
+
+        if arg in ("", "on", "start", "enter"):
+            reason = " ".join(parts[2:]) if arg else ""
+            await self.enter_plan_mode(session_id, reason=reason)
+            await self._send_text(
+                session_id,
+                "Plan mode is ON. I'll research with read-only tools and "
+                "propose a plan; I won't change anything. `/plan approve` to "
+                "accept, `/plan off` to discard. Approving does not "
+                "pre-approve the individual steps.",
+            )
+            return True
+
+        if arg in ("approve", "accept", "ok"):
+            was_active = self.plan_mode.is_active(session_id)
+            state = await self.exit_plan_mode(session_id, approved=True)
+            await self._send_text(
+                session_id,
+                "Plan approved, plan mode is OFF. Each step still goes "
+                "through the normal approval flow."
+                if was_active else "Not in plan mode.",
+            )
+            del state
+            return True
+
+        if arg in ("off", "exit", "cancel", "stop", "discard"):
+            was_active = self.plan_mode.is_active(session_id)
+            await self.exit_plan_mode(session_id, approved=False)
+            await self._send_text(
+                session_id,
+                "Plan mode is OFF." if was_active else "Not in plan mode.",
+            )
+            return True
+
+        if arg == "status":
+            state = self.plan_mode.describe(session_id)
+            await self._send_text(
+                session_id,
+                f"Plan mode: {'ON' if state['plan_mode'] else 'OFF'} "
+                f"({state['plan_count']} plan(s) submitted).",
+            )
+            return True
+
+        await self._send_text(
+            session_id,
+            "Usage: `/plan` (enter), `/plan approve`, `/plan off`, `/plan status`.",
+        )
+        return True
+
     def _stamp_session_surface(self, session_id: str, context: Optional[dict]) -> str:
         """Resolve and persist the execution surface for ``session_id``.
 
@@ -2162,6 +2436,11 @@ class Orchestrator:
         logger.info(f"[{session_id[:8]}] Command: {text}")
         self._session_finalized.discard(session_id)
         self._stamp_session_surface(session_id, context)
+
+        # Explicit plan-mode entry/exit, before routing. `/plan` would
+        # otherwise be read as the `/skill` prefix form in `_route_prompt`.
+        if await self._maybe_handle_plan_meta_command(session_id, text):
+            return
 
         if await self._maybe_handle_pending_tool_approval_text(session_id, text):
             return
@@ -2294,6 +2573,16 @@ class Orchestrator:
             mcp_tools = self._mcp_client.to_llm_tool_definitions()
             if mcp_tools:
                 tools = (tools or []) + mcp_tools
+
+        # Plan mode, exposure half. Applied AFTER the MCP merge so MCP
+        # tools (which carry no manifest safety metadata and therefore fail
+        # closed) are filtered too. `relevant_skills` is pruned in the same
+        # breath because `self_model.build_tooling_catalog` reads endpoints
+        # off the manifest independently of this array, and would otherwise
+        # tell the model `edit_file` is "Active this turn" and then refuse it.
+        tools, relevant_skills = self._apply_plan_mode_filter(
+            session_id, tools, relevant_skills,
+        )
 
         # v2026.5.48 grounded-memory closure (non-stream path). See the
         # docstring on ``_force_tool_for_query``. ``forced_tool`` pins
@@ -2764,6 +3053,10 @@ class Orchestrator:
         Falls back to non-streaming if LLM doesn't support it.
         """
         self._stamp_session_surface(session_id, context)
+        # Explicit plan-mode entry/exit, before routing. `/plan` would
+        # otherwise be read as the `/skill` prefix form in `_route_prompt`.
+        if await self._maybe_handle_plan_meta_command(session_id, text):
+            return
         if await self._maybe_handle_pending_tool_approval_text(session_id, text):
             return
 
@@ -2861,6 +3154,12 @@ class Orchestrator:
             mcp_tools = self._mcp_client.to_llm_tool_definitions()
             if mcp_tools:
                 tools = (tools or []) + mcp_tools
+
+        # Plan mode, exposure half (stream path). Mirrors the non-stream
+        # branch above; see the comment there.
+        tools, relevant_skills = self._apply_plan_mode_filter(
+            session_id, tools, relevant_skills,
+        )
 
         # v2026.5.48 grounded-memory closure (stream path). Mirrors the
         # non-stream branch — force the timeline tool when the gate

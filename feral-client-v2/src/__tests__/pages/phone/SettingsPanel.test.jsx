@@ -113,8 +113,81 @@ describe('SettingsPanel', () => {
     const chainedConfig = { ...defaultConfig, voice: { ...defaultConfig.voice, mode: 'chained' } };
     const { getByTestId } = await renderSettings(chainedConfig);
     await act(async () => {
+      fireEvent.change(getByTestId('tts-provider-picker'), { target: { value: 'openai' } });
+    });
+    expect(getByTestId('tts-voice-picker').value).toBe('alloy');
+  });
+
+  it('offers exactly the TTS providers the brain registers', async () => {
+    // feral-core/voice/tts_providers/__init__.py registers openai,
+    // elevenlabs and cartesia. Anything else makes get_tts_provider
+    // raise and the chained session never opens.
+    const chainedConfig = { ...defaultConfig, voice: { ...defaultConfig.voice, mode: 'chained' } };
+    const { getByTestId } = await renderSettings(chainedConfig);
+    const values = [...getByTestId('tts-provider-picker').options].map((o) => o.value);
+    expect(values).toEqual(['openai', 'elevenlabs', 'cartesia']);
+  });
+
+  it('offers exactly the STT providers the brain registers', async () => {
+    const chainedConfig = { ...defaultConfig, voice: { ...defaultConfig.voice, mode: 'chained' } };
+    const { getByTestId } = await renderSettings(chainedConfig);
+    const values = [...getByTestId('stt-provider-picker').options].map((o) => o.value);
+    expect(values).toEqual(['deepgram', 'openai_whisper', 'groq_whisper']);
+  });
+
+  it('elevenlabs and cartesia expose a voice ID field, not a name dropdown', async () => {
+    // Those two providers address voices by opaque id. The old
+    // friendly-name dropdown wrote `chained.tts_voice`, which the brain
+    // ignores for both (voice/router.py reads `tts_voice_id`), so every
+    // pick silently did nothing.
+    const chainedConfig = { ...defaultConfig, voice: { ...defaultConfig.voice, mode: 'chained' } };
+    const { getByTestId, queryByTestId } = await renderSettings(chainedConfig);
+    await act(async () => {
       fireEvent.change(getByTestId('tts-provider-picker'), { target: { value: 'elevenlabs' } });
     });
-    expect(getByTestId('tts-voice-picker').value).toBe('rachel');
+    expect(queryByTestId('tts-voice-picker')).toBeNull();
+    expect(getByTestId('tts-voice-id-input')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.change(getByTestId('tts-provider-picker'), { target: { value: 'cartesia' } });
+    });
+    expect(getByTestId('tts-voice-id-input')).toBeTruthy();
+  });
+
+  it('persists the chained pick at voice.chained, not voice.voice.chained', async () => {
+    // Regression: the /api/config/update fallback used to send
+    // {section:'voice', key:'voice'}, which lands at
+    // settings.voice.voice.chained, one level below every reader
+    // (api/server.py reads voice.mode, voice/router.py reads
+    // voice.chained.*). PATCH /api/config/settings does not exist on
+    // the brain, so this fallback is the path every save takes.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const chainedConfig = { ...defaultConfig, voice: { ...defaultConfig.voice, mode: 'chained' } };
+    installFetchMock((url, init) => {
+      if (init?.method === 'PATCH') throw new Error('404');
+      if (url.includes('/api/config')) return chainedConfig;
+      return {};
+    });
+    let utils;
+    await act(async () => { utils = render(<SettingsPanel initialConfig={chainedConfig} />); });
+    await act(async () => {
+      fireEvent.change(utils.getByTestId('stt-provider-picker'), { target: { value: 'groq_whisper' } });
+    });
+    await act(async () => { vi.advanceTimersByTime(350); });
+    vi.useRealTimers();
+
+    await waitFor(() => {
+      const updateCalls = fetch.mock.calls
+        .filter(([url, init]) => url.includes('/api/config/update') && init?.method === 'POST')
+        .map(([, init]) => JSON.parse(init.body));
+      const chainedWrite = updateCalls.find((b) => b.section === 'voice' && b.key === 'chained');
+      expect(chainedWrite).toBeTruthy();
+      expect(chainedWrite.value.stt_provider).toBe('groq_whisper');
+      expect(chainedWrite.value.stt_model).toBe('whisper-large-v3');
+      // The mode must land at voice.mode for api/server.py to see it.
+      expect(updateCalls.find((b) => b.section === 'voice' && b.key === 'mode')).toBeTruthy();
+      // Nothing may be written under the doubled `voice.voice` key.
+      expect(updateCalls.find((b) => b.section === 'voice' && b.key === 'voice')).toBeFalsy();
+    });
   });
 });

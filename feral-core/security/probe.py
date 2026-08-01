@@ -798,7 +798,121 @@ VOICE_PROVIDER_CATALOGUE: tuple[tuple[str, str, str], ...] = (
     ("elevenlabs", "tts", "ElevenLabs"),
     ("cartesia", "tts", "Cartesia"),
     ("openai_tts", "tts", "OpenAI TTS"),
+    # Local engines. Their "probe" answers a different question from
+    # every entry above: not "does this credential authenticate" but
+    # "is the code importable and are the weights on disk". They never
+    # touch the network and they never consult the vault.
+    ("whispercpp", "stt", "whisper.cpp (local)"),
+    ("faster_whisper", "stt", "faster-whisper (local)"),
+    ("macos_say", "tts", "macOS say (local)"),
+    ("piper", "tts", "Piper (local, GPL-3.0)"),
+    ("silero_vad", "vad", "Silero VAD (local)"),
 )
+
+# Which catalogue entries run entirely on this machine. The setup
+# wizard and the WebUI use this to offer a fully-local voice stack
+# without hardcoding a second list that can drift from this one.
+LOCAL_VOICE_PROVIDERS: frozenset[str] = frozenset(
+    {"whispercpp", "faster_whisper", "macos_say", "piper", "silero_vad"}
+)
+
+
+# ---------------------------------------------------------------------------
+# Local voice engine probes
+#
+# Every probe above asks a remote service whether a credential is any
+# good. These ask the filesystem whether an engine can run: is the
+# optional package importable, and are its weights already downloaded.
+#
+# They never download. A probe that fetched 75MB of model on first run
+# would make `feral doctor` and the setup table unpredictable, and the
+# rule for local weights is that they arrive during setup or on an
+# explicit command, never as a side effect of asking a question.
+#
+# ``had_key`` is meaningless here, so these build ProbeResults directly
+# rather than going through ``_http_probe``.
+# ---------------------------------------------------------------------------
+
+
+def _local_result(
+    provider: str, ready: bool, reason: str, started: float
+) -> ProbeResult:
+    return ProbeResult(
+        provider=provider,
+        ok=ready,
+        status_code=None,
+        # "ready" carries no information in the failure case, and the
+        # wizard's `_probe_indicates_bad_key` treats "not_configured"
+        # as informational rather than as a rejected credential, which
+        # is exactly right for "the operator has not installed this
+        # optional engine yet".
+        reason="" if ready else "not_configured",
+        detail=reason,
+        probed_at=time.time(),
+        latency_ms=(time.perf_counter() - started) * 1000.0,
+    )
+
+
+@register_probe("whispercpp")
+async def _probe_whispercpp(**_kwargs: Any) -> ProbeResult:
+    started = time.perf_counter()
+    try:
+        from voice.stt_providers.whispercpp import whispercpp_available
+
+        ready, reason = whispercpp_available()
+    except Exception as exc:
+        ready, reason = False, f"{exc.__class__.__name__}: {exc}"
+    return _local_result("whispercpp", ready, reason, started)
+
+
+@register_probe("faster_whisper")
+async def _probe_faster_whisper(**_kwargs: Any) -> ProbeResult:
+    started = time.perf_counter()
+    try:
+        from voice.stt_providers.faster_whisper_local import (
+            faster_whisper_available,
+        )
+
+        ready, reason = faster_whisper_available()
+    except Exception as exc:
+        ready, reason = False, f"{exc.__class__.__name__}: {exc}"
+    return _local_result("faster_whisper", ready, reason, started)
+
+
+@register_probe("macos_say")
+async def _probe_macos_say(**_kwargs: Any) -> ProbeResult:
+    started = time.perf_counter()
+    try:
+        from voice.tts_providers.macos_say import say_available
+
+        ready, reason = say_available()
+    except Exception as exc:
+        ready, reason = False, f"{exc.__class__.__name__}: {exc}"
+    return _local_result("macos_say", ready, reason, started)
+
+
+@register_probe("piper")
+async def _probe_piper(**_kwargs: Any) -> ProbeResult:
+    started = time.perf_counter()
+    try:
+        from voice.tts_providers.piper import piper_available
+
+        ready, reason = piper_available()
+    except Exception as exc:
+        ready, reason = False, f"{exc.__class__.__name__}: {exc}"
+    return _local_result("piper", ready, reason, started)
+
+
+@register_probe("silero_vad")
+async def _probe_silero_vad(**_kwargs: Any) -> ProbeResult:
+    started = time.perf_counter()
+    try:
+        from voice.vad import vad_available
+
+        ready, reason = vad_available()
+    except Exception as exc:
+        ready, reason = False, f"{exc.__class__.__name__}: {exc}"
+    return _local_result("silero_vad", ready, reason, started)
 
 
 OPENAI_REALTIME_DEFAULT_MODEL = "gpt-realtime"
@@ -886,6 +1000,23 @@ def _openai_realtime_models() -> list[str]:
 _DATE_TAIL = re.compile(r"-\d{4}-\d{2}-\d{2}$")
 
 
+def _voice_engine_caveats() -> dict[str, str]:
+    """Known limits on what a green probe proves, per provider id.
+
+    Lives in ``voice/diagnostics.py`` (the module whose job is being
+    honest about failure) and is imported lazily here so ``security``
+    keeps no hard dependency on ``voice``. A missing module degrades to
+    "no caveats", never to a fabricated one.
+    """
+    try:
+        from voice.diagnostics import ENGINE_CAVEATS
+
+        return dict(ENGINE_CAVEATS)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("voice engine caveats unavailable", exc_info=True)
+        return {}
+
+
 def voice_provider_catalogue() -> list[dict[str, Any]]:
     """Return the structured catalogue of voice providers the brain
     knows about (regardless of whether they're configured / probed
@@ -901,6 +1032,19 @@ def voice_provider_catalogue() -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for pid, kind, name in VOICE_PROVIDER_CATALOGUE:
         entry: dict[str, Any] = {"id": pid, "kind": kind, "name": name}
+        # ``local`` tells callers that readiness means "installed and
+        # downloaded", not "credential accepted", so a UI does not
+        # offer an API-key prompt for an engine that has no account.
+        entry["local"] = pid in LOCAL_VOICE_PROVIDERS
+        # ``caveat`` is what a green probe does NOT prove. For a local
+        # engine, ``ok`` means "importable and the weights are on disk",
+        # which is a weaker claim than "works" -- and for three of the
+        # engines here it is the ONLY claim anyone has ever checked.
+        # Carrying the caveat on the catalogue entry means every
+        # consumer (the REST surface, the setup wizard, the voice
+        # diagnostic) inherits the honesty instead of each one deciding
+        # for itself. Empty string means "nothing to qualify".
+        entry["caveat"] = _voice_engine_caveats().get(pid, "")
         if pid == "openai_realtime":
             entry["models"] = _openai_realtime_models()
             entry["default_model"] = OPENAI_REALTIME_DEFAULT_MODEL

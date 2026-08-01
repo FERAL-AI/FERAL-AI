@@ -18,11 +18,29 @@ import BudgetExceededBanner from '../components/BudgetExceededBanner';
 import { ToolCallList } from '../components/ToolCallCard';
 import ReasoningSection from '../components/ReasoningSection';
 import TimelineCard from '../components/TimelineCard';
+import TodoPanel from '../components/TodoPanel';
 import ChatNotice from '../components/ChatNotice';
 import CopyButton from '../ui/CopyButton';
 
 function newId() {
   return `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+// Tools whose calls are NOT rendered as a ToolCallCard.
+//
+// `feral_workflows__todo_write` is a full-list-replacement endpoint that
+// the model rewrites on nearly every step, so one card per write buries
+// the conversation under a stack of near-identical entries. Its state is
+// pinned in <TodoPanel> instead, fed by the `todo_update` frame the
+// brain emits alongside the tool result. Exported for the vitest.
+export const SUPPRESSED_TOOL_CARDS = new Set(['feral_workflows__todo_write']);
+
+export function isSuppressedToolCard(payload) {
+  const name = payload?.tool || payload?.name || '';
+  if (SUPPRESSED_TOOL_CARDS.has(name)) return true;
+  const skill = payload?.skill_id || '';
+  const endpoint = payload?.endpoint_id || '';
+  return !!skill && !!endpoint && SUPPRESSED_TOOL_CARDS.has(`${skill}__${endpoint}`);
 }
 
 // Client-side defense-in-depth scrubber for assistant display text.
@@ -86,6 +104,10 @@ export default function Chat() {
   // live (spinner + ticking elapsed) instead of appearing only after
   // the turn commits. A hung tool used to look like a dead UI.
   const [liveTools, setLiveTools] = useState([]);
+  // The agent's own task list for this thread. Replaced wholesale on
+  // every `todo_update` frame, mirroring the brain's full-list-
+  // replacement contract, so the panel and the store cannot drift.
+  const [todos, setTodos] = useState([]);
   // S6 — yellow inline banner emitted by Lane 08's `budget_exceeded`
   // WS frame. Multiple call-sites can exceed simultaneously (chat +
   // vision), so we key the active banners by call_site.
@@ -329,6 +351,9 @@ export default function Chat() {
         'tool_start', 'tool_call', 'skill_start', 'tool_end',
         'tool_result', 'reasoning', 'budget_exceeded', 'skill_proposal',
         'refusal', 'error',
+        // The todo panel is per-thread state, so a write on thread A
+        // must not repaint thread B's panel.
+        'todo_update',
         // `transcript` belongs here too: voice frames are session-scoped
         // like every other chat frame, and without it a transcript from
         // a voice session started on thread A rendered into whichever
@@ -415,8 +440,12 @@ export default function Chat() {
           model: p.model || '',
           usage: p.usage && Object.keys(p.usage).length ? p.usage : null,
         });
+      } else if (type === 'todo_update') {
+        // Pinned panel, not a card. See SUPPRESSED_TOOL_CARDS.
+        setTodos(Array.isArray(msg.payload?.todos) ? msg.payload.todos : []);
       } else if (type === 'tool_start' || type === 'tool_call' || type === 'skill_start') {
         const p = msg.payload || {};
+        if (isSuppressedToolCard(p)) return;
         const key = traceKey(p);
         const label = friendlyToolLabel(p);
         // Capture the args preview from whichever field the brain
@@ -444,6 +473,7 @@ export default function Chat() {
         setToolChip(label);
       } else if (type === 'tool_result' || type === 'skill_result') {
         const p = msg.payload || {};
+        if (isSuppressedToolCard(p)) return;
         const key = traceKey(p);
         const label = friendlyToolLabel(p);
         const idx = pendingTraceRef.current.findIndex((t) => t.key === key);
@@ -839,6 +869,9 @@ export default function Chat() {
     pendingTraceRef.current = [];
     setLiveTools([]);
     setToolChip(null);
+    // The todo list is per-thread. Carrying it across a thread switch
+    // would show thread A's tasks under thread B's transcript.
+    setTodos([]);
     turnActiveRef.current = false;
   }, []);
 
@@ -1048,6 +1081,10 @@ export default function Chat() {
           <div ref={bottomRef} />
         </div>
       </Pane>
+
+      {/* Pinned below the log, above the composer: the list stays visible
+          as the transcript scrolls, which is the point of tracking it. */}
+      <TodoPanel todos={todos} />
 
       {pendingAttachments.length > 0 && (
         <div className="v2-chat-attachment-chips" role="list" aria-label="Pending attachments">

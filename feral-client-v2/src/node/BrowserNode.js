@@ -169,6 +169,75 @@ export class BrowserNode {
     this._pausedAt = 0;
     this._visibilityHandler = null;
     this._voiceConfigSent = false;
+    // Microphone mute. Enforced at capture, not just in the UI: the
+    // promise a mute button makes is that the audio does not leave the
+    // device, and gating the send alone leaves the OS recording
+    // indicator on and any other consumer of this MediaStream still
+    // receiving samples.
+    this._micMuted = false;
+  }
+
+  /** True when the microphone is muted at capture. */
+  isMicMuted() {
+    return this._micMuted === true;
+  }
+
+  /**
+   * Mute / unmute the microphone.
+   *
+   * Three things happen, and all three are needed:
+   *   1. The MediaStream's audio tracks are DISABLED (not stopped, so
+   *      unmuting needs no fresh permission prompt and no getUserMedia
+   *      round-trip). A disabled track emits silence at the source.
+   *   2. `_pushAudioChunk` starts dropping, so a worklet that is still
+   *      draining cannot leak the last buffers past the toggle.
+   *   3. The brain is told, twice on purpose: a `voice_mute` frame (the
+   *      dedicated envelope) and `muted` on `voice_config` (a wire path
+   *      the brain's VoiceRouter already reads, so brain-side ingress
+   *      is gated even where no `voice_mute` handler exists yet).
+   *
+   * Muting also flushes an `is_final` audio chunk so the brain closes
+   * the utterance in flight instead of holding half a sentence until
+   * some later audio flushes it.
+   */
+  setMicMuted(muted) {
+    const next = muted === true;
+    if (this._micMuted === next) return;
+    this._micMuted = next;
+    this._applyMicMute();
+    if (next) this._flushUtterance();
+    this._send("voice_mute", { node_id: this.nodeId, muted: next });
+    // Merged into the node's voice config rather than replacing it:
+    // `sendVoiceConfig` fills in mode/provider/sample_rate and the brain
+    // merges what arrives onto what it already had.
+    this.sendVoiceConfig({ muted: next }).catch(() => { /* best effort */ });
+  }
+
+  /**
+   * Push the current mute state onto whatever MediaStream exists now.
+   *
+   * Called from `setMicMuted` and from `startMic`, because a reconnect
+   * acquires a NEW stream after the toggle: without re-applying, a
+   * muted session would come back with a live microphone for the gap
+   * between `getUserMedia` resolving and the next user action.
+   */
+  _applyMicMute() {
+    if (!this._mediaStream) return;
+    const tracks = this._mediaStream.getAudioTracks?.() || [];
+    for (const track of tracks) track.enabled = !this._micMuted;
+  }
+
+  /** Send a zero-length `is_final` chunk to close the current utterance. */
+  _flushUtterance() {
+    if (!this._voiceConfigSent) return;
+    this._send("audio_chunk", {
+      node_id: this.nodeId,
+      data_b64: "",
+      chunk_index: this._audioChunkIndex++,
+      is_final: true,
+      encoding: "pcm16",
+      sample_rate: AUDIO_TARGET_SAMPLE_RATE,
+    });
   }
 
   async connect() {
@@ -277,6 +346,10 @@ export class BrowserNode {
       this._mediaStream = this._mediaStream || await navigator.mediaDevices.getUserMedia({
         audio: true,
       });
+      // A reconnect into a still-muted session acquires a fresh stream
+      // here; it must arrive already muted rather than live for the gap
+      // until the next user action.
+      this._applyMicMute();
       if (!this._voiceConfigSent) {
         // Intentionally not awaited — we just want the frame on the
         // wire; sendVoiceConfig's internal WebSocket send is synchronous.
@@ -466,6 +539,10 @@ export class BrowserNode {
   }
 
   _pushAudioChunk(float32) {
+    // Second line of defence behind the disabled track: a worklet that
+    // is still draining its buffer must not leak the last frames past
+    // the mute toggle.
+    if (this._micMuted) return;
     if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return;
     const b64 = floatToPCM16Base64(float32);
     this._send("audio_chunk", {

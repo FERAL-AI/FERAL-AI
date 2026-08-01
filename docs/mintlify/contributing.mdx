@@ -71,6 +71,80 @@ pytest --cov --cov-report=term
 
 Test files live in `feral-core/tests/`. Use `pytest-asyncio` for async tests — the `asyncio_mode = "auto"` config handles the event loop.
 
+### The settings reader gate
+
+If you add a key to `DEFAULT_SETTINGS` in `feral-core/config/loader.py`, a test
+will fail unless something actually reads it.
+
+`feral-core/tests/test_settings_keys_have_readers.py` walks every leaf of
+`DEFAULT_SETTINGS` and asserts each one has a reader somewhere in `feral-core`.
+It exists because FERAL has shipped the same bug four separate times: a key is
+written by an operator surface (the setup wizard, the WebUI Settings page, the
+phone Settings panel), persisted to `settings.json`, and then read by nothing.
+The operator sees a switch, flips it, the value survives a restart, and the
+runtime ignores it forever. Confirmed instances: `vision.provider` /
+`vision.model` (an operator who picked free local Ollama vision was still billed
+for every frame on the shared paid chat model), `voice.chained.*` (a Groq
+Whisper plus ElevenLabs pick still ran Deepgram), `security.autonomy_mode`
+(picking "strict" silently ran "hybrid"), and `audio.realtime_providers` (still
+dead, see below). Each was found by hand, months apart. The test turns that
+audit into CI.
+
+A key counts as read when either holds:
+
+1. **Direct read.** Some non-test module under `feral-core` accesses the leaf
+   name in a read-shaped position (`.get("leaf")`, `block["leaf"]`,
+   `helper("leaf", default)`, `get_setting("section", "leaf")`) with the key's
+   parent path segments nearby. Write-shaped constructs are blanked out first,
+   because a key that is only ever *written* is exactly the bug.
+2. **Env-var read.** Several subsystems resolve their config only from the
+   variables `ConfigLoader.export_as_env` emits. The path-to-variable map is not
+   hardcoded in the test; it is *probed* by mutating one leaf at a time and
+   diffing the `export_as_env()` output, so it cannot drift away from the loader.
+
+Deliberate scoping: readers must live in `feral-core` (a JS client reading a key
+back purely to render its own toggle is the write path round-tripping, not a
+consumer); tests are not readers; and `config/loader.py` is a reader, but its
+own `DEFAULT_SETTINGS` literal is masked out so a key cannot vouch for itself.
+
+**If the gate flags your key,** the fix is to wire a reader or delete the key.
+Only if it genuinely should have no reader do you add it to
+`UNREAD_KEY_ALLOWLIST`, and the allowlist is kept honest by three further tests:
+
+- The reason string must be at least **60 characters** after stripping.
+- It may not contain any of the filler phrases `todo`, `fixme`, `tbd`,
+  `for now`, `later`, `unknown`, `not sure`, `temporary`, `wip`, `xxx`.
+  A substring match anywhere in the reason fails, so write the sentence you
+  actually mean rather than a placeholder.
+- An entry whose key has since acquired a reader, or which no longer exists in
+  `DEFAULT_SETTINGS`, fails as stale and must be removed.
+
+Two entries are on the allowlist today: `version` (a schema stamp, not a
+behaviour switch) and `audio.realtime_providers` (genuinely unread; the router
+resolves a single provider from the scalar `audio.realtime_primary`, and the
+ordered list is written by the WebUI Settings page and consumed by nobody).
+
+The analysis is a heuristic that errs toward calling things read, so a flagged
+key is worth believing. If it flags something that really does have a reader,
+widen `_read_patterns` rather than burying the key in the allowlist.
+
+<Warning>
+**Known limit 1: the gate walks `DEFAULT_SETTINGS` only.** A key that is written
+straight to `settings.json` by the setup wizard or by a client, without a
+corresponding default in the loader, is invisible to it. `audio.chained_providers`
+is a live example: the WebUI Settings page persists it, no Python reads it, and
+the gate cannot see it because it is not in `DEFAULT_SETTINGS`. If you add an
+operator-facing key, add its default to `DEFAULT_SETTINGS` so the gate covers
+it.
+
+**Known limit 2: a read inside dead code still counts as a read.** The analysis
+is textual, so it cannot tell that the function containing the read is never
+called. `coding.tool_call_context` passes the gate on the
+`os.environ.get("FERAL_TOOL_CALL_CONTEXT", "on")` inside
+`skills/call_context.py::context_enabled()`, which has no call sites anywhere in
+the tree, so the setting is inert in exactly the way the gate exists to catch.
+</Warning>
+
 ## Pull Request Process
 
 1. **Fork** the repository and create a feature branch:

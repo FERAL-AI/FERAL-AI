@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 from config.loader import feral_home
 from models.skill_manifest import SkillManifest, WEATHER_SKILL
@@ -24,6 +23,21 @@ class SkillRegistry:
         self.skills: dict[str, SkillManifest] = {}
         self._tool_cache: dict[str, list[dict]] = {}  # skill_id → LLM tool defs
         self._cron_service = None
+        # Monotonic counter bumped on every ``register()``. Consumers that
+        # snapshot ``self.skills`` (notably ``ToolDispatchValidator``, which
+        # precomputes per-endpoint schemas) compare this against the value
+        # they built from and rebuild when it moves. Without it, anything
+        # registered after the first tool call (marketplace installs,
+        # ``reload_skill``, Tool Genesis output, hot-plugged hardware) was
+        # permanently rejected as ``unknown_endpoint`` even though it was
+        # present in ``self.skills``.
+        self._generation = 0
+
+    @property
+    def generation(self) -> int:
+        """Registration generation. Increments whenever a manifest is
+        registered or re-registered, so cached views can detect staleness."""
+        return self._generation
 
     def set_cron_service(self, cron_service):
         """Wire the CronService so _auto_create_routines can register jobs.
@@ -114,6 +128,7 @@ class SkillRegistry:
         """Register a skill manifest."""
         self.skills[manifest.skill_id] = manifest
         self._tool_cache[manifest.skill_id] = self._manifest_to_tools(manifest)
+        self._generation += 1
         logger.info(f"Registered skill: {manifest.brand.name} ({manifest.skill_id})")
         self._auto_create_routines(manifest)
 

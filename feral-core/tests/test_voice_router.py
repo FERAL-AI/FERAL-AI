@@ -274,8 +274,11 @@ async def test_open_chained_session_threads_sample_rate_to_stt(monkeypatch):
     chained.open_session = AsyncMock(return_value=MagicMock())
     r.set_chained_pipeline(chained)
 
-    # Stub the audio settings so the router uses the default
-    # ``deepgram + elevenlabs`` pair from chained_fallback.
+    # Stub both settings blocks the provider resolver consults so this
+    # test pins the sample rate and nothing else. ``voice.chained`` is
+    # the phone Settings panel's block and wins when populated; empty
+    # here means the ``chained_fallback`` pair below is what applies.
+    r._load_voice_settings = MagicMock(return_value={})
     r._load_audio_settings = MagicMock(return_value={
         "chained_fallback": {
             "stt_provider": "deepgram",

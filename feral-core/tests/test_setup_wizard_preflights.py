@@ -8,8 +8,6 @@ macOS-only, read-only, and surfaces deeplinks.
 from __future__ import annotations
 
 import asyncio
-import json
-import sys
 import time
 from unittest.mock import MagicMock
 
@@ -60,7 +58,7 @@ def test_voice_preflight_skipped_when_user_declines(
     from cli.setup.helpers import SkipStep
     from cli.setup.state import WizardState
 
-    monkeypatch.setattr(vp, "confirm", lambda *a, **kw: False)
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "skip")
 
     state = WizardState.load(feral_home)
     with pytest.raises(SkipStep):
@@ -82,6 +80,12 @@ def test_voice_preflight_persists_realtime_and_chained_picks(
     from cli.setup.state import WizardState
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     pick_seq = iter([
         # 1) realtime → openai_realtime
@@ -123,6 +127,12 @@ def test_voice_preflight_asks_model_after_openai_realtime(
     from cli.setup.state import WizardState
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     pick_seq = iter([
         Option(id="openai_realtime", label="OpenAI Realtime"),
@@ -163,6 +173,12 @@ def test_voice_step_uses_picker_not_ask_text_for_realtime_model(
     from cli.setup.helpers import Option
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     pick_seq = iter([
         Option(id="openai_realtime", label="OpenAI Realtime"),
@@ -204,6 +220,12 @@ def test_voice_step_reuses_existing_openai_key(
     from cli.setup.helpers import Option
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     pick_seq = iter([
         Option(id="openai_realtime", label="OpenAI Realtime"),
@@ -250,6 +272,12 @@ def test_voice_step_prompts_key_for_different_vendor(
     from cli.setup.helpers import Option
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     pick_seq = iter([
         Option(id="gemini_live", label="Gemini Live"),
@@ -349,6 +377,12 @@ def test_voice_reuse_warns_when_existing_key_rejected(
     monkeypatch.setattr(vk_mod, "add_provider_key", lambda *a, **kw: None)
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     # Capture the model picker's options so we can assert the badge
     # does NOT say ready.
@@ -442,6 +476,12 @@ def test_voice_reuse_silent_when_probe_ok(
     monkeypatch.setattr(vk_mod, "list_provider_keys", lambda pid, **kw: [])
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     pick_seq = iter([
         Option(id="openai_realtime", label="OpenAI Realtime"),
@@ -505,6 +545,12 @@ def test_key_masking_uniform_across_steps(
     monkeypatch.setattr(vk_mod, "list_provider_keys", lambda pid, **kw: [])
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
     monkeypatch.setattr(
         vp, "ask_choice",
         lambda *a, **kw: next(iter([
@@ -542,7 +588,6 @@ def test_key_masking_uniform_across_steps(
 
     # --- chat surface (drive _configure_provider_key directly) ---
     from cli.setup.steps import llm as llm_step
-    from unittest.mock import AsyncMock
 
     fake_catalog = MagicMock()
     fake_catalog.configure = MagicMock()
@@ -592,12 +637,17 @@ def test_tcc_preflight_no_op_off_darwin(feral_home, monkeypatch):
         tcc_preflight.run(state)
 
 
-def test_tcc_preflight_persists_snapshot_and_uses_deeplinks(
+def test_tcc_preflight_is_read_only_and_uses_deeplinks(
     feral_home, monkeypatch, capsys,
 ):
-    """On macOS, the step calls ``all_gui_permission_statuses``,
-    renders deeplinks from ``TCC_CATALOG``, and persists a snapshot
-    under ``settings.macos.tcc_snapshot``."""
+    """On macOS, the step calls ``all_gui_permission_statuses`` and
+    renders deeplinks from ``TCC_CATALOG``.
+
+    It must NOT persist anything. It used to write a
+    ``settings.macos.tcc_snapshot`` list "so the doctor + dashboard can
+    reflect the wizard's last reading without re-probing", but nothing
+    in the codebase ever read that key, and TCC grants change outside
+    FERAL so a cached copy is stale on arrival."""
     from cli.setup.steps import tcc_preflight
     from cli.setup.state import WizardState
     from security.macos_permissions import TCCStatus
@@ -626,15 +676,11 @@ def test_tcc_preflight_persists_snapshot_and_uses_deeplinks(
     state = WizardState.load(feral_home)
     tcc_preflight.run(state)
 
-    snapshot = state.get_setting("macos", "tcc_snapshot")
-    assert isinstance(snapshot, list)
-    assert {s["permission"] for s in snapshot} == {
-        "accessibility", "screen_recording", "calendar",
-    }
-    # The snapshot must include the deeplink for at least the
-    # screen_recording entry (denied → operator needs the URL).
-    sr = next(s for s in snapshot if s["permission"] == "screen_recording")
-    assert sr["deeplink"].startswith("x-apple.systempreferences:")
+    # Regression: the step must leave settings untouched. The dead
+    # ``macos.tcc_snapshot`` write is gone, and it was the step's only
+    # write, so nothing at all should be persisted.
+    assert state.get_setting("macos", "tcc_snapshot") is None
+    assert state.settings == {}
 
     out = capsys.readouterr().out
     # The deeplink for screen_recording must be printed when the

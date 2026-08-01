@@ -60,10 +60,21 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
-def _disable_api_key_middleware_for_tests(monkeypatch):
+def _disable_api_key_middleware_for_tests(monkeypatch, isolate_feral_home):
     """Starlette TestClient reports client host as 'testclient'; accept that as localhost
     for tests so the auth middleware bypasses without every test needing to send a header.
     Real production hosts never report 'testclient'.
+
+    Depends on ``isolate_feral_home`` on purpose, and the dependency is
+    load-bearing rather than cosmetic. This fixture imports ``api.server``,
+    which imports ``api.state``, which instantiates ``BrainState()`` at
+    module scope (``api/state.py``) and pushes ``export_as_env()`` into
+    ``os.environ``. That import happens exactly once per process, so
+    whichever test runs first decides which home the whole session reads.
+    Ordered by definition alone this fixture ran first and that home was
+    the developer's real ``~/.feral``, leaking ``FERAL_LLM_PROVIDER``,
+    ``FERAL_STREAMING`` and friends process-wide. Naming the fixture as a
+    parameter makes pytest resolve it first regardless of definition order.
     """
     from security import session_auth as _sa
     orig_is_localhost = _sa.is_localhost
@@ -182,3 +193,24 @@ def isolate_os_keychain(monkeypatch):
     monkeypatch.setattr(_v, "_keyring_get_password", fake_get)
     monkeypatch.setattr(_v, "_keyring_set_password", fake_set)
     monkeypatch.setattr(_v, "_keyring_delete_password", fake_delete)
+
+
+@pytest.fixture(autouse=True)
+def isolate_autonomy_env(monkeypatch):
+    """Keep the developer's real autonomy tier out of unit tests.
+
+    ``FERAL_AUTONOMY`` is the single source both ``agents/tool_runner``
+    and ``security/exec_mode.current_autonomy_mode()`` read. Since
+    ``ConfigLoader.export_as_env()`` started exporting it (so the
+    wizard's autonomy choice stops being a dead write), a developer
+    whose real ``~/.feral/settings.json`` says ``loose`` had that value
+    pushed into ``os.environ`` the moment anything imported
+    ``api.server``, which the autouse middleware fixture above does,
+    before ``isolate_feral_home`` has had a chance to redirect the home
+    directory. Tests asserting the shipped default then saw ``loose``.
+
+    Defined LAST so it runs after that import and wins. Tests that care
+    about a specific tier set it themselves (``patch.dict`` /
+    ``monkeypatch.setenv`` inside the test body both run later).
+    """
+    monkeypatch.delenv("FERAL_AUTONOMY", raising=False)
