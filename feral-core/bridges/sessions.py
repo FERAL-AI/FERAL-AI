@@ -152,7 +152,6 @@ class SessionRegistry:
         env: Optional[dict[str, str]] = None,
         permission_timeout: float = 120.0,
         approval_manager: Any = None,
-        extra_broker: Optional[PermissionBroker] = None,
     ) -> ManagedSession:
         """Spawn an agent, initialize, and open one session.
 
@@ -164,7 +163,11 @@ class SessionRegistry:
         :meth:`answer_permission`; nothing is auto-allowed either way.
         """
         queueing = QueueingBroker(timeout_seconds=permission_timeout)
-        broker: PermissionBroker = extra_broker or queueing
+        # ``queueing`` is always the innermost broker, because it is the
+        # one ``ManagedSession.pending_permissions`` and
+        # ``answer_permission`` reach through. Swapping it out would make
+        # a parked request invisible to the surface that answers it.
+        broker: PermissionBroker = queueing
         if approval_manager is not None:
             broker = ApprovalManagerBroker(
                 approval_manager,
