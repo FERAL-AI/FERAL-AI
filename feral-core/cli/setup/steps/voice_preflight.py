@@ -77,9 +77,17 @@ async def run(state: WizardState) -> None:
             "later with `feral voice providers` or in Settings → Voice."
         )
 
+    # This question gates BOTH voice steps. The "Speech in / out" step
+    # that follows used to ask a verbatim-identical "Configure voice
+    # now?" with the opposite default, so pressing enter answered yes
+    # here and no there and left a half-configured voice stack. It now
+    # reads ``audio.configured_via_wizard`` instead of re-asking, so the
+    # wording here has to cover the whole of voice, not just realtime.
     try:
         wants_voice = confirm(
-            "Configure voice now? (Skip if you only need text chat — voice can be set up later.)",
+            "Set up voice now? (Covers realtime, speech-to-text and "
+            "text-to-speech. Skip if you only need text chat, voice can be "
+            "set up later.)",
             default=True,
         )
     except (KeyboardInterrupt, BackNavigation, QuitNavigation):
@@ -426,16 +434,34 @@ async def _prompt_and_verify_key(
     same distinction :func:`_probe_indicates_bad_key` already draws for
     pre-existing keys.
 
+    Every prompt accepts an empty line as "skip this credential". It
+    used to be ``allow_empty=False``, and both the helper and
+    ``ui_kit.password`` loop forever on an empty value, so an operator
+    who reached this prompt with no key to type had no way out but
+    Ctrl+C. The attempt counter only bounded REJECTED keys, never
+    empty ones. A wizard prompt must always terminate.
+
     Returns True when the provider accepted the key.
     """
     import os as _os
 
     from security.probe import probe as _probe
 
+    skippable_prompt = f"{prompt} (leave blank to skip)"
+
     # Bounded so a provider that rejects everything (expired billing,
     # region block) can't trap the operator in the wizard.
     for attempt in range(_MAX_KEY_ATTEMPTS):
-        key = ask_text(prompt, allow_empty=False, secret=True)
+        key = (ask_text(skippable_prompt, allow_empty=True, secret=True) or "").strip()
+        if not key:
+            console.print(
+                f"  [dim]Skipped. No {vendor_id} key stored, add one later "
+                f"with `feral key add --provider {vendor_id}`.[/]"
+                if _RICH_AVAILABLE else
+                f"  Skipped. No {vendor_id} key stored, add one later with "
+                f"`feral key add --provider {vendor_id}`."
+            )
+            return False
         state.set_credential(env_var, key)
         _os.environ[env_var] = key
         try:
@@ -645,9 +671,18 @@ def _option_status(res) -> str:
 
 
 def _first_ready(options) -> str:
+    """Default the picker to a provider that actually probed ready.
+
+    This used to fall back to ``options[0]`` when nothing was ready,
+    which on a fresh keyless install preselected the first catalogue
+    entry (OpenAI Realtime). Pressing enter through the wizard then
+    wrote ``audio.realtime_primary=openai_realtime`` on a machine with
+    no OpenAI key, and walked the operator straight into a mandatory
+    API-key prompt they never asked for. ``__none__`` is the honest
+    default when nothing is configured: the operator can still pick a
+    provider explicitly, and the enter-through path terminates.
+    """
     for opt in options:
         if opt.status == "ready":
             return opt.id
-    if options and options[0].id != "__none__":
-        return options[0].id
     return "__none__"

@@ -48,7 +48,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -358,7 +358,15 @@ BUILT_IN_DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         display_name="Ollama (local)",
         supports_local=True,
         requires_api_key=False,
-        default_base_url="http://localhost:11434",
+        # MUST carry the ``/v1`` OpenAI-compat suffix. The runtime posts
+        # the relative path ``/chat/completions`` against this base
+        # (agents/llm_provider.py), and Ollama only serves that under
+        # ``/v1``. The bare root 404s on every chat turn. The wizard
+        # copies this value straight into ``llm.base_url``, and
+        # ``llm_provider`` only fills the slot when it is empty, so a
+        # bare URL here can never be repaired downstream. Matches
+        # ``config.runtime.ollama_openai_base_url()``.
+        default_base_url="http://localhost:11434/v1",
         default_model="",
         aliases=("local-ollama",),
     ),

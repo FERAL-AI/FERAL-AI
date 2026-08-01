@@ -97,12 +97,18 @@ async def run(state: WizardState) -> None:
     # number here contradicted it the moment the step list changed.
     if _RICH_AVAILABLE:
         console.print(
-            "Pick how FERAL should listen + speak. Skip if you only use text chat."
+            "Pick how FERAL should listen + speak."
         )
 
-    if not confirm("  Configure voice now?", default=False):
-        state.set_setting("audio", "stt_provider", state.get_setting("audio", "stt_provider", "openai"))
-        state.set_setting("audio", "tts_provider", state.get_setting("audio", "tts_provider", "openai"))
+    if not _wants_voice(state, console):
+        # NOTE: no ``audio.*`` writes on the skip path. This used to
+        # materialise ``stt_provider``/``tts_provider`` as "openai" even
+        # when the operator declined voice, so an install with no OpenAI
+        # key ended up with a settings file explicitly asserting the
+        # OpenAI speech providers and the finish summary printing
+        # "STT: openai · ?". The values match DEFAULT_SETTINGS anyway,
+        # so writing nothing keeps "operator skipped" distinguishable
+        # from "operator chose OpenAI".
         return
 
     if confirm("  Prefer fully-local voice? (no cloud, no keys)", default=has_local_stt and has_local_tts):
@@ -112,6 +118,38 @@ async def run(state: WizardState) -> None:
     _configure_provider(state, "stt", _STT_PROVIDERS, has_local_stt, has_openai_key, caps, console)
     _configure_provider(state, "tts", _TTS_PROVIDERS, has_local_tts, has_openai_key, caps, console)
     _configure_fallback_tts(state, console, has_openai_key, has_local_tts)
+
+
+def _wants_voice(state: WizardState, console) -> bool:
+    """Whether to configure the speech pipeline, without re-asking.
+
+    The preceding ``voice_preflight`` step opens with "Set up voice
+    now?" and records the answer at ``audio.configured_via_wizard``.
+    This step used to ask a verbatim-identical "Configure voice now?"
+    one screen later with the OPPOSITE default, so an operator pressing
+    enter through the wizard answered yes to voice on one step and no
+    on the next. The two steps write disjoint key sets and nothing
+    reconciles them, so the result was a half-configured voice stack
+    (e.g. ``realtime_primary=gemini_live`` from the first step next to
+    ``stt_provider=openai`` from the second's skip default).
+
+    Now the answer is carried forward. The prompt only reappears when
+    ``voice_preflight`` never got to ask, which happens when the voice
+    catalogue could not be imported or came back empty. That prompt
+    defaults to yes, matching ``voice_preflight``, so enter-through
+    behaves the same on both paths.
+    """
+    answered = state.get_setting("audio", "configured_via_wizard", None)
+    if answered is False:
+        console.print(
+            "  [dim]Voice was skipped on the previous step.[/]"
+            if _RICH_AVAILABLE else
+            "  Voice was skipped on the previous step."
+        )
+        return False
+    if answered is True:
+        return True
+    return confirm("  Set up speech in / out now?", default=True)
 
 
 def _configure_fallback_tts(
@@ -188,9 +226,15 @@ def _configure_local(state: WizardState, has_stt: bool, has_tts: bool, console) 
         )
     if has_tts:
         state.set_setting("audio", "tts_provider", "piper")
+        state.set_setting("audio", "tts_model", "piper")
         state.set_setting("audio", "tts_voice", "en_US-lessac-medium")
     else:
         state.set_setting("audio", "tts_provider", "piper")
+        # Written on both arms so the finish summary does not print
+        # "TTS: piper · ?" for a value the step already knows. The
+        # default from DEFAULT_SETTINGS is the OpenAI "tts-1", which is
+        # wrong for a local Piper pipeline.
+        state.set_setting("audio", "tts_model", "piper")
         state.set_setting("audio", "tts_voice", "en_US-lessac-medium")
         console.print(
             "  [yellow]piper isn't installed.[/] Run `pip install feral-ai[tts]`."
