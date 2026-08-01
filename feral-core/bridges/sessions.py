@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -36,6 +37,24 @@ logger = logging.getLogger("feral.bridges.sessions")
 # a human to think about a permission prompt and come back; short enough
 # that a crashed UI does not leave an agent resident all day.
 DEFAULT_IDLE_TIMEOUT = 900.0
+
+
+def _env_jail_enabled() -> bool:
+    """``external_agents.env_jail``, defaulting to on.
+
+    Imported lazily because ``bridges.catalog`` is the only module in
+    this package that touches FERAL settings, and the protocol layers
+    below deliberately stay configuration-free so they can be tested
+    without a configured brain. A settings read that fails must not stop
+    an agent starting, and the safe answer when it does is the jail.
+    """
+    try:
+        from bridges.catalog import external_agent_settings
+
+        return bool(external_agent_settings()["env_jail"])
+    except Exception as exc:
+        logger.debug("env_jail setting unreadable (%s); jailing anyway", exc)
+        return True
 
 
 @dataclass
@@ -249,6 +268,13 @@ class SessionRegistry:
         FERAL restart. Whether the agent actually restored any history is
         reported as :attr:`ManagedSession.origin` rather than assumed:
         see :meth:`bridges.acp.AcpAgentProcess.reattach_session`.
+
+        ``env`` left at ``None`` means "let ``spawn`` jail the child",
+        which is the default and what every caller should want. The
+        ``external_agents.env_jail`` setting turns that off by handing
+        ``spawn`` the operator's environment explicitly, for an operator
+        whose agent authenticates by subscription login rather than an
+        API key; see ``security/env_jail.py`` on what that gives away.
         """
         queueing = QueueingBroker(timeout_seconds=permission_timeout)
         # ``queueing`` is always the innermost broker, because it is the
@@ -262,6 +288,15 @@ class SessionRegistry:
                 session_key=f"external_agent:{agent_id}",
                 fallback=broker,
             )
+
+        if env is None and not _env_jail_enabled():
+            logger.warning(
+                "external_agents.env_jail is off: spawning %s with the "
+                "operator's full environment, so it can read ~/.claude, "
+                "~/.codex, ~/.ssh and every exported API key",
+                agent_id,
+            )
+            env = dict(os.environ)
 
         process = await AcpAgentProcess.spawn(
             command, cwd=cwd, env=env, broker=broker

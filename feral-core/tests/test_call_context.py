@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from skills.call_context import (
     UNBOUND,
     bind_context,
+    context_enabled,
     current_context,
     new_turn_id,
     require_context,
@@ -94,3 +97,77 @@ async def test_concurrent_binds_do_not_bleed_across_tasks():
 
 def test_turn_ids_are_unique():
     assert new_turn_id() != new_turn_id()
+
+
+# ----------------------------------------------------------------------
+# FERAL_TOOL_CALL_CONTEXT, the kill switch
+# ----------------------------------------------------------------------
+#
+# The knob shipped with ``context_enabled()`` as its only reader and
+# ``context_enabled()`` had no call sites at all, so an operator who set
+# ``coding.tool_call_context: "off"`` changed nothing. These pin that it
+# now reaches the two functions every consumer reads identity through.
+
+
+def test_context_is_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("FERAL_TOOL_CALL_CONTEXT", raising=False)
+    assert context_enabled() is True
+
+
+@pytest.mark.parametrize("value", ["off", "OFF", "0", "false", "No", " off "])
+def test_the_switch_accepts_the_conventional_off_spellings(monkeypatch, value):
+    monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", value)
+    assert context_enabled() is False
+
+
+@pytest.mark.parametrize("value", ["on", "1", "true", "yes", "", "garbage"])
+def test_anything_that_is_not_off_leaves_it_on(monkeypatch, value):
+    monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", value)
+    assert context_enabled() is True
+
+
+def test_switching_off_unbinds_current_context(monkeypatch):
+    with bind_context(session_id="s1", turn_id="t1", surface="websocket"):
+        assert current_context().session_id == "s1"
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "off")
+        assert current_context() == UNBOUND
+        assert current_context().bound is False
+
+
+def test_switching_off_unbinds_require_context(monkeypatch):
+    """``coding_tools`` reads identity through ``require_context``.
+
+    Read-before-edit tracking and checkpoint turn grouping both key off
+    the returned ``session_id`` / ``turn_id``, so an empty context is
+    exactly the "no per-session state" the switch promises.
+    """
+    monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "off")
+    with bind_context(session_id="s1", turn_id="t1"):
+        ctx = require_context("coding_tools__edit_file")
+    assert ctx == UNBOUND
+    assert ctx.turn_id == ""
+
+
+def test_the_switch_is_read_live_not_cached(monkeypatch):
+    """``ConfigLoader.update_settings`` re-exports this at runtime, so a
+    WebUI toggle has to take effect on the next tool call."""
+    with bind_context(session_id="s1"):
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "off")
+        assert current_context() == UNBOUND
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "on")
+        assert current_context().session_id == "s1"
+
+
+def test_binding_still_works_while_the_switch_is_off(monkeypatch):
+    """The switch gates reads, not the contextvar itself.
+
+    Binding has to stay well-formed so that flipping the switch back on
+    mid-session restores identity instead of leaving a torn stack.
+    """
+    monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "off")
+    with bind_context(session_id="outer", turn_id="t1"):
+        with bind_context(session_id="inner"):
+            assert current_context() == UNBOUND
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "on")
+        assert current_context().session_id == "outer"
+        assert current_context().turn_id == "t1"

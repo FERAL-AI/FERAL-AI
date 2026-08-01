@@ -20,7 +20,9 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -631,3 +633,115 @@ class TestFraming:
             assert body["method"] == "initialize"
         finally:
             await proc.close()
+
+
+class TestEnvJailIsTheSpawnDefault:
+    """``spawn(env=None)`` used to inherit the operator's environment.
+
+    An external coding agent got the operator's real ``HOME`` and with
+    it ``~/.claude``, ``~/.codex``, ``~/.ssh`` and every exported API
+    key. ``security/env_jail.py`` existed with no production caller.
+    These pin that the default changed, that a caller can still opt out
+    explicitly, and that the throwaway HOME is cleaned up.
+
+    The probe child dumps its own environment to a file, so every
+    assertion is about what actually crossed the process boundary. It
+    writes to a file rather than stdout because ``spawn`` has already
+    handed stdout to the JSON-RPC peer's read loop.
+    """
+
+    PROBE = (
+        "import json, os, sys\n"
+        "open(sys.argv[1], 'w').write(json.dumps(dict(os.environ)))\n"
+        "import time; time.sleep(5)\n"
+    )
+
+    async def _child_env(self, tmp_path, **spawn_kwargs):
+        script = tmp_path / "probe_env.py"
+        script.write_text(self.PROBE)
+        dump = tmp_path / "child_env.json"
+        proc = await AcpAgentProcess.spawn(
+            [sys.executable, "-u", str(script), str(dump)],
+            cwd=str(tmp_path),
+            **spawn_kwargs,
+        )
+        for _ in range(200):
+            if dump.exists() and dump.stat().st_size:
+                break
+            await asyncio.sleep(0.05)
+        else:  # pragma: no cover - only on a wedged child
+            await proc.close()
+            raise AssertionError(f"probe never wrote its env: {proc.stderr_tail}")
+        return json.loads(dump.read_text()), proc
+
+    async def test_the_child_does_not_get_the_operator_home(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HOME", "/Users/pretend-operator")
+        child_env, proc = await self._child_env(tmp_path)
+        try:
+            assert child_env["HOME"] != "/Users/pretend-operator"
+            assert not Path(child_env["HOME"], ".claude").exists()
+        finally:
+            await proc.close()
+
+    async def test_the_child_does_not_get_operator_secrets(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_should_not_travel")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws_should_not_travel")
+        monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/should-not-travel.sock")
+        child_env, proc = await self._child_env(tmp_path)
+        try:
+            for name in ("GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "SSH_AUTH_SOCK"):
+                assert name not in child_env, f"{name} reached the agent"
+        finally:
+            await proc.close()
+
+    async def test_the_child_keeps_the_model_key_it_needs_to_work(
+        self, tmp_path, monkeypatch
+    ):
+        """The jail is a default, not a way to break every agent."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-for-the-agent")
+        child_env, proc = await self._child_env(tmp_path)
+        try:
+            assert child_env["ANTHROPIC_API_KEY"] == "sk-ant-for-the-agent"
+            assert child_env["PATH"] == os.environ["PATH"]
+        finally:
+            await proc.close()
+
+    async def test_an_explicit_env_still_replaces_verbatim(
+        self, tmp_path, monkeypatch
+    ):
+        """The opt-out ``bridges/sessions.py`` uses when env_jail is off."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_explicitly_passed")
+        child_env, proc = await self._child_env(tmp_path, env=dict(os.environ))
+        try:
+            assert child_env["GITHUB_TOKEN"] == "ghp_explicitly_passed"
+            assert child_env["HOME"] == os.environ["HOME"]
+        finally:
+            await proc.close()
+
+    async def test_the_jail_directory_is_removed_on_close(self, tmp_path):
+        child_env, proc = await self._child_env(tmp_path)
+        jail_home = child_env["HOME"]
+        assert Path(jail_home).is_dir()
+        await proc.close()
+        assert not Path(jail_home).exists()
+
+    async def test_an_explicit_env_leaves_no_jail_to_clean_up(self, tmp_path):
+        _child_env, proc = await self._child_env(tmp_path, env=dict(os.environ))
+        try:
+            assert proc._jail is None
+        finally:
+            await proc.close()
+
+    async def test_a_missing_binary_does_not_leak_a_jail_directory(self, tmp_path):
+        """The FileNotFoundError path runs before anything owns the jail."""
+        before = set(Path(tempfile.gettempdir()).glob("feral-env-jail-*"))
+        with pytest.raises(AcpProtocolError, match="not found"):
+            await AcpAgentProcess.spawn(
+                ["/nonexistent/definitely-not-here"], cwd=str(tmp_path)
+            )
+        after = set(Path(tempfile.gettempdir()).glob("feral-env-jail-*"))
+        assert after == before

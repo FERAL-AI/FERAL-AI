@@ -3,6 +3,7 @@ FERAL Timeline API — Chronological life view
 """
 from __future__ import annotations
 
+import os
 import time
 from fastapi import APIRouter, HTTPException, Query
 
@@ -389,13 +390,23 @@ async def get_autonomy():
 async def set_autonomy(body: dict):
     """Set autonomy mode (strict/hybrid/loose).
 
-    v2026.5.26 — also persists the choice to ``~/.feral/settings.json``
+    v2026.5.26 also persists the choice to ``~/.feral/settings.json``
     under ``security.autonomy_mode`` so the chosen tier survives brain
     restart. Pre-fix this endpoint only mutated the in-memory
     ``ToolRunner._autonomy_mode``; on next ``feral start`` the value
     reverted to ``hybrid`` (or whatever ``FERAL_AUTONOMY`` env var
     pinned). Operator's WebUI Settings -> Autonomy pick was effectively
     a no-op across sessions.
+
+    The tier gates two independent things and they used to move apart.
+    ``ToolRunner`` holds its own ``_autonomy_mode`` and gates tool
+    approvals from it. ``security/exec_mode.current_autonomy_mode()``
+    gates the shell path and reads ``FERAL_AUTONOMY`` and nothing else.
+    Flipping only the first meant an operator who moved to ``strict``
+    got a stricter approval gate immediately and the old, looser shell
+    gate until the next restart re-exported the setting. So the env var
+    is rewritten here too, before the disk write, because the shell gate
+    must not lag the approval gate even when persistence fails.
     """
     mode = body.get("mode", "hybrid")
     if mode not in ("strict", "hybrid", "loose"):
@@ -408,6 +419,12 @@ async def set_autonomy(body: dict):
     # the new tier without waiting for a restart.
     orch.tool_runner.set_autonomy_mode(mode)
 
+    # Second gate, same tier. Unconditional and ahead of the persist:
+    # ``ConfigLoader.update_settings`` now re-exports this too, but the
+    # route must still move it when ``state.config`` is absent or the
+    # disk write throws.
+    os.environ["FERAL_AUTONOMY"] = mode
+
     # Persist so restarts honour the operator's choice. Best-effort:
     # the in-memory flip ABOVE already succeeded; a disk-write failure
     # shouldn't roll back the live state, just log truthfully.
@@ -419,7 +436,7 @@ async def set_autonomy(body: dict):
     except Exception as exc:
         import logging
         logging.getLogger("feral.api.autonomy").warning(
-            "set_autonomy: persist to settings.json failed: %s — "
+            "set_autonomy: persist to settings.json failed: %s, "
             "live mode is %s but restart will revert", exc, mode,
         )
     return {"success": True, "mode": mode, "persisted": persisted}

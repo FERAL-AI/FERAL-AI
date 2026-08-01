@@ -31,6 +31,41 @@ from uuid import uuid4
 
 logger = logging.getLogger("feral.config")
 
+# Secrets that ``export_as_env`` can emit. They are excluded from the
+# runtime re-export in ``update_settings`` for the same reason
+# ``api/state.py::_should_export_runtime_env_key`` excludes them at boot:
+# a channel token belongs in the config object that needs it, not in
+# process-global env where every subprocess inherits it.
+_NEVER_REEXPORT_ENV_KEYS = frozenset({
+    "NODE_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "MOONSHOT_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "TAVILY_API_KEY",
+    "BRAVE_API_KEY",
+    "EXA_API_KEY",
+    "SERPER_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_CSE_ID",
+    "GITHUB_TOKEN",
+    "SPOTIFY_CLIENT_ID",
+    "FERAL_TELEGRAM_BOT_TOKEN",
+    "FERAL_SLACK_BOT_TOKEN",
+    "FERAL_SLACK_APP_TOKEN",
+    "FERAL_SLACK_SIGNING_SECRET",
+    "FERAL_DISCORD_BOT_TOKEN",
+    "FERAL_WHATSAPP_PHONE_NUMBER_ID",
+    "FERAL_WHATSAPP_ACCESS_TOKEN",
+    "FERAL_WHATSAPP_VERIFY_TOKEN",
+    "FERAL_WHATSAPP_APP_SECRET",
+})
+
 DEFAULT_SETTINGS = {
     "version": "0.4.0",
     "llm": {
@@ -369,6 +404,14 @@ DEFAULT_SETTINGS = {
         # unanswered before ``bridges/permissions.py`` rejects it. Floored
         # at 5; there is no value meaning "allow".
         "permission_timeout_seconds": 120,
+        # Spawn external agents in ``security/env_jail.py`` (a throwaway
+        # HOME plus a model-key allowlist) instead of the operator's own
+        # environment. On by default: an unjailed agent can read
+        # ``~/.claude``, ``~/.codex`` and ``~/.ssh`` for free. Turn it off
+        # only if the agent authenticates by subscription login rather
+        # than an API key, since that login lives in the real HOME.
+        # ``bridges/catalog.py::external_agent_settings`` reads it.
+        "env_jail": True,
     },
     # Pairing access mode (Mode A LAN / Mode B localhost / Mode C remote).
     # Default is "localhost" to preserve the historical loopback-only
@@ -1031,8 +1074,64 @@ class ConfigLoader:
             "Credentials saved to encrypted vault (%d key(s))", len(flat_creds)
         )
 
+    def _env_snapshot(self) -> dict[str, str]:
+        """``export_as_env()`` defensively, for diffing. Never raises."""
+        try:
+            return dict(self.export_as_env())
+        except Exception as exc:  # pragma: no cover - export is pure today
+            logger.debug("export_as_env failed during env sync: %s", exc)
+            return {}
+
+    def _publish_env_changes(self, before: dict[str, str]) -> tuple[str, ...]:
+        """Push env vars whose value changed since ``before`` into os.environ.
+
+        This closes the "setting written, env var not exported" defect at
+        its funnel instead of once per surface. Whole subsystems resolve
+        their config ONLY from the environment: ``security/exec_mode``
+        and ``agents/tool_runner`` read ``FERAL_AUTONOMY``,
+        ``agents/learner`` reads ``FERAL_SELF_LEARNING``,
+        ``skills/file_state`` reads ``FERAL_READ_BEFORE_EDIT``. A write
+        that lands in ``settings.json`` and stops there takes effect only
+        on the next ``feral start``, which reads to the operator as the
+        toggle not working.
+
+        Only the diff is applied, so writing ``audio.tts_voice`` touches
+        ``FERAL_TTS_VOICE`` and nothing else. A runtime value set by
+        another subsystem (``api/state.py`` heals ``FERAL_LLM_MODEL``,
+        ``api/routes/llm.py`` installs provider keys) is left alone
+        unless this write genuinely changed it.
+
+        Secrets in :data:`_NEVER_REEXPORT_ENV_KEYS` are never pushed;
+        see that constant.
+        """
+        after = self._env_snapshot()
+        changed: list[str] = []
+        for name, value in after.items():
+            if name in _NEVER_REEXPORT_ENV_KEYS or name.startswith("FERAL_KEY_"):
+                continue
+            if before.get(name) != value:
+                os.environ[name] = value
+                changed.append(name)
+        for name in before:
+            if name in after or name in _NEVER_REEXPORT_ENV_KEYS:
+                continue
+            if name.startswith("FERAL_KEY_"):
+                continue
+            os.environ.pop(name, None)
+            changed.append(name)
+        if changed:
+            logger.debug("settings write re-exported %s", sorted(changed))
+        return tuple(sorted(changed))
+
     def update_settings(self, section: str, key: str, value):
-        """Update a single setting and persist to user config."""
+        """Update a single setting, persist it, and re-export its env var.
+
+        Returns the env var names this write changed in ``os.environ``,
+        which is empty for a setting that has no env mirror. See
+        :meth:`_publish_env_changes` for why the re-export is here rather
+        than in each of the four surfaces that write settings.
+        """
+        before = self._env_snapshot()
         if section not in self._merged:
             self._merged[section] = {}
         self._merged[section][key] = value
@@ -1061,6 +1160,7 @@ class ConfigLoader:
             self._merged.setdefault("features", {})["vision"] = bool(value)
 
         self.save_user_settings(user_settings)
+        return self._publish_env_changes(before)
 
     def mark_setup_complete(self):
         """Mark that initial setup has been completed."""

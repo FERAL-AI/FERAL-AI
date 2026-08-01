@@ -8,7 +8,9 @@ than asserted against a stub session.
 
 from __future__ import annotations
 
+import inspect
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -118,6 +120,7 @@ class TestCatalogueSettings:
         assert block["opencode_version"] == catalog.DEFAULT_OPENCODE_VERSION
         assert block["opencode_bin"] == ""
         assert block["permission_timeout_seconds"] == 120
+        assert block["env_jail"] is True
 
     def test_every_key_is_actually_read(self):
         conf = catalog.external_agent_settings(
@@ -127,6 +130,7 @@ class TestCatalogueSettings:
                     "opencode_bin": "/opt/oc",
                     "opencode_version": "9.9.9",
                     "permission_timeout_seconds": 45,
+                    "env_jail": False,
                 }
             }
         )
@@ -135,12 +139,35 @@ class TestCatalogueSettings:
             "opencode_bin": "/opt/oc",
             "opencode_version": "9.9.9",
             "permission_timeout_seconds": 45.0,
+            "env_jail": False,
         }
 
     def test_a_missing_block_falls_back_to_defaults(self):
         conf = catalog.external_agent_settings({})
         assert conf["default_agent"] == "opencode"
         assert conf["opencode_version"] == catalog.DEFAULT_OPENCODE_VERSION
+
+    def test_the_env_jail_defaults_on_and_survives_a_hand_edited_string(self):
+        """An unset or unparseable value must not read as "no jail".
+
+        The default is the safe direction, and ``"false"`` typed into
+        settings.json by hand has to mean false rather than "non-empty
+        string, therefore true".
+        """
+        assert catalog.external_agent_settings({})["env_jail"] is True
+        assert catalog.external_agent_settings(
+            {"external_agents": {}}
+        )["env_jail"] is True
+        for off in (False, "false", "0", "off", "no"):
+            conf = catalog.external_agent_settings(
+                {"external_agents": {"env_jail": off}}
+            )
+            assert conf["env_jail"] is False, off
+        for on in (True, "true", "1", "yes", "anything-else"):
+            conf = catalog.external_agent_settings(
+                {"external_agents": {"env_jail": on}}
+            )
+            assert conf["env_jail"] is True, on
 
     def test_the_permission_timeout_can_never_be_set_to_zero(self):
         """Zero would mean 'reject instantly', which is a footgun."""
@@ -248,6 +275,68 @@ class TestApprovalManagerLookup:
 
         monkeypatch.setattr("builtins.__import__", explode)
         assert _approval_manager() is None
+
+
+class TestRegistryHonoursTheEnvJailSetting:
+    """``SessionRegistry.open`` decides jail vs inherit, and nothing else.
+
+    The skill used to pass ``env=dict(os.environ)`` at the call site,
+    which meant the jail default in ``AcpAgentProcess.spawn`` could never
+    fire no matter what it was set to. These pin that the decision lives
+    in one place and that the default is the jail.
+    """
+
+    @staticmethod
+    def _recording_spawn(seen):
+        async def fake_spawn(command, **kwargs):
+            seen.append(kwargs.get("env", "MISSING"))
+            raise RuntimeError("stop here, the env is all we needed")
+
+        return fake_spawn
+
+    async def _open(self, monkeypatch, tmp_path, jail: bool):
+        from bridges import sessions as sessions_mod
+
+        seen: list = []
+        monkeypatch.setattr(sessions_mod, "_env_jail_enabled", lambda: jail)
+        monkeypatch.setattr(
+            sessions_mod.AcpAgentProcess, "spawn", self._recording_spawn(seen)
+        )
+        registry = sessions_mod.SessionRegistry(
+            index=sessions_mod.SessionIndex(tmp_path / "sessions.json")
+        )
+        with pytest.raises(RuntimeError, match="stop here"):
+            await registry.open(
+                agent_id="opencode", command=["true"], cwd=str(tmp_path)
+            )
+        return seen[0]
+
+    async def test_the_default_leaves_the_env_to_spawn_so_it_jails(
+        self, monkeypatch, tmp_path
+    ):
+        assert await self._open(monkeypatch, tmp_path, jail=True) is None
+
+    async def test_turning_the_setting_off_hands_over_the_real_environment(
+        self, monkeypatch, tmp_path
+    ):
+        env = await self._open(monkeypatch, tmp_path, jail=False)
+        assert env == dict(os.environ)
+
+    async def test_an_unreadable_setting_jails_rather_than_failing_open(
+        self, monkeypatch, tmp_path
+    ):
+        from bridges import sessions as sessions_mod
+
+        def explode(*_a, **_k):
+            raise RuntimeError("settings unavailable")
+
+        monkeypatch.setattr(catalog, "external_agent_settings", explode)
+        assert sessions_mod._env_jail_enabled() is True
+
+    def test_the_skill_no_longer_pins_the_environment_at_the_call_site(self):
+        """A regression guard on the one line that made the jail moot."""
+        source = Path(inspect.getsourcefile(ExternalAgentSkill)).read_text()
+        assert "env=dict(os.environ)" not in source
 
 
 class TestSkillDispatch:

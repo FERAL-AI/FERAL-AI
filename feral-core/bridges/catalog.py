@@ -137,13 +137,29 @@ class ResolvedAgent:
 # Settings
 # ----------------------------------------------------------------------
 
+def _as_bool(value: Any, default: bool = True) -> bool:
+    """Coerce a settings value to bool, tolerating JSON and string forms.
+
+    A settings file hand-edited to ``"false"`` must not read as True,
+    which is what a bare ``bool()`` would do with a non-empty string.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() not in ("false", "0", "no", "off", "")
+
+
 def external_agent_settings(settings: Optional[dict] = None) -> dict[str, Any]:
     """Read the ``external_agents`` block out of merged FERAL settings.
 
     Reads (this is the reader ``tests/test_settings_keys_have_readers.py``
     looks for): ``external_agents.default_agent``,
-    ``external_agents.opencode_bin``, ``external_agents.opencode_version``
-    and ``external_agents.permission_timeout_seconds``.
+    ``external_agents.opencode_bin``, ``external_agents.opencode_version``,
+    ``external_agents.permission_timeout_seconds`` and
+    ``external_agents.env_jail``.
     """
     if settings is None:
         try:
@@ -170,6 +186,14 @@ def external_agent_settings(settings: Optional[dict] = None) -> dict[str, Any]:
         # Floored, not clamped to a default: 0 would mean "reject every
         # permission instantly", which is a footgun disguised as a value.
         "permission_timeout_seconds": max(5.0, timeout),
+        # Spawn agents in ``security.env_jail`` rather than the
+        # operator's environment. On by default. The escape hatch exists
+        # because the jail replaces HOME, and an operator authenticated
+        # by a Claude or ChatGPT subscription rather than an API key has
+        # their login in ``~/.claude`` / ``~/.codex`` where a jailed
+        # child cannot see it. Turning it off restores the old
+        # behaviour: the agent inherits everything, keys included.
+        "env_jail": _as_bool(block.get("env_jail", True)),
     }
 
 
