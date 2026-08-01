@@ -37,14 +37,22 @@ on CPU while pretending to be the fast option. It stays available as
 
 Leading pad
 -----------
-Whisper drops the first word of an utterance that starts at sample
-zero. Reproduced here on both the native-16kHz and the resampled path:
-the same audio transcribes as "quick brown fox ..." with no pad and
-"The quick brown fox ..." with 100ms of leading silence. Chained-mode
-audio always starts abruptly, because VAD endpointing trims exactly
-the silence Whisper needs, so :data:`LEAD_PAD_MS` is prepended before
-every decode. It costs nothing: whisper zero-pads to a 30s window
-regardless.
+Whisper can drop the first word of an utterance that starts at sample
+zero. Reproduced on both the native-16kHz and the resampled path: one
+clip transcribes as "quick-brown fox jumps over the lazy dog..." with
+no pad and "The quick brown fox jumps over the lazy dog..." with 100ms
+of leading silence in front of it.
+
+It is intermittent, not universal, and that is the awkward part.
+Sampled across five ``say`` utterances, four short ones survived
+unpadded and the longest one did not, so the failure would have shown
+up in production as an occasional missing word rather than as
+something reproducible enough to report.
+
+Chained-mode audio always starts abruptly, because VAD endpointing
+trims exactly the silence Whisper wants, so :data:`LEAD_PAD_MS` is
+prepended before every decode. It costs nothing measurable: whisper
+zero-pads to a 30s window regardless.
 """
 
 from __future__ import annotations
@@ -65,8 +73,9 @@ DEFAULT_MODEL = "base.en"
 WHISPER_SAMPLE_RATE = 16000
 
 #: Silence prepended to every decode, in milliseconds. See the module
-#: docstring: without it Whisper eats the first word of VAD-trimmed
-#: audio. 100ms was the smallest value that recovered it in testing.
+#: docstring: without it Whisper can eat the first word of VAD-trimmed
+#: audio. 100ms was the smallest value tried that recovered it, and
+#: 250ms and 500ms were no better, so the floor is not the cost driver.
 LEAD_PAD_MS = 100
 
 # Process-wide model cache. whisper.cpp models are read-only after

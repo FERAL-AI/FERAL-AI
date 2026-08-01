@@ -54,9 +54,11 @@ logger = logging.getLogger("feral.voice.stt.faster_whisper")
 DEFAULT_MODEL = "base.en"
 WHISPER_SAMPLE_RATE = 16000
 
-#: Silence prepended to every decode, in milliseconds. Whisper eats the
-#: first word of audio that starts at sample zero, and VAD endpointing
-#: guarantees exactly that shape.
+#: Silence prepended to every decode, in milliseconds. Whisper can eat
+#: the first word of audio that starts at sample zero, and VAD
+#: endpointing guarantees exactly that shape. Intermittent rather than
+#: universal; see ``voice/stt_providers/whispercpp.py`` for the
+#: measurements.
 LEAD_PAD_MS = 100
 
 _MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
