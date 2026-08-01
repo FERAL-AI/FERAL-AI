@@ -36,6 +36,17 @@ logger = logging.getLogger("feral.executor")
 # before they add explicit `requires_sandbox: true`.
 SANDBOX_REQUIRED_SKILL_IDS = {"workspace_scripts", "code_interpreter"}
 
+# BlindVault namespace holding per-skill API keys.
+#
+# Skill ids are lowercase (``web_search``) and provider credentials are
+# SCREAMING_CASE env-var names (``OPENAI_API_KEY``), so a flat namespace
+# would *probably* not collide. "Probably" is not a storage contract: a
+# skill legitimately called ``openai_api_key`` would silently read the
+# operator's chat key. The namespaced vault API keeps the two apart, and
+# ``_get_key`` still falls back to the flat namespace so keys written by
+# older builds keep resolving.
+SKILL_KEY_NAMESPACE = "skill_keys"
+
 
 class SkillExecutor:
     """
@@ -80,8 +91,96 @@ class SkillExecutor:
                 logger.info(f"Vault: loaded key for skill '{skill_id}'")
 
     def set_key(self, skill_id: str, key: str):
-        """Manually set an API key for a skill."""
+        """Manually set an API key for a skill (process memory only)."""
         self._vault[skill_id] = key
+
+    def store_key(self, skill_id: str, key: str) -> bool:
+        """Persist a skill API key and make it usable immediately.
+
+        This is the write half of the round trip the operator surfaces
+        (``POST /api/config/credentials`` with ``skill_keys``, and
+        ``POST /api/skills/{skill_id}/key``) need. Before this existed
+        the routes wrote into ``ConfigLoader._credentials["skill_keys"]``,
+        which nothing on the execution path ever read: the ONLY way to
+        give a skill a key was to export ``FERAL_KEY_<skill_id>`` and
+        restart the brain.
+
+        Writes to the encrypted vault first (survives a restart) and to
+        the in-memory cache always (no restart needed). Returns True
+        when the value reached the vault.
+
+        Raises ``ValueError`` for an empty ``skill_id`` / ``key`` so a
+        route cannot store a blank credential and report success.
+        """
+        skill_id = (skill_id or "").strip()
+        key = (key or "").strip()
+        if not skill_id:
+            raise ValueError("skill_id is required")
+        if not key:
+            raise ValueError("key is required")
+
+        self._vault[skill_id] = key
+        persisted = False
+        if self._blind_vault is not None and hasattr(self._blind_vault, "put"):
+            try:
+                self._blind_vault.put(
+                    SKILL_KEY_NAMESPACE, skill_id, key, stored_by="skill_key_api",
+                )
+                persisted = True
+            except Exception as exc:
+                logger.warning(
+                    "store_key: vault write failed for skill '%s': %s — the key "
+                    "is live in this process but will not survive a restart.",
+                    skill_id, exc,
+                )
+        else:
+            logger.warning(
+                "store_key: no vault attached; skill '%s' key is live in this "
+                "process only and will not survive a restart.", skill_id,
+            )
+        return persisted
+
+    def remove_key(self, skill_id: str) -> bool:
+        """Forget a skill API key (memory + vault). True when something went."""
+        skill_id = (skill_id or "").strip()
+        if not skill_id:
+            return False
+        removed = self._vault.pop(skill_id, None) is not None
+        vault = self._blind_vault
+        if vault is not None:
+            for remover, args in (
+                (getattr(vault, "remove_from", None), (SKILL_KEY_NAMESPACE, skill_id)),
+                (getattr(vault, "remove", None), (skill_id,)),
+            ):
+                if remover is None:
+                    continue
+                try:
+                    removed = bool(remover(*args)) or removed
+                except Exception as exc:
+                    logger.warning(
+                        "remove_key: vault delete failed for '%s': %s", skill_id, exc,
+                    )
+        return removed
+
+    def key_ids(self) -> list[str]:
+        """Skill ids that currently have a key, for status surfaces.
+
+        Never returns the values — the UI only needs to know which rows
+        are configured.
+        """
+        ids = set(self._vault.keys())
+        vault = self._blind_vault
+        lister = getattr(vault, "list_namespace", None) if vault is not None else None
+        if lister is not None:
+            try:
+                ids.update(lister(SKILL_KEY_NAMESPACE))
+            except Exception as exc:
+                logger.debug("key_ids: vault listing failed: %s", exc)
+        return sorted(ids)
+
+    def has_key(self, skill_id: str) -> bool:
+        """True when :meth:`_get_key` would resolve a key for this skill."""
+        return bool(self._get_key(skill_id))
 
     def set_blind_vault(self, vault):
         """Connect the BlindVault for secure credential retrieval."""
@@ -146,11 +245,41 @@ class SkillExecutor:
         return True, "ok"
 
     def _get_key(self, skill_id: str) -> Optional[str]:
-        """Get API key — checks BlindVault first, then env cache."""
-        if self._blind_vault:
-            key = self._blind_vault.retrieve(skill_id, requester="executor")
-            if key:
-                return key
+        """Resolve a skill's API key.
+
+        Order, most specific first:
+
+        1. The vault's ``skill_keys`` namespace — what the Settings UI
+           writes through :meth:`store_key`.
+        2. The vault's flat default namespace — where builds before this
+           change put anything a caller passed to ``vault.store``.
+        3. The in-process cache, populated by ``FERAL_KEY_<SKILL_ID>``
+           env vars at construction and by :meth:`set_key` /
+           :meth:`store_key`.
+        """
+        skill_id = (skill_id or "").strip()
+        if not skill_id:
+            return None
+        vault = self._blind_vault
+        if vault is not None:
+            getter = getattr(vault, "get", None)
+            if getter is not None:
+                try:
+                    key = getter(
+                        SKILL_KEY_NAMESPACE, skill_id, requester="executor",
+                    )
+                except Exception as exc:
+                    logger.debug("_get_key: namespaced vault read failed: %s", exc)
+                else:
+                    if key:
+                        return key
+            try:
+                key = vault.retrieve(skill_id, requester="executor")
+            except Exception as exc:
+                logger.debug("_get_key: flat vault read failed: %s", exc)
+            else:
+                if key:
+                    return key
         return self._vault.get(skill_id)
 
     async def execute(

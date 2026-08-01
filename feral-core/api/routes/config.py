@@ -307,6 +307,40 @@ def _is_accepted_env_key(key: str) -> bool:
     return bool(_KEY_ENV_PATTERN.match(key))
 
 
+def _apply_skill_keys(skill_keys: dict) -> tuple[list[str], list[str]]:
+    """Write skill API keys through to the live SkillExecutor.
+
+    Returns ``(saved_skill_ids, rejected_skill_ids)``. Values are never
+    echoed back. Rejection means the id or the value was empty, or the
+    executor is not up yet — in either case the caller must not report
+    the key as saved.
+    """
+    saved: list[str] = []
+    rejected: list[str] = []
+    executor = getattr(state, "skill_executor", None)
+    for skill_id, secret in (skill_keys or {}).items():
+        if not isinstance(skill_id, str) or not isinstance(secret, str):
+            rejected.append(str(skill_id))
+            continue
+        if executor is None:
+            rejected.append(skill_id)
+            continue
+        try:
+            executor.store_key(skill_id, secret)
+        except Exception as exc:
+            logger.warning("skill key store failed for %r: %s", skill_id, exc)
+            rejected.append(skill_id)
+            continue
+        saved.append(skill_id)
+    if rejected and executor is None:
+        logger.warning(
+            "skill_keys posted but no SkillExecutor is running; %d key(s) "
+            "dropped rather than written somewhere nothing reads.",
+            len(rejected),
+        )
+    return saved, rejected
+
+
 @router.post("/api/config/credentials")
 async def save_credentials(body: dict):
     """Save API credentials.
@@ -321,16 +355,36 @@ async def save_credentials(body: dict):
 
         { "OPENAI_API_KEY": "...", "GEMINI_API_KEY": "...",
           "skill_keys": { "<skill_id>": "..." } }
+
+    ``skill_keys`` entries are written through to the running
+    ``SkillExecutor`` (vault ``skill_keys`` namespace plus its in-process
+    cache), so the key is usable on the next tool call with no restart.
+    They are reported back under ``skill_keys_saved`` /
+    ``skill_keys_rejected`` rather than ``keys_saved``.
     """
     creds: dict = {}
     rejected: list[str] = []
+    skill_keys_saved: list[str] = []
+    skill_keys_rejected: list[str] = []
     for key, value in (body or {}).items():
         if key == "skill_keys" and isinstance(value, dict):
             creds["skill_keys"] = value
-            # Skill keys are read from the in-process registry / vault at
-            # call time (see ``skills/executor.py``); we no longer push
-            # them through ``os.environ`` because that leaked test-case
+            # Skill keys go straight to the SkillExecutor, which owns the
+            # vault namespace the execution path reads. They are NOT
+            # pushed through ``os.environ`` because that leaked test-case
             # state across the entire process.
+            #
+            # This write-through is the fix for the dead round trip: the
+            # route used to hand ``skill_keys`` to
+            # ``ConfigLoader.save_credentials`` and stop there. That
+            # landed the value in ``ConfigLoader._credentials`` where the
+            # only reader was ``ConfigLoader.get_skill_key``, which no
+            # production code calls. A key typed into Settings therefore
+            # never reached ``SkillExecutor._get_key``, and the only
+            # working path was ``FERAL_KEY_<SKILL_ID>`` plus a restart.
+            saved, rejected_ids = _apply_skill_keys(value)
+            skill_keys_saved.extend(saved)
+            skill_keys_rejected.extend(rejected_ids)
             continue
         if not _is_accepted_env_key(key):
             rejected.append(key)
@@ -463,6 +517,11 @@ async def save_credentials(body: dict):
         "persisted_to_credentials_json": persisted_to_creds,
         "persisted_to_vault": persisted_to_vault,
         "rejected": rejected,
+        # Reported separately from ``keys_saved`` because a skill key is
+        # not an env var and lands in a different store. A UI that shows
+        # "saved" must key off this list, not off a 200.
+        "skill_keys_saved": skill_keys_saved,
+        "skill_keys_rejected": skill_keys_rejected,
     }
 
 
