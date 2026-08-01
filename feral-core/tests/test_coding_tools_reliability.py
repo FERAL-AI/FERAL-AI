@@ -476,8 +476,20 @@ def test_no_em_dashes_in_the_new_modules():
         "skills/file_state.py", "skills/checkpoints.py",
         "skills/diagnostics.py", "api/routes/checkpoints.py",
         "tests/test_coding_tools_reliability.py",
+        # The manifest is owned by this lane, and the rule is repo-wide
+        # rather than scoped to lines we authored. Checked after a JSON
+        # round-trip because the file stores them as \\u2014 escapes, so a
+        # raw byte scan reads clean while the delivered string is not.
+        "skills/manifests/coding_tools.json",
     ):
-        assert em_dash not in (root / rel).read_text(), f"em dash in {rel}"
+        text = (root / rel).read_text()
+        assert em_dash not in text, f"em dash in {rel}"
+        if rel.endswith(".json"):
+            import json
+
+            assert em_dash not in json.dumps(json.loads(text)), (
+                f"escaped em dash (\\u2014) in {rel}"
+            )
 
 
 def test_asyncio_is_importable_for_the_lock_fixture():

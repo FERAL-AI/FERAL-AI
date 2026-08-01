@@ -176,7 +176,7 @@
       "id": "grep_search",
       "method": "PYTHON",
       "url": "",
-      "description": "Search for a regex pattern in files (ripgrep-backed). Defaults to returning matching FILE NAMES (output_mode='files_with_matches') \u2014 cheap and best for narrowing; ask for output_mode='content' only after you know which files matter. Paths are relative to the workspace root.",
+      "description": "Search for a regex pattern in files (ripgrep-backed). Defaults to returning matching FILE NAMES (output_mode='files_with_matches'), which is cheap and best for narrowing; ask for output_mode='content' only after you know which files matter. Paths are relative to the workspace root.",
       "params": [
         {
           "name": "pattern",
@@ -200,7 +200,7 @@
           "name": "output_mode",
           "type": "string",
           "required": false,
-          "description": "'files_with_matches' (default \u2014 file names), 'content' (lines with line numbers), or 'count' (per-file counts). Prefer files_with_matches first to save context."
+          "description": "'files_with_matches' (default: file names), 'content' (lines with line numbers), or 'count' (per-file counts). Prefer files_with_matches first to save context."
         },
         {
           "name": "head_limit",
@@ -246,7 +246,7 @@
           "description": "Max files to return (default 100; 0 = unlimited). Truncated responses set {truncated: true}."
         }
       ],
-      "returns_description": "{files[], total, truncated?} \u2014 files relative to workspace root, newest first",
+      "returns_description": "{files[], total, truncated?}: files relative to workspace root, newest first",
       "ui_hint": "list",
       "safety_tier": "safe",
       "read_only_hint": true,
