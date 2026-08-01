@@ -1,10 +1,104 @@
 # Changelog
 
-<!-- feral-version: 2026.8.1 -->
+<!-- feral-version: 2026.8.2 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.2] - 2026-08-01 - external coding agents, cross-agent memory, command hardening
+
+### Added
+
+- **feat(bridges): cross-agent session memory and continuity.** Each external
+  agent turn becomes one episode in the existing memory store, not a parallel
+  one: a test asserts the record surfaces through `notes_memory__fused_timeline`,
+  which predates this feature and knows nothing about external agents, so decay,
+  sync and encryption apply for free. A real run emits over a thousand events;
+  what is kept is one entry per `toolCallId` (never fewer, with
+  `INTERRUPTED_TOOL_CALL` preserved when a call has no terminal state), the files
+  touched, and **the permissions and their refusals**, which is the one thing the
+  event stream never contains because an agent narrates what it did and never
+  what it was stopped from doing. Agent reasoning chunks and intermediate tool
+  states are dropped, with the discarded count recorded so the record is honest
+  about it.
+
+  `bridges/continuity.py` maps a FERAL handle to an agent session across process
+  death, reusing the original handle so a caller holding it from an hour ago is
+  not stranded. **It prefers `session/resume` over `session/load`, which is the
+  opposite of what the capability naming suggests:** opencode's `loadSession`
+  replays the entire prior conversation as `session/update` notifications, which
+  is right for an editor repainting a transcript and actively wrong here, because
+  the replay lands in the session transcript and the next turn's digest would
+  attribute the previous turn's work to the new turn. When load is the only
+  option the transcript is cleared first. An agent that advertises neither gets
+  restart-with-context, briefed from the stored record, and says so rather than
+  implying continuity. hermes' `resume_session` silently creates a new session
+  when the id is unknown and returns success, which a client cannot detect, so
+  continuity is reported as likely rather than certain.
+
+- **feat(health): Whoop data is durable, and there is a health frame the phone
+  can render.** Whoop was live-fetched into a transient dict, so no history
+  survived and any question about a trend was unanswerable however long the
+  account had been connected. Records now mirror into `biometric_samples` rather
+  than a new table, because every field synced is already a scalar with a
+  timestamp and a source. Workouts are deliberately not synced: a workout is an
+  interval event with a categorical sport, not a point reading.
+
+  Two things had to be true first. The 35-day prune is right for a 1 Hz BLE
+  sensor and destroys the point of mirroring a ten-rows-a-day cloud wearable, so
+  cloud sources get a 400-day horizon while **live sensors still prune at exactly
+  35 days, unchanged**. And Whoop's `resting_heart_rate` is one derived value a
+  day while the glasses' `hr` is a PPG sample many times a minute, so sharing a
+  metric name would have corrupted every min, max and average in `vitals_trend`.
+  Cloud sources are restricted to a `daily` metric family, enforced in the
+  vocabulary itself so a future mapping typo cannot reintroduce it.
+
+  New `health_update` frame, envelope mirroring `device_event` exactly rather
+  than inventing a vocabulary. `health_summary` and `vitals_trend` carry the same
+  reading shape so one renderer handles both. `precision` is a display hint only;
+  the stored value keeps the source's own precision, after a bug that persisted
+  HRV 78.5 ms as 78.0 ms because it rounded on write.
+
+  `integrations/health_canonical.py` does not add a sixth reading shape. It
+  promotes the `biometric_samples` row, the only one already persisted,
+  source-tagged, per-sample timestamped and queryable over a window; the other
+  four are lossy projections of it.
+
+### Fixed
+
+- **fix(security): a model-authored grep pattern could hang the brain forever.**
+  `_grep_fallback` compiled the pattern with Python's backtracking engine and no
+  timeout. Verified: `(a+)+$` against thirty characters does not return, with no
+  way to interrupt it. Patterns now go through a ReDoS-safe compiler that refuses
+  backreferences, lookarounds, nested quantifiers and quantified alternations,
+  and the tool returns a 400 naming the problem. The ripgrep path needed no guard
+  because Rust's engine is linear-time by construction; only the fallback was
+  ever exposed.
+
+- **fix(security): obfuscated shell commands read as innocent.** Policy checks
+  matched the literal command string, so `echo cm0gLXJmIC8K | base64 -d | sh`
+  passed a pattern set that exists to stop exactly that. A recursive unwrapper
+  now strips heredocs, decodes ANSI-C quoting including hex and unicode escapes,
+  unwraps quotes, extracts command substitutions, and recurses on anything piped
+  to a shell, with base64 and hex payloads refused outright. This is
+  pre-normalisation, not a replacement: the allowlist posture is unchanged and
+  remains stronger than a denylist.
+
+- **fix(integrations): OAuth probes never refreshed, so a working connection read
+  as disconnected.** The probe read `access_token` straight out of the stored
+  blob, and `OAuthManager.get_token` is the only thing that refreshes. Any probe
+  more than a token lifetime after connecting returned 401. Whoop's tokens last
+  about an hour, which made it permanent rather than a rare race; Google, Spotify
+  and Microsoft share the lifetime and shared the bug. All five OAuth2 providers
+  now refresh. `home_assistant` keeps the plain read, its token being long-lived
+  with no refresh flow.
+
+- **fix(integrations): completing Oura's OAuth stored a token nothing could
+  load.** `OuraClient` was constructed with no `oauth_manager` on the line
+  directly below `WhoopClient`, which does pass one, so `_headers` could only ever
+  read `FERAL_OURA_TOKEN` from the environment.
+
 
 ### Added
 
