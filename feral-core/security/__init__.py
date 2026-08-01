@@ -45,6 +45,21 @@ _LAZY: dict[str, tuple[str, str]] = {
     "verify_session": ("security.session_auth", "verify_session"),
     # device_pairing
     "DevicePairingStore": ("security.device_pairing", "DevicePairingStore"),
+    # command_unwrap
+    "scannable_command": ("security.command_unwrap", "scannable_command"),
+    "obfuscation_findings": ("security.command_unwrap", "obfuscation_findings"),
+    # safe_regex
+    "compile_safe_regex": ("security.safe_regex", "compile_safe_regex"),
+    "is_pattern_safe": ("security.safe_regex", "is_pattern_safe"),
+    "UnsafePatternError": ("security.safe_regex", "UnsafePatternError"),
+    # content_defense
+    "wrap_external_content": ("security.content_defense", "wrap_external_content"),
+    "detect_injection_attempt": ("security.content_defense", "detect_injection_attempt"),
+    "screen_content": ("security.content_defense", "screen_content"),
+    "ScreenVerdict": ("security.content_defense", "ScreenVerdict"),
+    # env_jail
+    "build_child_env": ("security.env_jail", "build_child_env"),
+    "env_jail": ("security.env_jail", "env_jail"),
     # audit_log (new in v2026.5.38)
     "audit_event": ("security.audit_log", "audit_event"),
     "audit_event_or_raise": ("security.audit_log", "audit_event_or_raise"),
