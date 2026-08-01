@@ -24,6 +24,11 @@ from security.safety_resolver import (
     is_read_only,
     resolve_policy,
 )
+from agents.plan_mode import (
+    PlanModeState,
+    is_plan_safe_tool,
+    plan_mode_refusal,
+)
 from agents.tool_dispatch_validator import (
     ToolDispatchValidator,
     make_tool_error_envelope,
@@ -105,6 +110,13 @@ class ToolRunner:
         # Fallback turn ids for dispatch paths with no orchestrator turn
         # record behind them (cron, taskflows). See `_turn_id_for`.
         self._synthetic_turns: dict[str, tuple[str, float]] = {}
+        # Plan mode lives HERE, not on the orchestrator, because the
+        # dispatch gate is the enforcement point that actually holds and
+        # it has to work even on paths that never went through the
+        # orchestrator's tool-list filter (voice builds its list from
+        # `get_all_tools()`). The orchestrator exposes it as
+        # `Orchestrator.plan_mode`; there is exactly one instance.
+        self.plan_mode = PlanModeState()
 
         raw_mode = os.environ.get("FERAL_AUTONOMY", "").strip().lower() or autonomy_mode
         self._autonomy_mode = raw_mode if raw_mode in VALID_AUTONOMY_MODES else "hybrid"
@@ -214,6 +226,42 @@ class ToolRunner:
         manifest-aware resolver. Returns ``None`` if the orchestrator is
         not wired (rare; mostly happens in unit tests using mocks)."""
         return getattr(self._orch, "skills", None)
+
+    # ─────────────────────────────────────────────
+    # Plan mode: hard dispatch gate
+    # ─────────────────────────────────────────────
+
+    def enforce_plan_mode(self, tool_name: str, session_id: str) -> Optional[dict]:
+        """Refuse any non-plan-safe call while the session is in plan mode.
+
+        This is the enforcement point that matters. Filtering the exposed
+        tool list in the orchestrator is advisory: the model can name a
+        tool it was never given, and the voice surfaces assemble their
+        tool list from ``SkillRegistry.get_all_tools()`` on a completely
+        separate path that the orchestrator filter never touches. Every
+        LLM-originated call funnels through here, so here is where the
+        mode becomes true rather than merely suggested.
+
+        Placed ABOVE the MCP, subagent and daemon branches on purpose:
+        none of those carry manifest safety metadata, and all three would
+        otherwise be a hole straight through the mode.
+        """
+        if not self.plan_mode.is_active(session_id):
+            return None
+        if is_plan_safe_tool(tool_name, self._skill_registry()):
+            return None
+        logger.warning(
+            "plan mode blocked %r for session %s", tool_name, (session_id or "")[:8],
+        )
+        try:
+            from observability.metrics import increment
+            increment(
+                "feral_plan_mode_blocked_total",
+                attributes={"tool": tool_name or "", "session": session_id or ""},
+            )
+        except Exception:  # instrumentation must never break the gate
+            logger.debug("plan-mode block metric failed", exc_info=True)
+        return plan_mode_refusal(tool_name, session_id=session_id)
 
     def classify_safety(self, tool_name: str, args: dict) -> str:
         """Manifest-aware safety classification.
@@ -548,6 +596,10 @@ class ToolRunner:
     def clear_session(self, session_id: str):
         """Remove anti-loop state for a disconnected session."""
         self._tool_repeat_state.pop(session_id, None)
+        # Plan mode is per-session and ephemeral by design, so it dies with
+        # the session rather than outliving a disconnect the user can no
+        # longer see.
+        self.plan_mode.clear_session(session_id)
 
     # ─────────────────────────────────────────────
     # Daemon Command Execution
@@ -919,6 +971,11 @@ class ToolRunner:
         args = tool_call["args"]
         logger.info(f"  LLM Tool call: {tool_name}({json.dumps(args)[:200]})")
 
+        # Plan mode, before every other branch. See `enforce_plan_mode`.
+        plan_refusal = self.enforce_plan_mode(tool_name, session_id)
+        if plan_refusal is not None:
+            return plan_refusal
+
         mcp_client = self._orch._mcp_client
         if tool_name.startswith("mcp_") and mcp_client:
             denial = self.enforce_safety(
@@ -1114,6 +1171,15 @@ class ToolRunner:
         args = tool_call["args"]
         logger.info(f"  Tool call: {tool_name}({json.dumps(args)[:200]})")
 
+        # The UI-event / action-intent dispatch path reaches the executor
+        # without passing through `_execute_tool_call_for_llm_inner`, so it
+        # needs its own gate. Plan mode means this session mutates nothing,
+        # regardless of which dispatch lane the call arrived on.
+        plan_refusal = self.enforce_plan_mode(tool_name, session_id)
+        if plan_refusal is not None:
+            await self._orch._send_text(session_id, plan_refusal["reason"])
+            return
+
         parts = tool_name.split("__", 1)
         if len(parts) != 2:
             await self._orch._send_text(session_id, f"Invalid tool reference: {tool_name}")
@@ -1177,6 +1243,16 @@ class ToolRunner:
 
     async def spawn_subagents(self, session_id: str, args: dict) -> dict:
         """Run multiple sub-tasks in parallel with isolated subagent contexts."""
+        # Defence in depth. `_execute_tool_call_for_llm_inner` already
+        # refuses `subagent__spawn_subagent` in plan mode, but this method
+        # is public and is also reachable via
+        # `Orchestrator._spawn_subagents_for_task`. Without the second
+        # check plan mode would leak wholesale: subagents run through the
+        # same dispatch gate but under `_run_subagent_task`'s
+        # `{parent}:sub:{n}:{rand}` session id.
+        if self.plan_mode.is_active(session_id):
+            return plan_mode_refusal("subagent__spawn_subagent", session_id=session_id)
+
         tasks_arg = args.get("tasks")
         if isinstance(tasks_arg, str):
             tasks = [tasks_arg]

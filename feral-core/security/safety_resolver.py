@@ -157,14 +157,42 @@ def is_read_only(
     tool_name: str,
     *,
     registry: Optional["SkillRegistry"] = None,
+    strict: bool = False,
 ) -> bool:
     """Manifest-aware read-only check used by strict-mode autonomy.
 
-    Prefers the manifest's ``read_only_hint`` when set; otherwise falls
-    back to the substring heuristic the legacy classifier used so we
-    don't regress existing behaviour for unannotated third-party
-    skills."""
+    Default (``strict=False``) prefers the manifest's ``read_only_hint``
+    when set and otherwise falls back to the substring heuristic the
+    legacy classifier used, so we don't regress existing behaviour for
+    unannotated third-party skills.
+
+    ``strict=True`` skips the substring fallback entirely and answers
+    only from declared metadata: ``read_only_hint is True`` OR
+    ``safety_tier == "safe"``, and never when the endpoint also demands
+    user approval. Absence of metadata means False.
+
+    Strict mode exists because the substring list is far too generous to
+    be a security boundary. ``_LEGACY_READ_ONLY_TOKENS`` admits any name
+    containing ``read``, ``status``, ``list`` or ``current``, which in
+    the manifests shipping in this repo alone lets through
+    ``messaging_sms__slack_reply_to_thread`` (matches ``read`` inside
+    "thread"), ``messaging_sms__slack_set_status`` and
+    ``spotify_music__play_playlist``. All three mutate remote state.
+    Anything asking "is this endpoint incapable of mutation?" (plan
+    mode) must pass ``strict=True``; the graduated-autonomy caller keeps
+    the lenient default so unannotated third-party skills behave as
+    before.
+    """
     endpoint = _find_endpoint(tool_name, registry)
+    if strict:
+        if endpoint is None:
+            return False
+        if getattr(endpoint, "requires_user_approval", False):
+            return False
+        if endpoint.read_only_hint is True:
+            return True
+        tier = (getattr(endpoint, "safety_tier", None) or "").strip().lower()
+        return tier == "safe"
     if endpoint is not None and endpoint.read_only_hint:
         return True
     name_lower = (tool_name or "").lower()

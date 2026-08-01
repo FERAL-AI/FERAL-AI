@@ -6,21 +6,38 @@ so the runner, templating (L4), and safety pre-flight (L2) all apply uniformly.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from skills.base import BaseSkill
 from skills.impl import register_skill
+from skills.impl.todo_store import TodoValidationError, get_store
 
 
 # Optional test/embedding overrides.
 _TASKFLOWS_OVERRIDE: Any = None
 _PACKS_OVERRIDE: Any = None
+_TODO_STORE_OVERRIDE: Any = None
 
 
 def set_overrides(taskflows: Any = None, packs: Any = None) -> None:
     global _TASKFLOWS_OVERRIDE, _PACKS_OVERRIDE
     _TASKFLOWS_OVERRIDE = taskflows
     _PACKS_OVERRIDE = packs
+
+
+def _get_todo_store() -> Any:
+    return _TODO_STORE_OVERRIDE if _TODO_STORE_OVERRIDE is not None else get_store()
+
+
+def _todo_session_id(args: Dict[str, Any]) -> str:
+    """Prefer the ambient call context over the model-supplied value, so
+    the model cannot write a list into someone else's session."""
+    try:
+        from skills.call_context import current_context
+        bound = getattr(current_context(), "session_id", "") or ""
+    except Exception:
+        bound = ""
+    return bound or str(_arg_value(args, "session_id") or "")
 
 
 def _get_taskflows() -> Any:
@@ -64,6 +81,12 @@ class FeralWorkflowsSkill(BaseSkill):
 
     async def execute(self, endpoint_id: str, args: Dict[str, Any], vault: Dict[str, str]) -> Dict[str, Any]:
         del vault
+        # Handled BEFORE the TaskFlow-runtime check on purpose. The todo
+        # list is the agent's own scratch state, not a TaskFlow, so it must
+        # not 503 on an install where the runtime is absent.
+        if endpoint_id == "todo_write":
+            return self._todo_write(args)
+
         taskflows = _get_taskflows()
         if taskflows is None:
             return {
@@ -142,6 +165,60 @@ class FeralWorkflowsSkill(BaseSkill):
         if flow is None:
             return {"success": False, "status_code": 404, "data": None, "error": f"Workflow {flow_id} not found"}
         return {"success": True, "status_code": 200, "data": {"flow": flow}, "error": None}
+
+    def _todo_write(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Replace this session's todo list wholesale and echo it back.
+
+        Full replacement rather than incremental patches is the point: the
+        model rewrites the list from what it last saw, so an incremental
+        API guarantees the model's view and the store drift apart. The
+        server enforces at most one ``in_progress`` item because a focus
+        mechanism that only asks nicely is a wish list.
+
+        The echo is what the model reads on the next turn, so it must
+        survive the result budget intact. ``todo_write`` declares the
+        ``feed`` tier in the manifest (50 list items) and
+        ``todo_store.MAX_TODO_ITEMS`` caps the list at 40, strictly under
+        it. Without both halves the endpoint would inherit ``standard`` at
+        20 items and a longer list would come back truncated, after which
+        the model rewrites from the truncated view and silently loses the
+        tail.
+        """
+        raw = _arg_value(args, "todos")
+        if raw is None:
+            return {
+                "success": False,
+                "status_code": 400,
+                "data": None,
+                "error": "todo_write requires a 'todos' array (the COMPLETE list).",
+                "error_code": "missing_required_field",
+                "field": "todos",
+            }
+
+        session_id = _todo_session_id(args)
+        store = _get_todo_store()
+        try:
+            rows = store.replace(session_id, raw)
+        except TodoValidationError as exc:
+            return {
+                "success": False,
+                "status_code": 400,
+                "data": None,
+                "error": exc.message,
+                "error_code": exc.error_code,
+                "field": "todos",
+            }
+
+        return {
+            "success": True,
+            "status_code": 200,
+            "data": {
+                "todos": rows,
+                "counts": store.counts(rows),
+                "session_id": session_id,
+            },
+            "error": None,
+        }
 
     def _instantiate_pack(self, taskflows, args: Dict[str, Any]) -> Dict[str, Any]:
         workflow_id = str(_arg_value(args, "workflow_id", "pack_id") or "").strip()

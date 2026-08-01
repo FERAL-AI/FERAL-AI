@@ -249,6 +249,7 @@ class IdentityLoader:
         full_catalog: list["SkillManifest"] | None = None,
         memory_filter: str = "",
         query: str = "",
+        plan_mode: bool = False,
     ) -> str:
         """Assemble the full system prompt for an LLM conversation turn.
 
@@ -264,8 +265,25 @@ class IdentityLoader:
                 context builder so knowledge-graph + episode search fire per
                 turn. Empty string = legacy behaviour (working memory + recent
                 episodes only).
+            plan_mode: True while the session is in plan mode. Adds the
+                plan-mode block near the top of the prompt. Callers are
+                expected to have already pruned ``skills`` / ``full_catalog``
+                to their plan-safe endpoints; this flag only controls the
+                prose, it does not filter anything itself.
         """
         identity = identity_text if identity_text is not None else self.load_identity()
+
+        # Plan mode goes FIRST, ahead of the tool-selection block, because
+        # that block is an aggressive "if a tool exists, call it" instruction
+        # and would otherwise read as a licence to act. This one says the
+        # opposite for this turn, so it has to win.
+        plan_mode_header = ""
+        if plan_mode:
+            try:
+                from agents.plan_mode import plan_mode_prompt_block
+                plan_mode_header = plan_mode_prompt_block() + "\n"
+            except Exception:
+                logger.debug("plan-mode prompt block unavailable", exc_info=True)
 
         # The static header is structured so the most-violated disciplines
         # (tool-selection, grounded recall, honest execution) land BEFORE
@@ -273,7 +291,7 @@ class IdentityLoader:
         # signals at the top of the prompt; budget-priced models honour
         # the last instruction. Putting these blocks first AND echoing the
         # critical ones near the end (Execution Bias) covers both shapes.
-        prompt = (
+        prompt = plan_mode_header + (
             "## Tool-Selection Discipline\n"
             "Tools are FERAL's senses and hands. Calling the right tool beats parametric\n"
             "guessing every time. Before answering, ask: is there a tool that would\n"

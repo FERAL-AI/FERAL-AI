@@ -719,3 +719,68 @@
   cursor: pointer;
 }
 .v2-int-copy:hover { background: var(--v2-surface-2); }
+
+/* ── Todo panel ───────────────────────────────────────────────────
+   Pinned between the transcript and the composer. Deliberately quiet:
+   it is persistent chrome, not a message, so it must not compete with
+   the conversation for attention. */
+.v2-todo-panel { margin: 6px 0 0; }
+.v2-todo-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  border-radius: var(--v2-radius-xs);
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--v2-text-primary);
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+.v2-todo-panel__head:focus-visible { outline: none; box-shadow: var(--v2-shadow-focus); }
+.v2-todo-panel__title { font-weight: 600; flex-shrink: 0; }
+.v2-todo-panel__meta {
+  color: var(--v2-text-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.v2-todo-panel__now {
+  flex: 1;
+  min-width: 0;
+  color: var(--v2-text-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v2-todo-panel__list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.v2-todo {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--v2-text-primary);
+}
+.v2-todo__icon { flex-shrink: 0; margin-top: 3px; }
+.v2-todo__icon--done { color: var(--v2-state-live); }
+.v2-todo__icon--active { color: var(--v2-accent, var(--v2-text-primary)); }
+.v2-todo__icon--pending { color: var(--v2-text-tertiary); }
+.v2-todo__text { min-width: 0; overflow-wrap: anywhere; }
+.v2-todo--completed .v2-todo__text {
+  color: var(--v2-text-tertiary);
+  text-decoration: line-through;
+}
+.v2-todo--in_progress .v2-todo__text { font-weight: 600; }
