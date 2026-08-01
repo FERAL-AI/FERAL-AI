@@ -1,0 +1,81 @@
+"""REST surface for FERAL's file-write checkpoints.
+
+Read the turns the agent has written files in, inspect what a revert
+would do, and run one. Backed by ``skills/checkpoints.py``, which stores
+content-addressed blobs plus a SQLite index under
+``$FERAL_HOME/checkpoints`` and never invokes git.
+
+``feral checkpoints`` in the CLI deliberately does NOT go through these
+routes: it reads the same SQLite directly, because the case you most
+need a revert in is the one where the brain is wedged and its HTTP
+surface is not answering.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException
+
+from skills.checkpoints import BASH_NOT_COVERED_NOTE, get_store
+
+router = APIRouter(tags=["checkpoints"])
+
+
+def _store():
+    try:
+        return get_store()
+    except Exception as exc:  # noqa: BLE001 - surfaced as 503, not a 500 trace
+        raise HTTPException(
+            status_code=503, detail=f"Checkpoint store unavailable: {exc}",
+        ) from exc
+
+
+@router.get("/api/checkpoints/turns")
+async def list_turns(session_id: str = "", limit: int = 20):
+    """Turns that wrote at least one file, most recent first."""
+    rows = _store().list_turns(
+        session_id=session_id.strip() or None,
+        limit=max(1, min(int(limit), 200)),
+    )
+    return {"count": len(rows), "turns": rows, "note": BASH_NOT_COVERED_NOTE}
+
+
+@router.get("/api/checkpoints/turns/{turn_id}")
+async def turn_detail(turn_id: str):
+    """Per-write rows for one turn, plus the revert plan for it."""
+    store = _store()
+    entries = store.entries_for_turn(turn_id)
+    if not entries:
+        raise HTTPException(
+            status_code=404, detail=f"No checkpoints recorded for turn '{turn_id}'",
+        )
+    return {
+        "turn_id": turn_id,
+        "writes": entries,
+        "plan": store.plan_revert(turn_id),
+    }
+
+
+@router.post("/api/checkpoints/revert")
+async def revert(body: dict):
+    """Revert a turn.
+
+    ``force`` defaults to false, and without it any file whose current
+    content no longer matches what the agent left is listed and skipped
+    rather than clobbered. That refusal is the point of the endpoint: a
+    revert that silently discards somebody else's newer edit is worse
+    than no revert at all.
+    """
+    store = _store()
+    turn_id = str((body or {}).get("turn_id") or "").strip()
+    session_id = str((body or {}).get("session_id") or "").strip()
+    if not turn_id:
+        turn_id = store.latest_turn(session_id or None) or ""
+    if not turn_id:
+        raise HTTPException(status_code=404, detail="No checkpointed turn to revert")
+
+    result = store.revert_turn(
+        turn_id,
+        force=bool((body or {}).get("force", False)),
+        dry_run=bool((body or {}).get("dry_run", False)),
+    )
+    return result

@@ -28,6 +28,7 @@ from agents.tool_dispatch_validator import (
     ToolDispatchValidator,
     make_tool_error_envelope,
 )
+from skills.call_context import bind_context, new_turn_id
 from skills.result_budget import serialize_tool_result
 
 MAX_LLM_TOOLS = 64
@@ -101,6 +102,9 @@ class ToolRunner:
         # to local construction.
         self._approval_mgr = approval_manager or ApprovalManager()
         self._dispatch_validator: Optional[ToolDispatchValidator] = None
+        # Fallback turn ids for dispatch paths with no orchestrator turn
+        # record behind them (cron, taskflows). See `_turn_id_for`.
+        self._synthetic_turns: dict[str, tuple[str, float]] = {}
 
         raw_mode = os.environ.get("FERAL_AUTONOMY", "").strip().lower() or autonomy_mode
         self._autonomy_mode = raw_mode if raw_mode in VALID_AUTONOMY_MODES else "hybrid"
@@ -372,6 +376,63 @@ class ToolRunner:
             if isinstance(value, str) and value:
                 return value
         return "websocket"
+
+    # ─── Turn identity ───
+
+    def _turn_id_for(self, session_id: str) -> str:
+        """Stable id for the user message this tool call is answering.
+
+        ``turn_id`` does not exist anywhere in FERAL today, and
+        ``skills/checkpoints.py`` needs one to group "everything the agent
+        wrote while answering this message" so a revert undoes a coherent
+        unit rather than one arbitrary file write.
+
+        Minting it here rather than in the orchestrator (which this lane
+        must not touch) works because the orchestrator already opens one
+        record per user message in ``Orchestrator._begin_turn`` and pushes
+        it on ``_active_turns[session_id]``. We read the innermost record
+        and stamp an id into it the first time we see it. That is an
+        additive key on a dict the orchestrator only ever reads named
+        fields from, so it changes no existing behaviour, and the id is a
+        genuine per-user-message identity rather than a heuristic.
+
+        Subagent sessions (``<parent>:sub:<n>:<rand>``) resolve to the
+        parent's turn, so the six workers ``spawn_subagents`` runs in
+        parallel all check point into the turn that spawned them. That is
+        what makes "revert that" undo the whole fan-out.
+
+        Paths with no orchestrator turn behind them at all (cron,
+        taskflows, the REST tool surface) fall back to a per-session id
+        that rotates after an idle gap. That fallback IS a heuristic and
+        is only used where the alternative is no grouping at all.
+        """
+        base = session_id.split(":sub:")[0]
+        stack = getattr(self._orch, "_active_turns", None)
+        if isinstance(stack, dict):
+            records = stack.get(base) or stack.get(session_id)
+            if records:
+                turn = records[-1]
+                if isinstance(turn, dict):
+                    turn_id = turn.get("_feral_turn_id")
+                    if not turn_id:
+                        turn_id = new_turn_id()
+                        turn["_feral_turn_id"] = turn_id
+                    return str(turn_id)
+        return self._synthetic_turn_id(base)
+
+    def _synthetic_turn_id(self, session_id: str) -> str:
+        try:
+            idle_after = float(os.environ.get("FERAL_TURN_IDLE_SECONDS", "180"))
+        except ValueError:
+            idle_after = 180.0
+        now = time.time()
+        existing = self._synthetic_turns.get(session_id)
+        if existing and (now - existing[1]) <= idle_after:
+            self._synthetic_turns[session_id] = (existing[0], now)
+            return existing[0]
+        turn_id = new_turn_id()
+        self._synthetic_turns[session_id] = (turn_id, now)
+        return turn_id
 
     def set_autonomy_mode(self, mode: str) -> str:
         """Runtime toggle for autonomy mode. Returns the effective mode."""
@@ -770,10 +831,38 @@ class ToolRunner:
         *,
         surface: Optional[str] = None,
     ) -> dict:
+        """Bind tool-call identity, then run the call.
+
+        This is the last layer that still knows the session:
+        ``SkillExecutor.execute`` takes only (tool_name, args, skill,
+        endpoint) and ``BaseSkill.execute`` takes even less. The bind
+        publishes the identity on a contextvar so implementations can read
+        it without a signature change. See ``skills/call_context.py``.
+        """
+        effective_surface = surface or self._resolve_surface_for_session(session_id)
+        with bind_context(
+            session_id=session_id,
+            surface=effective_surface,
+            tool_name=str(tool_call.get("name") or ""),
+            call_id=str(tool_call.get("id") or ""),
+            turn_id=self._turn_id_for(session_id),
+        ):
+            return await self._execute_tool_call_for_llm_inner(
+                session_id, tool_call, available_skills,
+                effective_surface=effective_surface,
+            )
+
+    async def _execute_tool_call_for_llm_inner(
+        self,
+        session_id: str,
+        tool_call: dict,
+        available_skills,
+        *,
+        effective_surface: str,
+    ) -> dict:
         tool_name = tool_call["name"]
         args = tool_call["args"]
         logger.info(f"  LLM Tool call: {tool_name}({json.dumps(args)[:200]})")
-        effective_surface = surface or self._resolve_surface_for_session(session_id)
 
         mcp_client = self._orch._mcp_client
         if tool_name.startswith("mcp_") and mcp_client:
@@ -940,12 +1029,32 @@ class ToolRunner:
         *,
         surface: Optional[str] = None,
     ):
+        effective_surface = surface or self._resolve_surface_for_session(session_id)
+        with bind_context(
+            session_id=session_id,
+            surface=effective_surface,
+            tool_name=str(tool_call.get("name") or ""),
+            call_id=str(tool_call.get("id") or ""),
+            turn_id=self._turn_id_for(session_id),
+        ):
+            return await self._execute_tool_call_inner(
+                session_id, tool_call, available_skills,
+                effective_surface=effective_surface,
+            )
+
+    async def _execute_tool_call_inner(
+        self,
+        session_id: str,
+        tool_call: dict,
+        available_skills,
+        *,
+        effective_surface: str,
+    ):
         from models.protocol import FeralMessage, SDUIPayload
 
         tool_name = tool_call["name"]
         args = tool_call["args"]
         logger.info(f"  Tool call: {tool_name}({json.dumps(args)[:200]})")
-        effective_surface = surface or self._resolve_surface_for_session(session_id)
 
         parts = tool_name.split("__", 1)
         if len(parts) != 2:

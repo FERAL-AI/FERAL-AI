@@ -86,7 +86,7 @@ from config.runtime import (
 # Update both lists when adding a new top-level command.
 PURE_LOCAL_SUBCOMMANDS = frozenset({
     "doctor", "setup", "key", "grant", "access", "pair",
-    "voice", "models", "integrations",
+    "voice", "models", "integrations", "checkpoints",
     "install-service", "uninstall-service",
     "service-status", "logs", "stop", "restart",
     "wake-test", "publisher", "publish", "app",
@@ -2408,6 +2408,77 @@ def cmd_marketplace(action: str, query: str, registry: str | None = None):
             print(f"  {s.get('name', s.get('skill_id', '?'))} v{s.get('version', '?')}")
 
 
+def cmd_checkpoints(args) -> int:
+    """`feral checkpoints list|show|revert`.
+
+    Reads ``$FERAL_HOME/checkpoints/index.db`` directly instead of calling
+    ``/api/checkpoints/*``. That is deliberate: the moment you most want
+    to undo what the agent wrote is the moment the brain is wedged, mid
+    restart, or answering nothing at all. A recovery tool that depends on
+    the thing you are recovering from is not a recovery tool.
+    """
+    from skills.checkpoints import BASH_NOT_COVERED_NOTE, CheckpointStore, checkpoint_root
+
+    action = getattr(args, "action", None) or "list"
+    store = CheckpointStore(checkpoint_root())
+    if not store.db_path.exists():
+        print(f"  No checkpoints recorded yet ({store.db_path}).")
+        return 0
+
+    if action == "list":
+        turns = store.list_turns(
+            session_id=(getattr(args, "session", "") or "").strip() or None,
+            limit=max(1, int(getattr(args, "limit", 20) or 20)),
+        )
+        if not turns:
+            print("  No checkpointed turns.")
+            return 0
+        print(f"  {'TURN':24s} {'FILES':>5s} {'WRITES':>6s}  SESSION")
+        for row in turns:
+            print(
+                f"  {row['turn_id']:24s} {row['files']:5d} {row['writes']:6d}  "
+                f"{row['session_id'] or '-'}"
+            )
+        print(f"\n  {BASH_NOT_COVERED_NOTE}")
+        return 0
+
+    turn_id = (getattr(args, "turn_id", "") or "").strip() or (store.latest_turn() or "")
+    if not turn_id:
+        print("  No checkpointed turn to act on.")
+        return 1
+
+    if action == "show":
+        plan = store.plan_revert(turn_id)
+        print(f"  Turn {turn_id}")
+        for entry in plan["files"]:
+            print(f"    [{entry['status']:16s}] {entry['action']:8s} {entry['path']}")
+            if entry["detail"]:
+                print(f"        {entry['detail']}")
+        print(f"\n  {BASH_NOT_COVERED_NOTE}")
+        return 0
+
+    if action == "revert":
+        result = store.revert_turn(
+            turn_id,
+            force=bool(getattr(args, "force", False)),
+            dry_run=bool(getattr(args, "cp_dry_run", False)),
+        )
+        for entry in result["files"]:
+            print(f"    [{entry['status']:16s}] {entry['action']:8s} {entry['path']}")
+            if entry["detail"]:
+                print(f"        {entry['detail']}")
+        if result.get("error"):
+            print(f"\n  {result['error']}")
+        else:
+            verb = "Would revert" if result["dry_run"] else "Reverted"
+            print(f"\n  {verb} {result['reverted_count']} file(s).")
+        print(f"  {BASH_NOT_COVERED_NOTE}")
+        return 0 if result.get("success") else 1
+
+    print(f"  Unknown action: {action}")
+    return 1
+
+
 def cmd_sync(action: str, file_path: str):
     """Federated sync CLI commands."""
     if action == "status":
@@ -2835,6 +2906,32 @@ def main():
     grant_revoke = grant_sub.add_parser("revoke", help="Revoke a previously granted folder")
     grant_revoke.add_argument("path", help="Absolute folder path to revoke")
 
+    # feral checkpoints: inspect or undo the agent's file writes.
+    # Pure-local on purpose: it reads the checkpoint SQLite directly
+    # rather than calling the brain's REST route, because the situation
+    # you most need an undo in is the one where the brain is wedged.
+    cp_p = sub.add_parser(
+        "checkpoints",
+        help="List or revert the file writes FERAL made, per turn",
+    )
+    cp_sub = cp_p.add_subparsers(dest="action")
+    cp_list = cp_sub.add_parser("list", help="List recent turns that wrote files")
+    cp_list.add_argument("--session", default="", help="Filter to one session id")
+    cp_list.add_argument("--limit", type=int, default=20, help="Max turns to show")
+    cp_show = cp_sub.add_parser("show", help="Show what a revert of a turn would do")
+    cp_show.add_argument("turn_id", nargs="?", default="", help="Turn id (default: most recent)")
+    cp_revert = cp_sub.add_parser("revert", help="Restore the files a turn wrote")
+    cp_revert.add_argument("turn_id", nargs="?", default="", help="Turn id (default: most recent)")
+    cp_revert.add_argument(
+        "--force", action="store_true",
+        help="Also revert files that changed after FERAL wrote them, "
+             "discarding those changes. Refused without this flag.",
+    )
+    cp_revert.add_argument(
+        "--dry-run", dest="cp_dry_run", action="store_true",
+        help="Report what would happen without touching any file",
+    )
+
     # feral bridge install — wraps scripts/install-phone-bridge.sh
     bridge_p = sub.add_parser("bridge", help="Install the FERAL phone-bridge daemon on this host")
     bridge_sub = bridge_p.add_subparsers(dest="action")
@@ -2967,6 +3064,8 @@ def main():
     elif args.subcommand == "grant":
         from cli.grant_commands import cmd_grant
         sys.exit(cmd_grant(args))
+    elif args.subcommand == "checkpoints":
+        sys.exit(cmd_checkpoints(args))
     elif args.subcommand == "key":
         from cli.key_commands import dispatch_key_subcommand
         sys.exit(dispatch_key_subcommand(args))

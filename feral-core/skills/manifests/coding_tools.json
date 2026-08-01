@@ -134,7 +134,7 @@
       "id": "edit_file",
       "method": "PYTHON",
       "url": "",
-      "description": "Search and replace text in a file. Finds the first occurrence of old_text and replaces it with new_text.",
+      "description": "Search and replace text in a file. Prefer text copied verbatim from coding_tools__read_file. If the exact text is not found, a chain of fallback matchers (line-trimmed, whitespace-normalised, indentation-flexible, escape-normalised, and last a first/last-line block anchor) tries to locate the same block; the strategy that succeeded is reported back as match_strategy. Text matching more than one place is always refused, never guessed at: add surrounding context, or set replace_all when every occurrence should change.",
       "params": [
         {
           "name": "path",
@@ -146,16 +146,28 @@
           "name": "old_text",
           "type": "string",
           "required": true,
-          "description": "Exact text to find (must be unique in file)"
+          "description": "Text to find. Must identify exactly one location unless replace_all is set."
         },
         {
           "name": "new_text",
           "type": "string",
           "required": true,
           "description": "Replacement text"
+        },
+        {
+          "name": "replace_all",
+          "type": "boolean",
+          "required": false,
+          "description": "Replace every occurrence instead of requiring old_text to be unique (default false)."
+        },
+        {
+          "name": "expected_replacements",
+          "type": "integer",
+          "required": false,
+          "description": "Fail unless exactly this many occurrences are found. Use it as a checksum when you already know the count."
         }
       ],
-      "returns_description": "Confirmation with diff preview",
+      "returns_description": "{path, replacements, match_strategy, matched_lines} on success, plus diagnostics when a checker exists for the file type. On failure: error_code (not_found / ambiguous / unexpected_replacement_count / oversized_span) and, when nothing matched, closest_match with the real file text nearest to old_text.",
       "ui_hint": "detail_card",
       "safety_tier": "confirm",
       "emit_result_preview": true
@@ -264,6 +276,36 @@
       "safety_tier": "safe",
       "read_only_hint": true,
       "result_budget": "standard"
+    },
+    {
+      "id": "revert_turn",
+      "method": "PYTHON",
+      "url": "",
+      "description": "Undo the file writes made while answering one user message. Restores each file to the content it had before the turn started, from FERAL's own content-addressed checkpoints (no git involved, so the user's index and stash are untouched). Files that changed after FERAL wrote them are listed and skipped unless force is set. Shell commands are NOT checkpointed, so anything coding_tools__bash changed is not reverted.",
+      "params": [
+        {
+          "name": "turn_id",
+          "type": "string",
+          "required": false,
+          "description": "Turn to revert. Defaults to the most recent checkpointed turn in this session."
+        },
+        {
+          "name": "force",
+          "type": "boolean",
+          "required": false,
+          "description": "Revert files that changed after FERAL wrote them, discarding those changes. Off by default."
+        },
+        {
+          "name": "dry_run",
+          "type": "boolean",
+          "required": false,
+          "description": "Report what would be reverted without touching any file."
+        }
+      ],
+      "returns_description": "{turn_id, reverted[], reverted_count, skipped[], drifted[], files[], bash_not_covered, note}",
+      "ui_hint": "detail_card",
+      "safety_tier": "confirm",
+      "emit_result_preview": true
     }
   ],
   "flows": [],

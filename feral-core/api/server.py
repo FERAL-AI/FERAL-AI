@@ -93,6 +93,7 @@ from api.routes.capabilities import router as capabilities_router  # Phase 5
 from api.routes.system_permissions import router as system_permissions_router  # Phase 11
 from api.routes.discovery import router as discovery_router  # Phase 13
 from api.routes.approvals import router as approvals_router
+from api.routes.checkpoints import router as checkpoints_router
 # --- Subagent A (realtime GA) additions ---
 from api.routes.realtime_client_secret import router as realtime_client_secret_router
 
@@ -619,6 +620,7 @@ app.include_router(channels_router)
 app.include_router(conversations_router)
 app.include_router(devices_router)
 app.include_router(access_router)
+app.include_router(checkpoints_router)
 
 # Optional demo routes — mounted only when feral-demo-data is installed
 # AND FERAL_DEV_DEMO=1. Discovery is via the `feral.plugins` entry
