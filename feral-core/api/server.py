@@ -2628,10 +2628,36 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     # keyed by node_id while chained sessions are keyed by
                     # session_id. Safe on unknown or idle sessions and on a
                     # router with no pipeline wired, so no mode check.
+                    # Guarded the same way as the two branches above. A
+                    # router without the method (or a test double) must
+                    # not raise here, because the except clause below
+                    # reports "interrupt_failed" and that would replace
+                    # the honest "nothing to cancel" no-op with an error.
                     if not cancelled:
-                        cancelled = await state.voice_router.cancel_chained_response(
-                            session_id
+                        # Derived here rather than reused from the
+                        # `voice_session_start` branch: that branch binds a
+                        # local `session_id` (see the assignment near the
+                        # top of this loop), so it only exists on this
+                        # connection if a start actually arrived first. A
+                        # barge-in on a socket that never started a session
+                        # would otherwise raise NameError into the except
+                        # clause below and report "interrupt_failed" where
+                        # the honest answer is "nothing to cancel". Same
+                        # derivation the start branch uses, so a live
+                        # chained session resolves to the same key.
+                        chained_session_id = stream_id or f"voice-{node_id}"
+                        cancel_chained = getattr(
+                            state.voice_router, "cancel_chained_response", None
                         )
+                        if callable(cancel_chained):
+                            _result = cancel_chained(chained_session_id)
+                            # A router returning something non-awaitable (an
+                            # older router, or a test double whose attributes
+                            # are auto-created) must not raise here either.
+                            if asyncio.iscoroutine(_result) or isinstance(
+                                _result, asyncio.Future
+                            ):
+                                cancelled = bool(await _result)
                     if not cancelled:
                         logger.info(
                             "voice_interrupt for node=%s found no live session "
