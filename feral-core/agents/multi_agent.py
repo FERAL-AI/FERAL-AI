@@ -123,6 +123,51 @@ class AgentWorker:
         self._bus = bus
         self._orchestrator = orchestrator
 
+    def _gate_tool_call(
+        self, tool_name: str, args: dict, session_id: str
+    ) -> Optional[dict]:
+        """Run ToolRunner's gates for a call this path is about to execute.
+
+        ``AgentWorker`` calls ``SkillExecutor.execute`` directly, so it
+        never reaches ``ToolRunner``, which owns plan mode AND the
+        safety/approval gate. Both were therefore skipped on the primary
+        text chat path, since ``features.multi_agent`` defaults to True.
+
+        Verified live before this existed: with plan mode active and
+        autonomy set to ``strict``, ``feral_reminders__create`` executed
+        and created the reminder, with no plan-mode refusal and no
+        approval frame, while ``resolve_policy`` for that tool returns
+        ``confirm``.
+
+        Returns a refusal envelope to use as the tool result, or None to
+        proceed. Gates are reached through the orchestrator rather than a
+        new dependency so this stays a lookup, not a rewiring. A missing
+        runner returns None: the older behaviour, not a new failure mode.
+        """
+        runner = getattr(self._orchestrator, "tool_runner", None)
+        if runner is None:
+            return None
+        for gate_name, gate_args in (
+            ("enforce_plan_mode", (tool_name, session_id)),
+            ("enforce_safety", (tool_name, args, session_id)),
+        ):
+            gate = getattr(runner, gate_name, None)
+            if not callable(gate):
+                continue
+            try:
+                refusal = gate(*gate_args)
+            except Exception:
+                logger.exception(
+                    "multi-agent %s check failed for %s", gate_name, tool_name
+                )
+                continue
+            if refusal is not None:
+                logger.info(
+                    "multi-agent refused %s via %s", tool_name, gate_name
+                )
+                return refusal
+        return None
+
     def get_tools(self) -> list[dict]:
         if not self._skills:
             return []
@@ -249,7 +294,23 @@ class AgentWorker:
                                 endpoint = next((ep for ep in skill.endpoints if ep.id == endpoint_id), None)
                                 if endpoint:
                                     t0 = time.time()
-                                    result = await self._executor.execute(tc["name"], tc["args"], skill, endpoint)
+                                    # Gate before executing. This path calls
+                                    # SkillExecutor directly and never reaches
+                                    # ToolRunner, which owns both plan mode and
+                                    # the safety/approval gate. Proven live: with
+                                    # plan mode active and autonomy set to strict,
+                                    # feral_reminders__create ran and created the
+                                    # reminder with no refusal and no approval
+                                    # frame. features.multi_agent defaults True,
+                                    # so this is the primary text chat path, not
+                                    # an edge case.
+                                    _gate = self._gate_tool_call(
+                                        tc["name"], tc.get("args") or {}, session_id
+                                    )
+                                    if _gate is not None:
+                                        result = _gate
+                                    else:
+                                        result = await self._executor.execute(tc["name"], tc["args"], skill, endpoint)
                                     tool_results.append(result)
                                     if self._orchestrator is not None:
                                         try:
