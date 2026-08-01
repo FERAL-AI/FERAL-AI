@@ -188,13 +188,25 @@ async def test_cartesia_rest_payload_shape(monkeypatch):
 # ── Voice catalogue surface ( hook) ─────────────────────────────
 
 
-def test_voice_provider_catalogue_lists_all_eight():
+def test_voice_provider_catalogue_lists_every_cloud_vendor():
     catalogue = voice_provider_catalogue()
-    assert len(catalogue) == 8
     ids = {entry["id"] for entry in catalogue}
-    assert ids == set(VOICE_PROVIDER_IDS)
+    assert set(VOICE_PROVIDER_IDS) <= ids
+    # Local engines are catalogue entries too, so the count is no
+    # longer a fixed eight; what must hold is that no cloud vendor
+    # dropped out and every entry declares which kind it is.
+    cloud = {e["id"] for e in catalogue if not e["local"]}
+    assert cloud == set(VOICE_PROVIDER_IDS)
     kinds = {entry["kind"] for entry in catalogue}
-    assert kinds == {"realtime", "stt", "tts"}
+    assert kinds == {"realtime", "stt", "tts", "vad"}
+
+
+def test_local_catalogue_entries_are_flagged_local():
+    from security.probe import LOCAL_VOICE_PROVIDERS
+
+    catalogue = {e["id"]: e for e in voice_provider_catalogue()}
+    for pid in LOCAL_VOICE_PROVIDERS:
+        assert catalogue[pid]["local"] is True
 
 
 def test_voice_provider_catalogue_kinds_are_consistent():

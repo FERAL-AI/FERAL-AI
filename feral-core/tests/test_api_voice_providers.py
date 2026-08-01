@@ -47,15 +47,15 @@ def client(monkeypatch):
         yield TestClient(app, raise_server_exceptions=False)
 
 
-def test_voice_providers_lists_eight_with_kinds(client):
+def test_voice_providers_lists_cloud_and_local_with_kinds(client):
     r = client.get("/api/voice/providers")
     assert r.status_code == 200
     body = r.json()
     rows = body["providers"]
-    assert len(rows) == 8
 
     ids = {p["id"] for p in rows}
-    assert ids == {
+    # The eight cloud vendors, unchanged.
+    assert {
         "openai_realtime",
         "gemini_live",
         "deepgram",
@@ -64,16 +64,43 @@ def test_voice_providers_lists_eight_with_kinds(client):
         "elevenlabs",
         "cartesia",
         "openai_tts",
-    }
+    } <= ids
+    # Plus the local engines, which are selectable providers in their
+    # own right rather than a mode of the cloud ones.
+    assert {"whispercpp", "faster_whisper", "macos_say", "piper"} <= ids
     kinds = {p["kind"] for p in rows}
-    assert kinds == {"realtime", "stt", "tts"}
+    assert kinds == {"realtime", "stt", "tts", "vad"}
+
+    # Every row says whether readiness means "credential accepted" or
+    # "installed and downloaded", so a UI never offers an API-key
+    # prompt for an engine that has no account.
+    by_id = {p["id"]: p for p in rows}
+    assert by_id["deepgram"]["local"] is False
+    assert by_id["whispercpp"]["local"] is True
+    assert by_id["macos_say"]["local"] is True
 
 
 def test_voice_providers_marks_unconfigured_when_no_keys(client):
     body = client.get("/api/voice/providers").json()
-    for row in body["providers"]:
+    # Scoped to the cloud rows on purpose. A local engine has no
+    # credential to be missing, so "no_key" is not a verdict that can
+    # apply to it: its probe answers a different question (is the code
+    # importable and are the weights on disk) and reports
+    # "not_configured" when the answer is no. macOS `say` needs
+    # neither, so on a Mac it is legitimately ready with no key at all.
+    cloud = [row for row in body["providers"] if not row["local"]]
+    assert cloud
+    for row in cloud:
         assert row["configured"] is False
         assert row["probe_status"] == "no_key"
+
+
+def test_local_rows_are_never_reported_as_missing_a_key(client):
+    body = client.get("/api/voice/providers").json()
+    local = [row for row in body["providers"] if row["local"]]
+    assert local
+    for row in local:
+        assert row["probe_status"] != "no_key", row
         # latency_ms is reported (0.0 for the no_key short-circuit).
         assert "latency_ms" in row
 
@@ -111,8 +138,9 @@ def test_probe_all_when_provider_id_omitted(client):
     r = client.post("/api/voice/providers/probe", json={})
     assert r.status_code == 200
     rows = r.json()["providers"]
-    assert len(rows) == 8
-    assert all(row["reason"] == "no_key" for row in rows)
+    cloud = [row for row in rows if not row.get("local")]
+    assert len(cloud) == 8
+    assert all(row["reason"] == "no_key" for row in cloud)
 
 
 # ----------------------------------------------------------------------

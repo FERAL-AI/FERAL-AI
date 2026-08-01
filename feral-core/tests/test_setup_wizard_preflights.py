@@ -58,7 +58,7 @@ def test_voice_preflight_skipped_when_user_declines(
     from cli.setup.helpers import SkipStep
     from cli.setup.state import WizardState
 
-    monkeypatch.setattr(vp, "confirm", lambda *a, **kw: False)
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "skip")
 
     state = WizardState.load(feral_home)
     with pytest.raises(SkipStep):
@@ -80,6 +80,12 @@ def test_voice_preflight_persists_realtime_and_chained_picks(
     from cli.setup.state import WizardState
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     pick_seq = iter([
         # 1) realtime → openai_realtime
@@ -121,6 +127,12 @@ def test_voice_preflight_asks_model_after_openai_realtime(
     from cli.setup.state import WizardState
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     pick_seq = iter([
         Option(id="openai_realtime", label="OpenAI Realtime"),
@@ -161,6 +173,12 @@ def test_voice_step_uses_picker_not_ask_text_for_realtime_model(
     from cli.setup.helpers import Option
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     pick_seq = iter([
         Option(id="openai_realtime", label="OpenAI Realtime"),
@@ -202,6 +220,12 @@ def test_voice_step_reuses_existing_openai_key(
     from cli.setup.helpers import Option
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     pick_seq = iter([
         Option(id="openai_realtime", label="OpenAI Realtime"),
@@ -248,6 +272,12 @@ def test_voice_step_prompts_key_for_different_vendor(
     from cli.setup.helpers import Option
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     pick_seq = iter([
         Option(id="gemini_live", label="Gemini Live"),
@@ -347,6 +377,12 @@ def test_voice_reuse_warns_when_existing_key_rejected(
     monkeypatch.setattr(vk_mod, "add_provider_key", lambda *a, **kw: None)
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     # Capture the model picker's options so we can assert the badge
     # does NOT say ready.
@@ -440,6 +476,12 @@ def test_voice_reuse_silent_when_probe_ok(
     monkeypatch.setattr(vk_mod, "list_provider_keys", lambda pid, **kw: [])
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
 
     pick_seq = iter([
         Option(id="openai_realtime", label="OpenAI Realtime"),
@@ -503,6 +545,12 @@ def test_key_masking_uniform_across_steps(
     monkeypatch.setattr(vk_mod, "list_provider_keys", lambda pid, **kw: [])
 
     monkeypatch.setattr(vp, "confirm", lambda *a, **kw: True)
+    # The step now opens with a three-way "how should voice run?"
+    # (cloud / fully local / skip) before any provider picker, so a
+    # test that drives the cloud flow has to say so. Patching the
+    # helper rather than threading an extra Option through every
+    # pick sequence keeps each test's intent readable.
+    monkeypatch.setattr(vp, "_ask_voice_stack", lambda *a, **kw: "cloud")
     monkeypatch.setattr(
         vp, "ask_choice",
         lambda *a, **kw: next(iter([

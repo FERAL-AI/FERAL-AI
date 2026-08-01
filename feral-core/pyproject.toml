@@ -160,11 +160,58 @@ discovery = [
     # widely referenced in docs / install guides) so `pip install
     # feral-ai[discovery]` still resolves; pip handles the duplicate.
 ]
+# Local STT, CTranslate2 backend. The right choice on Linux and on any
+# machine with an NVIDIA GPU. NOT the right choice on macOS: CTranslate2
+# has no Metal backend and `device="mps"` raises, so it runs on CPU
+# while looking like the accelerated option. Macs want `stt-local`.
 stt = [
     "faster-whisper>=1.0.0,<2.0",
 ]
+# Local STT, whisper.cpp backend. MIT, prebuilt wheels for macOS arm64
+# and manylinux, and the only Whisper family member with real Apple
+# Silicon GPU acceleration (measured: whisper.cpp binds Metal / MTL0 on
+# an M1 and decodes 2.16s of speech in 0.096s warm). Default local STT
+# on macOS.
+stt-local = [
+    "pywhispercpp>=1.3.0,<2.0",
+]
+# Local TTS via Piper.
+#
+# READ THIS BEFORE ADDING IT TO A DEFAULT INSTALL. piper-tts is
+# GPL-3.0-or-later (it relicensed from MIT with the piper1-gpl
+# rewrite). FERAL is Apache-2.0. Combining Apache-2.0 code with a
+# GPL-3.0 dependency it requires to function carries obligations the
+# rest of this project does not, so Piper is never installed
+# implicitly, is never a default, and is never the macOS default,
+# where the OS `say` synthesiser does the same job with no licensing
+# question and nothing to download.
+tts-piper = [
+    "piper-tts>=1.2.0,<2.0",
+]
+# Historical alias. `feral-ai[tts]` has always meant Piper and is
+# referenced from install guides, so it keeps resolving. Same GPL-3.0
+# terms as `tts-piper` above - the name simply predates the
+# relicensing and does not advertise it.
 tts = [
     "piper-tts>=1.2.0,<2.0",
+]
+# Server-side voice activity detection (Silero VAD, MIT, ~2.2MB ONNX).
+# This is what ends an utterance in the chained pipeline. Without it
+# the pipeline falls back to a packet-absence timer that cannot fire
+# until the client stops sending, which costs roughly 1.9s per turn
+# (measured: 2218ms to endpoint before, 309ms after).
+#
+# onnxruntime is also pulled by `wake`; pip resolves the duplicate.
+vad = [
+    "onnxruntime>=1.16.0,<2.0",
+]
+# Everything needed for a fully-local voice stack on macOS: local
+# endpointing plus local STT. Local TTS is the built-in `say`, so
+# there is nothing to install for it. Note that the LLM is NOT covered
+# by this extra and is still whatever remote provider is configured.
+voice-local = [
+    "onnxruntime>=1.16.0,<2.0",
+    "pywhispercpp>=1.3.0,<2.0",
 ]
 wake = [
     "openwakeword>=0.6.0,<1.0",
@@ -238,7 +285,19 @@ all = [
     "onnxruntime>=1.16.0,<2.0",
     "rich>=13.0.0,<15.0",
     "faster-whisper>=1.0.0,<2.0",
-    "piper-tts>=1.2.0,<2.0",
+    # Local STT via whisper.cpp. MIT, and the only Whisper backend with
+    # Apple Silicon GPU support, so `[all]` on a Mac gets a local STT
+    # that actually uses the hardware.
+    "pywhispercpp>=1.3.0,<2.0",
+    # piper-tts is deliberately NOT here.
+    #
+    # It is GPL-3.0-or-later and FERAL is Apache-2.0. `pip install
+    # feral-ai[all]` reads as "give me the optional features", not as
+    # "add a copyleft dependency to my install", and someone
+    # redistributing a product built on `[all]` would inherit an
+    # obligation nothing told them about. Local TTS is available
+    # explicitly via `feral-ai[tts-piper]`, and on macOS the built-in
+    # `say` synthesiser covers it with no dependency at all.
     "aiomqtt>=2.0.0,<3.0",
     "opentelemetry-sdk>=1.20,<2.0",
     "opentelemetry-exporter-otlp-proto-http>=1.20,<2.0",

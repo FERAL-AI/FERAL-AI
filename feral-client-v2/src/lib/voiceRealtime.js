@@ -17,6 +17,26 @@ const WORKLET_NAME = 'pcm-capture-processor';
 const VAD_ENERGY_THRESHOLD = 0.005;
 const VAD_SILENCE_FRAMES = 15; // ~1.5s of silence before stopping send
 
+// Whether the energy gate above is allowed to STOP sending audio.
+//
+// It never should when the brain endpoints for itself. The gate was
+// the client half of a two-stage endpointer: it kept streaming for 15
+// quiet frames (1.5s) after the speaker stopped, went silent, and only
+// then could the server's own packet-absence timer start its 0.8s
+// count. Two silence timers in series, about 2.3s of dead air before
+// the transcription request was even issued. Measured against the
+// chained pipeline: 2218ms from end of speech to `processing`.
+//
+// With server-side VAD (`feral-core/voice/vad.py`) the brain decides
+// where the utterance ended by reading the audio, and it needs the
+// audio to keep arriving to do that. Same measurement with the gate
+// off and VAD on: 309ms.
+//
+// The energy reading is still computed and still drives `onVADChange`,
+// because the orb animation wants to know when the user is talking.
+// What changes is that it no longer censors the stream.
+const CLIENT_GATE_ENDPOINTING = false;
+
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 16000;
 const RECONNECT_MAX_ATTEMPTS = 8;
@@ -218,7 +238,10 @@ export class RealtimeVoiceEngine {
           this._isSpeaking = false;
           if (this.onVADChange) this.onVADChange(false);
         }
-        if (!this._isSpeaking) return;
+        // The `return` here is what used to stop the stream. Keeping
+        // it would starve the server VAD of exactly the silence it
+        // needs to hear in order to call the end of the utterance.
+        if (!this._isSpeaking && CLIENT_GATE_ENDPOINTING) return;
       } else {
         if (!this._isSpeaking) {
           this._isSpeaking = true;
