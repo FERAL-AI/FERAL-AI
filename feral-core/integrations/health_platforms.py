@@ -692,7 +692,8 @@ class HealthAggregator:
             "sample_count": total,
             "series": series,
             "note": (
-                f"{total} durable readings across {len(series)} metrics over "
+                f"{total} durable reading{'' if total == 1 else 's'} across "
+                f"{len(series)} metric{'' if len(series) == 1 else 's'} over "
                 f"{window}d, from {', '.join(sorted(sources)) or 'no source'}."
                 if total
                 else (
