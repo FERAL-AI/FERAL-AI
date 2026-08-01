@@ -107,8 +107,18 @@ class ToolRunner:
         logger.info(f"ToolRunner autonomy_mode={self._autonomy_mode}")
 
     def _get_dispatch_validator(self) -> ToolDispatchValidator:
+        """Memoised validator, refreshed when the skill registry changes.
+
+        Building the validator precomputes a schema per endpoint, so it is
+        cached. It used to be cached forever, which hard-blocked every skill
+        registered after the first tool call at ``execute_tool_call_for_llm``
+        below. ``refresh_if_stale()`` rebuilds only when
+        ``SkillRegistry.generation`` has moved.
+        """
         if self._dispatch_validator is None:
             self._dispatch_validator = ToolDispatchValidator(registry=self._skill_registry())
+        else:
+            self._dispatch_validator.refresh_if_stale()
         return self._dispatch_validator
 
     @staticmethod
@@ -151,6 +161,45 @@ class ToolRunner:
             )
             tools = tools[:max_tools]
         return tools or []
+
+    # ─────────────────────────────────────────────
+    # Instrumentation: which tools actually get used
+    # ─────────────────────────────────────────────
+
+    @staticmethod
+    def _metric_safe(name: str) -> str:
+        """Coerce a tool name into a Prometheus-legal metric name suffix."""
+        return "".join(c if (c.isalnum() or c == "_") else "_" for c in name)
+
+    def _record_tool_invocation(self, tool_name: str, session_id: str, surface: str) -> None:
+        """Count a real tool invocation, per tool.
+
+        ``ALWAYS_INCLUDE_SKILLS`` puts 59 tools in front of the model on
+        every turn and the chat path applies no cap at all
+        (``MAX_LLM_TOOLS`` binds only inside ``_run_subagent_task``). We want
+        to trim that surface on evidence rather than guesswork, so record
+        what the model actually reaches for.
+
+        Two counters are emitted deliberately. ``increment`` drops
+        ``attributes`` entirely on the in-process fallback path (the one
+        ``/metrics`` scrapes when OpenTelemetry is not configured), so the
+        dimensional counter alone would collapse to a single opaque total.
+        The per-tool counter name keeps the tool identity in that case.
+        """
+        try:
+            from observability.metrics import increment
+
+            increment(
+                "feral_tool_invocations_total",
+                attributes={
+                    "tool": tool_name,
+                    "session": session_id or "",
+                    "surface": surface or "",
+                },
+            )
+            increment(f"feral_tool_invocations_total_{self._metric_safe(tool_name)}")
+        except Exception as exc:  # instrumentation must never break dispatch
+            logger.debug("tool invocation metric failed for %s: %s", tool_name, exc)
 
     # ─────────────────────────────────────────────
     # Safety: Graduated Permission System
@@ -774,6 +823,7 @@ class ToolRunner:
         args = tool_call["args"]
         logger.info(f"  LLM Tool call: {tool_name}({json.dumps(args)[:200]})")
         effective_surface = surface or self._resolve_surface_for_session(session_id)
+        self._record_tool_invocation(tool_name, session_id, effective_surface)
 
         mcp_client = self._orch._mcp_client
         if tool_name.startswith("mcp_") and mcp_client:
@@ -946,6 +996,7 @@ class ToolRunner:
         args = tool_call["args"]
         logger.info(f"  Tool call: {tool_name}({json.dumps(args)[:200]})")
         effective_surface = surface or self._resolve_surface_for_session(session_id)
+        self._record_tool_invocation(tool_name, session_id, effective_surface)
 
         parts = tool_name.split("__", 1)
         if len(parts) != 2:

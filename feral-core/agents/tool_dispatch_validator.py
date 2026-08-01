@@ -238,14 +238,56 @@ class ToolDispatchValidator:
         manifests: Optional[dict[str, SkillManifest]] = None,
     ):
         self._registry = registry
+        # Only a validator built *from* a registry tracks that registry's
+        # generation. An explicit ``manifests=`` snapshot is the caller's
+        # own fixed view and must never be silently replaced.
+        self._tracks_registry = manifests is None and registry is not None
         if manifests is not None:
             self._manifests = dict(manifests)
         elif registry is not None and hasattr(registry, "skills"):
             self._manifests = dict(registry.skills)
         else:
             self._manifests = self._load_manifest_files()
+        self._registry_generation = self._current_registry_generation()
         self._endpoint_schemas: dict[tuple[str, str], EndpointSchema] = {}
         self._precompute_schemas()
+
+    def _current_registry_generation(self) -> Optional[int]:
+        """Read ``SkillRegistry.generation``, or ``None`` when the registry
+        does not expose one (plain dicts, mocks, manifest-only validators)."""
+        if not self._tracks_registry:
+            return None
+        generation = getattr(self._registry, "generation", None)
+        return generation if isinstance(generation, int) else None
+
+    def refresh_if_stale(self) -> bool:
+        """Re-snapshot manifests and schemas when the registry has changed.
+
+        ``__init__`` takes a one-shot copy of ``registry.skills`` and
+        precomputes every endpoint schema, so skills registered afterwards
+        (marketplace installs, ``SkillRegistry.reload_skill``, Tool Genesis
+        output, hot-plugged hardware) used to validate as
+        ``unknown_endpoint`` forever. Callers that hold a long-lived
+        validator call this before ``validate()``.
+
+        Returns ``True`` when a rebuild happened.
+        """
+        if not self._tracks_registry:
+            return False
+        generation = self._current_registry_generation()
+        if generation is None or generation == self._registry_generation:
+            return False
+        if not hasattr(self._registry, "skills"):
+            return False
+        self._manifests = dict(self._registry.skills)
+        self._registry_generation = generation
+        self._endpoint_schemas = {}
+        self._precompute_schemas()
+        logger.info(
+            "ToolDispatchValidator refreshed at registry generation %s (%d skills)",
+            generation, len(self._manifests),
+        )
+        return True
 
     @staticmethod
     def _load_manifest_files() -> dict[str, SkillManifest]:

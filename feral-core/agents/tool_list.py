@@ -19,6 +19,12 @@ logger = logging.getLogger("feral.tool_list")
 OPENAI_TOOL_HARD_LIMIT = 128
 
 # Always retained at the front of capped lists (order = priority).
+#
+# Voice builds its tool list from ``get_all_tools()`` (176 tools today) and
+# caps it at 128, so 48 tools are dropped every session. The pins were all
+# robot / routine flavoured, which meant not one coding tool survived the
+# cap: voice could never read, edit, write, grep or run a shell command.
+# The five ``coding_tools`` entries below close that gap.
 PINNED_OPENAI_TOOL_NAMES: tuple[str, ...] = (
     "feral_routines__create",
     "feral_routines__list",
@@ -27,6 +33,11 @@ PINNED_OPENAI_TOOL_NAMES: tuple[str, ...] = (
     "cutebot__halt",
     "cutebot__status",
     "notes_memory__fused_timeline",
+    "coding_tools__read_file",
+    "coding_tools__edit_file",
+    "coding_tools__write_file",
+    "coding_tools__grep_search",
+    "coding_tools__bash",
 )
 
 

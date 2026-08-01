@@ -324,14 +324,25 @@ class CodingToolsSkill(BaseSkill):
         denied = self._check_read(str(path))
         if denied:
             return denied
-        if not path.exists():
-            return {"success": False, "status_code": 404, "data": None, "error": f"File not found: {path}"}
-        if not path.is_file():
-            return {"success": False, "status_code": 400, "data": None, "error": f"Not a file: {path}"}
-        if path.stat().st_size > 2_000_000:
-            return {"success": False, "status_code": 413, "data": None, "error": "File too large (>2MB). Use offset/limit."}
 
-        text = path.read_text(errors="replace")
+        def _stat_and_read() -> tuple[dict | None, str]:
+            """Blocking stat + read. Returns ``(error_envelope, text)``.
+
+            Kept as one thread hop so the stat checks and the read cannot
+            interleave with other coroutines against a changing file.
+            """
+            if not path.exists():
+                return {"success": False, "status_code": 404, "data": None, "error": f"File not found: {path}"}, ""
+            if not path.is_file():
+                return {"success": False, "status_code": 400, "data": None, "error": f"Not a file: {path}"}, ""
+            if path.stat().st_size > 2_000_000:
+                return {"success": False, "status_code": 413, "data": None, "error": "File too large (>2MB). Use offset/limit."}, ""
+            return None, path.read_text(errors="replace")
+
+        error, text = await asyncio.to_thread(_stat_and_read)
+        if error is not None:
+            return error
+
         lines = text.splitlines()
 
         offset = int(args.get("offset", 1)) - 1
@@ -358,8 +369,11 @@ class CodingToolsSkill(BaseSkill):
         if denied:
             return denied
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
+        def _mkdir_and_write() -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+
+        await asyncio.to_thread(_mkdir_and_write)
 
         return {
             "success": True,
@@ -378,20 +392,31 @@ class CodingToolsSkill(BaseSkill):
         denied = self._check_write(str(path))
         if denied:
             return denied
-        if not path.exists():
-            return {"success": False, "status_code": 404, "data": None, "error": f"File not found: {path}"}
-        if not old_text:
-            return {"success": False, "status_code": 400, "data": None, "error": "old_text is required"}
 
-        content = path.read_text(errors="replace")
-        count = content.count(old_text)
-        if count == 0:
-            return {"success": False, "status_code": 404, "data": None, "error": "old_text not found in file"}
-        if count > 1:
-            return {"success": False, "status_code": 409, "data": None, "error": f"old_text matches {count} locations — provide more context to be unique"}
+        def _read_match_write() -> dict | None:
+            """Blocking read-modify-write. Returns an error envelope or None.
 
-        new_content = content.replace(old_text, new_text, 1)
-        path.write_text(new_content)
+            Kept as one thread hop so the uniqueness check and the write see
+            the same file contents.
+            """
+            if not path.exists():
+                return {"success": False, "status_code": 404, "data": None, "error": f"File not found: {path}"}
+            if not old_text:
+                return {"success": False, "status_code": 400, "data": None, "error": "old_text is required"}
+
+            content = path.read_text(errors="replace")
+            count = content.count(old_text)
+            if count == 0:
+                return {"success": False, "status_code": 404, "data": None, "error": "old_text not found in file"}
+            if count > 1:
+                return {"success": False, "status_code": 409, "data": None, "error": f"old_text matches {count} locations — provide more context to be unique"}
+
+            path.write_text(content.replace(old_text, new_text, 1))
+            return None
+
+        error = await asyncio.to_thread(_read_match_write)
+        if error is not None:
+            return error
 
         return {
             "success": True,
