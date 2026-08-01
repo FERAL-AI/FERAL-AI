@@ -19,7 +19,7 @@ from __future__ import annotations
 from cli import ui_kit
 
 from .. import network
-from ..helpers import BackNavigation, QuitNavigation, get_console, _RICH_AVAILABLE
+from ..helpers import JumpToStep, QuitNavigation, get_console, _RICH_AVAILABLE
 from ..state import WizardState
 
 
@@ -104,4 +104,10 @@ async def run(state: WizardState) -> None:
     except KeyboardInterrupt:
         raise QuitNavigation()
     if picked == "__back__":
-        raise BackNavigation()
+        # The button says "change network mode", so it must land on the
+        # network step. A bare ``BackNavigation`` is ``idx -= 1`` in the
+        # state machine, and ``network`` is five steps earlier than
+        # ``pairing``. The operator who followed the loopback warning
+        # got dropped on "Messaging channels" instead. ``JumpToStep``
+        # already carried an optional target for exactly this.
+        raise JumpToStep("network")

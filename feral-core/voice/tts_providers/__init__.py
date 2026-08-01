@@ -1,8 +1,11 @@
 """
 TTS Provider abstraction for the chained voice pipeline.
 
-Each provider implements ``TTSProvider`` and is selected at runtime
-via ``voice.chained.tts_provider`` in settings.  All providers expose
+Each provider implements ``TTSProvider`` and is selected at runtime by
+``VoiceRouter._resolve_chained_config``: per-session ``provider_opts``
+win, then ``voice.chained.tts_provider`` (what the phone Settings panel
+writes), then ``audio.chained_fallback.tts_provider`` (what ``feral
+setup`` writes and ``config/loader.py`` defaults).  All providers expose
 ``synthesize(text) -> async iterator of audio bytes``, streaming
 base64-encoded audio chunks for the phone client.
 """

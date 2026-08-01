@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import platform
 
-from cli import ui_kit
-
 from ..helpers import (
     SkipStep,
     confirm,
@@ -88,20 +86,14 @@ def run(state: WizardState) -> None:
     else:
         _render_plain(console, rendered)
 
-    # Persist a snapshot in settings.json so the doctor + dashboard
-    # can reflect the wizard's last reading without re-probing.
-    state.set_setting(
-        "macos",
-        "tcc_snapshot",
-        [
-            {
-                "permission": s.permission,
-                "status": s.status,
-                "deeplink": d,
-            }
-            for s, d in rendered
-        ],
-    )
+    # This step used to persist a ``macos.tcc_snapshot`` list here with
+    # a comment claiming "the doctor + dashboard can reflect the
+    # wizard's last reading without re-probing". Nothing ever read it:
+    # the only occurrence of the key in the whole codebase was this
+    # write. TCC grants change outside FERAL (the operator flips them
+    # in System Settings), so a cached snapshot would be stale the
+    # moment it was written anyway. The step is read-only now, which is
+    # what its own module docstring already claims.
 
     # Offer to print the deeplink list one more time so the operator
     # can copy-paste before continuing — useful when the terminal

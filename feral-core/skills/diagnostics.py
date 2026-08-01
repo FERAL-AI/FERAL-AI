@@ -110,8 +110,20 @@ def _enabled() -> bool:
     )
 
 
-async def diagnose(path, *, before_text: Optional[str]) -> Optional[dict]:
+async def diagnose(
+    path,
+    *,
+    before_text: Optional[str],
+    after_text: Optional[str] = None,
+) -> Optional[dict]:
     """Check ``path`` and return the findings the write introduced.
+
+    ``after_text`` is the content the caller just wrote. Passing it skips
+    reading the file back, which is what lets the whole of this run
+    *outside* the per-path write lock: no file access means no race with
+    another writer, and a linter subprocess with a five second timeout
+    cannot keep another subagent waiting. Omit it and the file is read in
+    a worker thread instead.
 
     Returns ``None`` when nothing ran: unknown extension, checker not
     installed, file too large, timeout, or any error at all. The caller
@@ -120,20 +132,36 @@ async def diagnose(path, *, before_text: Optional[str]) -> Optional[dict]:
     if not _enabled():
         return None
     try:
-        return await _diagnose_inner(Path(path), before_text)
+        return await _diagnose_inner(Path(path), before_text, after_text)
     except Exception as exc:  # noqa: BLE001 - advisory only, never fatal
         logger.debug("post-write diagnostics failed for %s: %s", path, exc)
         return None
 
 
-async def _diagnose_inner(target: Path, before_text: Optional[str]) -> Optional[dict]:
+async def _diagnose_inner(
+    target: Path, before_text: Optional[str], after_text: Optional[str],
+) -> Optional[dict]:
     suffix = target.suffix.lower()
-    if suffix in SKIPPED_SUFFIXES or not target.is_file():
+    if suffix in SKIPPED_SUFFIXES:
         return None
-    try:
-        if target.stat().st_size > MAX_FILE_BYTES:
+
+    if after_text is None:
+        # Blocking stat + read, so it goes to a thread like every other
+        # file touch in this layer.
+        def _stat_and_read() -> Optional[str]:
+            if not target.is_file():
+                return None
+            if target.stat().st_size > MAX_FILE_BYTES:
+                return None
+            return target.read_text(errors="replace")
+
+        try:
+            after_text = await asyncio.to_thread(_stat_and_read)
+        except OSError:
             return None
-    except OSError:
+        if after_text is None:
+            return None
+    elif len(after_text) > MAX_FILE_BYTES:
         return None
 
     checker = _pick_checker(suffix)
@@ -144,7 +172,6 @@ async def _diagnose_inner(target: Path, before_text: Optional[str]) -> Optional[
     # Every checker is content-in / findings-out. The path is passed only
     # so config-resolving checkers can be told where the content came
     # from; nothing is ever written to it.
-    after_text = target.read_text(errors="replace")
     after = await runner(after_text, target)
     if after is None:
         return None
@@ -207,7 +234,19 @@ def _pick_checker(suffix: str):
 # ── in-process checkers ───────────────────────────────────────────────
 
 
+# These parse the whole file, which is CPU-bound work with no await in
+# it. `ast.parse` and `yaml.safe_load` on a large file are tens of
+# milliseconds of straight-line C and Python, so they go to a thread like
+# every other blocking call here rather than stalling the loop. The
+# subprocess checkers need no such treatment: they are already async all
+# the way down.
+
+
 async def _check_python_ast(text: str, _path: Path) -> list[dict]:
+    return await asyncio.to_thread(_check_python_ast_sync, text)
+
+
+def _check_python_ast_sync(text: str) -> list[dict]:
     try:
         ast.parse(text)
     except SyntaxError as exc:
@@ -216,6 +255,10 @@ async def _check_python_ast(text: str, _path: Path) -> list[dict]:
 
 
 async def _check_json(text: str, _path: Path) -> list[dict]:
+    return await asyncio.to_thread(_check_json_sync, text)
+
+
+def _check_json_sync(text: str) -> list[dict]:
     try:
         json.loads(text)
     except ValueError as exc:
@@ -225,6 +268,10 @@ async def _check_json(text: str, _path: Path) -> list[dict]:
 
 
 async def _check_yaml(text: str, _path: Path) -> list[dict]:
+    return await asyncio.to_thread(_check_yaml_sync, text)
+
+
+def _check_yaml_sync(text: str) -> list[dict]:
     import yaml
 
     try:

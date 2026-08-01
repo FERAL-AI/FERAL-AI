@@ -128,20 +128,7 @@ class StateMachine:
                 # otherwise the operator's next ``feral setup`` would
                 # see a stale "resume?" prompt for an install that
                 # already completed.
-                already_complete = bool(
-                    (self.state.settings.get("meta") or {}).get("setup_complete")
-                )
-                if not already_complete:
-                    try:
-                        self.state.write_setup_state(
-                            last_step=name,
-                            completed_steps=sorted(self.state.completed_steps),
-                        )
-                    except Exception:
-                        logger.debug(
-                            "setup: could not persist resume sidecar",
-                            exc_info=True,
-                        )
+                self._persist_resume_marker(name)
                 idx += 1
             except BackNavigation:
                 if idx == 0:
@@ -170,6 +157,14 @@ class StateMachine:
                     continue
                 idx = target_idx
             except SkipStep:
+                # A skipped step is a DONE step: the operator answered
+                # its question (with "no") or it had nothing to ask.
+                # Leaving it out of ``completed_steps`` and out of the
+                # resume sidecar meant a Ctrl+C on the next step
+                # rewound to the step the operator had just explicitly
+                # skipped, and the jump picker under-reported progress.
+                self.state.completed_steps.add(name)
+                self._persist_resume_marker(name)
                 idx += 1
             except QuitNavigation:
                 # Sidecar already written by the last successful
@@ -190,6 +185,29 @@ class StateMachine:
                 logger.exception("step %s raised", name)
                 self.console.print(f"[red]Step {name!r} failed: {exc}.[/] Continuing.")
                 idx += 1
+
+    def _persist_resume_marker(self, name: str) -> None:
+        """Write the resume sidecar after a step finished or was skipped.
+
+        Persisted after every step so a Ctrl+C / crash on the NEXT step
+        doesn't lose the progress just made. The finish step calls
+        ``state.mark_complete()``, which deletes the sidecar, so we must
+        NOT re-write it for an install that already completed, otherwise
+        the operator's next ``feral setup`` sees a stale "resume?"
+        prompt.
+        """
+        already_complete = bool(
+            (self.state.settings.get("meta") or {}).get("setup_complete")
+        )
+        if already_complete:
+            return
+        try:
+            self.state.write_setup_state(
+                last_step=name,
+                completed_steps=sorted(self.state.completed_steps),
+            )
+        except Exception:
+            logger.debug("setup: could not persist resume sidecar", exc_info=True)
 
     def _maybe_resume(self) -> int:
         """Read the resume sidecar (if any) and return the starting idx.

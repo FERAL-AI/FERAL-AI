@@ -13,6 +13,8 @@ surface is not answering.
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 
 from skills.checkpoints import BASH_NOT_COVERED_NOTE, get_store
@@ -32,7 +34,9 @@ def _store():
 @router.get("/api/checkpoints/turns")
 async def list_turns(session_id: str = "", limit: int = 20):
     """Turns that wrote at least one file, most recent first."""
-    rows = _store().list_turns(
+    store = _store()
+    rows = await asyncio.to_thread(
+        store.list_turns,
         session_id=session_id.strip() or None,
         limit=max(1, min(int(limit), 200)),
     )
@@ -43,7 +47,7 @@ async def list_turns(session_id: str = "", limit: int = 20):
 async def turn_detail(turn_id: str):
     """Per-write rows for one turn, plus the revert plan for it."""
     store = _store()
-    entries = store.entries_for_turn(turn_id)
+    entries = await asyncio.to_thread(store.entries_for_turn, turn_id)
     if not entries:
         raise HTTPException(
             status_code=404, detail=f"No checkpoints recorded for turn '{turn_id}'",
@@ -51,7 +55,7 @@ async def turn_detail(turn_id: str):
     return {
         "turn_id": turn_id,
         "writes": entries,
-        "plan": store.plan_revert(turn_id),
+        "plan": await asyncio.to_thread(store.plan_revert, turn_id),
     }
 
 
@@ -69,13 +73,15 @@ async def revert(body: dict):
     turn_id = str((body or {}).get("turn_id") or "").strip()
     session_id = str((body or {}).get("session_id") or "").strip()
     if not turn_id:
-        turn_id = store.latest_turn(session_id or None) or ""
+        turn_id = await asyncio.to_thread(store.latest_turn, session_id or None) or ""
     if not turn_id:
         raise HTTPException(status_code=404, detail="No checkpointed turn to revert")
 
-    result = store.revert_turn(
+    # SQLite plus a restore per file. Blocking, so it goes to a thread
+    # rather than stalling every other request on this loop.
+    return await asyncio.to_thread(
+        store.revert_turn,
         turn_id,
         force=bool((body or {}).get("force", False)),
         dry_run=bool((body or {}).get("dry_run", False)),
     )
-    return result

@@ -10,6 +10,7 @@ The original computer_use.py is kept for backward compatibility.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 import re
@@ -342,17 +343,42 @@ class CodingToolsSkill(BaseSkill):
 
     async def _read_file(self, args: dict) -> dict:
         path = Path(args.get("path", "")).expanduser()
-        denied = self._check_read(str(path))
-        if denied:
-            return denied
-        if not path.exists():
-            return {"success": False, "status_code": 404, "data": None, "error": f"File not found: {path}"}
-        if not path.is_file():
-            return {"success": False, "status_code": 400, "data": None, "error": f"Not a file: {path}"}
-        if path.stat().st_size > 2_000_000:
-            return {"success": False, "status_code": 413, "data": None, "error": "File too large (>2MB). Use offset/limit."}
 
-        text = path.read_text(errors="replace")
+        def _stat_read_and_observe() -> "tuple[dict | None, str, object]":
+            """Blocking permission check + stat + read + fingerprint.
+
+            Kept as one thread hop so the stat checks and the read cannot
+            interleave with other coroutines against a changing file. The
+            fingerprint joins the same hop rather than taking one of its
+            own, because an observation recorded from a second hop could
+            describe a version of the file the agent never saw, which
+            would make a later staleness check pass when it should fail.
+
+            The grant check is in here too, and that is not cosmetic:
+            ``SandboxPolicy.can_read_path`` calls ``_load_grants()``,
+            which does ``read_text`` on
+            ``~/.feral/workspace_grants.json`` every single call. It was
+            running on the event loop. Wave 1's thread-identity spy could
+            not see it, because it records one thread per patched method
+            name and the in-hop ``read_text`` overwrote the loop-thread
+            record a moment later.
+            """
+            denied = self._check_read(str(path))
+            if denied:
+                return denied, "", None
+            if not path.exists():
+                return {"success": False, "status_code": 404, "data": None, "error": f"File not found: {path}"}, "", None
+            if not path.is_file():
+                return {"success": False, "status_code": 400, "data": None, "error": f"Not a file: {path}"}, "", None
+            if path.stat().st_size > 2_000_000:
+                return {"success": False, "status_code": 413, "data": None, "error": "File too large (>2MB). Use offset/limit."}, "", None
+            text = path.read_text(errors="replace")
+            return None, text, file_state.get_tracker().observe(path)
+
+        error, text, observation = await asyncio.to_thread(_stat_read_and_observe)
+        if error is not None:
+            return error
+
         lines = text.splitlines()
 
         offset = int(args.get("offset", 1)) - 1
@@ -364,14 +390,20 @@ class CodingToolsSkill(BaseSkill):
         # Record what the agent actually looked at, so a later write to
         # this path can tell "edited against what it read" from "edited
         # from memory" and from "edited against a version that has since
-        # changed". See skills/file_state.py.
+        # changed". See skills/file_state.py. Storing is a dict write, so
+        # it stays on the loop; the blocking fingerprint already happened
+        # above, inside the same hop as the read it describes.
         ctx = require_context("coding_tools__read_file")
-        partial = len(selected) < len(lines)
-        file_state.get_tracker().record_read(
-            ctx.session_id, path,
-            partial=partial,
-            window=(offset + 1, offset + len(selected)) if partial else None,
-        )
+        if observation is not None:
+            partial = len(selected) < len(lines)
+            file_state.get_tracker().remember(
+                ctx.session_id,
+                dataclasses.replace(
+                    observation,
+                    partial=partial,
+                    window=(offset + 1, offset + len(selected)) if partial else None,
+                ),
+            )
 
         return {
             "success": True,
@@ -399,9 +431,16 @@ class CodingToolsSkill(BaseSkill):
     @staticmethod
     def _write_verbatim(path: Path, content: str) -> None:
         """Write without newline translation, so the bytes on disk are
-        exactly the string we computed."""
-        with path.open("w", newline="") as fh:
-            fh.write(content)
+        exactly the string we computed.
+
+        ``Path.write_text`` rather than ``path.open(...).write`` on
+        purpose: it takes ``newline`` from Python 3.10, and staying on the
+        same method Wave 1's thread-identity spy patches keeps that
+        regression guard pointed at the real write. (``Path.read_text``
+        only gained ``newline`` in 3.13, which is why the read side of
+        this pair cannot do the same.)
+        """
+        path.write_text(content, newline="")
 
     @staticmethod
     def _edit_limits() -> tuple[int, int]:
@@ -474,17 +513,25 @@ class CodingToolsSkill(BaseSkill):
 
     @staticmethod
     async def _finish_write(
-        data: dict,
         *,
+        data: dict,
         ctx: "ToolCallContext",
         path: Path,
         before_text: Optional[str],
+        after_text: str,
         checkpoint_id: Optional[str],
         warning: Optional[dict],
     ) -> dict:
-        """Post-write bookkeeping shared by write_file and edit_file."""
-        CodingToolsSkill._record_checkpoint_after(checkpoint_id, path)
-        file_state.get_tracker().note_write(ctx.session_id, path)
+        """Assemble the result and attach diagnostics.
+
+        Runs *after* the per-path lock has been released, deliberately.
+        The write, the checkpoint and the observation refresh are all done
+        by this point, and diagnostics no longer reads the file at all:
+        every checker takes its content on stdin, so both the pre-write
+        and post-write text are passed in directly. That removes the
+        re-read race and means a linter subprocess with a five second
+        timeout cannot keep another subagent waiting on the same path.
+        """
         if checkpoint_id:
             data["checkpoint_id"] = checkpoint_id
             data["turn_id"] = ctx.turn_id
@@ -492,7 +539,9 @@ class CodingToolsSkill(BaseSkill):
             data["read_before_edit"] = warning
             data["warning"] = warning.get("message", "")
 
-        diag = await diagnostics_mod.diagnose(path, before_text=before_text)
+        diag = await diagnostics_mod.diagnose(
+            path, before_text=before_text, after_text=after_text,
+        )
         # Absent, not empty: an empty findings list reads to the model as
         # "checked, and clean", which is a stronger claim than we can make
         # when there was no checker to run.
@@ -508,20 +557,29 @@ class CodingToolsSkill(BaseSkill):
             return {"success": False, "status_code": 400, "data": None, "error": "No path provided"}
         path = Path(raw_path).expanduser()
         content = args.get("content", "")
-        denied = self._check_write(str(path))
-        if denied:
-            return denied
 
         ctx = require_context("coding_tools__write_file")
         tracker = file_state.get_tracker()
-        # Held across check-capture-write. `spawn_subagents` runs up to six
-        # workers with full coding_tools access, so without this two of
-        # them can both pass the staleness check against the same
-        # fingerprint and the second silently discards the first's write.
-        async with tracker.lock_for(path):
+
+        def _guarded_write() -> "tuple[dict | None, dict | None]":
+            """Blocking grant check, staleness check, checkpoint and write.
+
+            One thread hop, the same reason Wave 1 used one: the stat, the
+            hash, the pre-write snapshot and the write must see a
+            consistent view of the file. Splitting it would let another
+            coroutine interleave between the check and the write, which is
+            precisely the race the lock exists to prevent.
+
+            ``_check_write`` leads, both to keep a 403 ahead of a 409 and
+            because it reads the workspace-grants file off the loop. See
+            ``_read_file`` for why that was previously invisible.
+            """
+            denied = self._check_write(str(path))
+            if denied:
+                return denied, None
             refusal, warning = self._guard_write(ctx, path)
             if refusal:
-                return refusal
+                return refusal, None
 
             before_text = None
             if path.is_file():
@@ -535,11 +593,28 @@ class CodingToolsSkill(BaseSkill):
             path.parent.mkdir(parents=True, exist_ok=True)
             self._write_verbatim(path, content)
 
-            return await self._finish_write(
-                {"path": str(path), "bytes_written": len(content.encode())},
-                ctx=ctx, path=path, before_text=before_text,
-                checkpoint_id=checkpoint_id, warning=warning,
-            )
+            self._record_checkpoint_after(checkpoint_id, path)
+            tracker.note_write(ctx.session_id, path)
+            return None, {
+                "data": {"path": str(path), "bytes_written": len(content.encode())},
+                "before_text": before_text,
+                "after_text": content,
+                "checkpoint_id": checkpoint_id,
+                "warning": warning,
+            }
+
+        # The lock is taken on the event loop (asyncio.Lock is loop-affine
+        # and must never be acquired from a worker thread) and held across
+        # the whole hop. `spawn_subagents` runs up to six workers with full
+        # coding_tools access, so without it two of them can both pass the
+        # staleness check against the same fingerprint and the second
+        # silently discards the first's write.
+        async with tracker.lock_for(path):
+            refusal, outcome = await asyncio.to_thread(_guarded_write)
+        if refusal is not None:
+            return refusal
+
+        return await self._finish_write(ctx=ctx, path=path, **outcome)
 
     # ── edit_file ─────────────────────────────────────────────────
 
@@ -557,22 +632,47 @@ class CodingToolsSkill(BaseSkill):
                 "error": "expected_replacements must be an integer",
             }
 
-        denied = self._check_write(str(path))
-        if denied:
-            return denied
-        if not path.exists():
-            return {"success": False, "status_code": 404, "data": None, "error": f"File not found: {path}"}
-        if not old_text:
-            return {"success": False, "status_code": 400, "data": None, "error": "old_text is required"}
-
         ctx = require_context("coding_tools__edit_file")
         tracker = file_state.get_tracker()
         max_content_lines, max_needle_lines = self._edit_limits()
 
-        async with tracker.lock_for(path):
+        def _guarded_edit() -> "tuple[dict | None, dict | None]":
+            """Blocking grant check, staleness check, match and write.
+
+            One thread hop, extending Wave 1's ``_read_match_write`` rather
+            than replacing its reasoning: the existence check, the read,
+            the match and the write must all see the same file contents.
+            The fuzzy matcher lives in here too because it is the most
+            expensive part of the whole call. The sliding-window
+            strategies are O(file_lines x needle_lines), so on a
+            4000-line file with a large needle it is millions of string
+            comparisons, which is far too much to run on the event loop.
+
+            ``_check_write`` leads for the same two reasons as in
+            ``_write_file``: 403 before 409, and it reads the
+            workspace-grants file.
+            """
+            denied = self._check_write(str(path))
+            if denied:
+                return denied, None
+
             refusal, warning = self._guard_write(ctx, path)
             if refusal:
-                return refusal
+                return refusal, None
+
+            if not path.exists():
+                return {
+                    "success": False, "status_code": 404, "data": None,
+                    "error": f"File not found: {path}",
+                }, None
+            if not old_text:
+                # 400 rather than letting the matcher's empty_needle land
+                # as a 409: a missing required argument is a bad request,
+                # and this is the pre-existing contract.
+                return {
+                    "success": False, "status_code": 400, "data": None,
+                    "error": "old_text is required",
+                }, None
 
             content = self._read_verbatim(path)
             match = edit_matchers.find_edit_match(
@@ -583,7 +683,7 @@ class CodingToolsSkill(BaseSkill):
                 max_needle_lines=max_needle_lines,
             )
             if not match.ok:
-                return self._edit_failure(path, match, warning)
+                return self._edit_failure(path, match, warning), None
 
             checkpoint_id = self._capture_checkpoint(ctx, path)
 
@@ -592,6 +692,9 @@ class CodingToolsSkill(BaseSkill):
             # either find nothing or replace a different occurrence.
             new_content = edit_matchers.splice(content, match.candidates, new_text)
             self._write_verbatim(path, new_content)
+
+            self._record_checkpoint_after(checkpoint_id, path)
+            tracker.note_write(ctx.session_id, path)
 
             data = {
                 "path": str(path),
@@ -610,11 +713,20 @@ class CodingToolsSkill(BaseSkill):
                     "the replaced interior was not verified against old_text. "
                     "Re-read the file to confirm the result."
                 )
-            return await self._finish_write(
-                data, ctx=ctx, path=path, before_text=content,
-                checkpoint_id=checkpoint_id, warning=warning,
-            )
+            return None, {
+                "data": data,
+                "before_text": content,
+                "after_text": new_content,
+                "checkpoint_id": checkpoint_id,
+                "warning": warning,
+            }
 
+        async with tracker.lock_for(path):
+            error, outcome = await asyncio.to_thread(_guarded_edit)
+        if error is not None:
+            return error
+
+        return await self._finish_write(ctx=ctx, path=path, **outcome)
     @staticmethod
     def _edit_failure(path: Path, match, warning: Optional[dict] = None) -> dict:
         status = 404 if match.error_code == "not_found" else 409
@@ -675,21 +787,28 @@ class CodingToolsSkill(BaseSkill):
                 "error": f"Checkpoint store unavailable: {exc}",
             }
 
-        turn_id = str(args.get("turn_id") or "").strip()
-        if not turn_id:
-            turn_id = store.latest_turn(ctx.session_id or None) or ""
-        if not turn_id:
+        # SQLite queries, blob reads and the restores themselves are all
+        # blocking, and a revert can touch every file a turn wrote. One
+        # thread hop for the lot, for the same reason the writers use one.
+        def _resolve_and_revert() -> "tuple[str, dict | None]":
+            turn_id = str(args.get("turn_id") or "").strip()
+            if not turn_id:
+                turn_id = store.latest_turn(ctx.session_id or None) or ""
+            if not turn_id:
+                return "", None
+            return turn_id, store.revert_turn(
+                turn_id,
+                force=bool(args.get("force", False)),
+                dry_run=bool(args.get("dry_run", False)),
+            )
+
+        turn_id, result = await asyncio.to_thread(_resolve_and_revert)
+        if result is None:
             return {
                 "success": False, "status_code": 404,
                 "data": {"bash_not_covered": True, "note": checkpoint_store.BASH_NOT_COVERED_NOTE},
                 "error": "No checkpointed turn found to revert.",
             }
-
-        result = store.revert_turn(
-            turn_id,
-            force=bool(args.get("force", False)),
-            dry_run=bool(args.get("dry_run", False)),
-        )
         success = bool(result.pop("success", False))
         error = result.pop("error", None)
         return {

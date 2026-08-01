@@ -101,8 +101,18 @@ class Orchestrator:
       - IdentityLoader   – ~/.feral/ identity files → system prompt
     """
 
-    # Class-level constants kept on Orchestrator for backward compat
-    ALWAYS_INCLUDE_SKILLS = {
+    # Class-level constants kept on Orchestrator for backward compat.
+    #
+    # This is a tuple, not a set, on purpose. ``_ensure_core_skills`` appends
+    # in iteration order, and a set iterates in hash order, which varies with
+    # PYTHONHASHSEED across processes. That made the tail of the tool list
+    # (and therefore whatever any future cap would drop) differ from boot to
+    # boot. A tuple pins a single deterministic priority order.
+    #
+    # ``"browser"`` used to sit in here and matched no registered manifest,
+    # so it was a silent no-op swallowed by the ``in self.skills.skills``
+    # guard in ``_ensure_core_skills``. Removed.
+    ALWAYS_INCLUDE_SKILLS = (
         # Core OS / desktop surface.
         # ``coding_tools`` replaced ``computer_use`` here: the two skills
         # exposed identical endpoints with identical trigger phrases, so the
@@ -110,14 +120,13 @@ class Orchestrator:
         # arbitrarily. ``coding_tools`` is the better implementation
         # (paginated grep/glob, workspace-relative output) and is now the
         # single canonical shell + filesystem surface.
-        "desktop_control",
         "coding_tools",
-        "browser",
+        "desktop_control",
         "desktop_automation",
         "screen_capture",
         "system_settings",
         "agentic_computer_use",
-        # Messaging / comms — always reachable so the agent never claims it "can't send"
+        # Messaging / comms, always reachable so the agent never claims it "can't send"
         "messaging_channels",
         # Never-say-no escape hatches + self-knowledge
         "workspace_scripts",
@@ -125,12 +134,12 @@ class Orchestrator:
         # Memory + search
         "notes_memory",
         "web_search",
-        # Smart loops — recurring routines + multi-step workflows as
+        # Smart loops: recurring routines + multi-step workflows as
         # first-class tools (gated by FERAL_SMART_LOOPS, default on, via
         # _ensure_core_skills below).
         "feral_routines",
         "feral_workflows",
-    }
+    )
 
     # Smart-loops skill ids whose *exposure* can be killed with
     # ``FERAL_SMART_LOOPS=0`` without touching the rest of the always-include
