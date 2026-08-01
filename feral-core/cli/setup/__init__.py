@@ -29,6 +29,7 @@ from .steps import (
     audio,
     capabilities,
     channels,
+    external_agents,
     finish,
     home_assistant,
     identity,
@@ -89,6 +90,9 @@ async def _run_async(*, from_step: str = "") -> None:
             ("integrations", integrations.run),
             ("home_assistant", home_assistant.run),
             ("tool_keys", tool_keys.run),
+            # Sits next to tool_keys: both are optional developer
+            # tooling the operator can decline without breaking FERAL.
+            ("external_agents", external_agents.run),
             ("channels", channels.run),
             ("pairing", pairing.run),
             ("tcc_preflight", tcc_preflight.run),

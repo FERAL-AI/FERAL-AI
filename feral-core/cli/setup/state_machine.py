@@ -50,6 +50,7 @@ _STEP_TITLES = {
     "integrations": "Integrations",
     "home_assistant": "Home Assistant",
     "tool_keys": "Tool API keys",
+    "external_agents": "External coding agents",
     "channels": "Messaging channels",
     "pairing": "Connect your phone",
     "tcc_preflight": "System permissions",

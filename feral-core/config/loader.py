@@ -346,6 +346,30 @@ DEFAULT_SETTINGS = {
         # ``agents/tool_runner.py``.
         "turn_idle_seconds": 180,
     },
+    # External coding agents FERAL can drive as subprocesses over ACP
+    # (the Agent Client Protocol). Every key here is read by
+    # ``bridges/catalog.py::external_agent_settings``, which is the only
+    # place in ``bridges/`` that touches settings at all.
+    "external_agents": {
+        # Which agent the ``external_agent`` skill picks when the caller
+        # does not name one. Only ``opencode`` is installable by FERAL;
+        # ``claude_code`` and ``codex`` need their own Node shims because
+        # neither CLI speaks ACP natively.
+        "default_agent": "opencode",
+        # Absolute path override for the opencode binary. Empty means
+        # "look on PATH, then in ~/.opencode/bin", which is where the
+        # official installer puts it when run with --no-modify-path.
+        "opencode_bin": "",
+        # Version the setup step installs. Pinned on purpose: this is a
+        # 45 MB binary with its own permission engine, not a thing to
+        # resolve to "latest" on a user's machine at install time.
+        # ``cli/setup/steps/external_agents.py`` reads it.
+        "opencode_version": "1.18.10",
+        # Seconds a permission request from an external agent may sit
+        # unanswered before ``bridges/permissions.py`` rejects it. Floored
+        # at 5; there is no value meaning "allow".
+        "permission_timeout_seconds": 120,
+    },
     # Pairing access mode (Mode A LAN / Mode B localhost / Mode C remote).
     # Default is "localhost" to preserve the historical loopback-only
     # behavior on existing installs; the /setup wizard prompts the user
