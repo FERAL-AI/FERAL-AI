@@ -1438,6 +1438,26 @@ class RealtimeProxy:
                 exc_info=True,
             )
 
+    def _plan_mode_refusal(self, tool_name: str, session_id: str) -> Optional[dict]:
+        """Return a refusal envelope when plan mode blocks ``tool_name``.
+
+        Delegates to ``ToolRunner.enforce_plan_mode`` so this surface and
+        the chat surface share one definition of plan-safe. Returns None
+        when plan mode is off, when the tool is plan-safe, or when the
+        orchestrator is absent (this proxy is constructed without one in
+        several tests, and a missing orchestrator must not fail a call
+        that plan mode was never going to block).
+        """
+        runner = getattr(self._orchestrator, "tool_runner", None)
+        enforce = getattr(runner, "enforce_plan_mode", None)
+        if not callable(enforce):
+            return None
+        try:
+            return enforce(tool_name, session_id)
+        except Exception:
+            logger.exception("plan-mode check failed for voice tool %s", tool_name)
+            return None
+
     async def _handle_tool_call(
         self, session_id: str, call_id: str, name: str, arguments: str,
     ) -> str:
@@ -1481,7 +1501,19 @@ class RealtimeProxy:
                 # legacy transcript path above stays as the fallback.
                 logger.exception("voice tool_start emit failed")
 
-        result = await self._skill_executor.execute(name, args, skill, endpoint)
+        # Plan mode has to be re-checked here. This path calls
+        # SkillExecutor directly and never reaches ToolRunner, so the
+        # gate in `ToolRunner.enforce_plan_mode` (which the chat and
+        # chained-voice paths funnel through) does not see it. Without
+        # this, a session in plan mode could still mutate state through
+        # a live realtime voice call, which is precisely the thing the
+        # mode promises it cannot do. Reuses the same gate rather than
+        # re-deriving plan-safety, so the two paths cannot drift.
+        _refusal = self._plan_mode_refusal(name, session_id)
+        if _refusal is not None:
+            result = _refusal
+        else:
+            result = await self._skill_executor.execute(name, args, skill, endpoint)
 
         if self._orchestrator is not None:
             latency_ms = (time.time() - t0) * 1000.0
