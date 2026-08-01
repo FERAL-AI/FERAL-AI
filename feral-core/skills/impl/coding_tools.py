@@ -25,7 +25,9 @@ from security.exec_mode import (
     NEEDS_WORKSPACE_GRANT,
     resolve_execution_mode,
 )
+from security.command_unwrap import scannable_command
 from security.fetch_guard import html_to_markdown, safe_fetch
+from security.safe_regex import UnsafePatternError, compile_safe_regex
 from security.sandbox_policy import SandboxPolicy
 from skills import checkpoints as checkpoint_store
 from skills import diagnostics as diagnostics_mod
@@ -196,7 +198,14 @@ class CodingToolsSkill(BaseSkill):
         if not command:
             return {"success": False, "status_code": 400, "data": None, "error": "No command provided"}
 
-        if DANGEROUS_COMMANDS.search(command):
+        # Scan the unwrapped form as well as the raw one. This pattern set
+        # reads the literal string, so `echo cm0gLXJmIC8K | base64 -d | sh`
+        # sails past every entry in it while meaning exactly what the
+        # entries exist to stop. exec_mode applies the same normalisation
+        # immediately after, but this check runs first and returns first.
+        if DANGEROUS_COMMANDS.search(command) or DANGEROUS_COMMANDS.search(
+            scannable_command(command)
+        ):
             return {
                 "success": False, "status_code": 403, "data": None,
                 "error": f"Blocked potentially destructive command: {command}",
@@ -908,7 +917,24 @@ class CodingToolsSkill(BaseSkill):
     ) -> dict:
         """Pure-Python fallback when ripgrep is not installed. Honors the
         same output_mode + pagination contract as the rg path."""
-        regex = re.compile(pattern)
+        # The pattern is model-authored, and Python's `re` backtracks, so
+        # a catastrophic pattern hangs the brain with no timeout and no
+        # way to interrupt it. Verified: `(a+)+$` against 30 characters
+        # does not return. The ripgrep path above needs no guard because
+        # Rust's regex engine is linear-time by construction; only this
+        # fallback is exposed.
+        try:
+            regex = compile_safe_regex(pattern)
+        except UnsafePatternError as exc:
+            return {
+                "success": False, "status_code": 400, "data": None,
+                "error": (
+                    f"Unsafe regex rejected: {exc}. This pattern can take "
+                    f"exponential time on Python's backtracking engine. "
+                    f"Rewrite it without nested or stacked quantifiers, or "
+                    f"install ripgrep, whose engine has no such failure mode."
+                ),
+            }
         root = Path(search_path).expanduser()
         glob_pat = include or "**/*"
         content_rows: list[dict] = []

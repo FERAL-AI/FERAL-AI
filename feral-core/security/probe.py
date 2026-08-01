@@ -8,10 +8,12 @@ presence or token JSON shape alone.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
@@ -191,6 +193,56 @@ def _resolve_oauth_access_token(
         return None
     token = blob.get("access_token")
     return str(token).strip() if token else None
+
+
+async def _resolve_refreshed_oauth_token(
+    vault: Any,
+    provider_id: str,
+    *,
+    env_token_keys: tuple[str, ...] = (),
+) -> Optional[str]:
+    """Like ``_resolve_oauth_access_token`` but refreshes an expired token.
+
+    The plain resolver reads ``access_token`` straight out of the stored
+    blob and never refreshes, so for a provider with a short-lived token
+    every probe run more than that lifetime after the connection returned
+    401 and the integration read as disconnected while a real call would
+    have succeeded. Whoop's tokens last about an hour, which made this
+    permanent in practice rather than a rare race.
+
+    ``OAuthManager.get_token`` is the only thing that refreshes (it checks
+    ``obtained_at + expires_in - 60``). Reaching it through ``sys.modules``
+    rather than an import keeps ``security`` from depending on ``api``,
+    which is the layering rule ``exec_mode`` already documents. An env
+    override still wins, and a missing or failing manager falls back to
+    the raw read, so this can only ever improve on the old behaviour.
+    """
+    for env_key in env_token_keys:
+        env_val = os.environ.get(env_key)
+        if env_val is not None and str(env_val).strip():
+            return str(env_val).strip()
+
+    state_mod = sys.modules.get("api.state")
+    manager = getattr(getattr(state_mod, "state", None), "oauth", None)
+    get_token = getattr(manager, "get_token", None)
+    if callable(get_token):
+        try:
+            token = get_token(provider_id)
+            if inspect.isawaitable(token):
+                token = await token
+            if token and str(token).strip():
+                return str(token).strip()
+        except Exception:
+            logger.debug(
+                "probe: refresh via OAuthManager failed for %s, "
+                "falling back to the stored token",
+                provider_id,
+                exc_info=True,
+            )
+
+    return _resolve_oauth_access_token(
+        vault, provider_id, env_token_keys=env_token_keys
+    )
 
 
 def _lmstudio_base_url() -> str:
@@ -469,7 +521,7 @@ async def _probe_bedrock(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 @register_probe("google")
 async def _probe_google(*, vault=None, **_kwargs: Any) -> ProbeResult:
-    token = _resolve_oauth_access_token(vault, "google")
+    token = await _resolve_refreshed_oauth_token(vault, "google")
     headers = {"Authorization": f"Bearer {token}"} if token else None
     return await _http_probe(
         "google",
@@ -482,7 +534,7 @@ async def _probe_google(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 @register_probe("notion")
 async def _probe_notion(*, vault=None, **_kwargs: Any) -> ProbeResult:
-    token = _resolve_oauth_access_token(
+    token = await _resolve_refreshed_oauth_token(
         vault,
         "notion",
         env_token_keys=("NOTION_TOKEN",),
@@ -502,7 +554,7 @@ async def _probe_notion(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 @register_probe("spotify")
 async def _probe_spotify(*, vault=None, **_kwargs: Any) -> ProbeResult:
-    token = _resolve_oauth_access_token(vault, "spotify")
+    token = await _resolve_refreshed_oauth_token(vault, "spotify")
     headers = {"Authorization": f"Bearer {token}"} if token else None
     return await _http_probe(
         "spotify",
@@ -515,7 +567,10 @@ async def _probe_spotify(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 @register_probe("whoop")
 async def _probe_whoop(*, vault=None, **_kwargs: Any) -> ProbeResult:
-    token = _resolve_oauth_access_token(
+    # Refreshing resolver: Whoop access tokens last about an hour, so the
+    # plain read reported a working connection as disconnected for all
+    # but the first hour after connecting.
+    token = await _resolve_refreshed_oauth_token(
         vault,
         "whoop",
         env_token_keys=("FERAL_WHOOP_TOKEN",),
@@ -532,7 +587,7 @@ async def _probe_whoop(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 @register_probe("oura")
 async def _probe_oura(*, vault=None, **_kwargs: Any) -> ProbeResult:
-    token = _resolve_oauth_access_token(
+    token = await _resolve_refreshed_oauth_token(
         vault,
         "oura",
         env_token_keys=("FERAL_OURA_TOKEN",),
@@ -559,7 +614,7 @@ async def _probe_oura(*, vault=None, **_kwargs: Any) -> ProbeResult:
 
 @register_probe("microsoft")
 async def _probe_microsoft(*, vault=None, **_kwargs: Any) -> ProbeResult:
-    token = _resolve_oauth_access_token(vault, "microsoft")
+    token = await _resolve_refreshed_oauth_token(vault, "microsoft")
     headers = {"Authorization": f"Bearer {token}"} if token else None
     return await _http_probe(
         "microsoft",
