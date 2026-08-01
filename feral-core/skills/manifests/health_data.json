@@ -9,7 +9,7 @@
     "logo_url": "",
     "icon_set": "sf_symbols"
   },
-  "description": "Unified personal-health view across the platforms the user has connected: Whoop (recovery, strain, sleep, HRV, resting heart rate), Oura (readiness, sleep, activity), Apple HealthKit (heart rate, sleep, workouts \u2014 paired iPhone, ingested via the FERAL companion app), AND live wearable sensors that stream directly into the brain (W300 smart glasses, BLE wristbands \u2014 heart rate, SpO2, skin temperature). Use this skill any time the user asks about sleep, recovery, readiness, heart rate, HRV, strain, activity, or week-over-week vitals trends \u2014 it merges whatever sources are connected, tags each data point with its source, and falls back to the glasses-derived vitals trend when no third-party wearable is connected.",
+  "description": "Unified personal-health view across the platforms the user has connected: Whoop (recovery, strain, sleep, HRV, resting heart rate), Oura (readiness, sleep, activity), Apple HealthKit (heart rate, sleep, workouts (paired iPhone, ingested via the FERAL companion app), AND live wearable sensors that stream directly into the brain (W300 smart glasses, BLE wristbands: heart rate, SpO2, skin temperature). Use this skill any time the user asks about sleep, recovery, readiness, heart rate, HRV, strain, activity, or week-over-week vitals trends. It merges whatever sources are connected, tags each data point with its source, and falls back to the glasses-derived vitals trend when no third-party wearable is connected.",
   "trigger_phrases": [
     "how did i sleep",
     "how was my sleep last night",
@@ -101,7 +101,7 @@
       "id": "vitals_trend",
       "method": "PYTHON",
       "url": "python://health_data/vitals_trend",
-      "description": "Week-over-week vitals trend derived from live wearable sensors that stream directly into the brain (W300 smart glasses, BLE wristbands) \u2014 NOT third-party cloud platforms. Use this for 'how were my vitals this week / over the last week', resting heart-rate trend, HR range, or SpO2 trend when the user has no Whoop/Oura/HealthKit connected. Returns per-day resting-HR (daily min), avg/max HR, SpO2 avg/min, sample counts, and the contributing source(s). Honest about provenance ('derived from glasses sensor, N samples over Nd'). Read-only.",
+      "description": "Week-over-week vitals trend derived from live wearable sensors that stream directly into the brain (W300 smart glasses, BLE wristbands), NOT third-party cloud platforms. Use this for 'how were my vitals this week / over the last week', resting heart-rate trend, HR range, or SpO2 trend when the user has no Whoop/Oura/HealthKit connected. Returns per-day resting-HR (daily min), avg/max HR, SpO2 avg/min, sample counts, and the contributing source(s). Honest about provenance ('derived from glasses sensor, N samples over Nd'). Read-only.",
       "params": [
         {
           "name": "days",

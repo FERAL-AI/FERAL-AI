@@ -57,6 +57,14 @@ HEALTH_EVENT_TYPES = (HEALTH_EVENT_SUMMARY, HEALTH_EVENT_TREND)
 SOURCE_WHOOP = "whoop"
 #: Canonical source id for the Oura cloud API.
 SOURCE_OURA = "oura"
+#: Decimals kept when a reading is persisted. This is NOT the display
+#: precision (that is ``MetricSpec.precision``): it exists only so a
+#: float round-trip through SQLite cannot make an unchanged vendor
+#: record look like a new one to the sync de-duplicator. Storage keeps
+#: the source's own precision, because rounding on write is lossy
+#: forever while rounding on render is not.
+_STORAGE_PRECISION = 4
+
 #: Cloud wearable sources. Their samples are daily aggregates (a handful
 #: of rows per day), not a streaming sensor, so they get a much longer
 #: retention horizon than the live BLE series. See
@@ -197,6 +205,14 @@ def build_reading(
          "value": 54.0, "unit": "bpm", "precision": 0,
          "category": "vitals", "source": "whoop", "ts": 1754006400.0}
 
+    ``precision`` is a DISPLAY hint, not a storage instruction.
+    ``value`` keeps the source's own precision (rounded only at
+    ``_STORAGE_PRECISION`` decimals, to stop float noise from making an
+    unchanged vendor record look new to the sync de-duplicator). A
+    reading is persisted verbatim and rounded at render time, because
+    rounding on write is lossy forever: an HRV of 78.5 ms stored through
+    a 0-decimal display hint becomes 78.0 ms in the database.
+
     Returns ``None`` for an unknown metric or a non-numeric value so a
     bad vendor field can never become a fabricated reading.
     """
@@ -212,7 +228,7 @@ def build_reading(
     return {
         "metric": spec.key,
         "label": spec.label,
-        "value": round(numeric, spec.precision) if spec.precision else round(numeric),
+        "value": round(numeric, _STORAGE_PRECISION),
         "unit": spec.unit,
         "precision": spec.precision,
         "category": spec.category,
@@ -249,9 +265,7 @@ def build_series(
             continue
         entry: dict[str, Any] = {
             "ts": float(point.get("ts") or 0.0),
-            "value": (
-                round(numeric, spec.precision) if spec.precision else round(numeric)
-            ),
+            "value": round(numeric, _STORAGE_PRECISION),
         }
         if point.get("date"):
             entry["date"] = str(point["date"])
