@@ -1,10 +1,12 @@
 # Changelog
 
-<!-- feral-version: 2026.7.31 -->
+<!-- feral-version: 2026.8.1 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.1] - 2026-08-01 - setup correctness, coding-harness reliability, voice rebuild, plan mode
 
 ### Added
 
