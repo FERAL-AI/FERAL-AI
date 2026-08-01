@@ -16,11 +16,14 @@ Policy file: ~/.feral/policies/default.yaml (or per-device)
 from __future__ import annotations
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Optional
 
 from config.loader import feral_home
+from security.command_unwrap import obfuscation_findings
+from security.safe_regex import UnsafePatternError, compile_safe_regex
 
 logger = logging.getLogger("feral.sandbox_policy")
 
@@ -144,6 +147,15 @@ class SandboxPolicy:
                 "allow_shell_commands": True,
                 "allow_file_write": False,
                 "allow_network_requests": True,
+                # Extra deny regexes for the workspace shell, on top of
+                # the reviewed floor in ``_COMMAND_DENY_FLOOR``. Empty by
+                # default: the floor is the shipped behaviour and an
+                # operator adds site-specific rules here. Read by
+                # ``denied_command_patterns()`` and compiled through
+                # ``security.safe_regex``, so a rule that could backtrack
+                # catastrophically is dropped with a warning instead of
+                # hanging the checker.
+                "denied_command_patterns": [],
             },
 
             # audit-r12 A3 (v2026.5.38) — ``daemon://local/shell`` enforcement.
@@ -512,6 +524,69 @@ class SandboxPolicy:
         "$", "`", "|", "&", ";", ">", "<", "\n", "\r", "\\",
     )
 
+    # Operator-supplied deny rules for the *workspace* shell
+    # (``coding_tools__bash`` via ``security.exec_mode``), not the daemon
+    # path above, which is an allowlist and does not need them.
+    #
+    # These strings come out of a policy file an operator edited, which
+    # makes them exactly the class of pattern ``security.safe_regex``
+    # exists for: a typo'd ``(a+)+`` in a config file would otherwise
+    # hang the checker with no timeout and no way to interrupt it. The
+    # hardcoded floor below is reviewed in-repo source and is compiled
+    # directly, because routing it through the safe compiler would only
+    # create pressure to weaken that compiler.
+    # ``_CMD_START`` anchors a rule to *command position*: the start of a
+    # line, or just after a separator, with any number of ``sudo`` /
+    # ``doas`` / ``env`` prefixes consumed. Without it these rules fire on
+    # a command that merely mentions the word, and ``grep -r reboot .``
+    # becomes a refusal. That false positive is worse than the miss it
+    # prevents: an agent that gets refused for grepping learns to route
+    # around the check.
+    _CMD_START: str = r"(?:^|[;&|]\s*)\s*(?:(?:sudo|doas|env)\s+)*"
+
+    _COMMAND_DENY_FLOOR: tuple[re.Pattern[str], ...] = (
+        # ``rm -rf /`` and ``rm -fr ~`` only. ``rm -rf /tmp/build`` and
+        # ``rm -rf node_modules`` are ordinary work and stay allowed.
+        re.compile(
+            _CMD_START + r"rm\s+(?:-[a-zA-Z]*\s+)*-?[a-zA-Z]*[rR][a-zA-Z]*f?\s+[/~]\s*$",
+            re.I | re.M,
+        ),
+        re.compile(_CMD_START + r"mkfs(?:\.\w+)?\b", re.I | re.M),
+        re.compile(_CMD_START + r"dd\s[^\n]*\bof=/dev/", re.I | re.M),
+        re.compile(_CMD_START + r"(?:shutdown|reboot|halt|poweroff)\b", re.I | re.M),
+        # Fork bomb, in its canonical spelling.
+        re.compile(r":\s*\(\s*\)\s*\{.*\|.*&\s*\}\s*;", re.S),
+        # Writing to a raw block device is never a workspace operation.
+        re.compile(r">\s*/dev/(?:sd|nvme|disk)", re.I),
+    )
+
+    def denied_command_patterns(self) -> list[re.Pattern[str]]:
+        """Deny patterns for a workspace shell: the floor plus operator rules.
+
+        Operator rules live at ``execution.denied_command_patterns`` in
+        the policy file and are compiled with
+        :func:`security.safe_regex.compile_safe_regex`. A rule the safe
+        compiler refuses is dropped with a warning rather than crashing
+        the policy load: one bad line in a config file must not take the
+        brain down, and dropping it is visible in the log while still
+        leaving the floor in place.
+        """
+        patterns = list(self._COMMAND_DENY_FLOOR)
+        raw = self._data.get("execution", {}).get("denied_command_patterns", [])
+        if not isinstance(raw, list):
+            return patterns
+        for entry in raw:
+            if not isinstance(entry, str) or not entry.strip():
+                continue
+            try:
+                patterns.append(compile_safe_regex(entry, re.IGNORECASE))
+            except (UnsafePatternError, re.error) as exc:
+                logger.warning(
+                    "dropping execution.denied_command_patterns entry %r: %s",
+                    entry[:80], exc,
+                )
+        return patterns
+
     def daemon_shell_allowlist(self) -> list[str]:
         """Return the configured argv[0] program allowlist for
         ``daemon://local/shell``.
@@ -560,6 +635,42 @@ class SandboxPolicy:
                     f"daemon://local/shell — chain via separate calls "
                     f"or route to ``coding_tools__bash`` (workspace-scoped)"
                 )
+
+        # Pre-normalisation, running after the raw checks and never
+        # instead of them: it can only add a refusal.
+        #
+        # Be clear about what it buys *here*, because the honest answer
+        # is "nothing today". Every encoding the unwrapper decodes needs
+        # a character the sweep above already rejects: ANSI-C quoting and
+        # command substitution both need ``$``, backtick substitution
+        # needs a backtick, a pipe-to-shell needs ``|``, a heredoc needs
+        # ``<``. Quoting hides a character's *meaning*, never the
+        # character, so unwrapping cannot surface a metacharacter that
+        # was not in the raw string. On this path the check is
+        # unreachable by construction.
+        #
+        # It stays because the construction is one edit away from being
+        # false. The moment somebody relaxes ``_SHELL_REJECT_CHARS`` --
+        # dropping ``$`` to allow ``open "$HOME/Doc"`` is the obvious
+        # request -- ``osascript -e $'\x64\x6f shell script "rm -rf ~"'``
+        # becomes reachable and this is what catches it.
+        # ``test_daemon_pre_normalisation_catches_a_relaxed_reject_set``
+        # pins that, by relaxing the set exactly as a future edit would.
+        #
+        # The test is structural rather than another metacharacter sweep.
+        # This path is an allowlist of single programs, so ANY nested
+        # execution is disqualifying by definition: ``open`` has no
+        # legitimate need of a command substitution, a heredoc, a
+        # pipe-to-shell, or an ANSI-C literal. Re-running the char sweep
+        # over the unwrapped text would instead be a tautology, because
+        # the unwrapper joins decoded payloads with newlines and ``\n``
+        # is itself a rejected character.
+        for finding in obfuscation_findings(stripped):
+            return False, (
+                f"refusing an obfuscated daemon://local/shell invocation: "
+                f"{finding.detail}. The allowlist covers single programs, "
+                f"not nested execution."
+            )
 
         try:
             import shlex

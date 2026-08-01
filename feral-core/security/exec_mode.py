@@ -61,6 +61,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from security.command_unwrap import (
+    KIND_ENCODED_PAYLOAD_TO_SHELL,
+    obfuscation_findings,
+    scannable_command,
+)
 from security.sandbox_policy import SandboxPolicy
 
 logger = logging.getLogger("feral.exec_mode")
@@ -121,6 +126,20 @@ class ExecutionDecision:
             "needs": self.needs,
             "denied_path": self.denied_path,
         }
+
+
+def unwrap_enabled() -> bool:
+    """Is command unwrapping on? ``FERAL_SHELL_UNWRAP``, default on.
+
+    The escape hatch exists because unwrapping adds refusals, and an
+    operator who hits a false positive on a legitimate build script needs
+    a way to keep working while it is fixed rather than a reason to turn
+    the whole shell path off. Set ``FERAL_SHELL_UNWRAP=0`` (or ``false``
+    / ``off`` / ``no``) to disable. Any other value, including unset,
+    leaves it on.
+    """
+    raw = (os.environ.get("FERAL_SHELL_UNWRAP", "") or "").strip().lower()
+    return raw not in ("0", "false", "off", "no")
 
 
 def current_autonomy_mode() -> str:
@@ -303,23 +322,79 @@ def resolve_execution_mode(
             ),
         )
 
-    # 5. One filesystem policy for the whole toolset: a path the file tools
-    #    refuse must not be reachable by naming it on the command line.
-    for candidate in command_argument_paths(command, resolved_cwd):
-        if not policy.can_read_path(candidate):
+    # 5. Pre-normalisation. Every check below reads command *text*, and
+    #    text is the attacker's choice of encoding:
+    #    ``echo cm0gLXJmIC8K | base64 -d | sh`` names no path and matches
+    #    no deny pattern while running ``rm -rf /``. Unwrap once here and
+    #    run the same checks over both forms; see
+    #    ``security.command_unwrap``.
+    scannable = scannable_command(command) if unwrap_enabled() else ""
+    forms = [command] + ([scannable] if scannable and scannable != command else [])
+
+    #    Deliberate obfuscation is refused outright rather than scanned.
+    #    A base64 or hex blob decoded straight into a shell has no
+    #    legitimate use from a tool call: an operator who wants that
+    #    writes the command, and a model that produces it is either
+    #    working around the policy or repeating something that was
+    #    injected into it. Other findings (a plain ``$(...)``, a
+    #    heredoc) are ordinary and only feed the scan.
+    if scannable:
+        for finding in obfuscation_findings(command):
+            if finding.kind != KIND_ENCODED_PAYLOAD_TO_SHELL:
+                continue
+            logger.warning("refusing obfuscated shell command: %s", finding.detail)
             return ExecutionDecision(
                 mode=MODE_REFUSED,
-                needs=NEEDS_WORKSPACE_GRANT,
+                needs=NEEDS_POLICY,
                 cwd=resolved_cwd,
                 workspace=workspace,
                 workspace_source=source,
-                denied_path=candidate,
                 reason=(
-                    f"command references {candidate}, which the filesystem "
-                    f"policy denies to the file tools as well. Grant the "
-                    f"folder or drop the argument."
+                    f"refusing an obfuscated command: {finding.detail}. "
+                    f"It decodes to: {finding.revealed!r}. Run the decoded "
+                    f"command directly if that is what you meant."
                 ),
             )
+
+    #    Operator deny rules plus the reviewed floor, matched against the
+    #    unwrapped text so an encoding does not walk past them.
+    for pattern in policy.denied_command_patterns():
+        for form in forms:
+            match = pattern.search(form)
+            if not match:
+                continue
+            return ExecutionDecision(
+                mode=MODE_REFUSED,
+                needs=NEEDS_POLICY,
+                cwd=resolved_cwd,
+                workspace=workspace,
+                workspace_source=source,
+                reason=(
+                    f"command matches a denied pattern "
+                    f"({match.group(0)[:60]!r}); refusing"
+                ),
+            )
+
+    # 6. One filesystem policy for the whole toolset: a path the file tools
+    #    refuse must not be reachable by naming it on the command line.
+    #    Run over the unwrapped form too, so ``cat $(echo ~/.ssh/id_rsa)``
+    #    and its ANSI-C spelling are caught alongside the direct one.
+    for form in forms:
+        for candidate in command_argument_paths(form, resolved_cwd):
+            if not policy.can_read_path(candidate):
+                return ExecutionDecision(
+                    mode=MODE_REFUSED,
+                    needs=NEEDS_WORKSPACE_GRANT,
+                    cwd=resolved_cwd,
+                    workspace=workspace,
+                    workspace_source=source,
+                    denied_path=candidate,
+                    reason=(
+                        f"command references {candidate}, which the filesystem "
+                        f"policy denies to the file tools as well. Grant the "
+                        f"folder or drop the argument."
+                    ),
+                )
 
     return ExecutionDecision(
         mode=MODE_HOST_WORKSPACE,
@@ -343,4 +418,5 @@ __all__ = [
     "current_autonomy_mode",
     "resolve_cwd",
     "resolve_execution_mode",
+    "unwrap_enabled",
 ]
