@@ -2311,7 +2311,11 @@ function OAuthSelfServeCard({ provider, onSaved, onDisconnect, connected }) {
   };
 
   const authorize = () => {
-    window.open(`${API_BASE}/api/oauth/authorize/${encodeURIComponent(pid)}`, '_blank', 'width=520,height=640');
+    // `redirect=1` makes the brain 302 to the provider. Without it the
+    // route answers with JSON and the popup renders `{"success": true,
+    // "url": ...}` instead of the consent screen, which is what this
+    // button did for every OAuth provider.
+    window.open(`${API_BASE}/api/oauth/authorize/${encodeURIComponent(pid)}?redirect=1`, '_blank', 'width=520,height=640');
   };
 
   return (
