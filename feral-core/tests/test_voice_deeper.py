@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from voice.realtime_proxy import DEFAULT_MODEL as _DEFAULT_REALTIME_MODEL
 from voice.router import VoiceRouter, _ENV_VOICE_PROVIDER
 from voice.realtime_proxy import (
     AUDIO_FORMAT,
@@ -161,7 +162,7 @@ async def test_handle_audio_from_node_openai_starts_session(monkeypatch):
     rt.start_session.assert_awaited_once()
     kwargs = rt.start_session.await_args.kwargs
     assert rt.start_session.await_args.args == ("sid", "n1")
-    assert kwargs["model"] == "gpt-realtime"
+    assert kwargs["model"] == _DEFAULT_REALTIME_MODEL
     assert kwargs["voice"] == "marin"
     assert kwargs["input_sample_rate"] == 24000
     assert kwargs["language_hint"] == ""

@@ -31,7 +31,23 @@ def feral_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def stub_probes(monkeypatch):
+def force_macos(monkeypatch):
+    """Pin the platform so the local-engine defaults are deterministic.
+
+    ``_default_local_stt`` picks whisper.cpp only on Darwin, because it is
+    the only Whisper build with Metal acceleration, and falls through to
+    faster-whisper elsewhere. Without this pin these tests assert the
+    macOS outcome and pass on a developer Mac while failing on Linux CI,
+    which is exactly what happened. See ``test_linux_defaults_to_faster_whisper``
+    for the other side of the branch.
+    """
+    import platform
+
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+
+
+@pytest.fixture
+def stub_probes(monkeypatch, force_macos):
     """Local engines ready, cloud ones not configured."""
     from security import probe as probe_mod
 
@@ -215,3 +231,33 @@ def test_cloud_branch_does_not_offer_local_engines(
     for local in ("whispercpp", "macos_say", "piper", "faster_whisper"):
         assert local not in offered, f"{local} offered on the cloud branch"
     assert "deepgram" in offered
+
+
+def test_linux_defaults_to_faster_whisper():
+    """The other side of the platform branch, pinned explicitly.
+
+    whisper.cpp is preferred on Darwin because it is the only Whisper
+    build with Metal acceleration. On Linux there is no such advantage
+    and CTranslate2 is the faster path, so faster-whisper wins. This test
+    exists because the Darwin-only assertion above silently passed on a
+    developer Mac and failed on Linux CI.
+    """
+    import platform
+    from unittest.mock import patch
+
+    from cli.setup.steps.voice_preflight import _default_local_stt
+
+    entries = [{"id": "whispercpp"}, {"id": "faster_whisper"}]
+
+    with patch.object(platform, "system", lambda: "Linux"):
+        assert _default_local_stt(entries) == "faster_whisper"
+
+    with patch.object(platform, "system", lambda: "Darwin"):
+        assert _default_local_stt(entries) == "whispercpp"
+
+
+def test_neither_engine_available_yields_no_pick():
+    """A machine with no local STT must not be handed a phantom default."""
+    from cli.setup.steps.voice_preflight import _default_local_stt
+
+    assert _default_local_stt([{"id": "macos_say"}]) == "__none__"
