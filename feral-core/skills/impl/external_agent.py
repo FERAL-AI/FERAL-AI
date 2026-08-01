@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Any, Dict
 
 from skills.base import BaseSkill
@@ -243,17 +244,24 @@ def _registry():
 def _approval_manager():
     """FERAL's own approval store, when this process has one.
 
-    Returned as ``None`` rather than constructed on the spot when it is
-    unavailable: a fresh ApprovalManager pointed at a scratch database
-    would answer "no grant" for everything, which is safe, but it would
-    also silently persist ``allow_always`` answers somewhere nobody can
-    revoke them from.
+    ``approval_manager`` is an attribute of the ``BrainState`` instance,
+    not of ``api.state`` the module, so it has to be reached through
+    ``api.state.state``. Reading it off the module returns ``None``
+    forever and quietly disables the whole ApprovalManager integration.
+
+    Looked up through ``sys.modules`` rather than imported: importing
+    ``api.state`` pulls in the entire brain, and a skill call has no
+    business doing that. If the brain is not running there is no store to
+    consult, and ``None`` means every permission still has to be answered
+    by a human. Nothing is auto-allowed either way.
     """
-    try:
-        from api import state as api_state
-    except Exception:
+    module = sys.modules.get("api.state")
+    if module is None:
         return None
-    return getattr(api_state, "approval_manager", None)
+    brain_state = getattr(module, "state", None)
+    if brain_state is None:
+        return None
+    return getattr(brain_state, "approval_manager", None)
 
 
 register_skill(ExternalAgentSkill)

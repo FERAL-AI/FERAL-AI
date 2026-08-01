@@ -200,6 +200,43 @@ class TestCatalogueResolution:
         assert "hermes" not in catalog.CATALOG
 
 
+class TestApprovalManagerLookup:
+    """A regression guard for a bug that silently disabled the integration.
+
+    ``approval_manager`` hangs off the ``BrainState`` INSTANCE, so reading
+    it off the ``api.state`` module returns ``None`` forever and the
+    ApprovalManagerBroker never gets wired in. Nothing would fail loudly:
+    permissions would still be answered by a human, and an
+    ``allow_always`` would just never be remembered.
+    """
+
+    def test_it_reads_through_the_brain_state_instance(self, monkeypatch):
+        import types
+
+        from skills.impl.external_agent import _approval_manager
+
+        sentinel = object()
+        module = types.ModuleType("api.state")
+        module.state = types.SimpleNamespace(approval_manager=sentinel)
+        # The attribute also exists on the real module namespace in the
+        # buggy reading, so put a decoy there to catch a regression.
+        module.approval_manager = "wrong: this is the module, not the state"
+        monkeypatch.setitem(sys.modules, "api.state", module)
+
+        assert _approval_manager() is sentinel
+
+    def test_no_brain_means_no_manager_and_no_heavy_import(self, monkeypatch):
+        from skills.impl.external_agent import _approval_manager
+
+        monkeypatch.delitem(sys.modules, "api.state", raising=False)
+
+        def explode(*_args, **_kwargs):
+            raise AssertionError("a skill call must not import the brain")
+
+        monkeypatch.setattr("builtins.__import__", explode)
+        assert _approval_manager() is None
+
+
 class TestSkillDispatch:
     async def test_unknown_endpoint_is_a_404(self, skill):
         result = await skill.execute("teleport", {}, {})
