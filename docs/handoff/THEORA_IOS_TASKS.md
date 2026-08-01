@@ -376,3 +376,99 @@ agent's `bash` can never grant FERAL's `bash`.
   section will be updated when it lands rather than promised here.
 - **hermes is untested.** Its code path exists and it speaks ACP, but only
   opencode was exercised against a real binary.
+
+---
+
+# Health frame (added 2026-08-01, v2026.8.2)
+
+Theora's HUP client decodes nine frame types and none of them carry health data,
+so the only way Whoop or glasses history reached the app was as English prose in
+a chat reply. There is now a real frame.
+
+## The frame
+
+Type `health_update`. Envelope is the **exact mirror of `device_event`**
+(HUP_SPEC 5.4), so no new vocabulary: `{node_id, event_type, ts, data}`.
+Registered in `models/protocol.py` as `HealthUpdatePayload`.
+
+`event_type` is `health_summary` or `vitals_trend`. **Both carry the same
+reading shape, so one renderer handles both.**
+
+```json
+{
+  "hup_version": "1.3.0",
+  "type": "health_update",
+  "ts": 1785391964.235,
+  "payload": {
+    "node_id": "feral-iphone-1",
+    "event_type": "health_summary",
+    "ts": 1785391964.235,
+    "data": {
+      "sources": ["whoop"],
+      "window_days": 0,
+      "note": "",
+      "readings": [
+        {"metric": "recovery_score", "label": "Recovery", "value": 66.0,
+         "unit": "%", "precision": 0, "category": "recovery",
+         "source": "whoop", "ts": 1785391964.235},
+        {"metric": "resting_hr", "label": "Resting Heart Rate", "value": 54.0,
+         "unit": "bpm", "precision": 0, "category": "vitals",
+         "source": "whoop", "ts": 1785391964.235},
+        {"metric": "hrv", "label": "HRV", "value": 78.5,
+         "unit": "ms", "precision": 0, "category": "vitals",
+         "source": "whoop", "ts": 1785391964.235},
+        {"metric": "sleep_hours", "label": "Sleep", "value": 8.0,
+         "unit": "h", "precision": 2, "category": "sleep",
+         "source": "whoop", "ts": 1785391964.235},
+        {"metric": "strain", "label": "Strain", "value": 12.4,
+         "unit": "", "precision": 1, "category": "activity",
+         "source": "whoop", "ts": 1785391964.235}
+      ],
+      "series": []
+    }
+  }
+}
+```
+
+`vitals_trend` uses the same envelope with `readings` empty and `series`
+carrying charts:
+
+```json
+"series": [
+  {"metric": "recovery_score", "label": "Recovery", "unit": "%",
+   "precision": 0, "category": "recovery", "source": "whoop",
+   "points": [{"ts": 1785219164.235, "value": 64.0},
+              {"ts": 1785391964.235, "value": 66.0}]}
+]
+```
+
+## Three things that will bite you if you skip them
+
+1. **`precision` is a display hint only.** `value` keeps the source's own
+   precision. Round at render time, never on store. A bug in the brain did
+   exactly this and persisted HRV 78.5 ms as 78.0 ms, permanently.
+2. **`source` ids are carried verbatim and never translated.** Whoop is
+   `whoop`, the glasses are `jw_health_glasses`. The relay already sends
+   `jw_health_glasses` (`FeralHUPModels.swift:25`), so this matches. Do not
+   introduce a `glasses` alias; a rename here would be a sixth vocabulary.
+3. **`points[].date`** (`YYYY-MM-DD`) is present only when the producer had a
+   day label. Do not require it.
+
+## Two ways to get it
+
+- **Push**, over the node socket you already hold. Add `health_update` to
+  `FeralInboundParser.parse` alongside the other cases.
+- **Pull**, `GET /api/health/frame?event_type=&days=&push=`. Now on the
+  phone-bearer GET allowlist, so the existing pairing bearer works. It returns
+  the frame and also pushes it to every connected node, each copy stamped with
+  that node's own `node_id`.
+
+## Caveats, stated rather than discovered later
+
+- **No real Whoop response was recorded.** Fixtures are synthetic, written
+  against the documented v1 field names and the parsing already in
+  `health_platforms.py`. If the live API differs from what that client assumes,
+  the fixtures inherit the same error.
+- **Oura is not synced.** Only Whoop. Oura's client exists and its OAuth was
+  just fixed, but the sync is Whoop-only.
+- Whoop history is mirrored for 400 days. Live sensor samples still prune at 35.
