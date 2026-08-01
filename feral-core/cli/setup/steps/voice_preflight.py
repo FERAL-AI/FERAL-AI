@@ -16,8 +16,6 @@ from __future__ import annotations
 import asyncio
 
 from ..helpers import (
-    BackNavigation,
-    QuitNavigation,
     SkipStep,
     Option,
     ask_choice,
@@ -83,17 +81,14 @@ async def run(state: WizardState) -> None:
     # here and no there and left a half-configured voice stack. It now
     # reads ``audio.configured_via_wizard`` instead of re-asking, so the
     # wording here has to cover the whole of voice, not just realtime.
-    try:
-        wants_voice = confirm(
-            "Set up voice now? (Covers realtime, speech-to-text and "
-            "text-to-speech. Skip if you only need text chat, voice can be "
-            "set up later.)",
-            default=True,
-        )
-    except (KeyboardInterrupt, BackNavigation, QuitNavigation):
-        raise
+    #
+    # It is a three-way rather than a yes/no because "fully local" is a
+    # different shape of setup, not a different provider inside the
+    # same one: it has no credentials to collect, it downloads weights
+    # instead, and realtime does not exist for it at all.
+    stack = _ask_voice_stack(console)
 
-    if not wants_voice:
+    if stack == "skip":
         # Stamp a sentinel so we don't re-prompt next time.
         state.set_setting("audio", "configured_via_wizard", False)
         raise SkipStep()
@@ -106,6 +101,20 @@ async def run(state: WizardState) -> None:
     console.print()
     console.print("Probing voice providers… (5s ceiling per provider)")
     probe_results = await _probe_all(probe, [e["id"] for e in catalogue])
+
+    if stack == "local":
+        await _run_local_stack(
+            state, console, stt_entries, tts_entries, probe_results, probe,
+        )
+        state.set_setting("audio", "configured_via_wizard", True)
+        return
+
+    # Cloud path: local engines are not offered here, so a picker that
+    # listed them would let an operator choose an engine this branch
+    # never configures weights for.
+    realtime_entries = [e for e in realtime_entries if not e.get("local")]
+    stt_entries = [e for e in stt_entries if not e.get("local")]
+    tts_entries = [e for e in tts_entries if not e.get("local")]
 
     # Render the side-by-side preflight table — same columns as
     # `feral voice providers` for parity with the standalone CLI
@@ -258,6 +267,346 @@ async def run(state: WizardState) -> None:
                 _set_chained_fallback(state, "tts_provider", chosen.id)
 
     state.set_setting("audio", "configured_via_wizard", True)
+
+
+def _ask_voice_stack(console) -> str:
+    """Fully local, cloud, or skip. Returns ``local|cloud|skip``.
+
+    The wording is load-bearing. "Fully local voice" is a claim a
+    privacy-motivated operator will read as "nothing I say leaves this
+    machine", and that is not what it means: the transcript still goes
+    to whatever LLM provider is configured, which for almost every
+    install is a remote API. Saying so here, once, in the sentence that
+    offers the option, is the only place it cannot be missed.
+    """
+    console.print()
+    if _RICH_AVAILABLE:
+        console.print(
+            "[bold]Local voice[/bold] runs speech-to-text, text-to-speech and "
+            "endpointing on this machine. No audio is uploaded and no API key "
+            "is needed for them.\n"
+            "[yellow]Your words still reach your LLM provider.[/] FERAL "
+            "transcribes locally and then sends the [bold]text[/bold] to the "
+            "model you configured in the previous step, which is a remote "
+            "service unless you pointed it at Ollama or LM Studio. "
+            "\"Fully local voice\" means the audio, not the conversation."
+        )
+    else:
+        console.print(
+            "Local voice runs speech-to-text, text-to-speech and endpointing "
+            "on this machine. No audio is uploaded and no API key is needed "
+            "for them.\n"
+            "Your words still reach your LLM provider: FERAL transcribes "
+            "locally and then sends the TEXT to the model you configured, "
+            "which is a remote service unless you pointed it at Ollama or "
+            "LM Studio. \"Fully local voice\" means the audio, not the "
+            "conversation."
+        )
+    console.print()
+
+    chosen = ask_choice(
+        "How should voice run?",
+        [
+            Option(
+                id="cloud",
+                label="Cloud providers (lowest latency, needs API keys)",
+                aliases=("cloud", "remote", "api"),
+            ),
+            Option(
+                id="local",
+                label="Fully local audio (no keys, downloads models; LLM still remote)",
+                aliases=("local", "offline", "private"),
+            ),
+            Option(
+                id="skip",
+                label="Skip voice for now (text chat only)",
+                aliases=("skip", "none", "no"),
+            ),
+        ],
+        default="cloud",
+    )
+    return chosen.id
+
+
+async def _run_local_stack(
+    state: WizardState,
+    console,
+    stt_entries: list,
+    tts_entries: list,
+    probe_results: dict,
+    probe_fn,
+) -> None:
+    """Configure a fully-local chained pipeline.
+
+    Deliberately narrower than the cloud path:
+
+    * No realtime pick. Every realtime provider is a bidirectional
+      socket to a vendor; there is no local one, so offering the
+      question at all would imply otherwise.
+    * No credential prompts. Readiness for these engines is
+      "importable, and the weights are on disk", so the remedy for a
+      not-ready engine is a download, not a key.
+    * Endpointing is configured too. Silero VAD is what makes the
+      local path feel like a conversation instead of a walkie-talkie
+      (measured: 2218ms to end an utterance without it, 309ms with),
+      and it is 2.2MB, so it is offered first and defaulted on.
+    """
+    state.set_setting("audio", "realtime_primary", "")
+
+    await _offer_vad_download(console)
+
+    local_stt = [e for e in stt_entries if e.get("local")]
+    local_tts = [e for e in tts_entries if e.get("local")]
+
+    if local_stt:
+        opts = [
+            Option(
+                id=e["id"], label=e["name"], aliases=(e["id"],),
+                status=_option_status(probe_results.get(e["id"])),
+            )
+            for e in local_stt
+        ]
+        opts.append(Option(id="__none__", label="(skip local STT)", status=""))
+        default_id = (
+            state.get_setting("audio", "chained_stt_provider")
+            or _default_local_stt(local_stt)
+        )
+        chosen = ask_choice(
+            "Pick the local speech-to-text engine", opts, default=default_id,
+        )
+        if chosen.id != "__none__":
+            state.set_setting("audio", "chained_stt_provider", chosen.id)
+            _set_chained_fallback(state, "stt_provider", chosen.id)
+            _set_voice_chained(state, "stt_provider", chosen.id)
+            await _offer_stt_download(console, state, chosen.id, probe_fn)
+
+    if local_tts:
+        opts = [
+            Option(
+                id=e["id"], label=e["name"], aliases=(e["id"],),
+                status=_option_status(probe_results.get(e["id"])),
+            )
+            for e in local_tts
+        ]
+        opts.append(Option(id="__none__", label="(skip local TTS)", status=""))
+        default_id = (
+            state.get_setting("audio", "chained_tts_provider")
+            or _default_local_tts(local_tts, probe_results)
+        )
+        chosen = ask_choice(
+            "Pick the local text-to-speech engine", opts, default=default_id,
+        )
+        if chosen.id != "__none__":
+            state.set_setting("audio", "chained_tts_provider", chosen.id)
+            _set_chained_fallback(state, "tts_provider", chosen.id)
+            _set_voice_chained(state, "tts_provider", chosen.id)
+            if chosen.id == "piper":
+                _warn_piper_licence(console)
+                await _offer_piper_download(console, state)
+
+    # The chained pipeline is the only mode that can run local engines,
+    # so pin it rather than leave the router to infer it from a
+    # half-configured realtime block.
+    state.set_setting("audio", "fallback_mode", "chained")
+
+
+def _default_local_stt(entries: list) -> str:
+    """whisper.cpp on macOS, faster-whisper elsewhere.
+
+    Not a preference, a hardware fact: CTranslate2 (faster-whisper) has
+    no Metal backend, so on Apple Silicon it runs on CPU while
+    whisper.cpp uses the GPU.
+    """
+    import platform
+
+    ids = {e["id"] for e in entries}
+    if platform.system() == "Darwin" and "whispercpp" in ids:
+        return "whispercpp"
+    if "faster_whisper" in ids:
+        return "faster_whisper"
+    return "__none__"
+
+
+def _default_local_tts(entries: list, probe_results: dict) -> str:
+    """macOS ``say`` when it is there, otherwise Piper.
+
+    ``say`` is already installed, needs no download, and carries no
+    licensing question. Piper is GPL-3.0-or-later, so it is never the
+    default on a machine that has an alternative.
+    """
+    ids = {e["id"] for e in entries}
+    if "macos_say" in ids:
+        result = probe_results.get("macos_say")
+        if result is not None and getattr(result, "ok", False):
+            return "macos_say"
+    if "piper" in ids:
+        return "piper"
+    return "__none__"
+
+
+def _warn_piper_licence(console) -> None:
+    message = (
+        "Piper is licensed GPL-3.0-or-later, while FERAL is Apache-2.0. "
+        "It is not installed by default and is not pulled in by any other "
+        "extra. Installing it is your explicit choice: "
+        "pip install 'feral-ai[tts-piper]'"
+    )
+    console.print(f"  [yellow]{message}[/]" if _RICH_AVAILABLE else f"  {message}")
+
+
+async def _offer_vad_download(console) -> None:
+    """Offer the 2.2MB Silero VAD download. Defaults to yes."""
+    try:
+        from voice import local_models
+        from voice.vad import vad_available
+    except Exception as exc:
+        console.print(f"  Voice activity detection unavailable: {exc}")
+        return
+
+    ready, reason = vad_available()
+    if ready:
+        console.print(
+            "  [green]OK[/] Server voice-activity detection ready (Silero VAD)"
+            if _RICH_AVAILABLE else
+            "  OK Server voice-activity detection ready (Silero VAD)"
+        )
+        return
+    if "onnxruntime" in reason:
+        console.print(
+            "  [yellow]Voice activity detection needs onnxruntime:[/] "
+            "pip install 'feral-ai[vad]'"
+            if _RICH_AVAILABLE else
+            "  Voice activity detection needs onnxruntime: "
+            "pip install 'feral-ai[vad]'"
+        )
+        return
+
+    console.print(
+        "  Server voice-activity detection (Silero VAD, MIT, 2.2MB) decides "
+        "when you have stopped speaking. Without it FERAL waits for silence "
+        "on the wire instead, which adds about 1.9 seconds to every reply."
+    )
+    if not confirm("  Download Silero VAD now (2.2MB)?", default=True):
+        return
+    try:
+        path = await asyncio.to_thread(
+            local_models.ensure_silero_vad, allow_download=True
+        )
+        console.print(f"  Downloaded {path}")
+    except Exception as exc:
+        console.print(f"  [red]Download failed:[/] {exc}" if _RICH_AVAILABLE
+                      else f"  Download failed: {exc}")
+
+
+async def _offer_stt_download(
+    console, state: WizardState, provider_id: str, probe_fn,
+) -> None:
+    """Offer the whisper weights download for the chosen local STT."""
+    try:
+        from voice import local_models
+    except Exception:
+        return
+
+    if provider_id == "whispercpp":
+        try:
+            import pywhispercpp  # noqa: F401
+        except Exception:
+            console.print(
+                "  [yellow]whisper.cpp is not installed:[/] "
+                "pip install 'feral-ai[stt-local]'"
+                if _RICH_AVAILABLE else
+                "  whisper.cpp is not installed: pip install 'feral-ai[stt-local]'"
+            )
+            return
+        model = state.get_setting("audio", "chained_stt_model") or "base.en"
+        if local_models.whispercpp_model_present(model):
+            console.print(f"  [green]OK[/] whisper.cpp model {model} already present"
+                          if _RICH_AVAILABLE else
+                          f"  OK whisper.cpp model {model} already present")
+            return
+        size = local_models.whispercpp_model_size_mb(model)
+        if not confirm(
+            f"  Download the whisper.cpp {model} model now (~{size}MB)?",
+            default=True,
+        ):
+            return
+        try:
+            path = await asyncio.to_thread(
+                local_models.ensure_whispercpp_model, model, allow_download=True,
+            )
+            console.print(f"  Downloaded {path}")
+            _set_voice_chained(state, "stt_model", model)
+        except Exception as exc:
+            console.print(f"  [red]Download failed:[/] {exc}" if _RICH_AVAILABLE
+                          else f"  Download failed: {exc}")
+        return
+
+    if provider_id == "faster_whisper":
+        try:
+            import faster_whisper  # noqa: F401
+        except Exception:
+            console.print(
+                "  [yellow]faster-whisper is not installed:[/] "
+                "pip install 'feral-ai[stt]'"
+                if _RICH_AVAILABLE else
+                "  faster-whisper is not installed: pip install 'feral-ai[stt]'"
+            )
+            return
+        console.print(
+            "  faster-whisper downloads its model on first use "
+            "(~150MB for base.en)."
+        )
+
+
+async def _offer_piper_download(console, state: WizardState) -> None:
+    try:
+        from voice import local_models
+        from voice.tts_providers.piper import DEFAULT_VOICE
+    except Exception:
+        return
+    try:
+        import piper  # noqa: F401
+    except Exception:
+        console.print(
+            "  [yellow]Piper is not installed:[/] pip install 'feral-ai[tts-piper]'"
+            if _RICH_AVAILABLE else
+            "  Piper is not installed: pip install 'feral-ai[tts-piper]'"
+        )
+        return
+    voice = state.get_setting("audio", "chained_tts_voice") or DEFAULT_VOICE
+    if local_models.piper_voice_present(voice):
+        console.print(f"  [green]OK[/] Piper voice {voice} already present"
+                      if _RICH_AVAILABLE else
+                      f"  OK Piper voice {voice} already present")
+        return
+    if not confirm(f"  Download the Piper voice {voice} now (~60MB)?", default=True):
+        return
+    try:
+        path = await asyncio.to_thread(
+            local_models.ensure_piper_voice, voice, allow_download=True,
+        )
+        console.print(f"  Downloaded {path}")
+        _set_voice_chained(state, "tts_voice_id", voice)
+    except Exception as exc:
+        console.print(f"  [red]Download failed:[/] {exc}" if _RICH_AVAILABLE
+                      else f"  Download failed: {exc}")
+
+
+def _set_voice_chained(state: WizardState, key: str, value: str) -> None:
+    """Write a pick into ``voice.chained``, the block the router reads first.
+
+    ``_resolve_chained_config`` gives ``voice.chained.*`` precedence
+    over ``audio.chained_fallback.*`` because the former is a UI choice
+    and the latter is a wizard/headless default. A local pick made here
+    is an explicit choice, so it goes in both: the nested audio key
+    keeps the picker's own default stable across re-runs, and this one
+    is what the running pipeline obeys even if the phone Settings panel
+    later writes the block.
+    """
+    voice = state.settings.setdefault("voice", {})
+    chained = dict(voice.get("chained") or {})
+    chained[key] = value
+    voice["chained"] = chained
 
 
 def _set_chained_fallback(state: WizardState, key: str, provider_id: str) -> None:

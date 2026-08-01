@@ -121,6 +121,10 @@ export function VoiceFullscreen({
   const playbackCtxRef = useRef(null);
   const nextPlaybackTimeRef = useRef(0);
   const playbackQueueRef = useRef(Promise.resolve());
+  // Buffer sources currently scheduled on the playback timeline. Held
+  // so barge-in can stop them; an AudioBufferSourceNode cannot be
+  // un-scheduled any other way once `start()` has been called.
+  const activeSourcesRef = useRef(new Set());
 
   useEffect(() => {
     if (!open) return;
@@ -197,6 +201,8 @@ export function VoiceFullscreen({
     source.connect(ctx.destination);
     const now = ctx.currentTime;
     const startTime = Math.max(now, nextPlaybackTimeRef.current);
+    activeSourcesRef.current.add(source);
+    source.onended = () => activeSourcesRef.current.delete(source);
     source.start(startTime);
     nextPlaybackTimeRef.current = startTime + buffer.duration;
   }, [ensurePlaybackContext]);
@@ -211,6 +217,8 @@ export function VoiceFullscreen({
     source.connect(ctx.destination);
     const now = ctx.currentTime;
     const startTime = Math.max(now, nextPlaybackTimeRef.current);
+    activeSourcesRef.current.add(source);
+    source.onended = () => activeSourcesRef.current.delete(source);
     source.start(startTime);
     nextPlaybackTimeRef.current = startTime + decoded.duration;
   }, [ensurePlaybackContext]);
@@ -220,16 +228,55 @@ export function VoiceFullscreen({
     const encoding = (payload.encoding || '').toLowerCase();
     playbackQueueRef.current = playbackQueueRef.current
       .then(async () => {
-        if (encoding === 'mp3' || type === 'audio_chunk') {
+        // Route on the ENCODING, never on the frame type.
+        //
+        // This used to read `if (encoding === 'mp3' || type ===
+        // 'audio_chunk')`, and the second half of that condition ate
+        // the first: the chained pipeline sends its audio as
+        // `audio_chunk` whatever the codec, so raw PCM arriving on an
+        // `audio_chunk` frame went to `decodeAudioData`, which cannot
+        // parse headerless samples and threw `EncodingError` into a
+        // .catch that swallowed it. Silent assistant, no console error.
+        //
+        // That mattered the moment the pipeline started emitting PCM
+        // incrementally, which is what lets playback start on the
+        // first 100ms rather than after the last byte of the reply.
+        if (encoding === 'pcm16' || encoding === 'pcm' || encoding === 'linear16') {
+          await queuePcm16Playback(payload);
+          return;
+        }
+        if (encoding === 'mp3' || encoding === 'opus' || encoding === 'wav') {
           await queueEncodedPlayback(payload);
           return;
         }
-        await queuePcm16Playback(payload);
+        // No encoding declared. `tts_chunk` has always been PCM;
+        // anything else is assumed to be a self-contained encoded file.
+        if (type === 'tts_chunk') {
+          await queuePcm16Playback(payload);
+          return;
+        }
+        await queueEncodedPlayback(payload);
       })
       .catch(() => {
         // Keep queue healthy after transient decode/playback failures.
       });
   }, [queueEncodedPlayback, queuePcm16Playback]);
+
+  // Barge-in. The brain cancels the turn the moment its VAD hears the
+  // user start talking over the reply, and sends `voice_cancel`. The
+  // audio the client has already buffered has to go too: without this,
+  // the user keeps hearing the answer they interrupted for as long as
+  // playback was scheduled ahead, which is the whole experience
+  // barge-in exists to remove.
+  const cancelPlayback = useCallback(() => {
+    for (const source of activeSourcesRef.current) {
+      try { source.stop(); } catch (_err) { /* already ended */ }
+    }
+    activeSourcesRef.current.clear();
+    nextPlaybackTimeRef.current = 0;
+    // Drop anything still queued behind the current decode.
+    playbackQueueRef.current = Promise.resolve();
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -276,6 +323,10 @@ export function VoiceFullscreen({
         if (payload.speaking && voiceStateRef.current !== 'listening') {
           setVoiceState('listening');
         }
+      } else if (type === 'voice_cancel') {
+        // Barge-in from the brain's server-side VAD.
+        cancelPlayback();
+        setVoiceState('listening');
       } else if (type === 'speech_started') {
         nextPlaybackTimeRef.current = 0;
       } else if (type === 'voice_error') {
@@ -304,7 +355,7 @@ export function VoiceFullscreen({
     });
 
     return unsub;
-  }, [open, queueAudioPlayback, shell]);
+  }, [open, queueAudioPlayback, cancelPlayback, shell]);
 
   useEffect(() => {
     if (!open) return;

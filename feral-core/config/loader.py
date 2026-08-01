@@ -136,6 +136,50 @@ DEFAULT_SETTINGS = {
             "tts_provider": "elevenlabs",
         },
     },
+    # Voice-mode settings the phone Settings panel writes. The chained
+    # picks here WIN over ``audio.chained_fallback`` (see
+    # ``voice/router.py::_resolve_chained_config``): that block is the
+    # headless / wizard default, this one is an explicit UI choice.
+    "voice": {
+        # Empty strings mean "not chosen here" so the resolver falls
+        # through to ``audio.chained_fallback`` and then to the shipped
+        # provider defaults. Writing real values here would silently
+        # override a wizard pick on every install.
+        "chained": {
+            "stt_provider": "",
+            "tts_provider": "",
+            "stt_model": "",
+            "tts_model": "",
+            "tts_voice": "",
+            "tts_voice_id": "",
+        },
+        # Server-side voice activity detection (Silero, see
+        # ``voice/vad.py``). This is what ends an utterance; before it
+        # existed the pipeline waited for the client to stop sending
+        # and then waited again, roughly 2.3s of dead air per turn.
+        #
+        # Turning it off is supported and costs latency, not
+        # correctness: the packet-absence silence timer takes over.
+        "vad": {
+            "enabled": True,
+            # Speech starts above ``threshold`` and stops below
+            # ``neg_threshold``. The gap is hysteresis so one quiet
+            # frame mid-word does not read as end-of-utterance.
+            "threshold": 0.5,
+            "neg_threshold": 0.35,
+            # Continuous silence that ends the utterance. Under about
+            # 200ms, ordinary pauses between words start cutting
+            # people off; over about 500ms the reply feels sluggish.
+            "min_silence_ms": 300,
+            # Ignore blips shorter than this so a cough does not open
+            # an utterance that then has to be transcribed to nothing.
+            "min_speech_ms": 96,
+            # Speech detected while the assistant is talking cancels
+            # the turn. Requires the client's echo cancellation to be
+            # on, or the assistant's own voice re-triggers it.
+            "barge_in": True,
+        },
+    },
     "vision": {
         "enabled": False,
         "max_frame_kb": 512,

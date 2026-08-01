@@ -464,6 +464,11 @@ class TestVoicePreflightDefaultsTerminate:
         monkeypatch.setattr(probe_mod, "probe", _all_unconfigured)
         probe_mod.clear_probe_cache()
         monkeypatch.setattr(vp, "confirm", lambda *_a, **kw: kw.get("default", False))
+        # The step now opens with "how should voice run?" (cloud /
+        # fully local / skip), whose default is legitimately "cloud"
+        # rather than "__none__" - it is not a provider picker and the
+        # assertion below is about provider pickers.
+        monkeypatch.setattr(vp, "_ask_voice_stack", lambda *_a, **_kw: "cloud")
 
         seen_defaults: list[str] = []
 
@@ -905,13 +910,23 @@ class TestVoiceQuestionIsAskedOnce:
         from cli.setup.steps import audio as audio_step
         from cli.setup.steps import voice_preflight as vp
 
-        asked: list[tuple[str, bool]] = []
+        asked: list[tuple[str, object]] = []
 
         def _record(prompt, **kw):
             asked.append((prompt.strip().lower(), kw.get("default")))
             return False
 
-        monkeypatch.setattr(vp, "confirm", _record)
+        # The preflight's gate is now a three-way choice (cloud /
+        # fully local / skip) rather than a yes/no, because "fully
+        # local" is a different shape of setup and not a provider
+        # inside the same one. The collision this test guards against
+        # is unchanged: the two steps must not ask the operator the
+        # same question with opposite defaults.
+        def _record_choice(prompt, opts, default=None):
+            asked.append((prompt.strip().lower(), default))
+            return next(o for o in opts if o.id == "skip")
+
+        monkeypatch.setattr(vp, "ask_choice", _record_choice)
         with pytest.raises(SkipStep):
             asyncio.run(vp.run(WizardState.load(tmp_path / "feral")))
 
@@ -924,7 +939,9 @@ class TestVoiceQuestionIsAskedOnce:
         assert len(asked) == 2, asked
         (preflight_prompt, preflight_default), (audio_prompt, audio_default) = asked
         assert preflight_prompt != audio_prompt
-        assert preflight_default is True
+        # Pressing enter proceeds with voice on BOTH steps rather than
+        # yes on one and no on the other.
+        assert preflight_default == "cloud"
         assert audio_default is True
 
 

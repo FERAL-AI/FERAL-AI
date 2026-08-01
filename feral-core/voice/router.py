@@ -63,6 +63,57 @@ def _resolve_provider_key(provider_id: str, env_key: str) -> str:
     return ""
 
 
+# Which vendor credential each chained provider needs. ``("", "")``
+# means "runs on this machine, needs nothing".
+_STT_CREDENTIALS: dict[str, tuple[str, str]] = {
+    "deepgram": ("deepgram", "DEEPGRAM_API_KEY"),
+    "openai_whisper": ("openai", "OPENAI_API_KEY"),
+    "groq_whisper": ("groq", "GROQ_API_KEY"),
+    "whispercpp": ("", ""),
+    "faster_whisper": ("", ""),
+}
+
+_TTS_CREDENTIALS: dict[str, tuple[str, str]] = {
+    "openai": ("openai", "OPENAI_API_KEY"),
+    "openai_tts": ("openai", "OPENAI_API_KEY"),
+    "elevenlabs": ("elevenlabs", "ELEVENLABS_API_KEY"),
+    "cartesia": ("cartesia", "CARTESIA_API_KEY"),
+    "macos_say": ("", ""),
+    "piper": ("", ""),
+}
+
+
+def _provider_credential(kind: str, name: str) -> tuple[str, str]:
+    """``(vault_provider_id, env_var)`` for a chained provider.
+
+    Unknown names return ``("", "")`` - "no credential required" -
+    rather than the previous behaviour, which fell through to
+    ``("deepgram", "DEEPGRAM_API_KEY")`` for STT and
+    ``("elevenlabs", "ELEVENLABS_API_KEY")`` for TTS. That default was
+    harmless while every provider was a cloud vendor we shipped, and
+    actively wrong the moment a local engine existed: selecting
+    ``whispercpp`` aborted the session demanding a Deepgram key that
+    nothing in the session would ever use, and the operator got a
+    missing-credential banner for a provider they had not chosen.
+
+    A genuinely unknown name still fails, just later and more
+    honestly - at ``get_stt_provider``, with "Unknown STT provider",
+    which is what actually went wrong.
+    """
+    table = _STT_CREDENTIALS if kind == "stt" else _TTS_CREDENTIALS
+    return table.get(name, ("", ""))
+
+
+def _is_local_provider(kind: str, name: str) -> bool:
+    """True when *name* is an engine that runs on this machine."""
+    try:
+        from voice.provider_registry import requires_credential
+
+        return not requires_credential(kind, name)
+    except Exception:
+        return not _provider_credential(kind, name)[1]
+
+
 def _settings_realtime_model() -> str:
     """Resolve the operator-configured OpenAI Realtime model.
 
@@ -830,20 +881,16 @@ class VoiceRouter:
         # legacy default-namespace entry was never written. Env-only
         # setups continue to work via the fallback in
         # :func:`_resolve_provider_key`.
-        provider_env = {
-            "deepgram": ("deepgram", "DEEPGRAM_API_KEY"),
-            "openai_whisper": ("openai", "OPENAI_API_KEY"),
-            "groq_whisper": ("groq", "GROQ_API_KEY"),
-            "elevenlabs": ("elevenlabs", "ELEVENLABS_API_KEY"),
-            "cartesia": ("cartesia", "CARTESIA_API_KEY"),
-            "openai": ("openai", "OPENAI_API_KEY"),
-        }
-        stt_pid, stt_env = provider_env.get(stt_name, ("deepgram", "DEEPGRAM_API_KEY"))
-        tts_pid, tts_env = provider_env.get(tts_name, ("elevenlabs", "ELEVENLABS_API_KEY"))
+        stt_pid, stt_env = _provider_credential("stt", stt_name)
+        tts_pid, tts_env = _provider_credential("tts", tts_name)
 
         def _missing_keys(pairs: list[tuple[str, str]]) -> list[str]:
             m: list[str] = []
             for pid, env_var in pairs:
+                # ``("", "")`` marks a local engine: nothing to resolve,
+                # nothing that can be missing.
+                if not env_var:
+                    continue
                 if not _resolve_provider_key(pid, env_var):
                     m.append(env_var)
             return sorted(set(m))
@@ -880,8 +927,8 @@ class VoiceRouter:
                 session_id[:8], ",".join(missing),
             )
             stt_name, tts_name = "openai_whisper", "openai"
-            stt_pid, stt_env = provider_env["openai_whisper"]
-            tts_pid, tts_env = provider_env["openai"]
+            stt_pid, stt_env = _provider_credential("stt", stt_name)
+            tts_pid, tts_env = _provider_credential("tts", tts_name)
             missing = _missing_keys([(stt_pid, stt_env), (tts_pid, tts_env)])
             # The configured STT model belongs to the provider we just
             # walked away from (a Deepgram ``nova-*`` id is not a valid
@@ -1353,27 +1400,46 @@ class VoiceRouter:
         # — which does NOT also touch ``os.environ`` — is visible to
         # both the STT/TTS constructors below. Env-only setups keep
         # working unchanged.
-        stt_keys = {
-            "deepgram": _resolve_provider_key("deepgram", "DEEPGRAM_API_KEY"),
-            "openai_whisper": _resolve_provider_key("openai", "OPENAI_API_KEY"),
-            "groq_whisper": _resolve_provider_key("groq", "GROQ_API_KEY"),
-        }
-        tts_keys = {
-            "openai": _resolve_provider_key("openai", "OPENAI_API_KEY"),
-            "elevenlabs": _resolve_provider_key("elevenlabs", "ELEVENLABS_API_KEY"),
-            # Lane 05 : Cartesia is now a first-class TTS provider.
-            "cartesia": _resolve_provider_key("cartesia", "CARTESIA_API_KEY"),
-        }
+        # Local engines resolve to ``("", "")`` and get an empty key,
+        # which their constructors accept and discard. The router still
+        # passes ``api_key=`` to every provider, so a local provider
+        # that refused the kwarg would be unconstructible here.
+        stt_pid, stt_env = _provider_credential("stt", stt_name)
+        tts_pid, tts_env = _provider_credential("tts", tts_name)
 
         stt_kwargs = {
-            "api_key": stt_keys.get(stt_name, ""),
+            "api_key": _resolve_provider_key(stt_pid, stt_env) if stt_env else "",
             "sample_rate": stt_sample_rate,
         }
         if stt_model:
             stt_kwargs["model"] = stt_model
-        stt_provider = get_stt_provider(stt_name, **stt_kwargs)
-        tts_kwargs = {"api_key": tts_keys.get(tts_name, "")}
-        if tts_name == "openai":
+        stt_provider = await self._construct_provider(
+            session_id, "stt", stt_name, get_stt_provider, stt_kwargs
+        )
+        if stt_provider is None:
+            return None
+        tts_kwargs = {
+            "api_key": _resolve_provider_key(tts_pid, tts_env) if tts_env else "",
+        }
+        if tts_name == "macos_say":
+            # ``say`` addresses voices by their human name ("Samantha"),
+            # so either settings key can carry it; an empty value means
+            # "whatever the user picked in System Settings", which is
+            # the right default and the only way Apple's downloadable
+            # Enhanced / Premium voices get used.
+            chosen_voice = tts_voice or tts_voice_id
+            if chosen_voice:
+                tts_kwargs["voice"] = chosen_voice
+            # Synthesise at the session's own rate so no resampler sits
+            # between the engine and the speaker.
+            tts_kwargs["sample_rate"] = stt_sample_rate
+        elif tts_name == "piper":
+            # Piper addresses voices by model name
+            # ("en_US-lessac-medium"), which operators put in either key.
+            chosen_voice = tts_voice_id or tts_voice
+            if chosen_voice:
+                tts_kwargs["voice"] = chosen_voice
+        elif tts_name == "openai":
             tts_kwargs["model"] = tts_model
             tts_kwargs["voice"] = tts_voice
         elif tts_name == "elevenlabs":
@@ -1395,7 +1461,15 @@ class VoiceRouter:
             if tts_model_raw:
                 tts_kwargs["model_id"] = tts_model_raw
 
-        tts_provider_inst = get_tts_provider(tts_name, **tts_kwargs)
+        tts_provider_inst = await self._construct_provider(
+            session_id, "tts", tts_name, get_tts_provider, tts_kwargs
+        )
+        if tts_provider_inst is None:
+            try:
+                await stt_provider.close()
+            except Exception:
+                logger.debug("STT close after TTS failure", exc_info=True)
+            return None
 
         send_fn = self._send_to_session
 
@@ -1416,9 +1490,50 @@ class VoiceRouter:
             tts_provider=tts_provider_inst,
             llm_handle=self._orchestrator,
             send_frame=_send_frame,
+            sample_rate=stt_sample_rate,
         )
         self._session_voice_mode[session_id] = "chained"
         return session
+
+    async def _construct_provider(
+        self, session_id: str, kind: str, name: str, factory, kwargs: dict
+    ):
+        """Build one chained provider, or refuse loudly and return None.
+
+        A local engine that cannot run raises from its constructor with
+        a specific reason (extra not installed, weights not downloaded,
+        `say` missing). This turns that into a
+        ``voice_status state=unavailable`` frame naming the engine and
+        the reason, and then stops.
+
+        It deliberately does NOT substitute a cloud provider. The legacy
+        path in ``perception/audio_pipeline.py`` does exactly that, and
+        for someone who chose local engines specifically so that their
+        voice never leaves the machine, a silent flip to a cloud vendor
+        is the worst available outcome: it is the failure mode they were
+        trying to prevent, presented as success.
+
+        Cloud providers keep raising as before; the same banner just
+        makes the reason visible instead of leaving a dead session.
+        """
+        try:
+            return factory(name, **kwargs)
+        except Exception as exc:
+            local = _is_local_provider(kind, name)
+            detail = f"{name}: {exc}"
+            logger.error(
+                "Chained %s provider %r unavailable for session %s: %s",
+                kind, name, session_id[:8], exc,
+            )
+            await self.emit_unavailable(
+                session_id,
+                reason=(
+                    f"local_{kind}_unavailable" if local
+                    else f"chained_{kind}_unavailable"
+                ),
+                detail=detail[:400],
+            )
+            return None
 
     async def handle_chained_audio(
         self,
