@@ -26,9 +26,14 @@ from ..state import WizardState
 
 
 # (section, key, label, help) for every boolean the operator can flip
-# here. ``vision.enabled`` lives in its own section but ConfigLoader
-# keeps it in lockstep with ``features.vision``, so writing either is
-# enough — we write the one the runtime treats as canonical.
+# here. ``vision.enabled`` lives in its own section and ConfigLoader
+# coalesces it with ``features.vision``, but it does so with a logical
+# OR (``_unify_feature_flags``). "Writing either is enough" is true for
+# turning vision ON and false for turning it OFF: an operator who
+# enabled vision in the web UI (which writes ``features.vision``) and
+# then unticked it here kept a running ScreenLoop, the exact ambient
+# API-quota burner the loader warns about. Both keys are mirrored on
+# write, see ``_MIRRORED_KEYS``.
 _TOGGLES = (
     (
         "features", "proactive", "Proactive nudges",
@@ -53,6 +58,14 @@ _TOGGLES = (
 )
 
 
+# Toggles whose value must be written to more than one settings key,
+# because the loader ORs the pair and a single write can therefore only
+# ever turn the feature on.
+_MIRRORED_KEYS = {
+    ("vision", "enabled"): (("features", "vision"),),
+}
+
+
 _AUTONOMY_MODES = (
     ("strict", "Strict — ask before every tool that touches anything"),
     ("hybrid", "Hybrid — ask only for destructive or costly actions (recommended)"),
@@ -75,7 +88,17 @@ def run(state: WizardState) -> None:
 def _run_toggles(state: WizardState, console) -> None:
     choices = []
     for section, key, label, blurb in _TOGGLES:
+        # Mirror keys are OR'd by the loader, so the row is pre-marked
+        # when EITHER key is on. Otherwise an install that enabled
+        # vision through the web UI would show the row unticked here
+        # and look like it was already off.
         current = bool(state.get_setting(section, key, _default_for(section, key)))
+        for mirror_section, mirror_key in _MIRRORED_KEYS.get((section, key), ()):
+            current = current or bool(
+                state.get_setting(
+                    mirror_section, mirror_key, _default_for(mirror_section, mirror_key)
+                )
+            )
         choices.append({
             "name": f"{label} — {blurb}",
             "value": f"{section}.{key}",
@@ -91,6 +114,8 @@ def _run_toggles(state: WizardState, console) -> None:
     for section, key, label, _blurb in _TOGGLES:
         on = f"{section}.{key}" in marked
         state.set_setting(section, key, on)
+        for mirror_section, mirror_key in _MIRRORED_KEYS.get((section, key), ()):
+            state.set_setting(mirror_section, mirror_key, on)
         console.print(
             f"  {'[green]on [/]' if on else '[dim]off[/]'} {label}"
             if _RICH_AVAILABLE else

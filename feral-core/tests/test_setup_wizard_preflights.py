@@ -8,8 +8,6 @@ macOS-only, read-only, and surfaces deeplinks.
 from __future__ import annotations
 
 import asyncio
-import json
-import sys
 import time
 from unittest.mock import MagicMock
 
@@ -542,7 +540,6 @@ def test_key_masking_uniform_across_steps(
 
     # --- chat surface (drive _configure_provider_key directly) ---
     from cli.setup.steps import llm as llm_step
-    from unittest.mock import AsyncMock
 
     fake_catalog = MagicMock()
     fake_catalog.configure = MagicMock()
@@ -592,12 +589,17 @@ def test_tcc_preflight_no_op_off_darwin(feral_home, monkeypatch):
         tcc_preflight.run(state)
 
 
-def test_tcc_preflight_persists_snapshot_and_uses_deeplinks(
+def test_tcc_preflight_is_read_only_and_uses_deeplinks(
     feral_home, monkeypatch, capsys,
 ):
-    """On macOS, the step calls ``all_gui_permission_statuses``,
-    renders deeplinks from ``TCC_CATALOG``, and persists a snapshot
-    under ``settings.macos.tcc_snapshot``."""
+    """On macOS, the step calls ``all_gui_permission_statuses`` and
+    renders deeplinks from ``TCC_CATALOG``.
+
+    It must NOT persist anything. It used to write a
+    ``settings.macos.tcc_snapshot`` list "so the doctor + dashboard can
+    reflect the wizard's last reading without re-probing", but nothing
+    in the codebase ever read that key, and TCC grants change outside
+    FERAL so a cached copy is stale on arrival."""
     from cli.setup.steps import tcc_preflight
     from cli.setup.state import WizardState
     from security.macos_permissions import TCCStatus
@@ -626,15 +628,11 @@ def test_tcc_preflight_persists_snapshot_and_uses_deeplinks(
     state = WizardState.load(feral_home)
     tcc_preflight.run(state)
 
-    snapshot = state.get_setting("macos", "tcc_snapshot")
-    assert isinstance(snapshot, list)
-    assert {s["permission"] for s in snapshot} == {
-        "accessibility", "screen_recording", "calendar",
-    }
-    # The snapshot must include the deeplink for at least the
-    # screen_recording entry (denied → operator needs the URL).
-    sr = next(s for s in snapshot if s["permission"] == "screen_recording")
-    assert sr["deeplink"].startswith("x-apple.systempreferences:")
+    # Regression: the step must leave settings untouched. The dead
+    # ``macos.tcc_snapshot`` write is gone, and it was the step's only
+    # write, so nothing at all should be persisted.
+    assert state.get_setting("macos", "tcc_snapshot") is None
+    assert state.settings == {}
 
     out = capsys.readouterr().out
     # The deeplink for screen_recording must be printed when the

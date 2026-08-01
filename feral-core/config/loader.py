@@ -26,6 +26,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 from uuid import uuid4
 
 logger = logging.getLogger("feral.config")
@@ -213,6 +214,15 @@ DEFAULT_SETTINGS = {
     },
     "security": {
         "node_api_key": "",
+        # Tool-approval tier the operator picks in `feral setup`
+        # (capabilities step) or the timeline API. Exported to
+        # ``FERAL_AUTONOMY`` by ``export_as_env`` because that env var
+        # is the single source both ``agents/tool_runner.py`` and
+        # ``security/exec_mode.current_autonomy_mode()`` read. Before
+        # the export existed this key was written by the wizard and
+        # read by nothing, so picking "strict" still ran "hybrid".
+        # Valid: strict | hybrid | loose.
+        "autonomy_mode": "hybrid",
     },
     # Agent tool-loop budget (v2026.6.11). 0 = unlimited iterations — the
     # loop is governed by the no-progress guard (identical failing tool
@@ -271,7 +281,19 @@ def feral_home() -> Path:
 
 
 def feral_data_home() -> Path:
-    """Resolve the FERAL data directory (XDG-compliant on Linux)."""
+    """Resolve the FERAL data directory (XDG-compliant on Linux).
+
+    ``FERAL_HOME`` wins here exactly as it does in :func:`feral_home`.
+    It did not before, which gave an operator who relocated their
+    install a split brain: settings and vault under the new root,
+    databases still under ``~/.feral``. It was also a test-isolation
+    hazard, since setting ``FERAL_HOME`` alone left data writes
+    pointing at the real home directory.
+    """
+    env_home = os.environ.get("FERAL_HOME")
+    if env_home:
+        return Path(env_home)
+
     xdg_data = os.environ.get("XDG_DATA_HOME")
     if xdg_data:
         return Path(xdg_data) / "feral"
@@ -387,6 +409,12 @@ class ConfigLoader:
         # Layer 4: Environment variable overrides
         self._apply_env_overrides()
 
+        # Repair an ``llm.base_url`` a previous setup run persisted
+        # without the OpenAI-compat path suffix (see
+        # ``_repair_local_base_url``). Runs after the env layer so an
+        # explicit ``FERAL_LLM_BASE_URL`` is repaired too.
+        self._repair_local_base_url()
+
         # Unify vision flag: the settings UI historically wrote to
         # ``features.vision`` while the env/export path read from
         # ``vision.enabled``. Treat either being truthy as "on" and mirror
@@ -448,6 +476,11 @@ class ConfigLoader:
             "FERAL_TTS_MODEL": ("audio", "tts_model"),
             "FERAL_TTS_VOICE": ("audio", "tts_voice"),
             "NODE_API_KEY": ("security", "node_api_key"),
+            # Keeps env > settings precedence for the autonomy tier:
+            # the value lands in ``security.autonomy_mode`` here and is
+            # re-exported verbatim, so an operator's FERAL_AUTONOMY
+            # still wins over settings.json.
+            "FERAL_AUTONOMY": ("security", "autonomy_mode"),
         }
 
         for env_key, config_path in env_map.items():
@@ -467,6 +500,55 @@ class ConfigLoader:
                     pass
             else:
                 self._merged[section][key] = value
+
+    # Local OpenAI-compatible providers whose base URL MUST carry the
+    # ``/v1`` path prefix, because the LLM client posts the relative
+    # path ``/chat/completions`` against it.
+    _OPENAI_COMPAT_LOCAL_PROVIDERS = ("ollama", "lmstudio")
+
+    def _repair_local_base_url(self):
+        """Re-add the ``/v1`` suffix a bare local ``llm.base_url`` is missing.
+
+        Setup wizards up to v2026.7.31 copied the provider catalog's
+        Ollama descriptor into ``llm.base_url`` verbatim, and that
+        descriptor carried ``http://localhost:11434`` with no path. The
+        LLM client posts the relative path ``/chat/completions`` against
+        whatever base it is handed and only substitutes its own default
+        when the slot is EMPTY, so the bare URL won: the brain booted
+        clean, reported ``LLM: ready``, and 404'd on every chat turn.
+
+        The catalog now ships the ``/v1`` form, but installs created
+        before that fix already have the broken value persisted in
+        ``~/.feral/settings.json``. Repair it on read so an existing
+        install starts working again without the operator re-running
+        setup or hand-editing JSON.
+
+        Only a base URL with an empty path is touched. Anything that
+        already names a path (``/v1``, ``/v1beta``, a gateway prefix)
+        is the operator's deliberate choice and is left alone.
+        """
+        llm = self._merged.get("llm") or {}
+        provider = str(llm.get("provider") or "").strip().lower()
+        if provider not in self._OPENAI_COMPAT_LOCAL_PROVIDERS:
+            return
+        base_url = str(llm.get("base_url") or "").strip()
+        if not base_url:
+            return
+        try:
+            parsed = urlparse(base_url)
+        except Exception:
+            return
+        if not parsed.scheme or not parsed.netloc:
+            return
+        if parsed.path.strip("/"):
+            return
+        repaired = f"{parsed.scheme}://{parsed.netloc}/v1"
+        self._merged.setdefault("llm", {})["base_url"] = repaired
+        logger.info(
+            "config: repaired %s llm.base_url %s -> %s (missing OpenAI-compat "
+            "/v1 path; every chat request would have 404'd)",
+            provider, base_url, repaired,
+        )
 
     def _unify_feature_flags(self):
         """Coalesce ``features.vision`` and ``vision.enabled`` into one truth.
@@ -907,7 +989,21 @@ class ConfigLoader:
         env["FERAL_PROACTIVE"] = str(features.get("proactive", False)).lower()
         env["FERAL_MULTI_AGENT"] = str(features.get("multi_agent", True)).lower()
 
-        env["NODE_API_KEY"] = self._merged.get("security", {}).get("node_api_key", "")
+        security = self._merged.get("security", {}) or {}
+        env["NODE_API_KEY"] = security.get("node_api_key", "")
+
+        # Tool-approval tier. ``agents/tool_runner.py`` and
+        # ``security/exec_mode.current_autonomy_mode()`` both resolve
+        # this ONLY from ``FERAL_AUTONOMY``; nothing reads
+        # ``settings.security.autonomy_mode`` directly. Without this
+        # export the wizard's autonomy question was a dead write and an
+        # operator who picked "strict" silently ran "hybrid". Unknown
+        # values fall back to the same default both readers use, so a
+        # hand-edited settings file cannot widen the tier by accident.
+        raw_autonomy = str(security.get("autonomy_mode", "") or "").strip().lower()
+        env["FERAL_AUTONOMY"] = (
+            raw_autonomy if raw_autonomy in ("strict", "hybrid", "loose") else "hybrid"
+        )
 
         # Credentials — LLMs + messaging channels
         credential_env_keys = (

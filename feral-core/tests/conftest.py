@@ -182,3 +182,24 @@ def isolate_os_keychain(monkeypatch):
     monkeypatch.setattr(_v, "_keyring_get_password", fake_get)
     monkeypatch.setattr(_v, "_keyring_set_password", fake_set)
     monkeypatch.setattr(_v, "_keyring_delete_password", fake_delete)
+
+
+@pytest.fixture(autouse=True)
+def isolate_autonomy_env(monkeypatch):
+    """Keep the developer's real autonomy tier out of unit tests.
+
+    ``FERAL_AUTONOMY`` is the single source both ``agents/tool_runner``
+    and ``security/exec_mode.current_autonomy_mode()`` read. Since
+    ``ConfigLoader.export_as_env()`` started exporting it (so the
+    wizard's autonomy choice stops being a dead write), a developer
+    whose real ``~/.feral/settings.json`` says ``loose`` had that value
+    pushed into ``os.environ`` the moment anything imported
+    ``api.server``, which the autouse middleware fixture above does,
+    before ``isolate_feral_home`` has had a chance to redirect the home
+    directory. Tests asserting the shipped default then saw ``loose``.
+
+    Defined LAST so it runs after that import and wins. Tests that care
+    about a specific tier set it themselves (``patch.dict`` /
+    ``monkeypatch.setenv`` inside the test body both run later).
+    """
+    monkeypatch.delenv("FERAL_AUTONOMY", raising=False)
