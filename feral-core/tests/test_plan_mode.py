@@ -160,6 +160,78 @@ class TestStrictReadOnly:
             assert is_plan_safe_tool(name, registry=reg) is False, name
 
 
+class TestSafetyTierIsNotProofOfNonMutation:
+    """``safety_tier: "safe"`` means "no confirmation needed". Plan mode
+    needs "cannot mutate". Treating the first as the second is how
+    mutating endpoints got into a mode whose contract is that nothing
+    changes. Found by running plan mode against the shipped manifests
+    rather than against a fixture that set both flags at once.
+    """
+
+    def test_safe_tier_without_read_only_hint_is_not_plan_safe(self):
+        """The shape the old fixtures never built: safe tier, no hint.
+
+        ``is_read_only(strict=True)`` still admits it, by design, since
+        the graduated-autonomy caller wants that. Plan mode must not.
+        """
+        reg = SkillRegistry()
+        reg.register(_manifest("tiered", [
+            SkillEndpoint(
+                id="delete_thing", method="POST",
+                url="https://tiered.test/delete_thing",
+                description="deletes a thing, cheap and unsurprising",
+                safety_tier="safe",
+            ),
+        ]))
+        assert is_read_only("tiered__delete_thing", registry=reg, strict=True) is True
+        assert is_plan_safe_tool("tiered__delete_thing", registry=reg) is False
+
+    def test_shipped_mutating_endpoints_are_not_plan_safe(self):
+        """Real endpoints from this repo's manifests, every one of which
+        qualified as plan-safe on ``safety_tier: "safe"`` alone before
+        this was tightened. Deleting the user's routines and queueing
+        workflows is not "research and propose"."""
+        reg = SkillRegistry()
+        reg.load_from_directory(ROOT / "skills" / "manifests")
+        mutating = [
+            "feral_routines__create",
+            "feral_routines__delete",
+            "feral_routines__pause",
+            "feral_routines__resume",
+            "feral_workflows__create",
+            "feral_workflows__cancel",
+            "feral_workflows__instantiate_pack",
+            "email__draft_email",
+            "cutebot__set_lights",
+            "external_agent__close_session",
+        ]
+        for name in mutating:
+            assert is_plan_safe_tool(name, registry=reg) is False, name
+
+    def test_research_endpoints_still_survive(self):
+        """The tightening must not empty the mode out. These are the
+        tools a plan is actually researched with."""
+        reg = SkillRegistry()
+        reg.load_from_directory(ROOT / "skills" / "manifests")
+        for name in (
+            "coding_tools__read_file",
+            "coding_tools__grep_search",
+            "coding_tools__glob_search",
+            "coding_tools__web_fetch",
+        ):
+            assert is_plan_safe_tool(name, registry=reg) is True, name
+
+    def test_todo_write_stays_allowed_but_explicitly(self):
+        """It mutates only the agent's own scratch list, so it stays
+        available, via the named exception rather than by riding in on a
+        tier that never promised non-mutation."""
+        from agents.plan_mode import PLAN_MODE_ALWAYS_ALLOWED
+        assert "feral_workflows__todo_write" in PLAN_MODE_ALWAYS_ALLOWED
+        reg = SkillRegistry()
+        reg.load_from_directory(ROOT / "skills" / "manifests")
+        assert is_plan_safe_tool("feral_workflows__todo_write", registry=reg) is True
+
+
 # ── 2. plan-safe classification + exposure filter ─────────────────────
 
 

@@ -63,11 +63,27 @@ async def turn_detail(turn_id: str):
 async def revert(body: dict):
     """Revert a turn.
 
-    ``force`` defaults to false, and without it any file whose current
-    content no longer matches what the agent left is listed and skipped
-    rather than clobbered. That refusal is the point of the endpoint: a
-    revert that silently discards somebody else's newer edit is worse
-    than no revert at all.
+    ``force`` defaults to false, and without it a turn containing ANY
+    file whose current content no longer matches what the agent left is
+    refused WHOLE: nothing is restored, not even the files that did not
+    drift. That refusal is the point of the endpoint, and the
+    all-or-nothing shape is deliberate, since a turn half-reverted is a
+    tree in a state neither the user nor the agent ever saw. The drifted
+    paths come back under ``drifted``; re-send with ``force`` to revert
+    anyway and lose their newer content.
+
+    Two shapes of the response to know about, both verified against a
+    live brain and both surprising enough to check for before you build
+    a UI on them:
+
+    * A refused revert reports ``dry_run: true`` even though the caller
+      asked for a real one, because ``CheckpointStore.revert_turn``
+      reuses the preview envelope to say "nothing was applied". Read
+      ``success`` (and ``error``) to tell a refusal from a preview;
+      ``dry_run`` alone cannot distinguish them.
+    * ``skipped`` is not where drifted files go. It only ever holds
+      entries whose ``action`` is ``skip``; drift lands in ``drifted``
+      while keeping ``action: "restore"``.
     """
     store = _store()
     turn_id = str((body or {}).get("turn_id") or "").strip()

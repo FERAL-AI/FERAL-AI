@@ -45,15 +45,29 @@ Two enforcement points
    through either of those. Closing it means routing those two call sites
    through ``ToolRunner``, not adding a third check here.
 
-Plan-safe means DECLARED safe
------------------------------
+Plan-safe means DECLARED NON-MUTATING
+-------------------------------------
 An endpoint is plan-safe only when its manifest says ``read_only_hint:
-true`` or ``safety_tier: "safe"``. Absence of metadata is not-plan-safe.
-That is why this module calls ``security.safety_resolver.is_read_only``
-with ``strict=True``: the lenient default falls back to a substring
-token list that admits anything containing ``read``, ``status``,
-``list`` or ``current``, which is not a boundary a mode called "cannot
-mutate" can stand on.
+true``. Absence of metadata is not-plan-safe. That is why this module
+calls ``security.safety_resolver.is_read_only`` with ``strict=True``:
+the lenient default falls back to a substring token list that admits
+anything containing ``read``, ``status``, ``list`` or ``current``,
+which is not a boundary a mode called "cannot mutate" can stand on.
+
+``safety_tier: "safe"`` is NOT sufficient, and that is the one place
+this module deviates from ``is_read_only(strict=True)``, which accepts
+it. The two flags answer different questions: ``safety_tier`` answers
+"does this need the user to confirm it?" while plan mode has to answer
+"can this change anything?". Plenty of endpoints are cheap, reversible
+and unsurprising (so: no confirmation) while still mutating real state.
+A live run against the manifests shipping in this repo found 13 such
+endpoints admitted into plan mode on ``safety_tier`` alone, including
+``feral_routines__delete``, ``feral_routines__create``,
+``feral_workflows__create``, ``feral_workflows__instantiate_pack`` and
+``email__draft_email``. Deleting the user's routines is not "research
+and propose". So the tier is ignored here and only the explicit
+non-mutation hint counts, with :data:`PLAN_MODE_ALWAYS_ALLOWED` as the
+narrow, deliberate exception list.
 
 Entry is explicit only
 ----------------------
@@ -87,13 +101,26 @@ __all__ = [
 
 PLAN_REFUSAL_CODE = "plan_mode_blocked"
 
-# The plan skill's own endpoint. It is declared ``read_only_hint: true``
-# and ``safety_tier: "safe"`` in ``skills/manifests/plan.json`` so it
-# survives the filter on its own merits; the literal is here so it also
-# survives on the paths where no real registry is wired (early boot, the
-# MagicMock registries unit tests use). Without it, plan mode would be a
-# mode with no way to produce its one artefact.
-PLAN_MODE_ALWAYS_ALLOWED = frozenset({"plan__submit"})
+# Endpoints plan mode allows even though they write something.
+#
+# ``plan__submit`` is declared ``read_only_hint: true`` in
+# ``skills/manifests/plan.json`` so it survives the filter on its own
+# merits; the literal is here so it also survives on the paths where no
+# real registry is wired (early boot, the MagicMock registries unit
+# tests use). Without it, plan mode would be a mode with no way to
+# produce its one artefact.
+#
+# ``feral_workflows__todo_write`` genuinely mutates, but only the
+# agent's own per-session scratch list (``skills/impl/todo_store.py``),
+# never user-visible state, and tracking the steps of the plan you are
+# drafting is the activity plan mode exists for. It is listed here
+# rather than left to ride in on ``safety_tier: "safe"``, which is how
+# it used to qualify: the exception is deliberate and reviewable
+# instead of accidental.
+PLAN_MODE_ALWAYS_ALLOWED = frozenset({
+    "plan__submit",
+    "feral_workflows__todo_write",
+})
 
 # Subagents run through the same dispatch gate, but under a session id
 # minted by ``ToolRunner._run_subagent_task`` that the parent's plan-mode
@@ -141,8 +168,45 @@ def _tool_name_of(tool: Any) -> str:
     return ""
 
 
+def _declares_read_only(tool_name: str, registry: Any) -> bool:
+    """True only when the manifest sets ``read_only_hint: true``.
+
+    Deliberately narrower than ``is_read_only(strict=True)``, which also
+    accepts ``safety_tier == "safe"``. See the module docstring: that
+    tier means "no confirmation needed", not "cannot mutate", and taking
+    it as proof of the latter is what let ``feral_routines__delete``
+    into a mode whose contract is that nothing changes.
+
+    The lookup mirrors ``security.safety_resolver._find_endpoint`` and
+    splits on the FIRST ``__`` for the same reason it does, so the two
+    always agree on which endpoint a tool name refers to.
+    """
+    if registry is None or not tool_name:
+        return False
+    if "__" in tool_name:
+        skill_id, _, endpoint_id = tool_name.partition("__")
+    elif "." in tool_name:
+        skill_id, _, endpoint_id = tool_name.partition(".")
+    else:
+        return False
+    skill = getattr(registry, "skills", {}).get(skill_id)
+    if skill is None:
+        return False
+    for endpoint in getattr(skill, "endpoints", None) or []:
+        if getattr(endpoint, "id", None) == endpoint_id:
+            return getattr(endpoint, "read_only_hint", None) is True
+    return False
+
+
 def is_plan_safe_tool(tool_name: str, registry: Any = None) -> bool:
     """True when ``tool_name`` is declared incapable of mutating state.
+
+    Both conditions must hold: ``is_read_only(strict=True)`` (which also
+    rejects anything demanding user approval) AND an explicit
+    ``read_only_hint: true`` on the endpoint. The second is not implied
+    by the first, because strict mode also admits ``safety_tier:
+    "safe"``; see the module docstring for why plan mode cannot accept
+    that as proof of non-mutation.
 
     Fails closed on everything that has no FERAL manifest behind it:
     MCP tools (``mcp_*``) and daemon commands (``daemon_*``) carry no
@@ -157,7 +221,9 @@ def is_plan_safe_tool(tool_name: str, registry: Any = None) -> bool:
         return True
     if name.startswith("mcp_") or name.startswith("daemon_"):
         return False
-    return is_read_only(name, registry=registry, strict=True)
+    if not is_read_only(name, registry=registry, strict=True):
+        return False
+    return _declares_read_only(name, registry)
 
 
 def filter_tools_for_plan_mode(tools: Optional[list], registry: Any = None) -> list:

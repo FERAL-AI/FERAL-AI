@@ -720,6 +720,49 @@
 }
 .v2-int-copy:hover { background: var(--v2-surface-2); }
 
+/* ── Plan mode banner ─────────────────────────────────────────────
+   Sits with the todo panel, above the composer. Louder than the todo
+   panel on purpose: this one says the agent has been deliberately
+   prevented from acting, and a user who cannot see that reads the
+   refusals as breakage. */
+.v2-planmode {
+  margin: 6px 0 0;
+  border-left: 2px solid var(--v2-accent, currentColor);
+}
+.v2-planmode__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--v2-text-primary);
+}
+.v2-planmode__icon { flex-shrink: 0; }
+.v2-planmode__title { font-weight: 600; flex-shrink: 0; }
+.v2-planmode__meta {
+  color: var(--v2-text-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.v2-planmode__body {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--v2-text-secondary);
+}
+.v2-planmode__body code {
+  font-size: 11px;
+  padding: 0 3px;
+  border-radius: var(--v2-radius-xs);
+  background: var(--v2-surface-2);
+}
+.v2-planmode__reason {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--v2-text-tertiary);
+}
+
 /* ── Todo panel ───────────────────────────────────────────────────
    Pinned between the transcript and the composer. Deliberately quiet:
    it is persistent chrome, not a message, so it must not compete with
