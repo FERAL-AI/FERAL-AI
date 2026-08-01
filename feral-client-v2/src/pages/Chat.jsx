@@ -19,6 +19,7 @@ import { ToolCallList } from '../components/ToolCallCard';
 import ReasoningSection from '../components/ReasoningSection';
 import TimelineCard from '../components/TimelineCard';
 import TodoPanel from '../components/TodoPanel';
+import PlanModeBanner from '../components/PlanModeBanner';
 import ChatNotice from '../components/ChatNotice';
 import CopyButton from '../ui/CopyButton';
 
@@ -108,6 +109,13 @@ export default function Chat() {
   // every `todo_update` frame, mirroring the brain's full-list-
   // replacement contract, so the panel and the store cannot drift.
   const [todos, setTodos] = useState([]);
+  // Per-session plan-mode posture. Same contract as `todos`: the brain's
+  // `plan_mode` frame is a full state snapshot, so each one replaces
+  // this wholesale. Unlike `todo_update` the frame is emitted on
+  // TRANSITIONS ONLY, so the effect below also hydrates it over REST
+  // when the active session changes; a reload inside plan mode would
+  // otherwise drop the banner while the mode was still on.
+  const [planMode, setPlanMode] = useState(null);
   // S6 — yellow inline banner emitted by Lane 08's `budget_exceeded`
   // WS frame. Multiple call-sites can exceed simultaneously (chat +
   // vision), so we key the active banners by call_site.
@@ -230,6 +238,28 @@ export default function Chat() {
     })();
     return () => { cancelled = true; };
   }, [setMessages, activeSessionId]);
+
+  // Plan-mode hydration. The `plan_mode` WS frame fires on transitions
+  // only, so a tab that opens (or reloads, or switches threads) while a
+  // session is already in plan mode never receives one and would show
+  // no banner while every mutating call is still being refused. This
+  // asks the brain directly. Cheap, and the frame keeps it live after.
+  useEffect(() => {
+    let cancelled = false;
+    setPlanMode(null);
+    if (!activeSessionId) return undefined;
+    (async () => {
+      try {
+        const state = await apiJson(
+          `/api/sessions/${encodeURIComponent(activeSessionId)}/plan_mode`,
+        );
+        if (!cancelled) setPlanMode(state || null);
+      } catch {
+        /* posture is advisory chrome, never block the page on it */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeSessionId]);
 
   const resumeThought = async (thoughtId) => {
     try {
@@ -354,6 +384,9 @@ export default function Chat() {
         // The todo panel is per-thread state, so a write on thread A
         // must not repaint thread B's panel.
         'todo_update',
+        // Plan mode is per-session for the same reason: entering it on
+        // thread A must not tell thread B it cannot act.
+        'plan_mode',
         // `transcript` belongs here too: voice frames are session-scoped
         // like every other chat frame, and without it a transcript from
         // a voice session started on thread A rendered into whichever
@@ -443,6 +476,11 @@ export default function Chat() {
       } else if (type === 'todo_update') {
         // Pinned panel, not a card. See SUPPRESSED_TOOL_CARDS.
         setTodos(Array.isArray(msg.payload?.todos) ? msg.payload.todos : []);
+      } else if (type === 'plan_mode') {
+        // Full snapshot per frame, like todo_update. <PlanModeBanner>
+        // renders nothing when the payload says the mode is off, so the
+        // exit frame clears the banner without a second branch here.
+        setPlanMode(msg.payload || null);
       } else if (type === 'tool_start' || type === 'tool_call' || type === 'skill_start') {
         const p = msg.payload || {};
         if (isSuppressedToolCard(p)) return;
@@ -1081,6 +1119,12 @@ export default function Chat() {
           <div ref={bottomRef} />
         </div>
       </Pane>
+
+      {/* Pinned below the log, above the composer: the posture stays
+          visible as the transcript scrolls. Above the todo list because
+          "the agent cannot act right now" outranks "here is what it
+          plans to do". */}
+      <PlanModeBanner state={planMode} />
 
       {/* Pinned below the log, above the composer: the list stays visible
           as the transcript scrolls, which is the point of tracking it. */}

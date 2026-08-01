@@ -196,6 +196,78 @@ async def test_rest_revert_refuses_drift(seeded):
     assert target.read_text() == "original\n"
 
 
+async def test_rest_revert_refuses_the_whole_turn_not_just_the_drifted_file(
+    home, tmp_path,
+):
+    """Drift in one file blocks the revert of its CLEAN siblings too.
+
+    The single-file fixture above cannot see this, and the route's
+    docstring used to describe the opposite ("listed and skipped"),
+    which would mean the clean files still revert. A live run against a
+    two-file turn showed nothing reverts. Pin the real contract: a turn
+    reverts whole or not at all.
+    """
+    from api.routes.checkpoints import revert
+
+    store = CheckpointStore(home / "checkpoints")
+    clean = tmp_path / "clean.txt"
+    dirty = tmp_path / "dirty.txt"
+    for path, original in ((clean, "orig clean\n"), (dirty, "orig dirty\n")):
+        path.write_text(original)
+        cp = store.capture(path, turn_id="t2", session_id="s2",
+                           tool_name="coding_tools__write_file")
+        path.write_text("agent edit\n")
+        store.record_after(cp, path)
+
+    dirty.write_text("somebody else's work\n")
+
+    result = await revert({"turn_id": "t2"})
+
+    assert result["success"] is False
+    assert result["reverted_count"] == 0
+    # The clean file is untouched: not reverted, and not clobbered.
+    assert clean.read_text() == "agent edit\n"
+    assert dirty.read_text() == "somebody else's work\n"
+    assert [e["path"] for e in result["drifted"]] == [str(dirty)]
+
+
+async def test_rest_refused_revert_is_distinguishable_from_a_preview(
+    home, tmp_path,
+):
+    """A refused real revert reports ``dry_run: true``.
+
+    ``revert_turn`` reuses the preview envelope to mean "nothing was
+    applied", so ``dry_run`` cannot tell a caller whether it asked for a
+    preview or was refused. Anything rendering this has to key off
+    ``success``. Pinned so the day that envelope is fixed, this fails
+    and the docstring gets corrected with it.
+    """
+    from api.routes.checkpoints import revert
+
+    store = CheckpointStore(home / "checkpoints")
+    target = tmp_path / "drifted.txt"
+    target.write_text("original\n")
+    cp = store.capture(target, turn_id="t3", session_id="s3",
+                       tool_name="coding_tools__write_file")
+    target.write_text("agent edit\n")
+    store.record_after(cp, target)
+    target.write_text("user work\n")
+
+    refused = await revert({"turn_id": "t3", "dry_run": False})
+    preview = await revert({"turn_id": "t3", "dry_run": True})
+
+    assert refused["dry_run"] is True and preview["dry_run"] is True
+    assert refused["success"] is False
+    assert refused["error"]
+    # `success` is the only field that separates them today.
+    assert refused["success"] == preview["success"]
+
+    # And drifted entries are NOT in `skipped`, despite reading that way.
+    assert refused["skipped"] == []
+    assert len(refused["drifted"]) == 1
+    assert refused["drifted"][0]["action"] == "restore"
+
+
 async def test_rest_unknown_turn_is_404(seeded):
     from fastapi import HTTPException
 
