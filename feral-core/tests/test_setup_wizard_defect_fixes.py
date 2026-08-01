@@ -897,7 +897,12 @@ class TestVoiceQuestionIsAskedOnce:
         asyncio.run(audio_step.run(state))
 
         assert not any("configure voice" in p.lower() for p in prompts), prompts
-        assert state.get_setting("audio", "stt_provider") == "faster-whisper"
+        # Which local engine lands here is platform-dependent (macOS
+        # gets whisper.cpp for its Metal backend, everything else gets
+        # faster-whisper); this test is about the prompt, not the pick.
+        assert state.get_setting("audio", "stt_provider") in (
+            "faster-whisper", "whispercpp",
+        )
 
     def test_the_two_voice_prompts_agree(self, tmp_path, monkeypatch):
         """The prompts were verbatim identical with opposite defaults, so

@@ -14,6 +14,7 @@ provider list lives in this step.
 from __future__ import annotations
 
 import asyncio
+import platform
 
 from ..helpers import (
     SkipStep,
@@ -415,10 +416,9 @@ def _default_local_stt(entries: list) -> str:
 
     Not a preference, a hardware fact: CTranslate2 (faster-whisper) has
     no Metal backend, so on Apple Silicon it runs on CPU while
-    whisper.cpp uses the GPU.
+    whisper.cpp uses the GPU. Measured on an M1 with tiny.en over the
+    same 4.87s clip: whisper.cpp 0.110s warm, faster-whisper 0.241s.
     """
-    import platform
-
     ids = {e["id"] for e in entries}
     if platform.system() == "Darwin" and "whispercpp" in ids:
         return "whispercpp"
@@ -450,6 +450,29 @@ def _warn_piper_licence(console) -> None:
         "It is not installed by default and is not pulled in by any other "
         "extra. Installing it is your explicit choice: "
         "pip install 'feral-ai[tts-piper]'"
+    )
+    console.print(f"  [yellow]{message}[/]" if _RICH_AVAILABLE else f"  {message}")
+    if platform.system() == "Darwin":
+        _warn_piper_macos(console)
+
+
+def _warn_piper_macos(console) -> None:
+    """Say plainly that Piper is a bad deal on a Mac.
+
+    Not a general caution. piper-tts 1.5.0 and 1.6.0 ship macOS arm64
+    wheels that abort the process on the first synthesis (espeak-ng
+    data path linked into the native library at CI build time, not
+    overridable). 1.4.2 works, and the `tts-piper` extra pins below
+    1.5 on Darwin for that reason, but the built-in `say` needs no
+    download, no pin and no GPL-3.0 obligation.
+    """
+    message = (
+        "On macOS you do not need Piper. The built-in `say` synthesiser is "
+        "already installed, is verified working, downloads nothing and "
+        "carries no licence obligation. Piper on macOS additionally needs "
+        "a version pin: piper-tts 1.5.0 and 1.6.0 abort the process on "
+        "first synthesis because their arm64 wheels resolve an espeak "
+        "data path from the build machine. Only 1.2 to 1.4.x work here."
     )
     console.print(f"  [yellow]{message}[/]" if _RICH_AVAILABLE else f"  {message}")
 
@@ -552,19 +575,45 @@ async def _offer_stt_download(
                 "  faster-whisper is not installed: pip install 'feral-ai[stt]'"
             )
             return
-        # This used to claim the model downloads on first use. It does
-        # not: nothing passes allow_download=True, there is no
-        # ensure_faster_whisper_model(), and the provider constructor
-        # refuses when the weights are absent. A fresh install that
-        # picked faster-whisper therefore refused every session while
-        # the wizard had promised it would sort itself out.
-        console.print(
-            "  faster-whisper will NOT fetch its model automatically. "
-            "Nothing in the runtime passes allow_download, so a session "
-            "that picks it fails until the weights are fetched by hand. "
-            "Prefer whispercpp, which is also the only Whisper build "
-            "with Metal acceleration on Apple silicon."
-        )
+        # Downloads happen here, in the wizard, and nowhere else at
+        # runtime. This is the same rule the rest of the local stack
+        # follows: a voice turn that discovers missing weights fails
+        # loudly rather than stalling for a multi-hundred-megabyte
+        # fetch that is indistinguishable from a hang, and an operator
+        # who chose local engines for privacy is told when bytes leave
+        # the machine.
+        model = state.get_setting("audio", "chained_stt_model") or "base.en"
+        if local_models.faster_whisper_model_present(model):
+            console.print(
+                f"  [green]OK[/] faster-whisper model {model} already present"
+                if _RICH_AVAILABLE else
+                f"  OK faster-whisper model {model} already present"
+            )
+            _set_voice_chained(state, "stt_model", model)
+            return
+        size = local_models.faster_whisper_model_size_mb(model)
+        suffix = f" (~{size}MB)" if size else ""
+        if not confirm(
+            f"  Download the faster-whisper {model} model now{suffix}?",
+            default=True,
+        ):
+            console.print(
+                "  Skipped. faster-whisper will refuse to open a session "
+                "until the weights are on disk. Fetch them later with "
+                f"`python -m voice.local_models fetch-faster-whisper {model}`."
+            )
+            return
+        try:
+            path = await asyncio.to_thread(
+                local_models.ensure_faster_whisper_model, model,
+                allow_download=True,
+            )
+            console.print(f"  Downloaded {path}")
+            _set_voice_chained(state, "stt_model", model)
+        except Exception as exc:
+            console.print(f"  [red]Download failed:[/] {exc}" if _RICH_AVAILABLE
+                          else f"  Download failed: {exc}")
+        return
 
 
 async def _offer_piper_download(console, state: WizardState) -> None:

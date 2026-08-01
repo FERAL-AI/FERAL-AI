@@ -16,6 +16,24 @@ and the setup wizard defaults Macs to
 The engine was already in the tree, wired only to the legacy
 ``perception/audio_pipeline.py``. This exposes it to the chained
 pipeline, which is the path that actually runs.
+
+Measured, through this provider class
+-------------------------------------
+faster-whisper 1.2.1, tiny.en int8, Apple M1, 4.87s of macOS ``say``
+speech at 24kHz pushed through ``send_audio``/``flush``:
+
+    model load        0.15s
+    flush run 1       0.285s   (0.059x realtime)
+    flush run 2       0.247s
+    flush run 3       0.241s
+
+whisper.cpp on the same machine, same audio, same model size: 0.110s
+warm. That is the CPU-versus-Metal gap the paragraph above predicts,
+and it is why macOS defaults to whispercpp.
+
+Weights are 78MB on disk for tiny.en and are fetched by
+:func:`voice.local_models.ensure_faster_whisper_model` in ``feral
+setup``, never here.
 """
 
 from __future__ import annotations
@@ -35,6 +53,13 @@ logger = logging.getLogger("feral.voice.stt.faster_whisper")
 
 DEFAULT_MODEL = "base.en"
 WHISPER_SAMPLE_RATE = 16000
+
+#: Silence prepended to every decode, in milliseconds. Whisper can eat
+#: the first word of audio that starts at sample zero, and VAD
+#: endpointing guarantees exactly that shape. Intermittent rather than
+#: universal; see ``voice/stt_providers/whispercpp.py`` for the
+#: measurements.
+LEAD_PAD_MS = 100
 
 _MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
 _CACHE_LOCK = asyncio.Lock()
@@ -114,11 +139,22 @@ class FasterWhisperSTTProvider(STTProvider):
 
         from voice import local_models
 
+        # Resolve to a directory on disk and pass local_files_only.
+        #
+        # The obvious spelling, ``WhisperModel(size, download_root=X)``,
+        # is a trap: download_root is forwarded as *cache_dir*, so
+        # constructing the model reaches out to HuggingFace and pulls
+        # the weights inside whatever call happens to be first. In
+        # chained mode that is a voice turn, which is the exact
+        # mid-session download voice/local_models.py exists to forbid.
+        # Naming the directory and refusing the network makes a missing
+        # model an error at open time instead of a stall mid-sentence.
+        path = local_models.faster_whisper_model_path(self._model_name)
         return WhisperModel(
-            self._model_name,
+            str(path),
             device=self._device,
             compute_type=self._compute_type,
-            download_root=str(local_models.model_dir("faster_whisper")),
+            local_files_only=True,
         )
 
     async def _ensure_model(self):
@@ -171,6 +207,10 @@ class FasterWhisperSTTProvider(STTProvider):
         samples = self._to_float32_16k(pcm)
         if samples.size < WHISPER_SAMPLE_RATE // 20:
             return
+        # Same first-word loss as whisper.cpp, same fix. See
+        # ``voice/stt_providers/whispercpp.py``. Applied after the
+        # length check so a click stays too short to decode.
+        samples = self._pad_lead(samples)
 
         loop = asyncio.get_running_loop()
         async with _DECODE_LOCK:
@@ -193,6 +233,16 @@ class FasterWhisperSTTProvider(STTProvider):
             kwargs["language"] = self._language
         segments, _info = model.transcribe(samples, **kwargs)
         return " ".join((seg.text or "").strip() for seg in segments).strip()
+
+    def _pad_lead(self, samples):
+        if LEAD_PAD_MS <= 0 or samples.size == 0:
+            return samples
+        import numpy as np
+
+        pad = np.zeros(
+            int(WHISPER_SAMPLE_RATE * LEAD_PAD_MS / 1000), dtype=samples.dtype
+        )
+        return np.concatenate([pad, samples])
 
     def _to_float32_16k(self, pcm: bytes):
         import numpy as np

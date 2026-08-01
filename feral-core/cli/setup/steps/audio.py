@@ -41,8 +41,20 @@ _STT_PROVIDERS = (
         "available_models": ["whisper-1"],
     },
     {
+        "id": "whispercpp",
+        "label": "whisper.cpp (local, Metal on Apple silicon)",
+        "needs_key": False,
+        "env": "",
+        "is_local": True,
+        "aliases": ("whispercpp", "whisper-cpp", "whisper.cpp"),
+        "default_model": "base.en",
+        "available_models": [
+            "tiny.en", "base.en", "small.en", "medium.en", "large-v3-turbo",
+        ],
+    },
+    {
         "id": "faster-whisper",
-        "label": "faster-whisper (local)",
+        "label": "faster-whisper (local, CPU on macOS)",
         "needs_key": False,
         "env": "",
         "is_local": True,
@@ -67,8 +79,20 @@ _TTS_PROVIDERS = (
         "available_voices": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
     },
     {
+        "id": "macos_say",
+        "label": "macOS say (local, built in)",
+        "needs_key": False,
+        "env": "",
+        "is_local": True,
+        "aliases": ("say", "macos", "macos-say"),
+        "default_model": "say",
+        "default_voice": "Samantha",
+        "available_models": ["say"],
+        "available_voices": ["Samantha", "Alex", "Daniel", "Karen"],
+    },
+    {
         "id": "piper",
-        "label": "Piper (local)",
+        "label": "Piper (local, GPL-3.0)",
         "needs_key": False,
         "env": "",
         "is_local": True,
@@ -212,30 +236,57 @@ def _configure_fallback_tts(
 
 
 def _configure_local(state: WizardState, has_stt: bool, has_tts: bool, console) -> None:
-    if has_stt:
-        state.set_setting("audio", "stt_provider", "faster-whisper")
-        state.set_setting("audio", "stt_model", "base")
+    """Write the fully-local stack, picking engines by platform.
+
+    This used to hardcode faster-whisper plus Piper on every host. On
+    macOS those are the two worst available choices and both are now
+    measured rather than argued:
+
+    * whisper.cpp binds Metal on Apple silicon and decoded a 4.87s clip
+      in 0.110s warm. faster-whisper, whose CTranslate2 backend has no
+      Metal path and silently resolves ``auto`` to CPU, took 0.241s for
+      the same clip and the same model size.
+    * ``say`` is installed on every Mac, needs no download and carries
+      no licensing question. Piper is GPL-3.0-or-later, needs a 63MB
+      voice, and its macOS arm64 wheels at 1.5.0 and 1.6.0 abort the
+      process on first synthesis.
+
+    The previous step, ``voice_preflight``, already gets this right.
+    This one silently overwrote it one screen later.
+    """
+    import platform
+
+    is_mac = platform.system() == "Darwin"
+
+    if is_mac:
+        state.set_setting("audio", "stt_provider", "whispercpp")
+        state.set_setting("audio", "stt_model", "base.en")
     else:
         state.set_setting("audio", "stt_provider", "faster-whisper")
         state.set_setting("audio", "stt_model", "base")
-        console.print(
-            "  [yellow]faster-whisper isn't installed.[/] Run "
-            "`pip install feral-ai[stt]` and voice input will auto-enable."
-            if _RICH_AVAILABLE else
-            "  faster-whisper isn't installed. Run: pip install feral-ai[stt]"
-        )
-    if has_tts:
-        state.set_setting("audio", "tts_provider", "piper")
-        state.set_setting("audio", "tts_model", "piper")
-        state.set_setting("audio", "tts_voice", "en_US-lessac-medium")
-    else:
-        state.set_setting("audio", "tts_provider", "piper")
-        # Written on both arms so the finish summary does not print
-        # "TTS: piper · ?" for a value the step already knows. The
-        # default from DEFAULT_SETTINGS is the OpenAI "tts-1", which is
-        # wrong for a local Piper pipeline.
-        state.set_setting("audio", "tts_model", "piper")
-        state.set_setting("audio", "tts_voice", "en_US-lessac-medium")
+        if not has_stt:
+            console.print(
+                "  [yellow]faster-whisper isn't installed.[/] Run "
+                "`pip install feral-ai[stt]` and voice input will auto-enable."
+                if _RICH_AVAILABLE else
+                "  faster-whisper isn't installed. Run: pip install feral-ai[stt]"
+            )
+
+    if is_mac:
+        # Nothing to install and nothing to download.
+        state.set_setting("audio", "tts_provider", "macos_say")
+        state.set_setting("audio", "tts_model", "say")
+        state.set_setting("audio", "tts_voice", "Samantha")
+        return
+
+    state.set_setting("audio", "tts_provider", "piper")
+    # Written on both arms so the finish summary does not print
+    # "TTS: piper · ?" for a value the step already knows. The
+    # default from DEFAULT_SETTINGS is the OpenAI "tts-1", which is
+    # wrong for a local Piper pipeline.
+    state.set_setting("audio", "tts_model", "piper")
+    state.set_setting("audio", "tts_voice", "en_US-lessac-medium")
+    if not has_tts:
         console.print(
             "  [yellow]piper isn't installed.[/] Run `pip install feral-ai[tts]`."
             if _RICH_AVAILABLE else

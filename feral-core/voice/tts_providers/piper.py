@@ -21,28 +21,45 @@ HuggingFace carry permissive per-voice licences, and they are
 downloaded on demand into ``$FERAL_HOME/models/piper`` during setup,
 never mid-session.
 
-Verified, and not verified
---------------------------
-Verified on this machine: the voice download path (``en_US-amy-low``,
-63MB, fetched through :mod:`voice.local_models`), the package metadata
-(``piper-tts`` 1.6.0, ``GPL-3.0-or-later``), and the 1.6 Python API
-shape (``PiperVoice.load`` then ``synthesize()`` yielding ``AudioChunk``
-with ``audio_int16_bytes`` / ``sample_rate``).
+macOS: the espeak wheel defect, measured
+----------------------------------------
+Synthesis has now actually been run, and the picture is
+version-dependent. On this machine (Apple M1, macOS 15, CPython
+3.11):
 
-NOT verified: actual synthesis. The macOS arm64 wheels for both
-``piper-tts`` 1.4.2 and 1.6.0 abort with::
+``piper-tts`` **1.4.2 works completely**. Full end-to-end run through
+this provider with ``en_US-lessac-medium``: 630ms to synthesise 2.23s
+of 22050Hz audio, and feeding that audio back through whisper.cpp
+returned the input sentence verbatim.
+
+``piper-tts`` **1.5.0 and 1.6.0 are broken on macOS arm64** and cannot
+be repaired from outside the wheel::
 
     Error processing file '/Users/runner/work/piper1-gpl/piper1-gpl/
-    _skbuild/.../espeak-ng-data/phontab': No such file or directory
+    _skbuild/macosx-11.0-arm64-3.9/cmake-build/espeak_ng-install/
+    share/espeak-ng-data/phontab': No such file or directory.
 
-The wheel bundles a complete ``espeak-ng-data`` directory, but the
-native library resolves the build machine's absolute path instead, and
-neither the ``espeak_data_dir`` argument nor ``ESPEAK_DATA_PATH``
-overrides it. That is an upstream packaging defect on this platform, it
-is another reason ``say`` is tier 0 here, and it means the synthesis
-path below is written against the documented API rather than an
-observed one. :func:`piper_available` runs a real phonemisation so an
-operator finds out at setup time rather than mid-conversation.
+The wheel bundles a complete ``espeak-ng-data`` directory and the
+Python layer passes its path in, but ``espeakbridge.so`` has the build
+machine's absolute path linked into it and uses that instead. Tested
+and ruled out on 1.6.0: the ``espeak_data_dir=`` argument to
+``PiperVoice.load``, a direct ``EspeakPhonemizer(<path>)``, a bare
+``espeakbridge.initialize(<path>)``, and the ``ESPEAK_DATA_PATH``,
+``ESPEAK_DATA_DIR`` and ``PIPER_ESPEAK_DATA`` environment variables.
+All ten combinations fail identically.
+
+**The failure is a process exit, not an exception.** espeak-ng calls
+``exit(1)`` from native code, so the interpreter dies with status 1
+and no traceback. ``try``/``except Exception`` cannot contain it. That
+is why :func:`piper_available` probes in a subprocess on Darwin
+(:func:`_probe_synthesis_out_of_process`) instead of calling
+``synthesize`` and hoping: an in-process probe would take the whole
+brain down at setup time.
+
+None of this makes Piper the right choice on a Mac anyway. ``say`` is
+tier 0 here, ships with the OS, needs no download and carries no
+GPL-3.0 obligation. Piper on macOS is supported only in the narrow
+sense that a working version exists and is pinned for.
 """
 
 from __future__ import annotations
@@ -67,13 +84,108 @@ _CACHE_LOCK = asyncio.Lock()
 _SYNTH_LOCK = asyncio.Lock()
 
 
+#: How long the out-of-process synthesis probe may take. A cold ONNX
+#: load plus one short sentence is well under this on any machine that
+#: could run Piper at all; the timeout exists so a wedged native
+#: library cannot hang ``feral setup`` forever.
+PROBE_TIMEOUT_S = 60.0
+
+_PROBE_SOURCE = """\
+import sys
+voice, config = sys.argv[1], sys.argv[2]
+from piper import PiperVoice
+v = PiperVoice.load(voice, config_path=config)
+n = 0
+for chunk in v.synthesize("Test."):
+    data = getattr(chunk, "audio_int16_bytes", None)
+    if data is None:
+        data = chunk if isinstance(chunk, (bytes, bytearray)) else b""
+    n += len(data)
+if n <= 0:
+    raise SystemExit("piper produced no audio")
+print("PIPER_PROBE_OK", n)
+"""
+
+
+#: Probe results, keyed by voice name. The probe costs a process spawn
+#: plus a cold ONNX load, and the answer cannot change while the
+#: process is running (neither the installed wheel nor the weights move
+#: underneath it). ``PiperTTSProvider.__init__`` calls
+#: :func:`piper_available` on every session open, so without this the
+#: probe would be paid per conversation.
+_PROBE_CACHE: dict[str, tuple[bool, str]] = {}
+
+
+def clear_piper_probe_cache() -> None:
+    """Drop cached probe results. For tests and for post-install retry."""
+    _PROBE_CACHE.clear()
+
+
+def _probe_synthesis_out_of_process(voice: str) -> tuple[bool, str]:
+    """Synthesise one word in a child process. ``(ok, reason)``.
+
+    This has to be a subprocess. The macOS espeak failure is
+    ``exit(1)`` raised from native code inside espeak-ng, not a Python
+    exception, so an in-process probe does not return False, it kills
+    the interpreter. Running ``feral setup`` would simply terminate.
+    """
+    import subprocess
+    import sys
+
+    cached = _PROBE_CACHE.get(voice)
+    if cached is not None:
+        return cached
+
+    from voice import local_models
+
+    weights, config = local_models.piper_voice_specs(voice)
+    argv = [
+        sys.executable,
+        "-c",
+        _PROBE_SOURCE,
+        str(local_models.model_path(weights.family, weights.filename)),
+        str(local_models.model_path(config.family, config.filename)),
+    ]
+    try:
+        result = subprocess.run(
+            argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired:
+        # Cached: a wedged native library stays wedged, and paying the
+        # timeout again on every session open is worse than the wrong
+        # answer would be.
+        outcome = (
+            False,
+            f"piper synthesis probe timed out after {PROBE_TIMEOUT_S:.0f}s",
+        )
+        _PROBE_CACHE[voice] = outcome
+        return outcome
+    except Exception as exc:  # pragma: no cover - spawn failure
+        return False, f"piper synthesis probe could not run: {exc}"
+    if result.returncode == 0 and "PIPER_PROBE_OK" in result.stdout:
+        outcome = (True, "ready")
+    else:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        tail = detail[-1] if detail else f"exit status {result.returncode}"
+        outcome = (False, f"piper cannot synthesise here: {tail}")
+    _PROBE_CACHE[voice] = outcome
+    return outcome
+
+
 def piper_available(voice: str = DEFAULT_VOICE) -> tuple[bool, str]:
     """``(ready, reason)``. Import, weights, and a real synthesis probe.
 
-    The probe matters: on macOS arm64 the package imports cleanly and
-    the weights are present, and synthesis still fails on a bad espeak
-    data path baked into the wheel. Reporting "ready" on importability
-    alone would push that failure into the middle of a conversation.
+    The probe matters: on macOS arm64 the package imports cleanly, the
+    weights are present, ``PiperVoice.load`` succeeds, and synthesis
+    still dies on an espeak data path baked into the wheel. Reporting
+    "ready" on importability alone pushes that failure into the middle
+    of a conversation.
+
+    The previous version called :func:`_load_voice_blocking` and called
+    that a synthesis probe. It is not: loading only reads the ONNX
+    graph and the JSON config, and espeak is not touched until the
+    first ``synthesize`` call. It therefore returned "ready" on exactly
+    the platform where synthesis is fatal.
     """
     try:
         from piper import PiperVoice  # noqa: F401
@@ -83,11 +195,7 @@ def piper_available(voice: str = DEFAULT_VOICE) -> tuple[bool, str]:
 
     if not local_models.piper_voice_present(voice):
         return False, f"Piper voice {voice!r} not downloaded"
-    try:
-        _load_voice_blocking(voice)
-    except Exception as exc:
-        return False, f"piper cannot synthesise here: {exc}"
-    return True, "ready"
+    return _probe_synthesis_out_of_process(voice)
 
 
 def _load_voice_blocking(voice: str):

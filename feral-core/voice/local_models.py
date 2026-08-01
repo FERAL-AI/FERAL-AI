@@ -278,13 +278,32 @@ def _pywhispercpp_cached_path(model: str) -> Path | None:
     Returns None rather than raising when pywhispercpp is not
     installed: a readiness check must never depend on the optional
     dependency being importable.
+
+    The fallback is platform-correct. pywhispercpp resolves its cache
+    through ``platformdirs``, which is
+    ``~/Library/Application Support/pywhispercpp/models`` on macOS and
+    ``~/.local/share/pywhispercpp/models`` on Linux (verified: the
+    installed pywhispercpp 1.5.0 reports the Library path on Darwin).
+    Hardcoding the Linux path meant a Mac with weights already in the
+    platform cache was told to download them again.
     """
     try:
         from pywhispercpp import constants  # type: ignore
 
         base = Path(getattr(constants, "MODELS_DIR", ""))
     except Exception:
-        base = Path.home() / ".local" / "share" / "pywhispercpp" / "models"
+        import platform as _platform
+
+        if _platform.system() == "Darwin":
+            base = (
+                Path.home()
+                / "Library"
+                / "Application Support"
+                / "pywhispercpp"
+                / "models"
+            )
+        else:
+            base = Path.home() / ".local" / "share" / "pywhispercpp" / "models"
     if not str(base):
         return None
     candidate = base / whispercpp_model_filename(model)
@@ -337,16 +356,46 @@ def ensure_whispercpp_model(model: str, *, allow_download: bool = False) -> Path
     return Path(download_model(model, download_dir=str(whispercpp_model_dir())))
 
 
-def faster_whisper_model_present(model: str) -> bool:
-    """True when a faster-whisper (CTranslate2) model is materialised.
+FASTER_WHISPER_FAMILY = "faster_whisper"
 
-    faster-whisper resolves through the HuggingFace hub cache rather
-    than a single file, so presence is "a snapshot directory holding a
-    model.bin exists".
+#: Approximate on-disk size per faster-whisper (CTranslate2, int8)
+#: model, in megabytes. Measured for ``tiny.en`` (75MB on disk after
+#: ``download_model``); the rest are scaled from the published
+#: CTranslate2 conversions.
+FASTER_WHISPER_MODEL_SIZES_MB: dict[str, int] = {
+    "tiny": 75, "tiny.en": 75,
+    "base": 145, "base.en": 145,
+    "small": 484, "small.en": 484,
+    "medium": 1530, "medium.en": 1530,
+    "large-v2": 3090, "large-v3": 3090,
+    "distil-small.en": 340, "distil-large-v3": 1510,
+}
+
+
+def faster_whisper_model_size_mb(model: str) -> int:
+    return FASTER_WHISPER_MODEL_SIZES_MB.get(model, 0)
+
+
+def faster_whisper_model_dir(model: str) -> Path:
+    """FERAL's own directory for one faster-whisper model.
+
+    A flat per-model directory rather than a HuggingFace hub cache
+    tree. ``faster_whisper.download_model(size, output_dir=...)`` maps
+    ``output_dir`` onto ``local_dir``, so the files land here directly
+    and ``WhisperModel`` can be pointed at the directory with
+    ``local_files_only=True``.
     """
-    root = model_dir("faster_whisper")
-    if (root / model / "model.bin").is_file():
-        return True
+    return model_dir(FASTER_WHISPER_FAMILY) / model
+
+
+def _hf_hub_snapshot(model: str) -> Path | None:
+    """A HuggingFace hub snapshot for *model*, if one already exists.
+
+    An operator who ran faster-whisper elsewhere on this machine
+    already has the weights; making them download a second copy of the
+    same bytes into FERAL's store is a waste of the disk they were
+    worried about in the first place.
+    """
     hub = Path(
         os.environ.get("HF_HOME")
         or os.environ.get("HUGGINGFACE_HUB_CACHE")
@@ -354,13 +403,83 @@ def faster_whisper_model_present(model: str) -> bool:
     )
     if hub.name != "hub":
         hub = hub / "hub"
-    pattern = f"models--Systran--faster-whisper-{model}"
-    snapshot_root = hub / pattern / "snapshots"
+    snapshot_root = hub / f"models--Systran--faster-whisper-{model}" / "snapshots"
     if not snapshot_root.is_dir():
-        return False
-    return any(
-        (snap / "model.bin").is_file() for snap in snapshot_root.iterdir()
-    )
+        return None
+    for snap in snapshot_root.iterdir():
+        if (snap / "model.bin").is_file():
+            return snap
+    return None
+
+
+def faster_whisper_model_present(model: str) -> bool:
+    """True when a faster-whisper (CTranslate2) model is materialised.
+
+    faster-whisper resolves to a directory of files rather than one
+    blob, so presence is "a directory holding a model.bin exists",
+    either in FERAL's store or in an existing HuggingFace hub cache.
+    """
+    if (faster_whisper_model_dir(model) / "model.bin").is_file():
+        return True
+    return _hf_hub_snapshot(model) is not None
+
+
+def faster_whisper_model_path(model: str) -> Path:
+    """Resolve *model* to a directory ``WhisperModel`` can load.
+
+    FERAL's own store wins over the HuggingFace cache so an uninstall
+    takes the weights with it. Returns the FERAL path even when
+    nothing is present yet, so callers have somewhere to report.
+    """
+    own = faster_whisper_model_dir(model)
+    if (own / "model.bin").is_file():
+        return own
+    snapshot = _hf_hub_snapshot(model)
+    return snapshot if snapshot is not None else own
+
+
+def ensure_faster_whisper_model(
+    model: str, *, allow_download: bool = False
+) -> Path:
+    """Return a loadable faster-whisper model directory, optionally fetching it.
+
+    This is the piece that was missing. Without it, choosing
+    faster-whisper in ``feral setup`` produced an install that refused
+    every session: nothing ever passed ``allow_download=True`` and no
+    fetch path existed, so
+    :func:`~voice.stt_providers.faster_whisper_local.faster_whisper_available`
+    reported "model not downloaded" forever.
+
+    The fetch is delegated to ``faster_whisper.download_model`` rather
+    than reimplementing the repo layout, but ``output_dir`` pins it to
+    FERAL's store. Note that this is deliberately *not* the same as
+    ``WhisperModel(size, download_root=...)``: ``download_root`` is a
+    *cache_dir*, and constructing a ``WhisperModel`` that way will
+    silently hit the network at load time, which is exactly the
+    mid-session download this module exists to prevent.
+    """
+    if faster_whisper_model_present(model):
+        return faster_whisper_model_path(model)
+    dest = faster_whisper_model_dir(model)
+    if not allow_download:
+        raise ModelUnavailable(
+            f"faster-whisper model {model!r}",
+            dest,
+            "Run `feral setup` and choose local voice to download it, or "
+            f"fetch it with `python -m voice.local_models "
+            f"fetch-faster-whisper {model}`.",
+        )
+    from faster_whisper import download_model
+
+    dest.mkdir(parents=True, exist_ok=True)
+    logger.info("Downloading faster-whisper model %r -> %s", model, dest)
+    path = Path(download_model(model, output_dir=str(dest)))
+    if not (path / "model.bin").is_file():
+        raise RuntimeError(
+            f"faster-whisper download of {model!r} produced no model.bin at "
+            f"{path} - refusing to report it as installed"
+        )
+    return path
 
 
 def sha256(path: Path) -> str:
@@ -377,8 +496,11 @@ def _cli() -> int:
 
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help"):
-        print("usage: python -m voice.local_models "
-              "{fetch-vad|fetch-piper <voice>|where}")
+        print(
+            "usage: python -m voice.local_models {where|fetch-vad"
+            "|fetch-piper <voice>|fetch-whispercpp <model>"
+            "|fetch-faster-whisper <model>}"
+        )
         return 0
     cmd = args[0]
     if cmd == "where":
@@ -392,6 +514,18 @@ def _cli() -> int:
             print("fetch-piper needs a voice name, e.g. en_US-lessac-medium")
             return 2
         print(ensure_piper_voice(args[1], allow_download=True))
+        return 0
+    if cmd == "fetch-whispercpp":
+        if len(args) < 2:
+            print("fetch-whispercpp needs a model name, e.g. base.en")
+            return 2
+        print(ensure_whispercpp_model(args[1], allow_download=True))
+        return 0
+    if cmd == "fetch-faster-whisper":
+        if len(args) < 2:
+            print("fetch-faster-whisper needs a model name, e.g. base.en")
+            return 2
+        print(ensure_faster_whisper_model(args[1], allow_download=True))
         return 0
     print(f"unknown command {cmd!r}")
     return 2
