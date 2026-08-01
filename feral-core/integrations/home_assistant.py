@@ -8,7 +8,6 @@ Uses long-lived access tokens (no OAuth needed).
 
 from __future__ import annotations
 import asyncio
-import json
 import logging
 import os
 from typing import Optional
@@ -18,6 +17,106 @@ import httpx
 logger = logging.getLogger("feral.integrations.ha")
 ws_logger = logging.getLogger("feral.integrations.ha.ws")
 
+# Where a Home Assistant lives when nobody has said otherwise.
+DEFAULT_BASE_URL = "http://homeassistant.local:8123"
+ADDON_DEFAULT_BASE_URL = "http://supervisor/core"
+
+# Vault slot holding the operator's Home Assistant URL. Not a secret, but
+# the vault is the store this integration already reaches (through the
+# OAuth manager) and it is the one place a value written by an HTTP route
+# survives a restart without a settings-schema change.
+URL_VAULT_NAMESPACE = "integration_config"
+URL_VAULT_KEY = "home_assistant_url"
+
+
+def normalize_base_url(raw: str) -> str:
+    """Return a dialable base URL, or raise ``ValueError``.
+
+    Accepts what a person actually pastes: ``homeassistant.local:8123``,
+    ``http://10.0.0.4:8123/``, ``https://ha.example.com``. A missing
+    scheme becomes ``http://`` because that is what a LAN Home Assistant
+    speaks; a trailing slash is dropped so joining ``/api/states`` never
+    produces a double slash.
+    """
+    url = (raw or "").strip()
+    if not url:
+        raise ValueError("Home Assistant URL is empty")
+    if "://" not in url:
+        url = f"http://{url}"
+    scheme, _, rest = url.partition("://")
+    if scheme.lower() not in ("http", "https"):
+        raise ValueError(
+            f"Home Assistant URL must be http:// or https://, got {scheme!r}",
+        )
+    host = rest.split("/")[0]
+    if not host:
+        raise ValueError("Home Assistant URL has no host")
+    return url.rstrip("/")
+
+
+def _vault_of(oauth_manager) -> object | None:
+    """The BlindVault an OAuth manager is holding, when it has one."""
+    return getattr(oauth_manager, "_vault", None)
+
+
+def _url_from_vault(vault) -> str:
+    if vault is None:
+        return ""
+    getter = getattr(vault, "get", None)
+    if getter is None:
+        return ""
+    try:
+        return (getter(URL_VAULT_NAMESPACE, URL_VAULT_KEY,
+                       requester="home_assistant") or "").strip()
+    except Exception as exc:
+        logger.debug("HA URL vault read failed: %s", exc)
+        return ""
+
+
+def resolve_base_url(vault=None) -> str:
+    """Resolve the Home Assistant base URL, most explicit source first.
+
+    1. Add-on mode (``SUPERVISOR_TOKEN`` present): ``FERAL_HA_URL`` or
+       the Supervisor proxy. The add-on knows where Core is.
+    2. ``FERAL_HA_URL`` / ``HA_URL`` — an operator env override outranks
+       stored state, same as everywhere else in FERAL.
+    3. The URL saved from Settings (vault ``integration_config``).
+    4. :data:`DEFAULT_BASE_URL`.
+
+    Before this existed only 1, 2 (``HA_URL`` alone, outside add-on
+    mode) and 4 were reachable, and no HTTP route accepted a URL. Anyone
+    whose Home Assistant is not at ``homeassistant.local:8123`` had to
+    set an env var and restart the brain, while the provider's own setup
+    text told them to paste the token "alongside your HA URL" into a
+    field that did not exist.
+    """
+    if os.getenv("SUPERVISOR_TOKEN"):
+        return os.getenv("FERAL_HA_URL", ADDON_DEFAULT_BASE_URL).rstrip("/")
+    for env_key in ("FERAL_HA_URL", "HA_URL"):
+        env_value = (os.getenv(env_key) or "").strip()
+        if env_value:
+            try:
+                return normalize_base_url(env_value)
+            except ValueError as exc:
+                logger.warning("Ignoring invalid %s (%s)", env_key, exc)
+    stored = _url_from_vault(vault)
+    if stored:
+        try:
+            resolved = normalize_base_url(stored)
+        except ValueError as exc:
+            logger.warning("Ignoring invalid stored Home Assistant URL (%s)", exc)
+        else:
+            # ``security.probe._probe_home_assistant`` resolves its own
+            # base URL from the environment and nothing else, so without
+            # this export the integration would talk to the operator's
+            # Home Assistant while the probe that decides the connected
+            # badge talked to homeassistant.local. Exporting keeps the
+            # two honest. The env var still wins on the next resolve,
+            # and it is the same value, so this stays idempotent.
+            os.environ["HA_URL"] = resolved
+            return resolved
+    return DEFAULT_BASE_URL
+
 
 class HomeAssistantIntegration:
     """
@@ -25,20 +124,78 @@ class HomeAssistantIntegration:
     Connects via REST API and optional WebSocket for events.
     """
 
-    def __init__(self, oauth_manager=None):
+    def __init__(self, oauth_manager=None, base_url: Optional[str] = None):
         self._oauth = oauth_manager
         self._is_addon = bool(os.getenv("SUPERVISOR_TOKEN"))
+        if base_url:
+            self._base_url = normalize_base_url(base_url)
+        else:
+            self._base_url = resolve_base_url(vault=_vault_of(oauth_manager))
         if self._is_addon:
-            self._base_url = os.getenv("FERAL_HA_URL", "http://supervisor/core")
             self._token = os.getenv("SUPERVISOR_TOKEN", "")
             logger.info("Running as HA add-on — using Supervisor API at %s", self._base_url)
         else:
-            self._base_url = os.getenv("HA_URL", "http://homeassistant.local:8123")
             self._token = os.getenv("HA_TOKEN", "")
         self._http: Optional[httpx.AsyncClient] = None
         self._entities_cache: dict[str, dict] = {}
         self._ws = None
         self._event_handlers: list = []
+
+    @property
+    def base_url(self) -> str:
+        """The Home Assistant this integration is pointed at."""
+        return self._base_url
+
+    def set_base_url(self, url: str, *, persist: bool = True) -> str:
+        """Point the integration at a different Home Assistant, live.
+
+        Drops the cached HTTP client so the next call dials the new host,
+        and exports ``HA_URL`` so the registered probe agrees with the
+        integration. Returns the normalized URL; raises ``ValueError``
+        when the input is not a usable http(s) URL.
+        """
+        resolved = normalize_base_url(url)
+        if self._is_addon:
+            logger.warning(
+                "Ignoring Home Assistant URL %s — running as an add-on, where "
+                "Core is reached through the Supervisor proxy.", resolved,
+            )
+            return self._base_url
+
+        previous, self._base_url = self._base_url, resolved
+        stale, self._http = self._http, None
+        if stale is not None:
+            self._close_later(stale)
+        os.environ["HA_URL"] = resolved
+
+        if persist:
+            vault = _vault_of(self._oauth)
+            putter = getattr(vault, "put", None) if vault is not None else None
+            if putter is None:
+                logger.warning(
+                    "Home Assistant URL set to %s for this process only — no "
+                    "vault attached, so it will not survive a restart.",
+                    resolved,
+                )
+            else:
+                try:
+                    putter(URL_VAULT_NAMESPACE, URL_VAULT_KEY, resolved,
+                           stored_by="home_assistant")
+                except Exception as exc:
+                    logger.warning("Failed to persist Home Assistant URL: %s", exc)
+        if previous != resolved:
+            logger.info("Home Assistant URL: %s -> %s", previous, resolved)
+        return resolved
+
+    @staticmethod
+    def _close_later(client: httpx.AsyncClient) -> None:
+        """Close a replaced HTTP client without blocking a sync caller."""
+        try:
+            asyncio.get_running_loop().create_task(client.aclose())
+        except RuntimeError:
+            # No loop here; the client never opened a connection pool it
+            # could leak from a sync context.
+            pass
 
     async def _ensure_client(self):
         if self._http is None:

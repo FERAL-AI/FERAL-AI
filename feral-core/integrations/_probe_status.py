@@ -8,31 +8,42 @@ through every caller (skill executor, channel manager, observability
 endpoints, the WebUI etc.).
 
 This module is a thin in-process cache of the most-recent probe result
-per provider. Writers (the OAuth manager after a successful callback,
-the probe-all sweeper, operator-initiated "Refresh status" actions in
-the WebUI) call :func:`mark_probe_result` to record the latest result.
-Readers (integrations' ``connected`` property) call
+per provider. Readers (integrations' ``connected`` property) call
 :func:`is_connected_cached` to consult it synchronously.
+
+Writers, all of which exist:
+
+* ``integrations.probe_sweeper`` — the periodic sweep and the on-read
+  refresh behind ``GET /api/integrations``.
+* ``POST /api/integrations/refresh`` — the operator-initiated "Refresh
+  status" action. This docstring described that action for months
+  before any route implemented it; it does now.
+* ``OAuthManager`` after a successful token exchange.
+* ``POST /api/integrations/disconnect/{id}``, which records ``False``
+  immediately rather than leaving a green badge for the rest of the TTL.
 
 Semantics:
 
 * When a probe has run within :data:`STATUS_TTL_SECONDS` we trust its
   ``ok`` value verbatim — the integration's ``connected`` reflects a
-  real round-trip, not just token presence. **This is the contract
-  finding 19 calls out: "Every integration's ``connected`` property
-  uses ``probe(provider).ok``".**
+  real round-trip, not just token presence.
 * When there's no recent probe result, the cache returns ``None`` and
   the integration falls back to its token-presence baseline so we
   don't downgrade a known-good connection just because nobody's
-  pinged the provider in a minute.
+  pinged the provider in a minute. Read that fallback as "unverified",
+  not as "connected": before a sweeper existed it was the answer
+  essentially all the time, which is exactly how a revoked token kept
+  a green badge indefinitely.
 * Failed probes (``ok=False``) override token presence — if Whoop
   rejects our token with 401, ``connected`` must report False even
   when the access_token is still locally stored, so the LLM doesn't
   waste a tool call.
 
-The cache is process-local; no persistence. Cross-restart probe-state
-is rebuilt by the next probe call (which is cheap — see
-``security.probe.PROBE_CACHE_TTL_SECONDS`` for cadence).
+The cache is process-local; no persistence. Cross-restart probe-state is
+rebuilt by the first sweep after boot (see
+``integrations.probe_sweeper.DEFAULT_SWEEP_SECONDS``, deliberately
+shorter than :data:`STATUS_TTL_SECONDS` so the cache never goes cold
+between sweeps).
 """
 
 from __future__ import annotations
@@ -87,6 +98,17 @@ def latest(provider_id: str) -> Optional[bool]:
     if time.time() - entry.recorded_at > STATUS_TTL_SECONDS:
         return None
     return entry.ok
+
+
+def verified(provider_id: str) -> bool:
+    """True when this provider's status is backed by a recent probe.
+
+    Lets a status surface say "connected (verified 12s ago)" versus
+    "token present, unverified" instead of rendering both as a green
+    badge. The two are different claims and conflating them is how a
+    revoked token read as connected.
+    """
+    return latest(provider_id) is not None
 
 
 def is_connected_cached(

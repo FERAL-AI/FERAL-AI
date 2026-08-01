@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from html import escape as html_escape
+from typing import Optional
 
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -18,9 +19,48 @@ router = APIRouter()
 # ─────────────────────────────────────────────
 
 
+async def _probe_provider(provider_id: str) -> tuple[Optional[bool], dict]:
+    """Run one provider's probe now and return ``(ok, detail)``.
+
+    ``ok`` is ``None`` when no probe is registered for the provider, so
+    the caller can keep its existing fallback rather than reporting a
+    disconnection it has no evidence for.
+    """
+    from integrations import _probe_status
+
+    ok = await _probe_status.refresh(provider_id, vault=getattr(state, "vault", None))
+    detail = _probe_status.snapshot().get(provider_id, {})
+    return ok, detail
+
+
 @router.get("/api/integrations")
-async def list_integrations():
-    """List all available integrations and their connection status."""
+async def list_integrations(refresh: bool = True):
+    """List all available integrations and their connection status.
+
+    Probes providers whose cached verdict has expired before answering,
+    so the ``connected`` flags in the response are the result of a real
+    round-trip rather than "a token string exists somewhere". Pass
+    ``?refresh=0`` to read the cache as-is (a poller that does not want
+    to trigger network calls).
+
+    Nothing used to run the probes at all: ``probe_all`` and every
+    integration's ``probe_connected`` had no caller in the brain, so
+    after the 60 second cache from an OAuth callback expired, every badge
+    reverted to token presence permanently. A revoked token stayed green
+    until someone re-authorized.
+    """
+    if refresh:
+        from integrations import probe_sweeper
+
+        vault = getattr(state, "vault", None)
+        try:
+            await probe_sweeper.sweep_once(vault=vault, only_stale=True)
+            probe_sweeper.ensure_started(vault=vault)
+        except Exception as exc:
+            # A probe sweep must never be able to take the settings page
+            # down; a stale badge beats a 500.
+            logger.warning("integration probe sweep failed: %s", exc)
+
     providers = state.oauth.list_providers() if state.oauth else []
     email_connected = bool(state.email and state.email.connected)
     # Surface the Gmail App Password path as a first-class provider row so
@@ -33,13 +73,36 @@ async def list_integrations():
             "connected": email_connected,
             "has_client_id": False,
         }]
+
+    # Tell the client WHICH claim each badge is making. ``connected`` on
+    # its own cannot distinguish "the provider answered us just now" from
+    # "we are holding a token string and have never checked it", and a UI
+    # that renders both as one green dot is the reason a revoked token
+    # looked fine for months.
+    from integrations import _probe_status
+
+    statuses = _probe_status.snapshot()
+    providers = [
+        {
+            **p,
+            "probe_verified": _probe_status.verified(p.get("id", "")),
+            "probe_reason": statuses.get(p.get("id", ""), {}).get("reason", ""),
+            "probe_detail": statuses.get(p.get("id", ""), {}).get("detail", ""),
+            "probe_age_s": statuses.get(p.get("id", ""), {}).get("age_s"),
+        }
+        for p in providers
+    ]
+
+    ha = getattr(state, "home_assistant", None)
     return {
         "providers": providers,
         "spotify_connected": state.spotify.connected if state.spotify else False,
-        "home_assistant_connected": state.home_assistant.connected if state.home_assistant else False,
+        "home_assistant_connected": ha.connected if ha else False,
+        "home_assistant_url": getattr(ha, "base_url", "") if ha else "",
         "notion_connected": state.notion.connected if state.notion else False,
         "gmail_connected": email_connected,
         "email_connected": email_connected,
+        "probe_statuses": statuses,
     }
 
 
@@ -155,10 +218,21 @@ async def oauth_callback(
 
 @router.post("/api/integrations/token")
 async def store_integration_token(body: dict):
-    """Store a long-lived API token (e.g., Home Assistant) or Gmail creds."""
+    """Store a long-lived API token (e.g., Home Assistant) or Gmail creds.
+
+    Home Assistant additionally accepts ``url`` (alias ``base_url``).
+    Until this existed the card had one field, a token, while
+    ``HomeAssistantIntegration`` resolved its base URL only from
+    ``FERAL_HA_URL`` / ``HA_URL`` and otherwise assumed
+    ``http://homeassistant.local:8123``. Anyone whose Home Assistant sits
+    on a static LAN IP, a non-default port, or a reverse proxy could not
+    connect from the UI at all: they had to set an env var and restart.
+    """
     provider_id = body.get("provider_id", "")
     if provider_id == "gmail":
         return await _store_gmail_app_password(body)
+    if provider_id == "home_assistant":
+        return await _store_home_assistant_token(body)
     token = body.get("token", "")
     if not provider_id or not token:
         return {"error": "provider_id and token are required"}
@@ -233,6 +307,61 @@ async def store_oauth_client(body: dict):
     }
 
 
+async def _store_home_assistant_token(body: dict) -> dict:
+    """Save the Home Assistant URL + long-lived token, then probe for real.
+
+    Both fields are optional individually so an operator can correct just
+    the URL without re-pasting the token, but at least one must be
+    present. The response carries the probe verdict rather than a bare
+    ``ok``: "saved" and "reachable" are different claims and the card
+    renders both.
+    """
+    raw_url = (body.get("url") or body.get("base_url") or "").strip()
+    token = (body.get("token") or "").strip()
+    if not raw_url and not token:
+        return {"error": "token or url is required", "provider": "home_assistant"}
+
+    ha = getattr(state, "home_assistant", None)
+    base_url = ""
+    if raw_url:
+        if ha is None:
+            return {
+                "error": "Home Assistant integration not initialized",
+                "provider": "home_assistant",
+            }
+        try:
+            base_url = ha.set_base_url(raw_url)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "provider": "home_assistant",
+                "error": str(exc),
+                "reason": "invalid_url",
+            }
+    elif ha is not None:
+        base_url = ha.base_url
+
+    if token:
+        if state.oauth:
+            state.oauth.store_api_token("home_assistant", token)
+        if ha is not None:
+            # The integration caches the token it read from HA_TOKEN at
+            # construction and prefers it over the OAuth manager, so a
+            # token pasted into the UI would otherwise be shadowed by an
+            # empty env var for the life of the process.
+            ha._token = token
+            ha._http = None
+
+    connected, probe = await _probe_provider("home_assistant")
+    return {
+        "ok": True,
+        "provider": "home_assistant",
+        "base_url": base_url,
+        "connected": bool(connected),
+        "probe": probe,
+    }
+
+
 async def _store_gmail_app_password(body: dict) -> dict:
     """Validate Gmail address + App Password against Gmail's IMAP/SMTP
     servers and persist only on success, so a green badge is truthful."""
@@ -258,6 +387,54 @@ async def _store_gmail_app_password(body: dict) -> dict:
     return {"ok": True, "provider": "gmail", "connected": True, "probe": probe}
 
 
+@router.post("/api/integrations/refresh")
+async def refresh_integration_status(body: dict | None = None):
+    """Re-probe integrations and report what each provider actually says.
+
+    This is the operator-initiated "Refresh status" action that
+    ``integrations/_probe_status.py`` has documented as a writer of the
+    cache since it was written, and that no route implemented.
+
+    Body (optional): ``{"provider_id": "spotify"}`` to refresh one
+    provider; omit it to sweep every provider with a registered probe.
+    Bypasses the cache TTL — the point of pressing the button is to
+    distrust the cached answer.
+
+    ``results`` maps provider id to ``true`` / ``false`` / ``null``,
+    where ``null`` means no probe is registered for that provider and its
+    badge keeps whatever fallback it had. ``statuses`` carries the
+    reason and detail behind each verdict, which is what turns "not
+    connected" into something an operator can act on.
+    """
+    from integrations import _probe_status, probe_sweeper
+
+    provider_id = ((body or {}).get("provider_id") or "").strip()
+    vault = getattr(state, "vault", None)
+
+    if provider_id:
+        known = probe_sweeper.known_provider_ids()
+        if known and provider_id not in known:
+            return {
+                "ok": False,
+                "error": f"no probe registered for {provider_id!r}",
+                "reason": "no_probe",
+                "known": sorted(known),
+            }
+        results = await probe_sweeper.sweep_once(
+            vault=vault, provider_ids=[provider_id],
+        )
+    else:
+        results = await probe_sweeper.sweep_once(vault=vault)
+
+    probe_sweeper.ensure_started(vault=vault)
+    return {
+        "ok": True,
+        "results": results,
+        "statuses": _probe_status.snapshot(),
+        "sweeper_running": probe_sweeper.is_running(),
+    }
+
+
 @router.post("/api/integrations/disconnect/{provider_id}")
 async def disconnect_integration(provider_id: str):
     """Disconnect an integration by revoking its tokens."""
@@ -266,6 +443,15 @@ async def disconnect_integration(provider_id: str):
         return {"ok": True, "provider": "gmail"}
     if state.oauth:
         state.oauth.revoke_token(provider_id)
+    # A cached ``ok=True`` from a probe that ran seconds ago would keep
+    # the badge green for the rest of the TTL after the operator pressed
+    # Disconnect. Record the truth we already know.
+    from integrations import _probe_status
+
+    _probe_status.mark_probe_result(
+        provider_id, ok=False, reason="disconnected",
+        detail="credentials revoked by operator",
+    )
     return {"ok": True, "provider": provider_id}
 
 
