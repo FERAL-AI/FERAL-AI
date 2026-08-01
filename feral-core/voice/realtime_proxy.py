@@ -40,7 +40,11 @@ from voice.transcript_order import TRANSCRIPT_ORDER
 logger = logging.getLogger("feral.voice.openai")
 
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
-DEFAULT_MODEL = "gpt-realtime"
+# Mini by default, matching ``audio.realtime_model`` in the config
+# defaults. Kept in sync deliberately: this constant is the fallback when
+# the setting is unset, so leaving it on the full model would mean a
+# fresh install silently pays full price until someone opens Settings.
+DEFAULT_MODEL = "gpt-realtime-mini"
 SAMPLE_RATE = 24000
 AUDIO_FORMAT = "pcm16"
 

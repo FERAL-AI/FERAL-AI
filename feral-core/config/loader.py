@@ -112,7 +112,16 @@ DEFAULT_SETTINGS = {
         # ``feral setup`` (voice preflight) or the WebUI Voice card;
         # the runtime falls back to ``RealtimeProxy.DEFAULT_MODEL``
         # when this key is unset (Lane U2).
-        "realtime_model": "gpt-realtime",
+        # Defaults to the mini tier on cost. Realtime audio is billed per
+        # audio token in both directions and the full model is roughly 3x
+        # the mini on both, so a default of the full model quietly makes
+        # every voice turn three times more expensive than it needs to be
+        # for most usage. An operator who wants the full model sets this
+        # key; the picker lists both.
+        #
+        # Name taken from providers/model_catalog.json, which is refreshed
+        # from the live provider endpoint, rather than from documentation.
+        "realtime_model": "gpt-realtime-mini",
         # Ordered list of fallback TTS providers consulted when the
         # primary realtime provider fails (OpenAI 1013
         # insufficient_quota, 429, invalid_api_key). The router walks
