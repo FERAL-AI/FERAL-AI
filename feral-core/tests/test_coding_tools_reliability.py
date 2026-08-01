@@ -464,6 +464,285 @@ async def test_unbound_edit_still_works(skill, work):
     assert f.read_text() == "x = 2\n"
 
 
+# ── the loop must stay responsive ─────────────────────────────────────
+
+
+# A wall-clock "did the loop stall" probe was tried first and rejected on
+# evidence: with a 40,000-line write the worst loop gap was 9.4ms running
+# the blocking work inline versus 4.2ms with it threaded. Real, but far
+# too close to separate from CI noise without either a multi-second
+# workload or a threshold that would flake. Thread identity is the same
+# property measured exactly, which is why Wave 1 used it in
+# test_coding_tools_async_io.py, and it does fail when the work is moved
+# back onto the loop.
+
+
+class _CallThreadSpy:
+    """Records which thread each patched callable ran on."""
+
+    def __init__(self, monkeypatch) -> None:
+        self.threads: dict[str, int] = {}
+        self._monkeypatch = monkeypatch
+
+    def watch(self, target, name: str, label: str = "") -> None:
+        import inspect
+        import threading
+
+        original = getattr(target, name)
+        key = label or f"{getattr(target, '__name__', target)}.{name}"
+
+        def wrapper(*a, **kw):
+            self.threads[key] = threading.get_ident()
+            return original(*a, **kw)
+
+        # Setting a plain function on a class makes it an instance method,
+        # so a `@staticmethod` original would start receiving `self` as its
+        # first argument and every call site would fail with "takes 2
+        # positional arguments but 3 were given". `getattr` already
+        # unwrapped the descriptor, so re-wrap to keep the binding
+        # behaviour the class actually declares.
+        patched = wrapper
+        if isinstance(target, type):
+            raw = inspect.getattr_static(target, name)
+            if isinstance(raw, staticmethod):
+                patched = staticmethod(wrapper)
+            elif isinstance(raw, classmethod):
+                patched = classmethod(wrapper)
+
+        self._monkeypatch.setattr(target, name, patched)
+
+    def assert_all_off_loop(self, loop_thread: int, *, expected: set) -> None:
+        missing = expected - set(self.threads)
+        assert not missing, f"never called, so nothing was verified: {sorted(missing)}"
+        for key, ident in self.threads.items():
+            assert ident != loop_thread, (
+                f"{key} ran on the event loop thread. Every blocking step of "
+                f"a write must be inside the asyncio.to_thread hop."
+            )
+
+
+async def test_write_runs_all_blocking_work_off_the_loop(skill, work, monkeypatch):
+    """The staleness fingerprint, the checkpoint blob and its SQLite
+    write, and the write itself must all be off the loop.
+
+    Wave 1 moved coding_tools' file I/O off the loop precisely so this
+    lane could pile checkpointing and linting on top of it. Everything
+    added here is blocking, so it has to go the same way.
+    """
+    import sqlite3
+    import threading
+
+    from skills import checkpoints as cp
+    from skills import file_state as fs
+    from skills.impl.coding_tools import CodingToolsSkill
+
+    loop_thread = threading.get_ident()
+    spy = _CallThreadSpy(monkeypatch)
+    spy.watch(fs, "_fingerprint", "file_state._fingerprint")
+    spy.watch(cp.CheckpointStore, "_put_blob", "CheckpointStore._put_blob")
+    spy.watch(sqlite3, "connect", "sqlite3.connect")
+    spy.watch(CodingToolsSkill, "_write_verbatim", "_write_verbatim")
+
+    f = work / "a.py"
+    f.write_text("original\n")
+    with ctx(tool="coding_tools__read_file"):
+        await skill.execute("read_file", {"path": str(f)}, {})
+
+    with ctx(turn_id="turn-thread", tool="coding_tools__write_file"):
+        result = await skill.execute(
+            "write_file", {"path": str(f), "content": "replaced\n"}, {},
+        )
+
+    assert result["success"] is True, result
+    spy.assert_all_off_loop(loop_thread, expected={
+        "file_state._fingerprint",
+        "CheckpointStore._put_blob",
+        "sqlite3.connect",
+        "_write_verbatim",
+    })
+
+
+async def test_edit_runs_the_matcher_off_the_loop(skill, work, monkeypatch):
+    """The fuzzy matcher is the most expensive part of an edit: the
+    sliding-window strategies are O(file_lines x needle_lines), so on a
+    large file it is millions of string comparisons."""
+    import threading
+
+    from skills import edit_matchers as em
+    from skills.impl.coding_tools import CodingToolsSkill
+
+    loop_thread = threading.get_ident()
+    spy = _CallThreadSpy(monkeypatch)
+    spy.watch(em, "find_edit_match", "edit_matchers.find_edit_match")
+    spy.watch(em, "splice", "edit_matchers.splice")
+    spy.watch(CodingToolsSkill, "_read_verbatim", "_read_verbatim")
+
+    f = work / "b.py"
+    f.write_text("x = 1\n")
+    with ctx():
+        result = await skill.execute(
+            "edit_file", {"path": str(f), "old_text": "x = 1", "new_text": "x = 2"}, {},
+        )
+
+    assert result["success"] is True, result
+    spy.assert_all_off_loop(loop_thread, expected={
+        "edit_matchers.find_edit_match",
+        "edit_matchers.splice",
+        "_read_verbatim",
+    })
+
+
+async def test_permission_check_runs_off_the_loop(skill, work, monkeypatch):
+    """SandboxPolicy.can_write_path reads ~/.feral/workspace_grants.json
+    from disk on every single call.
+
+    That read was happening on the event loop. Wave 1's spy could not see
+    it, because it records one thread per patched method name and the
+    in-hop read_text overwrote the loop-thread record immediately after.
+    """
+    import threading
+
+    from skills.impl.coding_tools import CodingToolsSkill
+
+    loop_thread = threading.get_ident()
+    spy = _CallThreadSpy(monkeypatch)
+    spy.watch(CodingToolsSkill, "_check_write", "_check_write")
+
+    with ctx(turn_id="turn-perm", tool="coding_tools__write_file"):
+        await skill.execute("write_file", {"path": str(work / "c.txt"), "content": "x"}, {})
+
+    spy.assert_all_off_loop(loop_thread, expected={"_check_write"})
+
+
+async def test_revert_runs_off_the_loop(skill, work, monkeypatch):
+    """A revert is SQLite plus one restore per file, all blocking."""
+    import sqlite3
+    import threading
+
+    f = work / "r.txt"
+    f.write_text("before\n")
+    with ctx(turn_id="turn-revert", tool="coding_tools__write_file"):
+        await skill.execute("write_file", {"path": str(f), "content": "after\n"}, {})
+
+    loop_thread = threading.get_ident()
+    spy = _CallThreadSpy(monkeypatch)
+    spy.watch(sqlite3, "connect", "sqlite3.connect")
+
+    with ctx(turn_id="turn-other", tool="coding_tools__revert_turn"):
+        result = await skill.execute("revert_turn", {"turn_id": "turn-revert"}, {})
+
+    assert result["success"] is True, result
+    assert f.read_text() == "before\n"
+    spy.assert_all_off_loop(loop_thread, expected={"sqlite3.connect"})
+
+
+async def test_diagnostics_run_outside_the_write_lock(skill, work, monkeypatch):
+    """Diagnostics must not hold the per-path lock.
+
+    A linter subprocess has a five second timeout. Holding the lock
+    across it would make one slow lint block every other subagent editing
+    that file. It runs after the lock is released, on content passed in
+    rather than re-read, so there is no race either.
+    """
+    monkeypatch.setenv("FERAL_POST_EDIT_DIAGNOSTICS", "on")
+    held = {}
+    tracker = file_state.get_tracker()
+    f = work / "d.py"
+
+    import skills.diagnostics as diag_mod
+
+    original = diag_mod.diagnose
+
+    async def _spy(path, **kw):
+        held["locked_during_diagnostics"] = tracker.lock_for(f).locked()
+        return await original(path, **kw)
+
+    monkeypatch.setattr(diag_mod, "diagnose", _spy)
+
+    with ctx(turn_id="turn-diag", tool="coding_tools__write_file"):
+        result = await skill.execute("write_file", {"path": str(f), "content": "x = 1\n"}, {})
+
+    assert result["success"] is True
+    assert held.get("locked_during_diagnostics") is False, (
+        "diagnostics ran while the per-path write lock was still held"
+    )
+
+
+def _barrier_probe(monkeypatch, parties: int, timeout: float):
+    """Make every write inside the critical section rendezvous.
+
+    Deterministic rather than timing-based: if two writes can be inside
+    their critical sections at the same time the barrier releases, and if
+    they are serialised it times out. Timing comparisons would only
+    measure the GIL, since much of this work is Python-level.
+    """
+    import threading
+
+    from skills.impl.coding_tools import CodingToolsSkill
+
+    barrier = threading.Barrier(parties, timeout=timeout)
+    # Already a plain function when reached through the class, since
+    # `_write_verbatim` is a staticmethod.
+    original = CodingToolsSkill._write_verbatim
+    reached = []
+
+    def _wrapped(path, content):
+        reached.append(str(path))
+        try:
+            barrier.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return original(path, content)
+
+    monkeypatch.setattr(CodingToolsSkill, "_write_verbatim", staticmethod(_wrapped))
+    return barrier, reached
+
+
+async def test_writes_to_different_paths_are_not_serialised(skill, work, monkeypatch):
+    """The lock is per path, so unrelated files never wait on each other.
+
+    Both writes must be inside their critical section simultaneously for
+    the barrier to release. That also proves the blocking section is off
+    the loop: if it ran inline, the first write could never yield to let
+    the second start.
+    """
+    barrier, reached = _barrier_probe(monkeypatch, parties=2, timeout=5.0)
+
+    async def _one(name: str):
+        with ctx(turn_id="turn-par", tool="coding_tools__write_file"):
+            return await skill.execute(
+                "write_file", {"path": str(work / name), "content": "x"}, {},
+            )
+
+    results = await asyncio.gather(_one("a.txt"), _one("b.txt"))
+    assert all(r["success"] for r in results)
+    assert len(reached) == 2
+    assert not barrier.broken, (
+        "two writes to different paths could not be in their critical "
+        "sections at the same time; the lock is serialising unrelated files"
+    )
+
+
+async def test_writes_to_the_same_path_are_serialised(skill, work, monkeypatch):
+    """The converse, and the reason the lock exists: `spawn_subagents`
+    runs up to six workers, and two of them writing one file must not
+    both pass the staleness check against the same fingerprint."""
+    barrier, reached = _barrier_probe(monkeypatch, parties=2, timeout=0.75)
+
+    async def _one():
+        with ctx(turn_id="turn-same", tool="coding_tools__write_file"):
+            return await skill.execute(
+                "write_file", {"path": str(work / "same.txt"), "content": "x"}, {},
+            )
+
+    results = await asyncio.gather(_one(), _one())
+    assert all(r["success"] for r in results)
+    assert barrier.broken, (
+        "two writes to the SAME path were inside the critical section at "
+        "once; the per-path lock is not holding"
+    )
+
+
 def test_no_em_dashes_in_the_new_modules():
     """Hard project rule. Scoped to modules this lane owns outright;
     the pre-existing files it edits already contain some."""

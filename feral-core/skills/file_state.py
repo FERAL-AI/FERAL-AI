@@ -194,22 +194,29 @@ class FileStateTracker:
 
     # ── observations ──────────────────────────────────────────────
 
-    def record_read(
+    def observe(
         self,
-        session_id: str,
         path,
         *,
         partial: bool = False,
         window: Optional[tuple[int, int]] = None,
     ) -> Optional[FileObservation]:
-        if not session_id:
-            return None
+        """Fingerprint ``path``. **Blocking**: stats and hashes the file.
+
+        Split out from :meth:`record_read` so a caller that is already
+        inside an ``asyncio.to_thread`` hop can take the fingerprint in the
+        same hop as the read it belongs to, then store it on the event loop
+        with :meth:`remember`. Taking it in a second hop would be worse
+        than pointless: the file could change in between, and the
+        observation would then record a state the agent never actually
+        read, which makes a later staleness check pass when it should fail.
+        """
         key = self._key(path)
         fp = _fingerprint(Path(key))
         if fp is None:
             return None
         mtime_ns, size, digest = fp
-        obs = FileObservation(
+        return FileObservation(
             path=key,
             mtime_ns=mtime_ns,
             size=size,
@@ -218,7 +225,26 @@ class FileStateTracker:
             partial=partial,
             window=window,
         )
-        self._observations.setdefault(session_id, {})[key] = obs
+
+    def remember(self, session_id: str, obs: Optional[FileObservation]) -> None:
+        """Store an observation. Pure in-memory, safe on the event loop."""
+        if not session_id or obs is None:
+            return
+        self._observations.setdefault(session_id, {})[obs.path] = obs
+
+    def record_read(
+        self,
+        session_id: str,
+        path,
+        *,
+        partial: bool = False,
+        window: Optional[tuple[int, int]] = None,
+    ) -> Optional[FileObservation]:
+        """Blocking convenience wrapper around observe + remember."""
+        if not session_id:
+            return None
+        obs = self.observe(path, partial=partial, window=window)
+        self.remember(session_id, obs)
         return obs
 
     def note_write(self, session_id: str, path) -> Optional[FileObservation]:

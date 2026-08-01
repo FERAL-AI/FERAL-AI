@@ -207,12 +207,16 @@ class TestBehaviourPreserved:
             {"path": str(target), "old_text": "OLD", "new_text": "NEW"},
         )
 
-        assert result == {
-            "success": True,
-            "status_code": 200,
-            "data": {"path": str(target), "replacements": 1},
-            "error": None,
-        }
+        assert result["success"] is True
+        assert result["status_code"] == 200
+        assert result["error"] is None
+        # The envelope this originally asserted on exactly has since gained
+        # additive keys from the reliability lane (`match_strategy`,
+        # `matched_lines`, and the checkpoint/diagnostics fields when those
+        # are active), all declared in the manifest's returns_description.
+        # Pin the fields this test is actually about and let the rest grow.
+        assert result["data"]["path"] == str(target)
+        assert result["data"]["replacements"] == 1
         assert target.read_text() == "keep NEW keep"
 
     async def test_edit_file_missing_is_404_before_old_text_check(self, skill, workspace):
@@ -234,7 +238,12 @@ class TestBehaviourPreserved:
             {"path": str(target), "old_text": "absent", "new_text": "x"},
         )
         assert result["status_code"] == 404
-        assert result["error"] == "old_text not found in file"
+        # Wording changed with the fallback matchers: a miss now means
+        # "not found byte-exactly and not found under any fallback", which
+        # is a stronger and more useful statement than the original. The
+        # status code and the no-write guarantee are what this pins.
+        assert "not found" in result["error"]
+        assert target.read_text() == "body"
 
     async def test_edit_file_ambiguous_match_is_409_and_does_not_write(self, skill, workspace):
         target = workspace / "e4.txt"
