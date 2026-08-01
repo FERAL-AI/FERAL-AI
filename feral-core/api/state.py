@@ -1159,7 +1159,12 @@ class BrainState:
             self.microsoft365 = Microsoft365Integration(oauth_manager=self.oauth)
         with boot_subsystem(self._boot_report, "HealthAggregator"):
             whoop = WhoopClient(oauth_manager=self.oauth)
-            oura = OuraClient()
+            # Oura needs the manager for the same reason Whoop does.
+            # Without it `OuraClient._headers` can only ever read
+            # FERAL_OURA_TOKEN from the environment, so completing the
+            # Oura OAuth flow stored a token the client could never
+            # load and the integration read as unconfigured forever.
+            oura = OuraClient(oauth_manager=self.oauth)
             # Operator report 2026-06-07: chat ran the health_summary
             # tool and answered "no current data" while the W300
             # glasses were streaming HR into the perception frame.
@@ -1176,11 +1181,27 @@ class BrainState:
             # wearable samples when no Whoop/Oura is connected (operator
             # report 2026-06-13). Lazy so construction order doesn't
             # matter and the hot path avoids importing api.state.
+            # Whoop is a cloud wearable: roughly ten records a day, and
+            # the API only serves a rolling window. Reading it on demand
+            # meant no history survived, so "my recovery over six
+            # months" was unanswerable no matter how long the account
+            # had been connected. The sync mirrors those records into
+            # ``biometric_samples`` under the cloud retention horizon.
+            #
+            # ``store_provider`` is lazy on purpose: it defers the
+            # BaselineEngine lookup past construction order and keeps
+            # ``integrations`` free of an ``api.state`` import.
+            from integrations.health_sync import WhoopDurableSync
+            self.whoop_sync = WhoopDurableSync(
+                whoop=whoop,
+                store_provider=lambda: self.baseline_engine,
+            )
             self.health_aggregator = HealthAggregator(
                 whoop=whoop,
                 oura=oura,
                 live_wearable_provider=self._latest_live_wearable_snapshot,
                 biometric_history_provider=lambda: self.baseline_engine,
+                sync_provider=lambda: self.whoop_sync,
             )
         with boot_subsystem(self._boot_report, "LocationEngine"):
             from perception.location import LocationEngine

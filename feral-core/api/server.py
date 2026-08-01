@@ -468,6 +468,7 @@ for _p in (
     "/api/memory/context",                # memory read
     "/api/timeline",                      # operator timeline (single route, was the stale "/api/timeline/" prefix)
     "/api/autonomy",                      # iOS may surface current tier
+    "/api/health/frame",                  # health_update frame for the phone
 ):
     _PHONE_BEARER_GET.add_literal(_p)
 # Prefix-matched read-mostly families. Anything below a prefix here is
