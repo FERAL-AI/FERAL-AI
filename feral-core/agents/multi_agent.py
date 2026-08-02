@@ -161,7 +161,13 @@ class AgentWorker:
                     "multi-agent %s check failed for %s", gate_name, tool_name
                 )
                 continue
-            if refusal is not None:
+            # Must be a real refusal envelope, not merely non-None. A
+            # MagicMock runner returns a MagicMock from every call, which
+            # is truthy, so a None check alone blocks every tool call in
+            # every test that uses a mock orchestrator. This exact bug
+            # already bit the voice barge-in path earlier; a dict check is
+            # the fix that holds.
+            if isinstance(refusal, dict):
                 logger.info(
                     "multi-agent refused %s via %s", tool_name, gate_name
                 )

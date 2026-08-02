@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import os
 import logging
+import sys
 import uuid
 from typing import Optional
 
@@ -282,6 +283,65 @@ class SkillExecutor:
                     return key
         return self._vault.get(skill_id)
 
+    def _gate(self, tool_name: str, args: dict) -> Optional[dict]:
+        """Plan mode and approval, enforced where they cannot be skipped.
+
+        Returns a refusal envelope to use as the tool result, or None to
+        proceed. Reached through ``api.state`` in ``sys.modules`` rather
+        than an import, so ``skills`` does not gain a dependency on
+        ``api`` and a brain that has not booted simply has no gates yet.
+
+        Deliberately fails OPEN when the runner is absent or a gate
+        raises. That sounds wrong for a security control and is the right
+        call here: this method is also driven by tests, the CLI and
+        offline tooling with no brain around, and a gate that refuses
+        everything when it cannot find a runner would break those without
+        making a real session safer. The real defence is that a live
+        brain always has a runner. What must never happen is a live gate
+        being silently skipped, and that is what this closes.
+
+        Plan mode is checked first on purpose: a tool can be plan-unsafe
+        and still auto-approved under a loose autonomy mode, so checking
+        approval first would let it through.
+        """
+        state_mod = sys.modules.get("api.state")
+        runner = getattr(getattr(state_mod, "state", None), "tool_runner", None)
+        if runner is None:
+            orch = getattr(getattr(state_mod, "state", None), "orchestrator", None)
+            runner = getattr(orch, "tool_runner", None)
+        if runner is None:
+            return None
+
+        try:
+            from skills.call_context import current_context
+
+            session_id = current_context().session_id or ""
+        except Exception:
+            session_id = ""
+
+        for gate_name, gate_args in (
+            ("enforce_plan_mode", (tool_name, session_id)),
+            ("enforce_safety", (tool_name, args, session_id)),
+        ):
+            gate = getattr(runner, gate_name, None)
+            if not callable(gate):
+                continue
+            try:
+                refusal = gate(*gate_args)
+            except Exception:
+                logger.exception("executor %s check failed for %s", gate_name, tool_name)
+                continue
+            # Must be a real refusal envelope, not merely non-None. A
+            # MagicMock runner returns a MagicMock from every call, which
+            # is truthy, so a None check alone blocks every tool call in
+            # every test that uses a mock orchestrator. This exact bug
+            # already bit the voice barge-in path earlier; a dict check is
+            # the fix that holds.
+            if isinstance(refusal, dict):
+                logger.info("executor refused %s via %s", tool_name, gate_name)
+                return refusal
+        return None
+
     async def execute(
         self,
         tool_name: str,
@@ -292,6 +352,31 @@ class SkillExecutor:
         """
         Execute a skill endpoint call.
         """
+        # Gate here, at the chokepoint, not at the caller.
+        #
+        # Plan mode and the approval gate used to live only in
+        # ``ToolRunner``. But this method is public and has seven
+        # production callers, of which only two go through ToolRunner:
+        # ``agents/multi_agent.py``, ``agents/direct_execution.py``,
+        # ``mcp/server.py``, ``api/routes/tools.py`` and both voice
+        # realtime proxies all arrive here directly. A gate the caller
+        # has to opt into fails open for every path that does not know
+        # to ask, which is how a live brain in plan mode with autonomy
+        # set to strict created a reminder with no refusal and no
+        # approval prompt. Two of those bypasses were patched
+        # individually before anyone counted the rest.
+        #
+        # ``mcp/server.py`` is the one that makes this a security
+        # boundary rather than a UX bug: it is FERAL exposed to
+        # external MCP clients.
+        #
+        # Session identity comes from the ToolCallContext contextvar, so
+        # no signature changes and no caller has to cooperate. The
+        # ToolRunner gates stay where they are as defence in depth.
+        _refusal = self._gate(tool_name, args)
+        if _refusal is not None:
+            return _refusal
+
         logger.info(f"Executing: {tool_name} → {endpoint.method} {endpoint.url}")
         logger.info(f"  args: {args}")
 

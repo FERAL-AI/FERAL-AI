@@ -187,6 +187,17 @@ def test_settings_write_re_exports_the_env_var(tmp_path, monkeypatch):
     """
     from config.loader import ConfigLoader
 
+    # The re-export fires only when a brain owns this process's
+    # environment. Publishing unconditionally mutated global state from
+    # the setup wizard and from every test that writes a setting, which
+    # leaked env vars across tests and made 28 of them fail in the full
+    # suite while each passed alone.
+    #
+    # Patch the predicate rather than sys.modules: installing a stub
+    # "api.state" leaks to every later test that imports the real one,
+    # which is the same class of bug this gate exists to stop.
+    monkeypatch.setattr(ConfigLoader, "_brain_is_live", staticmethod(lambda: True))
+
     monkeypatch.delenv("FERAL_AUTONOMY", raising=False)
     monkeypatch.delenv("FERAL_TTS_VOICE", raising=False)
     loader = ConfigLoader()

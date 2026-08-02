@@ -24,6 +24,7 @@ import copy
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -1160,7 +1161,42 @@ class ConfigLoader:
             self._merged.setdefault("features", {})["vision"] = bool(value)
 
         self.save_user_settings(user_settings)
+
+        # Republish to os.environ only when a brain is actually running.
+        #
+        # The re-export exists so a live toggle reaches env-only readers
+        # without a restart, which is a real bug it fixes. But it mutates
+        # global process state, and that is hostile everywhere else: the
+        # setup wizard writes settings before any brain exists (the brain
+        # then reads the file at boot, so publishing is pointless), and a
+        # test cannot undo it, because monkeypatch can only revert writes
+        # it made itself and ``delenv(name, raising=False)`` on an absent
+        # variable registers no undo at all.
+        #
+        # That is not hypothetical: it made 28 tests fail in the full
+        # suite while every one passed alone. A parametrised case leaked
+        # FERAL_POST_EDIT_DIAGNOSTICS as 'enforce', and the diagnostics
+        # suite then saw a disabled checker and got None from every call.
+        # Disabling the publish turned 28 failures into 0.
+        #
+        # Gating on a live brain keeps the fix exactly where it matters
+        # and removes it everywhere it only causes harm.
+        if not self._brain_is_live():
+            return ()
         return self._publish_env_changes(before)
+
+    @staticmethod
+    def _brain_is_live() -> bool:
+        """True when a booted brain owns this process's environment.
+
+        Checked through ``sys.modules`` rather than an import so config
+        does not depend on api, and so merely importing api.state (which
+        pytest collection does) is not mistaken for a running brain: the
+        module is present long before ``orchestrator`` is built.
+        """
+        state_mod = sys.modules.get("api.state")
+        state_obj = getattr(state_mod, "state", None)
+        return getattr(state_obj, "orchestrator", None) is not None
 
     def mark_setup_complete(self):
         """Mark that initial setup has been completed."""

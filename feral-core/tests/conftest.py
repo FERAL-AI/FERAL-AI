@@ -214,3 +214,36 @@ def isolate_autonomy_env(monkeypatch):
     ``monkeypatch.setenv`` inside the test body both run later).
     """
     monkeypatch.delenv("FERAL_AUTONOMY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def restore_process_env():
+    """Snapshot and restore ``os.environ`` around every test.
+
+    ``ConfigLoader.update_settings`` publishes changed settings straight
+    into ``os.environ`` so a live toggle reaches env-only readers without
+    a restart. That is correct at runtime and hostile to test isolation:
+    monkeypatch can only undo writes it made itself, and
+    ``monkeypatch.delenv(name, raising=False)`` on an already-absent
+    variable registers no undo at all. So a test that deletes a variable
+    and then calls ``update_settings`` leaves the published value behind
+    for every test that follows.
+
+    That is not hypothetical. It made 28 tests fail in the full suite
+    while every one of them passed alone: a parametrised case in
+    test_coding_settings_mirror leaked FERAL_POST_EDIT_DIAGNOSTICS as
+    'enforce', and the post-edit-diagnostics suite then saw a disabled
+    checker and got None back from every call.
+
+    Snapshotting the whole environment rather than a named list because
+    the funnel exports whatever the settings diff contains, so a list
+    here would go stale the moment someone adds a key. Cooperates with
+    monkeypatch: this restores after monkeypatch's own undo runs.
+    """
+    snapshot = dict(os.environ)
+    try:
+        yield
+    finally:
+        if os.environ != snapshot:
+            os.environ.clear()
+            os.environ.update(snapshot)
