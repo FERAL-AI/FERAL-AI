@@ -263,24 +263,37 @@ def test_brain_state_helper_never_bricks_boot_on_bad_backend(monkeypatch):
 # ─────────────────────────────────────────────
 
 
-def test_sqlite_vec_adapter_add_search_roundtrip(tmp_path):
+@pytest.mark.asyncio
+async def test_sqlite_vec_adapter_add_search_roundtrip(tmp_path):
+    # Async, for the same reason as the chroma and qdrant adapters below:
+    # upsert / count / search_cosine / delete / close have all been
+    # coroutine functions since the async-native MemoryStore refactor
+    # (328c9a70b, v2026.5.33) and this test called them synchronously.
+    # `idx.count` was a bound method, so `== 2` could never be true.
+    #
+    # It stayed green by never running. The skip above fires unless the
+    # sqlite-vec EXTENSION loads, and sqlite-vec was not installed
+    # anywhere, so the body had not executed since the refactor. Making
+    # sqlite-vec a core dependency in v2026.8.3 un-skipped it on Linux CI
+    # and it failed immediately on `assert count == 2`.
     db = tmp_path / "vec.db"
     idx = SQLiteVecIndex(dim=4, db_path=str(db))
     if not idx.indexed:
         pytest.skip(
             "sqlite-vec extension not available on this host "
-            "(install `feral-ai[vec]`); end-to-end search relies on it"
+            "(the interpreter may be built without loadable SQLite "
+            "extension support); end-to-end search relies on it"
         )
     v1 = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
     v2 = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
-    idx.upsert("a", v1)
-    idx.upsert("b", v2)
-    assert idx.count == 2
-    hits = idx.search_cosine(v1, limit=2)
+    await idx.upsert("a", v1)
+    await idx.upsert("b", v2)
+    assert await idx.count() == 2
+    hits = await idx.search_cosine(v1, limit=2)
     assert hits, "search returned no hits"
     assert hits[0][0] == "a"
-    idx.delete("a")
-    idx.close()
+    await idx.delete("a")
+    await idx.close()
 
 
 # ─────────────────────────────────────────────
