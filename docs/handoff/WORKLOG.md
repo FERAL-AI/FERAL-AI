@@ -167,7 +167,144 @@ compiler, the security classifier prompt, and env jails.
 
 ## Open, and who owns it
 
-### Test isolation, dug into properly
+### Memory, made to work A-Z (v2026.8.3)
+
+Driven by one instruction: memory is the product's strongest feature, so exercise
+it rather than reason about it. Everything below was found by actually installing
+the optional packages and running them, and none of it was visible before.
+
+**Embeddings are free and local by default.** `fastembed` +
+`BAAI/bge-small-en-v1.5` (384-dim, matches the existing `LOCAL_DIM`, no index
+migration, no torch) now ship in core `dependencies`, with a wizard step that
+installs, warms the model, and verifies semantically rather than checking that an
+import succeeded. Measured here: 0.42s cold including model load, 17ms warm.
+
+Previously the mere presence of `OPENAI_API_KEY` selected paid OpenAI
+embeddings, so a key exported for chat silently billed every memory write.
+`FERAL_EMBED_PROVIDER` now gates that: `auto` (default) never selects a paid
+provider, `openai` is an explicit opt-in.
+
+**Retrieval proven end to end**, with near-zero lexical overlap so only the
+vector leg can satisfy it:
+
+| query | top hit |
+|---|---|
+| "coffee machine upkeep" | "The espresso machine needs descaling every two months." |
+| "how does the eyewear send sound?" | "Theora glasses stream audio over BLE to the iPhone." |
+
+**Qdrant was broken in four ways**, all hidden because its tests skip unless the
+package is installed and it never is:
+- `memory/backends/qdrant.py` called `client.search()`, removed from
+  qdrant-client (gone in 1.18). Every query raised `AttributeError`.
+- The vector-index adapter passed raw chunk ids to Qdrant, which requires a UUID
+  or uint64. FERAL's look like `note_984acdb8_c0`, so every write failed. The
+  sibling module already solved this with `_to_qdrant_id`; the adapter never got
+  it.
+- Search returned Qdrant's internal UUID rather than the caller's chunk id, so a
+  hit could not be mapped back.
+- All of it was silent: `search` caught everything at `logger.debug` and returned
+  `[]`, so a completely broken backend looked like "no results".
+
+Both adapter tests also called async methods without awaiting, asserting on a
+coroutine object. Chroma was equally unexercised but turned out correct.
+
+**The numpy fallback was ~11x slower than it needed to be.** It scanned
+candidates in a Python per-row loop (`blob_to_vec` + `cosine_similarity`) where
+one blocked matmul would do. Measured 384-dim: 273ms to 23ms at 100k rows, 27ms
+to 2.7ms at 10k, results identical within 1e-6. Converted at five call sites.
+This matters more than sqlite-vec, because it is the path that actually runs
+whenever the extension cannot load.
+
+**sqlite-vec cannot load on many macOS installs**, and the old diagnostic blamed
+the wrong thing. pyenv builds CPython without loadable SQLite extension support,
+so `pip install sqlite-vec` succeeds and the extension still never loads. FERAL
+now says exactly that, with the rebuild flag, instead of "not installed".
+
+### Streaming defaults ON, and that exposed an unbilled path
+
+Two sources of truth disagreed: `agents/orchestrator.py:306` defaulted
+`FERAL_STREAMING` to `"true"` while `config/loader.py:246` defaulted the setting
+to `False` and exported `FERAL_STREAMING=false`. Git history shows the runtime
+literal was flipped to streaming-first in `256be0fcd` and the settings side was
+never updated, a four-day-old omission. Now one `DEFAULT_STREAMING = True` that
+both sides import, so they cannot drift again. Env override still wins.
+
+Side effect worth noting: the chained voice pipeline taps `stream_delta` to
+speak sentence 1 while the model writes sentence 2, so with streaming
+effectively off, every chained-voice turn was taking the slow fallback.
+
+**Flipping it surfaced a real gap: streamed turns were never billed.** The
+chat-completions SSE route never sent `stream_options.include_usage` and the
+Anthropic route discarded `message_delta` usage outright, so nothing reached
+`cost_events` and a configured cap could not trip. Both now record once per turn.
+An endpoint that rejects `stream_options` is retried once without it and
+remembered, so the turn survives where usage cannot be captured, and nothing is
+ever estimated. Proven by moving a real `CostBudget` from under to over cap and
+watching `check_and_reserve` flip.
+
+That fix also closed a latent crash: `chunk.get("choices", [{}])[0]` raised
+`IndexError` on a usage-only chunk, which would have fired on every OpenAI turn
+the moment we asked for usage.
+
+**Still open here:** live-provider verification of `stream_options` support is
+outstanding (all of it is mocked SSE), Anthropic prompt-cache tokens are not
+billed on either path because `cost/pricing.py` has no cache rates, and
+`FERAL_MULTI_AGENT` has the identical two-defaults defect in the opposite
+direction.
+
+### `feral doctor` was printing install commands that install the wrong thing
+
+Every extras hint in the command was mangled by Rich, which parsed the bracket
+as a style tag: `pip install 'feral-ai[embeddings]'` rendered as
+`pip install 'feral-ai'`. Same for `[browser]`, `[stt]`, `[tts]`,
+`[memory-chroma]`, `[memory-qdrant]`, `[macos-extras]`. Fixed once at the render
+point so a future probe cannot reintroduce it by writing a bracket in a detail
+string. The same latent bug exists in `cli/setup/steps/voice_preflight.py` and is
+NOT fixed.
+
+### CI on main was red, and it was a real inconsistency
+
+`tests/perf/test_lane08_live_traces.py::test_trace_2_stream_nonstream_parity`
+had been failing in CI. Not flaky, and not caused by this work (it fails
+identically against the pre-change conftest).
+
+Streaming has two different defaults depending on which you reach first:
+`agents/orchestrator.py:306` reads `os.environ.get("FERAL_STREAMING", "true")`
+while `config/loader.py:246` defaults the setting to `False` and line 1280
+exports `FERAL_STREAMING=false` from it. On a fresh `FERAL_HOME` streaming is
+therefore OFF, `handle_command_stream` emits no `stream_delta` frames, and the
+parity test compares an empty assembled string against a real non-streamed
+reply.
+
+It passed only when an earlier test had left `FERAL_STREAMING` set, which is
+why a full local suite went green while CI's isolated perf job failed. The test
+now sets the feature it is testing. `tests/perf/` is 7 passed in isolation.
+
+**The underlying inconsistency is still there** and is worth a decision: the
+code default says streaming is on, the settings default says it is off.
+
+### The six dialing tests are fixed, and the cause was not what it looked like
+
+Neither file was "a test that forgot to stub". Both were hiding something:
+
+- `switch_provider()` itself fires a genuine `POST /chat/completions`
+  (`agents/llm_provider.py:2770`), a deliberate round-trip availability probe
+  added in v2026.5.23 so it can report a model as actually reachable.
+  `_probe_chat_availability`'s broad `except Exception` swallowed the network
+  guard's error, which is exactly why a strict-mode run still showed "passed".
+  Now wired to a `MockTransport` that records the dialed host, so the tests
+  additionally assert the request went to `api.groq.com` / `api.deepseek.com` /
+  `openrouter.ai`. That proves more than before, not less.
+
+- `test_ambient_api.py::_make_mock_state()` built a bare `MagicMock` and never
+  set `s.vault`. `api/routes/ambient.py:86` checks
+  `hasattr(state, "vault") and state.vault`, and on a MagicMock both the
+  attribute and `retrieve(...)` auto-vivify as truthy, so **the "no API key"
+  test was never testing the no-key path**. Fixed by setting `s.vault = None`,
+  which is the truthful state for a brain that never wired a vault.
+
+Verified: 46 passed with zero `[network guard]` output, in plain mode, strict
+mode, and strict mode with a key present.
 
 You asked for this to stop being a problem rather than be patched case by
 case. What the evidence turned up:

@@ -7,10 +7,19 @@ Vector Index Strategy:
   1. Try sqlite-vec extension → vec0 virtual table with vec_distance_cosine
   2. Fall back to numpy brute-force scan (degraded, still works)
 
-Embedding Providers:
-  1. OpenAI text-embedding-3-small (1536d) — preferred when OPENAI_API_KEY is set
-  2. Local sentence-transformers all-MiniLM-L6-v2 (384d) — preferred when no key
-  3. Hash fallback (no semantic similarity — degraded development/runtime fallback)
+Embedding Providers (local-first, see ``FERAL_EMBED_PROVIDER`` below):
+  1. fastembed BAAI/bge-small-en-v1.5 (384d) — default when importable
+  2. Local sentence-transformers all-MiniLM-L6-v2 (384d) — next in line
+  3. Hash fallback (no semantic similarity, degraded development/runtime fallback)
+  4. OpenAI text-embedding-3-small (1536d) — ONLY on explicit opt-in
+
+Provider selection is local-first on purpose. Until v2026.6 the mere
+presence of ``OPENAI_API_KEY`` in the environment selected OpenAI, so a
+key exported for chat completions silently turned every memory write
+into a billed API call. Measured: ``pytest tests/test_memory.py`` with a
+key exported posted to ``api.openai.com`` from 11 tests. A key is not
+consent to spend money, so paid embeddings now require
+``FERAL_EMBED_PROVIDER=openai``.
 
 Runtime degrade & fallback
 --------------------------
@@ -28,6 +37,22 @@ the vector cannot be produced.
 
 Configuration
 -------------
+``FERAL_EMBED_PROVIDER`` — which primary provider to use. Default ``auto``.
+
+  * ``auto`` (default) — fastembed if importable, else sentence-transformers
+    if importable, else hash. NEVER selects a paid provider, whatever keys
+    happen to be exported.
+  * ``local`` — same chain as ``auto`` minus any possibility of a network
+    provider ever being reachable from this setting. Identical behaviour
+    today; kept separate so ``auto`` can gain a smarter (still free)
+    default later without silently changing what ``local`` promises.
+  * ``openai`` — text-embedding-3-small, and only when ``OPENAI_API_KEY``
+    is set. With no key it warns and degrades down the ``auto`` chain
+    rather than raising, because embedding is a background path and a
+    missing key must not take the process down.
+  * ``hash`` — force the deterministic hash fallback. Useful in tests and
+    on machines where a model download is not acceptable.
+
 ``FERAL_EMBED_FALLBACK`` — fallback strategy when the primary is degraded.
 
   * ``hash`` (default) — deterministic SHA-256 hash projected to the primary's
@@ -53,12 +78,12 @@ warnings (persist failures, skipped chunks). Default ``300``.
 from __future__ import annotations
 import asyncio
 import hashlib
-import json
 import logging
 import os
+import re
 import sqlite3
-import struct
 import time
+from collections.abc import Sequence
 from typing import Any, Optional
 
 import aiosqlite
@@ -70,6 +95,22 @@ OPENAI_DIM = 1536
 LOCAL_DIM = 384
 CHUNK_SIZE = 400
 CHUNK_OVERLAP = 80
+
+# Default local model. Chosen so the local-first default costs nothing and
+# fits anywhere: fastembed 0.8 runs the model on onnxruntime and has NO torch
+# dependency (verified against the published 0.8.0 metadata: huggingface-hub,
+# loguru, mmh3, numpy, onnxruntime, pillow, py-rust-stemmers, requests,
+# tokenizers, tqdm). Measured in a clean venv: ~193MB installed, of which
+# onnxruntime is 75MB and numpy (already a FERAL dep) is 36MB, versus ~2.5GB
+# for a torch-based sentence-transformers install.
+#
+# bge-small-en-v1.5 emits 384 dims — the same as all-MiniLM-L6-v2 and the
+# existing LOCAL_DIM — so adding this backend needs no index migration and
+# no dimension change for anyone already on the sentence-transformers path.
+# Verified by running it: shape (384,), float32, L2-normalised (norm 1.0).
+FASTEMBED_MODEL = "BAAI/bge-small-en-v1.5"
+
+_VALID_PROVIDER_MODES = ("auto", "local", "openai", "hash")
 
 
 def _tokenize_rough(text: str) -> list[str]:
@@ -99,12 +140,195 @@ def blob_to_vec(blob: bytes) -> np.ndarray:
     return np.frombuffer(blob, dtype=np.float32).copy()
 
 
+class EmbeddingDimensionMismatch(ValueError):
+    """A query vector was compared against a stored vector of another dimension.
+
+    Subclasses :class:`ValueError` because that is what ``np.dot`` already
+    raised for this case, so every existing caller's exception handling keeps
+    working unchanged.
+    """
+
+
+# One error line per distinct (query_dim, stored_dim) pair per process. The
+# mismatch is discovered inside per-row scan loops (memory/store.py,
+# memory/notes_legacy.py, memory/knowledge_graph.py all iterate every stored
+# vector), so an unthrottled log would emit one line per row.
+_REPORTED_DIM_MISMATCHES: set[tuple[int, int]] = set()
+
+
+def _report_dim_mismatch(dim_a: int, dim_b: int) -> None:
+    """Emit the once-per-(query_dim, stored_dim)-pair mismatch ERROR.
+
+    Shared by the scalar :func:`cosine_similarity` and the vectorized
+    :func:`cosine_similarity_bulk` so the throttle state is one set for the
+    whole process. Converting a call site from the scalar loop to the bulk
+    path must not un-throttle the log, and must not re-report a pair the
+    scalar path already reported.
+    """
+    key = (dim_a, dim_b)
+    if key in _REPORTED_DIM_MISMATCHES:
+        return
+    _REPORTED_DIM_MISMATCHES.add(key)
+    logger.error(
+        "embedding_dimension_mismatch query_dim=%d stored_dim=%d — the "
+        "stored vectors were written by a different embedding provider "
+        "(OpenAI=%d, local=%d). Vector search is dead for this data "
+        "until the two agree: either set FERAL_EMBED_PROVIDER back to "
+        "the provider that wrote them, or clear the vector tables so "
+        "they are re-embedded at the current dimension. Keyword/FTS "
+        "search is unaffected.",
+        dim_a, dim_b, OPENAI_DIM, LOCAL_DIM,
+    )
+
+
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    # Dimension mismatch means the vectors were written by a DIFFERENT
+    # embedding provider than the one running now (OpenAI is 1536, every local
+    # backend is 384). Without this check the failure is close to invisible:
+    # np.dot raises a shape ValueError, and the three numpy-scan callers all
+    # wrap the loop in `except Exception: logger.debug(...)`, so switching
+    # FERAL_EMBED_PROVIDER silently turns vector search into "returns nothing"
+    # with a debug line nobody reads. There is no re-embedding migration in
+    # this codebase, so the honest behaviour is to say so loudly and let the
+    # caller degrade to its FTS path rather than to guess at a conversion.
+    shape_a = getattr(a, "shape", None)
+    shape_b = getattr(b, "shape", None)
+    if shape_a is not None and shape_b is not None and shape_a != shape_b:
+        dim_a = int(shape_a[-1]) if shape_a else 0
+        dim_b = int(shape_b[-1]) if shape_b else 0
+        _report_dim_mismatch(dim_a, dim_b)
+        raise EmbeddingDimensionMismatch(
+            f"query vector has {dim_a} dims but stored vector has {dim_b}; "
+            "embedding provider changed and stored vectors were not re-embedded"
+        )
+
     norm_a = np.linalg.norm(a)
     norm_b = np.linalg.norm(b)
     if norm_a == 0 or norm_b == 0:
         return 0.0
     return float(np.dot(a, b) / (norm_a * norm_b))
+
+
+# Rows decoded and scored per block in ``cosine_similarity_bulk``. Small
+# enough that the joined byte buffer (2048 * 384 * 4 = 3MB at the local
+# dimension) stays close to cache and never doubles process RSS the way a
+# single 150MB join over a 100k-row table would; large enough that the
+# per-block numpy call overhead is noise. Measured on this machine at 100k
+# rows x 384 dims: 2048 -> 23.5ms, 4096 -> 25.0ms, 8192 -> 29.7ms,
+# monolithic single join -> 29.3ms.
+_BULK_SCAN_BLOCK_ROWS = 2048
+
+
+def cosine_similarity_bulk(
+    query_vec: np.ndarray, blobs: Sequence[bytes]
+) -> np.ndarray:
+    """Cosine similarity of ``query_vec`` against many stored float32 blobs.
+
+    Returns a float32 array of ``len(blobs)`` scores, in input order, with
+    ``result[i] == cosine_similarity(query_vec, blob_to_vec(blobs[i]))``.
+
+    Why this exists
+    ---------------
+    sqlite-vec is an *extension*, and it cannot load on an interpreter built
+    without ``enable_load_extension`` (pyenv on macOS builds it out by
+    default, confirmed on this machine, see ``_try_load_sqlite_vec``). So the
+    numpy brute-force scan is not an exotic degraded path, it is the DEFAULT
+    path for a large share of installs, and every one of those scans used to
+    run as a Python per-row loop of ``blob_to_vec`` + ``cosine_similarity``,
+    i.e. one ``np.frombuffer`` + one ``.copy()`` + one dot product per row.
+
+    Measured on this machine, 384-dim float32, same blobs and same query in
+    one process, per-row loop versus THIS function (not versus a bare
+    matmul: the numbers below include the width guard and the byte-buffer
+    decode, which are most of the remaining cost):
+
+    ======  ============  ==========  =====
+    chunks  per-row loop  this        ratio
+    ======  ============  ==========  =====
+      1000         2.8ms       0.2ms  15.6x
+     10000        26.6ms       1.8ms  14.9x
+     50000       135.3ms      11.4ms  11.9x
+    100000       266.9ms      23.7ms  11.3x
+    ======  ============  ==========  =====
+
+    At 100k chunks that was ~0.27s of pure interpreter overhead on every
+    memory query. Nothing about the arithmetic was slow, only the loop.
+
+    The floor for the arithmetic alone at 100k x 384 is ~9ms (3.9ms for the
+    matvec, 5.4ms for the row norms). The other ~14ms is ~9ms of width
+    guard and ~11ms of ``b"".join`` decode, overlapped by blocking. Both are
+    the price of reading rows that arrive as a Python list of ``bytes``; the
+    only way to remove them is to stop round-tripping vectors through
+    SQLite BLOBs, i.e. to make sqlite-vec or another index load.
+
+    Ragged and mismatched input
+    ---------------------------
+    ``np.frombuffer(b"".join(blobs))`` over blobs of MIXED widths does not
+    fail, it silently reinterprets the byte stream and returns confident
+    garbage. That is a real state to be in: a provider switch (1536-dim
+    OpenAI vs 384-dim local) leaves the table holding both widths, because
+    there is no re-embedding migration in this codebase.
+
+    So every blob's width is checked against the query's before any decode.
+    If any row is the wrong width, the first such row (in input order) is
+    reported through the same throttled ERROR as the scalar path and
+    :class:`EmbeddingDimensionMismatch` is raised, which is exactly what the
+    per-row loop did when it reached that row. The failure must stay loud:
+    the callers all wrap their scan in ``except Exception: logger.debug(...)``,
+    so a silent wrong answer here is indistinguishable from a working index.
+
+    The width pass costs ~9ms of the ~23ms total at 100k rows. It is kept
+    anyway, and kept exact (a set of distinct widths, not a cheaper
+    total-bytes check), because a total-bytes check accepts e.g. one
+    zero-length blob paired with one double-width blob and hands the reshape
+    a buffer that is the right size and the wrong data.
+    """
+    q = np.asarray(query_vec, dtype=np.float32).ravel()
+    dim = int(q.shape[0])
+    n = len(blobs)
+    out = np.zeros(n, dtype=np.float32)
+    if n == 0:
+        return out
+
+    expected_bytes = dim * 4
+    widths = set(map(len, blobs))
+    if widths != {expected_bytes}:
+        # Slow path, only reached when the data is already broken. Find the
+        # first offending row so the reported (query_dim, stored_dim) pair is
+        # the same one the per-row loop would have reported.
+        bad_width = next(len(b) for b in blobs if len(b) != expected_bytes)
+        stored_dim = bad_width // 4
+        _report_dim_mismatch(dim, stored_dim)
+        raise EmbeddingDimensionMismatch(
+            f"query vector has {dim} dims but stored vector has {stored_dim} "
+            f"({bad_width} bytes); embedding provider changed and stored "
+            "vectors were not re-embedded"
+        )
+
+    norm_q = float(np.linalg.norm(q))
+    if norm_q == 0.0 or dim == 0:
+        # Scalar path returns 0.0 for a zero-norm operand rather than
+        # dividing. Match it, and never let a 0/0 NaN reach a ranking.
+        return out
+
+    for start in range(0, n, _BULK_SCAN_BLOCK_ROWS):
+        block = blobs[start:start + _BULK_SCAN_BLOCK_ROWS]
+        rows = len(block)
+        # Read-only view over the joined buffer. Nothing writes through it:
+        # the matmul and the einsum both allocate their own outputs, and the
+        # array returned to the caller is the writable ``out`` above.
+        mat = np.frombuffer(b"".join(block), dtype=np.float32).reshape(rows, dim)
+        dots = mat @ q
+        # einsum beats both np.linalg.norm(axis=1) and (mat*mat).sum(axis=1)
+        # here (measured 5.4ms vs 12.5ms vs 12.5ms at 100k x 384) because it
+        # makes no temporary the size of the matrix.
+        norms = np.sqrt(np.einsum("ij,ij->i", mat, mat))
+        np.divide(
+            dots, norms * norm_q,
+            out=out[start:start + rows],
+            where=norms > 0,
+        )
+    return out
 
 
 # ─────────────────────────────────────────────
@@ -129,6 +353,27 @@ def _try_load_sqlite_vec(conn: sqlite3.Connection) -> bool:
             _SQLITE_VEC_AVAILABLE = False
             return False
 
+    # Checked before the load attempt, because the failure it produces is
+    # an AttributeError that reads like a bug in FERAL rather than what it
+    # is: a Python interpreter compiled without loadable SQLite extension
+    # support. pyenv builds it out by default on macOS, so "pip install
+    # sqlite-vec" succeeds, the import succeeds, and the extension can
+    # still never load. Observed on pyenv 3.11.11 with SQLite 3.51.0.
+    #
+    # Worth a distinct message rather than folding into the generic
+    # handler: the other branches are fixed by installing something, and
+    # this one is only fixed by rebuilding or replacing the interpreter.
+    if not hasattr(conn, "enable_load_extension"):
+        logger.warning(
+            "sqlite-vec cannot load: this Python was built without loadable "
+            "SQLite extension support, so vector search falls back to a "
+            "numpy brute-force scan (correct, but O(n) per query). Rebuild "
+            "with PYTHON_CONFIGURE_OPTS=\"--enable-loadable-sqlite-extensions\" "
+            "(pyenv) or use a python.org / Homebrew interpreter.",
+        )
+        _SQLITE_VEC_AVAILABLE = False
+        return False
+
     try:
         conn.enable_load_extension(True)
         import sqlite_vec
@@ -137,11 +382,14 @@ def _try_load_sqlite_vec(conn: sqlite3.Connection) -> bool:
         logger.info("sqlite-vec loaded — using vec0 virtual table for vector search")
         return True
     except ImportError:
-        logger.info("sqlite-vec not installed — using numpy fallback for vector search")
+        logger.info(
+            "sqlite-vec not installed — using numpy fallback for vector search. "
+            "Install it with: pip install 'feral-ai[embeddings]'",
+        )
         _SQLITE_VEC_AVAILABLE = False
         return False
     except Exception as e:
-        logger.info(f"sqlite-vec load failed ({e}) — using numpy fallback")
+        logger.warning(f"sqlite-vec load failed ({e}) — using numpy fallback")
         _SQLITE_VEC_AVAILABLE = False
         return False
 
@@ -167,11 +415,14 @@ class VectorIndex:
     with automatic fallback to brute-force numpy scan.
     """
 
+    _VEC0_DIM_RE = re.compile(r"FLOAT\s*\[\s*(\d+)\s*\]", re.IGNORECASE)
+
     def __init__(self, db_path: str, dimension: int, table_name: str = "vec_index"):
         self._db_path = db_path
         self._dim = dimension
         self._table_name = table_name
         self._use_vec = False
+        self._dim_mismatch: Optional[tuple[int, int]] = None
         self._init()
 
     def _conn(self) -> sqlite3.Connection:
@@ -183,10 +434,58 @@ class VectorIndex:
             _try_load_sqlite_vec(conn)
         return conn
 
+    @classmethod
+    def _declared_dim(cls, create_sql: Optional[str]) -> Optional[int]:
+        """Dimension a vec0 table was CREATEd with, parsed from its stored DDL.
+
+        sqlite-vec bakes the dimension into the column type (``FLOAT[384]``)
+        and there is no pragma that reports it back, so sqlite_master.sql is
+        the only place the on-disk dimension is recorded.
+        """
+        if not create_sql:
+            return None
+        match = cls._VEC0_DIM_RE.search(create_sql)
+        return int(match.group(1)) if match else None
+
+    def _existing_dim(self, conn: sqlite3.Connection) -> Optional[int]:
+        try:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (self._table_name,),
+            ).fetchone()
+        except Exception:
+            return None
+        return self._declared_dim(row["sql"] if row else None)
+
     def _init(self):
         self._use_vec = sqlite_vec_available()
         conn = self._conn()
         if self._use_vec:
+            # A vec0 table's dimension is fixed at CREATE time, and
+            # ``CREATE VIRTUAL TABLE IF NOT EXISTS`` is a silent no-op when
+            # the table already exists at another dimension. Without this
+            # check, switching FERAL_EMBED_PROVIDER (1536-dim OpenAI vs
+            # 384-dim local) leaves a table whose every upsert is rejected by
+            # sqlite-vec and swallowed by the debug-level handler in
+            # ``upsert``, and whose searches return nothing. Refuse the stale
+            # table instead: ``indexed`` goes False, the caller degrades to
+            # its FTS/brute-force path, and the operator gets one loud line
+            # saying exactly what to do.
+            existing_dim = self._existing_dim(conn)
+            if existing_dim is not None and existing_dim != self._dim:
+                self._dim_mismatch = (existing_dim, self._dim)
+                self._use_vec = False
+                logger.error(
+                    "vec0 table '%s' exists at dim=%d but the active embedding "
+                    "provider produces dim=%d — refusing to use the index "
+                    "(vector search disabled for this table; keyword search is "
+                    "unaffected). Set FERAL_EMBED_PROVIDER back to the provider "
+                    "that wrote it, or drop the table so it is rebuilt at the "
+                    "current dimension.",
+                    self._table_name, existing_dim, self._dim,
+                )
+                conn.close()
+                return
             try:
                 conn.execute(f"""
                     CREATE VIRTUAL TABLE IF NOT EXISTS {self._table_name}
@@ -205,6 +504,11 @@ class VectorIndex:
     @property
     def indexed(self) -> bool:
         return self._use_vec
+
+    @property
+    def dim_mismatch(self) -> Optional[tuple[int, int]]:
+        """``(on_disk_dim, active_dim)`` when the index was refused, else None."""
+        return self._dim_mismatch
 
     def upsert(self, chunk_id: str, embedding: np.ndarray):
         """Insert or update a vector in the index."""
@@ -579,8 +883,14 @@ class EmbeddingProvider:
     def __init__(self):
         self._provider: Optional[str] = None
         self._model = None
+        self._fastembed_model = None
+        self._fastembed_unavailable = False
         self._dim = LOCAL_DIM
         self._cache: dict[str, np.ndarray] = {}
+        # Default assigned here as well as in _detect_provider: tests patch
+        # _detect_provider out to force a provider, and everything reading the
+        # mode has to keep working when they do.
+        self._provider_mode = "auto"
 
         raw_fallback = (os.getenv("FERAL_EMBED_FALLBACK") or "hash").strip().lower()
         if raw_fallback not in {"hash", "local", "skip"}:
@@ -620,6 +930,11 @@ class EmbeddingProvider:
         return self._fallback_mode
 
     @property
+    def provider_mode(self) -> str:
+        """Normalised ``FERAL_EMBED_PROVIDER`` value actually in effect."""
+        return self._provider_mode
+
+    @property
     def degraded(self) -> bool:
         return time.time() < self._degraded_until
 
@@ -642,22 +957,65 @@ class EmbeddingProvider:
         return self._provider is not None
 
     def _detect_provider(self):
-        if os.getenv("OPENAI_API_KEY"):
-            self._provider = "openai"
-            self._dim = OPENAI_DIM
+        """Pick the primary provider. Local-first, paid only on explicit opt-in.
+
+        The precedence used to be "OPENAI_API_KEY is set, therefore OpenAI",
+        which billed users who exported that key for chat completions and never
+        asked for cloud embeddings (verified: 11 tests in tests/test_memory.py
+        posted to api.openai.com under a plain `pytest` run). Selecting a paid
+        provider is now something an operator does on purpose, via
+        FERAL_EMBED_PROVIDER=openai, and nothing else.
+        """
+        mode = (os.getenv("FERAL_EMBED_PROVIDER") or "auto").strip().lower()
+        if mode not in _VALID_PROVIDER_MODES:
+            logger.warning(
+                "Unknown FERAL_EMBED_PROVIDER=%r — defaulting to 'auto' (%s)",
+                mode, "|".join(_VALID_PROVIDER_MODES),
+            )
+            mode = "auto"
+        self._provider_mode = mode
+
+        if mode == "hash":
+            self._select_hash()
+            return
+
+        if mode == "openai":
+            if os.getenv("OPENAI_API_KEY"):
+                self._provider = "openai"
+                self._dim = OPENAI_DIM
+                logger.info(
+                    "Embedding provider: OpenAI text-embedding-3-small "
+                    "(explicitly selected via FERAL_EMBED_PROVIDER=openai; "
+                    "fallback=%s, rate_limit_threshold=%d)",
+                    self._fallback_mode, self._rl_threshold,
+                )
+                return
+            # Do not raise. Embedding runs on background queues, and a missing
+            # key is an operator mistake to report, not a reason to take down
+            # memory writes. Degrade down the local chain instead.
+            logger.warning(
+                "FERAL_EMBED_PROVIDER=openai but OPENAI_API_KEY is not set — "
+                "falling back to local embeddings. Export the key or unset "
+                "FERAL_EMBED_PROVIDER to silence this."
+            )
+
+        # auto / local / opted-into-openai-but-keyless all land here.
+        #
+        # Lazy: detect availability without paying the (multi-second,
+        # first-run-downloads-a-model) construction cost on the boot
+        # critical path. The models are built on first embed via
+        # ``_ensure_fastembed_model`` / ``_ensure_local_model``. This keeps
+        # ``feral serve`` fast regardless of the configured vector backend.
+        import importlib.util
+        if importlib.util.find_spec("fastembed") is not None:
+            self._provider = "fastembed"
+            self._dim = LOCAL_DIM
             logger.info(
-                "Embedding provider: OpenAI text-embedding-3-small "
-                "(fallback=%s, rate_limit_threshold=%d)",
-                self._fallback_mode, self._rl_threshold,
+                "Embedding provider: fastembed (%s, %dd, lazy-loaded on first embed)",
+                FASTEMBED_MODEL, LOCAL_DIM,
             )
             return
 
-        # Lazy: detect availability without paying the (multi-second,
-        # first-run-downloads-a-model) construction cost on the boot
-        # critical path. The actual ``SentenceTransformer`` is built on
-        # first embed via ``_ensure_local_model``. This keeps ``feral
-        # serve`` fast regardless of the configured vector backend.
-        import importlib.util
         if importlib.util.find_spec("sentence_transformers") is not None:
             self._provider = "sentence_transformers"
             self._dim = LOCAL_DIM
@@ -667,9 +1025,15 @@ class EmbeddingProvider:
             )
             return
 
+        self._select_hash()
+
+    def _select_hash(self):
         self._provider = "hash"
         self._dim = LOCAL_DIM
-        logger.info("Embedding provider: hash fallback (no semantic similarity)")
+        logger.info(
+            "Embedding provider: hash fallback (no semantic similarity — "
+            "install the 'embeddings' extra for real local vectors)"
+        )
 
     async def embed(self, text: str) -> np.ndarray:
         cache_key = hashlib.md5(text.encode()).hexdigest()
@@ -688,10 +1052,11 @@ class EmbeddingProvider:
         """Best-effort synchronous embedding for sync callers.
 
         Returns a real semantic vector when one can be produced
-        without blocking the asyncio event loop on a network call —
-        i.e. when the active provider is the local ``sentence_transformers``
-        model. Returns ``None`` in every other case so the caller knows
-        to degrade to its lexical / FTS path:
+        without blocking the asyncio event loop on a network call,
+        i.e. when the active provider is one of the local models
+        (``fastembed`` or ``sentence_transformers``). Returns ``None``
+        in every other case so the caller knows to degrade to its
+        lexical / FTS path:
 
         * primary provider is OpenAI — the embed path is HTTP, which
           we refuse to drive synchronously (would block the event loop
@@ -711,21 +1076,27 @@ class EmbeddingProvider:
             return None
         if self.degraded:
             return None
-        if self._provider != "sentence_transformers":
+        if self._provider not in ("sentence_transformers", "fastembed"):
             return None
 
         cache_key = hashlib.md5(text.encode()).hexdigest()
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
-        if self._model is None:
-            # Loader race — the constructor reported the provider as
-            # sentence_transformers but the model object never
-            # materialised. Return None so the caller falls back to
-            # lexical-only rather than crashing.
+        model = self._fastembed_model if self._provider == "fastembed" else self._model
+        if model is None:
+            # Loader race — the constructor reported a local provider but
+            # the model object never materialised. Return None so the
+            # caller falls back to lexical-only rather than crashing.
+            # Deliberately NOT loading it here: construction downloads and
+            # initialises a model, which is not something a sync call on a
+            # request path should ever block on.
             return None
         try:
-            vec = self._local_embed(text)
+            vec = (
+                self._fastembed_embed(text) if self._provider == "fastembed"
+                else self._local_embed(text)
+            )
         except Exception:
             return None
         self._cache[cache_key] = vec
@@ -770,6 +1141,8 @@ class EmbeddingProvider:
                 if not fallback:
                     raise
                 return [self._fallback_embed(t) for t in texts]
+        if self._provider == "fastembed":
+            return self._fastembed_batch(texts)
         if self._provider == "sentence_transformers":
             return [self._local_embed(t) for t in texts]
         return [self._hash_embed(t, self._dim) for t in texts]
@@ -787,6 +1160,8 @@ class EmbeddingProvider:
                 if not fallback:
                     raise
                 return self._fallback_embed(text)
+        if self._provider == "fastembed":
+            return self._fastembed_embed(text)
         if self._provider == "sentence_transformers":
             return self._local_embed(text)
         return self._hash_embed(text, self._dim)
@@ -921,6 +1296,13 @@ class EmbeddingProvider:
                 "FERAL_EMBED_FALLBACK=skip — chunk persisted without vector"
             )
         if self._fallback_mode == "local":
+            # Both local backends emit LOCAL_DIM, so the dim guard below is
+            # the same for either. fastembed is tried first to match the
+            # local-first precedence in _detect_provider; without it a host
+            # that has only fastembed installed would silently hash here.
+            if self._dim == LOCAL_DIM:
+                if self._fastembed_model is not None or self._ensure_fastembed_model():
+                    return self._fastembed_embed(text)
             if self._model is None:
                 try:
                     from sentence_transformers import SentenceTransformer
@@ -931,6 +1313,56 @@ class EmbeddingProvider:
                 return self._local_embed(text)
             # dim mismatch or unavailable — fall through to hash so the index keeps shape
         return self._hash_embed(text, self._dim)
+
+    def _ensure_fastembed_model(self) -> bool:
+        """Lazily construct the fastembed model on first use. Idempotent.
+
+        Construction is where fastembed downloads the ONNX model (~130MB for
+        bge-small-en-v1.5, measured: 5 files, ~10s on a warm connection) into
+        its own on-disk cache, so it is deferred out of ``__init__`` for the
+        same reason the sentence-transformers load is: boot must not block on
+        a model download. Every later process start reads the cache and makes
+        no network call.
+        """
+        if self._fastembed_model is not None:
+            return True
+        if self._fastembed_unavailable:
+            # One attempt, one warning. _fallback_embed can reach this on
+            # every single embed during a degrade window, and a retry-plus-log
+            # per call would both spam the log and re-pay the import failure.
+            return False
+        try:
+            from fastembed import TextEmbedding
+            self._fastembed_model = TextEmbedding(model_name=FASTEMBED_MODEL)
+            return True
+        except Exception as exc:  # noqa: BLE001 — degrade to hash, never crash
+            self._fastembed_unavailable = True
+            logger.warning("fastembed lazy load failed: %s", exc)
+            return False
+
+    def _fastembed_embed(self, text: str) -> np.ndarray:
+        if self._fastembed_model is None and not self._ensure_fastembed_model():
+            return self._hash_embed(text, self._dim)
+        return self._fastembed_batch([text])[0]
+
+    def _fastembed_batch(self, texts: list[str]) -> list[np.ndarray]:
+        """Embed a batch through fastembed.
+
+        ``TextEmbedding.embed`` takes an iterable of documents and yields one
+        numpy array per document, in input order. Verified against fastembed
+        0.8.0: yields ``np.ndarray`` of shape ``(384,)``, dtype float32,
+        already L2-normalised (measured norm 1.0), so no extra normalisation
+        step is applied here and cosine distance behaves the same as it does
+        for the sentence-transformers path, which normalises at encode time.
+        """
+        if self._fastembed_model is None and not self._ensure_fastembed_model():
+            return [self._hash_embed(t, self._dim) for t in texts]
+        try:
+            vecs = list(self._fastembed_model.embed([t[:2000] for t in texts]))
+        except Exception as exc:  # noqa: BLE001 — degrade to hash, never crash
+            logger.warning("fastembed embed failed: %s — using hash fallback", exc)
+            return [self._hash_embed(t, self._dim) for t in texts]
+        return [np.asarray(v, dtype=np.float32) for v in vecs]
 
     def _ensure_local_model(self) -> bool:
         """Lazily construct the sentence-transformers model on first use.

@@ -392,11 +392,12 @@ class StreamDeltaPayload(BaseModel):
     # the user to tell. Empty when the provider did not report it.
     #
     # ``usage`` is ``{input_tokens, output_tokens, total_tokens}``. Empty when
-    # the provider reported none. Notably the chat-completions streaming path
-    # which only emits usage if the request sets ``stream_options.include_usage``
-    # (this repo does not set it anywhere). The Responses API reports it on the
-    # terminal event with no opt-in, and gpt-5.6 routes there, so the default
-    # install does get real numbers.
+    # the provider reported none. The chat-completions streaming path only
+    # emits usage when the request sets ``stream_options.include_usage``,
+    # which FERAL now does (an endpoint that rejects the key is retried once
+    # without it, and then reports no usage). The Responses API reports it on
+    # the terminal event with no opt-in. Anthropic splits it across
+    # ``message_start`` (input) and ``message_delta`` (output).
     model: str = ""
     usage: dict = Field(default_factory=dict)
 

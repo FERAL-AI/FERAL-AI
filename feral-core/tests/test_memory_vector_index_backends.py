@@ -287,12 +287,21 @@ def test_sqlite_vec_adapter_add_search_roundtrip(tmp_path):
 # Optional-dep backends: smoke test if installed
 # ─────────────────────────────────────────────
 
+# These two adapters expose an ASYNC interface (upsert / search_cosine /
+# close are all coroutine functions). Both tests used to call them
+# synchronously and assert on the returned coroutine, which fails with
+# "'coroutine' object is not subscriptable". Nobody saw it because each
+# test skips itself unless its optional package is installed, and neither
+# is installed by default, so the bodies had never run. Installing
+# qdrant-client turned the skip into exactly that failure.
+
 
 @pytest.mark.skipif(
     importlib.util.find_spec("chromadb") is None,
     reason="chromadb not installed (feral-ai[memory-chroma])",
 )
-def test_chroma_adapter_add_search_roundtrip(tmp_path):
+@pytest.mark.asyncio
+async def test_chroma_adapter_add_search_roundtrip(tmp_path):
     sys.modules.pop("memory.vector_index_backends.chroma", None)
     backend = load_vector_index(
         "chroma", dim=4, persist_dir=str(tmp_path / "chroma"),
@@ -300,18 +309,19 @@ def test_chroma_adapter_add_search_roundtrip(tmp_path):
     assert backend.backend_id == "chroma"
     v1 = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
     v2 = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
-    backend.upsert("a", v1)
-    backend.upsert("b", v2)
-    hits = backend.search_cosine(v1, limit=2)
+    await backend.upsert("a", v1)
+    await backend.upsert("b", v2)
+    hits = await backend.search_cosine(v1, limit=2)
     assert hits and hits[0][0] == "a"
-    backend.close()
+    await backend.close()
 
 
 @pytest.mark.skipif(
     importlib.util.find_spec("qdrant_client") is None,
     reason="qdrant_client not installed (feral-ai[memory-qdrant])",
 )
-def test_qdrant_adapter_add_search_roundtrip(tmp_path):
+@pytest.mark.asyncio
+async def test_qdrant_adapter_add_search_roundtrip(tmp_path):
     sys.modules.pop("memory.vector_index_backends.qdrant", None)
     backend = load_vector_index(
         "qdrant", dim=4, persist_dir=str(tmp_path / "qdrant"),
@@ -319,8 +329,8 @@ def test_qdrant_adapter_add_search_roundtrip(tmp_path):
     assert backend.backend_id == "qdrant"
     v1 = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
     v2 = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
-    backend.upsert("a", v1)
-    backend.upsert("b", v2)
-    hits = backend.search_cosine(v1, limit=2)
+    await backend.upsert("a", v1)
+    await backend.upsert("b", v2)
+    hits = await backend.search_cosine(v1, limit=2)
     assert hits and hits[0][0] == "a"
-    backend.close()
+    await backend.close()

@@ -79,8 +79,7 @@ from memory.embeddings import (
     EmbeddingProvider,
     EmbedQueue,
     chunk_text,
-    blob_to_vec,
-    cosine_similarity,
+    cosine_similarity_bulk,
 )
 from memory.vector_index_backends import VectorIndexBackend
 from memory.notes_legacy import (
@@ -1495,9 +1494,15 @@ class MemoryStore:
                         "WHERE source_table = 'episodes' AND embedding IS NOT NULL"
                     ) as cur:
                         chunks = await cur.fetchall()
-                    for c in chunks:
-                        evec = blob_to_vec(c["embedding"])
-                        sim = cosine_similarity(query_vec, evec)
+                    # One blocked matmul instead of a Python loop of
+                    # blob_to_vec + cosine_similarity. See
+                    # cosine_similarity_bulk for the measured numbers
+                    # (286ms -> 23ms at 100k chunks).
+                    sims = cosine_similarity_bulk(
+                        query_vec, [c["embedding"] for c in chunks]
+                    )
+                    for c, sim in zip(chunks, sims):
+                        sim = float(sim)
                         eid = c["source_id"]
                         if sim > 0.25 and (eid not in vec_results or sim > vec_results[eid]["vec_score"]):
                             vec_results[eid] = {"id": eid, "vec_score": sim}

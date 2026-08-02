@@ -83,12 +83,13 @@ async def _run_stream_turn(done_event: dict) -> list[dict]:
     orch.llm.available = True
     orch.llm.model_name = "configured-model-not-the-answer"
     # Pin the streaming gate instead of inheriting it. ``Orchestrator``
-    # reads FERAL_STREAMING at construction, and the config loader exports
-    # it from ``features.streaming``, which defaults to False. A developer
-    # profile with streaming on made this test pass locally and fail in
-    # CI, where there is no settings.json: ``handle_command_stream``
-    # silently delegated to the non-streaming path and emitted no
-    # stream_delta frames at all.
+    # reads FERAL_STREAMING at construction and the config loader
+    # exports it from ``features.streaming``. The default is now ON
+    # (config/loader.py ``DEFAULT_STREAMING``), but a settings file or
+    # a shell export can still turn it off, and then
+    # ``handle_command_stream`` silently delegates to the non-streaming
+    # path and emits no stream_delta frames at all. A test of the
+    # streaming path has to own the flag it depends on.
     orch._streaming_enabled = True
 
     async def _stream(messages, tools=None, **kwargs):

@@ -136,12 +136,34 @@ class QdrantBackend:
                 ]
             )
 
-        hits = await self._client.search(
-            collection_name=self._collection,
-            query_vector=list(query_vec),
-            limit=limit,
-            query_filter=q_filter,
-        )
+        # `search()` was deprecated and then REMOVED from qdrant-client;
+        # 1.18.0 has no such attribute and this raised AttributeError at
+        # the first real query. It went unnoticed because every qdrant
+        # test skips itself when the package is absent, and the package
+        # is not installed by default, so the whole backend was never
+        # executed. Installing qdrant-client and re-running turned two
+        # skips into two failures.
+        #
+        # `query_points()` is the replacement: `query` rather than
+        # `query_vector`, and the hits arrive under `.points` instead of
+        # being the return value. Both spellings are supported here
+        # because pyproject allows `qdrant-client>=1.11,<2.0` and the
+        # older clients in that range still only have `search()`.
+        if hasattr(self._client, "query_points"):
+            response = await self._client.query_points(
+                collection_name=self._collection,
+                query=list(query_vec),
+                limit=limit,
+                query_filter=q_filter,
+            )
+            hits = response.points
+        else:
+            hits = await self._client.search(
+                collection_name=self._collection,
+                query_vector=list(query_vec),
+                limit=limit,
+                query_filter=q_filter,
+            )
         records: list[MemoryRecord] = []
         for hit in hits:
             payload = dict(hit.payload or {})

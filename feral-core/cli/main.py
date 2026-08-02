@@ -1486,12 +1486,26 @@ def cmd_doctor():
     # The summary panel renders all four counts (passes, infos,
     # warnings, failures) so the operator can still tell at a glance
     # whether anything in the install is actually broken.
+    # Everything interpolated into a Rich markup string has to be escaped
+    # first, or Rich parses the operator's own text as style tags.
+    #
+    # This was not theoretical. Every extras hint in this command came out
+    # wrong: "pip install 'feral-ai[embeddings]'" rendered as
+    # "pip install 'feral-ai'", because Rich consumed [embeddings] as a
+    # tag. Same for [browser], [stt], [tts], [memory-chroma],
+    # [memory-qdrant] and [macos-extras]. The doctor was confidently
+    # printing install commands that install the wrong thing.
+    #
+    # Escaping here rather than at each call site, so a future probe
+    # cannot reintroduce it by writing a bracket in a detail string.
+    from rich.markup import escape as _esc
+
     def _pass(label: str, detail: str = ""):
         nonlocal passed
         passed += 1
-        msg = f"[green]✔[/green]  {label}"
+        msg = f"[green]✔[/green]  {_esc(label)}"
         if detail:
-            msg += f"  [dim]{detail}[/dim]"
+            msg += f"  [dim]{_esc(detail)}[/dim]"
         console.print(msg)
 
     def _info(label: str, detail: str = ""):
@@ -1505,17 +1519,17 @@ def cmd_doctor():
         """
         nonlocal infos
         infos += 1
-        msg = f"[cyan]ℹ[/cyan]  {label}"
+        msg = f"[cyan]ℹ[/cyan]  {_esc(label)}"
         if detail:
-            msg += f"  [dim]{detail}[/dim]"
+            msg += f"  [dim]{_esc(detail)}[/dim]"
         console.print(msg)
 
     def _warn(label: str, detail: str = "", fix: str = ""):
         nonlocal warnings
         warnings += 1
-        msg = f"[yellow]⚠[/yellow]  {label}"
+        msg = f"[yellow]⚠[/yellow]  {_esc(label)}"
         if detail:
-            msg += f"  [dim]{detail}[/dim]"
+            msg += f"  [dim]{_esc(detail)}[/dim]"
         console.print(msg)
         if fix:
             fixes.append(fix)
@@ -1523,9 +1537,9 @@ def cmd_doctor():
     def _fail(label: str, detail: str = "", fix: str = ""):
         nonlocal failures
         failures += 1
-        msg = f"[red]✘[/red]  {label}"
+        msg = f"[red]✘[/red]  {_esc(label)}"
         if detail:
-            msg += f"  [dim]{detail}[/dim]"
+            msg += f"  [dim]{_esc(detail)}[/dim]"
         console.print(msg)
         if fix:
             fixes.append(fix)
@@ -1720,6 +1734,57 @@ def cmd_doctor():
             )
     except Exception as exc:
         _warn("Memory vector backend", f"could not verify: {exc}")
+
+    # ── 6b-2. Embedding provider ──
+    #
+    # Reported because the degraded state is otherwise invisible and
+    # silent. "hash" is a deterministic SHA-256 projection: the index
+    # keeps working and every query still returns rows, so semantic
+    # search looks alive while actually being lexical-only. Nothing in
+    # the CLI or the UI said which provider was live, so a user could
+    # run for months believing memory search was semantic.
+    #
+    # This became reachable in normal use when embeddings stopped
+    # treating the mere presence of OPENAI_API_KEY as consent to send
+    # every note to a paid endpoint. That change is right, and it makes
+    # naming the fallback out loud a requirement rather than a nicety.
+    try:
+        from memory.embeddings import EmbeddingProvider
+
+        _emb = EmbeddingProvider()
+        _emb_name = _emb.provider_name
+        _emb_mode = getattr(_emb, "provider_mode", "auto")
+        if _emb_name in ("fastembed", "sentence_transformers"):
+            _pass(
+                "Embedding provider",
+                f"{_emb_name} ({_emb.dimension}d, local and free)",
+            )
+        elif _emb_name == "openai":
+            _info(
+                "Embedding provider",
+                "OpenAI text-embedding-3-small (explicitly selected, billed per call)",
+            )
+        else:
+            # _info, not _warn. On a fresh install with no extras this is
+            # the designed default rather than a malfunction, and
+            # test_doctor_severity is right to insist a clean first boot
+            # shows zero warnings. The install hint rides in the detail so
+            # the state is still named out loud without registering a
+            # suggested fix for something that is not broken.
+            _info(
+                "Embedding provider",
+                "hash fallback, memory search is keyword-only and NOT semantic. "
+                "pip install 'feral-ai[embeddings]' for local, free semantic "
+                "search (no torch, ~130MB)",
+            )
+        if _emb_mode == "openai" and _emb_name != "openai":
+            _warn(
+                "Embedding provider mode",
+                "FERAL_EMBED_PROVIDER=openai but no OPENAI_API_KEY is set",
+                "Set OPENAI_API_KEY, or unset FERAL_EMBED_PROVIDER to use local embeddings",
+            )
+    except Exception as exc:
+        _warn("Embedding provider", f"could not verify: {exc}")
 
     # ── 6c. Memory at-rest encryption (v2026.5.43) ──
     #
@@ -2195,7 +2260,7 @@ def cmd_doctor():
         console.print()
         console.print("[bold]Suggested fixes:[/bold]")
         for i, fix in enumerate(fixes, 1):
-            console.print(f"  {i}. {fix}")
+            console.print(f"  {i}. {_esc(fix)}")
         console.print()
 
     # ── Lane 07  — exit code reflects severity ──

@@ -78,6 +78,59 @@ except Exception:  # pragma: no cover - defensive
 logger = logging.getLogger("feral.llm")
 
 
+# Endpoints (provider, base_url) known to reject
+# ``stream_options: {"include_usage": true}`` on /chat/completions.
+#
+# The key is opt-IN on OpenAI's chat-completions API: without it the
+# provider sends no usage chunk at all, so every streamed turn billed
+# at ZERO tokens (see ``chat_stream``). We therefore send it by
+# default. But FERAL points that same code at openrouter, deepseek,
+# groq, kimi, qwen and local servers (Ollama / LM Studio / vLLM /
+# llama.cpp), and strict OpenAI-compatible shims reject unknown body
+# keys with a 400 instead of ignoring them. When that happens we retry
+# the SAME turn once without the key and remember the endpoint here,
+# so the degradation is "no usage data for that provider" and never
+# "the turn fails". Entries are added only after the retry SUCCEEDS,
+# so a 400 that was really about something else (bad model, bad tool
+# schema) does not permanently disable usage capture.
+#
+# Process-lifetime cache: cleared on restart, which is also when an
+# operator would have upgraded the local server that gained support.
+_STREAM_OPTIONS_UNSUPPORTED: set[tuple[str, str]] = set()
+
+
+def _usage_event_payload(raw: Any) -> Optional[dict]:
+    """Normalise a provider usage block into the ``done`` event shape.
+
+    Accepts both the OpenAI chat-completions naming
+    (``prompt_tokens`` / ``completion_tokens``) and the Anthropic /
+    Responses naming (``input_tokens`` / ``output_tokens``) and emits
+    the latter, matching what ``_responses_stream`` already puts on its
+    terminal event so the UI has one shape to read.
+
+    Returns ``None`` when the block carries no usable numbers, so
+    callers can distinguish "provider sent no usage" from "provider
+    sent zeros" and avoid inventing spend.
+    """
+    if not isinstance(raw, dict):
+        return None
+    _in = raw.get("input_tokens")
+    if _in is None:
+        _in = raw.get("prompt_tokens")
+    _out = raw.get("output_tokens")
+    if _out is None:
+        _out = raw.get("completion_tokens")
+    if _in is None and _out is None:
+        return None
+    try:
+        _in = int(_in or 0)
+        _out = int(_out or 0)
+        _total = int(raw.get("total_tokens") or (_in + _out))
+    except (TypeError, ValueError):
+        return None
+    return {"input_tokens": _in, "output_tokens": _out, "total_tokens": _total}
+
+
 def _gemini_api_key() -> str | None:
     """Return Gemini API key. Prefers GEMINI_API_KEY; falls back to GOOGLE_API_KEY."""
     return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
@@ -1981,9 +2034,10 @@ class LLMProvider:
                         yield {"type": "tool_call_delta", "tool_call": _finalise_tool_call(tc)}
                     # The Responses API reports token usage inside the
                     # terminal event's ``response`` object, with no opt-in
-                    # required (unlike chat-completions, which needs
-                    # ``stream_options.include_usage`` — see the note in
-                    # ``_extract_usage``). It was arriving here and being
+                    # required (unlike chat-completions, where the usage
+                    # chunk only arrives if the request asked for
+                    # ``stream_options.include_usage``, which
+                    # ``chat_stream`` now does). It was arriving here and being
                     # discarded, which had two consequences: the UI could
                     # never show per-turn tokens, and ``_budget_record``
                     # billed every streamed turn at ZERO tokens, so the
@@ -2199,10 +2253,20 @@ class LLMProvider:
                         # ``chat_with_failover`` at :4102), so every streamed
                         # turn was being billed at ZERO tokens and the
                         # per-call-site caps in settings.json never moved for
-                        # it. Note this is the opt-in path, not the default:
-                        # ``features.streaming`` defaults to False, so a fresh
-                        # profile serves chat from ``_handle_command_impl``.
-                        # Both paths have to record, and now both do.
+                        # it. Both paths have to record, and now both do.
+                        #
+                        # Scope note (v2026.7): ``features.streaming``
+                        # now defaults to True (config/loader.py
+                        # ``DEFAULT_STREAMING``), so a fresh profile
+                        # serves chat from ``handle_command_stream``.
+                        # All THREE stream routes now record: this
+                        # Responses one, the chat-completions SSE
+                        # branch below (which asks for
+                        # ``stream_options.include_usage`` and bills
+                        # off the final usage chunk) and
+                        # ``_chat_stream_anthropic`` (which bills off
+                        # ``message_start`` + ``message_delta``). Each
+                        # records exactly once per turn on completion.
                         #
                         # ``_extract_usage`` already accepts the
                         # ``{usage: {input_tokens, output_tokens}}`` shape the
@@ -2255,9 +2319,15 @@ class LLMProvider:
         # this branch returned ``error`` events with no failover at
         # all — see findings/13-llm-core.md fix #1 + #5.
         if self.provider == "anthropic":
+            # ``call_site`` is threaded through so the Anthropic stream
+            # can bill this turn against the SAME per-call-site cap the
+            # non-stream path uses. Without it the branch would have to
+            # assume "chat" and background loops (screen_loop, learner)
+            # would bill to the wrong bucket.
             async for delta in self._chat_stream_anthropic(
                 messages, tools, temperature, max_tokens,
                 force_tool=force_tool,
+                call_site=call_site,
             ):
                 yield delta
             return
@@ -2281,27 +2351,74 @@ class LLMProvider:
 
         apply_reasoning_fork(self.provider, self.model, body)
 
+        # Ask for the usage chunk. On chat-completions this is opt-in:
+        # without ``stream_options.include_usage`` the provider closes
+        # the stream after the last content delta and NEVER reports
+        # tokens, so ``_budget_record`` below has nothing to bill and
+        # the operator's caps sit at $0 forever. That mattered less
+        # when streaming was opt-in; ``features.streaming`` now
+        # defaults to True (config/loader.py ``DEFAULT_STREAMING``),
+        # making this the primary chat path.
+        #
+        # ``_STREAM_OPTIONS_UNSUPPORTED`` (module level) records the
+        # endpoints that 400 on the key so we only pay the extra
+        # round-trip once per process.
+        _usage_endpoint = (self.provider, str(self.base_url or ""))
+        _want_usage = _usage_endpoint not in _STREAM_OPTIONS_UNSUPPORTED
+        if _want_usage:
+            body["stream_options"] = {"include_usage": True}
+
         streamed_text = False
         stream_cm = None
-        try:
+        usage_raw: Optional[dict] = None
+        answering_model = ""
+        billed = False
+
+        async def _record_stream_usage() -> None:
+            """Bill this turn exactly once, on stream completion.
+
+            Guarded by ``billed`` because the SSE loop has two exits
+            ([DONE] and stream-closed) and double-billing is worse than
+            not billing. When the provider sent no usage block we
+            record NOTHING: there is no documented estimator here, and
+            a fabricated number is worse than a visible gap.
+            """
+            nonlocal billed
+            if billed or usage_raw is None:
+                return
+            billed = True
+            await self._budget_record(
+                call_site,
+                answering_model or self.model,
+                {"usage": usage_raw},
+            )
+
+        async def _open_stream(req_body: dict):
+            """Open the SSE stream with the existing retry policy.
+
+            Extracted from the inline loop so the
+            ``stream_options``-rejected retry below can re-run it with
+            a stripped body without duplicating the retry semantics.
+            """
+            nonlocal stream_cm
             for _attempt in range(MAX_RETRIES):
                 try:
-                    stream_cm = self.client.stream("POST", "/chat/completions", json=body)
-                    resp = await stream_cm.__aenter__()
+                    stream_cm = self.client.stream("POST", "/chat/completions", json=req_body)
+                    _resp = await stream_cm.__aenter__()
                     # v2026.5.28 — see ``_responses_stream`` for the
                     # rationale: pull the body before raise_for_status
                     # so the OpenAI / Anthropic / DeepSeek error JSON
                     # survives into ``_describe_http_status_error``.
                     # ``isinstance`` guard for MagicMock-backed unit
                     # tests (``>= 400`` raises TypeError on MagicMock).
-                    _status = getattr(resp, "status_code", None)
+                    _status = getattr(_resp, "status_code", None)
                     if isinstance(_status, int) and _status >= 400:
                         try:
-                            await resp.aread()
+                            await _resp.aread()
                         except Exception:
                             pass
-                    resp.raise_for_status()
-                    break
+                    _resp.raise_for_status()
+                    return _resp
                 except Exception as e:
                     if stream_cm:
                         try:
@@ -2316,6 +2433,34 @@ class LLMProvider:
                     logger.warning("LLM stream connect failed (attempt %d/%d) — retrying",
                                    _attempt + 1, MAX_RETRIES)
                     await asyncio.sleep(RETRY_DELAYS[_attempt])
+            raise RuntimeError("stream retry loop exhausted without a response")
+
+        try:
+            try:
+                resp = await _open_stream(body)
+            except Exception as first_exc:
+                # A 4xx while we are asking for usage may be the strict
+                # shims (some vLLM / llama.cpp / gateway builds) that
+                # reject unknown body keys outright. Retry the same turn
+                # once without ``stream_options`` so losing usage data
+                # never costs the user their answer. Anything else, or a
+                # second failure, falls through to the existing
+                # failover/error handling untouched.
+                _exc_status = getattr(getattr(first_exc, "response", None), "status_code", None)
+                if not (_want_usage and isinstance(_exc_status, int) and _exc_status in (400, 422)):
+                    raise
+                body.pop("stream_options", None)
+                _want_usage = False
+                resp = await _open_stream(body)
+                # Only now is it proven the key was the problem: the
+                # same request minus ``stream_options`` succeeded.
+                _STREAM_OPTIONS_UNSUPPORTED.add(_usage_endpoint)
+                logger.warning(
+                    "%s at %s rejected stream_options.include_usage (HTTP %s); "
+                    "retried without it. Streamed turns for this endpoint will "
+                    "not be billed against cost caps.",
+                    self.provider, self.base_url, _exc_status,
+                )
 
             accumulated_tool_calls: dict[int, dict] = {}
             async for line in resp.aiter_lines():
@@ -2338,7 +2483,12 @@ class LLMProvider:
                         except json.JSONDecodeError:
                             tc["args"] = {}
                         yield {"type": "tool_call_delta", "tool_call": tc}
-                    yield {"type": "done"}
+                    await _record_stream_usage()
+                    _done_event: dict = {"type": "done"}
+                    _usage_payload = _usage_event_payload(usage_raw)
+                    if _usage_payload:
+                        _done_event["usage"] = _usage_payload
+                    yield _done_event
                     return
 
                 try:
@@ -2346,7 +2496,30 @@ class LLMProvider:
                 except json.JSONDecodeError:
                     continue
 
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                # The usage chunk. OpenAI sends it as the LAST chunk
+                # before ``[DONE]`` with an EMPTY ``choices`` array;
+                # OpenRouter and DeepSeek instead attach ``usage`` to
+                # the final content chunk. Read it off any chunk that
+                # carries one and keep the last, so both shapes work.
+                _chunk_usage = chunk.get("usage")
+                if isinstance(_chunk_usage, dict) and _chunk_usage:
+                    usage_raw = _chunk_usage
+                if chunk.get("model"):
+                    # Bill against the model that ANSWERED. OpenRouter
+                    # substitutes models transparently, so the
+                    # configured id is not always the billed one.
+                    answering_model = str(chunk["model"])
+
+                # ``choices`` is empty on the usage chunk. The old
+                # ``chunk.get("choices", [{}])[0]`` raised IndexError
+                # there, which the outer handler turned into an
+                # ``error`` event at the very end of an otherwise
+                # successful turn. That never fired before because we
+                # never asked for usage; it would fire on every turn now.
+                _choices = chunk.get("choices") or []
+                if not _choices:
+                    continue
+                delta = _choices[0].get("delta") or {}
 
                 if delta.get("content"):
                     piece = sanitize_assistant_display_text(delta["content"])
@@ -2370,6 +2543,14 @@ class LLMProvider:
                         entry["arguments"] += func["arguments"]
                     if tc_delta.get("id"):
                         entry["id"] = tc_delta["id"]
+
+            # Stream closed without an explicit ``[DONE]`` sentinel.
+            # Some OpenAI-compatible servers (and proxies that drop the
+            # trailing sentinel) end this way. The turn already
+            # delivered its text, so bill whatever usage arrived rather
+            # than losing the turn's cost. ``_record_stream_usage`` is
+            # idempotent, so the ``[DONE]`` path above cannot double-bill.
+            await _record_stream_usage()
 
         except httpx.HTTPStatusError as e:
             detail = _describe_http_status_error(e)
@@ -2420,10 +2601,11 @@ class LLMProvider:
         max_tokens: int = 1024,
         *,
         force_tool: Optional[str] = None,
+        call_site: str = "chat",
     ) -> AsyncGenerator[dict, None]:
         """Native Anthropic Messages API streaming via SSE.
 
-        Two structural changes vs. the  implementation:
+        Three structural changes vs. the  implementation:
 
         1. **base_url propagation.** The POST URL is now derived from
            ``self.base_url`` (which is in turn driven by the
@@ -2444,6 +2626,14 @@ class LLMProvider:
            candidates. The handoff respects ``streamed_text`` so a
            mid-stream failure (after the user has already seen tokens)
            is not silently restarted.
+
+        3. **Usage capture.** The ``message_delta`` event was matched
+           and then dropped (``pass``), which is exactly where
+           Anthropic reports ``usage.output_tokens``. With it discarded
+           there was nothing to bill, so streamed Anthropic turns never
+           reached ``cost_events`` and the operator's caps never moved
+           for them. Input tokens arrive earlier, on ``message_start``,
+           so both events have to be read to bill a turn.
         """
         # ``self.api_key`` is the source of truth — it's what
         # ``switch_provider`` and ``reconfigure`` write. When empty,
@@ -2493,6 +2683,45 @@ class LLMProvider:
         accumulated_tool_calls: dict[str, dict] = {}
         streamed_text = False
         primary_error: Optional[Exception] = None
+        # Usage is split across two events on the Anthropic wire:
+        # ``message_start`` carries ``usage.input_tokens`` (the prompt
+        # is already counted when the model starts) and ``message_delta``
+        # carries the running ``usage.output_tokens``, updated as the
+        # response grows. Neither event alone can bill a turn.
+        usage_input = 0
+        usage_output = 0
+        saw_usage = False
+        billed = False
+        answering_model = ""
+
+        async def _record_anthropic_usage() -> None:
+            """Bill this turn exactly once, on stream completion.
+
+            ``billed`` guards the two completion exits (``message_stop``
+            and the stream closing without one). When the stream carried
+            no usage at all we record nothing rather than invent a
+            number: there is no estimator here to reuse.
+
+            Note the ``cache_creation_input_tokens`` /
+            ``cache_read_input_tokens`` fields are deliberately NOT
+            folded into the prompt count. ``cost/pricing.py`` has no
+            cache rates, so adding them would bill cache reads at the
+            full input rate. This matches what the non-stream Anthropic
+            path already does, so stream and non-stream agree.
+            """
+            nonlocal billed
+            if billed or not saw_usage:
+                return
+            billed = True
+            await self._budget_record(
+                call_site,
+                answering_model or self.model,
+                {"usage": {
+                    "input_tokens": usage_input,
+                    "output_tokens": usage_output,
+                }},
+            )
+
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 async with client.stream(
@@ -2529,7 +2758,34 @@ class LLMProvider:
 
                         event_type = event.get("type", "")
 
-                        if event_type == "content_block_start":
+                        if event_type == "message_start":
+                            _msg = event.get("message") or {}
+                            _u = _msg.get("usage")
+                            if isinstance(_u, dict):
+                                _in = _u.get("input_tokens")
+                                if _in is not None:
+                                    try:
+                                        usage_input = int(_in)
+                                        saw_usage = True
+                                    except (TypeError, ValueError):
+                                        pass
+                                # ``message_start`` also carries an
+                                # opening ``output_tokens`` (usually 1);
+                                # ``message_delta`` supersedes it below.
+                                _out = _u.get("output_tokens")
+                                if _out is not None:
+                                    try:
+                                        usage_output = int(_out)
+                                        saw_usage = True
+                                    except (TypeError, ValueError):
+                                        pass
+                            if _msg.get("model"):
+                                # Bill the model that ANSWERED, which
+                                # can differ from the configured alias
+                                # (e.g. a dated snapshot id).
+                                answering_model = str(_msg["model"])
+
+                        elif event_type == "content_block_start":
                             block = event.get("content_block", {})
                             if block.get("type") == "tool_use":
                                 current_tool_id = block.get("id", "")
@@ -2551,9 +2807,33 @@ class LLMProvider:
                                     accumulated_tool_calls[current_tool_id]["arguments"] += delta.get("partial_json", "")
 
                         elif event_type == "message_delta":
-                            pass
+                            # This event is where Anthropic reports
+                            # ``usage.output_tokens`` (cumulative, so
+                            # the LAST one wins rather than summing).
+                            # It used to be ``pass``, which is why
+                            # streamed Anthropic turns billed nothing.
+                            _u = event.get("usage")
+                            if isinstance(_u, dict):
+                                _out = _u.get("output_tokens")
+                                if _out is not None:
+                                    try:
+                                        usage_output = int(_out)
+                                        saw_usage = True
+                                    except (TypeError, ValueError):
+                                        pass
+                                # Newer API versions echo input_tokens
+                                # here too; take it only if
+                                # ``message_start`` did not supply one.
+                                _in = _u.get("input_tokens")
+                                if _in is not None and not usage_input:
+                                    try:
+                                        usage_input = int(_in)
+                                        saw_usage = True
+                                    except (TypeError, ValueError):
+                                        pass
 
                         elif event_type == "message_stop":
+                            await _record_anthropic_usage()
                             for tc in accumulated_tool_calls.values():
                                 try:
                                     tc["args"] = json.loads(tc.get("arguments", "{}"))
@@ -2567,10 +2847,29 @@ class LLMProvider:
                                 # the tool.
                                 streamed_text = True
                                 yield {"type": "tool_call_delta", "tool_call": tc}
-                            yield {"type": "done"}
+                            _stop_event: dict = {"type": "done"}
+                            if saw_usage:
+                                _stop_event["usage"] = {
+                                    "input_tokens": usage_input,
+                                    "output_tokens": usage_output,
+                                    "total_tokens": usage_input + usage_output,
+                                }
+                            yield _stop_event
                             return
 
-            yield {"type": "done"}
+            # Stream closed without a ``message_stop``. The turn still
+            # delivered its text, so bill whatever usage arrived.
+            # ``_record_anthropic_usage`` is idempotent, so the
+            # ``message_stop`` path above cannot double-bill.
+            await _record_anthropic_usage()
+            _end_event: dict = {"type": "done"}
+            if saw_usage:
+                _end_event["usage"] = {
+                    "input_tokens": usage_input,
+                    "output_tokens": usage_output,
+                    "total_tokens": usage_input + usage_output,
+                }
+            yield _end_event
             return
         except httpx.HTTPStatusError as e:
             primary_error = e
@@ -3269,9 +3568,14 @@ class LLMProvider:
         * Bare ``{usage: {input_tokens, output_tokens}}`` (already
           normalised at adapter level)
 
-        Returns ``(0, 0, 0)`` when the response carries no usage data
-        (streaming without ``stream_options.include_usage``); the
-        budget then records the call without billing tokens.
+        Returns ``(0, 0, 0)`` when the response carries no usage data;
+        the budget then records the call without billing tokens. The
+        stream routes avoid feeding that case in at all: each calls
+        ``_budget_record`` only once it actually has a usage block
+        (chat-completions asks for ``stream_options.include_usage``,
+        Anthropic reads ``message_start`` + ``message_delta``), so a
+        provider that reports nothing stays unrecorded rather than
+        being billed as a zero-token turn.
         """
         if not isinstance(result, dict):
             return (0, 0, 0)

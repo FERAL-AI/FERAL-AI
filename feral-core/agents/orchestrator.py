@@ -302,8 +302,20 @@ class Orchestrator:
         self._last_proactive_check: dict[str, float] = {}
         self._proactive_cooldown = 60.0
 
-        # Streaming config
-        self._streaming_enabled = os.environ.get("FERAL_STREAMING", "true").lower() in ("true", "1", "yes")
+        # Streaming config. The default is NOT a literal here: it is
+        # imported from ``config.loader`` so this line and
+        # ``DEFAULT_SETTINGS["features"]["streaming"]`` cannot drift
+        # apart again. They did: this read defaulted to "true" while
+        # the settings default was False and ``export_as_env``
+        # published FERAL_STREAMING=false into os.environ, so whether
+        # streaming was on depended on whether the config loader had
+        # run in this process. An explicit FERAL_STREAMING still wins
+        # over both, which is what the Settings toggle and an operator
+        # shell export rely on.
+        from config.loader import DEFAULT_STREAMING
+        self._streaming_enabled = os.environ.get(
+            "FERAL_STREAMING", str(DEFAULT_STREAMING).lower()
+        ).lower() in ("true", "1", "yes")
         # v2026.6.11 — tool loops are UNLIMITED by default (0). A limit is
         # a user-set option only: settings.json ``agents.max_tool_iterations``
         # or the FERAL_MAX_ITERATIONS env var. Runaway loops are stopped by

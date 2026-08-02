@@ -80,10 +80,13 @@ def _make_orchestrator() -> Orchestrator:
         memory=None, vision_buffer=None, perception=None, learner=None,
     )
     # Pin the streaming gate. ``Orchestrator`` reads FERAL_STREAMING at
-    # construction, and the config loader exports it from
-    # ``features.streaming``, which defaults to False. Inheriting it made
-    # these tests pass on a developer profile with streaming enabled and
-    # fail in CI, where there is no settings.json: ``handle_command_stream``
+    # construction and the config loader exports it from
+    # ``features.streaming``, so the value is ambient. The default is
+    # now ON (config/loader.py ``DEFAULT_STREAMING``), but a settings
+    # file or a shell export can still turn it off, and a test of the
+    # streaming path must not depend on which. Inheriting it made these
+    # tests pass on a profile with streaming enabled and fail where the
+    # flag was off: ``handle_command_stream``
     # silently delegates to the non-streaming path, emits no stream_delta
     # frames, and the mocked ``chat_stream`` is never called (surfacing as
     # "object MagicMock can't be used in 'await' expression", because only
@@ -117,6 +120,89 @@ def _capture_sends(orch: Orchestrator) -> list[dict]:
 
     orch.send = _send
     return captured
+
+
+class TestStreamingGateDefault:
+    """The gate a fresh install lands on, exercised end to end.
+
+    Everything else in this module pins ``_streaming_enabled`` by hand
+    so it tests the stream path rather than the flag. These two tests
+    do the opposite: they leave the flag alone and assert what an
+    un-pinned orchestrator actually does, because the drift this
+    guards against (settings default False vs. code default true) was
+    invisible to every test that pinned the flag.
+    """
+
+    @pytest.mark.asyncio
+    async def test_default_orchestrator_streams(self, monkeypatch):
+        monkeypatch.delenv("FERAL_STREAMING", raising=False)
+
+        orch = _make_default_gate_orchestrator()
+        assert orch._streaming_enabled is True
+
+        sends = _capture_sends(orch)
+        await orch.handle_command_stream(session_id="s-default", text="hello")
+
+        deltas = [
+            f["payload"].get("delta", "")
+            for f in sends
+            if f["type"] == "stream_delta" and not f["payload"].get("is_final")
+        ]
+        assert deltas, "a default orchestrator emitted no stream_delta frames"
+        assert "".join(deltas) == "streamed reply"
+
+    @pytest.mark.asyncio
+    async def test_env_false_still_disables(self, monkeypatch):
+        """The operator override has to keep working, both halves.
+
+        ``_streaming_enabled`` goes False AND the turn is delegated to
+        the non-stream path, which answers with a ``text_response``
+        frame and no deltas.
+        """
+        monkeypatch.setenv("FERAL_STREAMING", "false")
+
+        orch = _make_default_gate_orchestrator()
+        assert orch._streaming_enabled is False
+
+        sends = _capture_sends(orch)
+        await orch.handle_command_stream(session_id="s-off", text="hello")
+
+        assert not [f for f in sends if f["type"] == "stream_delta"]
+        assert [f for f in sends if f["type"] == "text_response"]
+
+
+def _make_default_gate_orchestrator() -> Orchestrator:
+    """An orchestrator whose streaming gate is NOT pinned, wired for
+    both paths so either one can answer the turn."""
+    reg = MagicMock()
+    reg.skills = SKILLS
+    reg.find_skills_for_query = lambda q, top_k=5: []
+    reg.get_tools_for_skills = lambda skills: []
+    orch = Orchestrator(
+        skill_registry=reg, send_to_client=AsyncMock(), daemons={},
+        memory=None, vision_buffer=None, perception=None, learner=None,
+    )
+    orch.llm = MagicMock()
+    orch.llm.available = True
+    orch.llm.model_name = "test-model"
+
+    async def _stream(messages, tools=None, **kwargs):
+        for piece in ["streamed ", "reply"]:
+            yield {"type": "text_delta", "content": piece}
+        yield {"type": "done"}
+
+    orch.llm.chat_stream = _stream
+    orch.llm.chat_with_failover = AsyncMock(return_value={
+        "choices": [{"message": {"role": "assistant", "content": "buffered reply"}}],
+    })
+    orch.llm.extract_response = MagicMock(return_value=("buffered reply", []))
+    orch._route_prompt = AsyncMock(return_value=[])
+    orch._ensure_core_skills = lambda x: x
+    orch.memory = MagicMock()
+    orch.memory.working_push = MagicMock()
+    orch.memory.episode_save = AsyncMock(return_value={})
+    orch.memory.log_execution = AsyncMock()
+    return orch
 
 
 class TestParityChatOnlyTurn:

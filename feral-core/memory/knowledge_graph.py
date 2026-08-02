@@ -31,8 +31,7 @@ from memory.fts_query import fts5_match_query
 from memory.embeddings import (
     EmbeddingProvider,
     vec_to_blob,
-    blob_to_vec,
-    cosine_similarity,
+    cosine_similarity_bulk,
 )
 
 logger = logging.getLogger("feral.memory.kg")
@@ -665,10 +664,16 @@ class KnowledgeGraph:
         finally:
             await self._release(conn)
 
+        # One blocked matmul instead of a Python loop of blob_to_vec +
+        # cosine_similarity. See cosine_similarity_bulk for the measured
+        # numbers (286ms -> 23ms at 100k rows). A dimension mismatch still
+        # raises out of here exactly as the per-row loop did.
         vec_results = {}
-        for e in all_entities:
-            evec = blob_to_vec(e["embedding"])
-            sim = cosine_similarity(query_vec, evec)
+        sims = cosine_similarity_bulk(
+            query_vec, [e["embedding"] for e in all_entities]
+        )
+        for e, sim in zip(all_entities, sims):
+            sim = float(sim)
             if sim > 0.3:
                 vec_results[e["id"]] = {
                     "id": e["id"], "name": e["name"], "type": e["entity_type"],
@@ -978,14 +983,20 @@ class KnowledgeGraph:
         finally:
             await self._release(conn)
 
+        # One blocked matmul instead of a Python loop of blob_to_vec +
+        # cosine_similarity. See cosine_similarity_bulk for the measured
+        # numbers (286ms -> 23ms at 100k rows). argmax returns the FIRST
+        # maximum, which is the row the strictly-greater-than loop kept.
         best_match = None
         best_sim = 0.0
-        for e in all_entities:
-            evec = blob_to_vec(e["embedding"])
-            sim = cosine_similarity(name_vec, evec)
-            if sim > best_sim:
-                best_sim = sim
-                best_match = e
+        sims = cosine_similarity_bulk(
+            name_vec, [e["embedding"] for e in all_entities]
+        )
+        if sims.size:
+            top = int(np.argmax(sims))
+            if float(sims[top]) > best_sim:
+                best_sim = float(sims[top])
+                best_match = all_entities[top]
 
         if best_match and best_sim >= ENTITY_MERGE_THRESHOLD:
             logger.info(

@@ -4,12 +4,16 @@ Tests for FERAL Config Loader — Layered configuration system.
 
 import json
 import os
-import tempfile
-from pathlib import Path
 
 import pytest
 
-from config.loader import ConfigLoader, feral_home, feral_data_home, DEFAULT_SETTINGS
+from config.loader import (
+    ConfigLoader,
+    feral_home,
+    feral_data_home,
+    DEFAULT_SETTINGS,
+    DEFAULT_STREAMING,
+)
 
 pytestmark = pytest.mark.no_auto_feral_home
 
@@ -83,7 +87,23 @@ class TestConfigDiscovery:
         assert settings["llm"]["model"] == "from-env"
 
     def test_boolean_env_coercion(self, temp_dirs, monkeypatch):
+        # Coerce in the direction that is NOT the shipped default, or
+        # the assertion passes whether or not the env var was read at
+        # all. ``features.streaming`` defaults to True, so "false" is
+        # the value that proves the string reached the bool.
         tmp_path, user_home, _ = temp_dirs
+        monkeypatch.setenv("FERAL_STREAMING", "false")
+
+        loader = ConfigLoader(project_dir=str(tmp_path / "my-project"))
+        loader.user_home = user_home
+        settings = loader.discover()
+        assert settings["features"]["streaming"] is False
+
+    def test_boolean_env_coercion_true(self, temp_dirs, monkeypatch):
+        tmp_path, user_home, _ = temp_dirs
+        (user_home / "settings.json").write_text(
+            json.dumps({"features": {"streaming": False}})
+        )
         monkeypatch.setenv("FERAL_STREAMING", "true")
 
         loader = ConfigLoader(project_dir=str(tmp_path / "my-project"))
@@ -216,6 +236,76 @@ class TestWriteAPI:
         env = loader.export_as_env()
         assert env["OPENAI_API_KEY"] == "sk-export"
         assert env["FERAL_LLM_PROVIDER"] == "openai"
+
+
+class TestStreamingDefault:
+    """One default for streaming, agreed on by both readers.
+
+    There used to be two. ``DEFAULT_SETTINGS`` said False and
+    ``export_as_env`` published ``FERAL_STREAMING=false`` from it, while
+    ``Orchestrator.__init__`` defaulted the same variable to "true". So
+    whether streaming ran depended on whether the config loader had run
+    first in that process, and on a fresh FERAL_HOME the loader won:
+    ``handle_command_stream`` emitted zero ``stream_delta`` frames and
+    delegated every turn to the non-stream path.
+    """
+
+    def test_settings_default_is_the_shared_constant(self):
+        assert DEFAULT_SETTINGS["features"]["streaming"] is DEFAULT_STREAMING
+        assert DEFAULT_STREAMING is True
+
+    def test_orchestrator_default_is_the_shared_constant(self):
+        """The runtime reader must not carry its own literal."""
+        import inspect
+
+        from agents.orchestrator import Orchestrator
+
+        source = inspect.getsource(Orchestrator.__init__)
+        assert "DEFAULT_STREAMING" in source, (
+            "Orchestrator.__init__ must take the streaming default from "
+            "config.loader.DEFAULT_STREAMING, not from a literal."
+        )
+
+    def test_fresh_home_publishes_streaming_on(self, temp_dirs):
+        """No settings.json anywhere: the exported env says on."""
+        tmp_path, user_home, _ = temp_dirs
+
+        loader = ConfigLoader(project_dir=str(tmp_path / "my-project"))
+        loader.user_home = user_home
+        settings = loader.discover()
+
+        assert settings["features"]["streaming"] is True
+        assert loader.export_as_env()["FERAL_STREAMING"] == "true"
+
+    def test_operator_override_still_wins(self, temp_dirs, monkeypatch):
+        """``FERAL_STREAMING=false`` survives the round trip.
+
+        Env lands in ``features.streaming`` via ``_apply_env_overrides``
+        and ``export_as_env`` publishes it straight back, so an operator
+        shell export is not quietly re-enabled by the new default.
+        """
+        tmp_path, user_home, _ = temp_dirs
+        monkeypatch.setenv("FERAL_STREAMING", "false")
+
+        loader = ConfigLoader(project_dir=str(tmp_path / "my-project"))
+        loader.user_home = user_home
+        settings = loader.discover()
+
+        assert settings["features"]["streaming"] is False
+        assert loader.export_as_env()["FERAL_STREAMING"] == "false"
+
+    def test_settings_file_can_turn_it_off(self, temp_dirs):
+        tmp_path, user_home, _ = temp_dirs
+        (user_home / "settings.json").write_text(
+            json.dumps({"features": {"streaming": False}})
+        )
+
+        loader = ConfigLoader(project_dir=str(tmp_path / "my-project"))
+        loader.user_home = user_home
+        settings = loader.discover()
+
+        assert settings["features"]["streaming"] is False
+        assert loader.export_as_env()["FERAL_STREAMING"] == "false"
 
 
 class TestXDGPaths:

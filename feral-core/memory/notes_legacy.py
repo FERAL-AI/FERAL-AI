@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import aiosqlite
 
-from memory.embeddings import blob_to_vec, chunk_text, cosine_similarity
+from memory.embeddings import chunk_text, cosine_similarity_bulk
 from memory.fts_query import fts5_match_query
 
 logger = logging.getLogger("feral.memory.notes_legacy")
@@ -197,14 +197,17 @@ async def _vec_results_for_notes(
                 "WHERE source_table = 'notes' AND embedding IS NOT NULL"
             ) as cur:
                 chunks = await cur.fetchall()
-            for c in chunks:
-                evec = blob_to_vec(c["embedding"])
-                sim = cosine_similarity(query_vec, evec)
+            # One blocked matmul instead of a Python loop of
+            # blob_to_vec + cosine_similarity. See cosine_similarity_bulk
+            # for the measured numbers (286ms -> 23ms at 100k chunks).
+            sims = cosine_similarity_bulk(query_vec, [c["embedding"] for c in chunks])
+            for c, sim in zip(chunks, sims):
+                sim = float(sim)
                 if sim < _NOTES_VEC_MIN_SIM:
                     continue
                 nid = c["source_id"]
                 if nid not in vec_results or sim > vec_results[nid]["vec_score"]:
-                    vec_results[nid] = {"id": nid, "vec_score": float(sim)}
+                    vec_results[nid] = {"id": nid, "vec_score": sim}
     except Exception as exc:
         logger.debug("notes vector leg failed: %s", exc)
         return {}

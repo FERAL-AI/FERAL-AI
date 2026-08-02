@@ -67,6 +67,50 @@ _NEVER_REEXPORT_ENV_KEYS = frozenset({
     "FERAL_WHATSAPP_APP_SECRET",
 })
 
+# Single source of truth for the streaming default.
+#
+# There used to be two, and they disagreed. ``DEFAULT_SETTINGS`` said
+# False (and ``export_as_env`` published ``FERAL_STREAMING=false`` into
+# os.environ from it) while ``Orchestrator.__init__`` read
+# ``os.environ.get("FERAL_STREAMING", "true")``. So the answer to "is
+# streaming on" depended on whether the config loader had run first in
+# that process: an orchestrator built without a loader streamed, one
+# built after ``export_as_env`` did not. On a fresh FERAL_HOME the
+# loader wins, so ``handle_command_stream`` emitted zero
+# ``stream_delta`` frames and quietly delegated every turn to the
+# non-stream path. ``tests/perf/test_lane08_live_traces.py``'s parity
+# trace compared an empty assembled string against a real reply and
+# passed only when an earlier test had left the variable set.
+#
+# The False was correct when it was written and was then left behind.
+# History: v0.4.0 (dce5ede60) added the runtime gate as opt-in,
+# ``os.environ.get("THEORA_STREAMING", "")``, i.e. OFF unless the
+# operator exported it. The v0.5.0 config scaffold (a258a92a6) wrote
+# this settings default to match. Four days later 256be0fcd
+# ("streaming-first loops") flipped the runtime default to "true" and
+# did not touch the settings side, so the two have disagreed ever
+# since and the settings side, which publishes into os.environ, was
+# the one that won at boot.
+#
+# ON is the resolved answer, not just the newer one. Streaming is the
+# better-covered path today (multi-agent hand-off, plan mode, the
+# pending-approval gate, forced tools, parallel tool execution and
+# cross-provider failover all have explicit stream-side parity, pinned
+# by tests/test_stream_nonstream_parity.py), and the chained voice
+# pipeline reads these token deltas to start speaking sentence 1 while
+# the model is still writing sentence 2 (voice/llm_stream_tap.py).
+#
+# Flipping this default surfaced a real gap, which has since been
+# closed: neither SSE route billed a streamed turn, so streamed spend
+# never reached ``cost_events`` and a configured per-call-site cap could
+# not trip. The chat-completions route did not send
+# ``stream_options.include_usage`` and the Anthropic route discarded the
+# ``message_delta`` usage block outright. Both now record once per turn
+# (``agents/llm_provider.py``), and an endpoint that rejects
+# ``stream_options`` is retried once without it and remembered, so the
+# turn survives even where usage cannot be captured.
+DEFAULT_STREAMING = True
+
 DEFAULT_SETTINGS = {
     "version": "0.4.0",
     "llm": {
@@ -243,7 +287,10 @@ DEFAULT_SETTINGS = {
         "scene_cooldown": 10,
     },
     "features": {
-        "streaming": False,
+        # See ``DEFAULT_STREAMING`` above. Do not write a literal here:
+        # ``agents/orchestrator.py`` imports the same constant, and the
+        # two defaults disagreeing is what broke the stream path.
+        "streaming": DEFAULT_STREAMING,
         "proactive": False,
         "self_learning": True,
         "multi_agent": True,
@@ -1277,7 +1324,9 @@ class ConfigLoader:
         if vision.get("base_url"):
             env["FERAL_VLM_BASE_URL"] = str(vision["base_url"])
 
-        env["FERAL_STREAMING"] = str(features.get("streaming", False)).lower()
+        env["FERAL_STREAMING"] = str(
+            features.get("streaming", DEFAULT_STREAMING)
+        ).lower()
         env["FERAL_PROACTIVE"] = str(features.get("proactive", False)).lower()
         env["FERAL_MULTI_AGENT"] = str(features.get("multi_agent", True)).lower()
         # ``agents/learner.py::_self_learning_enabled`` reads

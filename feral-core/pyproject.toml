@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "feral-ai"
-version = "2026.8.2"
+version = "2026.8.3"
 description = "FERAL — Open-source AI agent with computer use, GenUI, voice, hardware control, and persistent memory."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -66,6 +66,53 @@ dependencies = [
     # (FastAPI handlers, orchestrator, sync scheduler, decay sweeper)
     # awaits MemoryStore directly without thread-pool bridging.
     "aiosqlite>=0.20.0,<1.0",
+    # v2026.8.3: real local embeddings are part of the install, not an
+    # opt-in extra. Same reasoning that promoted `qrcode[pil]` below:
+    # persistent memory is the feature people install FERAL for, and
+    # without fastembed the EmbeddingProvider silently selects the
+    # SHA-256 `hash` fallback. That fallback is not "slightly worse
+    # search", it is not search: with it, `feral memory search
+    # "building"` finds a note and `feral memory search "what am I
+    # building?"` returns nothing, because a hash projection has no
+    # notion of similarity. Nothing in the product surfaces that
+    # difference at the moment a user hits it.
+    #
+    # The cost is measured, not estimated, and the basis is stated
+    # because "how big is it" has two honest answers. fastembed runs
+    # BAAI/bge-small-en-v1.5 on onnxruntime and pulls NO torch. Its
+    # transitive closure with sqlite-vec is 30 distributions, ~226MB
+    # installed on disk (macOS arm64, CPython 3.11); ~177MB of that is
+    # net new once you subtract what core already carries (numpy,
+    # Pillow, PyYAML, tqdm, certifi, idna, typing-extensions). Two
+    # packages are ~80% of it: onnxruntime (66MB) and the sympy (75MB)
+    # it depends on. Compare ~2.5GB for a torch-backed
+    # sentence-transformers stack, which is the whole reason fastembed
+    # is the choice here.
+    #
+    # First embed downloads the ~130MB model once. `feral setup` warms
+    # it (see cli/setup/steps/memory.py) so that cost is paid during
+    # setup, not on the user's first question. The model is 384-dim,
+    # exactly LOCAL_DIM, so no index migration.
+    #
+    # Licence: Apache-2.0. The bundled LICENSE and the upstream repo
+    # are both Apache-2.0; the "Other/Proprietary" trove classifier in
+    # its published metadata is wrong. The model is MIT. No copyleft
+    # obligation of the kind that keeps piper-tts out of the default
+    # install (see the `tts-piper` extra).
+    "fastembed>=0.8,<0.9",
+    # Ships with fastembed for the same reason: the vec0 virtual table
+    # is what keeps memory search sub-linear as the store grows.
+    # Apache-2.0 / MIT dual-licensed.
+    #
+    # Installing it is necessary but not always sufficient, and the
+    # setup wizard says so out loud rather than claiming success.
+    # Loading a SQLite extension requires an interpreter built with
+    # `--enable-loadable-sqlite-extensions`; pyenv omits that on macOS
+    # by default, so `sqlite3.Connection` has no `enable_load_extension`
+    # and the extension can never load no matter how the package was
+    # installed. FERAL is correct either way (VectorIndex falls back to
+    # a numpy brute-force scan) but the fallback is O(n) per query.
+    "sqlite-vec>=0.1.1,<1.0",
     "cryptography>=41.0.0,<47.0",
     "pynacl>=1.5.0,<2.0",
     # W9: vault encryption-at-rest. The OS keychain is now a hard
@@ -132,7 +179,25 @@ llm = [
     "Pillow>=10.0.0,<12.0",
     "aiohttp>=3.9.0,<4.0",
 ]
+# NOTE: `sqlite-vec` moved to base `dependencies` in v2026.8.3 (see the
+# comment there). Kept as an alias so `pip install feral-ai[vec]` keeps
+# resolving for anyone following an older install guide; pip handles the
+# duplicate.
 vec = [
+    "sqlite-vec>=0.1.1,<1.0",
+]
+# NOTE: `fastembed` moved to base `dependencies` in v2026.8.3. Real
+# local embeddings are a first-run feature, not an opt-in. The full
+# rationale (size, licence, why the hash fallback is not acceptable as a
+# default) lives with the dep itself in the base block.
+#
+# This extra is kept alive because it is referenced from the README,
+# the install guides, and the `feral doctor` hint, so `pip install
+# 'feral-ai[embeddings]'` must keep resolving. It now also pulls
+# sqlite-vec, which is what a reader of that hint expects "install the
+# embeddings stack" to mean.
+embeddings = [
+    "fastembed>=0.8,<0.9",
     "sqlite-vec>=0.1.1,<1.0",
 ]
 memory-chroma = [
@@ -296,6 +361,11 @@ all = [
     # feature). Left out of `[all]` to avoid pip resolver duplicate
     # work; the base wheel always carries it.
     "onnxruntime>=1.16.0,<2.0",
+    # v2026.8.3: `fastembed` and `sqlite-vec` moved to base
+    # `dependencies`. `[all]` no longer has to opt into real local
+    # vectors, because every install has them. Left out of this list
+    # (like `qrcode[pil]` above) to avoid pip resolver duplicate work;
+    # the base wheel always carries both.
     "rich>=13.0.0,<15.0",
     "faster-whisper>=1.0.0,<2.0",
     # Local STT via whisper.cpp. MIT, and the only Whisper backend with

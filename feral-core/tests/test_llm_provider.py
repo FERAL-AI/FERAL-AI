@@ -4,7 +4,6 @@ Tests for ``LLMProvider``: env-based setup, Anthropic normalization, streaming, 
 
 from __future__ import annotations
 
-import json
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,6 +24,43 @@ def anthropic_env() -> dict[str, str]:
         "ANTHROPIC_API_KEY": "sk-ant-test",
         "FERAL_LLM_MODEL": "claude-test-model",
     }
+
+
+def _install_probe_mock_transport(monkeypatch) -> list[str]:
+    """Wire every client ``_build_client`` builds for the rest of this
+    test onto an in-process ``httpx.MockTransport``.
+
+    ``switch_provider`` does not just flip attributes: since
+    v2026.5.23 it also fires a real round-trip availability probe
+    (``POST /chat/completions``) through the client it just built via
+    ``self._build_client()``. Patching ``client.post`` after
+    ``switch_provider()`` returns is too late, the dial already
+    happened by then. This wraps the real builder (so header /
+    vault-key resolution logic still runs for real, unmocked) and only
+    swaps in a mock transport that answers the probe locally, the same
+    pattern ``tests/test_whoop_durable_sync.py`` uses for
+    ``WhoopClient``.
+
+    Returns the list of hosts every probed request actually hit, so a
+    test can assert ``switch_provider`` dialed the *correct* provider's
+    endpoint instead of merely trusting the ``base_url`` attribute.
+    """
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    transport = httpx.MockTransport(handler)
+    real_build_client = LLMProvider._build_client
+
+    def build_with_mock_transport(self):
+        client = real_build_client(self)
+        client._transport = transport
+        return client
+
+    monkeypatch.setattr(LLMProvider, "_build_client", build_with_mock_transport)
+    return hosts
 
 
 class TestLLMProviderInit:
@@ -234,7 +270,7 @@ class TestChatStream:
 
 class TestSwitchProvider:
     @pytest.mark.asyncio
-    async def test_switch_provider_updates_base_url_and_model(self) -> None:
+    async def test_switch_provider_updates_base_url_and_model(self, monkeypatch) -> None:
         env = {
             "FERAL_LLM_PROVIDER": "openai",
             "OPENAI_API_KEY": "sk-x",
@@ -243,12 +279,22 @@ class TestSwitchProvider:
             with patch.object(LLMProvider, "_detect_ollama", return_value=None):
                 llm = LLMProvider()
 
+        # switch_provider's v2026.5.23 availability probe fires a real
+        # POST /chat/completions through the freshly built client. Wire
+        # it to a MockTransport instead of letting it dial groq for
+        # real; the handler still records the host so the assertion
+        # below proves the probe (and therefore the client) actually
+        # targeted groq, not just that the ``base_url`` attribute says so.
+        hosts = _install_probe_mock_transport(monkeypatch)
+
         await llm.switch_provider("groq", model="llama-custom", api_key="gq-key")
 
         assert llm.provider == "groq"
         assert llm.base_url == "https://api.groq.com/openai/v1"
         assert llm.model == "llama-custom"
         assert llm.api_key == "gq-key"
+        assert hosts == ["api.groq.com"]
+        assert llm.available is True
 
         await llm.close()
 
@@ -448,7 +494,7 @@ class TestSwitchProviderUnknown:
         await llm.close()
 
     @pytest.mark.asyncio
-    async def test_switch_to_deepseek_hits_deepseek_not_openai(self) -> None:
+    async def test_switch_to_deepseek_hits_deepseek_not_openai(self, monkeypatch) -> None:
         """Regression: ``switch_provider("deepseek")`` used to fall
         through the old PROVIDER_BASES dict (which didn't list
         deepseek, openrouter, kimi or qwen) and silently re-point at
@@ -459,15 +505,27 @@ class TestSwitchProviderUnknown:
             with patch.object(LLMProvider, "_detect_ollama", return_value=None):
                 llm = LLMProvider()
 
+        # Both hops below are "probe eligible" (v2026.5.23 real
+        # round-trip availability probe), so both fire a genuine
+        # POST /chat/completions through the newly built client. Wire
+        # that onto a MockTransport that records the host actually
+        # dialed -- this is what proves the regression stays fixed:
+        # not just that ``base_url`` reads right, but that the wire
+        # the client speaks on actually lands on deepseek's / openrouter's
+        # own host instead of quietly falling through to OpenAI's.
+        hosts = _install_probe_mock_transport(monkeypatch)
+
         await llm.switch_provider("deepseek", model="deepseek-chat", api_key="sk-ds")
         assert llm.provider == "deepseek"
         assert "deepseek.com" in llm.base_url
         assert "openai.com" not in llm.base_url
+        assert hosts[-1] == "api.deepseek.com"
         await llm.close()
 
         await llm.switch_provider("openrouter", model="anthropic/claude-opus-4-7", api_key="sk-or")
         assert llm.provider == "openrouter"
         assert "openrouter.ai" in llm.base_url
+        assert hosts[-1] == "openrouter.ai"
         await llm.close()
 
 

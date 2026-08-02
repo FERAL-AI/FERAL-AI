@@ -111,7 +111,29 @@ async def test_trace_1_s1_memory_route_no_llm():
 
 
 @pytest.mark.asyncio
-async def test_trace_2_stream_nonstream_parity():
+async def test_trace_2_stream_nonstream_parity(monkeypatch):
+    # A parity test has to own the feature it is comparing.
+    #
+    # Streaming has two different defaults depending on which one you
+    # reach first: ``agents/orchestrator.py`` reads
+    # ``os.environ.get("FERAL_STREAMING", "true")`` while
+    # ``config/loader.py`` defaults the setting to False and exports
+    # ``FERAL_STREAMING=false`` from it. So on a fresh FERAL_HOME
+    # streaming is OFF, ``handle_command_stream`` emits no
+    # ``stream_delta`` frames, and the assembled text is empty against a
+    # non-empty non-streamed reply.
+    #
+    # This test therefore passed only when some earlier test had left
+    # FERAL_STREAMING set, and failed whenever it ran early or alone,
+    # which is exactly what CI does: the perf traces run in their own job
+    # (1 failed, 2 passed) while a full local suite went green. Setting
+    # it explicitly makes the test say what it depends on instead of
+    # inheriting it.
+    #
+    # Read before __init__ (orchestrator.py:306), so this must be set
+    # before _make_orchestrator().
+    monkeypatch.setenv("FERAL_STREAMING", "true")
+
     text = "Yesterday you had 2 meetings and wrote 4 notes."
 
     # Non-stream

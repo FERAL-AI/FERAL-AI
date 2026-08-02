@@ -33,12 +33,29 @@ def _make_mock_state():
     s.memory = None
     s.wake_word = None
 
+    # Explicitly "no vault configured", matching a fresh brain that
+    # never wired one. Left as an auto-vivified MagicMock, ``state.vault``
+    # is truthy and ``state.vault.retrieve(...)`` returns another
+    # unconfigured (truthy) Mock rather than ``None`` -- the briefing
+    # route's ``ow_key = state.vault.retrieve(...) or ""`` then reads a
+    # real-looking key out of thin air and dials OpenWeatherMap for
+    # real on every test that hits ``/briefing``, key or no key.
+    s.vault = None
+
     return s
 
 
 @pytest.fixture
-def _patched_app(_disable_api_key_middleware_for_tests):
+def _patched_app(_disable_api_key_middleware_for_tests, monkeypatch):
     """Import the app with a mocked state so we don't need the full brain."""
+    # Belt-and-suspenders alongside ``s.vault = None`` above: if the
+    # developer's shell (or CI) happens to export a real
+    # OPENWEATHER_API_KEY, the briefing route would pick it up from
+    # ``os.environ`` and dial out for real regardless of the mocked
+    # vault. These tests never opt into that path, so keep it absent
+    # by default; ``test_briefing_weather_null_without_api_key`` relies
+    # on exactly this.
+    monkeypatch.delenv("OPENWEATHER_API_KEY", raising=False)
     mock = _make_mock_state()
     with patch("api.routes.ambient.state", mock), \
          patch("api.state.state", mock):

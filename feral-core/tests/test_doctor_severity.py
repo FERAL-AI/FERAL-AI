@@ -123,6 +123,14 @@ ALLOWED_WARN_LABELS: set[str] = {
     "Node.js",
     # Local audio detection itself raised (rare; tests/dev paths).
     "Local Audio",
+    # The operator asked for paid embeddings and cannot have them:
+    # FERAL_EMBED_PROVIDER=openai with no OPENAI_API_KEY set. A real
+    # misconfiguration, since the request silently degrades to local.
+    # Absence of the [embeddings] extra is NOT here; that is the
+    # designed fresh-install default and reports as ``_info``.
+    "Embedding provider mode",
+    # The provider probe itself raised (import error, corrupt config).
+    "Embedding provider",
     # macOS TCC entitlements probed via PyObjC — denied state still
     # warns because the operator must take System Settings action to
     # enable GUI computer-use; we no longer ``_fail`` on it.

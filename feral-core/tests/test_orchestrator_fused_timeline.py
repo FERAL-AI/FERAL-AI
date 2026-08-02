@@ -541,10 +541,13 @@ def _build_live_orchestrator() -> Orchestrator:
         memory=None, vision_buffer=None, perception=None, learner=None,
     )
     # Pin the streaming gate. ``Orchestrator`` reads FERAL_STREAMING at
-    # construction, and the config loader exports it from
-    # ``features.streaming``, which defaults to False. Inheriting it made
-    # these tests pass on a developer profile with streaming enabled and
-    # fail in CI, where there is no settings.json: ``handle_command_stream``
+    # construction and the config loader exports it from
+    # ``features.streaming``, so the value is ambient. The default is
+    # now ON (config/loader.py ``DEFAULT_STREAMING``), but a settings
+    # file or a shell export can still turn it off, and a test of the
+    # streaming path must not depend on which. Inheriting it made these
+    # tests pass on a profile with streaming enabled and fail where the
+    # flag was off: ``handle_command_stream``
     # silently delegates to the non-streaming path, emits no stream_delta
     # frames, and the mocked ``chat_stream`` is never called (surfacing as
     # "object MagicMock can't be used in 'await' expression", because only

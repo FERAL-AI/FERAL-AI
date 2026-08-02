@@ -40,6 +40,7 @@ from .steps import (
     tool_keys,
     welcome,
 )
+from .steps import memory as memory_step
 from .steps import network as network_step
 
 logger = logging.getLogger("feral.cli.setup")
@@ -86,6 +87,13 @@ async def _run_async(*, from_step: str = "") -> None:
             # files ``agents/identity_loader`` reads on every turn.
             ("personality", personality.run),
             ("capabilities", capabilities.run),
+            # Memory sits right after the capability toggles and before
+            # the optional-integration tail: it is infrastructure every
+            # install depends on, it is the one step that may download a
+            # ~130MB model, and it verifies semantic retrieval by
+            # behaviour rather than by import. Running it here means the
+            # model is warm long before the operator reaches `finish`.
+            ("memory", memory_step.run),
             ("network", network_step.run),
             ("integrations", integrations.run),
             ("home_assistant", home_assistant.run),

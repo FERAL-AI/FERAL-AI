@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -108,8 +109,36 @@ class QdrantVectorIndex:
             logger.debug("qdrant count() failed: %s", exc)
             return 0
 
+    @staticmethod
+    def _point_id(chunk_id: str) -> str:
+        """Map a FERAL chunk id onto something Qdrant will accept.
+
+        Qdrant point ids must be a UUID or a uint64. FERAL chunk ids look
+        like ``note_984acdb8_c0``, so passing them through raised
+        "Point id a is not a valid UUID" on every write. UUIDv5 keeps the
+        mapping stable, so re-inserting the same chunk id updates the
+        same point instead of duplicating it.
+
+        ``memory/backends/qdrant.py`` already did exactly this via
+        ``_to_qdrant_id``; this adapter is a separate module and never
+        got it. Nothing caught the difference because the adapter test
+        skips itself unless qdrant-client is installed, and it is not
+        installed by default.
+        """
+        try:
+            return str(uuid.UUID(chunk_id))
+        except ValueError:
+            return str(uuid.uuid5(uuid.NAMESPACE_URL, f"feral:{chunk_id}"))
+
     def _make_point(self, chunk_id: str, embedding: np.ndarray):
-        return self._qm.PointStruct(id=chunk_id, vector=embedding.tolist())
+        # The caller id rides in the payload because the point id is a
+        # one-way hash: without this, search returns the UUID and every
+        # caller loses the chunk id it asked about.
+        return self._qm.PointStruct(
+            id=self._point_id(chunk_id),
+            vector=embedding.tolist(),
+            payload={"chunk_id": chunk_id},
+        )
 
     async def upsert(self, chunk_id: str, embedding: np.ndarray) -> None:
         vec = np.asarray(embedding, dtype=np.float32)
@@ -147,7 +176,9 @@ class QdrantVectorIndex:
             await self._ensure_collection()
             await self._client.delete(
                 collection_name=self._collection,
-                points_selector=self._qm.PointIdsList(points=[chunk_id]),
+                points_selector=self._qm.PointIdsList(
+                    points=[self._point_id(chunk_id)]
+                ),
                 wait=False,
             )
         except Exception as exc:
@@ -161,17 +192,39 @@ class QdrantVectorIndex:
             return []
         try:
             await self._ensure_collection()
-            hits = await self._client.search(
-                collection_name=self._collection,
-                query_vector=vec.tolist(),
-                limit=max(1, int(limit)),
-                with_payload=False,
-                with_vectors=False,
-            )
+            # `search()` was removed from qdrant-client (gone in 1.18);
+            # `query_points()` replaces it and returns hits under
+            # `.points`. Both are supported because pyproject allows
+            # `qdrant-client>=1.11,<2.0`. with_payload is now True so the
+            # original chunk id comes back, see `_make_point`.
+            if hasattr(self._client, "query_points"):
+                response = await self._client.query_points(
+                    collection_name=self._collection,
+                    query=vec.tolist(),
+                    limit=max(1, int(limit)),
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                hits = response.points
+            else:
+                hits = await self._client.search(
+                    collection_name=self._collection,
+                    query_vector=vec.tolist(),
+                    limit=max(1, int(limit)),
+                    with_payload=True,
+                    with_vectors=False,
+                )
         except Exception as exc:
-            logger.debug("qdrant search failed: %s", exc)
+            # warning, not debug: every failure above returns an empty
+            # result set, which reads as "nothing matched" rather than
+            # "the backend is broken". That is how a removed client
+            # method and an invalid id format both stayed invisible.
+            logger.warning("qdrant search failed: %s", exc)
             return []
-        return [(str(h.id), 1.0 - float(h.score)) for h in hits]
+        return [
+            ((h.payload or {}).get("chunk_id") or str(h.id), 1.0 - float(h.score))
+            for h in hits
+        ]
 
     async def search_cosine(
         self, query_vec: np.ndarray, limit: int = 20

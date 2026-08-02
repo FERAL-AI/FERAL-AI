@@ -46,6 +46,7 @@ _STEP_TITLES = {
     "identity": "Identity",
     "personality": "Personality",
     "capabilities": "Capabilities",
+    "memory": "Memory & semantic search",
     "network": "Network access",
     "integrations": "Integrations",
     "home_assistant": "Home Assistant",

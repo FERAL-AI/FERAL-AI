@@ -224,6 +224,10 @@ class TestLogThrottle:
 
 def _build_openai_provider(monkeypatch, *, fallback: str = "hash", threshold: int = 3):
     """Construct a provider configured for the OpenAI primary path under test."""
+    # A key alone no longer selects OpenAI (that billed users who exported one
+    # for chat completions), so the paid path has to be asked for explicitly.
+    # See tests/test_embeddings_local_first.py for the precedence itself.
+    monkeypatch.setenv("FERAL_EMBED_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("FERAL_EMBED_FALLBACK", fallback)
     monkeypatch.setenv("FERAL_EMBED_RATE_LIMIT_THRESHOLD", str(threshold))
