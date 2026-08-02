@@ -49,6 +49,7 @@
     },
     {
       "id": "list",
+      "read_only_hint": true,
       "method": "GET",
       "url": "python://feral_reminders/list",
       "description": "List stored reminders, optionally including completed entries.",

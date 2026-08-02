@@ -33,6 +33,56 @@ describe('ToolCallCard', () => {
     expect(screen.getByText(/"temp_f": 64/)).toBeInTheDocument();
   });
 
+  describe('refusals are not failures', () => {
+    // A refusal means the tool never ran and nothing was written. It used
+    // to render identically to a crash, which hid the fact that FERAL
+    // held a boundary on purpose.
+    const refusal = (code, error) => ({
+      key: 'k', label: 'feral_reminders.create', success: false,
+      error, error_code: code, latency_ms: 12,
+    });
+
+    it('renders plan-mode refusal as refused, not failed', () => {
+      render(<ToolCallCard trace={refusal('plan_mode_blocked', 'Plan mode is active.')} defaultOpen />);
+      expect(screen.getByTestId('tool-call-card')).toHaveAttribute('data-status', 'refused');
+      expect(screen.getByText('refused')).toBeInTheDocument();
+      expect(screen.getByText('blocked by plan mode')).toBeInTheDocument();
+      expect(screen.getByText('Plan mode is active.')).toBeInTheDocument();
+      // Never the failure treatment.
+      expect(screen.queryByText('error')).toBeNull();
+      expect(screen.queryByText('failed')).toBeNull();
+    });
+
+    it('renders a policy denial and a pending approval as refused too', () => {
+      const { unmount } = render(<ToolCallCard trace={refusal('policy_denied', 'Blocked.')} defaultOpen />);
+      expect(screen.getByTestId('tool-call-card')).toHaveAttribute('data-status', 'refused');
+      expect(screen.getByText('blocked by policy')).toBeInTheDocument();
+      unmount();
+
+      render(<ToolCallCard trace={refusal('pending_approval', 'Needs approval.')} defaultOpen />);
+      expect(screen.getByTestId('tool-call-card')).toHaveAttribute('data-status', 'refused');
+      expect(screen.getByText('waiting for your approval')).toBeInTheDocument();
+    });
+
+    it('does not claim the call completed with no output', () => {
+      render(<ToolCallCard trace={refusal('plan_mode_blocked', 'Plan mode is active.')} defaultOpen />);
+      expect(screen.queryByText(/Completed with no returned output/)).toBeNull();
+    });
+
+    it('an unknown error_code still renders as a plain failure', () => {
+      // Fail-safe: only codes we know are refusals get the softer
+      // treatment, so a new brain error code can never mute a real crash.
+      render(<ToolCallCard trace={refusal('some_new_code', 'boom')} defaultOpen />);
+      expect(screen.getByTestId('tool-call-card')).toHaveAttribute('data-status', 'failed');
+      expect(screen.getByText('error')).toBeInTheDocument();
+    });
+
+    it('a brain that sends no error_code is unaffected', () => {
+      render(<ToolCallCard trace={{ key: 'k', label: 't', success: false, error: 'rate_limit' }} defaultOpen />);
+      expect(screen.getByTestId('tool-call-card')).toHaveAttribute('data-status', 'failed');
+    });
+  });
+
   it('renders failure path with error preview and a failed status', () => {
     render(
       <ToolCallCard trace={{ key: 'k', label: 't', success: false, error: 'rate_limit', latency_ms: 100 }} defaultOpen />,

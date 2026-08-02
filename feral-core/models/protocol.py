@@ -428,6 +428,16 @@ class ToolResultPayload(BaseModel):
     call_id: str = ""
     success: bool = True
     error: str = ""
+    # Machine-readable reason the call did not run, when it was DECLINED
+    # rather than attempted: "plan_mode_blocked", "policy_denied",
+    # "pending_approval". Empty for a normal success or a genuine failure.
+    #
+    # A refusal and a crash both arrive with success=False, so without this
+    # the client rendered "FERAL declined this on purpose" and "the tool
+    # threw" identically, as a red failure. The client keys its refused
+    # state off this code and never off the error prose, which is
+    # user-facing copy that changes.
+    error_code: str = ""
     latency_ms: float = 0.0
     # Human-readable excerpt of what the tool returned, for the chat UI's
     # result renderer. OPT-IN per endpoint via ``emit_result_preview`` in the

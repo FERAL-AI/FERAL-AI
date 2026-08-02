@@ -118,6 +118,7 @@
         },
         {
             "id": "get_cursor_position",
+            "read_only_hint": true,
             "method": "PYTHON",
             "url": "",
             "description": "Get the current cursor position and screen dimensions.",

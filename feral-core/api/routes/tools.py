@@ -15,6 +15,7 @@ Endpoints:
 from fastapi import APIRouter
 
 from api.state import state
+from skills.call_context import bind_context
 
 router = APIRouter(tags=["tools"])
 
@@ -109,7 +110,22 @@ async def execute_tool(body: dict):
             "policy": decision.to_dict(),
         }
 
-    result = await state.skill_executor.execute(canonical, args, manifest, endpoint)
+    # Bind session identity before dispatch. The executor's plan-mode and
+    # approval gates read the session from the ToolCallContext contextvar,
+    # so without this the route is invisible to plan mode: a live probe
+    # showed a mutating call reaching the executor with session_id="" while
+    # that session was demonstrably in plan mode. The route already accepts
+    # a session_id in the body and was simply dropping it.
+    #
+    # surface is "http_api" to match the policy decision computed above, so
+    # a refusal names the same surface the caller was judged on.
+    _session_id = str(body.get("session_id") or "").strip()
+    with bind_context(
+        session_id=_session_id,
+        surface="http_api",
+        tool_name=canonical,
+    ):
+        result = await state.skill_executor.execute(canonical, args, manifest, endpoint)
     out = {"tool_name": canonical}
     if isinstance(result, dict):
         out.update(result)

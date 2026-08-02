@@ -234,13 +234,16 @@ async def test_rest_revert_refuses_the_whole_turn_not_just_the_drifted_file(
 async def test_rest_refused_revert_is_distinguishable_from_a_preview(
     home, tmp_path,
 ):
-    """A refused real revert reports ``dry_run: true``.
+    """A refusal and a preview are now distinguishable on every field.
 
-    ``revert_turn`` reuses the preview envelope to mean "nothing was
-    applied", so ``dry_run`` cannot tell a caller whether it asked for a
-    preview or was refused. Anything rendering this has to key off
-    ``success``. Pinned so the day that envelope is fixed, this fails
-    and the docstring gets corrected with it.
+    They used to be byte-identical. ``revert_turn`` checked drift BEFORE
+    ``dry_run``, so previewing a drifted turn returned the refusal
+    envelope: same ``dry_run: true``, same ``success: false``, same
+    ``error``. Not even ``success`` separated them, which the previous
+    version of this test asserted without noticing what it proved.
+
+    A dry run writes nothing, so there is nothing to refuse. The preview
+    is now answered first and reports the drift as data.
     """
     from api.routes.checkpoints import revert
 
@@ -256,11 +259,27 @@ async def test_rest_refused_revert_is_distinguishable_from_a_preview(
     refused = await revert({"turn_id": "t3", "dry_run": False})
     preview = await revert({"turn_id": "t3", "dry_run": True})
 
-    assert refused["dry_run"] is True and preview["dry_run"] is True
+    # The refusal: not a dry run, because the caller did not ask for one.
     assert refused["success"] is False
+    assert refused["refused"] is True
+    assert refused["dry_run"] is False
+    assert refused["error_code"] == "revert_refused_drift"
     assert refused["error"]
-    # `success` is the only field that separates them today.
-    assert refused["success"] == preview["success"]
+
+    # The preview: succeeds, applies nothing, and reports the drift as data.
+    assert preview["success"] is True
+    assert preview["refused"] is False
+    assert preview["dry_run"] is True
+    assert preview["error_code"] == ""
+    assert not preview.get("error")
+    assert preview["reverted_count"] == 0
+
+    # Both still surface the drifted path; that was never the problem.
+    assert [e["path"] for e in refused["drifted"]] == [str(target)]
+    assert [e["path"] for e in preview["drifted"]] == [str(target)]
+
+    # And the preview did not touch the file.
+    assert target.read_text() == "user work\n"
 
     # And drifted entries are NOT in `skipped`, despite reading that way.
     assert refused["skipped"] == []

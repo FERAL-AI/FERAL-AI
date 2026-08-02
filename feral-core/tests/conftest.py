@@ -247,3 +247,68 @@ def restore_process_env():
         if os.environ != snapshot:
             os.environ.clear()
             os.environ.update(snapshot)
+
+
+@pytest.fixture(autouse=True)
+def reset_probe_cache():
+    """Clear the integration probe cache around every test.
+
+    ``integrations/_probe_status`` keeps a process-local dict of the most
+    recent probe result per provider, and ``connected`` on the Calendar
+    and Email integrations reads it through ``is_connected_cached``. A
+    test that marks "google" reachable therefore makes every later test
+    believe Google is connected, no matter what env it clears.
+
+    Found through ``pytest-randomly``: ``TestCalendarIntegration`` and
+    ``TestEmailIntegration``'s ``test_init_no_credentials`` assert
+    ``connected is False`` after deleting their env var, and both failed
+    with ``assert True is False`` once a shuffled order put a
+    cache-seeding test first. They pass alone and in file order, which is
+    exactly why this went unnoticed.
+
+    The module already exposed ``clear()`` for tests; nothing was calling
+    it between them. Cleared before AND after, so a test that seeds the
+    cache neither inherits nor exports a dirty one.
+    """
+    try:
+        from integrations import _probe_status
+    except Exception:  # integrations optional in some test contexts
+        yield
+        return
+    _probe_status.clear()
+    try:
+        yield
+    finally:
+        _probe_status.clear()
+
+
+@pytest.fixture(autouse=True)
+def reset_transcript_order():
+    """Reset the process-wide voice transcript ordering singleton.
+
+    ``voice.transcript_order.TRANSCRIPT_ORDER`` is shared by design (see
+    that module's docstring) and hands out a monotonic per-session
+    ``seq`` starting at 0. Tests reuse friendly session ids like
+    "sess-web", so the second test to use one gets ``seq == 1`` and an
+    assertion of ``seq == 0`` fails.
+
+    Caught by ``pytest-randomly``:
+    ``test_web_transcript_payload_carries_ordering_metadata`` failed with
+    ``assert 1 == 0`` in one shuffled order and passed in two others.
+    """
+    try:
+        from voice.transcript_order import TRANSCRIPT_ORDER
+    except Exception:  # voice extras optional
+        yield
+        return
+
+    def _wipe():
+        TRANSCRIPT_ORDER._seq.clear()
+        TRANSCRIPT_ORDER._prev.clear()
+        TRANSCRIPT_ORDER._items.clear()
+
+    _wipe()
+    try:
+        yield
+    finally:
+        _wipe()

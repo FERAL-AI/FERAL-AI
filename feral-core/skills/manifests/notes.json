@@ -47,6 +47,7 @@
         },
         {
             "id": "search_notes",
+            "read_only_hint": true,
             "method": "GET",
             "url": "http://localhost:9090/internal/memory/search",
             "description": "Search saved NOTES ONLY (user-written snippets tagged in memory). Does NOT query episodic robot/device activity, chat turns, or calendar events — those live in the fused timeline. For temporal recall ('what did my cutebot do yesterday', 'what was I doing this morning') call `fused_timeline`, NOT this endpoint.",
@@ -59,6 +60,7 @@
         },
         {
             "id": "list_recent",
+            "read_only_hint": true,
             "method": "GET",
             "url": "http://localhost:9090/internal/memory/recent",
             "description": "List the most recently saved notes.",

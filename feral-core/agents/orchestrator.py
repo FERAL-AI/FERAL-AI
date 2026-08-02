@@ -1150,6 +1150,36 @@ class Orchestrator:
         )[:2000]
         return summary, detail
 
+    @staticmethod
+    def _refusal_code(result_data: dict) -> str:
+        """Classify a DECLINED tool result for the client. "" if it ran.
+
+        Three gates refuse a call and each returns a different envelope,
+        because they were written at different times:
+
+        * plan mode already carries ``error_code`` (``plan_mode_blocked``)
+        * a surface/policy deny returns ``status`` ``PermissionOutcome::Deny``
+        * strict/hybrid autonomy returns ``status`` ``pending_approval``
+
+        All three arrive at the UI as ``success: False``, which is how a
+        deliberate refusal came to render identically to a crash. Rather
+        than rewrite three envelopes the LLM also consumes, the shapes are
+        normalised here, at the one place that builds the client frame.
+
+        Only these three map to a code. Anything else is a real failure and
+        must keep the error treatment, so a future refusal shape shows up as
+        a loud failure rather than being silently softened.
+        """
+        code = str(result_data.get("error_code") or "")
+        if code == "plan_mode_blocked":
+            return code
+        status = str(result_data.get("status") or "")
+        if status == "PermissionOutcome::Deny" or result_data.get("safety_level") == "deny":
+            return "policy_denied"
+        if status == "pending_approval":
+            return "pending_approval"
+        return ""
+
     async def _emit_tool_result(
         self,
         session_id: str,
@@ -1163,8 +1193,10 @@ class Orchestrator:
                 (isinstance(result_data, dict) and (result_data.get("success") or result_data.get("status") == "command_sent_to_hardware_daemon"))
             )
             err = ""
+            err_code = ""
             if isinstance(result_data, dict):
                 err = str(result_data.get("error") or "")[:240]
+                err_code = self._refusal_code(result_data)
             tool_name = str(tool_call.get("name", "tool"))
             # UI result excerpt, opt-in per endpoint. See
             # skills/result_budget.preview_enabled_for for why this is
@@ -1186,6 +1218,7 @@ class Orchestrator:
                     call_id=str(tool_call.get("id", "")),
                     success=success,
                     error=err,
+                    error_code=err_code,
                     latency_ms=float(latency_ms or 0.0),
                     result_preview=preview,
                     result_preview_truncated=preview_truncated,

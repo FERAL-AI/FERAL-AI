@@ -31,6 +31,7 @@
     "endpoints": [
         {
             "id": "list_repos",
+            "read_only_hint": true,
             "method": "GET",
             "url": "https://api.github.com/user/repos",
             "description": "List the authenticated user's repositories. Returns repo name, description, stars, language, and last updated.",
@@ -43,6 +44,7 @@
         },
         {
             "id": "list_issues",
+            "read_only_hint": true,
             "method": "GET",
             "url": "https://api.github.com/repos/{owner}/{repo}/issues",
             "description": "List issues for a specific repository. Returns issue title, state, labels, and author.",
@@ -56,6 +58,7 @@
         },
         {
             "id": "list_pull_requests",
+            "read_only_hint": true,
             "method": "GET",
             "url": "https://api.github.com/repos/{owner}/{repo}/pulls",
             "description": "List pull requests for a repository. Returns PR title, state, author, and review status.",

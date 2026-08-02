@@ -76,11 +76,15 @@ async def revert(body: dict):
     live brain and both surprising enough to check for before you build
     a UI on them:
 
-    * A refused revert reports ``dry_run: true`` even though the caller
-      asked for a real one, because ``CheckpointStore.revert_turn``
-      reuses the preview envelope to say "nothing was applied". Read
-      ``success`` (and ``error``) to tell a refusal from a preview;
-      ``dry_run`` alone cannot distinguish them.
+    * A refused revert reports ``refused: true`` with
+      ``error_code: "revert_refused_drift"`` and ``dry_run: false``. Key a
+      UI off ``refused`` and ``error_code``, never off ``dry_run`` and
+      never by parsing ``error`` prose. Both fields are present on every
+      response, so they can be read unconditionally.
+      (Previously a refusal and a preview were byte-identical: drift was
+      checked before ``dry_run``, so previewing a drifted turn returned
+      the refusal envelope. A dry run applies nothing, so it is now
+      answered first and reports the drift as data.)
     * ``skipped`` is not where drifted files go. It only ever holds
       entries whose ``action`` is ``skip``; drift lands in ``drifted``
       while keeping ``action: "restore"``.

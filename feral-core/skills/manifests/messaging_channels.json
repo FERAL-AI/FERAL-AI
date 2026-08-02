@@ -52,6 +52,7 @@
         },
         {
             "id": "list_channels",
+            "read_only_hint": true,
             "method": "CUSTOM",
             "url": "",
             "description": "List which messaging channels are currently configured and running. Call this BEFORE saying you can't send a message — the user's channels are listed here.",
@@ -61,6 +62,7 @@
         },
         {
             "id": "list_recent_chats",
+            "read_only_hint": true,
             "method": "CUSTOM",
             "url": "",
             "description": "List recently active chat ids on a given channel. Useful when the user says 'send to the last person I was talking to'.",

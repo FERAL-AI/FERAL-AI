@@ -43,6 +43,7 @@
         },
         {
             "id": "status",
+            "read_only_hint": true,
             "method": "GET",
             "url": "http://localhost:9090/internal/task/status",
             "description": "Check progress of a background task by flow_id. Use this when the user asks how a task is going.",
@@ -54,6 +55,7 @@
         },
         {
             "id": "list",
+            "read_only_hint": true,
             "method": "GET",
             "url": "http://localhost:9090/internal/task/list",
             "description": "List recent background tasks and their statuses.",

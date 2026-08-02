@@ -305,11 +305,27 @@ class SkillExecutor:
         approval first would let it through.
         """
         state_mod = sys.modules.get("api.state")
-        runner = getattr(getattr(state_mod, "state", None), "tool_runner", None)
+        state_obj = getattr(state_mod, "state", None)
+        runner = getattr(state_obj, "tool_runner", None)
         if runner is None:
-            orch = getattr(getattr(state_mod, "state", None), "orchestrator", None)
+            orch = getattr(state_obj, "orchestrator", None)
             runner = getattr(orch, "tool_runner", None)
         if runner is None:
+            # Two very different situations, and only one is normal.
+            #
+            # No ``api.state`` at all means offline tooling: tests, the CLI,
+            # an embedder. Ungated by design, silent by design.
+            #
+            # ``api.state`` present but no runner means a brain module is
+            # loaded and a tool is executing anyway. Every production caller
+            # runs inside a live orchestrator (``direct_execution`` is only
+            # imported by ``orchestrator.py``; ``mcp/server.py`` refuses to
+            # execute unless ``api.state`` wired its executor), so this
+            # should be unreachable. If it ever fires, the fail-open
+            # reasoning above has stopped holding and someone needs to know
+            # rather than find out from an ungated call.
+            if state_obj is not None:
+                self._warn_ungated(tool_name)
             return None
 
         try:
@@ -341,6 +357,33 @@ class SkillExecutor:
                 logger.info("executor refused %s via %s", tool_name, gate_name)
                 return refusal
         return None
+
+    _ungated_warned: set = set()
+
+    @classmethod
+    def _warn_ungated(cls, tool_name: str) -> None:
+        """Report an ungated dispatch on a loaded brain. Once per tool.
+
+        Rate-limited by tool name so a hot loop cannot flood the log and
+        bury the first occurrence, which is the one that matters.
+        """
+        if tool_name in cls._ungated_warned:
+            return
+        cls._ungated_warned.add(tool_name)
+        logger.warning(
+            "executor ran %s with no ToolRunner reachable while api.state is "
+            "loaded: plan mode and approval gates did NOT apply to this call",
+            tool_name,
+        )
+        try:
+            from observability.metrics import increment
+
+            increment(
+                "feral_executor_ungated_total",
+                attributes={"tool": tool_name or ""},
+            )
+        except Exception:  # instrumentation must never break dispatch
+            logger.debug("ungated-dispatch metric failed", exc_info=True)
 
     async def execute(
         self,

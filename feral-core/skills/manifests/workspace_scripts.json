@@ -42,6 +42,7 @@
         },
         {
             "id": "list_catalog",
+            "read_only_hint": true,
             "method": "CUSTOM",
             "url": "",
             "description": "List previously-saved scripts that succeeded. Each entry has id, name, language, path, args_schema (if provided). Use this before writing a new script — a previous one may already do the job.",

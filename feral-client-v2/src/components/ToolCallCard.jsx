@@ -21,6 +21,7 @@
  *     result_preview?: any,
  *     success: boolean | null,  // null === still running
  *     error: string,
+ *     error_code: string,       // '' unless the brain declined the call
  *     latency_ms: number,
  *     started_at?: number,      // Date.now() at tool_start
  *   }
@@ -29,7 +30,7 @@
  * live elapsed counter so a hung tool is visible rather than silent.
  */
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
-import { ChevronRight, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
+import { ChevronRight, CheckCircle2, XCircle, Loader2, ShieldAlert } from 'lucide-react';
 import Glass from '../ui/Glass';
 import ToolResultView from './ToolResultView';
 import {
@@ -43,7 +44,31 @@ import {
 
 const TICK_MS = 500;
 
+/**
+ * Tool results the brain declined rather than attempted.
+ *
+ * A refusal is not a failure. The tool never ran, nothing was written,
+ * and there is nothing to retry until the user changes something. Both
+ * used to render as a red ✕ "failed", which reads as a malfunction and
+ * hides the one thing the user needs to know: FERAL held a boundary on
+ * purpose. Keyed off `error_code` rather than matching the prose,
+ * because the prose is user-facing copy and will change.
+ *
+ * Populated by `_emit_tool_result` in agents/orchestrator.py.
+ */
+export const REFUSAL_CODES = Object.freeze({
+  plan_mode_blocked: 'blocked by plan mode',
+  policy_denied: 'blocked by policy',
+  pending_approval: 'waiting for your approval',
+});
+
+export function isRefusal(trace) {
+  return Object.hasOwn(REFUSAL_CODES, String(trace?.error_code || ''));
+}
+
 function statusOf(trace) {
+  // Checked before `success`, since a refusal also carries success:false.
+  if (isRefusal(trace)) return 'refused';
   if (trace?.success === true) return 'ok';
   if (trace?.success === false) return 'failed';
   return 'running';
@@ -52,6 +77,9 @@ function statusOf(trace) {
 function StatusIcon({ status }) {
   if (status === 'ok') {
     return <CheckCircle2 size={13} aria-hidden="true" className="v2-tool-card__icon v2-tool-card__icon--ok" />;
+  }
+  if (status === 'refused') {
+    return <ShieldAlert size={13} aria-hidden="true" className="v2-tool-card__icon v2-tool-card__icon--refused" />;
   }
   if (status === 'failed') {
     return <XCircle size={13} aria-hidden="true" className="v2-tool-card__icon v2-tool-card__icon--error" />;
@@ -106,6 +134,8 @@ export default function ToolCallCard({ trace, defaultOpen = false }) {
     ? formatDuration(elapsed)
     : formatDuration(trace.latency_ms);
   const error = trace.error || '';
+  const refused = status === 'refused';
+  const refusalLabel = REFUSAL_CODES[String(trace.error_code || '')] || 'refused';
   const hasResult = trace.result_preview != null && trace.result_preview !== '';
 
   return (
@@ -131,7 +161,7 @@ export default function ToolCallCard({ trace, defaultOpen = false }) {
           <span className="v2-tool-card__summary" title={argsSummary}>{argsSummary}</span>
         )}
         <span className="v2-tool-card__status-text">
-          {running ? 'running' : status === 'failed' ? 'failed' : ''}
+          {running ? 'running' : status === 'refused' ? refusalLabel : status === 'failed' ? 'failed' : ''}
         </span>
         {duration && <span className="v2-tool-card__lat">{duration}</span>}
       </button>
@@ -145,13 +175,21 @@ export default function ToolCallCard({ trace, defaultOpen = false }) {
                 <pre className="v2-tool-card__pre">{argsText}</pre>
               </div>
             )}
+            {refused && (
+              <div className="v2-tool-card__row v2-tool-card__row--refused">
+                <div className="v2-tool-card__row-label">refused</div>
+                <pre className="v2-tool-card__pre">
+                  {error || `This tool was ${refusalLabel}. It did not run.`}
+                </pre>
+              </div>
+            )}
             {status === 'failed' && (
               <div className="v2-tool-card__row v2-tool-card__row--error">
                 <div className="v2-tool-card__row-label">error</div>
                 <pre className="v2-tool-card__pre">{error || 'tool failed'}</pre>
               </div>
             )}
-            {hasResult && status !== 'failed' && (
+            {hasResult && status !== 'failed' && !refused && (
               <div className="v2-tool-card__row">
                 <div className="v2-tool-card__row-label">result</div>
                 <ToolResultView value={trace.result_preview} language={language} />
@@ -162,7 +200,7 @@ export default function ToolCallCard({ trace, defaultOpen = false }) {
                 <span className="v2-tool-card__pending">Waiting for the tool to return…</span>
               </div>
             )}
-            {!running && !hasResult && status !== 'failed' && (
+            {!running && !hasResult && status !== 'failed' && !refused && (
               <div className="v2-tool-card__row v2-tool-card__row--pending">
                 <span className="v2-tool-card__pending">Completed with no returned output.</span>
               </div>

@@ -61,7 +61,12 @@ __all__ = [
     "get_store",
     "checkpoint_root",
     "BASH_NOT_COVERED_NOTE",
+    "REVERT_REFUSED_DRIFT",
 ]
+
+# Machine-readable reason on a refused revert. A UI should key off this and
+# `refused`, never off `dry_run` or off parsing `error` prose.
+REVERT_REFUSED_DRIFT = "revert_refused_drift"
 
 BASH_NOT_COVERED_NOTE = (
     "Checkpoints cover coding_tools__write_file and coding_tools__edit_file "
@@ -385,23 +390,33 @@ class CheckpointStore:
             return {
                 "success": False,
                 "turn_id": turn_id,
+                "refused": False,
+                "error_code": "no_checkpoints",
                 "error": f"No checkpoints recorded for turn '{turn_id}'.",
                 "bash_not_covered": True,
                 "note": BASH_NOT_COVERED_NOTE,
             }
 
+        # A preview is answered before the drift check, never after it. A dry
+        # run writes nothing, so there is nothing to refuse: the drifted paths
+        # are exactly what the caller asked to be shown, and they come back
+        # under `drifted` with the plan. Refusing it made a preview and a
+        # refusal byte-identical, so no caller could tell which it had.
+        if dry_run:
+            return self._envelope(turn_id, plan, applied=[], dry_run=True, forced=force)
+
         drifted = [e for e in plan if e.status == "drifted"]
         if drifted and not force:
-            env = self._envelope(turn_id, plan, applied=[], dry_run=True, forced=False)
+            env = self._envelope(turn_id, plan, applied=[], dry_run=False, forced=False)
             env["success"] = False
+            env["refused"] = True
+            env["error_code"] = REVERT_REFUSED_DRIFT
             env["error"] = (
                 f"{len(drifted)} file(s) changed after the agent wrote them. "
                 f"Refusing to overwrite them. Re-run with force to revert "
                 f"anyway (their newer content will be lost)."
             )
             return env
-        if dry_run:
-            return self._envelope(turn_id, plan, applied=[], dry_run=True, forced=force)
 
         first_rows: dict[str, dict] = {}
         for row in self.entries_for_turn(turn_id):
@@ -460,6 +475,10 @@ class CheckpointStore:
             "success": True,
             "turn_id": turn_id,
             "dry_run": dry_run,
+            # Always present so a caller can read it unconditionally rather
+            # than inferring a refusal from the absence of a key.
+            "refused": False,
+            "error_code": "",
             "forced": forced,
             "reverted": applied,
             "reverted_count": len(applied),

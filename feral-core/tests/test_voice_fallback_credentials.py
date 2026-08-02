@@ -127,10 +127,19 @@ async def test_quota_with_working_deepgram_keys_still_morphs(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_no_openai_key_at_all_keeps_the_legacy_whisper_degrade(monkeypatch):
-    """Nothing was substituted, so nothing dishonest was promised."""
+    """Nothing was substituted, so nothing dishonest was promised.
+
+    Keys resolve through the vault before the env, so clearing the env
+    alone does not mean "no key". Without the vault stub this test
+    passed only in file order and failed whenever a randomised order put
+    a vault-seeding test ahead of it.
+    """
     monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "security.vault_keys.get_active_key", lambda *a, **k: "",
+    )
     router, captured = _capture_router(monkeypatch)
     _stub_audio_settings(
         monkeypatch,

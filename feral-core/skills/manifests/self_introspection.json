@@ -33,6 +33,7 @@
     "endpoints": [
         {
             "id": "list_capabilities",
+            "read_only_hint": true,
             "method": "CUSTOM",
             "url": "",
             "description": "Return the full list of registered skills on this FERAL instance with their endpoints. Use this instead of guessing whether a capability exists.",
@@ -80,6 +81,7 @@
         },
         {
             "id": "list_specialists",
+            "read_only_hint": true,
             "method": "CUSTOM",
             "url": "",
             "description": "List Agent-Mitosis specialist agents that have spawned on this instance and which domain/skills they cover.",
@@ -89,6 +91,7 @@
         },
         {
             "id": "list_pending_proposals",
+            "read_only_hint": true,
             "method": "CUSTOM",
             "url": "",
             "description": "List Tool-Genesis proposals waiting for user approval (hybrid autonomy) or recently auto-promoted skills (loose autonomy).",

@@ -526,6 +526,11 @@ export default function Chat() {
             || '',
           success: p.success !== false,
           error: p.error || '',
+          // Distinguishes "FERAL declined this" from "this crashed".
+          // ToolCallCard keys its refused status off this, never off the
+          // error prose. Absent on older brains, which fall back to the
+          // previous failed rendering.
+          error_code: p.error_code || '',
           latency_ms: Number(p.latency_ms || 0),
         };
         if (idx >= 0) {
@@ -533,6 +538,7 @@ export default function Chat() {
             ...next[idx],
             success: result.success,
             error: result.error,
+            error_code: result.error_code,
             // Fall back to measured wall-clock when the brain reports
             // 0ms so a slow call never displays as instant.
             latency_ms: result.latency_ms

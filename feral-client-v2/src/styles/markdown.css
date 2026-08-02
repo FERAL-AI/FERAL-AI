@@ -303,6 +303,13 @@
   border-left-color: var(--v2-state-error);
   background: var(--v2-state-error-soft);
 }
+/* Refused, not failed: FERAL declined the call and nothing ran. Warn
+   rather than error, so a held boundary does not read as a malfunction.
+   The warn tokens are already defined for both themes. */
+.v2-tool-card--refused {
+  border-left-color: var(--v2-state-warn);
+  background: var(--v2-state-warn-soft);
+}
 .v2-tool-card__head {
   display: flex;
   align-items: center;
@@ -325,6 +332,7 @@
 .v2-tool-card__icon { flex-shrink: 0; }
 .v2-tool-card__icon--ok { color: var(--v2-state-live); }
 .v2-tool-card__icon--error { color: var(--v2-state-error); }
+.v2-tool-card__icon--refused { color: var(--v2-state-warn); }
 .v2-tool-card__label { font-weight: 600; white-space: nowrap; flex-shrink: 0; }
 .v2-tool-card__summary {
   flex: 1;
@@ -344,6 +352,7 @@
   flex-shrink: 0;
 }
 .v2-tool-card--failed .v2-tool-card__status-text { color: var(--v2-state-error); }
+.v2-tool-card--refused .v2-tool-card__status-text { color: var(--v2-state-warn); }
 .v2-tool-card__lat {
   margin-left: auto;
   color: var(--v2-text-tertiary);
@@ -381,6 +390,10 @@
 .v2-tool-card__row--error .v2-tool-card__pre {
   color: var(--v2-state-error);
   border-color: var(--v2-state-error);
+}
+.v2-tool-card__row--refused .v2-tool-card__pre {
+  color: var(--v2-state-warn);
+  border-color: var(--v2-state-warn);
 }
 .v2-tool-card__pending { color: var(--v2-text-tertiary); font-style: italic; font-size: 11.5px; }
 

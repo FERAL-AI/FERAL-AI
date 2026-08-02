@@ -90,10 +90,20 @@ async def test_gemini_handle_error_without_router_does_not_raise():
 
 @pytest.mark.asyncio
 async def test_realtime_no_key_emits_degraded_voice_status(monkeypatch):
-    """When OPENAI_API_KEY is missing, ``start_session`` emits
+    """When no OpenAI key is configured, ``start_session`` emits
     ``openai_realtime_no_key`` through the fallback router instead
-    of returning None silently."""
+    of returning None silently.
+
+    "Not configured" means both sources. ``_resolve_openai_key`` reads
+    the vault first and only falls back to the env var, so clearing the
+    env alone does not express it: under a randomised test order this
+    picked up an ``sk-test`` another test had left in the shared vault,
+    reached a real handshake, and failed with "Incorrect API key".
+    """
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "security.vault_keys.get_active_key", lambda *a, **k: "",
+    )
     proxy = RealtimeProxy()
     router = _make_capturing_router()
     proxy.attach_fallback_router(router)
