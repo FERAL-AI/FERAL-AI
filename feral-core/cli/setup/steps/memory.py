@@ -91,6 +91,18 @@ _INSTALL_HINT_RICH = r"pip install 'feral-ai\[embeddings]'"
 _INSTALL_HINT_PLAIN = "pip install 'feral-ai[embeddings]'"
 
 
+def _stdin_is_interactive() -> bool:
+    """True when a human can actually answer a prompt.
+
+    Guarded with try/except because `sys.stdin` can be replaced by an
+    object with no `isatty` at all under pytest capture.
+    """
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except Exception:
+        return False
+
+
 def _install_hint() -> str:
     return _INSTALL_HINT_RICH if _RICH_AVAILABLE else _INSTALL_HINT_PLAIN
 
@@ -256,6 +268,26 @@ async def _offer_install(console, provider, embeddings_mod):
         "install. FERAL can fetch them now: ~120MB of wheels (onnxruntime "
         "and friends, no torch) plus a one-time ~130MB model download."
     )
+
+    # Never block on stdin when nobody is there to answer.
+    #
+    # `feral setup` gets driven non-interactively in three real
+    # situations: a scripted or piped install, CI, and any test that
+    # walks the whole wizard rather than this one step. In all three,
+    # `confirm` reaches for /dev/tty and dies with "reading from stdin
+    # while output is captured" (this is exactly how
+    # test_setup_wizard_preflights broke on the 3.12 CI leg, since that
+    # test drives every step and only stubs the ones it knows about).
+    #
+    # Downloading ~250MB unattended would be the wrong default, so the
+    # non-interactive answer is "do not install, say how", not "assume
+    # yes".
+    if not _stdin_is_interactive():
+        console.print(
+            f"  Non-interactive setup, so nothing was installed. "
+            f"To add local embeddings: {_install_hint()}"
+        )
+        return provider, embeddings_mod
 
     if not confirm("  Install local embeddings now?", default=True):
         console.print(
