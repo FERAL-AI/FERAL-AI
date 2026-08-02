@@ -41,7 +41,7 @@ dependencies = [
     "websockets>=13.0,<16.0",
     "httpx>=0.27.0,<1.0",
     "pyyaml>=6.0,<7.0",
-    "rich>=13.0.0,<15.0",
+    "rich>=13.0.0,<16.0",
     # CLI UX overhaul: arrow-key selects + masked-character paste in
     # `feral setup`, `feral install`, `feral key`, and `feral access`.
     # InquirerPy wraps prompt_toolkit to render selects, fuzzy
@@ -366,7 +366,7 @@ all = [
     # vectors, because every install has them. Left out of this list
     # (like `qrcode[pil]` above) to avoid pip resolver duplicate work;
     # the base wheel always carries both.
-    "rich>=13.0.0,<15.0",
+    "rich>=13.0.0,<16.0",
     "faster-whisper>=1.0.0,<2.0",
     # Local STT via whisper.cpp. MIT, and the only Whisper backend with
     # Apple Silicon GPU support, so `[all]` on a Mac gets a local STT
