@@ -706,10 +706,17 @@ def password(
 
     InquirerPy / prompt_toolkit show one ``mask`` character per typed
     character so the operator gets visible feedback that the paste
-    landed. Falls back to ``getpass.getpass`` (silent — same as the
+    landed. Falls back to ``getpass.getpass`` (silent, same as the
     legacy behaviour) when the library is unavailable or stdin is not
     a TTY. The fallback annotates the prompt label so the operator can
     see they're in the silent path.
+
+    ``getpass`` is the documented non-TTY fallback, but it opens
+    /dev/tty directly, so where there is no controlling terminal at all
+    (a piped `feral setup`, CI, pytest with captured output) it does not
+    degrade, it raises OSError. That is handled at the call below rather
+    than by refusing to prompt up front, so the getpass path itself stays
+    exercisable and testable.
     """
 
     def _final_validate(raw: str) -> bool:
@@ -747,6 +754,15 @@ def password(
             value = getpass.getpass(label + ": ")
         except (EOFError, KeyboardInterrupt):
             raise
+        except OSError:
+            # No controlling terminal: getpass could not open /dev/tty.
+            # Under pytest this is "reading from stdin while output is
+            # captured", which is how a CI run of the voice preflight
+            # died rather than skipping an optional API key. An empty
+            # answer is what this prompt already treats as "skip", so a
+            # scripted run degrades instead of crashing.
+            logger.debug("password prompt: no tty, treating as skipped")
+            return ""
         if _final_validate(value):
             return value
         sys.stdout.write("  value cannot be empty — try again.\n")

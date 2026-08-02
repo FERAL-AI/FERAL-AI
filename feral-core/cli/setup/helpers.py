@@ -213,6 +213,31 @@ def ask_choice(
             console.print(f"'{raw}' isn't a valid choice. Try again (type 'back' to go back).")
 
 
+# A wizard prompt must terminate even when nobody is there to answer.
+#
+# `feral setup` gets driven non-interactively more often than the prompt
+# helpers assumed: a scripted or piped install, CI, and any test that
+# walks a step rather than stubbing each prompt inside it. The
+# interactive branches below already check ``ui_kit.is_interactive()``,
+# but the FALLBACK path did a raw stdin read, so a non-TTY run did not
+# degrade, it blocked, and under pytest it died with "reading from stdin
+# while output is captured".
+#
+# That is what broke test_setup_wizard_preflights on CI: the voice step
+# asks for an API key (voice_preflight.py, ask_text(secret=True)) only
+# when no key is discoverable, which is CI's situation but not a
+# developer's, so it passed locally and failed there.
+#
+# Returning the documented default is the honest answer: it is what the
+# operator would get by pressing enter, and it never invents a secret.
+def _can_prompt() -> bool:
+    """True when a human can actually answer."""
+    try:
+        return bool(ui_kit.is_interactive())
+    except Exception:
+        return False
+
+
 def ask_text(
     prompt: str,
     *,
@@ -382,6 +407,12 @@ def _prompt_raw(prompt: str, console) -> str:
     """Plain-text input fallback — kept for the typed code path that
     still handles ``back`` / ``quit`` sentinels.
     """
+    if not _can_prompt():
+        # Nobody can answer, so do not read. See _can_prompt for why the
+        # guard lives at the READER rather than at ask_text/confirm:
+        # tests replace the reader, and a guard above their stub would
+        # short-circuit the very behaviour they pin.
+        raise QuitNavigation()
     try:
         sys.stdout.write(prompt + ": ")
         sys.stdout.flush()

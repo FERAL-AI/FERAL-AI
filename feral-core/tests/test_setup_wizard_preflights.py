@@ -194,7 +194,18 @@ def test_voice_step_uses_picker_not_ask_text_for_realtime_model(
 
     # Loud assertion: if any voice-preflight path falls through to
     # ask_text for a model id, fail the test.
+    #
+    # Scoped to MODEL prompts on purpose. The step legitimately calls
+    # ask_text(secret=True) to collect an API key, which is a different
+    # question, and failing on that made this test assert something it
+    # never meant. It only stayed green because the key prompt is
+    # reached solely when no key is discoverable: in a full-suite run a
+    # key was in scope so the branch never ran, and in isolation (or on
+    # CI, which has no key) it did and the test failed. Order-dependent
+    # for a reason that had nothing to do with model pickers.
     def _no_ask_text(*a, **kw):
+        if kw.get("secret"):
+            return ""          # the key prompt, skipped, not a model pick
         raise AssertionError(
             f"ask_text must NOT be used to pick a realtime model; got {a!r} {kw!r}"
         )
