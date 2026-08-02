@@ -167,6 +167,73 @@ compiler, the security classifier prompt, and env jails.
 
 ## Open, and who owns it
 
+### Test isolation, dug into properly
+
+You asked for this to stop being a problem rather than be patched case by
+case. What the evidence turned up:
+
+- **The root cause of the whole "no key configured" family was one line.**
+  `security/vault.py` holds a process-wide `_vault` singleton, keys resolve
+  through the **vault first** and the process env second, and `reset_vault()`
+  existed for tests but nothing called it between them. So a test that seeded
+  the vault made every later test believe a key existed regardless of what env
+  it cleared. That is six separate failures across shuffled runs, all one bug.
+  It was invisible to a scan for mutable module globals because a lazily
+  initialised singleton starts life as `None`.
+
+- **`tests/conftest.py` now has one list**, `_SHARED_STATE_RESETTERS`, naming
+  every global reset between tests, with a companion comment naming what is
+  deliberately NOT reset and why. The rule that matters: reset what is filled
+  at **runtime**, never what is filled at **import**. Clearing a provider
+  registry populated by import-time decorators empties it for the rest of the
+  session.
+
+- **Some tests do reach external hosts. The number is small, and an earlier
+  version of this file said 112, which was wrong.**
+
+  The 112 came from my own broken measurement: the guard hooks
+  `httpx.Client.send`, which runs for `httpx.MockTransport` too, so every
+  correctly-stubbed test counted as a network attempt. Six
+  `test_whoop_durable_sync` tests were reported as calling
+  `api.prod.whoop.com` when all six were already wired to a `MockTransport`.
+  The guard now ignores Mock/ASGI/WSGI transports.
+
+  Real, verified: `test_llm_provider.py` and `test_ambient_api.py` attempt 6
+  calls (`api.deepseek.com`, `api.groq.com`, `openrouter.ai`,
+  `api.openweathermap.org`).
+
+  **How to check this correctly, because the obvious way is wrong.** Running
+  with `FERAL_STRICT_TEST_NETWORK=1` and seeing everything pass does NOT mean
+  nothing dialed out. Those two files report `46 passed` AND 6 recorded
+  attempts in the same run, because the provider-probe code catches the
+  guard's exception in a broad `except`. Read the `[network guard]` report at
+  the end of the run, never the pass/fail count.
+
+  `memory/embeddings.py:801` posting to the live embeddings endpoint on the
+  normal code path is a separate and more serious question, because that is
+  production code rather than a test: with a reachable key it makes billable
+  calls. Three shuffled runs each failed a different memory/KG test on
+  `httpcore.ReadTimeout`, which is what a live call looks like on a loaded
+  machine. **Still to confirm** whether the memory tests reach it through a
+  stub or for real, now that the MockTransport false positive is out of the
+  measurement.
+
+- **The env-leak guard warns, it does not fail the build, and that is
+  deliberate.** Measured across the full suite: 532 tests leave `FERAL_HOME`
+  changed, 181 `OPENAI_API_KEY`, ~70 each across the `FERAL_*` settings keys.
+  That is not 532 sloppy tests. `ConfigLoader.update_settings` publishes
+  settings into `os.environ` on purpose so a live toggle reaches env-only
+  readers without a restart, so any test exercising it "leaks" while behaving
+  correctly. Blocking on that would fail the build for working production
+  behaviour. `FERAL_STRICT_ENV_LEAKS=1` makes it blocking for cleaning up one
+  area at a time. The honest permanent fix is settings that do not write to the
+  process environment, which is a design change and is not done.
+
+- **`pytest-randomly` is why "the suite passed" was a weak claim.** Order
+  changes every run. CI should pin a seed and additionally run one shuffled
+  job, so a regression is reproducible and a new order-dependency still gets
+  caught. Not wired into CI yet.
+
 ### Mine, done since
 - **Refusals now render as refusals.** The gap was narrower than "refusals are
   not shown": the client already had a refusal renderer, but only
@@ -239,15 +306,55 @@ compiler, the security classifier prompt, and env jails.
   genuinely wrong is that the skip was silent: it now logs a warning and
   increments `feral_executor_ungated_total` when `api.state` is loaded but no
   runner is reachable, which is the combination that should be impossible.
-- **The env jail breaks subscription logins.** Claude Code stores auth in
-  `~/.claude`; a jailed agent gets a fresh HOME and must be API-key
-  authenticated. Escape hatch is `external_agents.env_jail: false`.
+- **The env jail vs subscription logins: solved, needs your sign-off on the
+  directory location.** You asked whether a client could log in with their own
+  Claude / Codex subscription and still reach the external agent. They can, and
+  it does not require turning the jail off.
+
+  Both vendors support relocating their entire config directory: Claude Code
+  reads `CLAUDE_CONFIG_DIR`, Codex reads `CODEX_HOME`. Passing the *operator's*
+  value through would be wrong, since it points straight back at their real
+  config and undoes the replaced HOME in one variable, which is why the jail
+  refuses it. What is safe is pointing those variables at a directory FERAL
+  owns, `~/.feral/agent-credentials/{claude,codex}`, that the operator logs
+  into once:
+
+      CLAUDE_CONFIG_DIR=~/.feral/agent-credentials/claude claude /login
+      CODEX_HOME=~/.feral/agent-credentials/codex codex login
+
+  After that a jailed agent authenticates with the subscription and still
+  cannot read `~/.claude`, `~/.ssh`, `~/.aws` or shell history. Strictly better
+  than both previous options. Implemented in `security/env_jail.py`
+  (`subscription_credential_env`), on by default, and it only activates when
+  the directory exists so nothing changes for anyone who has not logged in.
+
+  **macOS caveat, verified:** Claude Code prefers the Keychain over the file,
+  so on macOS the token may not land in the directory. Two documented ways out:
+  copy it once with `security find-generic-password -a "$USER" -s "Claude
+  Code-credentials" -w > <dir>/.credentials.json`, or mint a long-lived token
+  with `claude setup-token` (confirmed present in 2.1.220) and pass it as
+  `ANTHROPIC_AUTH_TOKEN`, which needs no directory at all.
+
+  **Not yet verified end to end**, because it needs your subscription: I have
+  not logged a real Claude or Codex session into that directory and driven an
+  agent through the jail. That is one of the three things you said you would
+  test.
 
 ### Yours
-- **Rotate the OpenAI key** committed in Theora's git history
-  (`ios/Theora/Configuration.swift:36`, in history since `546e0e7`).
-- **Publish gates.** Both releases went straight to PyPI; I claimed they would
-  pause for approval and they did not. That is a GitHub environment setting.
+- **Rotate the OpenAI key** committed in Theora's git history. **Done, you
+  rotated it.**
+- **Publish gates. I had this wrong twice over.** I said both releases went
+  straight to PyPI. In fact **2026.8.2 never reached PyPI at all**: PyPI's
+  latest is 2026.8.1. The tag and the GitHub release exist, which is why it
+  looks shipped.
+
+  Cause: the release workflow's TestPyPI canary. The wheel and sdist uploaded
+  to TestPyPI cleanly at 21:44:57, then the canary polled TestPyPI's simple
+  index 12 times over ~2 minutes, never saw it, failed, and that skipped the
+  real publish job. The version **is** on TestPyPI now, so the artifact was
+  always fine and only the gate was impatient. Widened to ~11 minutes with
+  backoff, and the failure message now says whether the upload succeeded and
+  tells you to re-run the job rather than re-cut the release.
 
 ---
 

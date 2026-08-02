@@ -185,11 +185,21 @@ jobs:
         # This avoids dependency shadowing when TestPyPI has stale or
         # malformed third-party packages with the same names.
         #
-        # TestPyPI's simple index lags behind the JSON API by minutes
-        # in our experience — the JSON probe above can succeed while
+        # TestPyPI's simple index lags behind the JSON API, sometimes by
+        # a lot: the JSON probe above can succeed while
         # ``pip download --index-url https://test.pypi.org/simple/``
-        # still 404s on the brand-new version. Retry the download up
-        # to 12 times (2min) instead of failing immediately.
+        # still 404s on the brand-new version.
+        #
+        # This budget used to be 12 attempts x 10s (2 minutes) and it
+        # cost us a release. v2026.8.2 uploaded to TestPyPI cleanly at
+        # 21:44:57, the canary gave up at 21:48:10, the publish job was
+        # skipped, and 2026.8.2 never reached PyPI even though the tag
+        # and the GitHub release existed. The artifact was fine; only
+        # the gate was impatient. The version did show up on TestPyPI
+        # later, which is the whole point.
+        #
+        # Now ~11 minutes with a backoff, because waiting longer costs
+        # nothing on a release and a false failure costs a re-cut.
         shell: bash
         env:
           EXPECTED_VERSION: ${{ needs.build.outputs.version }}
@@ -201,7 +211,8 @@ jobs:
           rm -rf .stage-dist
           mkdir -p .stage-dist
           shopt -s nullglob
-          for attempt in $(seq 1 12); do
+          ATTEMPTS=30
+          for attempt in $(seq 1 "${ATTEMPTS}"); do
             if python -m pip download \
                  --no-deps \
                  --index-url https://test.pypi.org/simple/ \
@@ -213,14 +224,29 @@ jobs:
                 break
               fi
             fi
-            echo "  · TestPyPI simple-index still propagating (attempt ${attempt}); sleeping"
-            sleep 10
+            # Backoff: quick early (usually lands in the first minute),
+            # patient later rather than hammering a lagging index.
+            if   [ "${attempt}" -le 6  ]; then delay=10
+            elif [ "${attempt}" -le 18 ]; then delay=20
+            else                              delay=30
+            fi
+            echo "  · TestPyPI simple-index still propagating (attempt ${attempt}/${ATTEMPTS}); sleeping ${delay}s"
+            sleep "${delay}"
             rm -rf .stage-dist
             mkdir -p .stage-dist
           done
           wheels=(.stage-dist/feral_ai-"${EXPECTED_VERSION}"-*.whl)
           if [ "${#wheels[@]}" -eq 0 ]; then
-            echo "No wheel for feral-ai==${EXPECTED_VERSION} was downloaded from TestPyPI after 12 attempts." >&2
+            {
+              echo "No wheel for feral-ai==${EXPECTED_VERSION} appeared on the TestPyPI"
+              echo "simple index after ${ATTEMPTS} attempts (~11 minutes)."
+              echo
+              echo "The upload step above runs BEFORE this one. If it reported"
+              echo "'Uploading feral_ai-${EXPECTED_VERSION}-py3-none-any.whl' then the"
+              echo "artifact is fine and this is index lag, not a bad build."
+              echo "Check https://test.pypi.org/project/feral-ai/${EXPECTED_VERSION}/ and"
+              echo "just re-run THIS job. Do not re-cut the release."
+            } >&2
             ls -la .stage-dist >&2
             exit 1
           fi

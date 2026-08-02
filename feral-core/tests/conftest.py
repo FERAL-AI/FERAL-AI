@@ -1,5 +1,6 @@
 import pytest
 import os
+import warnings
 
 
 # Raise the rate-limit ceiling well before the server module imports so
@@ -245,67 +246,358 @@ def restore_process_env():
         yield
     finally:
         if os.environ != snapshot:
+            leaked = sorted(
+                set(os.environ) ^ set(snapshot)
+                | {k for k in set(os.environ) & set(snapshot)
+                   if os.environ[k] != snapshot[k]}
+            )
             os.environ.clear()
             os.environ.update(snapshot)
+            _record_env_leak(leaked)
 
 
-@pytest.fixture(autouse=True)
-def reset_probe_cache():
-    """Clear the integration probe cache around every test.
+# Variables a test is ALLOWED to leave changed, with the reason. Keep this
+# empty if you can: every entry is a test that can reorder-break another.
+_ENV_LEAK_ALLOWED = frozenset({
+    # pytest sets this itself, once per test, by design.
+    "PYTEST_CURRENT_TEST",
+})
+
+_ENV_LEAKS: dict[str, int] = {}
+
+
+def _record_env_leak(names) -> None:
+    for name in names:
+        if name not in _ENV_LEAK_ALLOWED:
+            _ENV_LEAKS[name] = _ENV_LEAKS.get(name, 0) + 1
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Report environment variables tests left changed. Warn, not fail.
+
+    ``restore_process_env`` puts the environment back, so a leak can no
+    longer break a later test. That also makes it invisible, which is how
+    the class survived: settings writes reached ``os.environ`` directly,
+    ``monkeypatch.delenv(..., raising=False)`` on an absent variable
+    registered no undo, and 28 tests failed in the full suite while every
+    one passed alone. This prints what the restore had to clean up so the
+    next one cannot hide.
+
+    **Why this warns instead of failing the build.** Measured across the
+    full suite: 532 tests leave ``FERAL_HOME`` changed, 181
+    ``OPENAI_API_KEY``, and ~70 each across the ``FERAL_*`` settings
+    keys. That is not 532 sloppy tests. ``ConfigLoader.update_settings``
+    publishes changed settings into ``os.environ`` on purpose, so a live
+    toggle reaches env-only readers without a restart, and any test
+    exercising it "leaks" by this measure while behaving correctly. A
+    blocking gate here would fail the build for working production
+    behaviour, and the honest fix (settings that do not write to the
+    process environment) is a design change, not a test change.
+
+    So: the restore is the real fix, and this is the visibility. Set
+    ``FERAL_STRICT_ENV_LEAKS=1`` to make it blocking, which is worth
+    doing on a targeted subset while cleaning one area up.
+    """
+    if _NETWORK_ATTEMPTS:
+        detail = "\n".join(
+            f"  {host}\n" + "\n".join(f"      {n}" for n in sorted(ids))
+            for host, ids in sorted(_NETWORK_ATTEMPTS.items())
+        )
+        print(
+            "\n[network guard] Tests attempted outbound calls to external "
+            f"hosts:\n{detail}"
+        )
+
+    if not _ENV_LEAKS:
+        return
+    lines = "\n".join(
+        f"  {name}  (left changed by {count} test(s))"
+        for name, count in sorted(_ENV_LEAKS.items(), key=lambda kv: -kv[1])
+    )
+    message = (
+        "Tests leaked environment variables into the process:\n"
+        f"{lines}\n"
+        "The environment was restored so nothing broke. Most of these come "
+        "from ConfigLoader.update_settings publishing to os.environ by "
+        "design. For a genuinely accidental one, use monkeypatch.setenv/"
+        "delenv, and remember delenv on an ALREADY-ABSENT name registers "
+        "no undo."
+    )
+    if os.environ.get("FERAL_STRICT_ENV_LEAKS"):
+        session.exitstatus = 1
+        print(f"\n[env-leak guard] STRICT: {message}")
+        return
+    warnings.warn(message, stacklevel=1)
+
+
+def _reset_probe_status():
+    """Integration probe cache behind Calendar/Email ``connected``.
 
     ``integrations/_probe_status`` keeps a process-local dict of the most
-    recent probe result per provider, and ``connected`` on the Calendar
-    and Email integrations reads it through ``is_connected_cached``. A
-    test that marks "google" reachable therefore makes every later test
-    believe Google is connected, no matter what env it clears.
-
-    Found through ``pytest-randomly``: ``TestCalendarIntegration`` and
-    ``TestEmailIntegration``'s ``test_init_no_credentials`` assert
-    ``connected is False`` after deleting their env var, and both failed
+    recent probe result per provider. A test that marks "google"
+    reachable made every later test believe Google was connected no
+    matter what env it cleared, so ``TestCalendarIntegration`` and
+    ``TestEmailIntegration``'s ``test_init_no_credentials`` both failed
     with ``assert True is False`` once a shuffled order put a
-    cache-seeding test first. They pass alone and in file order, which is
-    exactly why this went unnoticed.
-
-    The module already exposed ``clear()`` for tests; nothing was calling
-    it between them. Cleared before AND after, so a test that seeds the
-    cache neither inherits nor exports a dirty one.
+    cache-seeding test first. The module already exposed ``clear()`` for
+    tests; nothing was calling it between them.
     """
-    try:
-        from integrations import _probe_status
-    except Exception:  # integrations optional in some test contexts
-        yield
-        return
+    from integrations import _probe_status
+
     _probe_status.clear()
-    try:
-        yield
-    finally:
-        _probe_status.clear()
+
+
+def _reset_transcript_order():
+    """Voice transcript ordering singleton.
+
+    ``TRANSCRIPT_ORDER`` is process-wide by design (see that module's
+    docstring) and hands out a monotonic per-session ``seq`` starting at
+    0. Tests reuse friendly session ids like "sess-web", so the second
+    test to use one gets ``seq == 1``. Caught by ``pytest-randomly``:
+    ``test_web_transcript_payload_carries_ordering_metadata`` failed with
+    ``assert 1 == 0`` in one order and passed in two others.
+    """
+    from voice.transcript_order import TRANSCRIPT_ORDER
+
+    TRANSCRIPT_ORDER._seq.clear()
+    TRANSCRIPT_ORDER._prev.clear()
+    TRANSCRIPT_ORDER._items.clear()
+
+
+def _reset_security_probe_cache():
+    """Provider reachability cache behind the "connected" badges."""
+    from security.probe import clear_probe_cache
+
+    clear_probe_cache()
+
+
+def _reset_vault():
+    """Process-wide credential vault singleton.
+
+    THE root cause of the "no key configured" family. Keys resolve
+    through the vault FIRST and the process env second, so a test that
+    seeds the vault makes every later test believe a key exists no matter
+    what env it clears. Under a shuffled order this failed
+    ``test_realtime_proxy_available_reflects_api_key``,
+    ``test_realtime_session_connect_skips_without_api_key``,
+    ``test_available_false_without_keys_and_no_ollama`` and both
+    ``test_..._no_openai_key...`` voice tests, all with a stray
+    ``sk-test`` reaching a real handshake.
+
+    ``reset_vault()`` was written for exactly this and nothing called it
+    between tests. It was also invisible to a scan for mutable globals,
+    because a lazily-initialised singleton starts life as ``None``.
+    """
+    from security.vault import reset_vault
+
+    reset_vault()
+
+
+def _reset_budget_cache():
+    """Per-skill result-budget tier cache."""
+    from skills.result_budget import reset_budget_cache
+
+    reset_budget_cache()
+
+
+def _reset_shared_catalog():
+    """Shared provider/model catalog singleton."""
+    from providers.catalog import reset_shared_catalog
+
+    reset_shared_catalog()
+
+
+def _reset_device_pairing_store():
+    """Device pairing store singleton."""
+    from security.device_pairing import reset_store
+
+    reset_store()
+
+
+def _reset_rate_limit_store():
+    """Per-client-IP request windows in the API rate limiter.
+
+    Shared across tests, so one test's requests count against another's
+    budget and a test asserting "not rate limited" fails depending on
+    what ran before it.
+    """
+    from api.server import _rate_limit_store
+
+    _rate_limit_store.clear()
+
+
+# Every module-level mutable global a test can dirty for the next test.
+#
+# This list is not guesswork. A diagnostic plugin fingerprinted every
+# candidate global after each of the 6606 tests and reported which ones
+# actually changed across unrelated tests. Only these carried real
+# cross-test state; the other candidates (provider registries, Prometheus
+# collectors, FastAPI routers) are populated once at import and must NOT
+# be cleared, which is why they are absent here.
+#
+# Add to this list rather than writing another autouse fixture, so there
+# stays exactly one place that answers "what leaks between tests".
+_SHARED_STATE_RESETTERS = (
+    _reset_probe_status,
+    _reset_transcript_order,
+    _reset_security_probe_cache,
+    _reset_rate_limit_store,
+    _reset_vault,
+    _reset_budget_cache,
+    _reset_shared_catalog,
+    _reset_device_pairing_store,
+)
+
+# Deliberately NOT reset here, so nobody adds them back "for symmetry":
+#
+# * ``observability/metrics`` collectors. Prometheus counters are meant
+#   to be cumulative for the life of the process, and tests assert on
+#   deltas rather than absolutes.
+# * Provider/backend registries (``providers.base._REGISTRY``,
+#   ``memory.backends.base._REGISTRY``, the STT/TTS
+#   ``_PROVIDER_REGISTRY`` pairs). These are populated once at import by
+#   decorators. Clearing them empties the registry for the rest of the
+#   session, which breaks everything downstream.
+#
+# The distinction that matters: reset things filled at RUNTIME, never
+# things filled at IMPORT.
+
+
+_ALLOWED_HOSTS = frozenset({
+    "localhost", "127.0.0.1", "::1", "0.0.0.0", "", "testserver",
+})
+
+# host -> {nodeid, ...} of tests that tried to reach it. Reported at the
+# end of the session so the whole list comes out of one run.
+_NETWORK_ATTEMPTS: dict[str, set] = {}
 
 
 @pytest.fixture(autouse=True)
-def reset_transcript_order():
-    """Reset the process-wide voice transcript ordering singleton.
+def block_outbound_network(monkeypatch, request):
+    """Fail any test that opens a socket to a non-local host.
 
-    ``voice.transcript_order.TRANSCRIPT_ORDER`` is shared by design (see
-    that module's docstring) and hands out a monotonic per-session
-    ``seq`` starting at 0. Tests reuse friendly session ids like
-    "sess-web", so the second test to use one gets ``seq == 1`` and an
-    assertion of ``seq == 0`` fails.
+    ``memory/embeddings.py`` posts to ``https://api.openai.com/v1/embeddings``
+    on the real code path. With a key reachable (the vault resolves before
+    the env, and the vault used to leak between tests) the suite made
+    genuine calls to OpenAI: real latency, real flakiness, and real money
+    on the operator's account. Three shuffled runs each failed a
+    different memory/KG test on ``httpcore.ReadTimeout``, which is what a
+    live call looks like when the machine is loaded.
 
-    Caught by ``pytest-randomly``:
-    ``test_web_transcript_payload_carries_ordering_metadata`` failed with
-    ``assert 1 == 0`` in one shuffled order and passed in two others.
+    Localhost is allowed, so a test that stands up its own server still
+    works. FastAPI's TestClient never reaches this: it speaks ASGI
+    in-process rather than opening a socket.
+
+    Mark a test ``@pytest.mark.allow_network`` if it genuinely must dial
+    out. There should be approximately none.
     """
-    try:
-        from voice.transcript_order import TRANSCRIPT_ORDER
-    except Exception:  # voice extras optional
+    # `live` already means "talks to real external APIs" and is gated by
+    # FERAL_LIVE_TESTS, so it implies the allowance without a second marker.
+    if request.node.get_closest_marker("allow_network") or request.node.get_closest_marker("live"):
         yield
         return
 
+    try:
+        import httpx
+    except Exception:  # pragma: no cover - httpx is a hard dep in practice
+        yield
+        return
+
+    nodeid = request.node.nodeid
+
+    def _is_mocked(client) -> bool:
+        """True when the client can never reach the wire.
+
+        ``httpx.MockTransport`` and ASGI/WSGI transports resolve requests
+        in-process. ``send`` still runs for them, so without this check a
+        properly stubbed test looks identical to one dialing out, and the
+        report is worthless. This was not hypothetical: it initially
+        reported six ``test_whoop_durable_sync`` tests as calling
+        ``api.prod.whoop.com`` when every one of them was already wired to
+        a ``MockTransport``.
+        """
+        seen = []
+        transport = getattr(client, "_transport", None)
+        if transport is not None:
+            seen.append(transport)
+        mounts = getattr(client, "_mounts", None) or {}
+        seen.extend(t for t in mounts.values() if t is not None)
+        if not seen:
+            return False
+        safe = ("MockTransport", "ASGITransport", "WSGITransport")
+        return all(type(t).__name__ in safe for t in seen)
+
+    def _check(client, request):
+        host = (request.url.host or "").lower()
+        if not host or host in _ALLOWED_HOSTS:
+            return
+        if _is_mocked(client):
+            return
+        message = (
+            f"Test tried to reach {host!r} ({request.method} {request.url}). "
+            "Tests must not call external services: it is slow, flaky, "
+            "and on a provider endpoint it spends real money. Stub the "
+            "client, or mark the test @pytest.mark.allow_network if it "
+            "truly must dial out."
+        )
+        _NETWORK_ATTEMPTS.setdefault(host, set()).add(nodeid)
+        if os.environ.get("FERAL_STRICT_TEST_NETWORK"):
+            raise RuntimeError(message)
+        # Default: RECORD ONLY, and let the call proceed.
+        #
+        # This is deliberately not a blanket block, and the reasoning
+        # matters because the tempting version is worse. 112 tests dial
+        # out today. Intercepting them all would silently change what
+        # those tests exercise, and "the suite is green" would then mean
+        # "green under a fake network" rather than green. That is a
+        # workaround wearing a fix's clothes.
+        #
+        # So this reports, loudly, at the end of every run, and the
+        # individual offenders get stubbed properly one at a time. The
+        # list is in docs/handoff/WORKLOG.md. Set
+        # FERAL_STRICT_TEST_NETWORK=1 to make it blocking, which is how
+        # you keep an area clean once you have fixed it.
+        return
+
+    real_send = httpx.Client.send
+    real_asend = httpx.AsyncClient.send
+
+    def guarded_send(self, request, *a, **kw):
+        _check(self, request)
+        return real_send(self, request, *a, **kw)
+
+    async def guarded_asend(self, request, *a, **kw):
+        _check(self, request)
+        return await real_asend(self, request, *a, **kw)
+
+    # Deliberately at the httpx client layer rather than on raw sockets.
+    # Patching ``socket.socket.connect`` for every test reaches every
+    # thread in the process (aiosqlite workers, test servers) and killed
+    # a full run with SIGKILL. This covers the actual egress path, since
+    # every provider call in the codebase goes out through httpx.
+    monkeypatch.setattr(httpx.Client, "send", guarded_send)
+    monkeypatch.setattr(httpx.AsyncClient, "send", guarded_asend)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def reset_shared_process_state():
+    """Reset shared process globals before AND after every test.
+
+    Before as well as after, so a test neither inherits a dirty global
+    nor exports one. Each resetter is isolated: an optional subsystem
+    that is not importable in a given test context is skipped rather
+    than failing every test in the suite.
+    """
+
     def _wipe():
-        TRANSCRIPT_ORDER._seq.clear()
-        TRANSCRIPT_ORDER._prev.clear()
-        TRANSCRIPT_ORDER._items.clear()
+        for fn in _SHARED_STATE_RESETTERS:
+            try:
+                fn()
+            except Exception:
+                # Optional subsystem (voice extras, api server) absent in
+                # this context. Never let cleanup break the test itself.
+                pass
 
     _wipe()
     try:

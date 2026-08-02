@@ -67,12 +67,28 @@ What the jail breaks
 ====================
 Worth knowing before turning it on, because these are not bugs:
 
-* **Subscription and OAuth logins stop working.** Claude Code stores its
-  login under ``~/.claude``, Codex under ``~/.codex``, opencode under
-  ``~/.local/share/opencode``. A replaced ``HOME`` means none of them
-  are found, so a jailed agent must be authenticated by API key (see
-  :data:`CODING_AGENT_ALLOW`). An operator on a Max or Pro plan with no
-  key in the environment gets an auth failure on the first turn.
+* **Subscription and OAuth logins stop working by default, but this is
+  now fixable without disabling the jail.** Claude Code stores its login
+  under ``~/.claude``, Codex under ``~/.codex``, opencode under
+  ``~/.local/share/opencode``, and a replaced ``HOME`` finds none of
+  them.
+
+  The fix is NOT to pass the operator's ``CLAUDE_CONFIG_DIR`` through:
+  that points straight back at their real config and undoes the replaced
+  HOME in one variable. Instead FERAL keeps a per-agent credential
+  directory it owns (:func:`agent_credential_root`) and points the
+  vendor variable at that. The operator logs in there once::
+
+      CLAUDE_CONFIG_DIR=~/.feral/agent-credentials/claude claude /login
+      CODEX_HOME=~/.feral/agent-credentials/codex codex login
+
+  After that a jailed agent authenticates with the subscription while
+  still being unable to read ``~/.claude``, ``~/.ssh``, ``~/.aws`` or
+  shell history. See :func:`subscription_credential_env`, and note the
+  macOS Keychain caveat documented there.
+
+  Falling back to an API key (see :data:`CODING_AGENT_ALLOW`) or a
+  long-lived ``claude setup-token`` remains supported.
 * **``git commit`` inside the agent fails on identity.** ``~/.gitconfig``
   is out of reach, so ``user.name`` and ``user.email`` are unset. That is
   arguably right, since an agent committing under the operator's name is
@@ -107,6 +123,8 @@ __all__ = [
     "EnvJail",
     "build_child_env",
     "build_coding_agent_env",
+    "agent_credential_root",
+    "subscription_credential_env",
     "env_jail",
 ]
 
@@ -276,11 +294,70 @@ def build_child_env(
     return EnvJail(env=env, home=jail_home, dropped=dropped)
 
 
+# Per-agent credential directories FERAL owns, and the variable each
+# vendor reads to find one.
+#
+# This is the answer to "the jail means I cannot use my Claude Max or
+# ChatGPT subscription". Both vendors support relocating their whole
+# config directory: Claude Code reads ``CLAUDE_CONFIG_DIR`` and Codex
+# reads ``CODEX_HOME``. The jail refuses to pass the PARENT's value
+# (see the note above CODING_AGENT_ALLOW: it points straight back at the
+# operator's real config and undoes the replaced HOME). What it can do
+# safely is point those variables at a directory FERAL owns, which the
+# operator logs into once and which holds nothing else.
+#
+# The result is strictly better than both previous options: unlike
+# ``env_jail: false`` the child still cannot read ``~/.claude``,
+# ``~/.ssh``, ``~/.aws`` or shell history, and unlike an API key the
+# operator pays with the subscription they already have.
+_AGENT_CREDENTIAL_DIRS: Final[tuple[tuple[str, str], ...]] = (
+    ("claude", "CLAUDE_CONFIG_DIR"),
+    ("codex", "CODEX_HOME"),
+)
+
+
+def agent_credential_root() -> str:
+    """Directory holding FERAL-owned per-agent credential dirs."""
+    home = os.environ.get("FERAL_HOME") or os.path.join(
+        os.path.expanduser("~"), ".feral"
+    )
+    return os.path.join(home, "agent-credentials")
+
+
+def subscription_credential_env(root: Optional[str] = None) -> dict[str, str]:
+    """Map vendor config-dir variables onto FERAL-owned directories.
+
+    Only includes a variable when its directory ALREADY EXISTS. An empty
+    directory would make the agent think it is logged out and silently
+    fall back, so absence here means "the operator never ran the login"
+    rather than "logged in with nothing", and the caller can say so.
+
+    macOS caveat, and it is the one that bites: Claude Code prefers the
+    Keychain over the file. If ``.credentials.json`` is not in the
+    directory after a login, copy it across once with::
+
+        security find-generic-password -a "$USER" \\
+            -s "Claude Code-credentials" -w > <dir>/.credentials.json
+
+    or mint a long-lived token with ``claude setup-token`` and hand that
+    to the child as ``ANTHROPIC_AUTH_TOKEN`` instead, which needs no
+    directory at all.
+    """
+    base = root or agent_credential_root()
+    out: dict[str, str] = {}
+    for agent, var in _AGENT_CREDENTIAL_DIRS:
+        path = os.path.join(base, agent)
+        if os.path.isdir(path):
+            out[var] = path
+    return out
+
+
 def build_coding_agent_env(
     *,
     allow: Iterable[str] = (),
     extra: Optional[Mapping[str, str]] = None,
     source: Optional[Mapping[str, str]] = None,
+    subscription_auth: bool = True,
 ) -> EnvJail:
     """:func:`build_child_env` plus :data:`CODING_AGENT_ALLOW`.
 
@@ -290,12 +367,23 @@ def build_coding_agent_env(
     next to the jail, and so a caller reading the spawn site can see that
     model keys travel and nothing else does.
 
+    When ``subscription_auth`` is set (the default) and the operator has
+    logged a vendor CLI into its FERAL-owned directory, that directory is
+    handed to the child so a Claude Max / ChatGPT subscription works
+    inside the jail. ``extra`` still wins, so an explicit caller override
+    is never silently replaced.
+
     Read the module docstring's "What the jail breaks" section before
     assuming an agent that worked unjailed will work here.
     """
+    merged: dict[str, str] = {}
+    if subscription_auth:
+        merged.update(subscription_credential_env())
+    if extra:
+        merged.update(extra)
     return build_child_env(
         allow=tuple(CODING_AGENT_ALLOW) + tuple(allow),
-        extra=extra,
+        extra=merged or None,
         source=source,
     )
 

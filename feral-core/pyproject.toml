@@ -431,6 +431,7 @@ markers = [
     "no_auto_feral_home: skip the autouse FERAL_HOME isolation fixture",
     "chaos: federated-sync chaos / recovery tests (W11, roadmap §3.3 #1)",    "soak: long-duration soak test (gated behind --runsoak); see W12 / roadmap §3.4 #3-4",
     "live: round-trip against live external APIs (OpenAI etc); gated by FERAL_LIVE_TESTS=1 + API key env vars; never run in CI",
+    "allow_network: test may open sockets to non-local hosts; the autouse block_outbound_network guard is skipped for it",
 ]
 # Coverage is on by default for every `pytest` run. The previous setup
 # configured [tool.coverage.*] but never forced `--cov`, so pytest-cov
