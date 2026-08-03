@@ -267,9 +267,9 @@ def _configure_local(state: WizardState, has_stt: bool, has_tts: bool, console) 
         if not has_stt:
             console.print(
                 "  [yellow]faster-whisper isn't installed.[/] Run "
-                "`pip install feral-ai[stt]` and voice input will auto-enable."
+                "`pip install feral-ai\\[stt]` and voice input will auto-enable."
                 if _RICH_AVAILABLE else
-                "  faster-whisper isn't installed. Run: pip install feral-ai[stt]"
+                "  faster-whisper isn't installed. Run: pip install feral-ai\\[stt]"
             )
 
     if is_mac:
@@ -288,9 +288,9 @@ def _configure_local(state: WizardState, has_stt: bool, has_tts: bool, console) 
     state.set_setting("audio", "tts_voice", "en_US-lessac-medium")
     if not has_tts:
         console.print(
-            "  [yellow]piper isn't installed.[/] Run `pip install feral-ai[tts]`."
+            "  [yellow]piper isn't installed.[/] Run `pip install feral-ai\\[tts]`."
             if _RICH_AVAILABLE else
-            "  piper isn't installed. Run: pip install feral-ai[tts]"
+            "  piper isn't installed. Run: pip install feral-ai\\[tts]"
         )
 
 
@@ -307,7 +307,7 @@ def _configure_provider(
     for prov in providers:
         if prov["is_local"]:
             status = STATUS_READY if local_available else STATUS_UNAVAILABLE
-            hint = "ready" if local_available else f"install feral-ai[{'stt' if kind == 'stt' else 'tts'}]"
+            hint = "ready" if local_available else f"install feral-ai\\[{'stt' if kind == 'stt' else 'tts'}]"
         else:
             status = STATUS_READY if has_openai_key else STATUS_NEEDS_KEY
             hint = prov["env"]

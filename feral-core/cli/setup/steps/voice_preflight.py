@@ -449,7 +449,7 @@ def _warn_piper_licence(console) -> None:
         "Piper is licensed GPL-3.0-or-later, while FERAL is Apache-2.0. "
         "It is not installed by default and is not pulled in by any other "
         "extra. Installing it is your explicit choice: "
-        "pip install 'feral-ai[tts-piper]'"
+        "pip install 'feral-ai\\[tts-piper]'"
     )
     console.print(f"  [yellow]{message}[/]" if _RICH_AVAILABLE else f"  {message}")
     if platform.system() == "Darwin":
@@ -497,10 +497,10 @@ async def _offer_vad_download(console) -> None:
     if "onnxruntime" in reason:
         console.print(
             "  [yellow]Voice activity detection needs onnxruntime:[/] "
-            "pip install 'feral-ai[vad]'"
+            "pip install 'feral-ai\\[vad]'"
             if _RICH_AVAILABLE else
             "  Voice activity detection needs onnxruntime: "
-            "pip install 'feral-ai[vad]'"
+            "pip install 'feral-ai\\[vad]'"
         )
         return
 
@@ -536,9 +536,9 @@ async def _offer_stt_download(
         except Exception:
             console.print(
                 "  [yellow]whisper.cpp is not installed:[/] "
-                "pip install 'feral-ai[stt-local]'"
+                "pip install 'feral-ai\\[stt-local]'"
                 if _RICH_AVAILABLE else
-                "  whisper.cpp is not installed: pip install 'feral-ai[stt-local]'"
+                "  whisper.cpp is not installed: pip install 'feral-ai\\[stt-local]'"
             )
             return
         model = state.get_setting("audio", "chained_stt_model") or "base.en"
@@ -570,9 +570,9 @@ async def _offer_stt_download(
         except Exception:
             console.print(
                 "  [yellow]faster-whisper is not installed:[/] "
-                "pip install 'feral-ai[stt]'"
+                "pip install 'feral-ai\\[stt]'"
                 if _RICH_AVAILABLE else
-                "  faster-whisper is not installed: pip install 'feral-ai[stt]'"
+                "  faster-whisper is not installed: pip install 'feral-ai\\[stt]'"
             )
             return
         # Downloads happen here, in the wizard, and nowhere else at
@@ -626,9 +626,9 @@ async def _offer_piper_download(console, state: WizardState) -> None:
         import piper  # noqa: F401
     except Exception:
         console.print(
-            "  [yellow]Piper is not installed:[/] pip install 'feral-ai[tts-piper]'"
+            "  [yellow]Piper is not installed:[/] pip install 'feral-ai\\[tts-piper]'"
             if _RICH_AVAILABLE else
-            "  Piper is not installed: pip install 'feral-ai[tts-piper]'"
+            "  Piper is not installed: pip install 'feral-ai\\[tts-piper]'"
         )
         return
     voice = state.get_setting("audio", "chained_tts_voice") or DEFAULT_VOICE
