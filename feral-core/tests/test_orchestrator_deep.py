@@ -181,8 +181,33 @@ class TestBiometricUpdate:
 
 
 class TestMultiAgent:
-    def test_multi_agent_disabled_by_default(self, orch):
-        assert orch._multi_agent_enabled is False
+    def test_multi_agent_enabled_by_default(self, orch):
+        """With no env var set, the orchestrator agrees with settings.
+
+        This used to assert False, matching a literal "false" default in
+        ``Orchestrator.__init__`` that disagreed with
+        ``DEFAULT_SETTINGS["features"]["multi_agent"] is True``. Since
+        ``export_as_env`` publishes FERAL_MULTI_AGENT=true at boot, the
+        False was only ever reachable in a process where the config
+        loader had not run, which is to say in tests like this one and
+        not on any real install. Both readers now share
+        ``config.loader.DEFAULT_MULTI_AGENT``.
+        """
+        from config.loader import DEFAULT_MULTI_AGENT
+
+        assert orch._multi_agent_enabled is DEFAULT_MULTI_AGENT
+        assert orch._multi_agent_enabled is True
+
+    def test_multi_agent_disabled_via_env(self, send, memory, monkeypatch):
+        """An explicit opt-out still wins over the shared default."""
+        monkeypatch.setenv("FERAL_MULTI_AGENT", "false")
+        reg = MagicMock()
+        reg.skills = {}
+        o = Orchestrator(
+            skill_registry=reg, send_to_client=send,
+            daemons={}, memory=memory,
+        )
+        assert o._multi_agent_enabled is False
 
     def test_multi_agent_enabled_via_env(self, send, memory, monkeypatch):
         monkeypatch.setenv("FERAL_MULTI_AGENT", "true")

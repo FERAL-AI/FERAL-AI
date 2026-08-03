@@ -290,8 +290,21 @@ class Orchestrator:
         self._auto_learn_cooldown_seconds = 3600
         self._session_finalized: set[str] = set()
 
-        # Multi-agent
-        self._multi_agent_enabled = os.environ.get("FERAL_MULTI_AGENT", "false").lower() in ("true", "1", "yes")
+        # Multi-agent. The default is NOT a literal here: it is
+        # imported from ``config.loader`` so this line and
+        # ``DEFAULT_SETTINGS["features"]["multi_agent"]`` cannot drift
+        # apart again. They did, in the opposite direction from
+        # streaming: this read defaulted to "false" (4df5fc1cc, April
+        # 2026) while the settings default was True and
+        # ``export_as_env`` published FERAL_MULTI_AGENT=true into
+        # os.environ, so whether the multi-agent branch answered a turn
+        # depended on whether the loader had run first in the process.
+        # See ``DEFAULT_MULTI_AGENT`` in config/loader.py for the full
+        # history and why ON is the resolved answer.
+        from config.loader import DEFAULT_MULTI_AGENT
+        self._multi_agent_enabled = os.environ.get(
+            "FERAL_MULTI_AGENT", str(DEFAULT_MULTI_AGENT).lower()
+        ).lower() in ("true", "1", "yes")
         self._multi_agent: Optional["MultiAgentOrchestrator"] = None
 
         # Vision config

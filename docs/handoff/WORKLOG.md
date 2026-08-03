@@ -262,6 +262,61 @@ point so a future probe cannot reintroduce it by writing a bracket in a detail
 string. The same latent bug exists in `cli/setup/steps/voice_preflight.py` and is
 NOT fixed.
 
+### Follow-ups after v2026.8.3
+
+**`FERAL_MULTI_AGENT` drift closed, and the runtime literal was the stale side.**
+The mirror image of streaming. `d447a2c87` introduced the gate defaulting
+`"true"`; `4df5fc1cc` flipped it to `"false"` reasoning that "multi-agent was
+enabled by default, bypassing all tool use"; then `c7ac82c20` added the whole
+settings side ON (`features.multi_agent: True`, exported True, dashboard
+defaulting True) and never touched the runtime literal. Disagreeing since April.
+
+Settings win at boot because `export_as_env` publishes before the orchestrator
+reads, so shipped behaviour has been ON for four months and the codebase was
+built around it: the plan-mode and approval gates added to the worker path on
+2026-08-01 were justified explicitly by "multi_agent defaults True, so this is
+the primary text chat path". The April rationale no longer describes the code.
+Now one `DEFAULT_MULTI_AGENT = True` referenced by both readers.
+
+**Blast radius:** none on a real install, since the loader already exported
+`true`. It DOES change loader-less processes (embedded use, direct unit-test
+construction) from single-agent to multi-agent, which skips `_route_prompt`
+semantic routing, `_ensure_core_skills`, mitosis routing, `_force_tool_for_query`
+and MCP tool injection on that branch.
+
+**`stream_options.include_usage` verified against the live OpenAI API.**
+`scripts/verify_stream_usage_live.py` exists for exactly this, since mocked SSE
+proves our parsing and cannot prove a vendor still honours the opt-in. One real
+call returned `prompt_tokens: 14, completion_tokens: 1, total_tokens: 15`, so
+streamed turns on the default provider genuinely bill.
+
+**Still unverified:** groq, deepseek, openrouter and anthropic, because no keys
+for them are set here. Run `python3 scripts/verify_stream_usage_live.py --all`
+with those keys present. A provider that silently ignores the opt-in reports
+nothing and FERAL records nothing rather than estimating, so a cost cap on that
+provider is advisory until checked.
+
+**`requirements.lock` was stale in both directions.** Missing `fastembed`,
+`sqlite-vec`, `py-rust-stemmers`, `mmh3`, and still pinning `piper-tts`, which
+`pyproject` deliberately keeps out of `[all]` for being GPL-3.0-or-later. So the
+lock carried a package the project intentionally excludes. Regenerated: 7 added,
+2 removed, **zero existing pins changed version**. Note for next time:
+pip-tools 7.6.0 cannot run against pip 26 (`stdlib_pkgs` was removed from
+`pip._internal.utils.compat`), so it needs a throwaway venv holding `pip<25.3`.
+
+**CI was downloading a 130MB model mid-suite.** Once `fastembed` became a core
+dependency, `importorskip("fastembed")` stopped skipping and `TestRealModel`
+began fetching the model inside the runner. It did not complete, the provider
+degraded to hash vectors, both scores came back `0.000`, and the suite went from
+under 4 minutes to **35**. Now gated on the model already being cached, with the
+download opt-in behind `FERAL_TEST_DOWNLOAD_MODELS=1`.
+
+**16 more instances of the Rich bracket bug**, in `voice_preflight`, `audio` and
+`memory` setup steps. Checked rather than assumed: the occurrences in
+`cli/main.py` outside `cmd_doctor`, in `cli/app_commands.py` and in
+`cli/memory_cmd.py` go through plain `print()`, which does not parse markup, so
+they were correct already and left alone.
+
 ### CI on main was red, and it was a real inconsistency
 
 `tests/perf/test_lane08_live_traces.py::test_trace_2_stream_nonstream_parity`

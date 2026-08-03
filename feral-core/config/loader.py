@@ -111,6 +111,54 @@ _NEVER_REEXPORT_ENV_KEYS = frozenset({
 # turn survives even where usage cannot be captured.
 DEFAULT_STREAMING = True
 
+# Single source of truth for the multi-agent default.
+#
+# Same defect as ``DEFAULT_STREAMING`` above, pointing the other way.
+# ``DEFAULT_SETTINGS`` said True and ``export_as_env`` published
+# ``FERAL_MULTI_AGENT=true`` from it, while ``Orchestrator.__init__``
+# read ``os.environ.get("FERAL_MULTI_AGENT", "false")``. So whether the
+# multi-agent path answered a turn depended on whether the config
+# loader had run first in that process. It is not a toggle when the two
+# readers disagree, it is a race.
+#
+# History. d447a2c87 (v0.9, 2026-04-03) introduced the runtime gate as
+# ``THEORA_MULTI_AGENT`` defaulting to "true", i.e. ON. 4df5fc1cc
+# (2026-04-07, "4 critical bugs found during end-to-end audit") flipped
+# that literal to "false" on the stated grounds that "multi-agent was
+# enabled by default, bypassing all tool use". Three days later
+# c7ac82c20 (v1.2.0, 2026-04-10) added the settings side, all of it ON:
+# ``features.multi_agent: True`` here, ``FERAL_MULTI_AGENT`` defaulting
+# to True in ``export_as_env``, and the dashboard toggle rendered as
+# ``config.features?.multi_agent ?? true``. It did not touch the
+# runtime literal, so the two have disagreed ever since, and the
+# settings side, which publishes into os.environ at boot, is the one
+# that wins on a real install.
+#
+# ON is the resolved answer, and the April rationale for OFF no longer
+# describes the code. ``AgentWorker`` runs a full LLM function-calling
+# tool loop (``get_tools`` -> ``llm.chat(tools=...)`` ->
+# ``SkillExecutor.execute``), and that loop was already present in
+# d447a2c87 with a ``get_tools`` byte-identical to today's, so whatever
+# the April audit hit, it was not the absence of tool calling. Since
+# then the multi-agent branch has been built out as the default path on
+# purpose: 1063b3925 (2026-08-01) routed worker tool calls through
+# ``ToolRunner.enforce_plan_mode`` and ``enforce_safety``, proven
+# against a live brain, explicitly because "features.multi_agent
+# defaults to True, so this is the primary text chat path rather than
+# an edge case"; the WS3 stream-parity block in
+# ``Orchestrator._handle_command_stream_impl`` mirrors the non-stream
+# hand-off so enabling it does not change behaviour by client; and
+# ``_pop_multi_agent_attribution`` exists only because this branch
+# returns before the single-agent loop, so on a default profile it is
+# the branch that has to report the model and token usage.
+#
+# Turning the runtime literal into this constant changes nothing on an
+# install where the loader runs (it already saw "true"). What it fixes
+# is the loader-less process, embedded and unit-test construction of
+# ``Orchestrator``, which was silently taking a different chat path
+# from production.
+DEFAULT_MULTI_AGENT = True
+
 DEFAULT_SETTINGS = {
     "version": "0.4.0",
     "llm": {
@@ -293,7 +341,10 @@ DEFAULT_SETTINGS = {
         "streaming": DEFAULT_STREAMING,
         "proactive": False,
         "self_learning": True,
-        "multi_agent": True,
+        # See ``DEFAULT_MULTI_AGENT`` above. Same rule as streaming: no
+        # literal here, because ``agents/orchestrator.py`` imports the
+        # same constant and the two disagreeing is the whole bug.
+        "multi_agent": DEFAULT_MULTI_AGENT,
     },
     "memory": {
         # Pluggable vector-store backend. One of sqlite_vec (default),
@@ -1328,7 +1379,9 @@ class ConfigLoader:
             features.get("streaming", DEFAULT_STREAMING)
         ).lower()
         env["FERAL_PROACTIVE"] = str(features.get("proactive", False)).lower()
-        env["FERAL_MULTI_AGENT"] = str(features.get("multi_agent", True)).lower()
+        env["FERAL_MULTI_AGENT"] = str(
+            features.get("multi_agent", DEFAULT_MULTI_AGENT)
+        ).lower()
         # ``agents/learner.py::_self_learning_enabled`` reads
         # ``FERAL_SELF_LEARNING`` and nothing else, defaulting to true
         # when unset. Without this export the Settings toggle only held

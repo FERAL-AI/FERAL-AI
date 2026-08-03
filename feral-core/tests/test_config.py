@@ -13,6 +13,7 @@ from config.loader import (
     feral_data_home,
     DEFAULT_SETTINGS,
     DEFAULT_STREAMING,
+    DEFAULT_MULTI_AGENT,
 )
 
 pytestmark = pytest.mark.no_auto_feral_home
@@ -306,6 +307,83 @@ class TestStreamingDefault:
 
         assert settings["features"]["streaming"] is False
         assert loader.export_as_env()["FERAL_STREAMING"] == "false"
+
+
+class TestMultiAgentDefault:
+    """One default for multi-agent, agreed on by both readers.
+
+    There used to be two, disagreeing the other way round from
+    streaming. ``DEFAULT_SETTINGS`` said True and ``export_as_env``
+    published ``FERAL_MULTI_AGENT=true`` from it, while
+    ``Orchestrator.__init__`` defaulted the same variable to "false"
+    (4df5fc1cc, 2026-04-07). So whether the multi-agent branch answered
+    a turn depended on whether the config loader had run first in that
+    process: on a real install the loader wins and the branch runs,
+    while an orchestrator built without a loader took the single-agent
+    path instead. ON is the resolved answer; see ``DEFAULT_MULTI_AGENT``
+    in config/loader.py for the evidence.
+    """
+
+    def test_settings_default_is_the_shared_constant(self):
+        assert DEFAULT_SETTINGS["features"]["multi_agent"] is DEFAULT_MULTI_AGENT
+        assert DEFAULT_MULTI_AGENT is True
+
+    def test_orchestrator_default_is_the_shared_constant(self):
+        """The runtime reader must not carry its own literal."""
+        import inspect
+
+        from agents.orchestrator import Orchestrator
+
+        source = inspect.getsource(Orchestrator.__init__)
+        assert "DEFAULT_MULTI_AGENT" in source, (
+            "Orchestrator.__init__ must take the multi-agent default from "
+            "config.loader.DEFAULT_MULTI_AGENT, not from a literal."
+        )
+        assert 'os.environ.get("FERAL_MULTI_AGENT", "false")' not in source, (
+            "The 'false' literal is back. It disagrees with "
+            "DEFAULT_SETTINGS['features']['multi_agent']."
+        )
+
+    def test_fresh_home_publishes_multi_agent_on(self, temp_dirs):
+        """No settings.json anywhere: the exported env says on."""
+        tmp_path, user_home, _ = temp_dirs
+
+        loader = ConfigLoader(project_dir=str(tmp_path / "my-project"))
+        loader.user_home = user_home
+        settings = loader.discover()
+
+        assert settings["features"]["multi_agent"] is True
+        assert loader.export_as_env()["FERAL_MULTI_AGENT"] == "true"
+
+    def test_operator_override_still_wins(self, temp_dirs, monkeypatch):
+        """``FERAL_MULTI_AGENT=false`` survives the round trip.
+
+        Env lands in ``features.multi_agent`` via ``_apply_env_overrides``
+        and ``export_as_env`` publishes it straight back, so an operator
+        shell export is not quietly re-enabled by the shared default.
+        """
+        tmp_path, user_home, _ = temp_dirs
+        monkeypatch.setenv("FERAL_MULTI_AGENT", "false")
+
+        loader = ConfigLoader(project_dir=str(tmp_path / "my-project"))
+        loader.user_home = user_home
+        settings = loader.discover()
+
+        assert settings["features"]["multi_agent"] is False
+        assert loader.export_as_env()["FERAL_MULTI_AGENT"] == "false"
+
+    def test_settings_file_can_turn_it_off(self, temp_dirs):
+        tmp_path, user_home, _ = temp_dirs
+        (user_home / "settings.json").write_text(
+            json.dumps({"features": {"multi_agent": False}})
+        )
+
+        loader = ConfigLoader(project_dir=str(tmp_path / "my-project"))
+        loader.user_home = user_home
+        settings = loader.discover()
+
+        assert settings["features"]["multi_agent"] is False
+        assert loader.export_as_env()["FERAL_MULTI_AGENT"] == "false"
 
 
 class TestXDGPaths:
