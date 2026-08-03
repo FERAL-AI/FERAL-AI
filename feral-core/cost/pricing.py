@@ -13,6 +13,40 @@ Catalog reconciliation is part of the build: each entry in
 ``__needs_verification__`` so a follow-up PR can either confirm or
 flag the divergence. See findings/13-llm-core.md fix #4 + the
 "pricing reconciliation" table in the  LLM router PR body.
+
+Prompt-cache rates
+------------------
+Anthropic bills the two prompt-cache token classes separately from
+ordinary input tokens, and at different rates:
+
+===================  ====================================  ==========
+usage field          what it is                            rate
+===================  ====================================  ==========
+cache_creation_...   tokens WRITTEN to the cache           1.25x input (5m TTL)
+                                                           2x input (1h TTL)
+cache_read_...       tokens SERVED from the cache          0.1x input
+===================  ====================================  ==========
+
+Source (fetched 2026-08-03):
+https://platform.claude.com/docs/en/about-claude/pricing#prompt-caching
+The per-model dollar figures behind those multipliers are on the same
+page under "Model pricing", and they are what
+``providers/model_catalog.json`` carries verbatim as the per-model
+``cache_write`` / ``cache_read`` keys ($/1k, same units as
+``input`` / ``output``).
+
+``cache_write`` is the **5-minute** write rate. FERAL never sends
+``cache_control.ttl``, so the only cache writes it can incur are the
+5-minute kind; billing them at the 1h rate would over-charge by 60%.
+
+These rates are OPTIONAL per model. A model whose catalog entry has no
+``cache_write`` / ``cache_read`` keeps the pre-existing behaviour: its
+cache tokens are simply not billed. That is deliberate. Folding cache
+tokens into the plain prompt count would bill a cache READ at 10x its
+real price, which is a worse error than under-counting, and inventing a
+multiplier for a provider that does not publish one (OpenAI's cached
+input discount is a different shape entirely, and it has no write
+charge at all) would be a fabricated number in a cost gate.
 """
 
 from __future__ import annotations
@@ -93,7 +127,25 @@ def _merge_pricing_blob(target: dict[str, dict[str, float]], pricing: dict[str, 
             out = float(rates.get("output", 0.0))
         except (TypeError, ValueError):
             continue
-        target[model_id] = {"input": inp, "output": out}
+        entry: dict[str, float] = {"input": inp, "output": out}
+        # Prompt-cache rates are optional (see the module docstring). A
+        # missing / malformed / negative value is DROPPED rather than
+        # defaulted to 0.0 or to the input rate: absence has to stay
+        # distinguishable from "free", because ``compute_token_cost``
+        # keys "don't bill this class of token" off the key not being
+        # there. A 0.0 default would silently declare cache reads free.
+        for cache_key in ("cache_write", "cache_read"):
+            raw = rates.get(cache_key)
+            if raw is None:
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if value < 0.0:
+                continue
+            entry[cache_key] = value
+        target[model_id] = entry
         norm = _normalize_model_id(model_id)
         target.setdefault(norm, target[model_id])
 
@@ -155,6 +207,8 @@ def compute_token_cost(
     prompt_tokens: int,
     completion_tokens: int,
     reasoning_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    cache_read_tokens: int = 0,
 ) -> tuple[float, dict[str, float]]:
     """Return total USD and the per-1k rates used.
 
@@ -164,6 +218,14 @@ def compute_token_cost(
     the same per-1k rate as visible output tokens.  the budget
     estimator never read this field — see findings/13-llm-core.md
     fix #5 + audit-r13 05-token-billing-leakage.
+
+    ``cache_write_tokens`` / ``cache_read_tokens`` are Anthropic's
+    ``usage.cache_creation_input_tokens`` /
+    ``usage.cache_read_input_tokens``. They are billed at their own
+    per-model rates (module docstring), and only when the model
+    actually has those rates: for a model with no published cache rate
+    they contribute $0 rather than a guess. Both default to 0, so
+    every existing caller is unaffected.
     """
     rates = pricing.lookup(model)
     prompt = max(0, int(prompt_tokens))
@@ -171,7 +233,71 @@ def compute_token_cost(
     reasoning = max(0, int(reasoning_tokens))
     input_dollars = (prompt / 1000.0) * rates["input"]
     output_dollars = ((completion + reasoning) / 1000.0) * rates["output"]
-    return input_dollars + output_dollars, rates
+    cache_dollars = cache_token_cost(rates, cache_write_tokens, cache_read_tokens)
+    return input_dollars + output_dollars + cache_dollars, rates
+
+
+def cache_token_cost(
+    rates: dict[str, float],
+    cache_write_tokens: int = 0,
+    cache_read_tokens: int = 0,
+) -> float:
+    """USD for a turn's prompt-cache tokens, given already-looked-up *rates*.
+
+    Returns 0.0 when the model carries no cache rates, which is the
+    documented "leave them unbilled" fallback rather than an assertion
+    that they were free.
+    """
+    write = max(0, int(cache_write_tokens or 0))
+    read = max(0, int(cache_read_tokens or 0))
+    dollars = 0.0
+    if write and rates.get("cache_write") is not None:
+        dollars += (write / 1000.0) * float(rates["cache_write"])
+    if read and rates.get("cache_read") is not None:
+        dollars += (read / 1000.0) * float(rates["cache_read"])
+    return dollars
+
+
+def cache_equivalent_prompt_tokens(
+    model: str,
+    cache_write_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    pricing: ModelPricing | None = None,
+) -> int:
+    """How many *base-input-rate* tokens cost the same as this turn's
+    prompt-cache tokens.
+
+    This is the adapter that lets a caller bill cache tokens through a
+    ledger whose only input-side column is a plain prompt-token count
+    (``cost.budget.record_usage``) without either under-charging (drop
+    them, the pre-existing bug) or over-charging (add them raw, which
+    would bill a cache READ at 10x its real price).
+
+    ``dollars(prompt + equivalent) == dollars(prompt) + dollars(cache)``
+    by construction, so the cap moves by exactly the right amount. The
+    ``round`` is worth at most half a token, well under a hundredth of a
+    cent at any published rate, and it is the only place precision is
+    lost.
+
+    Returns 0 (meaning "bill nothing extra") when the model has no
+    cache rates or no usable base input rate. Never raises: a pricing
+    miss must not be able to take down a chat turn.
+    """
+    try:
+        table = pricing if pricing is not None else get_shared_pricing()
+        rates = table.lookup(model)
+        base_input = float(rates.get("input") or 0.0)
+        if base_input <= 0.0:
+            # No base rate to express the equivalence against (a
+            # catalog entry of 0.0, or a lookup that produced nothing).
+            return 0
+        dollars = cache_token_cost(rates, cache_write_tokens, cache_read_tokens)
+        if dollars <= 0.0:
+            return 0
+        return int(round(dollars / base_input * 1000.0))
+    except Exception as exc:
+        logger.debug("cache_equivalent_prompt_tokens(%r) failed: %s", model, exc)
+        return 0
 
 
 # ─────────────────────────────────────────────────────────────────────

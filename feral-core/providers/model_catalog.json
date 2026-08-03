@@ -270,78 +270,100 @@
       "pricing": {
         "_pricing_meta": {
           "source": "https://platform.claude.com/docs/en/pricing",
-          "reconciled_at": "2026-07-30",
-          "notes": "claude-sonnet-5 is on introductory pricing ($2/$10 per 1M) which rises to $3/$15 on 2026-09-01 \u2014 see the `scheduled` block on that entry. cache_read is the prompt-cache read rate; cost/pricing.py ignores keys other than input/output."
+          "reconciled_at": "2026-08-03",
+          "notes": "claude-sonnet-5 is on introductory pricing ($2/$10 per 1M) which rises to $3/$15 on 2026-09-01, see the `scheduled` block on that entry. cache_write / cache_read are the prompt-cache rates in $/1k, copied from the published per-model table at https://platform.claude.com/docs/en/about-claude/pricing#model-pricing (5m cache write = 1.25x base input, 1h cache write = 2x, cache read = 0.1x). cache_write is the 5-MINUTE write rate: FERAL never sends cache_control.ttl, so every cache write it can incur is the 5m kind. cost/pricing.py reads input/output/cache_write/cache_read and ignores every other key; a model with no cache_* rate has its cache tokens left unbilled rather than billed at a guessed rate."
         },
         "claude-fable-5": {
           "input": 0.01,
-          "output": 0.05
+          "output": 0.05,
+          "cache_write": 0.0125,
+          "cache_read": 0.001
         },
         "claude-opus-5": {
           "input": 0.005,
           "output": 0.025,
+          "cache_write": 0.00625,
           "cache_read": 0.0005
         },
         "claude-sonnet-5": {
           "input": 0.002,
           "output": 0.01,
+          "cache_write": 0.0025,
           "cache_read": 0.0002,
           "intro_pricing": true,
           "scheduled": {
             "effective_from": "2026-09-01",
             "input": 0.003,
-            "output": 0.015
+            "output": 0.015,
+            "cache_write": 0.00375,
+            "cache_read": 0.0003
           }
         },
         "claude-opus-4-8": {
           "input": 0.005,
           "output": 0.025,
+          "cache_write": 0.00625,
           "cache_read": 0.0005
         },
         "claude-opus-4-7": {
           "input": 0.005,
           "output": 0.025,
+          "cache_write": 0.00625,
           "cache_read": 0.0005
         },
         "claude-opus-4-6": {
           "input": 0.005,
           "output": 0.025,
+          "cache_write": 0.00625,
           "cache_read": 0.0005
         },
         "claude-sonnet-4-6": {
           "input": 0.003,
           "output": 0.015,
-          "cache_read": 0.0002
+          "cache_write": 0.00375,
+          "cache_read": 0.0003
         },
         "claude-haiku-4-5": {
           "input": 0.001,
           "output": 0.005,
+          "cache_write": 0.00125,
           "cache_read": 0.0001
         },
         "claude-haiku-4-5-20251001": {
           "input": 0.001,
           "output": 0.005,
+          "cache_write": 0.00125,
           "cache_read": 0.0001
         },
         "claude-opus-4-5": {
           "input": 0.005,
-          "output": 0.025
+          "output": 0.025,
+          "cache_write": 0.00625,
+          "cache_read": 0.0005
         },
         "claude-opus-4-5-20251101": {
           "input": 0.005,
-          "output": 0.025
+          "output": 0.025,
+          "cache_write": 0.00625,
+          "cache_read": 0.0005
         },
         "claude-sonnet-4-5": {
           "input": 0.003,
-          "output": 0.015
+          "output": 0.015,
+          "cache_write": 0.00375,
+          "cache_read": 0.0003
         },
         "claude-sonnet-4-5-20250929": {
           "input": 0.003,
-          "output": 0.015
+          "output": 0.015,
+          "cache_write": 0.00375,
+          "cache_read": 0.0003
         },
         "claude-opus-4-1-20250805": {
           "input": 0.015,
-          "output": 0.075
+          "output": 0.075,
+          "cache_write": 0.01875,
+          "cache_read": 0.0015
         }
       },
       "auth": {

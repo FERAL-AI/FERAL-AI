@@ -1208,7 +1208,19 @@ class LLMProvider:
             if tool_calls:
                 msg["tool_calls"] = tool_calls
 
-            return {"choices": [{"message": msg, "finish_reason": data.get("stop_reason", "end_turn")}]}
+            out: dict = {
+                "choices": [
+                    {"message": msg, "finish_reason": data.get("stop_reason", "end_turn")},
+                ],
+            }
+            # Carry ``usage`` (input/output AND the two prompt-cache
+            # counters) so ``_budget_record`` has something to bill.
+            # Dropping it here is why non-streamed Anthropic turns used
+            # to move the cap by exactly $0.
+            usage = self._anthropic_usage_block(data)
+            if usage is not None:
+                out["usage"] = usage
+            return out
         except httpx.HTTPStatusError as e:
             detail = _describe_http_status_error(e)
             logger.error("Anthropic API error: %s", detail)
@@ -2690,6 +2702,13 @@ class LLMProvider:
         # response grows. Neither event alone can bill a turn.
         usage_input = 0
         usage_output = 0
+        # Prompt-cache tokens ride the SAME ``message_start`` usage
+        # block as ``input_tokens``, as two sibling fields, and are
+        # NOT included in it. They are billed at their own rates now
+        # that ``cost/pricing.py`` carries them; previously they were
+        # dropped, so a cache-heavy streamed turn under-counted spend.
+        usage_cache_write = 0
+        usage_cache_read = 0
         saw_usage = False
         billed = False
         answering_model = ""
@@ -2702,12 +2721,10 @@ class LLMProvider:
             no usage at all we record nothing rather than invent a
             number: there is no estimator here to reuse.
 
-            Note the ``cache_creation_input_tokens`` /
-            ``cache_read_input_tokens`` fields are deliberately NOT
-            folded into the prompt count. ``cost/pricing.py`` has no
-            cache rates, so adding them would bill cache reads at the
-            full input rate. This matches what the non-stream Anthropic
-            path already does, so stream and non-stream agree.
+            The usage dict handed to ``_budget_record`` is the same
+            shape the non-stream Anthropic path now returns, cache
+            fields included, so both routes go through one billing
+            implementation and a turn costs the same either way.
             """
             nonlocal billed
             if billed or not saw_usage:
@@ -2719,8 +2736,44 @@ class LLMProvider:
                 {"usage": {
                     "input_tokens": usage_input,
                     "output_tokens": usage_output,
+                    "cache_creation_input_tokens": usage_cache_write,
+                    "cache_read_input_tokens": usage_cache_read,
                 }},
             )
+
+        def _absorb_cache_usage(block: dict) -> None:
+            """Take the cache counters off an Anthropic usage block.
+
+            Both ``message_start`` and ``message_delta`` are fed
+            through here: the prompt-cache counters are settled when
+            the prompt is processed, so ``message_start`` normally
+            carries them, but a ``message_delta`` that repeats them
+            must not be allowed to reset them to 0 either. Hence the
+            LAST non-zero value wins rather than the last value.
+
+            Reading these does not set ``saw_usage``: cache counters
+            alone are not enough to bill a turn, and a stream that
+            reported nothing else must stay unrecorded rather than be
+            billed as a zero-input turn.
+            """
+            nonlocal usage_cache_write, usage_cache_read
+            for key, is_write in (
+                ("cache_creation_input_tokens", True),
+                ("cache_read_input_tokens", False),
+            ):
+                raw = block.get(key)
+                if raw is None:
+                    continue
+                try:
+                    value = max(0, int(raw))
+                except (TypeError, ValueError):
+                    continue
+                if not value:
+                    continue
+                if is_write:
+                    usage_cache_write = value
+                else:
+                    usage_cache_read = value
 
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
@@ -2779,6 +2832,9 @@ class LLMProvider:
                                         saw_usage = True
                                     except (TypeError, ValueError):
                                         pass
+                                # Prompt-cache counters land here, as
+                                # siblings of ``input_tokens``.
+                                _absorb_cache_usage(_u)
                             if _msg.get("model"):
                                 # Bill the model that ANSWERED, which
                                 # can differ from the configured alias
@@ -2831,6 +2887,9 @@ class LLMProvider:
                                         saw_usage = True
                                     except (TypeError, ValueError):
                                         pass
+                                # Same for the cache counters when a
+                                # deployment reports them here instead.
+                                _absorb_cache_usage(_u)
 
                         elif event_type == "message_stop":
                             await _record_anthropic_usage()
@@ -3604,6 +3663,38 @@ class LLMProvider:
         except (TypeError, ValueError):
             return (0, 0, 0)
 
+    @staticmethod
+    def _extract_cache_usage(result: Any) -> tuple[int, int]:
+        """Pull ``(cache_write_tokens, cache_read_tokens)`` from a response.
+
+        These are Anthropic's ``usage.cache_creation_input_tokens`` and
+        ``usage.cache_read_input_tokens``. They are reported ALONGSIDE
+        ``input_tokens``, never inside it: a turn that reads 20k tokens
+        from the cache and sends 500 fresh ones reports
+        ``input_tokens=500``. So ``_extract_usage`` alone under-counts a
+        cache-heavy turn, which is why this exists as a separate read
+        rather than being folded into the prompt count there.
+
+        Kept OUT of ``_extract_usage`` on purpose: that helper's
+        3-tuple shape is pinned by tests and read by several call
+        sites, and cache tokens must not be billed at the plain input
+        rate anyway (see ``cost/pricing.py``).
+
+        Returns ``(0, 0)`` for every provider that does not report these
+        fields, which is every provider except Anthropic today.
+        """
+        if not isinstance(result, dict):
+            return (0, 0)
+        usage = result.get("usage")
+        if not isinstance(usage, dict):
+            return (0, 0)
+        try:
+            write = int(usage.get("cache_creation_input_tokens") or 0)
+            read = int(usage.get("cache_read_input_tokens") or 0)
+        except (TypeError, ValueError):
+            return (0, 0)
+        return (max(0, write), max(0, read))
+
     def _budget_exceeded_response(self, exc: Any) -> dict:
         """Build the structured ``BudgetExceeded`` response shape.
 
@@ -3686,12 +3777,57 @@ class LLMProvider:
         model: str,
         result: Any,
     ) -> None:
-        """Best-effort post-call usage recording. Never raises."""
+        """Best-effort post-call usage recording. Never raises.
+
+        Prompt-cache tokens
+        -------------------
+        Anthropic reports ``cache_creation_input_tokens`` (written) and
+        ``cache_read_input_tokens`` (served) separately from
+        ``input_tokens``, and bills them at their own rates: a write
+        costs 1.25x the base input rate, a read 0.1x (see
+        ``cost/pricing.py`` for the source URL). They used to be dropped
+        entirely, so a cache-heavy turn under-counted spend and a
+        configured cap tripped later than it should.
+
+        They are converted here into the number of base-input-rate
+        tokens that costs the same money
+        (``cost.pricing.cache_equivalent_prompt_tokens``) and added to
+        the prompt count, because ``CostBudget.record_usage`` bills off
+        a plain prompt/completion/reasoning triple and has no cache
+        columns. The dollars land exactly right; the caveat is that
+        ``cost_events.prompt_tokens`` is then a BILLING-EQUIVALENT
+        count, not the raw wire number. Adding the raw cache tokens
+        instead would bill a cache read at 10x its real price, which is
+        the error this replaced, in the other direction.
+
+        The conversion is a pure pricing lookup and returns 0 for any
+        model with no published cache rate, so a catalog miss degrades
+        to the old behaviour rather than to a wrong number, and the
+        whole body stays inside the existing try so it can never take
+        down a chat turn.
+        """
         budget = getattr(self, "_cost_budget", None)
         if budget is None:
             return
         try:
             prompt, completion, reasoning = self._extract_usage(result)
+            cache_write, cache_read = self._extract_cache_usage(result)
+            if cache_write or cache_read:
+                # Own try: a pricing failure must cost us the cache
+                # SURCHARGE only, not the whole turn's billing. Falling
+                # through to record_usage with the unmodified prompt
+                # count reproduces the old behaviour, which is the right
+                # degradation target.
+                try:
+                    from cost.pricing import cache_equivalent_prompt_tokens
+                    prompt += cache_equivalent_prompt_tokens(
+                        model, cache_write, cache_read,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "cache-token pricing failed for %s (non-fatal): %s",
+                        model, exc,
+                    )
             await budget.record_usage(
                 call_site=call_site,
                 model=model,
@@ -3884,6 +4020,45 @@ class LLMProvider:
         self._catalog = catalog
 
     @staticmethod
+    def _anthropic_usage_block(data: Any) -> Optional[dict]:
+        """Lift ``usage`` off a raw Anthropic Messages response.
+
+        The non-stream Anthropic normalisers used to return only
+        ``{"choices": [...]}``, dropping ``usage`` on the floor, so
+        ``_budget_record`` saw ``(0, 0, 0)`` and a NON-streamed
+        Anthropic turn billed nothing at all, not just its cache
+        tokens, its input and output tokens too. Carrying the block
+        through is what makes "a turn costs the same whether or not it
+        streamed" true, since the stream route already bills off the
+        same four fields.
+
+        Returns ``None`` when the response carries no usable usage, so
+        the caller can leave the key off entirely and ``_extract_usage``
+        keeps distinguishing "provider sent nothing" from "provider sent
+        zeros".
+        """
+        if not isinstance(data, dict):
+            return None
+        raw = data.get("usage")
+        if not isinstance(raw, dict):
+            return None
+        block: dict = {}
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        ):
+            value = raw.get(key)
+            if value is None:
+                continue
+            try:
+                block[key] = max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+        return block or None
+
+    @staticmethod
     def _normalize_anthropic_response(data: dict) -> dict:
         """Convert raw Anthropic Messages API response to OpenAI-shaped dict."""
         text_parts: list[str] = []
@@ -3903,7 +4078,15 @@ class LLMProvider:
         msg: dict = {"role": "assistant", "content": "\n".join(text_parts)}
         if tool_calls:
             msg["tool_calls"] = tool_calls
-        return {"choices": [{"message": msg, "finish_reason": data.get("stop_reason", "end_turn")}]}
+        out: dict = {
+            "choices": [
+                {"message": msg, "finish_reason": data.get("stop_reason", "end_turn")},
+            ],
+        }
+        usage = LLMProvider._anthropic_usage_block(data)
+        if usage is not None:
+            out["usage"] = usage
+        return out
 
     def _get_provider_config(self, provider_name: str) -> dict:
         """Resolve base_url / api_key / model for a named provider.

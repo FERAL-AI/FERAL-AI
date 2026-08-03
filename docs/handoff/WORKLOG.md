@@ -296,6 +296,44 @@ with those keys present. A provider that silently ignores the opt-in reports
 nothing and FERAL records nothing rather than estimating, so a cost cap on that
 provider is advisory until checked.
 
+**Anthropic prompt-cache tokens are billed, and a much larger bug turned up
+underneath.** The cache gap was real: writes cost 1.25x base input and reads
+0.1x (5-minute TTL, per
+`https://platform.claude.com/docs/en/about-claude/pricing`), and neither was
+counted, so a cache-heavy turn under-counted by **5x** on a representative shape
+($0.015 recorded against $0.075 actual).
+
+Only the 5-minute write rate is stored. FERAL never sends `cache_control.ttl`
+anywhere, so the 1-hour rate is unreachable and billing at its 2x would
+over-charge by 60%. If that ever changes, the 1h writes will under-bill.
+
+**The larger find: non-streaming Anthropic turns were billing $0 for
+everything**, input and output included, not just cache.
+`_normalize_anthropic_response` never emitted a `usage` key at all (verified
+against HEAD: the function does not contain the word), so `_budget_record`
+received nothing on every non-streamed Anthropic call. Both normalizers now
+carry a usage block through.
+
+Also corrected: `claude-sonnet-4-6` carried Sonnet **5**'s introductory cache-read
+rate. All 15 Anthropic catalog entries now re-derive exactly from the published
+multipliers, checked independently.
+
+**Not billing cache tokens, named:** every non-Anthropic provider (OpenAI's
+cached-input discount is a different shape, no write charge and a different read
+ratio, and was not invented), unknown models falling through to the pricing
+fallback, and 1-hour-TTL writes if they are ever sent.
+
+**Caveat worth knowing:** `cost_events` has no cache columns, so cache tokens are
+folded in as dollar-equivalent base-input tokens. The dollars are exact but
+`cost_events.prompt_tokens` is now a billing-equivalent count rather than the raw
+wire number. Confirmed nothing outside tests SELECTs that column. A faithful
+token-level record needs a `record_usage` signature change and a schema
+migration in `cost/budget.py`.
+
+**Still unverified:** no live Anthropic call was made, so the assumed shape of
+`cache_creation_input_tokens` / `cache_read_input_tokens` on `message_start`, and
+reconciliation against a real invoice line, remain open.
+
 **`requirements.lock` was stale in both directions.** Missing `fastembed`,
 `sqlite-vec`, `py-rust-stemmers`, `mmh3`, and still pinning `piper-tts`, which
 `pyproject` deliberately keeps out of `[all]` for being GPL-3.0-or-later. So the
