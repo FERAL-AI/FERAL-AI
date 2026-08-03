@@ -40,7 +40,7 @@ usually a sign the brain is missing a frame.
 ## The protocol, and the only rule that matters
 
 `models/protocol.py` is authoritative. `MESSAGE_TYPES` is the complete
-list of frame names and their payload models. As of v1.3.0 there are 51,
+list of frame names and their payload models. As of v1.3.0 there are 53,
 including the ones you already decode plus `health_update`,
 `sensor_telemetry`, `sensor_batch`, `glasses_status`, `vision_frame`,
 `permission_request`, `refusal` and `budget_exceeded`.
