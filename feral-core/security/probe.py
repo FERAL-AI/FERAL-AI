@@ -718,14 +718,27 @@ async def _probe_telegram(*, vault=None, **_kwargs: Any) -> ProbeResult:
     )
 
 
-@register_probe("slack")
 def _slack_body_error(body: Any) -> Optional[str]:
-    """Slack reports auth failures in a 200 body, not in the status."""
+    """Slack reports auth failures in a 200 body, not in the status.
+
+    Not a probe. ``@register_probe("slack")`` used to sit on this
+    function instead of on ``_probe_slack`` below, so the registry
+    called this body parser with the probe signature and every sweep
+    logged:
+
+        probe_status.refresh(slack) raised: _slack_body_error() got an
+        unexpected keyword argument 'vault'
+
+    Two consequences, and the quiet one was worse: the warning repeated
+    on every sweep, and the real Slack probe was never registered at
+    all, so Slack connectivity was never actually checked.
+    """
     if isinstance(body, dict) and body.get("ok") is False:
         return f"slack: {body.get('error') or 'auth.test reported ok=false'}"
     return None
 
 
+@register_probe("slack")
 async def _probe_slack(*, vault=None, **_kwargs: Any) -> ProbeResult:
     token = _resolve_env_or_vault(vault, ("FERAL_SLACK_BOT_TOKEN",))
     headers = {"Authorization": f"Bearer {token}"} if token else None
