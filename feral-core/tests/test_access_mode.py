@@ -171,9 +171,18 @@ class TestRepairContradiction:
         """No churn on the common path: defaults already agree."""
         assert repair_contradiction(_FakeConfig()) is None
 
-    def test_intent_wins_over_mechanism(self):
-        """Someone who chose LAN meant to pair over WiFi. Fix the bind,
-        do not silently demote them to localhost."""
+    def test_repair_never_widens_exposure(self):
+        """The demotion direction, and why it is not the intuitive one.
+
+        `local` + `127.0.0.1` is precisely what the old "Same WiFi"
+        button produced, so a large number of installs hold it while
+        listening on loopback only. Honouring the mode would bind every
+        interface on the next boot, on machines whose owners know this
+        state only as "the thing that didn't work" and who may be on a
+        café or hotel network. Opening a listener is an operator
+        decision; it does not happen inside discover(), which also runs
+        from `feral doctor`.
+        """
         cfg = _FakeConfig({
             "access": {"pairing_mode": "local"},
             "network": {"bind_host": "127.0.0.1"},
@@ -181,8 +190,29 @@ class TestRepairContradiction:
         result = repair_contradiction(cfg)
 
         assert result is not None
-        assert cfg.data["access"]["pairing_mode"] == "local"
-        assert cfg.data["network"]["bind_host"] == "0.0.0.0"
+        assert cfg.data["access"]["pairing_mode"] == "localhost"
+        assert cfg.data["network"]["bind_host"] == "127.0.0.1"
+
+    def test_repair_still_narrows_a_too_open_bind(self):
+        """Narrowing is safe, so it happens without ceremony."""
+        cfg = _FakeConfig({
+            "access": {"pairing_mode": "localhost"},
+            "network": {"bind_host": "0.0.0.0"},
+        })
+        result = repair_contradiction(cfg)
+
+        assert result is not None
+        assert cfg.data["access"]["pairing_mode"] == "localhost"
+        assert cfg.data["network"]["bind_host"] == "127.0.0.1"
+
+    def test_upgrading_a_loopback_install_does_not_open_a_port(self):
+        """The regression this guards is a security one, not a UX one."""
+        cfg = _FakeConfig({
+            "access": {"pairing_mode": "local"},
+            "network": {"bind_host": "127.0.0.1"},
+        })
+        repair_contradiction(cfg)
+        assert cfg.data["network"]["bind_host"] not in ("0.0.0.0", "::")
 
     def test_is_idempotent(self):
         cfg = _FakeConfig({
@@ -298,12 +328,15 @@ class TestBootRepairThroughConfigLoader:
         cfg.discover()
 
         on_disk = json.loads((home / "settings.json").read_text())
-        assert on_disk["network"]["bind_host"] == "0.0.0.0"
-        assert on_disk["access"]["pairing_mode"] == "local"
+        # Healed by demotion, not by opening the listener. discover()
+        # also runs from `feral doctor`, and neither is a place to widen
+        # a brain's network exposure on the operator's behalf.
+        assert on_disk["network"]["bind_host"] == "127.0.0.1"
+        assert on_disk["access"]["pairing_mode"] == "localhost"
         # Unrelated keys are untouched.
         assert on_disk["network"]["port"] == 9090
-        assert current_mode(cfg) is AccessMode.LAN
-        assert configured_bind_host(cfg) == "0.0.0.0"
+        assert current_mode(cfg) is AccessMode.LOCALHOST
+        assert configured_bind_host(cfg) == "127.0.0.1"
 
     def test_env_mirror_keeps_the_settings_write_from_being_shadowed(
         self, tmp_path, monkeypatch

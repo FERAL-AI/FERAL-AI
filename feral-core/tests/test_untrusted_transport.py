@@ -159,3 +159,59 @@ def test_session_socket_requires_a_token_over_an_untrusted_transport(apps):
             ws.send_json({"type": "chat", "text": "hello"})
             ws.receive_json()
     assert excinfo.value.code == 4001
+
+
+# ── The boundary must have no holes ────────────────────────────────
+
+
+def test_local_key_endpoint_is_refused_over_an_untrusted_transport(apps):
+    """The master API key must not be reachable through a tunnel.
+
+    /api/auth/local-key is in _OPEN_PATHS, so APIKeyMiddleware returns
+    before the transport check that guards every other loopback bypass.
+    Its own gate is therefore the only thing in front of the key, and
+    the key satisfies every check this whole boundary exists to enforce:
+    with it, an attacker gets the dashboard, /v1/session, and the power
+    to mint pairing tokens. One request would defeat the control.
+
+    Asserts only the untrusted side. Whether the trusted client gets the
+    key depends on conftest's ``is_localhost`` patch, which other tests
+    legitimately tighten, and that is not the claim being made here.
+    """
+    _, untrusted = apps
+
+    r = untrusted.get("/api/auth/local-key")
+    assert r.status_code == 403, r.text
+    assert "api_key" not in r.text
+
+
+def test_no_open_path_self_gates_on_loopback_without_the_transport_check():
+    """Structural guard so the next such route cannot drift out.
+
+    A route in _OPEN_PATHS bypasses the middleware entirely, so any of
+    them that makes its own trust decision has to consult
+    transport_is_trusted itself. Nothing else will do it for them.
+    """
+    import inspect
+    import re
+
+    from api import server as server_mod
+
+    offenders = []
+    for module_name in ("auth", "devices", "config", "access"):
+        try:
+            mod = __import__(f"api.routes.{module_name}", fromlist=["*"])
+        except Exception:
+            continue
+        src = inspect.getsource(mod)
+        for match in re.finditer(r"is_localhost\(", src):
+            window = src[max(0, match.start() - 400):match.start() + 400]
+            if "transport_is_trusted" not in window:
+                offenders.append(f"api/routes/{module_name}.py")
+
+    assert not offenders, (
+        "These modules gate on is_localhost without consulting "
+        f"transport_is_trusted: {sorted(set(offenders))}. A loopback check "
+        "alone is not evidence of trust; a tunnel terminates locally."
+    )
+    assert server_mod is not None

@@ -14,7 +14,7 @@ import logging
 from fastapi import APIRouter, Request, Response
 
 from api.keys import load_api_key
-from security.session_auth import is_localhost
+from security.session_auth import is_localhost, transport_is_trusted
 
 logger = logging.getLogger("feral.api.auth")
 
@@ -22,11 +22,19 @@ router = APIRouter()
 
 
 def _client_host(request: Request) -> str:
+    """The peer address, or "" when there is no peer to speak of.
+
+    Deliberately does not fall back to ``X-Forwarded-For``. This value
+    feeds the trust decision on the one endpoint that returns the master
+    API key, and that header is written by the client. An absent
+    ``request.client`` must read as "unknown", which
+    :func:`is_localhost` rejects, rather than as whatever the caller
+    claimed.
+    """
     client = request.client
     if client and client.host:
         return client.host
-    fwd = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-    return fwd or ""
+    return ""
 
 
 @router.get("/api/auth/local-key")
@@ -37,8 +45,15 @@ async def get_local_api_key(request: Request) -> Response:
     ``localStorage.feral_api_key`` on first load without the user having
     to open a terminal and copy the file.
     """
+    # Both halves matter. This path is in ``_OPEN_PATHS``, so
+    # ``APIKeyMiddleware`` returns before it reaches the transport check
+    # that guards every other loopback bypass, and this gate is the only
+    # thing standing in front of the master API key. A tunnel terminates
+    # on this machine and presents as 127.0.0.1, so loopback alone would
+    # hand the key to whoever is on the far end, and that key satisfies
+    # every check the untrusted transport exists to enforce.
     host = _client_host(request)
-    if not is_localhost(host):
+    if not (transport_is_trusted(request.scope) and is_localhost(host)):
         return Response(
             content='{"error": "local-only endpoint"}',
             status_code=403,

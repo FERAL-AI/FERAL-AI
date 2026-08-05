@@ -153,10 +153,12 @@ def apply_mode(config, mode: object) -> AccessModeResult:
     CLI helper wrote the JSON file directly, which left a running brain
     answering with a stale mode while the file said something else.
 
-    Does **not** touch ``os.environ``. The previous code set
-    ``FERAL_BIND_HOST`` here, which only ever affected the calling
-    process (useless for a detached service) and destroyed the one signal
-    we have for what the running brain actually bound.
+    Mirrors the derived bind host into ``FERAL_BIND_HOST`` because
+    ``brain_bind_host()`` ranks that variable above the settings file;
+    see the comment at the write site. It is only a mirror of intent.
+    What the running listener actually bound is answered by
+    ``config.runtime.bound_host()``, recorded at bind time and unaffected
+    by this call.
     """
     target = parse_strict(mode)
     previous_mode = current_mode(config)
@@ -225,10 +227,24 @@ def repair_contradiction(config) -> Optional[AccessModeResult]:
     127.0.0.1`` (the web-button bug), which advertises a LAN URL nothing
     is listening on.
 
-    The mode is treated as the operator's intent and the bind host is
-    corrected to match, rather than the reverse. Someone who clicked
-    "Same WiFi" meant to pair over WiFi; silently demoting them to
-    localhost would preserve the broken pairing rather than fix it.
+    **A repair never widens network exposure.** Where the two disagree
+    and honouring the mode would open a listener that is currently on
+    loopback, the *mode* is demoted instead. The contradiction being
+    repaired is, by construction, the state the old "Same WiFi" button
+    produced, so a large number of installs hold it while listening only
+    on 127.0.0.1. Resolving it toward the mode would silently bind every
+    interface on the next boot, on machines whose owners know this only
+    as "the thing that didn't work" and who may well be on a café or
+    hotel network. Widening exposure is an operator decision and it does
+    not get made inside ``discover()``, which also runs from
+    ``feral doctor``.
+
+    Demoting does not resurrect the original bug. The pair resolver now
+    compares intent against the live listener and refuses with a
+    remediation, and ``feral doctor`` reports that pairing is disabled
+    and how to enable it, so the operator is told rather than left with
+    a QR that cannot work. Re-applying "Same WiFi" is one click and it
+    writes both keys correctly through :func:`apply_mode`.
     """
     mode = current_mode(config)
     persisted_bind = configured_bind_host(config)
@@ -236,6 +252,16 @@ def repair_contradiction(config) -> Optional[AccessModeResult]:
 
     if persisted_bind == expected:
         return None
+
+    if persisted_bind in LOOPBACK_HOSTS and expected not in LOOPBACK_HOSTS:
+        logger.warning(
+            "access mode %r wants bind_host %s but this brain is persisted "
+            "on %s. Demoting the mode to %r rather than opening the "
+            "listener: widening exposure is not a repair. Re-apply the mode "
+            "from Settings (or `feral access lan`) to pair over WiFi.",
+            mode.value, expected, persisted_bind, AccessMode.LOCALHOST.value,
+        )
+        return apply_mode(config, AccessMode.LOCALHOST)
 
     logger.warning(
         "access mode %r requires bind_host %s but settings.json says %s. "
