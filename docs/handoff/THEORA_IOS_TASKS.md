@@ -650,6 +650,28 @@ confident lies.
 - AP/client isolation, the hotel-wifi case the whole remote tier exists
   for. The brain cannot detect it and says so honestly in its diagnostic.
 
+## Do not trust `p.brain_id` for a security decision
+
+The `p=` blob in the pair URL is **not signed**. Anyone can generate a QR
+code containing any `brain_id` they like, and nothing in it proves the QR
+came from the brain it names.
+
+That is fine for what it does today: a display label, and a hint about
+which stored endpoint set to try first. It stops being fine the moment it
+gates anything. In particular, S3 (multi-endpoint credential store keyed
+by `brain_id`) must not use it to answer "is this the same brain I paired
+with before, so may I reuse or overwrite its credentials?" A forged QR
+would answer yes.
+
+The real proof of identity is the pairing exchange itself: the token is
+minted by the brain and verified against it over the network. Key on
+that, not on a self-declared string in a QR.
+
+If a verifiable brain identity is genuinely needed on the app side, say
+so and it can be signed with the Ed25519 key that Stage 2 introduces for
+the relay. That is not built yet. Until it is, treat `brain_id` as
+untrusted input.
+
 ## One open design conflict, yours to settle
 
 Your own `docs/theora-feral-findings.md:70` evaluated
