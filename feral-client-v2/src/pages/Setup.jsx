@@ -253,13 +253,28 @@ export default function Setup() {
     try {
       // Persist the access mode FIRST so the next /api/devices/pair/url
       // call resolves through the right resolver branch.
-      const r = await apiFetch('/api/config/update', {
+      //
+      // Via /api/access/mode, not the generic /api/config/update setter:
+      // the latter writes access.pairing_mode alone, leaving bind_host
+      // wherever it was, which is how "Same WiFi" used to produce a QR
+      // pointing at an address the brain was not listening on.
+      const r = await apiFetch('/api/access/mode', {
         method: 'POST',
-        body: JSON.stringify({ section: 'access', key: 'pairing_mode', value: mode }),
+        body: JSON.stringify({ mode }),
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         setPairError(formatApiDetail(err, `failed to persist mode (${r.status})`));
+        return;
+      }
+      const applied = await r.json().catch(() => ({}));
+      if (applied?.restart?.required) {
+        // Pairing now would mint a token against a listener that has not
+        // moved yet. Say so instead of handing over a QR that cannot work.
+        setPairError(
+          `${applied.restart.reason || 'This change needs a restart to take effect'}`
+          + (applied.restart.command ? ` — run \`${applied.restart.command}\`, then try again.` : '.')
+        );
         return;
       }
       if (mode === 'localhost') {

@@ -66,6 +66,40 @@ def brain_bind_host() -> str:
     return "127.0.0.1"
 
 
+# The host the *running* listener actually bound, recorded once by
+# ``cli.main._spawn_brain_server``. ``brain_bind_host()`` answers "what
+# would the next boot bind", which is a different question and the one
+# that made the reported bug invisible: settings said "local" while the
+# live process was still on loopback, and nothing compared the two.
+_BOUND_HOST: str | None = None
+
+
+def record_bound_host(host: str) -> None:
+    """Record what the live listener bound. Called once, at serve time.
+
+    Deliberately takes the value passed to uvicorn rather than re-reading
+    config, because the whole point is to capture reality rather than
+    intent.
+    """
+    global _BOUND_HOST
+    _BOUND_HOST = host
+
+
+def bound_host() -> str | None:
+    """The live listener's bind host, or ``None`` if nothing is serving.
+
+    ``None`` means "no listener in this process" (a CLI invocation, a
+    test), not "unknown". Callers treat it as "nothing to restart".
+    """
+    return _BOUND_HOST
+
+
+def _reset_bound_host() -> None:
+    """Test seam. Registered in ``tests/conftest.py`` shared-state resets."""
+    global _BOUND_HOST
+    _BOUND_HOST = None
+
+
 def _settings_get(*path: str) -> object | None:
     """Best-effort read of a nested value from ``~/.feral/settings.json``.
 

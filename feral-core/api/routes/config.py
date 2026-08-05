@@ -4,7 +4,7 @@ import logging
 import os
 import re
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from api.state import state
 from config.loader import feral_home
@@ -83,6 +83,40 @@ async def update_config(body: dict):
     value = body.get("value")
     if not section or not key:
         return {"error": "section and key are required"}
+
+    # ── Access mode is not a free-form setting ────────────────────────
+    # This route is a generic, unvalidated setter. Letting it write
+    # ``access.pairing_mode`` is what produced the reachable-broken
+    # state: the web "Same WiFi" button posted the mode here, nothing
+    # co-wrote ``network.bind_host``, and the brain then advertised a
+    # LAN pair URL while still bound to loopback. The UI reported
+    # success. ``POST /api/access/mode`` writes both keys together and
+    # reports whether a restart is needed.
+    if section == "access" and key == "pairing_mode":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "use_access_mode_endpoint",
+                "message": (
+                    "access.pairing_mode cannot be set directly — it must stay "
+                    "consistent with network.bind_host."
+                ),
+                "remediation": "POST /api/access/mode with {\"mode\": \"...\"} instead.",
+            },
+        )
+    if section == "network" and key == "bind_host":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "bind_host_is_derived",
+                "message": (
+                    "network.bind_host is derived from the access mode and is "
+                    "not independently writable."
+                ),
+                "remediation": "POST /api/access/mode with {\"mode\": \"...\"} instead.",
+            },
+        )
+
     state.config.update_settings(section, key, value)
 
     if section == "agents" and state.orchestrator:

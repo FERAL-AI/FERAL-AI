@@ -22,7 +22,8 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from api.state import state
-from config.runtime import brain_port
+from config.access_mode import LOOPBACK_HOSTS, AccessMode, apply_mode
+from config.runtime import bound_host, brain_port
 from integrations import tailscale
 
 logger = logging.getLogger("feral.api.access")
@@ -36,7 +37,10 @@ def _persist_remote_url(url: str) -> None:
     cfg = getattr(state, "config", None)
     if cfg is None:
         return
-    cfg.update_settings("access", "pairing_mode", "remote")
+    # Through apply_mode, not a bare update_settings, so bind_host moves
+    # with the mode. The previous direct write left the two free to
+    # contradict each other.
+    apply_mode(cfg, AccessMode.TAILSCALE)
     existing = cfg._merged.get("access", {}) or {}
     ts = dict(existing.get("tailscale", {}) or {})
     ts["funnel"] = True
@@ -46,6 +50,17 @@ def _persist_remote_url(url: str) -> None:
 
 
 def _clear_remote_url() -> None:
+    """Drop the Funnel URL and demote the mode.
+
+    Demotion is deliberately *not* an unconditional fall to localhost.
+    The CLI equivalent used to demote to "local" when the brain was
+    bound to a LAN address, on the reasoning that revoking still-working
+    LAN pairing is worse than leaving it up, while this REST version
+    always went to localhost. The two disagreed. This is now the single
+    implementation, and it keeps the CLI's kinder behaviour: if the live
+    listener is still reachable on the LAN, land on LAN rather than
+    cutting off phones that are working fine.
+    """
     cfg = getattr(state, "config", None)
     if cfg is None:
         return
@@ -54,7 +69,48 @@ def _clear_remote_url() -> None:
     ts["funnel"] = False
     ts["tailnet_url"] = ""
     cfg.update_settings("access", "tailscale", ts)
-    cfg.update_settings("access", "pairing_mode", "localhost")
+
+    actual = bound_host()
+    still_on_lan = actual is not None and actual not in LOOPBACK_HOSTS
+    apply_mode(cfg, AccessMode.LAN if still_on_lan else AccessMode.LOCALHOST)
+
+
+@router.post("/api/access/mode")
+async def set_access_mode(body: dict):
+    """Set the access mode. The one supported way to change reachability.
+
+    Writes ``access.pairing_mode`` and ``network.bind_host`` together so
+    they cannot contradict, and tells the caller honestly whether the
+    change is live yet. ``bind_host`` is read once at bind time, so a
+    mode change on a running brain is persisted but not in effect until
+    a restart — which is precisely what nothing used to say.
+    """
+    cfg = getattr(state, "config", None)
+    if cfg is None:
+        raise HTTPException(status_code=503, detail={"code": "config_unavailable"})
+
+    try:
+        result = apply_mode(cfg, body.get("mode"))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_mode", "message": str(exc)},
+        )
+
+    payload = result.as_dict()
+    payload["ok"] = True
+    if result.restart_required:
+        payload["restart"] = {
+            "required": True,
+            "reason": (
+                f"listening on {bound_host()} but {result.mode.value} mode "
+                f"needs {result.bind_host}"
+            ),
+            "command": "feral restart",
+        }
+    logger.info("access mode set to %s (restart_required=%s)",
+                result.mode.value, result.restart_required)
+    return payload
 
 
 @router.get("/api/access/status")

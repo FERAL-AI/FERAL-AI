@@ -22,6 +22,7 @@ import pytest
 
 from cli.setup import network
 from cli.setup.state import WizardState
+from config.access_mode import AccessMode
 
 
 # ---------------------------------------------------------------------------
@@ -62,8 +63,11 @@ class TestSaveDoesNotClobberDiskWrites:
         monkeypatch.setenv("FERAL_HOME", str(home))
 
         state = WizardState.load(home)
-        network._persist_bind_host("0.0.0.0")
-        network._persist_pairing_mode("local")
+        # Seeds both keys at once. The two private helpers this used to
+        # call (_persist_bind_host / _persist_pairing_mode) are gone:
+        # writing the pair independently is exactly the defect that let
+        # the mode and the bind host contradict each other.
+        network._apply_access_mode(AccessMode.LAN)
 
         state.mark_complete()
 
