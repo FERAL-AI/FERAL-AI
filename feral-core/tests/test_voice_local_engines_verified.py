@@ -44,8 +44,21 @@ from voice import local_models
 
 @pytest.fixture(autouse=True)
 def _isolated_feral_home(tmp_path, monkeypatch):
-    """Never touch the operator's real ``~/.feral``."""
+    """Never touch the operator's real ``~/.feral``.
+
+    The HuggingFace hub cache is isolated for the same reason, and it is
+    not optional. ``faster_whisper_model_present`` falls back to
+    ``_hf_hub_snapshot`` when FERAL's own store has nothing, and that
+    reads ``$HF_HOME`` / ``$HUGGINGFACE_HUB_CACHE``, defaulting to
+    ``~/.cache/huggingface``, which FERAL_HOME does not cover. So any
+    machine that has ever pulled a faster-whisper model (this one has
+    ``models--Systran--faster-whisper-tiny.en``) permanently failed the
+    assertions that a model is absent. The test was host-dependent, not
+    flaky.
+    """
     monkeypatch.setenv("FERAL_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(tmp_path / "hf" / "hub"))
 
 
 def _fake_pywhispercpp(monkeypatch, recorder):

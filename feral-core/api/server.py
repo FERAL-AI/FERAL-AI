@@ -501,6 +501,24 @@ _PHONE_BEARER_POST.add_literal("/api/system/permissions/request")  # Lane 11 R-P
 # Apple HealthKit samples into the memory store; allowlist it here
 # so the phone bearer is accepted.
 _PHONE_BEARER_POST.add_literal("/api/health/ingest")
+# v2026.8.4 — Theora ambient recording. The iOS app POSTs a finished
+# session's transcript segments here on stop. Without this the phone got
+# 401 while curl from the same machine worked, because loopback bypasses
+# HTTP auth entirely (see the middleware below) and the phone connects
+# off-loopback.
+#
+# This is a memory WRITE, so it is worth being explicit that it does not
+# widen the phone's capability class, it only shortens the path:
+#   * ``/api/health/ingest`` directly above already writes phone-supplied
+#     content into the memory store.
+#   * A phone bearer already drives the full agent over the WebSocket
+#     (``text_command`` / ``chat_request``), and the agent can call
+#     ``notes_memory__save_note``. Arbitrary phone-authored text can
+#     therefore already reach memory today, just less directly.
+# The marginal risk is a compromised phone poisoning memory, which was
+# already true. What this buys is not having to launder a transcript
+# through a chat turn.
+_PHONE_BEARER_POST.add_literal("/api/wiki/ingest/text")
 # Operator approval surface. Path-parameterised on `request_id`; the
 # matcher uses Starlette's `compile_path`, the same function FastAPI's
 # router uses to dispatch the request — so a match here is by
@@ -4410,6 +4428,21 @@ def _assert_allowlist_routes_exist(target_app) -> None:
 
 
 _assert_allowlist_routes_exist(app)
+
+# Expose the brain state on the ASGI app so routes that take it by
+# request rather than by import can reach it.
+#
+# ``api/routes/discovery.py`` has always read ``request.app.state.feral``
+# and nothing ever assigned it, so GET /api/discovery/brain raised
+# AttributeError and returned 500 on every real call. No test caught it
+# because ``tests/test_discovery_api.py`` sets ``app.state.feral``
+# itself, so the tests were exercising a seam production never wired.
+#
+# That route is on the phone-bearer GET allowlist and is used by
+# onboarding, so the failure surfaced to operators as flaky pairing
+# rather than as a broken endpoint. Assigning it here fixes production
+# and keeps the injection point the tests rely on.
+app.state.feral = state
 
 
 if __name__ == "__main__":
