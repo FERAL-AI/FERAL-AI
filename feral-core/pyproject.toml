@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "feral-ai"
-version = "2026.8.3"
+version = "2026.8.4"
 description = "FERAL — Open-source AI agent with computer use, GenUI, voice, hardware control, and persistent memory."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -52,7 +52,20 @@ dependencies = [
     "html2text>=2024.2.26,<2026.0",
     "pymupdf>=1.24.0,<2.0",
     "numpy>=1.24.0,<3.0",
-    "Pillow>=10.0.0,<12.0",
+    # Ceiling is <13.0 and must not be narrowed back to <12.0.
+    #
+    # v2026.8.3 shipped `Pillow<12.0` alongside fastembed in the base
+    # dependencies, and fastembed 0.8.0 requires `pillow>=12.0.0` on
+    # Python 3.14 (it asks for >=10.3.0 on 3.10-3.12 and >=11.0.0 on
+    # 3.13, so only 3.14 collides). The two are unsatisfiable together,
+    # so `pip install feral-ai==2026.8.3` fails outright with
+    # ResolutionImpossible on 3.14, breaking both upgrades and fresh
+    # installs on the current Python.
+    #
+    # <13.0 matches fastembed's own ceiling on every Python it supports.
+    # Verified against Pillow 12.3.0 that the only PIL APIs this codebase
+    # uses still exist: Image.open, Image.frombytes, Image.LANCZOS.
+    "Pillow>=10.0.0,<13.0",
     "aiohttp>=3.9.0,<4.0",
     "openai>=1.50.0,<2.0",
     "PyJWT>=2.8.0,<3.0",
@@ -176,7 +189,7 @@ llm = [
     "openai>=1.50.0,<2.0",
     "exa-py>=1.0.0,<3.0",
     "numpy>=1.24.0,<3.0",
-    "Pillow>=10.0.0,<12.0",
+    "Pillow>=10.0.0,<13.0",
     "aiohttp>=3.9.0,<4.0",
 ]
 # NOTE: `sqlite-vec` moved to base `dependencies` in v2026.8.3 (see the
@@ -352,7 +365,7 @@ all = [
     "exa-py>=1.0.0,<3.0",
     "numpy>=1.24.0,<3.0",
     "pyautogui>=0.9.54,<1.0",
-    "Pillow>=10.0.0,<12.0",
+    "Pillow>=10.0.0,<13.0",
     "aiohttp>=3.9.0,<4.0",
     "playwright>=1.40.0,<2.0",
     "wasmtime>=22.0.0,<50.0",
