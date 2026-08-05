@@ -97,6 +97,13 @@ ALLOWED_FAIL_LABELS: set[str] = {
     # vault/keychain cannot be unlocked — the brain will not start until
     # the keychain entry is restored. (v2026.5.43)
     "Memory at-rest encryption",
+    # access.pairing_mode and network.bind_host disagree, so the brain
+    # advertises a pair URL nothing is listening on. Core: no phone can
+    # pair, and every surface reported healthy while it was true.
+    "Access mode coherence",
+    # The resolver refused to produce a pair origin. Same class: pairing
+    # is structurally impossible until the named condition is fixed.
+    "Phone pairing",
 }
 
 ALLOWED_WARN_LABELS: set[str] = {
@@ -110,6 +117,17 @@ ALLOWED_WARN_LABELS: set[str] = {
     "Memory database",
     # Configured FERAL port is occupied by some other process.
     "Port availability",
+    # Settings could not be read, or the pair resolver raised something
+    # other than PairUnavailable. Degraded reporting, not a broken brain.
+    "Pairing & access",
+    # Also in ALLOWED_FAIL_LABELS. It fails when the resolver refuses
+    # outright, and warns for the softer cases: a mode whose transport
+    # is not built yet (relay), or a resolver that raised something
+    # unexpected. Same probe, severity chosen by what it found.
+    "Phone pairing",
+    # TLS is on with the brain's self-signed cert. iOS has no trust
+    # override, so it refuses the connection; LAN pairing needs TLS off.
+    "TLS vs phone pairing",
     # Playwright Python lib not installed — CDP-only mode loses
     # selector healing. Not a fresh-install default state because
     # the `[browser]` extra adds it; absence is a real degradation.

@@ -520,7 +520,15 @@ class TestNodeWebSocket:
     def test_rejects_invalid_api_key(self, ws_mock_state, pairing_store_mock):
         with _node_client(ws_mock_state, pairing_store_mock) as client:
             with client.websocket_connect("/v1/node?api_key=not-valid") as ws:
+                # An unauthorized error frame precedes the close so the
+                # client can tell "rejected" from "network dropped" and
+                # stop retrying. See _send_protocol_error in api/server.py.
                 msg = ws.receive()
+                if msg.get("type") == "websocket.send":
+                    payload = json.loads(msg["text"])["payload"]
+                    assert payload["code"] == 1001, payload
+                    assert payload["name"] == "unauthorized", payload
+                    msg = ws.receive()
                 assert msg.get("type") == "websocket.close" or msg.get("code") == 4003
 
     def test_accepts_legacy_node_api_key_and_registers(self, ws_mock_state, pairing_store_mock):

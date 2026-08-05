@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from contextlib import ExitStack
@@ -95,5 +96,13 @@ def test_ws_unknown_bearer_closes_4003(node_client):
         "/v1/node",
         headers={"authorization": "Bearer not-a-real-bearer"},
     ) as ws:
+        # An unauthorized error frame (HUP §8 code 1001) precedes the
+        # close, so a client can distinguish a rejected credential from a
+        # dropped network and stop reconnecting.
         msg = ws.receive()
+        if msg.get("type") == "websocket.send":
+            payload = json.loads(msg["text"])["payload"]
+            assert payload["code"] == 1001, payload
+            assert payload["name"] == "unauthorized", payload
+            msg = ws.receive()
         assert msg.get("type") == "websocket.close" or msg.get("code") == 4003

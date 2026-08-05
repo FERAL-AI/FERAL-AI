@@ -1,6 +1,8 @@
 """Device mesh, session handoff, command ledger, node health, and pairing endpoints."""
 
+import base64
 import io
+import json
 import logging
 import secrets
 import socket
@@ -11,7 +13,8 @@ from fastapi.responses import StreamingResponse
 
 from api.middleware.rate_limit import code_claim_limiter
 from api.state import state
-from config.runtime import brain_port, brain_public_base_url
+from config.access_mode import LOOPBACK_HOSTS, AccessMode, coerce
+from config.runtime import bound_host, brain_port, brain_public_base_url
 
 logger = logging.getLogger("feral.pair")
 router = APIRouter()
@@ -70,27 +73,70 @@ class PairUnavailable(Exception):
     """Raised when the configured access mode cannot emit a pair URL."""
 
 
+def _assert_listener_agrees(mode: AccessMode) -> None:
+    """Refuse to advertise a LAN address the live process is not serving.
+
+    ``bind_host`` is read once, at bind time, so applying a mode to a
+    running brain persists the setting without moving the listener. The
+    reported bug was exactly this gap: settings said "Same WiFi", the
+    process was still on loopback, and the QR advertised a LAN address
+    nothing answered on. Comparing intent against
+    :func:`config.runtime.bound_host` closes it *before* the restart,
+    rather than emitting a URL that cannot work and blaming the network.
+
+    ``None`` means no listener in this process (a CLI invocation, a
+    test), so there is nothing to contradict.
+    """
+    if mode is not AccessMode.LAN:
+        return
+    actual = bound_host()
+    if actual is None or actual not in LOOPBACK_HOSTS:
+        return
+    raise PairUnavailable(
+        "Configured for same-WiFi pairing, but this brain is currently "
+        f"listening on {actual}, so nothing outside this machine can reach "
+        "it. Restart the brain (`feral restart`) to apply the change, then "
+        "pair again."
+    )
+
+
 def _resolve_pair_origin() -> str:
     """Pick the pair-URL origin based on the configured access mode.
 
-    Mode A "local"     → http://<lan-ip>:<brain-port>
-    Mode B "localhost" → unavailable; pairing requires network exposure
-    Mode C "remote"    → access.tailscale.tailnet_url, falling back to
-                         FERAL_PUBLIC_BASE_URL
+    "localhost" → unavailable; pairing requires network exposure
+    "local"     → http://<lan-ip>:<brain-port>
+    "relay"     → unavailable until the relay tunnel ships
+    "remote"    → access.tailscale.tailnet_url, falling back to
+                  FERAL_PUBLIC_BASE_URL
 
     Never falls back to a loopback URL silently — emitting
     http://127.0.0.1:9090 to a phone is the bug we are killing.
+
+    Dispatch is on :class:`AccessMode` rather than raw strings so a mode
+    added to the enum cannot quietly inherit the LAN branch by falling
+    off the end of the ``if`` chain. That is not hypothetical: ``relay``
+    was added to the enum bound to loopback, and under the old string
+    comparisons it landed in the LAN branch and advertised an address
+    nothing was listening on — the very bug this resolver exists to
+    prevent.
     """
     cfg = getattr(state, "config", None)
-    mode = cfg.access_pairing_mode if cfg else "localhost"
+    mode = coerce(cfg.access_pairing_mode if cfg else AccessMode.LOCALHOST.value)
 
-    if mode == "localhost":
+    if mode is AccessMode.LOCALHOST:
         raise PairUnavailable(
             "Mode B (localhost) does not expose pairing. "
             "Switch to LAN or remote in Settings to pair phones."
         )
 
-    if mode == "remote":
+    if mode is AccessMode.RELAY:
+        raise PairUnavailable(
+            "Any-network (relay) access is selected, but the relay tunnel "
+            "is not implemented yet, so there is no address to advertise. "
+            "Switch to Same WiFi in Settings to pair on this network."
+        )
+
+    if mode is AccessMode.TAILSCALE:
         configured = cfg.access_remote_url if cfg else ""
         url = _normalize_origin(configured) or _normalize_origin(brain_public_base_url())
         if not url:
@@ -110,6 +156,7 @@ def _resolve_pair_origin() -> str:
         return url
 
     # Mode A — LAN
+    _assert_listener_agrees(mode)
     ip = _detect_lan_ip()
     if not ip:
         raise PairUnavailable(
@@ -134,6 +181,11 @@ def _build_diagnostic(origin_url: str) -> dict:
         "mode": mode,
         "advertised_url": origin_url,
         "advertised_lan_ip": parsed.hostname or "",
+        # What the live process actually bound, not what settings say it
+        # would bind next boot. Null when nothing is serving in this
+        # process. Surfaced so a stuck user can see the mismatch that
+        # ``_assert_listener_agrees`` guards against.
+        "listening_on": bound_host(),
         "honest_caveats": [],
     }
     if mode == "local":
@@ -151,6 +203,38 @@ def _build_diagnostic(origin_url: str) -> dict:
     return diagnostic
 
 
+def _pair_link_blob(mode: str, brain_id: str, result: dict) -> str:
+    """Base64url-encode the identity fields for carrying inside the URL.
+
+    The QR encodes ``payload["url"]`` and nothing else, so every field
+    outside that string is invisible to anything that scans it. That is
+    why ``brain_id`` never reaches the phone, and why the comment on
+    ``ConfigLoader.brain_id`` describing phones as refusing to re-pair
+    against a different brain describes a check the transport could not
+    support.
+
+    Carried as a ``p=`` query parameter rather than by encoding the whole
+    JSON document into the QR, so the URL keeps working when scanned by a
+    plain camera app (which opens the ``/pair`` page) while a client that
+    knows to look gets the identity fields too. Deliberately compact: the
+    reachability diagnostic stays out of it, because it is prose destined
+    for the pair modal, and inflating the QR hurts scan reliability.
+    """
+    blob = json.dumps(
+        {
+            "v": 1,
+            "mode": mode,
+            "brain_id": brain_id,
+            "expires": int(result.get("expires_at") or 0),
+            "device_id": result["device_id"],
+            "name": "FERAL Brain",
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(blob).decode("ascii").rstrip("=")
+
+
 def _pair_payload(result: dict, origin: str | None = None) -> dict:
     """Build the unified v1 pair payload (single shape for QR + URL).
 
@@ -161,10 +245,11 @@ def _pair_payload(result: dict, origin: str | None = None) -> dict:
     cfg = getattr(state, "config", None)
     mode = cfg.access_pairing_mode if cfg else "localhost"
     brain_id = cfg.brain_id if cfg else ""
+    blob = _pair_link_blob(mode, brain_id, result)
     return {
         "v": 1,
         "mode": mode,
-        "url": f"{origin.rstrip('/')}/pair?t={result['token']}",
+        "url": f"{origin.rstrip('/')}/pair?t={result['token']}&p={blob}",
         "token": result["token"],
         "brain_id": brain_id,
         "expires": int(result.get("expires_at") or 0),

@@ -84,6 +84,31 @@ def is_localhost(host: str | None) -> bool:
     return host in ("127.0.0.1", "::1", "localhost")
 
 
+TRUSTED_TRANSPORT_SCOPE_KEY = "feral.untrusted"
+
+
+def transport_is_trusted(scope) -> bool:
+    """Whether the listener that accepted this connection is trusted.
+
+    Trust is a property of the *listener*, not of ``client.host`` and not
+    of a header. A remote tunnel terminates on the brain and therefore
+    arrives from loopback, so every loopback bypass in this codebase
+    would hand an unauthenticated connection to whoever is on the far
+    end of that tunnel.
+
+    The flag is stamped into the ASGI scope by the server instance
+    serving the tunnel (``api.server.untrusted_app``), so a client
+    cannot forge it and no header parsing is involved. Anything that
+    fails to set it is treated as trusted, which is correct: the flag
+    marks the narrower, stricter case, and the main listener is the
+    default.
+    """
+    try:
+        return not scope.get(TRUSTED_TRANSPORT_SCOPE_KEY, False)
+    except AttributeError:
+        return True
+
+
 def local_bypass_enabled() -> bool:
     """Whether localhost connections skip session auth (default ``False``).
 

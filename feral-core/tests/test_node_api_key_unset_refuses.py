@@ -23,6 +23,8 @@ connect in exactly that configuration.
 
 from __future__ import annotations
 
+import json
+
 import logging
 import sys
 from contextlib import ExitStack, contextmanager
@@ -78,9 +80,25 @@ def _assert_refused(ws, node_id: str = "probe-node") -> None:
             },
         }
     )
+    # The refusal now leads with an HUP §8 error frame (code 1001,
+    # name "unauthorized") and then closes. A bare close is
+    # indistinguishable from a dropped network to a client, and phone
+    # clients answer "dropped" by reconnecting forever, which is how a
+    # revoked token used to present as an endless "Connecting…" spinner.
+    # The security assertion is unchanged: no node_ack, socket closed.
     msg = ws.receive()
     body = str(msg.get("text") or msg.get("bytes") or "")
     assert "node_ack" not in body, f"connection was ADMITTED, not refused: {msg}"
+
+    if msg.get("type") == "websocket.send":
+        error = json.loads(body)
+        assert error["type"] == "error", error
+        assert error["payload"]["code"] == 1001, error
+        assert error["payload"]["name"] == "unauthorized", error
+        msg = ws.receive()
+        body = str(msg.get("text") or msg.get("bytes") or "")
+        assert "node_ack" not in body, f"admitted after the error frame: {msg}"
+
     assert msg.get("type") == "websocket.close" or msg.get("code") == 4003, msg
 
 
@@ -127,13 +145,17 @@ def test_attacker_node_cannot_register_when_no_key_configured(tmp_path):
                     },
                 }
             )
-            # The gate closes before any frame is read, so the first thing
-            # back must be the close — not a node_ack.
+            # The gate closes before any frame is read, so the only thing
+            # back is the unauthorized error frame and then the close —
+            # never a node_ack.
             first = ws.receive()
-            assert first.get("type") == "websocket.close", first
             assert "node_ack" not in str(
                 first.get("text") or first.get("bytes") or ""
             ), first
+            if first.get("type") == "websocket.send":
+                assert json.loads(first["text"])["payload"]["code"] == 1001, first
+                first = ws.receive()
+            assert first.get("type") == "websocket.close", first
 
 
 def test_empty_string_credential_is_refused_when_no_key_configured(tmp_path):

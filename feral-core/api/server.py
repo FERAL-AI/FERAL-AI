@@ -565,10 +565,16 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         # Tailscale / 0.0.0.0) requires the API key or phone bearer; the
         # dev escape hatch is ``FERAL_LOCAL_BYPASS=1``, which emits a loud
         # boot warning via ``warn_if_unsafe_bypass``.
+        #
+        # Both bypasses are conditioned on the transport being trusted.
+        # A remote tunnel terminates on this machine, so its requests
+        # arrive from 127.0.0.1 and would otherwise inherit the local
+        # dashboard's complete exemption from auth.
         client_host = request.client.host if request.client else None
-        if _session_auth_module.is_localhost(client_host):
+        trusted = _session_auth_module.transport_is_trusted(request.scope)
+        if trusted and _session_auth_module.is_localhost(client_host):
             return await call_next(request)
-        if _session_auth_module.local_bypass_enabled():
+        if trusted and _session_auth_module.local_bypass_enabled():
             return await call_next(request)
 
         auth = request.headers.get("authorization", "")
@@ -1426,9 +1432,16 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
 
     # audit-r12 A1 (v2026.5.38) — loopback always bypasses; off-loopback
     # requires a token, with ``FERAL_LOCAL_BYPASS=1`` as the dev opt-in.
-    if is_localhost(client_host):
+    #
+    # Both bypasses are gated on the transport. This socket carries the
+    # unrestricted chat session, and a tunnel terminating on this machine
+    # presents as loopback: without the gate, exposing the brain remotely
+    # would publish an unauthenticated chat socket to the internet. That
+    # is the single most dangerous line in the remote-access design.
+    _trusted = _session_auth_module.transport_is_trusted(ws.scope)
+    if _trusted and is_localhost(client_host):
         _ws_authed = True
-    elif local_bypass_enabled():
+    elif _trusted and local_bypass_enabled():
         _ws_authed = True
     elif token and (verify_session(token) or token == FERAL_API_KEY):
         _ws_authed = True
@@ -1959,6 +1972,19 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 "config.yaml) and give every daemon the same value, or pair "
                 "the device so it presents a pairing token instead."
             )
+            # Say it on the wire, not only in our own log. A bare
+            # close(4003) is indistinguishable from a dropped network to
+            # a client, and phone clients respond to "dropped" by
+            # retrying forever. HUP §8 code 1001 is the unauthorized
+            # signal clients treat as terminal.
+            await _send_protocol_error(
+                ws,
+                1001,
+                "This brain has no Edge Node API Key configured and this "
+                "device is not paired, so the connection cannot be "
+                "authorized. Pair the device from the brain's dashboard.",
+                name="unauthorized",
+            )
             await ws.close(
                 code=4003,
                 reason="Edge Node API Key not configured on brain",
@@ -1968,6 +1994,13 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
         # naive `!=` leaks key length/prefix through response timing.
         if not secrets.compare_digest(credential, NODE_API_KEY):
             logger.warning("Unauthorized daemon connection attempt rejected")
+            await _send_protocol_error(
+                ws,
+                1001,
+                "Credential rejected. The pairing token may have been "
+                "revoked or expired; pair this device again.",
+                name="unauthorized",
+            )
             await ws.close(code=4003, reason="Unauthorized Edge Node API Key")
             return
     node_id = None
@@ -3169,6 +3202,11 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 elif ev_type in {
                     "heart_rate", "spo2", "skin_temperature", "steps",
                     "temperature", "accelerometer", "gesture",
+                    # The Theora glasses relay emits "uv" (see the iOS
+                    # FeralHUP.EventType list). It was missing here, so
+                    # every UV reading hit the unknown-event branch and
+                    # was dropped at debug level with nothing surfaced.
+                    "uv",
                 }:
                     _handle_biometric_device_event(node_id, ev_type, de_payload)
                 elif ev_type in {"robot_telemetry", "robot_event"}:
@@ -4428,6 +4466,35 @@ def _assert_allowlist_routes_exist(target_app) -> None:
 
 
 _assert_allowlist_routes_exist(app)
+
+
+class UntrustedTransport:
+    """Wrap the app so everything it serves is marked remote-originated.
+
+    Pure ASGI on purpose. ``BaseHTTPMiddleware`` never sees websocket
+    scopes, and the websocket path is exactly where the dangerous
+    loopback bypass lives, so a Starlette middleware could not close
+    this gap.
+
+    Serve this instead of ``app`` on any listener whose peer is not
+    physically local: a relay tunnel, a Funnel ingress, anything that
+    terminates on this machine and would otherwise present as
+    ``127.0.0.1``. The flag is set by the server instance, so no client
+    can forge it and no header is parsed. A local process that finds the
+    port gets the *stricter* app, which is the safe direction to fail.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            scope = dict(scope)
+            scope[_session_auth_module.TRUSTED_TRANSPORT_SCOPE_KEY] = True
+        await self.app(scope, receive, send)
+
+
+untrusted_app = UntrustedTransport(app)
 
 # Expose the brain state on the ASGI app so routes that take it by
 # request rather than by import can reach it.
