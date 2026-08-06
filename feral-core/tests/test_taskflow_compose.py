@@ -170,7 +170,6 @@ def test_original_tokens_still_work():
 
 def test_meeting_recap_workflow_templates_all_resolve():
     """The shipped workflow is the reason this exists; assert it works."""
-    import json as _json
     import re as _re
     from pathlib import Path as _Path
 

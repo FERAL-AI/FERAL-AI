@@ -57,10 +57,19 @@ jobs:
     timeout-minutes: 45
     strategy:
       matrix:
-        # 3.14 is here because its absence is what let 2026.8.3 ship
-        # broken: fastembed requires pillow>=12 on 3.14 only, feral-ai
-        # capped pillow<12, and no job in this matrix could see it.
-        python-version: ['3.11', '3.12', '3.14']
+        # Deliberately NOT 3.14 here, even though 3.14 is the version
+        # 2026.8.3 broke on. This job installs with
+        # `--constraint requirements.lock`, and that lock pins
+        # pillow==11.3.0 while fastembed needs pillow>=12 on 3.14, so a
+        # 3.14 job here cannot install and would be red for a reason
+        # unrelated to the code under test.
+        #
+        # 3.14 belongs in install-smoke.yml instead, which does a plain
+        # `pip install feral-ai` with no constraint. That is the job
+        # shaped like the bug: 2026.8.3 was a dependency-resolution
+        # failure, not a code failure, and only an unconstrained install
+        # can see it.
+        python-version: ['3.11', '3.12']
     defaults:
       run:
         working-directory: feral-core
