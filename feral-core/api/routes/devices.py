@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import secrets
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
@@ -61,6 +62,64 @@ def _normalize_origin(url: str) -> str:
 
 class PairUnavailable(Exception):
     """Raised when the configured access mode cannot emit a pair URL."""
+
+
+@dataclass(frozen=True)
+class PairCandidate:
+    """One address a phone could try, and what is true about it."""
+
+    kind: str
+    url: str
+    encrypted: bool
+    caveat: str = ""
+
+    def as_dict(self) -> dict:
+        out = {"kind": self.kind, "url": self.url, "encrypted": self.encrypted}
+        if self.caveat:
+            out["caveat"] = self.caveat
+        return out
+
+
+# The order candidates are offered in, and the one line to change if
+# hardware testing says otherwise.
+#
+# A raw LAN literal leads today because it needs no name resolution. The
+# open question is Apple's: ``NSAllowsLocalNetworking`` unambiguously
+# covers ``.local`` names, and whether it also covers an RFC1918 literal
+# like 192.168.1.5 is the commonly disputed case. If a device test shows
+# the literal blocked while the ``.local`` name works, swap "lan" and
+# "mdns" here and nothing else in the codebase moves. That is why the
+# mDNS candidate is emitted even though it looks redundant.
+CANDIDATE_ORDER = ("lan", "mdns", "tailscale", "relay")
+
+
+def _pair_scheme() -> str:
+    """``https`` when the brain terminates TLS, else ``http``.
+
+    The scheme was hardcoded to ``http://`` in the LAN branch, so a
+    TLS-enabled brain advertised a URL on the wrong scheme and every
+    phone failed the handshake.
+    """
+    try:
+        from config.runtime import brain_tls_enabled
+
+        return "https" if brain_tls_enabled() else "http"
+    except Exception:  # pragma: no cover - defensive
+        return "http"
+
+
+def _tls_caveat() -> str:
+    """Why TLS on the LAN is currently worse than cleartext on the LAN.
+
+    ``_ensure_tls_certs`` generates a self-signed certificate, and iOS
+    has no trust override and no pinning. So a TLS-enabled LAN brain is
+    refused outright by the phone, where a cleartext one connects. Said
+    out loud rather than discovered.
+    """
+    return (
+        "TLS is enabled with a self-signed certificate. iOS will refuse "
+        "this connection. Disable TLS for same-WiFi pairing."
+    )
 
 
 def _assert_listener_agrees(mode: AccessMode) -> None:
@@ -153,7 +212,72 @@ def _resolve_pair_origin() -> str:
             "LAN IP not detected. Are you connected to a network? "
             "Switch to localhost or remote mode if not."
         )
-    return f"http://{ip}:{brain_port()}"
+    return f"{_pair_scheme()}://{ip}:{brain_port()}"
+
+
+def _resolve_pair_candidates() -> list[PairCandidate]:
+    """Every address a phone could try, best first.
+
+    One address was never enough. A multi-homed machine is reachable on
+    several and the resolver returned whichever the kernel picked; a
+    phone whose ATS policy refuses a raw literal needs the ``.local``
+    name; and a remote transport does not remove the LAN path, which is
+    faster and keeps working when the tunnel is down.
+
+    Raises :class:`PairUnavailable` when the list would be empty, with
+    the same message the single-origin resolver used, so the failure
+    text a stuck user sees is unchanged.
+    """
+    cfg = getattr(state, "config", None)
+    mode = coerce(cfg.access_pairing_mode if cfg else AccessMode.LOCALHOST.value)
+    scheme = _pair_scheme()
+    port = brain_port()
+    caveat = _tls_caveat() if scheme == "https" else ""
+    encrypted = scheme == "https"
+
+    by_kind: dict[str, list[PairCandidate]] = {k: [] for k in CANDIDATE_ORDER}
+
+    if mode is AccessMode.TAILSCALE:
+        # Delegates to the single-origin resolver so the remote branch
+        # keeps exactly one implementation, including its refusals.
+        by_kind["tailscale"].append(
+            PairCandidate(kind="tailscale", url=_resolve_pair_origin(), encrypted=True)
+        )
+    else:
+        # Raises for localhost and relay, and for a LAN mode whose
+        # listener disagrees. Do this before building anything.
+        _resolve_pair_origin()
+
+        from services.netinfo import detect_lan_ipv4s, mdns_hostname
+
+        for ip in detect_lan_ipv4s():
+            by_kind["lan"].append(
+                PairCandidate(
+                    kind="lan",
+                    url=f"{scheme}://{ip}:{port}",
+                    encrypted=encrypted,
+                    caveat=caveat,
+                )
+            )
+
+        host = mdns_hostname()
+        if host and host != ".local":
+            by_kind["mdns"].append(
+                PairCandidate(
+                    kind="mdns",
+                    url=f"{scheme}://{host}:{port}",
+                    encrypted=encrypted,
+                    caveat=caveat,
+                )
+            )
+
+    candidates = [c for kind in CANDIDATE_ORDER for c in by_kind[kind]]
+    if not candidates:
+        raise PairUnavailable(
+            "LAN IP not detected. Are you connected to a network? "
+            "Switch to localhost or remote mode if not."
+        )
+    return candidates
 
 
 def _build_diagnostic(origin_url: str) -> dict:
@@ -231,14 +355,45 @@ def _pair_payload(result: dict, origin: str | None = None) -> dict:
     See ``A4-pairing-redesign.md`` §4. Replaces the legacy mode=app /
     mode=web fork; clients always get the same JSON.
     """
-    origin = origin or _resolve_pair_origin()
+    # `v` stays 1 forever. FeralPairingPayload.swift guards on
+    # `version == 1`, so bumping it breaks every shipped iOS build.
+    # `schema` is the additive signal: a client that understands it
+    # reads `urls`, one that does not reads `url` and is unaffected.
+    # Candidates are computed whether or not the caller resolved an
+    # origin. The routes resolve one first so a PairUnavailable becomes
+    # a 409 *before* a token is minted, which is what keeps 409s from
+    # leaving orphan rows in paired_devices; passing it here must not
+    # then suppress the candidate list.
+    try:
+        candidates = _resolve_pair_candidates()
+    except PairUnavailable:
+        if origin is None:
+            raise
+        # The origin already resolved, so the caller is committed and a
+        # token exists. Degrade to describing that one address rather
+        # than failing a request that has already had side effects.
+        candidates = [
+            PairCandidate(kind="lan", url=origin, encrypted=origin.startswith("https"))
+        ]
+
+    if origin is None:
+        origin = candidates[0].url
+    elif origin not in [c.url for c in candidates]:
+        # The caller resolved something the candidate builder did not
+        # produce. Trust the caller: it is the value the QR encodes.
+        candidates = [
+            PairCandidate(kind="lan", url=origin, encrypted=origin.startswith("https"))
+        ] + candidates
+
     cfg = getattr(state, "config", None)
     mode = cfg.access_pairing_mode if cfg else "localhost"
     brain_id = cfg.brain_id if cfg else ""
     blob = _pair_link_blob(mode, brain_id, result)
     return {
         "v": 1,
+        "schema": 2,
         "mode": mode,
+        "urls": [c.as_dict() for c in candidates],
         "url": f"{origin.rstrip('/')}/pair?t={result['token']}&p={blob}",
         "token": result["token"],
         "brain_id": brain_id,
