@@ -868,7 +868,31 @@ class BrainState:
             set_shared_catalog(self.provider_catalog)
 
         from agents.llm_provider import LLMProvider
-        with boot_subsystem(self._boot_report, "LLMProvider", optional=False):
+        def _llm_is_coherent():
+            """The config error that produced 610 silent 401s.
+
+            provider=openrouter with base_url=https://api.anthropic.com/v1
+            posts an OpenRouter key to Anthropic. Every call failed, the
+            provider failed over quietly, and the boot report said OK because
+            constructing LLMProvider raises nothing when its endpoint is
+            wrong. This is a string comparison, so it costs nothing and needs
+            no network: a live probe at boot would be slow, would spend money
+            and would fail for reasons that have nothing to do with config.
+            """
+            from providers.catalog import provider_base_url_mismatch
+
+            cfg = {}
+            try:
+                if self.config:
+                    cfg = dict(self.config._merged.get("llm", {}))
+            except Exception:
+                return None  # cannot read config; that is not an LLM verdict
+            return provider_base_url_mismatch(
+                str(cfg.get("provider") or ""), cfg.get("base_url")
+            )
+
+        with boot_subsystem(self._boot_report, "LLMProvider", optional=False,
+                            verify=_llm_is_coherent):
             _shared_llm = LLMProvider()
             if self.provider_catalog is not None:
                 _shared_llm.set_catalog(self.provider_catalog)
@@ -1810,28 +1834,24 @@ class BrainState:
             self.browser = BrowserController()
             self._register_browser_skill()
 
-        with boot_subsystem(self._boot_report, "DockerSandbox"):
+        # The sandbox object imports cleanly even when the Docker daemon is
+        # unreachable, and then nothing can execute. This was the one
+        # subsystem that checked, via sixteen lines of mark_degraded
+        # boilerplate after the block, which is a fair explanation of why it
+        # was the only one. Same check, expressed as a probe.
+        def _sandbox_is_usable():
+            if self.docker_sandbox is None:
+                return "Docker not installed, code execution skill disabled"
+            available = getattr(self.docker_sandbox, "available", None)
+            if callable(available) and not available():
+                return ("Docker daemon not running, start Docker Desktop to "
+                        "enable code exec")
+            return None
+
+        with boot_subsystem(self._boot_report, "DockerSandbox",
+                            verify=_sandbox_is_usable):
             from security.docker_sandbox import get_sandbox
             self.docker_sandbox = get_sandbox()
-        # The sandbox object may import cleanly even when the Docker daemon
-        # is not actually reachable — in that case we can't execute anything,
-        # so mark the subsystem DEGRADED rather than the misleading green OK.
-        try:
-            if self.docker_sandbox is None:
-                self._boot_report.mark_degraded(
-                    "DockerSandbox",
-                    "Docker not installed — code execution skill disabled",
-                )
-            elif hasattr(self.docker_sandbox, "available") and not self.docker_sandbox.available():
-                self._boot_report.mark_degraded(
-                    "DockerSandbox",
-                    "Docker daemon not running — start Docker Desktop to enable code exec",
-                )
-        except Exception as _e:
-            self._boot_report.mark_degraded(
-                "DockerSandbox",
-                f"availability probe failed: {type(_e).__name__}",
-            )
 
         with boot_subsystem(self._boot_report, "CronService"):
             from agents.scheduler import CronService

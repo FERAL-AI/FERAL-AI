@@ -24,6 +24,11 @@ class SubsystemReport:
     message: str = ""
     elapsed_ms: float = 0.0
     optional: bool = True
+    # Whether anything checked that this subsystem can do its job, as opposed
+    # to merely checking that constructing it raised nothing. Most cannot:
+    # see boot_subsystem for why the distinction is recorded rather than
+    # assumed away.
+    verified: bool = False
 
 
 @dataclass
@@ -33,10 +38,11 @@ class BootReport:
     current: Optional[str] = None
 
     def record(self, name: str, status: SubsystemStatus, message: str = "",
-               elapsed_ms: float = 0.0, optional: bool = True):
+               elapsed_ms: float = 0.0, optional: bool = True,
+               verified: bool = False):
         self.subsystems.append(SubsystemReport(
             name=name, status=status, message=message,
-            elapsed_ms=elapsed_ms, optional=optional,
+            elapsed_ms=elapsed_ms, optional=optional, verified=verified,
         ))
 
     def mark_degraded(self, name: str, message: str = ""):
@@ -70,6 +76,14 @@ class BootReport:
     def degraded_count(self) -> int:
         return sum(1 for s in self.subsystems if s.status == SubsystemStatus.DEGRADED)
 
+    @property
+    def verified_count(self) -> int:
+        """OK subsystems that something actually checked the function of."""
+        return sum(
+            1 for s in self.subsystems
+            if s.status == SubsystemStatus.OK and s.verified
+        )
+
     def log_summary(self):
         logger.info("=" * 60)
         logger.info("FERAL Brain Boot Report")
@@ -83,8 +97,14 @@ class BootReport:
             ms = f" ({s.elapsed_ms:.0f}ms)" if s.elapsed_ms > 0 else ""
             logger.info(f"  {icon} [{color_label:4s}] {s.name}{ms}{detail}")
         logger.info("-" * 60)
+        # "initialized" means constructed. Saying how many of those were
+        # actually checked keeps the headline from implying the stronger
+        # claim, which is the whole reason this line existed unqualified
+        # while a subsystem underneath it failed every call it made.
         logger.info(
-            f"  {self.ok_count} initialized, {self.degraded_count} degraded, "
+            f"  {self.ok_count} initialized "
+            f"({self.verified_count} verified functional), "
+            f"{self.degraded_count} degraded, "
             f"{self.skipped_count} skipped, {self.failed_count} failed "
             f"({self.total_elapsed_ms:.0f}ms total)"
         )
@@ -93,7 +113,8 @@ class BootReport:
     def to_dict(self) -> dict:
         return {
             "subsystems": [
-                {"name": s.name, "status": s.status.value, "message": s.message, "elapsed_ms": s.elapsed_ms}
+                {"name": s.name, "status": s.status.value, "message": s.message,
+                 "elapsed_ms": s.elapsed_ms, "verified": s.verified}
                 for s in self.subsystems
             ],
             "current": self.current,
@@ -103,6 +124,7 @@ class BootReport:
             ),
             "summary": {
                 "ok": self.ok_count,
+                "verified": self.verified_count,
                 "degraded": self.degraded_count,
                 "skipped": self.skipped_count,
                 "failed": self.failed_count,
@@ -112,14 +134,66 @@ class BootReport:
 
 
 @contextmanager
-def boot_subsystem(report: BootReport, name: str, optional: bool = True):
-    """Context manager that records subsystem boot status to the report."""
+def boot_subsystem(report: BootReport, name: str, optional: bool = True,
+                   verify=None):
+    """Record subsystem boot status, optionally checking that it works.
+
+    Without *verify* this grades construction: the block did not raise, so
+    the subsystem is OK. That is a weaker claim than the report reads as,
+    and the gap is not hypothetical. LLMProvider reported OK on an install
+    whose base_url pointed at a different vendor than its provider, and it
+    went on to fail 610 consecutive calls with 401 while every boot said OK.
+
+    *verify* closes that gap for one subsystem at a time. It is called after
+    the block, so it can read whatever the block assigned, and it returns:
+
+    * ``None`` or ``True`` — the subsystem was checked and works. Recorded
+      OK with ``verified=True``.
+    * a string — the subsystem constructed but cannot do its job, and the
+      string says why. Recorded DEGRADED.
+
+    A probe that raises is itself a degraded result rather than a boot
+    failure: not knowing whether a subsystem works is not the same as
+    knowing it does. Subsystems with no probe stay OK and unverified, which
+    is exactly what the report should say about them, and the summary counts
+    them separately so "37 initialized" does not silently mean "37 objects
+    were constructed".
+    """
     start = time.time()
     report.current = name
     try:
         yield
         elapsed = (time.time() - start) * 1000
-        report.record(name, SubsystemStatus.OK, elapsed_ms=elapsed, optional=optional)
+        if verify is None:
+            report.record(name, SubsystemStatus.OK, elapsed_ms=elapsed,
+                          optional=optional)
+        else:
+            try:
+                problem = verify()
+            except Exception as probe_exc:
+                report.record(
+                    name, SubsystemStatus.DEGRADED,
+                    message=f"health probe failed: {type(probe_exc).__name__}: "
+                            f"{str(probe_exc)[:150]}",
+                    elapsed_ms=elapsed, optional=optional,
+                )
+                logger.warning(
+                    "[boot] %s constructed but its health probe failed: %s",
+                    name, probe_exc,
+                )
+            else:
+                if problem is None or problem is True:
+                    report.record(name, SubsystemStatus.OK, elapsed_ms=elapsed,
+                                  optional=optional, verified=True)
+                else:
+                    report.record(
+                        name, SubsystemStatus.DEGRADED, message=str(problem),
+                        elapsed_ms=elapsed, optional=optional, verified=True,
+                    )
+                    logger.warning(
+                        "[boot] %s constructed but is not functional: %s",
+                        name, problem,
+                    )
     except ImportError as e:
         elapsed = (time.time() - start) * 1000
         report.record(name, SubsystemStatus.SKIPPED,
