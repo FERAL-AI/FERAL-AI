@@ -52,11 +52,20 @@ def _resolve_addresses() -> list[str]:
        the wired interface IP, and includes it if found.
     3. Falls back silently — never raises. The caller logs a single
        INFO line listing what got advertised.
+
+    Now sourced from :mod:`services.netinfo`, shared with the pair QR
+    and the setup wizard, and returning **every** private address rather
+    than one. A machine with ethernet and wifi, or a VM bridge, is
+    reachable on several, and advertising only the one the kernel
+    happened to pick is a real cause of "discovery found it but I cannot
+    connect".
     """
+    from services.netinfo import detect_lan_ipv4s
+
     out: list[str] = ["127.0.0.1"]
-    wired = _wired_ip()
-    if wired and wired != "127.0.0.1" and wired not in out:
-        out.append(wired)
+    for addr in detect_lan_ipv4s():
+        if addr not in out:
+            out.append(addr)
     return out
 
 
@@ -89,6 +98,58 @@ def _wired_ip() -> Optional[str]:
             pass
 
 
+def _txt_properties(name: str, hostname: str, port: int) -> dict:
+    """The TXT record a discovering client actually needs.
+
+    It used to carry ``version``, ``name`` and ``hostname``, which is
+    enough to list a brain and not enough to do anything with one. In
+    particular there was no ``brain_id``, so a client that discovered a
+    service could not match it against a credential it had already
+    stored: discovery worked, acting on a discovery did not.
+
+    ``pair`` is the useful one for a browse list. A brain in
+    "This computer only" mode is still discoverable on loopback but
+    cannot accept a phone, and showing it as pairable produces a failure
+    the user cannot act on.
+
+    Every value is a string. TXT is a bag of bytes and zeroconf encodes
+    each entry separately, so the 255-byte-per-string limit applies per
+    key; these are all far short of it.
+
+    Never raises. mDNS advertisement runs at boot and a config read that
+    throws here would take discovery down with it.
+    """
+    props = {
+        "version": _FERAL_VERSION,
+        "name": name,
+        "hostname": hostname,
+        "port": str(port),
+        "proto": "1",
+    }
+
+    try:
+        from api.state import state
+        from config.access_mode import coerce
+
+        cfg = getattr(state, "config", None)
+        if cfg is not None:
+            props["brain_id"] = str(cfg.brain_id or "")
+            mode = coerce(cfg.access_pairing_mode)
+            props["mode"] = mode.value
+            props["pair"] = "1" if mode.exposes_pairing else "0"
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("mdns.txt_config_unavailable: %s", exc)
+
+    try:
+        from config.runtime import brain_tls_enabled
+
+        props["tls"] = "1" if brain_tls_enabled() else "0"
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("mdns.txt_tls_unavailable: %s", exc)
+
+    return props
+
+
 def _build_service_info(port: int, name: str):
     """Return a fresh `zeroconf.ServiceInfo` for the brain advertisement.
 
@@ -112,11 +173,7 @@ def _build_service_info(port: int, name: str):
         f"{name}._feral._tcp.local.",
         addresses=[socket.inet_aton(addr) for addr in addresses],
         port=port,
-        properties={
-            "version": _FERAL_VERSION,
-            "name": name,
-            "hostname": hostname,
-        },
+        properties=_txt_properties(name, hostname, port),
     )
     return info, primary
 

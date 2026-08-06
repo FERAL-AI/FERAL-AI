@@ -49,25 +49,45 @@ class TestResolveAddresses:
         addrs = mdns._resolve_addresses()
         assert addrs[0] == "127.0.0.1"
 
+    # These patch services.netinfo rather than the module-local
+    # ``_wired_ip``: address resolution is now shared with the pair QR
+    # and the setup wizard, which previously each had their own detector
+    # and disagreed with this one.
+
     def test_wired_appended_when_route_exists(self, monkeypatch):
         mdns = _reload_mdns()
-        monkeypatch.setattr(mdns, "_wired_ip", lambda: "192.168.1.42")
+        monkeypatch.setattr(
+            "services.netinfo.detect_lan_ipv4s", lambda timeout=0.5: ["192.168.1.42"]
+        )
         addrs = mdns._resolve_addresses()
         assert "127.0.0.1" in addrs
         assert "192.168.1.42" in addrs
         assert addrs[-1] == "192.168.1.42"
 
+    def test_every_lan_address_is_advertised(self, monkeypatch):
+        """Multi-homed hosts were advertising whichever one the kernel
+        picked, which is a real cause of "found it, cannot reach it"."""
+        mdns = _reload_mdns()
+        monkeypatch.setattr(
+            "services.netinfo.detect_lan_ipv4s",
+            lambda timeout=0.5: ["192.168.1.42", "10.0.0.7"],
+        )
+        addrs = mdns._resolve_addresses()
+        assert addrs == ["127.0.0.1", "192.168.1.42", "10.0.0.7"]
+
     def test_wired_skipped_on_no_route(self, monkeypatch):
         mdns = _reload_mdns()
-        monkeypatch.setattr(mdns, "_wired_ip", lambda: None)
+        monkeypatch.setattr("services.netinfo.detect_lan_ipv4s", lambda timeout=0.5: [])
         addrs = mdns._resolve_addresses()
         assert addrs == ["127.0.0.1"]
 
     def test_wired_dedup_when_equal_to_loopback(self, monkeypatch):
-        """A misconfigured host that returns ``127.0.0.1`` from the
-        wired probe must not produce a duplicated address."""
+        """A misconfigured host that reports ``127.0.0.1`` as a LAN
+        address must not produce a duplicated entry."""
         mdns = _reload_mdns()
-        monkeypatch.setattr(mdns, "_wired_ip", lambda: "127.0.0.1")
+        monkeypatch.setattr(
+            "services.netinfo.detect_lan_ipv4s", lambda timeout=0.5: ["127.0.0.1"]
+        )
         addrs = mdns._resolve_addresses()
         assert addrs == ["127.0.0.1"]
 

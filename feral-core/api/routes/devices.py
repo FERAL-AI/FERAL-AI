@@ -5,7 +5,6 @@ import io
 import json
 import logging
 import secrets
-import socket
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
@@ -15,6 +14,7 @@ from api.middleware.rate_limit import code_claim_limiter
 from api.state import state
 from config.access_mode import LOOPBACK_HOSTS, AccessMode, coerce
 from config.runtime import bound_host, brain_port, brain_public_base_url
+from services.netinfo import detect_lan_ipv4
 
 logger = logging.getLogger("feral.pair")
 router = APIRouter()
@@ -31,26 +31,16 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def _detect_lan_ip() -> str:
-    """Return this machine's outbound LAN IP, or "" if it cannot be
-    determined. Uses the kernel's UDP-connect trick — no packet is sent
-    on the wire, the call only asks "if I were to send to 8.8.8.8, which
-    interface address would you use?".
+    """This machine's best LAN address, or "" if it has none.
+
+    Thin shim over :mod:`services.netinfo`, kept because tests and the
+    diagnostic patch this name. The implementation it replaced connected
+    to ``8.8.8.8:80`` with **no timeout**, inside the request that mints
+    a pairing QR: behind a captive portal that call blocks, and the pair
+    modal hangs with it. It also fell back to ``gethostbyname``, which
+    on a misconfigured host cheerfully returns a loopback address.
     """
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            if ip and not _is_loopback_host(ip):
-                return ip
-    except OSError:
-        pass
-    try:
-        ip = socket.gethostbyname(socket.gethostname())
-        if ip and not _is_loopback_host(ip):
-            return ip
-    except OSError:
-        pass
-    return ""
+    return detect_lan_ipv4()
 
 
 def _normalize_origin(url: str) -> str:

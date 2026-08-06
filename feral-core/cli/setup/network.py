@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import socket
 from dataclasses import dataclass, field
 
 from config.access_mode import AccessMode
@@ -90,29 +89,17 @@ class NetworkApplyError(Exception):
 def _detect_lan_ipv4() -> str:
     """Best-effort local network IP detection.
 
-    Opens a UDP socket to a public address (no packet is actually
-    sent for UDP "connect") and reads the local end of the route. On
-    hosts without a default route we return an empty string rather
-    than the loopback IP so the wizard can show "no LAN detected"
-    truthfully.
+    Delegates to :mod:`services.netinfo` so the wizard, the pair QR and
+    the mDNS advertisement all answer "where am I reachable?" the same
+    way. They used to disagree, which is how the wizard could show one
+    address while the QR advertised another.
+
+    Still returns "" rather than a loopback address when there is no
+    route, so the wizard can say "no LAN detected" truthfully.
     """
-    sock = None
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(0.5)
-        sock.connect(("8.8.8.8", 80))
-        ip = sock.getsockname()[0]
-        if ip and ip != "127.0.0.1":
-            return ip
-        return ""
-    except Exception:
-        return ""
-    finally:
-        if sock is not None:
-            try:
-                sock.close()
-            except Exception:
-                pass
+    from services.netinfo import detect_lan_ipv4 as _detect
+
+    return _detect()
 
 
 # ---------------------------------------------------------------------------
