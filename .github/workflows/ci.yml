@@ -57,7 +57,10 @@ jobs:
     timeout-minutes: 45
     strategy:
       matrix:
-        python-version: ['3.11', '3.12']
+        # 3.14 is here because its absence is what let 2026.8.3 ship
+        # broken: fastembed requires pillow>=12 on 3.14 only, feral-ai
+        # capped pillow<12, and no job in this matrix could see it.
+        python-version: ['3.11', '3.12', '3.14']
     defaults:
       run:
         working-directory: feral-core

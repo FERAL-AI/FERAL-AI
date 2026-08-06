@@ -21,7 +21,9 @@ jobs:
        github.event.workflow_run.event == 'push')
     strategy:
       matrix:
-        python: ['3.11', '3.12']
+        # See ci.yml: 3.14 is the version 2026.8.3 broke on, and an
+        # install smoke that cannot install on it is the wrong shape.
+        python: ['3.11', '3.12', '3.14']
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -106,7 +108,9 @@ jobs:
       inputs.include_macos == true
     strategy:
       matrix:
-        python: ['3.11', '3.12']
+        # See ci.yml: 3.14 is the version 2026.8.3 broke on, and an
+        # install smoke that cannot install on it is the wrong shape.
+        python: ['3.11', '3.12', '3.14']
     runs-on: macos-latest
     timeout-minutes: 25
     steps:
