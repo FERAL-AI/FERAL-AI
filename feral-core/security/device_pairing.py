@@ -47,6 +47,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -1366,6 +1367,21 @@ class DevicePairingStore:
 
     PENDING_PAIR_CODE_TTL_SECONDS = 600
     PENDING_PAIR_CODE_PER_CODE_MAX_ATTEMPTS = 10
+    #: What a pair code may look like. Deliberately permissive on
+    #: charset and strict on length, because the shape is NOT what the
+    #: docs say. This class's own docstring claims "8-char base32" and
+    #: api/server.py claimed "~38 bits of entropy"; both are wrong. The
+    #: shipped SDKs generate a 6-digit decimal string:
+    #:   python-node-sdk: f"{secrets.randbelow(1_000_000):06d}"
+    #:   ts-node-sdk:     Math.random() -> 6 digits, padded
+    #: which is ~20 bits, not 38. Pinning the documented shape here
+    #: would have rejected every real node.
+    #:
+    #: The purpose of this check is not entropy, which announce cannot
+    #: enforce anyway. It is to stop an unauthenticated caller storing
+    #: unbounded junk, so it bounds length and excludes anything that is
+    #: not a plain identifier character.
+    PAIR_CODE_RE = re.compile(r"[A-Za-z0-9_-]{4,64}")
 
     def announce_pending_code(self, *, code: str, node_id: str, name: str) -> None:
         """A daemon advertises a freshly generated pair code.
@@ -1377,6 +1393,18 @@ class DevicePairingStore:
         """
         if not code or not node_id:
             raise ValueError("code and node_id are required")
+        # Shape check. This endpoint is unauthenticated by design (node
+        # SDKs announce from other machines), so the only thing standing
+        # between it and an attacker filling the table is this. It
+        # accepts nothing but the shape the SDKs actually generate, and
+        # it does not make announce a credential path: the token is still
+        # only minted at claim time, which now requires auth.
+        if not self.PAIR_CODE_RE.fullmatch(code):
+            raise ValueError(
+                "code must be 4-64 characters of [A-Za-z0-9_-]"
+            )
+        if len(node_id) > 128 or len(name or "") > 256:
+            raise ValueError("node_id or name is implausibly long")
         now = time.time()
         expires_at = now + self.PENDING_PAIR_CODE_TTL_SECONDS
         with self._lock:

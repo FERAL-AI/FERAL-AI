@@ -215,3 +215,37 @@ def test_no_open_path_self_gates_on_loopback_without_the_transport_check():
         "alone is not evidence of trust; a tunnel terminates locally."
     )
     assert server_mod is not None
+
+
+def test_metrics_is_not_served_over_an_untrusted_transport(apps):
+    """The last route that decided trust from client.host alone.
+
+    A tunnel terminates on this machine and presents as 127.0.0.1, so a
+    peer check by itself published the whole Prometheus surface remotely
+    even with FERAL_METRICS_PUBLIC unset. Same bug class as
+    /api/auth/local-key, found in the same sweep.
+    """
+    _, untrusted = apps
+    r = untrusted.get("/metrics")
+    assert r.status_code == 404, r.text
+
+
+def test_metrics_uses_the_one_definition_of_local():
+    """There were two: session_auth.is_localhost, and a private set in
+    api.server that had drifted to include Starlette's TestClient peer
+    name. Two definitions of a trust predicate is one too many."""
+    import inspect
+
+    from api import server
+
+    src = inspect.getsource(server.metrics_endpoint) if hasattr(
+        server, "metrics_endpoint") else inspect.getsource(server)
+    assert "_METRICS_LOOPBACK_HOSTS" not in src.split("_metrics_trusted")[1][:300]
+
+
+def test_an_unidentifiable_peer_does_not_skip_rate_limiting():
+    """`unknown` is the sentinel for a request with no client, so
+    treating it as loopback made a missing peer fail open."""
+    from api.server import _LOOPBACK_IPS
+
+    assert "unknown" not in _LOOPBACK_IPS

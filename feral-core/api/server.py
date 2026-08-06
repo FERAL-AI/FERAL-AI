@@ -136,7 +136,11 @@ _rate_limit_last_cleanup = 0.0
 
 # Loopback clients (the Brain + same-host browser / CLI / iOS sim) are never
 # rate-limited — that would throttle the app talking to itself.
-_LOOPBACK_IPS = frozenset({"127.0.0.1", "::1", "localhost", "unknown"})
+#: "unknown" is deliberately absent. It is the sentinel assigned when
+#: request.client is None, so including it meant a request with no
+#: identifiable peer was treated as loopback and skipped rate
+#: limiting entirely. An unidentifiable caller must fail closed.
+_LOOPBACK_IPS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 # Low-cost polling endpoints exempted from the per-IP bucket so a UI tab cannot
 # DoS itself. These are idempotent reads that the Brain should always answer.
@@ -193,7 +197,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         path = request.url.path
 
         # Skip loopback + well-known read-only polling endpoints entirely.
-        if client_ip in _LOOPBACK_IPS:
+        # Gated on the transport for the same reason as /metrics:
+        # tunnelled traffic arrives from loopback and would
+        # otherwise be entirely unthrottled.
+        if client_ip in _LOOPBACK_IPS and _session_auth_module.transport_is_trusted(
+            request.scope
+        ):
             response = await call_next(request)
             _emit_http_metrics(request, response, time.time())
             return response
@@ -306,13 +315,29 @@ _OPEN_PATHS = frozenset({
     # which stays open below.
     "/api/devices/pair/complete",
     # Code-pair flow (SDK ↔ dashboard typed pair code).
-    # Daemon announces an 8-char base32 code, dashboard claims it.
-    # Codes have ~38 bits of entropy, 600s TTL, and /code/claim is
-    # rate-limited to 5 wrong attempts per IP per 15 minutes — see
-    # ``feral-core/api/middleware/rate_limit.py``.
+    #
+    # ``announce`` stays open because the node SDKs call it from other
+    # machines (feral-nodes/python-node-sdk, ts-node-sdk). It mints
+    # nothing: it records a pending row, and the token is only issued at
+    # claim time.
+    #
+    # ``code/claim`` is NOT open, and used to be. The entropy argument
+    # that justified opening it does not hold: the caller supplies the
+    # code, so there is nothing to guess, and the 5-wrong-attempts limit
+    # never charges because a correct code is not a wrong attempt. That
+    # made an unauthenticated LAN peer able to announce a code of its own
+    # choosing, claim it, upgrade to a phone bearer and read
+    # /api/context/live, /api/conversations and /api/timeline. Because
+    # _OPEN_PATHS is consulted before the trusted-transport gate, it
+    # would also have worked through a relay tunnel, i.e. from the
+    # internet.
+    #
+    # Claiming is an operator action performed from the dashboard, which
+    # is either on loopback (covered by the bypass) or presenting the API
+    # key. It belongs on the same footing as /pair/url, which was already
+    # gated for exactly this reason.
     "/api/devices/pair/announce",
     "/api/devices/pair/status",
-    "/api/devices/pair/code/claim",
     # PIN second-factor (pair-pin-confirm PR). The phone calls /check
     # before rendering the form to learn whether a PIN is required;
     # /verify_pin is how it submits the PIN before /complete is allowed
@@ -765,7 +790,13 @@ async def install_phone_bridge_script():
 #  ``increment()``/``observe()`` call sites stay scrapeable
 # during the cross-module emit() rollout ( follow-up).
 
-_METRICS_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+#: Retained for callers that import it. The gate below no longer reads
+#: it: /metrics now asks ``session_auth.is_localhost``, the same
+#: function every other local check uses. Two definitions of "is this
+#: peer local" is one too many, and this one had drifted, carrying
+#: "testclient" (Starlette's TestClient peer name) in a production trust
+#: set.
+_METRICS_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
 def _metrics_endpoint_killed() -> bool:
@@ -783,7 +814,17 @@ async def metrics_endpoint(request: Request):
     if _metrics_endpoint_killed():
         return JSONResponse({"error": "Metrics endpoint disabled. Set FERAL_METRICS_ENDPOINT=1"}, status_code=404)
     client_host = request.client.host if request.client else None
-    if client_host not in _METRICS_LOOPBACK_HOSTS and not _metrics_public_enabled():
+    # The transport half matters as much as the peer address. A relay
+    # tunnel terminates on this machine and therefore presents as
+    # 127.0.0.1, so a peer check alone published the whole Prometheus
+    # surface remotely with FERAL_METRICS_PUBLIC=0. This was the last
+    # route still deciding trust from client.host alone, the same bug
+    # class as /api/auth/local-key.
+    _metrics_trusted = (
+        _session_auth_module.transport_is_trusted(request.scope)
+        and _session_auth_module.is_localhost(client_host)
+    )
+    if not _metrics_trusted and not _metrics_public_enabled():
         return JSONResponse({"error": "Not Found"}, status_code=404)
 
     from starlette.responses import PlainTextResponse
