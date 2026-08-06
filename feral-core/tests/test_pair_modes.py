@@ -475,3 +475,57 @@ def test_legacy_client_reading_only_url_still_works(env, monkeypatch):
     body = c.get("/api/devices/pair/url?name=phone").json()
     for field in ("v", "mode", "url", "token", "brain_id", "expires", "name", "device_id"):
         assert field in body, field
+
+
+def test_qr_blob_carries_the_candidate_list(env, monkeypatch):
+    """S5 depends on this.
+
+    The QR is the only channel a scanned pairing has, so a phone that
+    gets one address stores one address. That is why re-pairing on a
+    second network clobbered the first: the credential store had nowhere
+    to put a second endpoint because it was never given one.
+    """
+    import base64
+    import json
+    from urllib.parse import parse_qs, urlparse
+
+    c, config, _ = env
+    config.update_settings("access", "pairing_mode", "local")
+    monkeypatch.setattr("api.routes.devices._detect_lan_ip", lambda: "192.168.50.9")
+    monkeypatch.setattr(
+        "services.netinfo.detect_lan_ipv4s",
+        lambda timeout=0.5: ["192.168.50.9", "10.0.0.7"],
+    )
+    monkeypatch.setattr("services.netinfo.mdns_hostname", lambda: "macbook.local")
+
+    body = c.get("/api/devices/pair/url?name=phone").json()
+    raw = parse_qs(urlparse(body["url"]).query)["p"][0]
+    blob = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+
+    assert [u["kind"] for u in blob["urls"]] == ["lan", "lan", "mdns"]
+    assert blob["urls"][0]["url"] == "http://192.168.50.9:9090"
+    assert blob["urls"][2]["url"] == "http://macbook.local:9090"
+    # Order matches the HTTP payload, so a client cannot get two answers.
+    assert [u["url"] for u in blob["urls"]] == [u["url"] for u in body["urls"]]
+    # Caveat prose stays out: the QR pays for every byte in scan
+    # reliability and the pair modal already has the full payload.
+    assert all("caveat" not in u for u in blob["urls"])
+
+
+def test_qr_stays_scannable_with_candidates(env, monkeypatch):
+    """A QR that will not scan is worse than one missing a field."""
+    from urllib.parse import parse_qs, urlparse
+
+    c, config, _ = env
+    config.update_settings("access", "pairing_mode", "local")
+    monkeypatch.setattr("api.routes.devices._detect_lan_ip", lambda: "192.168.50.9")
+    monkeypatch.setattr(
+        "services.netinfo.detect_lan_ipv4s",
+        lambda timeout=0.5: ["192.168.50.9", "10.0.0.7", "172.16.4.4"],
+    )
+
+    url = c.get("/api/devices/pair/url?name=phone").json()["url"]
+    # QR version 20 at medium correction holds ~1000 alphanumeric chars.
+    # Staying well under keeps a phone camera reading it at arm's length.
+    assert len(url) < 600, f"pair URL is {len(url)} chars, QR density suffers"
+    assert "p" in parse_qs(urlparse(url).query)

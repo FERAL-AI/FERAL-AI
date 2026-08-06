@@ -361,7 +361,9 @@ def _build_diagnostic(origin_url: str) -> dict:
     return diagnostic
 
 
-def _pair_link_blob(mode: str, brain_id: str, result: dict) -> str:
+def _pair_link_blob(
+    mode: str, brain_id: str, result: dict, candidates: list | None = None
+) -> str:
     """Base64url-encode the identity fields for carrying inside the URL.
 
     The QR encodes ``payload["url"]`` and nothing else, so every field
@@ -378,15 +380,31 @@ def _pair_link_blob(mode: str, brain_id: str, result: dict) -> str:
     reachability diagnostic stays out of it, because it is prose destined
     for the pair modal, and inflating the QR hurts scan reliability.
     """
+    payload = {
+        "v": 1,
+        "mode": mode,
+        "brain_id": brain_id,
+        "expires": int(result.get("expires_at") or 0),
+        "device_id": result["device_id"],
+        "name": "FERAL Brain",
+    }
+
+    # Candidate URLs ride along because the QR is the only channel a
+    # scanned pairing has. Without them a phone learns exactly one
+    # address and stores it, which is why re-pairing on a second network
+    # used to clobber the first: the store had nowhere to put a second
+    # endpoint because it was never given one.
+    #
+    # Kinds and order only, no caveat text: the QR pays for every byte in
+    # scan reliability, and the caveats are prose for the pair modal,
+    # which already has the full payload over HTTP.
+    if candidates:
+        payload["urls"] = [
+            {"kind": c.kind, "url": c.url} for c in candidates
+        ]
+
     blob = json.dumps(
-        {
-            "v": 1,
-            "mode": mode,
-            "brain_id": brain_id,
-            "expires": int(result.get("expires_at") or 0),
-            "device_id": result["device_id"],
-            "name": "FERAL Brain",
-        },
+        payload,
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
@@ -432,7 +450,7 @@ def _pair_payload(result: dict, origin: str | None = None) -> dict:
     cfg = getattr(state, "config", None)
     mode = cfg.access_pairing_mode if cfg else "localhost"
     brain_id = cfg.brain_id if cfg else ""
-    blob = _pair_link_blob(mode, brain_id, result)
+    blob = _pair_link_blob(mode, brain_id, result, candidates)
     return {
         "v": 1,
         "schema": 2,
