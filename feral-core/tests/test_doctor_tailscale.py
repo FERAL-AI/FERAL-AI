@@ -150,6 +150,11 @@ def fake_tailscale(monkeypatch):
                 run=cli.run,
                 TimeoutExpired=subprocess.TimeoutExpired,
                 CompletedProcess=subprocess.CompletedProcess,
+                # _run passes stdin=subprocess.DEVNULL so a prompting
+                # CLI cannot block on input that will never arrive. The
+                # double has to model that or every probe dies on an
+                # AttributeError instead of exercising the probe.
+                DEVNULL=subprocess.DEVNULL,
             ),
         )
         # The userspace-socket probe must not depend on whatever is in

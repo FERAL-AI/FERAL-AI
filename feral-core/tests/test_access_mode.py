@@ -375,3 +375,49 @@ class TestBootRepairThroughConfigLoader:
 
         assert cfg.access_pairing_mode == "relay"
         assert current_mode(cfg) is AccessMode.RELAY
+
+
+class TestTailscaleKeepsItsBindHost:
+    """A regression I introduced, caught before it shipped.
+
+    The original ``apply_tailscale_funnel`` never touched ``bind_host``.
+    It wrote the Funnel URL and left the listener where the operator had
+    it. Deriving loopback for TAILSCALE, and then letting the boot
+    repair "narrow" an existing 0.0.0.0 to match, would have silently
+    broken anyone reached directly on their tailnet address rather than
+    through Funnel. Narrowing is not always safe.
+    """
+
+    def test_applying_tailscale_preserves_a_lan_bind(self):
+        cfg = _FakeConfig({
+            "access": {"pairing_mode": "local"},
+            "network": {"bind_host": "0.0.0.0"},
+        })
+        apply_mode(cfg, AccessMode.TAILSCALE)
+        assert cfg.data["access"]["pairing_mode"] == "remote"
+        assert cfg.data["network"]["bind_host"] == "0.0.0.0"
+
+    def test_applying_tailscale_preserves_a_loopback_bind(self):
+        """Funnel proxies to localhost, so loopback is legitimate too."""
+        cfg = _FakeConfig({
+            "access": {"pairing_mode": "localhost"},
+            "network": {"bind_host": "127.0.0.1"},
+        })
+        apply_mode(cfg, AccessMode.TAILSCALE)
+        assert cfg.data["network"]["bind_host"] == "127.0.0.1"
+
+    def test_boot_repair_leaves_tailscale_alone(self):
+        """The upgrade path that would have broken a working setup."""
+        cfg = _FakeConfig({
+            "access": {"pairing_mode": "remote"},
+            "network": {"bind_host": "0.0.0.0"},
+        })
+        assert repair_contradiction(cfg) is None
+        assert cfg.data["network"]["bind_host"] == "0.0.0.0"
+
+    def test_the_other_modes_still_derive(self):
+        """The fix must not turn the original bug back on."""
+        assert AccessMode.LAN.derives_bind_host is True
+        assert AccessMode.LOCALHOST.derives_bind_host is True
+        assert AccessMode.RELAY.derives_bind_host is True
+        assert AccessMode.TAILSCALE.derives_bind_host is False

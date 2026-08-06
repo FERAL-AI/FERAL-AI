@@ -50,8 +50,29 @@ class AccessMode(Enum):
     TAILSCALE = "remote"
 
     @property
+    def derives_bind_host(self) -> bool:
+        """Whether this mode dictates a bind host at all.
+
+        ``TAILSCALE`` does not, and forcing one on it was a regression.
+        The original ``apply_tailscale_funnel`` never touched
+        ``bind_host``: it wrote the Funnel URL and left the listener
+        wherever the operator had it. Both arrangements work, for
+        different reasons. Funnel proxies from the Tailscale daemon to
+        localhost, so a loopback bind is fine. But a phone reaching the
+        brain directly on its tailnet address needs a listener on that
+        interface, and narrowing to loopback would silently break it.
+        Tailscale mode therefore keeps whatever bind host is already
+        configured.
+        """
+        return self is not AccessMode.TAILSCALE
+
+    @property
     def bind_host(self) -> str:
-        """The only bind host that makes sense for this mode.
+        """The bind host this mode implies.
+
+        Only meaningful when :attr:`derives_bind_host` is true. For
+        ``TAILSCALE`` the caller must preserve the existing value
+        instead of reading this.
 
         ``RELAY`` binds loopback deliberately. The tunnel is an outbound
         connection and the relay hands us raw TLS on a local socket, so a
@@ -163,7 +184,11 @@ def apply_mode(config, mode: object) -> AccessModeResult:
     target = parse_strict(mode)
     previous_mode = current_mode(config)
     previous_bind = configured_bind_host(config)
-    bind = target.bind_host
+    # Tailscale does not dictate a bind host; see AccessMode.
+    # derives_bind_host. Keeping the operator's value is what the
+    # original apply_tailscale_funnel did, and overriding it here would
+    # break anyone reached directly on their tailnet address.
+    bind = target.bind_host if target.derives_bind_host else previous_bind
 
     # Both keys are written unconditionally, even when they already match
     # the computed values. Applying a mode is an explicit operator
@@ -248,8 +273,14 @@ def repair_contradiction(config) -> Optional[AccessModeResult]:
     """
     mode = current_mode(config)
     persisted_bind = configured_bind_host(config)
-    expected = mode.bind_host
 
+    # Nothing to repair for a mode that does not dictate a bind host.
+    # Treating Tailscale's bind as a contradiction would have narrowed
+    # a working 0.0.0.0 to loopback on the next boot, unprompted.
+    if not mode.derives_bind_host:
+        return None
+
+    expected = mode.bind_host
     if persisted_bind == expected:
         return None
 
