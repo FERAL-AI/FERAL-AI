@@ -1145,3 +1145,74 @@ def reset_shared_catalog() -> None:
 
 # Silence unused-import warnings in static analysis
 _ = contextlib, BaseProvider
+
+
+def provider_base_url_mismatch(provider_id: str, base_url: str | None) -> str | None:
+    """Return a complaint if ``base_url`` belongs to a different provider.
+
+    Returns ``None`` when the override is absent, matches the provider's
+    own endpoint, or points somewhere this catalog does not recognise.
+    That last case is deliberate: proxies, gateways, Ollama and
+    self-hosted endpoints are the reason the field exists, and a check
+    that flagged them would just teach people to ignore it.
+
+    What it does catch is one provider's adapter aimed at another
+    provider's API, which authenticates with the wrong key and fails on
+    every call. A real install ran `provider: openrouter` with
+    `base_url: https://api.anthropic.com/v1` and logged 610 consecutive
+    401s while every status surface reported the provider healthy.
+    """
+    if not base_url:
+        return None
+
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(base_url).hostname or "").lower()
+    except Exception:
+        return None
+    if not host:
+        return None
+
+    # Only second-guess a provider this catalog actually knows. An
+    # unrecognised provider id means an adapter we cannot reason about,
+    # and guessing at it would produce confident nonsense.
+    known = {d.provider_id for d in BUILT_IN_DESCRIPTORS}
+    if provider_id not in known:
+        return None
+
+    # Loopback and private addresses are shared ground: Ollama, LM Studio,
+    # a dev proxy and a corporate gateway all live there legitimately.
+    # Attributing localhost to whichever descriptor happens to default to
+    # it would flag every local setup, and a check that cries wolf on the
+    # normal case is a check people learn to ignore.
+    if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".local"):
+        return None
+    try:
+        import ipaddress
+
+        if ipaddress.ip_address(host).is_private:
+            return None
+    except ValueError:
+        pass
+
+    owners: dict[str, str] = {}
+    for desc in BUILT_IN_DESCRIPTORS:
+        own = getattr(desc, "default_base_url", "") or ""
+        try:
+            own_host = (urlparse(own).hostname or "").lower()
+        except Exception:
+            continue
+        if own_host and own_host not in {"localhost", "127.0.0.1", "::1"}:
+            owners[own_host] = desc.provider_id
+
+    owner = owners.get(host)
+    if owner is None or owner == provider_id:
+        return None
+    return (
+        f"llm.provider is {provider_id!r} but llm.base_url points at "
+        f"{host}, which is {owner!r}'s endpoint. The {provider_id} adapter "
+        f"will send a {provider_id} key to {owner}, and every call will "
+        f"fail authentication. Remove the base_url override, or set "
+        f"provider to {owner!r}."
+    )

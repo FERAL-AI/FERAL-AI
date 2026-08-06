@@ -273,6 +273,33 @@ async def get_memory_backend():
         "fell_back": bool(MEMORY_BACKEND_STATUS.get("fell_back")),
         "boot_error": MEMORY_BACKEND_STATUS.get("error"),
         "available": {name: _backend_available(name) for name in _known_backends()},
+        # Boot status is not the whole truth. A backend can construct
+        # perfectly at boot and still be unable to answer a single query,
+        # which is exactly what happens when the stored vectors were
+        # written by a different embedder than the one now configured:
+        # every vector query raises, hybrid search silently degrades to
+        # keyword-only, and this endpoint reported fell_back=false with
+        # boot_error=null the whole time. Its own docstring claimed it
+        # "now reports the TRUTH instead of a silent lie". It did not.
+        **_semantic_health(),
+    }
+
+
+def _semantic_health() -> dict:
+    """Whether semantic search can actually answer, not whether it booted.
+
+    Reads the live store rather than boot status. ``None`` for the error
+    means no vector query has failed in this process, which is not the
+    same as proof that one would succeed, and the field is named to say
+    so rather than implying a green light.
+    """
+    mem = getattr(state, "memory", None)
+    if mem is None:
+        return {"semantic_search": "unknown", "vector_leg_error": None}
+    err = getattr(mem, "_vector_leg_error", None)
+    return {
+        "semantic_search": "degraded" if err else "ok",
+        "vector_leg_error": err,
     }
 
 

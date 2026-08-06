@@ -278,6 +278,68 @@ def cmd_memory(action: str, backend_id: str | None, *, flags=None) -> None:
         print("  settings.json::memory.encrypted_at_rest = true")
         return
 
+    if action == "reembed":
+        """Rewrite stored embeddings with the currently configured provider.
+
+        Needed when the embedder changes underneath existing data. The
+        vectors written by the old provider have a different dimension,
+        so every vector query raises and hybrid search silently degrades
+        to keyword-only. Installing fastembed does exactly this: it wins
+        provider selection, and every chunk written before it is
+        orphaned.
+
+        Read-then-write per chunk, committing as it goes, so an
+        interrupted run leaves a partially migrated store that the next
+        run finishes rather than a corrupt one.
+        """
+        import asyncio
+        import sqlite3
+
+        from config.loader import feral_data_home
+        from memory.embeddings import EmbeddingProvider, vec_to_blob
+
+        db = feral_data_home() / "memory.db"
+        if not db.exists():
+            print(f"  No memory database at {db}")
+            sys.exit(1)
+
+        embedder = EmbeddingProvider()
+        target_dim = embedder.dimension
+        print(f"  Provider: {embedder.provider_name}  ({target_dim}d)")
+
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, text_content, embedding FROM memory_chunks "
+            "WHERE embedding IS NOT NULL"
+        ).fetchall()
+
+        stale = [r for r in rows if len(r["embedding"]) // 4 != target_dim]
+        print(f"  Chunks: {len(rows)} total, {len(stale)} written by a different provider")
+        if not stale:
+            print("  Nothing to do; every stored vector matches the active provider.")
+            conn.close()
+            return
+
+        done = 0
+        for r in stale:
+            text = r["text_content"]
+            if not text:
+                continue
+            vec = asyncio.run(embedder.embed(text))
+            conn.execute(
+                "UPDATE memory_chunks SET embedding = ? WHERE id = ?",
+                (vec_to_blob(vec), r["id"]),
+            )
+            done += 1
+            if done % 200 == 0:
+                conn.commit()
+                print(f"    {done}/{len(stale)}")
+        conn.commit()
+        conn.close()
+        print(f"  Re-embedded {done} chunk(s). Restart the brain to pick it up.")
+        return
+
     if action == "status":
         active = _current_backend()
         module_path, install_hint = _KNOWN_BACKENDS.get(

@@ -100,6 +100,10 @@ ALLOWED_FAIL_LABELS: set[str] = {
     # access.pairing_mode and network.bind_host disagree, so the brain
     # advertises a pair URL nothing is listening on. Core: no phone can
     # pair, and every surface reported healthy while it was true.
+    # llm.provider and llm.base_url naming different providers means
+    # every call authenticates with the wrong key. Core: the brain has no
+    # working LLM, and it reports the provider as healthy.
+    "LLM endpoint",
     "Access mode coherence",
     # The resolver refused to produce a pair origin. Same class: pairing
     # is structurally impossible until the named condition is fixed.
@@ -138,6 +142,8 @@ ALLOWED_WARN_LABELS: set[str] = {
     "Port availability",
     # Settings could not be read, or the pair resolver raised something
     # other than PairUnavailable. Degraded reporting, not a broken brain.
+    # settings.json unreadable, so coherence could not be checked.
+    "LLM endpoint",
     "Pairing & access",
     # Also in ALLOWED_FAIL_LABELS. It fails when the resolver refuses
     # outright, and warns for the softer cases: a mode whose transport

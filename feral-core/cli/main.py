@@ -653,6 +653,17 @@ def _brain_ssl_kwargs(*, tls: bool) -> dict:
     return ssl_kwargs
 
 
+def _settings_for_doctor() -> dict:
+    """Read settings.json directly. Doctor must not need a live brain."""
+    import json
+
+    from config.loader import feral_home
+
+    try:
+        return json.loads((feral_home() / "settings.json").read_text())
+    except Exception:
+        return {}
+
 def _print_pairing_line(bound: str, *, console=None) -> None:
     """State whether a phone can pair, right where the operator is looking.
 
@@ -1877,6 +1888,29 @@ def cmd_doctor():
         _pass("Port availability", f":{port} is free")
     finally:
         sock.close()
+
+    # ── 7a. LLM endpoint coherence ──
+    #
+    # A real install ran provider=openrouter with
+    # base_url=https://api.anthropic.com/v1 and logged 610 consecutive
+    # 401s while every status surface reported the provider healthy. The
+    # two fields were never compared by anything.
+    try:
+        from providers.catalog import provider_base_url_mismatch
+
+        _llm_cfg = (_settings_for_doctor().get("llm") or {})
+        _mismatch = provider_base_url_mismatch(
+            str(_llm_cfg.get("provider") or ""), _llm_cfg.get("base_url")
+        )
+        if _mismatch:
+            _fail("LLM endpoint", _mismatch,
+                  "Remove llm.base_url from ~/.feral/settings.json")
+        elif _llm_cfg.get("provider"):
+            _pass("LLM endpoint",
+                  f"{_llm_cfg.get('provider')} -> "
+                  f"{_llm_cfg.get('base_url') or 'provider default'}")
+    except Exception as exc:  # pragma: no cover - defensive
+        _warn("LLM endpoint", f"could not check: {exc}")
 
     # ── 7b. Pairing & access ──
     #
@@ -3368,6 +3402,7 @@ def main():
         choices=[
             "status", "switch", "list", "decay",
             "forget", "recall", "compact", "query", "encrypt",
+            "reembed",
         ],
         help=(
             "status: show current backend | list: installed backends | "

@@ -76,6 +76,7 @@ from memory.context_builder import (
     search_all as context_search_all,
 )
 from memory.embeddings import (
+    EmbeddingDimensionMismatch,
     EmbeddingProvider,
     EmbedQueue,
     chunk_text,
@@ -285,6 +286,10 @@ class MemoryStore:
                     _db_path_obj.with_name(_db_path_obj.name + ".bak.plaintext"),
                 )
 
+        #: Last failure from the vector leg of hybrid search, or None.
+        #: Surfaced by the memory backend endpoint so a degraded
+        #: semantic search cannot masquerade as "nothing matched".
+        self._vector_leg_error: str | None = None
         self.db_path = db_path
         self._working: dict[str, deque[dict]] = {}
         self._working_max = 50
@@ -1506,8 +1511,30 @@ class MemoryStore:
                         eid = c["source_id"]
                         if sim > 0.25 and (eid not in vec_results or sim > vec_results[eid]["vec_score"]):
                             vec_results[eid] = {"id": eid, "vec_score": sim}
+            except EmbeddingDimensionMismatch as exc:
+                # Not transient, and not recoverable by retrying: the
+                # stored vectors were written by a different embedder
+                # than the one now configured, so every vector query in
+                # this process will fail the same way. Logged loudly and
+                # recorded, because the symptom is an empty result set
+                # that is indistinguishable from "nothing matched".
+                self._vector_leg_error = str(exc)
+                logger.warning(
+                    "Vector search is DISABLED: %s. Stored embeddings were "
+                    "written by a different provider than the one now "
+                    "configured, so semantic recall returns nothing and "
+                    "search has silently degraded to keyword-only. Re-embed "
+                    "with `feral memory reembed`, or set FERAL_EMBED_PROVIDER "
+                    "back to the provider that wrote them.",
+                    exc,
+                )
             except Exception as e:
-                logger.debug("Vector search failed: %s", e)
+                # Same reasoning as the FTS leg above: a dead vector leg
+                # halves recall, and logging it at debug is why this one
+                # went unnoticed while the text leg's lesson was already
+                # written down twenty lines up.
+                self._vector_leg_error = str(e)
+                logger.warning("Episode vector leg failed for %r: %s", query, e)
 
             all_ids = set(fts_results.keys()) | set(vec_results.keys())
             episode_cache = {}
