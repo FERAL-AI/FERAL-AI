@@ -58,6 +58,48 @@ class TestRelayIdDerivation:
         assert differing > len(a) // 3, (a, b)
 
 
+class TestDerivationAgreesWithTheControlPlane:
+    """The relay control plane derives relay_id independently.
+
+    It imports nothing from feral-core on purpose: it is a separate
+    deployable, and a brain must be able to be older or newer than the
+    relay it talks to. The cost is a duplicated derivation, and a
+    duplicated derivation that drifts is a security bug, not an
+    inconvenience: the two sides would compute different ids and the
+    binding between an id and a key would stop meaning anything.
+
+    Both sides pin this vector. If either implementation changes, one of
+    the two suites fails.
+    """
+
+    #: Must equal feral_relay_cp.identity.PINNED_VECTOR.
+    PINNED_VECTOR = (b"\x01" * 32, "olgw5bbcyqd7w3ijq2ipceylpxwx5qxx")
+
+    def test_matches_the_pinned_vector(self):
+        pub, expected = self.PINNED_VECTOR
+        assert brain_identity.derive_relay_id(pub) == expected
+
+    def test_the_control_plane_pins_the_same_vector(self):
+        """Read the relay's constant directly rather than trusting that
+        the two literals were kept in step by hand."""
+        import re
+        from pathlib import Path
+
+        cp = (
+            Path(__file__).resolve().parents[2]
+            / "feral-relay" / "control" / "feral_relay_cp" / "identity.py"
+        )
+        if not cp.exists():
+            import pytest as _pytest
+
+            _pytest.skip("relay control plane not present in this checkout")
+
+        text = cp.read_text()
+        match = re.search(r'PINNED_VECTOR = \(b"\\x01" \* 32, "([a-z2-7]+)"\)', text)
+        assert match, "could not find PINNED_VECTOR in the control plane"
+        assert match.group(1) == self.PINNED_VECTOR[1]
+
+
 class TestSignAndVerify:
     """Exercised against generated keys directly, so these do not need a
     vault and cannot be broken by one being locked."""
