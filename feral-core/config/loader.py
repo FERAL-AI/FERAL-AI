@@ -1130,10 +1130,17 @@ class ConfigLoader:
 
     @property
     def brain_id(self) -> str:
-        """Stable per-brain UUID. Generated lazily on first access and
-        persisted under ``meta.brain_id`` so subsequent boots return the
-        same value. Phone clients refuse to re-pair against a different
-        brain by comparing the QR's ``brain_id`` to this one.
+        """Stable per-brain UUID, generated lazily and persisted.
+
+        A label, not a credential. This docstring used to claim phone
+        clients "refuse to re-pair against a different brain by
+        comparing the QR's ``brain_id`` to this one". No such check
+        exists on either side, and it could not be trusted if it did: a
+        uuid is unsigned, so anyone can put any value in a QR code.
+
+        For an identity a client can actually verify, see
+        :mod:`security.brain_identity`, whose ``relay_id`` is derived
+        from an Ed25519 public key rather than chosen.
         """
         existing = self._merged.get("meta", {}).get("brain_id", "")
         if isinstance(existing, str) and existing:
