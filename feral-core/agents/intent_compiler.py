@@ -202,6 +202,42 @@ class IntentCompiler:
         self._save_plan(plan)
         return True
 
+    def get_completed_today(self, tz_name: str | None = None) -> list[dict]:
+        """Actions finished today, the mirror of get_today_actions.
+
+        /api/ambient/wind_down has always called this behind a hasattr guard
+        that never passed, because the method did not exist, so the evening
+        recap reported an empty day however much was done. complete_action
+        already stamps completed_at, so the data was there the whole time.
+
+        Unlike get_today_actions this does not skip non-active plans: work
+        finished today counts toward today even if finishing it completed the
+        plan, which is the common case and precisely the part worth recapping.
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(tz_name or self._user_timezone)
+        today = datetime.now(tz).date()
+
+        done = []
+        for plan in self._plans.values():
+            for action in plan.micro_actions:
+                if not action.completed or not action.completed_at:
+                    continue
+                if datetime.fromtimestamp(action.completed_at, tz).date() != today:
+                    continue
+                done.append({
+                    "plan_id": plan.plan_id,
+                    "intent": plan.intent,
+                    "action": action.description,
+                    "action_id": action.action_id,
+                    "completed_at": action.completed_at,
+                    "result": action.result_summary,
+                })
+        done.sort(key=lambda a: a["completed_at"])
+        return done
+
     def get_today_actions(self, tz_name: str | None = None) -> list[dict]:
         from datetime import datetime
         from zoneinfo import ZoneInfo

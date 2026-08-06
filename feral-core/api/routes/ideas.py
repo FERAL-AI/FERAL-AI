@@ -72,16 +72,25 @@ async def refresh_ideas():
     """
     engine = _require_engine()
     bundle: list = []
+    # Both generators used to fail into a debug line under an unconditional
+    # success:True, so a pane with no ideas in it meant either "nothing to
+    # suggest today" or "both generators are broken", with no way to tell.
+    degraded: dict[str, str] = {}
     try:
         bundle.extend(engine.morning_brief())
     except Exception as exc:
-        logger.debug("morning_brief raised: %s", exc)
+        logger.warning("morning_brief raised: %s", exc)
+        degraded["morning_brief"] = f"{type(exc).__name__}: {exc}"
     try:
         bundle.extend(engine.refresh_waiting_user())
     except Exception as exc:
-        logger.debug("refresh_waiting_user raised: %s", exc)
+        logger.warning("refresh_waiting_user raised: %s", exc)
+        degraded["refresh_waiting_user"] = f"{type(exc).__name__}: {exc}"
     return {
-        "success": True,
+        # False when every generator failed: there is no sense in which the
+        # refresh the caller asked for succeeded.
+        "success": len(degraded) < 2,
+        "degraded": degraded,
         "new_ideas": [_idea_to_dict(i) for i in bundle],
         "today": [_idea_to_dict(i) for i in engine.list_today()],
     }

@@ -375,7 +375,9 @@ async def configure_llm_provider(provider_id: str, req: ConfigureRequest):
         try:
             state.config.update_settings("llm", "base_url", req.base_url)
         except Exception as exc:
-            logger.debug("update_settings(base_url) failed: %s", exc)
+            # The response below reports success either way, so a failed write
+            # here means the caller believes a base_url that was never saved.
+            logger.warning("update_settings(base_url) failed: %s", exc)
 
     return {
         "success": True,

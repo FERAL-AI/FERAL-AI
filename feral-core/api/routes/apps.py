@@ -181,7 +181,9 @@ async def _maybe_push_genui_to_phone(session_id: str, result: dict[str, Any], *,
             ),
         )
     except Exception as exc:
-        logger.debug("genui_push relay failed silently: %s", exc)
+        # It no longer fails silently. The phone showing nothing while the
+        # caller is told the screen was pushed is the failure being fixed.
+        logger.warning("genui_push relay failed: %s", exc)
 
 
 @router.get("/api/apps")
@@ -510,7 +512,9 @@ async def open_app(app_id: str, req: OpenSurfaceRequest):
                 title=f"{app_id} · {surface_id}",
             )
         except Exception as exc:
-            logger.debug("Push to session failed silently: %s", exc)
+            # Caller still gets success:True for the render; say the push part
+            # did not land instead of leaving it to be inferred.
+            logger.warning("push to session failed: %s", exc)
 
     return {"success": True, **result}
 

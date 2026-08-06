@@ -318,7 +318,10 @@ async def _get_dashboard_data() -> dict:
     try:
         snap = state._latest_live_wearable_snapshot()
     except Exception as exc:
-        logger.debug("latest_live_wearable_snapshot failed: %s", exc)
+        # Falling back quietly here is how the home tile and /api/health/summary
+        # start disagreeing about heart rate, which is what this block exists
+        # to prevent.
+        logger.warning("latest_live_wearable_snapshot failed: %s", exc)
         snap = None
     if snap and snap.get("heart_rate"):
         latest_health["heart_rate"] = snap["heart_rate"]
@@ -623,6 +626,12 @@ async def _push_health_update(frame: dict) -> int:
             await ws.send_json({**frame, "payload": payload})
             delivered += 1
         except Exception as exc:
+            # Deliberately still debug, unlike the other handlers in this file.
+            # A socket dying mid-broadcast is ordinary churn on a per-frame
+            # path, the count of successes is returned to the caller, and the
+            # broadcast-level failure is reported at warning by the caller. A
+            # warning here would fire on every phone that walks out of range
+            # and would be the first log line anyone learned to ignore.
             logger.debug("health_update push to %s failed: %s", node_id, exc)
     return delivered
 
@@ -673,5 +682,7 @@ async def health_frame(request: Request):
         try:
             await _push_health_update(frame)
         except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("health_update broadcast failed: %s", exc)
+            # The frame is returned either way, so without this the devices
+            # simply stop updating and the API still looks healthy.
+            logger.warning("health_update broadcast failed: %s", exc)
     return frame

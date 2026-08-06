@@ -247,7 +247,9 @@ async def update_config(body: dict):
                 try:
                     guard.reset()
                 except Exception as exc:
-                    logger.debug("loop_guard reset (%s) failed: %s", guard_attr, exc)
+                    # This route returns ok=True regardless; a guard that did not
+                    # reset stays tripped and keeps blocking work.
+                    logger.warning("loop_guard reset (%s) failed: %s", guard_attr, exc)
 
     return {"ok": True, "section": section, "key": key, "value": value}
 
@@ -462,7 +464,9 @@ async def save_credentials(body: dict):
                 try:
                     await state.orchestrator.llm.switch_provider(provider, api_key=creds[key_name])
                 except Exception as exc:
-                    logger.debug("switch_provider after save_credentials failed: %s", exc)
+                    # The key was saved but the live provider never picked it up,
+                    # so the user sees "saved" and the next call still fails.
+                    logger.warning("switch_provider after save_credentials failed: %s", exc)
                 break
 
     if state.channel_manager:

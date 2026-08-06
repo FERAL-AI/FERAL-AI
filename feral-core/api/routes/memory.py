@@ -140,7 +140,9 @@ async def get_memory_stats():
             if reason:
                 out["reason"] = reason
     except Exception as exc:
-        logger.debug("memory.stats() failed in /api/memory/stats: %s", exc)
+        # The response does carry ok=False, but the reason died here, so
+        # the one field that could explain a broken memory tile was dropped.
+        logger.warning("memory.stats() failed in /api/memory/stats: %s", exc)
         out["totals"] = {}
         out["ok"] = False
         out["reason"] = "stats_error"

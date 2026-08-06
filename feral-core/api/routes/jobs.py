@@ -17,8 +17,11 @@ Consciousness Layer (coming next) has a single source of truth for
 what the agent is doing right now.
 
 Design notes:
-* Each source is wrapped in its own try/except — a misbehaving source
-  can't take the whole endpoint down.
+* Each source is isolated — a misbehaving source can't take the whole
+  endpoint down. It is reported rather than hidden: the failing kind is
+  named in ``degraded`` and logged at warning, because an aggregator that
+  returns [] on error is indistinguishable from a quiet system, and this
+  endpoint's only job is telling those two apart.
 * ``cancellable_via`` names the route a client can POST to for cancel
   (or null if the item isn't cancellable from the outside).
 * ``progress`` is a 0.0-1.0 float when known, null otherwise.
@@ -75,8 +78,11 @@ def _taskflow_jobs() -> list[dict]:
             })
         return out
     except Exception as exc:
-        logger.debug("taskflow aggregator failed: %s", exc)
-        return []
+        # Re-raised so the combiner can report this source as degraded.
+        # Returning [] here made a dead source indistinguishable from an
+        # idle one, which is the entire question this endpoint answers.
+        logger.warning("taskflow aggregator failed: %s", exc)
+        raise
 
 
 def _routine_jobs() -> list[dict]:
@@ -108,8 +114,11 @@ def _routine_jobs() -> list[dict]:
             })
         return out
     except Exception as exc:
-        logger.debug("routine aggregator failed: %s", exc)
-        return []
+        # Re-raised so the combiner can report this source as degraded.
+        # Returning [] here made a dead source indistinguishable from an
+        # idle one, which is the entire question this endpoint answers.
+        logger.warning("routine aggregator failed: %s", exc)
+        raise
 
 
 def _specialist_jobs() -> list[dict]:
@@ -145,8 +154,11 @@ def _specialist_jobs() -> list[dict]:
             })
         return out
     except Exception as exc:
-        logger.debug("specialist aggregator failed: %s", exc)
-        return []
+        # Re-raised so the combiner can report this source as degraded.
+        # Returning [] here made a dead source indistinguishable from an
+        # idle one, which is the entire question this endpoint answers.
+        logger.warning("specialist aggregator failed: %s", exc)
+        raise
 
 
 def _tool_genesis_jobs() -> list[dict]:
@@ -177,8 +189,11 @@ def _tool_genesis_jobs() -> list[dict]:
             })
         return out
     except Exception as exc:
-        logger.debug("tool_genesis aggregator failed: %s", exc)
-        return []
+        # Re-raised so the combiner can report this source as degraded.
+        # Returning [] here made a dead source indistinguishable from an
+        # idle one, which is the entire question this endpoint answers.
+        logger.warning("tool_genesis aggregator failed: %s", exc)
+        raise
 
 
 def _daemon_jobs() -> list[dict]:
@@ -205,7 +220,11 @@ def _daemon_jobs() -> list[dict]:
                 },
             })
     except Exception as exc:
-        logger.debug("daemon aggregator failed: %s", exc)
+        # Re-raised so the combiner can report this source as degraded.
+        # Returning [] here made a dead source indistinguishable from an
+        # idle one, which is the entire question this endpoint answers.
+        logger.warning("daemon aggregator failed: %s", exc)
+        raise
     return out
 
 
@@ -229,10 +248,20 @@ async def list_jobs(
     }
     items: list[dict] = []
     counts: dict[str, int] = {}
+    # A source that failed and a source with nothing to report both used to
+    # come back as an empty list. This endpoint exists to answer "what is the
+    # brain doing right now", so those two answers being identical is the one
+    # thing it must not do: a dead aggregator reads as a calm system.
+    degraded: dict[str, str] = {}
     for k, fn in aggregators.items():
         if kind and kind != k:
             continue
-        rows = fn()
+        try:
+            rows = fn()
+        except Exception as exc:
+            # Isolation is still the contract, it just is not silent now.
+            degraded[k] = f"{type(exc).__name__}: {exc}"
+            rows = []
         counts[k] = len(rows)
         items.extend(rows)
 
@@ -247,5 +276,6 @@ async def list_jobs(
         "count": len(items),
         "counts_by_kind": counts,
         "items": items[:lim],
+        "degraded": degraded,
         "as_of": time.time(),
     }

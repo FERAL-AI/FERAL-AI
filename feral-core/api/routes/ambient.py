@@ -217,7 +217,16 @@ async def get_next_event():
             if isinstance(result, dict) and result.get("success") and result.get("data"):
                 return result["data"]
     except Exception as e:
-        logger.debug("next_event lookup failed: %s", e)
+        # The hint below tells the user to connect a calendar. When the lookup
+        # raised, the calendar may well be connected and failing, and sending
+        # someone to reconnect an already-connected integration is worse than
+        # saying nothing. Report the failure instead of guessing the cause.
+        logger.warning("next_event lookup failed: %s", e)
+        return {
+            "event": None,
+            "degraded": f"{type(e).__name__}: {e}",
+            "hint": "Calendar lookup failed. Check Settings > Integrations.",
+        }
 
     return {"event": None, "hint": "Connect Google Calendar via Settings > Integrations"}
 
@@ -238,6 +247,7 @@ async def get_snapshot():
         suggested_mode = "wind_down"
 
     vitals = {}
+    degraded: list[str] = []
     try:
         if state.perception and state.sessions:
             for sid in state.sessions:
@@ -251,12 +261,16 @@ async def get_snapshot():
                     }
                     break
     except Exception as e:
-        logger.debug("vitals snapshot failed: %s", e)
+        # An empty vitals dict is what a glasses-less desk session looks like,
+        # so a perception failure rendered as "no wearable connected".
+        logger.warning("vitals snapshot failed: %s", e)
+        degraded.append(f"vitals: {type(e).__name__}: {e}")
 
     return {
         "time": now.isoformat(),
         "suggested_mode": suggested_mode,
         "vitals": vitals,
+        "degraded": degraded,
     }
 
 
@@ -279,16 +293,22 @@ async def get_wind_down():
         "key_episodes": [],
     }
 
+    degraded: list[str] = []
+
+    # This used to sit behind a hasattr guard for a method IntentCompiler did
+    # not have, so the evening recap reported an empty day no matter how much
+    # was finished. The method exists now; call it directly, because a guard
+    # that silently skips is how the absence lasted.
     try:
-        if hasattr(state, "intent_compiler") and state.intent_compiler:
-            if hasattr(state.intent_compiler, "get_completed_today"):
-                day_recap["completed_tasks"] = state.intent_compiler.get_completed_today()
+        if getattr(state, "intent_compiler", None):
+            day_recap["completed_tasks"] = state.intent_compiler.get_completed_today()
     except Exception as e:
-        logger.debug("day recap unavailable: %s", e)
+        logger.warning("wind_down: day recap unavailable: %s", e)
+        degraded.append("completed_tasks")
 
     episodes: list = []
     try:
-        if hasattr(state, "memory") and state.memory:
+        if getattr(state, "memory", None):
             recent = (await state.memory.episode_recent(limit=10)) or []
             today = datetime.now().date()
             episodes = [
@@ -296,7 +316,10 @@ async def get_wind_down():
                 if datetime.fromisoformat(e.get("ts", "1970-01-01")).date() == today
             ][:2]
     except Exception as e:
-        logger.debug("episodes unavailable: %s", e)
+        # "Nothing memorable happened today" and "recall is broken" are
+        # different evenings.
+        logger.warning("wind_down: episodes unavailable: %s", e)
+        degraded.append("key_episodes")
 
     now = datetime.now()
     bedtime = now.replace(hour=23, minute=0, second=0, microsecond=0)
@@ -323,6 +346,7 @@ async def get_wind_down():
         ],
         "sleep_prep": sleep_prep,
         "journal_prompt": random.choice(_JOURNAL_PROMPTS),
+        "degraded": degraded,
     }
 
 

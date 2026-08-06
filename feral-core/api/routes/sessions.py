@@ -343,7 +343,8 @@ def _record_subsession_audit(
             detail={"child_id": child_id, **detail},
         )
     except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("subsession audit record failed: %s", exc)
+        # An audit trail with silent gaps is worse than none: it is trusted.
+        logger.warning("subsession audit record failed: %s", exc)
 
 
 def _serialize_child(child: dict) -> dict:
