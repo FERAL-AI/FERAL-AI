@@ -116,3 +116,74 @@ async def test_prompt_template_alias(runtime):
     assert latest["status"] == "completed"
     # prompt_template was rendered + aliased to prompt and sent to the LLM.
     assert any("refine: HELLO_FROM_LLM" == p for p in orch.prompts)
+
+
+# ── Dotted context paths in templates ──────────────────────────────
+#
+# Templates could reference only `previous_output` and `step_N`, so a
+# workflow had no way to read a value its trigger supplied.
+# `workflows/meeting_recap.json` is built entirely on `{{ context.* }}`
+# tokens, which matched nothing and were passed through as literal text.
+
+
+def _render(text, context):
+    rt = TaskFlowRuntime.__new__(TaskFlowRuntime)
+    return TaskFlowRuntime._render_string(rt, text, context)
+
+
+def test_dotted_context_path_is_substituted():
+    out = _render("Recap of {{ context.meeting_topic }}", {"meeting_topic": "Q3 plan"})
+    assert out == "Recap of Q3 plan"
+
+
+def test_nested_dotted_path_walks_mappings():
+    out = _render("{{ context.meeting.title }}", {"meeting": {"title": "Standup"}})
+    assert out == "Standup"
+
+
+def test_missing_context_path_renders_empty_not_the_literal_token():
+    """A model handed `{{ context.foo }}` will try to interpret it."""
+    out = _render("[{{ context.nope }}]", {"meeting_topic": "x"})
+    assert out == "[]"
+
+
+def test_dotted_path_does_not_reach_attributes():
+    """Mappings only. Attribute walking would expose arbitrary objects."""
+
+    class Sneaky:
+        secret = "leaked"
+
+    out = _render("{{ context.obj.secret }}", {"obj": Sneaky()})
+    assert out == ""
+
+
+def test_non_string_context_values_are_json_encoded():
+    out = _render("{{ context.items }}", {"items": ["a", "b"]})
+    assert out == '["a", "b"]'
+
+
+def test_original_tokens_still_work():
+    assert _render("{{ previous_output }}", {"previous_output": "prior"}) == "prior"
+    ctx = {"step_results": {"2": {"output": "second"}}}
+    assert _render("{{ step_2 }}", ctx) == "second"
+
+
+def test_meeting_recap_workflow_templates_all_resolve():
+    """The shipped workflow is the reason this exists; assert it works."""
+    import re as _re
+    from pathlib import Path as _Path
+
+    path = _Path(__file__).resolve().parent.parent / "workflows" / "meeting_recap.json"
+    tokens = set(_re.findall(r"\{\{[^}]*\}\}", path.read_text()))
+    assert tokens, "meeting_recap.json has no templates; test is stale"
+
+    context = {
+        "meeting_id": "m-1",
+        "meeting_topic": "Roadmap",
+        "transcript": "we talked",
+        "previous_output": "prior step",
+    }
+    for token in tokens:
+        rendered = _render(token, context)
+        assert "{{" not in rendered, f"{token} was not substituted"
+        assert rendered, f"{token} resolved to empty against a full context"

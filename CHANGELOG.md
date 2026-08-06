@@ -1,10 +1,136 @@
 # Changelog
 
-<!-- feral-version: 2026.8.4 -->
+<!-- feral-version: 2026.8.5 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.5] - 2026-08-05 - pairing tells the truth
+
+A phone that scanned a pairing QR could show "Connecting..." forever with
+no reason given. That was four independent defects stacking, and all four
+are fixed. Also lands the groundwork for remote access, which is code
+only: see "not yet operable" below before reading anything into it.
+
+### Fixed
+
+- **The brain no longer advertises addresses nothing is listening on.**
+  `access.pairing_mode` and `network.bind_host` were independent settings
+  that had to agree, with nine writers between them and only the setup
+  wizard writing both. Clicking "Same WiFi" in the web UI persisted the
+  mode alone, the brain stayed on loopback, and the QR advertised a LAN
+  address with nothing behind it while every surface reported success.
+  The bind host is now derived from the mode and `apply_mode` is the only
+  writer, so the contradiction is unrepresentable. Existing installs heal
+  on their next boot.
+- **A pair QR is refused rather than issued when it cannot work.**
+  `bind_host` is read once at bind time, so applying a mode to a running
+  brain does not move the listener. The resolver now compares intent
+  against the live listener and refuses with the restart to run, instead
+  of minting a QR for an address that cannot answer.
+- **Rejected credentials are now legible to the phone.** `/v1/node`
+  accepted the socket before checking the credential and then closed it
+  bare, which is indistinguishable from a dropped network, so clients
+  retried forever. It now sends an HUP error frame (code 1001,
+  `unauthorized`) before closing.
+- **The pair URL carries the brain's identity.** The QR encodes only the
+  URL string, so every field outside it was undeliverable. A compact
+  base64url blob now carries `brain_id`, `mode`, `expires` and
+  `device_id`. Note it is **unsigned**: treat it as a label, not proof.
+- **`uv` readings from the glasses are no longer dropped.** The event
+  type was missing from the brain's accepted set.
+- **Meeting notes work end to end.** `workflows/meeting_recap.json` is
+  built on `{{ context.* }}` tokens that matched nothing and were passed
+  through as literal text; templates now resolve dotted context paths.
+  `notes.json` read endpoints declare `result_budget: feed`, so a recall
+  is no longer capped at 20 rows and 2000 characters.
+
+### Added
+
+- **One tap to enable same-WiFi pairing.** The default stays private: a
+  fresh install does not open a listener on whatever network the machine
+  joined. When pairing is refused for that reason the pair screen offers
+  a single button, with the consequence stated rather than buried.
+- **`feral doctor` reports on pairing.** Mode coherence, and a dry run of
+  the real resolver that prints either the address a QR would carry or
+  the refusal verbatim. `feral serve` prints the same instead of
+  `localhost`, which is the one address a phone can never use.
+- **Every reachable address is offered, not just one.** The payload gains
+  `urls`, in priority order, each tagged with whether it is encrypted.
+  `v` stays `1` so shipped clients are unaffected; `schema: 2` is the
+  additive signal.
+- **mDNS advertises `brain_id`, `mode`, `port`, `tls` and `pair`.**
+  Discovery previously listed brains and gave a client nothing to act on.
+- **One LAN detector** (`services/netinfo.py`) replacing three that
+  disagreed, including one that connected to `8.8.8.8:80` with no timeout
+  inside the request that mints a pairing QR.
+- **Untrusted-transport auth gate.** Trust is now a property of the
+  listener rather than of `client.host`, so a tunnel terminating locally
+  cannot inherit the loopback auth exemption.
+
+### Security
+
+- `/api/auth/local-key` returns the master API key and gated on loopback
+  alone. It is in `_OPEN_PATHS`, so the auth middleware returns before
+  any transport check. Over a tunnel that would have been one request to
+  the dashboard, `/v1/session`, and pair-token issuance. It now requires
+  a trusted transport, and no longer trusts `X-Forwarded-For`.
+- Boot-time access-mode repair **never widens exposure**. Resolving the
+  contradiction in favour of the mode would have rebound loopback-only
+  installs to `0.0.0.0` on upgrade, unprompted, including from
+  `feral doctor`.
+- `proxy_headers` and `forwarded_allow_ips` are now explicit on the
+  uvicorn config. The inherited default is the only reason Funnel traffic
+  does not present as loopback.
+
+### Not yet operable
+
+Remote access groundwork ships in this release as **code, not a feature**.
+An Ed25519 brain identity with a `relay_id` derived from its public key,
+a control-plane registration protocol, and a TLS SNI reader. Nothing
+serves them: there is no relay to connect to. They are included because
+they are tested and inert, not because remote access works. It does not.
+Two external items gate it, neither of them code: a Let's Encrypt rate
+limit adjustment, and DNS delegation for `relay.feral.sh`.
+
+### Changed
+
+- **BREAKING:** `POST /api/config/update` returns 400 for
+  `access.pairing_mode` and `network.bind_host`. Use
+  `POST /api/access/mode`.
+- Pair endpoints return a structured 409 body (`{code, message, fix}`)
+  rather than a bare string.
+- CI now tests Python 3.14. Its absence is why 2026.8.3 shipped broken.
+
+## [2026.8.4] - 2026-08-05 - unbreak install on Python 3.14
+
+### Fixed
+
+- `feral-ai` capped `Pillow<12.0` while `fastembed` 0.8.0 requires
+  `pillow>=12.0.0` on Python 3.14, so `pip install feral-ai` failed to
+  resolve there. The ceiling is now `<13.0`, matching fastembed's own.
+  Only 3.14 was affected; 3.11 through 3.13 resolve either way. Promoting
+  fastembed into base dependencies in 2026.8.3 is what exposed it.
+
+## [2026.8.3] - 2026-08-02 - local embeddings by default
+
+### Added
+
+- Local embeddings via fastembed, promoted into base dependencies, with a
+  sqlite-vec adapter and a setup wizard memory step. Streaming on by
+  default.
+
+### Fixed
+
+- Setup wizard prompts terminate rather than blocking on stdin.
+- PyPI publish unblocked: the TestPyPI canary gave up before index
+  propagation and silently skipped the publish, which is why 2026.8.2
+  reached GitHub but never PyPI.
+
+### Known issue
+
+- Fails to install on Python 3.14. Fixed in 2026.8.4.
 
 ## [2026.8.2] - 2026-08-01 - external coding agents, cross-agent memory, command hardening
 

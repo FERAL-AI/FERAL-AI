@@ -56,7 +56,8 @@
                 {"name": "limit", "type": "number", "required": false, "default": "10", "description": "Max results"}
             ],
             "returns_description": "Array of {id, content, tags, created_at, relevance_score}",
-            "ui_hint": "list"
+            "ui_hint": "list",
+            "result_budget": "feed"
         },
         {
             "id": "list_recent",
@@ -68,7 +69,8 @@
                 {"name": "limit", "type": "number", "required": false, "default": "10", "description": "Number of recent notes"}
             ],
             "returns_description": "Array of {id, content, tags, created_at}",
-            "ui_hint": "list"
+            "ui_hint": "list",
+            "result_budget": "feed"
         },
         {
             "id": "fused_timeline",
@@ -83,7 +85,8 @@
                 {"name": "per_source_limit", "type": "number", "required": false, "default": "50", "description": "Cap entries returned per source. Default 50."}
             ],
             "returns_description": "{entries: [{type, timestamp, title, content, source, metadata}], summary, window: {from, to, label}, sources_queried: [...], degraded_sources: [{source, reason}]}",
-            "ui_hint": "timeline_card"
+            "ui_hint": "timeline_card",
+            "result_budget": "feed"
         }
     ],
     "flows": [],

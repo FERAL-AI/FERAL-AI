@@ -73,6 +73,7 @@ from config.runtime import (
     brain_public_scheme,
     brain_tls_enabled,
     hydrate_brain_runtime_env,
+    record_bound_host,
 )
 
 
@@ -652,6 +653,41 @@ def _brain_ssl_kwargs(*, tls: bool) -> dict:
     return ssl_kwargs
 
 
+def _print_pairing_line(bound: str, *, console=None) -> None:
+    """State whether a phone can pair, right where the operator is looking.
+
+    The ready panel printed ``localhost`` unconditionally, which is the
+    one address a phone can never use. Worse, it printed it identically
+    whether pairing was possible or structurally impossible. Ask the
+    resolver and print its answer, including its refusal text, which is
+    already written for a human.
+    """
+    from cli.ui_kit import banner_line as _banner
+
+    try:
+        from api.routes.devices import PairUnavailable, _resolve_pair_origin
+        from config.runtime import bound_host
+
+        # The resolver compares intent against the live listener, so it
+        # needs to know what we actually bound. _spawn_brain_server
+        # records it; this is a no-op restatement for the in-process case
+        # and a correction if anything reassigned it.
+        if bound_host() is None:
+            from config.runtime import record_bound_host
+
+            record_bound_host(bound)
+
+        try:
+            origin = _resolve_pair_origin()
+            _banner(f"Pair a phone: `feral pair` — QR points at {origin}", console=console)
+        except PairUnavailable as exc:
+            _banner(f"Phone pairing unavailable: {exc}", style="yellow", console=console)
+    except Exception as exc:  # pragma: no cover - never block startup
+        import logging as _logging
+
+        _logging.getLogger("feral.cli").debug("pairing line skipped: %s", exc)
+
+
 def _spawn_brain_server(
     host: str,
     port: int,
@@ -660,6 +696,11 @@ def _spawn_brain_server(
     """Start uvicorn in a non-daemon thread (shared by ``serve`` + ``start``)."""
     server_ready = threading.Event()
     server_holder: dict = {"server": None, "exc": None}
+
+    # Record what we are *actually* binding, so `restart_required` and
+    # the pair-URL resolver can compare reality against configuration
+    # instead of trusting configuration twice.
+    record_bound_host(host)
 
     def _run_server():
         import uvicorn as _uvicorn
@@ -670,6 +711,15 @@ def _spawn_brain_server(
                 port=port,
                 log_level="warning",
                 access_log=False,
+                # Explicit, not inherited. uvicorn 0.30.6 defaults
+                # proxy_headers=True with forwarded_allow_ips="127.0.0.1",
+                # and that default is the only reason Tailscale Funnel
+                # traffic does not hit the loopback auth bypass in
+                # api/server.py. A uvicorn bump flipping it would open
+                # the entire API. Pin it here so that cannot happen
+                # silently.
+                proxy_headers=True,
+                forwarded_allow_ips="127.0.0.1",
                 **ssl_kwargs,
             )
             server = _uvicorn.Server(config)
@@ -908,6 +958,7 @@ def cmd_serve(host: str | None = None, port: int | None = None, tls: bool = Fals
     public_base = os.getenv("FERAL_PUBLIC_BASE_URL", f"{scheme}://localhost:{port}")
     _banner_line(f"Dashboard: {public_base}", console=_console)
     _banner_line(f"API docs:  {public_base}/docs", style="dim", console=_console)
+    _print_pairing_line(host, console=_console)
 
     def _on_sigterm(_signum, _frame):  # pragma: no cover
         _stop_brain_server(server_thread, server_holder)
@@ -1168,6 +1219,7 @@ def cmd_start(
         tls=bool(ssl_kwargs),
         console=_console,
     )
+    _print_pairing_line(brain_bind_host(), console=_console)
 
     if not no_browser:
         _open_browser(port)
@@ -1825,6 +1877,77 @@ def cmd_doctor():
         _pass("Port availability", f":{port} is free")
     finally:
         sock.close()
+
+    # ── 7b. Pairing & access ──
+    #
+    # Doctor reported green while pairing was structurally impossible.
+    # A probe of 127.0.0.1:port proves the process is up; it proves
+    # nothing about the address printed into a QR code, which is the
+    # only address a phone ever tries. These checks compare the
+    # configured intent against what a phone would actually be handed.
+    from config.access_mode import AccessMode, configured_bind_host, current_mode
+    from config.loader import ConfigLoader
+
+    try:
+        cfg_for_access = ConfigLoader()
+        cfg_for_access.discover()
+    except Exception as exc:  # pragma: no cover - defensive
+        cfg_for_access = None
+        _warn("Pairing & access", f"could not read settings: {exc}")
+
+    if cfg_for_access is not None:
+        access_mode = current_mode(cfg_for_access)
+        persisted_bind = configured_bind_host(cfg_for_access)
+
+        if persisted_bind != access_mode.bind_host:
+            _fail(
+                "Access mode coherence",
+                f"mode {access_mode.value!r} requires bind_host "
+                f"{access_mode.bind_host} but settings.json says {persisted_bind}",
+                "Run `feral doctor --fix`, or re-apply the mode from Settings",
+            )
+        else:
+            _pass(
+                "Access mode coherence",
+                f"{access_mode.value} (binds {access_mode.bind_host})",
+            )
+
+        if access_mode is AccessMode.LOCALHOST:
+            _info(
+                "Phone pairing",
+                "disabled in 'This computer only' mode — switch to Same WiFi to pair",
+            )
+        elif access_mode is AccessMode.RELAY:
+            _warn(
+                "Phone pairing",
+                "'Any network' is selected but the relay tunnel is not implemented",
+                "Switch to Same WiFi in Settings until the relay ships",
+            )
+        else:
+            # Ask the resolver the same question the pair modal asks. Its
+            # refusal text is written for a human, so print it verbatim
+            # rather than paraphrasing it into something vaguer.
+            try:
+                from api.routes.devices import PairUnavailable, _resolve_pair_origin
+
+                try:
+                    origin = _resolve_pair_origin()
+                    _pass("Phone pairing", f"a QR would point at {origin}")
+                except PairUnavailable as exc:
+                    _fail("Phone pairing", str(exc),
+                          "Fix the condition above, then re-open the pair screen")
+            except Exception as exc:  # pragma: no cover - defensive
+                _warn("Phone pairing", f"could not evaluate: {exc}")
+
+        if brain_tls_enabled():
+            # iOS has no trust override and the brain's own cert is
+            # self-signed, so TLS on the LAN is strictly worse than
+            # cleartext there: the phone refuses the connection outright.
+            _warn(
+                "TLS vs phone pairing",
+                "TLS is on; iOS refuses the brain's self-signed certificate",
+                "Disable TLS for LAN pairing, or pair over a trusted remote URL",
+            )
 
     # ── 8. Browser runtime (Chrome + CDP + Playwright) ──
     #

@@ -472,3 +472,249 @@ carrying charts:
 - **Oura is not synced.** Only Whoop. Oura's client exists and its OAuth was
   just fixed, but the sync is Whoop-only.
 - Whoop history is mirrored for 400 days. Live sensor samples still prune at 35.
+
+---
+
+# Pairing and remote access (added 2026-08-05)
+
+Read this before touching anything under `ios/Theora/Feral/`. Some of it
+has already been done for you, in your repo, and redoing it will create
+conflicts.
+
+## What happened while you were gone
+
+Your session died mid-sentence on 2026-08-05 at about 07:00 UTC when the
+laptop lost power. Its last recorded commitment was, verbatim:
+
+> I'll wire it the moment you tell me it's in.
+
+That was about `/api/wiki/ingest/text` not being on the phone-bearer
+allowlist, which blocked ambient transcripts from reaching the brain.
+**It is in.** It shipped as `cd1f61b7a` on 2026-08-05. See the design
+conflict at the bottom before you build against it, though.
+
+Separately, a new user installed FERAL, scanned a pairing QR, and got an
+infinite "Connecting..." spinner. That turned out to be four independent
+defects stacked, two brain-side and two app-side. All four are now fixed.
+
+## What has already been done IN YOUR REPO. Do not redo it.
+
+Branch `fix/feral-pairing-2026-08`, commit `558b7fd`, three files:
+
+| File | Change |
+|---|---|
+| `ios/Theora/Info.plist` | Added `NSLocalNetworkUsageDescription`, `NSBonjourServices` (`_feral._tcp`), and `NSAppTransportSecurity` with `NSAllowsLocalNetworking`. Deliberately NOT `NSAllowsArbitraryLoads`. |
+| `ios/Theora/Feral/FeralConnectionManager.swift` | `maxReconnectAttempts = 6` and a terminal `.error` state; `teardownSocket` bumps `generation`; `autoConnectIfConfigured` resets `reconnectAttempt`. |
+| `ios/Theora/Feral/FeralPairingPayload.swift` | `parsePairLink` decodes the brain's new `p=` identity blob, so `brainId` and `name` survive a QR scan. |
+
+The Info.plist keys were the hard blocker. Before them the app could not
+reach a LAN brain at all: iOS 14+ needs `NSLocalNetworkUsageDescription`
+to even present the local-network prompt, and cleartext `ws://` to a
+private address needs an ATS exception. Neither existed. No brain-side
+configuration could have fixed that.
+
+Your other 48 uncommitted entries on `main` are untouched. I committed
+only those three files, on a separate branch, and pushed nothing.
+
+## What changed on the brain that you need to know
+
+All on branch `fix/pairing-access-2026-08` in the ASOS repo, **not yet
+released**. Spelling out what that means in practice, because it is easy
+to read the list below as describing the brain you can actually probe:
+the brain running on your machine came back up on released code after the
+reboot, so **none of items 1 to 5 are live right now.** A live probe of
+`/api/devices/pair/url` returns `?t=<token>` with no `p=` at all, and the
+1001 frame is not emitted. Anything you build against them cannot be
+exercised end to end until that branch ships. Verify with a probe before
+concluding your code is wrong.
+
+1. **`/v1/node` now sends an HUP error frame (code 1001, name
+   `unauthorized`) before `ws.close(4003)`.** Previously a rejected
+   credential produced a successful upgrade followed by a bare close,
+   which is indistinguishable from a dropped network. Your
+   `FeralConnectionManager` already had an `err.code == 1001` branch that
+   set a terminal state; it was dead code because nothing ever emitted
+   1001. It is live now. Your own `docs/theora-feral-findings.md` called
+   this out: treat "connected then immediately closed" as an auth
+   failure, not a transport failure.
+2. **The pair URL carries `&p=<base64url-json>`** holding `brain_id`,
+   `mode`, `expires`, `device_id`, `name`. The QR encodes only the URL
+   string, so before this every field except the token was structurally
+   undeliverable to anything that scanned it. Absent or malformed `p=` is
+   not an error; older brains do not emit it and the token alone pairs.
+3. **`POST /api/config/update` now returns 400** for
+   `access.pairing_mode` and `network.bind_host`. The new writer is
+   `POST /api/access/mode` with `{"mode": "..."}`. If any iOS code writes
+   those keys, it breaks.
+4. **`device_event` with `event_type: "uv"` is now accepted.** The
+   glasses relay emits it and the brain was dropping every reading at
+   debug level. No app change needed; it just works now.
+5. **A brain configured for LAN but still bound to loopback now refuses
+   to emit a QR**, returning 409 with remediation text, instead of
+   handing out an address nothing listens on. Expect to see that 409 in
+   testing. It is the fix, not a regression.
+
+## What is left for you
+
+From the approved plan's iOS section. Numbering is the plan's.
+
+- **S3, multi-endpoint credential store.** `FeralCredentialStore` holds a
+  single `feral_brain_url` String; re-pairing overwrites it and there is
+  no LAN/remote pair. Replace with a JSON array of
+  `{kind, url, priority}` keyed by `brain_id`, reading the old key once
+  as a migration source. This is a prerequisite for S5.
+- **S5, candidate racing.** Try endpoints in priority order with a 3s
+  connect timeout each. Sequential, not parallel, for battery.
+- **S7, render the connection state.** `reconnectAttempt` is `@Published`
+  and rendered nowhere. `BLEConnectionManager` already does this well;
+  copy its `"Reconnecting (n/10)..."` shape.
+- **S8, do not dismiss the pair sheet on start.** `FeralPairBrainView`
+  calls `dismiss()` immediately after `manager.connect(...)` without
+  awaiting the result, so a pairing that will never connect reports
+  success. Keep the sheet up until the first `node_ack` or a terminal
+  failure. It also discards the `@discardableResult` from
+  `FeralPairingService.complete`.
+- **S10, Bonjour discovery.** `NWBrowser` on `_feral._tcp`. The plist key
+  is already declared, and mDNS is **live now**: `dns-sd -B _feral._tcp`
+  returns real instances. But the TXT record carries only `version`,
+  `name`, and `hostname` (`services/mdns.py:115-119`). **There is no
+  `brain_id` in it.** So discovery works and acting on a discovery does
+  not: you cannot match a discovered service back to a stored credential
+  by brain id, which is exactly what an S3 brain-id-keyed store wants.
+  Hold S10 until the TXT records carry `brain_id`, or it is discovery you
+  cannot act on.
+- **S11, register the `feral://` URL scheme.** `CFBundleURLTypes` exists
+  in the plist already for Google Sign-In. Add a second dict to the
+  existing array; do not create a second `CFBundleURLTypes` key.
+- **S12, SPKI pinning.** Gated on the brain shipping a `tls_pin` field.
+  It does not yet. Do not build against it.
+
+## Verify all of this yourself before believing it
+
+This document was written on 2026-08-05 and will rot. Check, do not
+assume:
+
+```bash
+# Did the brain-side work actually land, and is it released?
+cd /Users/mahmoudomar/Desktop/thoera-mac/ASOS
+git log --oneline origin/main..fix/pairing-access-2026-08
+git tag --sort=-creatordate | head -3
+
+# What does a pair payload actually look like right now?
+curl -s localhost:9090/api/devices/pair/url?name=probe | python3 -m json.tool
+
+# What is already committed in your own repo?
+cd /Users/mahmoudomar/Desktop/Theora-backend-ML
+git log --oneline main..fix/feral-pairing-2026-08
+git diff main...fix/feral-pairing-2026-08 --stat
+```
+
+For anything about brain behaviour, read the source in
+`ASOS/feral-core`, not this file. `api/routes/devices.py` is the pair
+payload, `api/server.py` is the `/v1/node` handler and the auth
+middleware. Exclude `feral-core/build/lib/**` from every grep: it is a
+stale mirror of nearly every source file and reading it will tell you
+confident lies.
+
+## Traps that will cost you an hour each
+
+- **Never run `xcodegen generate`.** `ios/project.yml` declares
+  `name: Theora`, so it emits `Theora.xcodeproj` and rewrites the
+  scheme's `ReferencedContainer`. Somebody already did this once and
+  hand-reverted it; those reverts are sitting uncommitted in
+  `project.pbxproj` and `Theora.xcscheme`. Regenerating buries them.
+  `project.yml` has also diverged from the pbxproj (`DEVELOPMENT_TEAM`,
+  `CODE_SIGN_IDENTITY`, three extra framework search paths) and should be
+  treated as stale documentation, not source of truth.
+- **Build `ios/w.xcodeproj`, never `ios/Theora.xcodeproj`.** The latter
+  has no `project.pbxproj` and cannot open.
+- **The simulator can never work.** `RTKOTASDK` and `VeepooBleSDK` ship
+  device slices only. The only verification available without hardware:
+
+  ```bash
+  cd /Users/mahmoudomar/Desktop/Theora-backend-ML/ios
+  xcodebuild build -project w.xcodeproj -scheme Theora \
+    -configuration Debug -destination 'generic/platform=iOS' \
+    CODE_SIGNING_ALLOWED=NO
+  ```
+
+  For plist-only edits, `plutil -lint ios/Theora/Info.plist` is instant.
+- **`Info.plist` is hand-maintained, not generated.** `project.yml` has
+  no `info:` stanza, `GENERATE_INFOPLIST_FILE` is NO, and there are no
+  `INFOPLIST_KEY_*` build settings. Edit the plist directly.
+- **`FeralGlassesRelay.swift` lines 88 and 122 have uncommitted changes**
+  from the vitals-owner refactor. Do not clobber them. Every other file
+  under `Feral/` and `Views/Feral/` is at HEAD apart from the two I
+  committed.
+- **Do not push.** Per this repo's `CLAUDE.md`, iOS work is local only.
+- **No em dashes** anywhere in code, comments, or commit messages.
+
+## Genuinely needs hardware, and cannot be resolved by reading
+
+- The Local Network permission prompt: fresh install, physical device,
+  iOS 17 and 18. The Simulator does not model Local Network privacy.
+- ~~Whether ATS blocks cleartext to an RFC1918 literal~~ **Answered, and
+  the original framing here was backwards.** Per Apple DTS, ATS is *not
+  applied at all* to requests targeting an IP address on iOS 10 and
+  later. `NSAllowsLocalNetworking` exists for unqualified host names and
+  `.local` names, not as cover for literals. So `ws://192.168.x.x` is
+  not an ATS question, candidate priority does not need to change, and
+  `CANDIDATE_ORDER` stays `lan` first.
+
+  Both plist additions still earn their place: `NSAllowsLocalNetworking`
+  covers the `.local` names Bonjour hands back in S10, and
+  `NSLocalNetworkUsageDescription` is a different mechanism entirely.
+
+- **Local Network privacy on current iOS, which is the real open
+  question.** ATS and Local Network privacy are separate. Whether the
+  permission prompt appears and the connection completes on iOS 26 is
+  unverified, and there is at least one report of cleartext local-network
+  failures specific to iOS 26.5 on physical devices
+  (firebase-ios-sdk#16406). Treat the ATS answer as settled enough to
+  design against and still confirm this half on a device.
+- AP/client isolation, the hotel-wifi case the whole remote tier exists
+  for. The brain cannot detect it and says so honestly in its diagnostic.
+
+## Do not trust `p.brain_id` for a security decision
+
+The `p=` blob in the pair URL is **not signed**. Anyone can generate a QR
+code containing any `brain_id` they like, and nothing in it proves the QR
+came from the brain it names.
+
+That is fine for what it does today: a display label, and a hint about
+which stored endpoint set to try first. It stops being fine the moment it
+gates anything. In particular, S3 (multi-endpoint credential store keyed
+by `brain_id`) must not use it to answer "is this the same brain I paired
+with before, so may I reuse or overwrite its credentials?" A forged QR
+would answer yes.
+
+The real proof of identity is the pairing exchange itself: the token is
+minted by the brain and verified against it over the network. Key on
+that, not on a self-declared string in a QR.
+
+If a verifiable brain identity is genuinely needed on the app side, say
+so and it can be signed with the Ed25519 key that Stage 2 introduces for
+the relay. That is not built yet. Until it is, treat `brain_id` as
+untrusted input.
+
+## One open design conflict, yours to settle
+
+Your own `docs/theora-feral-findings.md:70` evaluated
+`/api/wiki/ingest/text` for ambient transcripts and **rejected** it as
+"document-shaped, no speaker or timestamps", proposing a
+`transcript_ingest` HUP frame instead carrying `session_id`, ordered
+`segments[{text, started_at, ended_at, speaker, confidence}]`,
+`source: "ios.ambient"`, and `is_final`.
+
+That endpoint is now reachable from the phone. But the objection was
+about **shape**, not availability, and it still stands. So "the allowlist
+landed" does not settle the question. Decide explicitly:
+
+- ship against `/api/wiki/ingest/text` now and accept losing speaker and
+  timestamps, or
+- ask for the `transcript_ingest` frame brain-side and wait.
+
+The seam on your side is already built and waiting either way:
+`ambient_segments.summarized` is written on insert, indexed, and read by
+nothing. That index exists for exactly one purpose, selecting segments
+not yet shipped upstream.

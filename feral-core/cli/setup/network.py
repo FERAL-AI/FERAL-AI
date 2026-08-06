@@ -22,9 +22,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import socket
 from dataclasses import dataclass, field
 
+from config.access_mode import AccessMode
 from config.loader import feral_home
 from config.runtime import brain_port
 
@@ -89,29 +89,17 @@ class NetworkApplyError(Exception):
 def _detect_lan_ipv4() -> str:
     """Best-effort local network IP detection.
 
-    Opens a UDP socket to a public address (no packet is actually
-    sent for UDP "connect") and reads the local end of the route. On
-    hosts without a default route we return an empty string rather
-    than the loopback IP so the wizard can show "no LAN detected"
-    truthfully.
+    Delegates to :mod:`services.netinfo` so the wizard, the pair QR and
+    the mDNS advertisement all answer "where am I reachable?" the same
+    way. They used to disagree, which is how the wizard could show one
+    address while the QR advertised another.
+
+    Still returns "" rather than a loopback address when there is no
+    route, so the wizard can say "no LAN detected" truthfully.
     """
-    sock = None
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(0.5)
-        sock.connect(("8.8.8.8", 80))
-        ip = sock.getsockname()[0]
-        if ip and ip != "127.0.0.1":
-            return ip
-        return ""
-    except Exception:
-        return ""
-    finally:
-        if sock is not None:
-            try:
-                sock.close()
-            except Exception:
-                pass
+    from services.netinfo import detect_lan_ipv4 as _detect
+
+    return _detect()
 
 
 # ---------------------------------------------------------------------------
@@ -180,9 +168,7 @@ async def get_snapshot() -> NetworkSnapshot:
 
 async def apply_localhost() -> NetworkSnapshot:
     """Switch the Brain back to loopback-only binding."""
-    _persist_bind_host("127.0.0.1")
-    _persist_pairing_mode("localhost")
-    os.environ["FERAL_BIND_HOST"] = "127.0.0.1"
+    _apply_access_mode(AccessMode.LOCALHOST)
     return await get_snapshot()
 
 
@@ -192,22 +178,20 @@ async def apply_lan(bind_host: str = "0.0.0.0") -> NetworkSnapshot:
     The wizard caller is responsible for showing the security warning
     before invoking this — opening the Brain to anyone on the local
     network is opt-in only and must be a deliberate operator choice.
+
+    ``bind_host`` is now derived from the mode rather than chosen here,
+    so the parameter only survives to reject the empty string for
+    callers (and tests) that still pass it. LAN mode always binds
+    0.0.0.0; binding a single interface was never actually plumbed
+    through to the pair-URL resolver, which detects the LAN address
+    independently.
     """
     if not bind_host:
         raise NetworkApplyError(
             code="invalid_bind_host",
             message="bind_host cannot be empty",
         )
-    _persist_bind_host(bind_host)
-    # Mode A. ``ConfigLoader.access_pairing_mode`` understands exactly
-    # three values — "local" (LAN), "localhost" (loopback), "remote"
-    # (Funnel) — and ``GET /api/devices/pair/url`` refuses to emit a
-    # pair URL for "localhost". Persisting "localhost" here (the
-    # pre-fix behaviour) meant the operator picked LAN, walked into
-    # the next wizard step telling them to pair their phone, and hit
-    # "Mode B (localhost) does not expose pairing".
-    _persist_pairing_mode("local")
-    os.environ["FERAL_BIND_HOST"] = bind_host
+    _apply_access_mode(AccessMode.LAN)
     return await get_snapshot()
 
 
@@ -357,10 +341,33 @@ def _write_settings(data: dict) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True))
 
 
-def _persist_bind_host(host: str) -> None:
-    data = _read_settings()
-    data.setdefault("network", {})["bind_host"] = host
-    _write_settings(data)
+class _SettingsFileConfig:
+    """Minimal ``ConfigLoader``-shaped adapter over ``settings.json``.
+
+    The CLI usually runs in a different process from the brain, so there
+    is no live ``ConfigLoader`` to mutate. Rather than duplicate the
+    mode-to-bind-host derivation for the file case (duplicating it is
+    what allowed the two to drift apart in the first place), wrap the
+    file in the small interface ``config.access_mode.apply_mode`` needs.
+    One derivation, two backends.
+    """
+
+    def __init__(self) -> None:
+        self._data = _read_settings()
+
+    def get(self, section: str, key: str, default=None):
+        return (self._data.get(section) or {}).get(key, default)
+
+    def update_settings(self, section: str, key: str, value) -> None:
+        self._data.setdefault(section, {})[key] = value
+        _write_settings(self._data)
+
+
+def _apply_access_mode(mode) -> None:
+    """Persist an access mode (and its bind host) from a CLI context."""
+    from config.access_mode import apply_mode
+
+    apply_mode(_SettingsFileConfig(), mode)
 
 
 def persist_port(port: int) -> None:
@@ -392,23 +399,17 @@ def persist_tls(enabled: bool) -> None:
     _write_settings(data)
 
 
-def _persist_pairing_mode(mode: str) -> None:
-    data = _read_settings()
-    access = data.setdefault("access", {})
-    access["pairing_mode"] = mode
-    _write_settings(data)
-
-
 def _persist_remote_url(url: str) -> None:
     data = _read_settings()
     access = data.setdefault("access", {})
-    access["pairing_mode"] = "remote"
     ts = dict(access.get("tailscale", {}) or {})
     ts["funnel"] = True
     ts["tailnet_url"] = url
     access["tailscale"] = ts
     access["remote_provider"] = "tailscale"
     _write_settings(data)
+    # Mode + bind host together, after the tailscale block is on disk.
+    _apply_access_mode(AccessMode.TAILSCALE)
 
 
 def _clear_remote_url() -> None:
@@ -423,10 +424,12 @@ def _clear_remote_url() -> None:
     # demoting it all the way to "localhost" would revoke phone
     # pairing that still works.
     bind_host = (data.get("network") or {}).get("bind_host") or "127.0.0.1"
-    access["pairing_mode"] = (
-        "localhost" if bind_host in ("127.0.0.1", "localhost", "") else "local"
-    )
     _write_settings(data)
+    _apply_access_mode(
+        AccessMode.LOCALHOST
+        if bind_host in ("127.0.0.1", "localhost", "")
+        else AccessMode.LAN
+    )
 
 
 # ---------------------------------------------------------------------------

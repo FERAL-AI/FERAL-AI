@@ -699,6 +699,13 @@ class ConfigLoader:
         # sync with itself, but we formalise the contract).
         self._unify_feature_flags()
 
+        # Repair an access mode that contradicts the persisted bind host.
+        # Installs made before the single-writer refactor can hold
+        # ``pairing_mode: local`` with ``bind_host: 127.0.0.1`` — the
+        # state the web "Same WiFi" button used to produce — which
+        # advertises a LAN pair URL that nothing is listening on.
+        self._repair_access_mode()
+
         # Load credentials separately
         self._load_credentials()
 
@@ -803,6 +810,26 @@ class ConfigLoader:
     # ``/v1`` path prefix, because the LLM client posts the relative
     # path ``/chat/completions`` against it.
     _OPENAI_COMPAT_LOCAL_PROVIDERS = ("ollama", "lmstudio")
+
+    def _repair_access_mode(self):
+        """Make ``access.pairing_mode`` and ``network.bind_host`` agree.
+
+        These two must be consistent or the brain advertises an address
+        it is not listening on. Only the setup wizard ever wrote both;
+        the web Settings button, the web Setup card, and both
+        ``remote-up`` paths wrote the mode alone. Repairing here means
+        an install that is already broken heals on its next boot rather
+        than needing the user to notice.
+
+        Best-effort: a failure to repair must never stop a brain from
+        booting, so this swallows and logs.
+        """
+        try:
+            from config.access_mode import repair_contradiction
+
+            repair_contradiction(self)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("access-mode repair skipped: %s", exc)
 
     def _repair_local_base_url(self):
         """Re-add the ``/v1`` suffix a bare local ``llm.base_url`` is missing.
@@ -1075,10 +1102,14 @@ class ConfigLoader:
         the other rebases cleanly because the implementation is
         identical.
         """
-        mode = self._merged.get("access", {}).get("pairing_mode", "localhost")
-        if mode not in ("local", "localhost", "remote"):
-            return "localhost"
-        return mode
+        from config.access_mode import coerce
+
+        # Single definition of what a valid mode is, shared with the
+        # write path. ``coerce`` keeps the historical forgiving
+        # behaviour (unknown value -> "localhost") so a hand-edited
+        # settings.json cannot stop a brain from booting, and it now
+        # also understands "relay".
+        return coerce(self._merged.get("access", {}).get("pairing_mode", "localhost")).value
 
     @property
     def access_remote_url(self) -> str:
@@ -1099,10 +1130,17 @@ class ConfigLoader:
 
     @property
     def brain_id(self) -> str:
-        """Stable per-brain UUID. Generated lazily on first access and
-        persisted under ``meta.brain_id`` so subsequent boots return the
-        same value. Phone clients refuse to re-pair against a different
-        brain by comparing the QR's ``brain_id`` to this one.
+        """Stable per-brain UUID, generated lazily and persisted.
+
+        A label, not a credential. This docstring used to claim phone
+        clients "refuse to re-pair against a different brain by
+        comparing the QR's ``brain_id`` to this one". No such check
+        exists on either side, and it could not be trusted if it did: a
+        uuid is unsigned, so anyone can put any value in a QR code.
+
+        For an identity a client can actually verify, see
+        :mod:`security.brain_identity`, whose ``relay_id`` is derived
+        from an Ed25519 public key rather than chosen.
         """
         existing = self._merged.get("meta", {}).get("brain_id", "")
         if isinstance(existing, str) and existing:

@@ -178,6 +178,7 @@ function AccessSection() {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState(null);
   const [message, setMessage] = useState('');
+  const [restart, setRestart] = useState(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -195,16 +196,27 @@ function AccessSection() {
     setBusy(mode);
     setError(null);
     setMessage('');
+    setRestart(null);
     try {
-      const r = await apiFetch('/api/config/update', {
+      // Not /api/config/update. That route is a generic setter with no
+      // co-writer for network.bind_host, so persisting the mode through
+      // it left the brain advertising a LAN pair URL while still bound
+      // to loopback — and reporting success. This endpoint writes both
+      // keys together and tells us whether the change is actually live.
+      const r = await apiFetch('/api/access/mode', {
         method: 'POST',
-        body: JSON.stringify({ section: 'access', key: 'pairing_mode', value: mode }),
+        body: JSON.stringify({ mode }),
       });
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
         throw new Error(formatApiDetail(body, `failed to set mode (${r.status})`));
       }
+      const body = await r.json().catch(() => ({}));
       setMessage(`Pairing mode set to ${mode}.`);
+      // A running brain reads bind_host once, at bind time. Saying
+      // "done" while the listener has not moved is the failure this
+      // whole change exists to stop.
+      if (body?.restart?.required) setRestart(body.restart);
       await refresh();
     } catch (e) {
       setError(e?.message || 'failed to set pairing mode');
@@ -346,6 +358,12 @@ function AccessSection() {
       </Row>
 
       {message && <div className="v2-chip v2-chip--live" data-testid="settings-access-message">{message}</div>}
+      {restart && (
+        <div className="v2-chip v2-chip--warn" role="alert" data-testid="settings-access-restart">
+          Restart required — {restart.reason || 'the running brain has not picked up this change'}
+          {restart.command ? `. Run \`${restart.command}\`.` : '.'}
+        </div>
+      )}
       {error && <div className="v2-chip v2-chip--error" data-testid="settings-access-error">{error}</div>}
     </div>
   );

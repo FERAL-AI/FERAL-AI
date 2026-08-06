@@ -1,9 +1,11 @@
 """Device mesh, session handoff, command ledger, node health, and pairing endpoints."""
 
+import base64
 import io
+import json
 import logging
 import secrets
-import socket
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
@@ -11,7 +13,9 @@ from fastapi.responses import StreamingResponse
 
 from api.middleware.rate_limit import code_claim_limiter
 from api.state import state
-from config.runtime import brain_port, brain_public_base_url
+from config.access_mode import LOOPBACK_HOSTS, AccessMode, coerce
+from config.runtime import bound_host, brain_port, brain_public_base_url
+from services.netinfo import detect_lan_ipv4
 
 logger = logging.getLogger("feral.pair")
 router = APIRouter()
@@ -28,26 +32,16 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def _detect_lan_ip() -> str:
-    """Return this machine's outbound LAN IP, or "" if it cannot be
-    determined. Uses the kernel's UDP-connect trick — no packet is sent
-    on the wire, the call only asks "if I were to send to 8.8.8.8, which
-    interface address would you use?".
+    """This machine's best LAN address, or "" if it has none.
+
+    Thin shim over :mod:`services.netinfo`, kept because tests and the
+    diagnostic patch this name. The implementation it replaced connected
+    to ``8.8.8.8:80`` with **no timeout**, inside the request that mints
+    a pairing QR: behind a captive portal that call blocks, and the pair
+    modal hangs with it. It also fell back to ``gethostbyname``, which
+    on a misconfigured host cheerfully returns a loopback address.
     """
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            if ip and not _is_loopback_host(ip):
-                return ip
-    except OSError:
-        pass
-    try:
-        ip = socket.gethostbyname(socket.gethostname())
-        if ip and not _is_loopback_host(ip):
-            return ip
-    except OSError:
-        pass
-    return ""
+    return detect_lan_ipv4()
 
 
 def _normalize_origin(url: str) -> str:
@@ -67,30 +61,175 @@ def _normalize_origin(url: str) -> str:
 
 
 class PairUnavailable(Exception):
-    """Raised when the configured access mode cannot emit a pair URL."""
+    """Raised when the configured access mode cannot emit a pair URL.
+
+    Carries a machine-readable ``code`` and, where one exists, a
+    ``fix``: the single action that would make pairing possible. The
+    default access mode is deliberately private, so "pairing is off" is
+    the expected state on a fresh install rather than an error, and the
+    UI should be able to offer one button instead of asking the user to
+    understand access modes and go find Settings.
+    """
+
+    def __init__(self, message: str, *, code: str = "pair_unavailable", fix: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.fix = fix
+
+    def as_detail(self) -> dict:
+        detail = {"code": self.code, "message": str(self)}
+        if self.fix:
+            detail["fix"] = self.fix
+        return detail
+
+
+# The one-tap consent. Offered wherever pairing is refused because the
+# brain is private, which is the default and therefore the common case.
+_ENABLE_LAN_FIX = {
+    "action": "set_access_mode",
+    "mode": AccessMode.LAN.value,
+    "label": "Enable same-WiFi pairing",
+    "consequence": (
+        "Your brain becomes reachable by other devices on whatever "
+        "network this computer is joined to. On an untrusted network "
+        "(hotel, cafe) turn it off again afterwards."
+    ),
+}
+
+
+@dataclass(frozen=True)
+class PairCandidate:
+    """One address a phone could try, and what is true about it."""
+
+    kind: str
+    url: str
+    encrypted: bool
+    caveat: str = ""
+
+    def as_dict(self) -> dict:
+        out = {"kind": self.kind, "url": self.url, "encrypted": self.encrypted}
+        if self.caveat:
+            out["caveat"] = self.caveat
+        return out
+
+
+# The order candidates are offered in.
+#
+# A raw LAN literal leads because it needs no name resolution, and
+# because App Transport Security does not apply to it: on iOS 10 and
+# later ATS is simply not evaluated for requests targeting an IP
+# address. An earlier revision of this comment had that backwards,
+# treating the literal as the disputed case and ``.local`` as the safe
+# one. It is the other way round. ``NSAllowsLocalNetworking`` exists for
+# unqualified host names and ``.local`` names, which is precisely what
+# Bonjour discovery hands back, so the mDNS candidate still earns its
+# place, and the plist key still earns its place, for that path rather
+# than as insurance for this one.
+#
+# ATS is not the only mechanism in play. Local Network privacy is
+# separate and unverified on current iOS, so if a device test shows the
+# literal failing, that is a permission-prompt problem and not an
+# ordering problem, and swapping these entries would not fix it.
+CANDIDATE_ORDER = ("lan", "mdns", "tailscale", "relay")
+
+
+def _pair_scheme() -> str:
+    """``https`` when the brain terminates TLS, else ``http``.
+
+    The scheme was hardcoded to ``http://`` in the LAN branch, so a
+    TLS-enabled brain advertised a URL on the wrong scheme and every
+    phone failed the handshake.
+    """
+    try:
+        from config.runtime import brain_tls_enabled
+
+        return "https" if brain_tls_enabled() else "http"
+    except Exception:  # pragma: no cover - defensive
+        return "http"
+
+
+def _tls_caveat() -> str:
+    """Why TLS on the LAN is currently worse than cleartext on the LAN.
+
+    ``_ensure_tls_certs`` generates a self-signed certificate, and iOS
+    has no trust override and no pinning. So a TLS-enabled LAN brain is
+    refused outright by the phone, where a cleartext one connects. Said
+    out loud rather than discovered.
+    """
+    return (
+        "TLS is enabled with a self-signed certificate. iOS will refuse "
+        "this connection. Disable TLS for same-WiFi pairing."
+    )
+
+
+def _assert_listener_agrees(mode: AccessMode) -> None:
+    """Refuse to advertise a LAN address the live process is not serving.
+
+    ``bind_host`` is read once, at bind time, so applying a mode to a
+    running brain persists the setting without moving the listener. The
+    reported bug was exactly this gap: settings said "Same WiFi", the
+    process was still on loopback, and the QR advertised a LAN address
+    nothing answered on. Comparing intent against
+    :func:`config.runtime.bound_host` closes it *before* the restart,
+    rather than emitting a URL that cannot work and blaming the network.
+
+    ``None`` means no listener in this process (a CLI invocation, a
+    test), so there is nothing to contradict.
+    """
+    if mode is not AccessMode.LAN:
+        return
+    actual = bound_host()
+    if actual is None or actual not in LOOPBACK_HOSTS:
+        return
+    raise PairUnavailable(
+        "Configured for same-WiFi pairing, but this brain is currently "
+        f"listening on {actual}, so nothing outside this machine can reach "
+        "it. Restart the brain (`feral restart`) to apply the change, then "
+        "pair again.",
+        code="restart_required",
+    )
 
 
 def _resolve_pair_origin() -> str:
     """Pick the pair-URL origin based on the configured access mode.
 
-    Mode A "local"     → http://<lan-ip>:<brain-port>
-    Mode B "localhost" → unavailable; pairing requires network exposure
-    Mode C "remote"    → access.tailscale.tailnet_url, falling back to
-                         FERAL_PUBLIC_BASE_URL
+    "localhost" → unavailable; pairing requires network exposure
+    "local"     → http://<lan-ip>:<brain-port>
+    "relay"     → unavailable until the relay tunnel ships
+    "remote"    → access.tailscale.tailnet_url, falling back to
+                  FERAL_PUBLIC_BASE_URL
 
     Never falls back to a loopback URL silently — emitting
     http://127.0.0.1:9090 to a phone is the bug we are killing.
+
+    Dispatch is on :class:`AccessMode` rather than raw strings so a mode
+    added to the enum cannot quietly inherit the LAN branch by falling
+    off the end of the ``if`` chain. That is not hypothetical: ``relay``
+    was added to the enum bound to loopback, and under the old string
+    comparisons it landed in the LAN branch and advertised an address
+    nothing was listening on — the very bug this resolver exists to
+    prevent.
     """
     cfg = getattr(state, "config", None)
-    mode = cfg.access_pairing_mode if cfg else "localhost"
+    mode = coerce(cfg.access_pairing_mode if cfg else AccessMode.LOCALHOST.value)
 
-    if mode == "localhost":
+    if mode is AccessMode.LOCALHOST:
         raise PairUnavailable(
-            "Mode B (localhost) does not expose pairing. "
-            "Switch to LAN or remote in Settings to pair phones."
+            "This brain is private, so phones cannot reach it yet. "
+            "Mode B (localhost) does not expose pairing.",
+            code="pairing_disabled",
+            fix=_ENABLE_LAN_FIX,
         )
 
-    if mode == "remote":
+    if mode is AccessMode.RELAY:
+        raise PairUnavailable(
+            "Any-network (relay) access is selected, but the relay tunnel "
+            "is not implemented yet, so there is no address to advertise.",
+            code="relay_not_implemented",
+            fix=_ENABLE_LAN_FIX,
+        )
+
+    if mode is AccessMode.TAILSCALE:
         configured = cfg.access_remote_url if cfg else ""
         url = _normalize_origin(configured) or _normalize_origin(brain_public_base_url())
         if not url:
@@ -110,13 +249,79 @@ def _resolve_pair_origin() -> str:
         return url
 
     # Mode A — LAN
+    _assert_listener_agrees(mode)
     ip = _detect_lan_ip()
     if not ip:
         raise PairUnavailable(
             "LAN IP not detected. Are you connected to a network? "
             "Switch to localhost or remote mode if not."
         )
-    return f"http://{ip}:{brain_port()}"
+    return f"{_pair_scheme()}://{ip}:{brain_port()}"
+
+
+def _resolve_pair_candidates() -> list[PairCandidate]:
+    """Every address a phone could try, best first.
+
+    One address was never enough. A multi-homed machine is reachable on
+    several and the resolver returned whichever the kernel picked; a
+    phone whose ATS policy refuses a raw literal needs the ``.local``
+    name; and a remote transport does not remove the LAN path, which is
+    faster and keeps working when the tunnel is down.
+
+    Raises :class:`PairUnavailable` when the list would be empty, with
+    the same message the single-origin resolver used, so the failure
+    text a stuck user sees is unchanged.
+    """
+    cfg = getattr(state, "config", None)
+    mode = coerce(cfg.access_pairing_mode if cfg else AccessMode.LOCALHOST.value)
+    scheme = _pair_scheme()
+    port = brain_port()
+    caveat = _tls_caveat() if scheme == "https" else ""
+    encrypted = scheme == "https"
+
+    by_kind: dict[str, list[PairCandidate]] = {k: [] for k in CANDIDATE_ORDER}
+
+    if mode is AccessMode.TAILSCALE:
+        # Delegates to the single-origin resolver so the remote branch
+        # keeps exactly one implementation, including its refusals.
+        by_kind["tailscale"].append(
+            PairCandidate(kind="tailscale", url=_resolve_pair_origin(), encrypted=True)
+        )
+    else:
+        # Raises for localhost and relay, and for a LAN mode whose
+        # listener disagrees. Do this before building anything.
+        _resolve_pair_origin()
+
+        from services.netinfo import detect_lan_ipv4s, mdns_hostname
+
+        for ip in detect_lan_ipv4s():
+            by_kind["lan"].append(
+                PairCandidate(
+                    kind="lan",
+                    url=f"{scheme}://{ip}:{port}",
+                    encrypted=encrypted,
+                    caveat=caveat,
+                )
+            )
+
+        host = mdns_hostname()
+        if host and host != ".local":
+            by_kind["mdns"].append(
+                PairCandidate(
+                    kind="mdns",
+                    url=f"{scheme}://{host}:{port}",
+                    encrypted=encrypted,
+                    caveat=caveat,
+                )
+            )
+
+    candidates = [c for kind in CANDIDATE_ORDER for c in by_kind[kind]]
+    if not candidates:
+        raise PairUnavailable(
+            "LAN IP not detected. Are you connected to a network? "
+            "Switch to localhost or remote mode if not."
+        )
+    return candidates
 
 
 def _build_diagnostic(origin_url: str) -> dict:
@@ -134,6 +339,11 @@ def _build_diagnostic(origin_url: str) -> dict:
         "mode": mode,
         "advertised_url": origin_url,
         "advertised_lan_ip": parsed.hostname or "",
+        # What the live process actually bound, not what settings say it
+        # would bind next boot. Null when nothing is serving in this
+        # process. Surfaced so a stuck user can see the mismatch that
+        # ``_assert_listener_agrees`` guards against.
+        "listening_on": bound_host(),
         "honest_caveats": [],
     }
     if mode == "local":
@@ -151,20 +361,84 @@ def _build_diagnostic(origin_url: str) -> dict:
     return diagnostic
 
 
+def _pair_link_blob(mode: str, brain_id: str, result: dict) -> str:
+    """Base64url-encode the identity fields for carrying inside the URL.
+
+    The QR encodes ``payload["url"]`` and nothing else, so every field
+    outside that string is invisible to anything that scans it. That is
+    why ``brain_id`` never reaches the phone, and why the comment on
+    ``ConfigLoader.brain_id`` describing phones as refusing to re-pair
+    against a different brain describes a check the transport could not
+    support.
+
+    Carried as a ``p=`` query parameter rather than by encoding the whole
+    JSON document into the QR, so the URL keeps working when scanned by a
+    plain camera app (which opens the ``/pair`` page) while a client that
+    knows to look gets the identity fields too. Deliberately compact: the
+    reachability diagnostic stays out of it, because it is prose destined
+    for the pair modal, and inflating the QR hurts scan reliability.
+    """
+    blob = json.dumps(
+        {
+            "v": 1,
+            "mode": mode,
+            "brain_id": brain_id,
+            "expires": int(result.get("expires_at") or 0),
+            "device_id": result["device_id"],
+            "name": "FERAL Brain",
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(blob).decode("ascii").rstrip("=")
+
+
 def _pair_payload(result: dict, origin: str | None = None) -> dict:
     """Build the unified v1 pair payload (single shape for QR + URL).
 
     See ``A4-pairing-redesign.md`` §4. Replaces the legacy mode=app /
     mode=web fork; clients always get the same JSON.
     """
-    origin = origin or _resolve_pair_origin()
+    # `v` stays 1 forever. FeralPairingPayload.swift guards on
+    # `version == 1`, so bumping it breaks every shipped iOS build.
+    # `schema` is the additive signal: a client that understands it
+    # reads `urls`, one that does not reads `url` and is unaffected.
+    # Candidates are computed whether or not the caller resolved an
+    # origin. The routes resolve one first so a PairUnavailable becomes
+    # a 409 *before* a token is minted, which is what keeps 409s from
+    # leaving orphan rows in paired_devices; passing it here must not
+    # then suppress the candidate list.
+    try:
+        candidates = _resolve_pair_candidates()
+    except PairUnavailable:
+        if origin is None:
+            raise
+        # The origin already resolved, so the caller is committed and a
+        # token exists. Degrade to describing that one address rather
+        # than failing a request that has already had side effects.
+        candidates = [
+            PairCandidate(kind="lan", url=origin, encrypted=origin.startswith("https"))
+        ]
+
+    if origin is None:
+        origin = candidates[0].url
+    elif origin not in [c.url for c in candidates]:
+        # The caller resolved something the candidate builder did not
+        # produce. Trust the caller: it is the value the QR encodes.
+        candidates = [
+            PairCandidate(kind="lan", url=origin, encrypted=origin.startswith("https"))
+        ] + candidates
+
     cfg = getattr(state, "config", None)
     mode = cfg.access_pairing_mode if cfg else "localhost"
     brain_id = cfg.brain_id if cfg else ""
+    blob = _pair_link_blob(mode, brain_id, result)
     return {
         "v": 1,
+        "schema": 2,
         "mode": mode,
-        "url": f"{origin.rstrip('/')}/pair?t={result['token']}",
+        "urls": [c.as_dict() for c in candidates],
+        "url": f"{origin.rstrip('/')}/pair?t={result['token']}&p={blob}",
         "token": result["token"],
         "brain_id": brain_id,
         "expires": int(result.get("expires_at") or 0),
@@ -522,7 +796,7 @@ async def pair_device_qr(request: Request, name: str = "unnamed", mode: str = "w
     try:
         origin = _resolve_pair_origin()
     except PairUnavailable as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=exc.as_detail())
     result = store.pair_device(name, kind="browser")
     payload = _pair_payload(result, origin=origin)
 
@@ -569,7 +843,7 @@ async def pair_device_url(
     try:
         origin = _resolve_pair_origin()
     except PairUnavailable as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=exc.as_detail())
     result = store.pair_device(
         name,
         kind="browser",

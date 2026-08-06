@@ -142,10 +142,21 @@ def _mirror_into_state(state: WizardState, snap) -> None:
     key: the former is what ``ConfigLoader.access_pairing_mode`` and
     ``GET /api/devices/pair/url`` read at runtime, while the latter was
     written by this step and read by nothing.
+
+    Both keys come from :class:`~config.access_mode.AccessMode`, so the
+    bind host is derived from the mode here exactly as it is on every
+    other write path. Mirroring ``snap.bind_host`` independently would
+    reintroduce a second derivation, which is what allowed the mode and
+    the bind host to drift apart in the first place.
     """
-    state.set_setting("network", "bind_host", snap.bind_host)
-    pairing_mode = {"lan": "local", "remote": "remote"}.get(snap.mode, "localhost")
-    state.set_setting("access", "pairing_mode", pairing_mode)
+    from config.access_mode import AccessMode
+
+    mode = {
+        "lan": AccessMode.LAN,
+        "remote": AccessMode.TAILSCALE,
+    }.get(snap.mode, AccessMode.LOCALHOST)
+    state.set_setting("network", "bind_host", mode.bind_host)
+    state.set_setting("access", "pairing_mode", mode.value)
     if snap.remote_url:
         access = state.settings.setdefault("access", {})
         tailscale = dict(access.get("tailscale") or {})

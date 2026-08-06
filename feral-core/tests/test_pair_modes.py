@@ -61,7 +61,10 @@ def test_default_mode_is_localhost_and_pair_url_is_unavailable(env):
     r = c.get("/api/devices/pair/url?name=phone-A")
     assert r.status_code == 409, r.text
     body = r.json()
-    assert "Mode B" in body["detail"] or "localhost" in body["detail"].lower()
+    assert body["detail"]["code"] == "pairing_disabled"
+    # Private is the default, so this is the expected fresh-install state,
+    # not an error. One tap makes it work.
+    assert body["detail"]["fix"]["mode"] == "local"
     # 409 responses must not leak orphan rows in paired_devices.
     assert len(store.list_devices()) == before
 
@@ -107,7 +110,7 @@ def test_mode_local_no_lan_ip_returns_409(env, monkeypatch):
     before = len(store.list_devices())
     r = c.get("/api/devices/pair/url?name=phone-LAN")
     assert r.status_code == 409
-    assert "LAN IP not detected" in r.json()["detail"]
+    assert "LAN IP not detected" in r.json()["detail"]["message"]
     assert len(store.list_devices()) == before
 
 
@@ -120,6 +123,104 @@ def test_mode_local_emits_brain_port_not_hardcoded_9090(env, monkeypatch):
     r = c.get("/api/devices/pair/url?name=phone-LAN")
     assert r.status_code == 200
     assert r.json()["url"].startswith("http://10.0.0.5:8080/pair?t=")
+
+
+# ── Mode A — LAN, but the live listener disagrees ──────────────────
+#
+# ``bind_host`` is read once at bind time, so applying a mode to a
+# running brain does not move the listener. Advertising the LAN address
+# anyway is the reported bug: the QR looked fine and nothing answered.
+
+
+def test_mode_local_with_loopback_listener_returns_409(env, monkeypatch):
+    c, config, store = env
+    from config.runtime import record_bound_host
+
+    config.update_settings("access", "pairing_mode", "local")
+    monkeypatch.setattr("api.routes.devices._detect_lan_ip", lambda: "192.168.50.9")
+    record_bound_host("127.0.0.1")
+    before = len(store.list_devices())
+
+    r = c.get("/api/devices/pair/url?name=phone-LAN")
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]["message"]
+    assert "127.0.0.1" in detail and "restart" in detail.lower()
+    # The unreachable address must not appear anywhere in the refusal —
+    # printing it is what made the old failure look like a network fault.
+    assert "192.168.50.9" not in detail
+    assert len(store.list_devices()) == before
+
+
+def test_mode_local_with_lan_listener_emits_url(env, monkeypatch):
+    c, config, _ = env
+    from config.runtime import record_bound_host
+
+    config.update_settings("access", "pairing_mode", "local")
+    monkeypatch.setattr("api.routes.devices._detect_lan_ip", lambda: "192.168.50.9")
+    record_bound_host("0.0.0.0")
+
+    r = c.get("/api/devices/pair/url?name=phone-LAN")
+    assert r.status_code == 200, r.text
+    assert r.json()["diagnostic"]["listening_on"] == "0.0.0.0"
+
+
+def test_no_live_listener_does_not_block_pairing(env, monkeypatch):
+    """A CLI invocation has no listener in-process; that is not a conflict."""
+    c, config, _ = env
+    config.update_settings("access", "pairing_mode", "local")
+    monkeypatch.setattr("api.routes.devices._detect_lan_ip", lambda: "192.168.50.9")
+
+    r = c.get("/api/devices/pair/url?name=phone-LAN")
+    assert r.status_code == 200, r.text
+    assert r.json()["diagnostic"]["listening_on"] is None
+
+
+# ── Relay — in the enum, no transport behind it yet ────────────────
+
+
+def test_mode_relay_refuses_rather_than_advertising_lan(env, monkeypatch):
+    """Regression: ``relay`` must not inherit the LAN branch.
+
+    ``AccessMode.RELAY`` binds loopback, so falling through to the LAN
+    branch would advertise ``http://<lan-ip>:<port>`` with nothing
+    listening on it — the exact defect the resolver exists to prevent.
+    """
+    c, config, store = env
+    config.update_settings("access", "pairing_mode", "relay")
+    monkeypatch.setattr("api.routes.devices._detect_lan_ip", lambda: "192.168.50.9")
+    before = len(store.list_devices())
+
+    r = c.get("/api/devices/pair/url?name=phone-relay")
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]["message"]
+    assert "192.168.50.9" not in detail
+    assert "relay" in detail.lower()
+    assert len(store.list_devices()) == before
+
+
+def test_every_access_mode_is_handled_by_the_resolver(env, monkeypatch):
+    """No mode may reach the LAN branch by falling off the if-chain.
+
+    Enumerating the enum means adding a member without teaching the
+    resolver about it fails here rather than in a user's pair modal.
+    """
+    from config.access_mode import AccessMode
+
+    c, config, _ = env
+    monkeypatch.setattr("api.routes.devices._detect_lan_ip", lambda: "192.168.50.9")
+
+    for mode in AccessMode:
+        config.update_settings("access", "pairing_mode", mode.value)
+        r = c.get(f"/api/devices/pair/url?name=phone-{mode.value}")
+        assert r.status_code in (200, 409), (mode, r.status_code, r.text)
+        if r.status_code == 200:
+            # Only a mode that actually exposes the network may emit a URL.
+            assert mode.exposes_pairing, mode
+            advertised = r.json()["diagnostic"]["advertised_lan_ip"]
+            if mode.bind_host in ("127.0.0.1", "::1", "localhost"):
+                raise AssertionError(
+                    f"{mode.value} binds loopback but advertised {advertised}"
+                )
 
 
 # ── Mode C — Remote ─────────────────────────────────────────────────
@@ -157,7 +258,8 @@ def test_mode_remote_with_no_url_returns_409(env, monkeypatch):
 
     r = c.get("/api/devices/pair/url?name=phone-Tailnet")
     assert r.status_code == 409
-    assert "remote-up" in r.json()["detail"] or "FERAL_PUBLIC_BASE_URL" in r.json()["detail"]
+    detail = r.json()["detail"]["message"]
+    assert "remote-up" in detail or "FERAL_PUBLIC_BASE_URL" in detail
     assert len(store.list_devices()) == before
 
 
@@ -168,7 +270,7 @@ def test_mode_remote_rejects_loopback_public_url(env, monkeypatch):
 
     r = c.get("/api/devices/pair/url?name=phone-Tailnet")
     assert r.status_code == 409
-    assert "loopback" in r.json()["detail"].lower()
+    assert "loopback" in r.json()["detail"]["message"].lower()
 
 
 # ── Unified payload schema ──────────────────────────────────────────
@@ -207,6 +309,54 @@ def test_qr_endpoint_mode_app_query_is_deprecated_but_emits_v1(env, monkeypatch,
     assert any("deprecated_mode_app_query" in m for m in caplog.messages)
 
 
+# ── The QR carries identity, not just a token ──────────────────────
+
+
+def test_pair_url_carries_identity_blob(env, monkeypatch):
+    """The scanned string must convey brain_id, not only the token.
+
+    The QR encodes ``payload["url"]`` alone, so anything outside that
+    string cannot reach a phone. Without the blob, ``brain_id`` is
+    structurally undeliverable and a client cannot tell one brain from
+    another when re-pairing.
+    """
+    import base64
+    import json
+    from urllib.parse import parse_qs, urlparse
+
+    c, config, _ = env
+    config.update_settings("access", "pairing_mode", "local")
+    monkeypatch.setattr("api.routes.devices._detect_lan_ip", lambda: "192.168.50.9")
+
+    r = c.get("/api/devices/pair/url?name=phone")
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    query = parse_qs(urlparse(body["url"]).query)
+    assert query["t"] == [body["token"]]
+
+    raw = query["p"][0]
+    # urlsafe_b64encode padding is stripped for URL cleanliness.
+    decoded = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+    assert decoded["brain_id"] == body["brain_id"]
+    assert decoded["device_id"] == body["device_id"]
+    assert decoded["mode"] == body["mode"]
+    assert decoded["expires"] == body["expires"]
+    # The reachability prose belongs to the pair modal, not the QR: it is
+    # long, and QR density costs scan reliability.
+    assert "diagnostic" not in decoded
+
+
+def test_pair_url_stays_a_working_link(env, monkeypatch):
+    """A plain camera app must still open the /pair page."""
+    c, config, _ = env
+    config.update_settings("access", "pairing_mode", "local")
+    monkeypatch.setattr("api.routes.devices._detect_lan_ip", lambda: "192.168.50.9")
+
+    r = c.get("/api/devices/pair/url?name=phone")
+    assert r.json()["url"].startswith("http://192.168.50.9:9090/pair?t=")
+
+
 # ── Brain ID stability ─────────────────────────────────────────────
 
 
@@ -236,3 +386,92 @@ def test_no_hardcoded_port_9090_in_pair_payload_source():
     # (e.g. log strings), but never as the hardcoded port assignment
     # ``port = 9090`` that ignored runtime config.
     assert "port = 9090" not in src
+
+
+# ── Multi-candidate payload ────────────────────────────────────────
+
+
+def test_payload_lists_every_reachable_candidate(env, monkeypatch):
+    """One address was never enough on a multi-homed machine."""
+    c, config, _ = env
+    config.update_settings("access", "pairing_mode", "local")
+    monkeypatch.setattr("api.routes.devices._detect_lan_ip", lambda: "192.168.50.9")
+    monkeypatch.setattr(
+        "services.netinfo.detect_lan_ipv4s",
+        lambda timeout=0.5: ["192.168.50.9", "10.0.0.7"],
+    )
+    monkeypatch.setattr("services.netinfo.mdns_hostname", lambda: "macbook.local")
+
+    r = c.get("/api/devices/pair/url?name=phone")
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert body["schema"] == 2
+    assert body["v"] == 1, "v must stay 1; shipped iOS guards on it"
+
+    urls = body["urls"]
+    assert [u["kind"] for u in urls] == ["lan", "lan", "mdns"]
+    assert urls[0]["url"] == "http://192.168.50.9:9090"
+    assert urls[1]["url"] == "http://10.0.0.7:9090"
+    assert urls[2]["url"] == "http://macbook.local:9090"
+    assert all(u["encrypted"] is False for u in urls)
+    # The primary is the first candidate, and `url` still carries it.
+    assert body["url"].startswith("http://192.168.50.9:9090/pair?t=")
+
+
+def test_mdns_candidate_is_always_offered(env, monkeypatch):
+    """Load-bearing, not redundant: NSAllowsLocalNetworking definitely
+    covers a .local name and arguably does not cover an RFC1918
+    literal. If a device test confirms that, mdns becomes the primary
+    and the only change is CANDIDATE_ORDER."""
+    c, config, _ = env
+    config.update_settings("access", "pairing_mode", "local")
+    monkeypatch.setattr("api.routes.devices._detect_lan_ip", lambda: "192.168.50.9")
+    monkeypatch.setattr(
+        "services.netinfo.detect_lan_ipv4s", lambda timeout=0.5: ["192.168.50.9"]
+    )
+
+    urls = c.get("/api/devices/pair/url?name=phone").json()["urls"]
+    assert any(u["kind"] == "mdns" for u in urls)
+
+
+def test_candidate_order_is_a_single_constant():
+    """The ATS answer must be a one-line change, not a redesign."""
+    from api.routes.devices import CANDIDATE_ORDER
+
+    assert CANDIDATE_ORDER.index("lan") < CANDIDATE_ORDER.index("mdns")
+    assert set(CANDIDATE_ORDER) >= {"lan", "mdns", "tailscale", "relay"}
+
+
+def test_tls_brain_advertises_https_not_http(env, monkeypatch):
+    """The scheme was hardcoded http://, so a TLS brain advertised a URL
+    on the wrong scheme and every phone failed the handshake."""
+    c, config, _ = env
+    config.update_settings("access", "pairing_mode", "local")
+    monkeypatch.setattr("api.routes.devices._detect_lan_ip", lambda: "192.168.50.9")
+    monkeypatch.setattr(
+        "services.netinfo.detect_lan_ipv4s", lambda timeout=0.5: ["192.168.50.9"]
+    )
+    monkeypatch.setattr("config.runtime.brain_tls_enabled", lambda: True)
+
+    body = c.get("/api/devices/pair/url?name=phone").json()
+    lan = [u for u in body["urls"] if u["kind"] == "lan"][0]
+    assert lan["url"].startswith("https://")
+    assert lan["encrypted"] is True
+    # iOS has no trust override and the cert is self-signed, so TLS on
+    # the LAN is strictly worse than cleartext. Say so.
+    assert "self-signed" in lan["caveat"]
+
+
+def test_legacy_client_reading_only_url_still_works(env, monkeypatch):
+    """Additive means additive: no field a shipped client reads moved."""
+    c, config, _ = env
+    config.update_settings("access", "pairing_mode", "local")
+    monkeypatch.setattr("api.routes.devices._detect_lan_ip", lambda: "192.168.50.9")
+    monkeypatch.setattr(
+        "services.netinfo.detect_lan_ipv4s", lambda timeout=0.5: ["192.168.50.9"]
+    )
+
+    body = c.get("/api/devices/pair/url?name=phone").json()
+    for field in ("v", "mode", "url", "token", "brain_id", "expires", "name", "device_id"):
+        assert field in body, field

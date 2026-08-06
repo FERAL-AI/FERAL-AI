@@ -414,6 +414,19 @@ def _reset_device_pairing_store():
     reset_store()
 
 
+def _reset_bound_host():
+    """The recorded live-listener bind host.
+
+    Set once per process by ``_spawn_brain_server``. A test that starts
+    a server would otherwise leave it set, and every later test asking
+    "does this need a restart?" would compare against a listener that is
+    no longer running.
+    """
+    from config.runtime import _reset_bound_host as _reset
+
+    _reset()
+
+
 def _reset_rate_limit_store():
     """Per-client-IP request windows in the API rate limiter.
 
@@ -446,6 +459,7 @@ _SHARED_STATE_RESETTERS = (
     _reset_budget_cache,
     _reset_shared_catalog,
     _reset_device_pairing_store,
+    _reset_bound_host,
 )
 
 # Deliberately NOT reset here, so nobody adds them back "for symmetry":

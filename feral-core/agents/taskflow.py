@@ -644,7 +644,16 @@ class TaskFlowRuntime:
 
     # ── L4 composition helpers ───────────────────────────────────────────
 
-    _TEMPLATE_RE = re.compile(r"\{\{\s*(previous_output|step_(\d+))\s*\}\}")
+    # ``context.a.b`` is accepted alongside the two original tokens.
+    # Without it, a workflow could only reference the immediately
+    # preceding step or a step by index, so anything needing a value the
+    # trigger supplied had nowhere to read it from. That is why
+    # ``workflows/meeting_recap.json`` never worked: its templates
+    # reference dotted context paths, they matched nothing, and the
+    # literal ``{{ ... }}`` text was passed through to the step.
+    _TEMPLATE_RE = re.compile(
+        r"\{\{\s*(previous_output|step_(\d+)|context\.([A-Za-z0-9_.]+))\s*\}\}"
+    )
 
     def _render_templates(self, value: Any, context: dict) -> Any:
         """Recursively render template tokens in strings of a payload."""
@@ -665,6 +674,11 @@ class TaskFlowRuntime:
             token = match.group(1)
             if token == "previous_output":
                 return str(context.get("previous_output", "") or "")
+
+            dotted = match.group(3)
+            if dotted:
+                return self._resolve_context_path(context, dotted)
+
             idx = match.group(2)
             entry = step_results.get(str(idx))
             if isinstance(entry, dict):
@@ -672,6 +686,28 @@ class TaskFlowRuntime:
             return str(entry or "")
 
         return self._TEMPLATE_RE.sub(_repl, text)
+
+    @staticmethod
+    def _resolve_context_path(context: dict, dotted: str) -> str:
+        """Walk a dotted path through the run context, or return "".
+
+        Missing keys resolve to the empty string rather than raising or
+        leaving the literal token in place. A workflow that references
+        something the trigger did not supply should degrade to a blank,
+        not hand the model a ``{{ context.foo }}`` string to interpret.
+
+        Mappings only. Attribute access would let a template reach into
+        arbitrary Python objects reachable from the context, which is a
+        much larger surface than a workflow author is asking for.
+        """
+        current: Any = context
+        for part in dotted.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return ""
+            current = current[part]
+        if current is None:
+            return ""
+        return current if isinstance(current, str) else json.dumps(current, default=str)
 
     @staticmethod
     def _step_output_text(outcome: dict) -> Optional[str]:
