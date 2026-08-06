@@ -61,7 +61,40 @@ def _normalize_origin(url: str) -> str:
 
 
 class PairUnavailable(Exception):
-    """Raised when the configured access mode cannot emit a pair URL."""
+    """Raised when the configured access mode cannot emit a pair URL.
+
+    Carries a machine-readable ``code`` and, where one exists, a
+    ``fix``: the single action that would make pairing possible. The
+    default access mode is deliberately private, so "pairing is off" is
+    the expected state on a fresh install rather than an error, and the
+    UI should be able to offer one button instead of asking the user to
+    understand access modes and go find Settings.
+    """
+
+    def __init__(self, message: str, *, code: str = "pair_unavailable", fix: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.fix = fix
+
+    def as_detail(self) -> dict:
+        detail = {"code": self.code, "message": str(self)}
+        if self.fix:
+            detail["fix"] = self.fix
+        return detail
+
+
+# The one-tap consent. Offered wherever pairing is refused because the
+# brain is private, which is the default and therefore the common case.
+_ENABLE_LAN_FIX = {
+    "action": "set_access_mode",
+    "mode": AccessMode.LAN.value,
+    "label": "Enable same-WiFi pairing",
+    "consequence": (
+        "Your brain becomes reachable by other devices on whatever "
+        "network this computer is joined to. On an untrusted network "
+        "(hotel, cafe) turn it off again afterwards."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -145,7 +178,8 @@ def _assert_listener_agrees(mode: AccessMode) -> None:
         "Configured for same-WiFi pairing, but this brain is currently "
         f"listening on {actual}, so nothing outside this machine can reach "
         "it. Restart the brain (`feral restart`) to apply the change, then "
-        "pair again."
+        "pair again.",
+        code="restart_required",
     )
 
 
@@ -174,15 +208,18 @@ def _resolve_pair_origin() -> str:
 
     if mode is AccessMode.LOCALHOST:
         raise PairUnavailable(
-            "Mode B (localhost) does not expose pairing. "
-            "Switch to LAN or remote in Settings to pair phones."
+            "This brain is private, so phones cannot reach it yet. "
+            "Mode B (localhost) does not expose pairing.",
+            code="pairing_disabled",
+            fix=_ENABLE_LAN_FIX,
         )
 
     if mode is AccessMode.RELAY:
         raise PairUnavailable(
             "Any-network (relay) access is selected, but the relay tunnel "
-            "is not implemented yet, so there is no address to advertise. "
-            "Switch to Same WiFi in Settings to pair on this network."
+            "is not implemented yet, so there is no address to advertise.",
+            code="relay_not_implemented",
+            fix=_ENABLE_LAN_FIX,
         )
 
     if mode is AccessMode.TAILSCALE:
@@ -752,7 +789,7 @@ async def pair_device_qr(request: Request, name: str = "unnamed", mode: str = "w
     try:
         origin = _resolve_pair_origin()
     except PairUnavailable as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=exc.as_detail())
     result = store.pair_device(name, kind="browser")
     payload = _pair_payload(result, origin=origin)
 
@@ -799,7 +836,7 @@ async def pair_device_url(
     try:
         origin = _resolve_pair_origin()
     except PairUnavailable as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=exc.as_detail())
     result = store.pair_device(
         name,
         kind="browser",

@@ -111,6 +111,12 @@ export default function Setup() {
   const [pairChoice, setPairChoice] = useState('');
   const [pairPayload, setPairPayload] = useState(null);
   const [pairError, setPairError] = useState(null);
+  // The single action that would make pairing work, when the brain
+  // says one exists. Private is the default access mode, so the
+  // common refusal is "not exposed yet" and it deserves a button
+  // rather than a paragraph telling the user to go find Settings.
+  const [pairFix, setPairFix] = useState(null);
+  const pickAccessModeRef = React.useRef(null);
   const [pairBusy, setPairBusy] = useState(false);
 
   const [saved, setSaved] = useState(false);
@@ -245,9 +251,40 @@ export default function Setup() {
     }
   }, [audio]);
 
+  const applyPairFix = useCallback(async (fix) => {
+    setPairBusy(true);
+    setPairError(null);
+    try {
+      const r = await apiFetch('/api/access/mode', {
+        method: 'POST',
+        body: JSON.stringify({ mode: fix.mode }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        setPairError(formatApiDetail(err, `could not enable pairing (${r.status})`));
+        return;
+      }
+      const applied = await r.json().catch(() => ({}));
+      setPairFix(null);
+      if (applied?.restart?.required) {
+        setPairError(
+          `${applied.restart.reason || 'This change needs a restart to take effect'}`
+          + (applied.restart.command ? ` — run \`${applied.restart.command}\`, then try again.` : '.')
+        );
+        return;
+      }
+      await pickAccessModeRef.current?.(fix.mode);
+    } catch (e) {
+      setPairError(e?.message || 'could not enable pairing');
+    } finally {
+      setPairBusy(false);
+    }
+  }, []);
+
   const pickAccessMode = useCallback(async (mode) => {
     setPairChoice(mode);
     setPairError(null);
+    setPairFix(null);
     setPairPayload(null);
     setPairBusy(true);
     try {
@@ -300,6 +337,13 @@ export default function Setup() {
       });
       if (!urlResp.ok) {
         const err = await urlResp.json().catch(() => ({}));
+        // A refusal that carries a `fix` is a one-tap consent, not a
+        // dead end. Private is the default, so "phones cannot reach
+        // this brain yet" is the expected fresh-install state and the
+        // user should get a button, not an instruction to go find
+        // Settings and learn what an access mode is.
+        const fix = err?.detail?.fix;
+        if (fix?.action === 'set_access_mode') setPairFix(fix);
         setPairError(formatApiDetail(err, `pair URL unavailable (${urlResp.status})`));
         return;
       }
@@ -311,6 +355,8 @@ export default function Setup() {
       setPairBusy(false);
     }
   }, []);
+
+  pickAccessModeRef.current = pickAccessMode;
 
   const finishSetup = useCallback(async () => {
     setFinishError(null);
@@ -433,6 +479,8 @@ export default function Setup() {
           onPick={pickAccessMode}
           payload={pairPayload}
           error={pairError}
+          fix={pairFix}
+          onApplyFix={applyPairFix}
           busy={pairBusy}
         />
       )}
@@ -769,7 +817,7 @@ function IdentityStep({ value, onChange }) {
 }
 
 
-function PairStep({ choice, onPick, payload, error, busy }) {
+function PairStep({ choice, onPick, payload, error, fix, onApplyFix, busy }) {
   const cards = [
     {
       id: 'local',
@@ -892,6 +940,22 @@ function PairStep({ choice, onPick, payload, error, busy }) {
           <div className="v2-chip v2-chip--error" data-testid="v2-setup-pair-error">
             {error}
           </div>
+          {fix?.action === 'set_access_mode' && (
+            <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
+              {fix.consequence && (
+                <div className="v2-chip v2-chip--warn">{fix.consequence}</div>
+              )}
+              <button
+                type="button"
+                className="v2-btn v2-btn--primary"
+                disabled={busy}
+                onClick={() => onApplyFix?.(fix)}
+                data-testid="v2-setup-pair-enable-lan"
+              >
+                {fix.label || 'Enable same-WiFi pairing'}
+              </button>
+            </div>
+          )}
         </Pane>
       )}
     </>

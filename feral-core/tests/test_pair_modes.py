@@ -61,7 +61,10 @@ def test_default_mode_is_localhost_and_pair_url_is_unavailable(env):
     r = c.get("/api/devices/pair/url?name=phone-A")
     assert r.status_code == 409, r.text
     body = r.json()
-    assert "Mode B" in body["detail"] or "localhost" in body["detail"].lower()
+    assert body["detail"]["code"] == "pairing_disabled"
+    # Private is the default, so this is the expected fresh-install state,
+    # not an error. One tap makes it work.
+    assert body["detail"]["fix"]["mode"] == "local"
     # 409 responses must not leak orphan rows in paired_devices.
     assert len(store.list_devices()) == before
 
@@ -107,7 +110,7 @@ def test_mode_local_no_lan_ip_returns_409(env, monkeypatch):
     before = len(store.list_devices())
     r = c.get("/api/devices/pair/url?name=phone-LAN")
     assert r.status_code == 409
-    assert "LAN IP not detected" in r.json()["detail"]
+    assert "LAN IP not detected" in r.json()["detail"]["message"]
     assert len(store.list_devices()) == before
 
 
@@ -140,7 +143,7 @@ def test_mode_local_with_loopback_listener_returns_409(env, monkeypatch):
 
     r = c.get("/api/devices/pair/url?name=phone-LAN")
     assert r.status_code == 409, r.text
-    detail = r.json()["detail"]
+    detail = r.json()["detail"]["message"]
     assert "127.0.0.1" in detail and "restart" in detail.lower()
     # The unreachable address must not appear anywhere in the refusal —
     # printing it is what made the old failure look like a network fault.
@@ -189,7 +192,7 @@ def test_mode_relay_refuses_rather_than_advertising_lan(env, monkeypatch):
 
     r = c.get("/api/devices/pair/url?name=phone-relay")
     assert r.status_code == 409, r.text
-    detail = r.json()["detail"]
+    detail = r.json()["detail"]["message"]
     assert "192.168.50.9" not in detail
     assert "relay" in detail.lower()
     assert len(store.list_devices()) == before
@@ -255,7 +258,8 @@ def test_mode_remote_with_no_url_returns_409(env, monkeypatch):
 
     r = c.get("/api/devices/pair/url?name=phone-Tailnet")
     assert r.status_code == 409
-    assert "remote-up" in r.json()["detail"] or "FERAL_PUBLIC_BASE_URL" in r.json()["detail"]
+    detail = r.json()["detail"]["message"]
+    assert "remote-up" in detail or "FERAL_PUBLIC_BASE_URL" in detail
     assert len(store.list_devices()) == before
 
 
@@ -266,7 +270,7 @@ def test_mode_remote_rejects_loopback_public_url(env, monkeypatch):
 
     r = c.get("/api/devices/pair/url?name=phone-Tailnet")
     assert r.status_code == 409
-    assert "loopback" in r.json()["detail"].lower()
+    assert "loopback" in r.json()["detail"]["message"].lower()
 
 
 # ── Unified payload schema ──────────────────────────────────────────
