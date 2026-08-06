@@ -113,16 +113,23 @@ class PairCandidate:
         return out
 
 
-# The order candidates are offered in, and the one line to change if
-# hardware testing says otherwise.
+# The order candidates are offered in.
 #
-# A raw LAN literal leads today because it needs no name resolution. The
-# open question is Apple's: ``NSAllowsLocalNetworking`` unambiguously
-# covers ``.local`` names, and whether it also covers an RFC1918 literal
-# like 192.168.1.5 is the commonly disputed case. If a device test shows
-# the literal blocked while the ``.local`` name works, swap "lan" and
-# "mdns" here and nothing else in the codebase moves. That is why the
-# mDNS candidate is emitted even though it looks redundant.
+# A raw LAN literal leads because it needs no name resolution, and
+# because App Transport Security does not apply to it: on iOS 10 and
+# later ATS is simply not evaluated for requests targeting an IP
+# address. An earlier revision of this comment had that backwards,
+# treating the literal as the disputed case and ``.local`` as the safe
+# one. It is the other way round. ``NSAllowsLocalNetworking`` exists for
+# unqualified host names and ``.local`` names, which is precisely what
+# Bonjour discovery hands back, so the mDNS candidate still earns its
+# place, and the plist key still earns its place, for that path rather
+# than as insurance for this one.
+#
+# ATS is not the only mechanism in play. Local Network privacy is
+# separate and unverified on current iOS, so if a device test shows the
+# literal failing, that is a permission-prompt problem and not an
+# ordering problem, and swapping these entries would not fix it.
 CANDIDATE_ORDER = ("lan", "mdns", "tailscale", "relay")
 
 

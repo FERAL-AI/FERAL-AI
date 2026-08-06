@@ -653,13 +653,25 @@ confident lies.
 
 - The Local Network permission prompt: fresh install, physical device,
   iOS 17 and 18. The Simulator does not model Local Network privacy.
-- **Whether ATS blocks cleartext to an RFC1918 literal like
-  `192.168.1.5`.** `NSAllowsLocalNetworking` unambiguously covers
-  `.local`, loopback, and link-local. The literal-IP case is the disputed
-  one and I am not certain of it. If `ws://<lan-ip>` fails while
-  `ws://<hostname>.local` succeeds, that answers it, and the payload's
-  candidate priority must put mDNS above raw LAN. This single test result
-  changes the design, so run it early.
+- ~~Whether ATS blocks cleartext to an RFC1918 literal~~ **Answered, and
+  the original framing here was backwards.** Per Apple DTS, ATS is *not
+  applied at all* to requests targeting an IP address on iOS 10 and
+  later. `NSAllowsLocalNetworking` exists for unqualified host names and
+  `.local` names, not as cover for literals. So `ws://192.168.x.x` is
+  not an ATS question, candidate priority does not need to change, and
+  `CANDIDATE_ORDER` stays `lan` first.
+
+  Both plist additions still earn their place: `NSAllowsLocalNetworking`
+  covers the `.local` names Bonjour hands back in S10, and
+  `NSLocalNetworkUsageDescription` is a different mechanism entirely.
+
+- **Local Network privacy on current iOS, which is the real open
+  question.** ATS and Local Network privacy are separate. Whether the
+  permission prompt appears and the connection completes on iOS 26 is
+  unverified, and there is at least one report of cleartext local-network
+  failures specific to iOS 26.5 on physical devices
+  (firebase-ios-sdk#16406). Treat the ATS answer as settled enough to
+  design against and still confirm this half on a device.
 - AP/client isolation, the hotel-wifi case the whole remote tier exists
   for. The brain cannot detect it and says so honestly in its diagnostic.
 
