@@ -104,6 +104,25 @@ ALLOWED_FAIL_LABELS: set[str] = {
     # The resolver refused to produce a pair origin. Same class: pairing
     # is structurally impossible until the named condition is fixed.
     "Phone pairing",
+    # ── Tailscale (Mode C remote pairing) ──
+    #
+    # Every one of these only reaches _fail when the operator has
+    # selected access mode "remote", i.e. they have declared that
+    # Tailscale Funnel IS their pairing transport. In that mode a
+    # missing binary / dead daemon / logged-out node / absent funnel
+    # each make phone pairing structurally impossible, which is the
+    # same bar "Phone pairing" and "Access mode coherence" clear.
+    # In any other mode these probes report _info, because not having
+    # Tailscale is the normal state for someone pairing over WiFi.
+    "Tailscale binary",
+    "Tailscale daemon",
+    "Tailscale account",
+    "Tailscale Funnel",
+    # Remote mode with no stored funnel URL, or a stored URL that no
+    # live funnel backs. Both hand the phone an address that answers
+    # nothing while every other probe stays green: exactly the silent
+    # failure this section was added to end.
+    "Remote access coherence",
 }
 
 ALLOWED_WARN_LABELS: set[str] = {
@@ -172,6 +191,23 @@ ALLOWED_WARN_LABELS: set[str] = {
     # verify the configured backend. Either way the operator should see
     # a yellow flag rather than a silent green.
     "Memory vector backend",
+    # ── Tailscale (Mode C remote pairing) ──
+    #
+    # The shipped integrations.tailscale module failed to import. The
+    # brain still runs; only the remote-access probes go dark.
+    "Tailscale integration",
+    # Also in ALLOWED_FAIL_LABELS. Tailscale is installed but the CLI
+    # either ran out of the 2.5s probe budget or errored, while the
+    # operator is NOT in remote mode. Nothing they depend on is broken,
+    # but a wedged daemon is a real degradation and is not the expected
+    # fresh-install state (which is "not installed" -> _info).
+    "Tailscale daemon",
+    "Tailscale Funnel",
+    # Also in ALLOWED_FAIL_LABELS. Warns for the reverse incoherence: a
+    # Funnel is publishing the brain port to the internet while the
+    # access mode says loopback/LAN. Nothing is broken, but nobody asked
+    # for that exposure, so it must not be silent.
+    "Remote access coherence",
 }
 
 

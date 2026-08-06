@@ -1,10 +1,57 @@
 # Changelog
 
-<!-- feral-version: 2026.8.5 -->
+<!-- feral-version: 2026.8.6 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.6] - 2026-08-06 - tell the operator why Funnel failed
+
+### Fixed
+
+- **Tailscale Funnel failures are no longer silent.** A user with
+  Tailscale installed, running and logged in was told only
+  `tailscale funnel --bg 9090 timed out after 20.0s`. Two defects in
+  `integrations/tailscale.py::_run` produced that, and both hide
+  information rather than lose functionality, which is why reading the
+  code found them and a week of guessing did not.
+
+  `subprocess.run` inherited stdin. `tailscale funnel` prompts for
+  confirmation when Funnel is not yet enabled on the tailnet: it prints
+  an enable URL and waits. Called from a daemon or an API request there
+  is no one to answer, so it blocked until the timeout. stdin is now
+  closed, so the CLI reads EOF and exits with its message.
+
+  `subprocess.TimeoutExpired` carries whatever the process wrote before
+  the timeout. The handler discarded both streams, so the enable URL was
+  read off the pipe and thrown away. Partial output is now surfaced and
+  classified first, so a timeout carrying a known message raises the
+  same typed error a non-zero exit would.
+
+- **Tailscale mode keeps its bind host.** A change in 2026.8.5 derived a
+  loopback bind for `remote` mode, and the boot repair would then have
+  narrowed an existing `0.0.0.0` on upgrade. Funnel proxies to localhost
+  so loopback works, but a brain reached directly on its tailnet address
+  needs the interface. Caught before it shipped to anyone in that state.
+
+### Added
+
+- **`feral doctor` probes Tailscale**: binary, daemon, account, funnel,
+  and coherence between the stored remote URL and the live one. Severity
+  follows declared intent, so a missing Tailscale is informational when
+  pairing over WiFi and a failure when the mode is `remote`. Every probe
+  has a 2.5s budget, and a timeout reports as "installed but wedged"
+  rather than "not installed".
+- The pair QR carries the candidate address list, so a phone that scans
+  it learns every address the brain answers on rather than one.
+
+### Not yet operable
+
+Relay groundwork continues to ship as inert code: a tunnel broker, an
+SNI reader, certificate issuance, and a brain-side relay client. No
+WebSocket transport is wired to any of it and no call has ever been made
+to Let's Encrypt. Remote access still means Tailscale.
 
 ## [2026.8.5] - 2026-08-05 - pairing tells the truth
 

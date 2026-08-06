@@ -1949,6 +1949,378 @@ def cmd_doctor():
                 "Disable TLS for LAN pairing, or pair over a trusted remote URL",
             )
 
+    # ── 7c. Tailscale (Mode C remote pairing transport) ──
+    #
+    # WHY: `feral access remote-up` shells out to
+    # `tailscale funnel --bg <port>` with a 20s ceiling. An operator
+    # whose machine had no Tailscale at all waited the full 20 seconds
+    # to be told the command "timed out after 20.0s", then pasted a
+    # download URL into a shell as if it were a command. Doctor, the
+    # one tool whose entire job is answering "is my install healthy?",
+    # had zero Tailscale probes and reported green the whole time.
+    # These rows make the remote transport visible *before* the operator
+    # spends 20 seconds discovering it is missing.
+    #
+    # Severity is a function of intent. Not having Tailscale is the
+    # normal, correct state for someone pairing over WiFi, so it reports
+    # as ℹ; it is only a ✘ when the operator has actually selected
+    # remote mode and is therefore depending on it.
+    #
+    # Every probe runs on a 2.5s budget: a diagnostic for a hang must
+    # not itself be able to hang. A probe that runs out of budget is
+    # reported as its own state ("did not answer") rather than being
+    # collapsed into "not installed", because a wedged daemon and a
+    # missing binary need completely different fixes.
+    import subprocess as _ts_subprocess
+
+    console.print()
+    console.print("[bold]Tailscale (remote access)[/bold]")
+
+    TS_PROBE_BUDGET = 2.5
+
+    # "Am I depending on Tailscale?". Guarded on cfg_for_access so an
+    # unreadable settings.json (already reported by 7b) degrades to
+    # "not remote" instead of raising NameError on access_mode.
+    ts_remote_mode = (
+        cfg_for_access is not None and access_mode is AccessMode.TAILSCALE
+    )
+    ts_install_cmd = (
+        "brew install --cask tailscale"
+        if sys.platform == "darwin"
+        else "curl -fsSL https://tailscale.com/install.sh | sh"
+    )
+
+    try:
+        from integrations import tailscale as ts_mod
+    except Exception as exc:  # pragma: no cover - module ships in the wheel
+        ts_mod = None
+        _warn(
+            "Tailscale integration",
+            f"integrations.tailscale failed to import: {exc}",
+            "Reinstall FERAL: pip install -e '.[all]'",
+        )
+
+    def _ts_probe(args: list[str]) -> tuple[str, str]:
+        """Run one short `tailscale` command and classify the outcome.
+
+        Returns ``(state, payload)`` where state is one of:
+
+          ``ok``          rc 0; payload is stdout
+          ``timeout``     no answer inside the probe budget
+          ``down``        daemon socket missing / not answering
+          ``logged_out``  daemon up, node not authenticated
+          ``missing``     binary disappeared between checks
+          ``error``       anything else; payload is stderr
+
+        Reuses ``integrations.tailscale._run`` so the probe inherits the
+        exact binary lookup and userspace-socket handling that the real
+        ``remote-up`` path uses. A doctor that probed a different
+        socket than the feature would be worse than no doctor. The one
+        thing it does not inherit is the timeout: that is passed
+        explicitly, because doctor asks questions, it does not wait on
+        daemons.
+        """
+        try:
+            proc = ts_mod._run(args, timeout=TS_PROBE_BUDGET)
+        except ts_mod.TailscaleNotInstalled:
+            return ("missing", "")
+        except ts_mod.TailscaleError as exc:
+            # ``_run`` folds subprocess.TimeoutExpired into a
+            # TailscaleSubprocessFailure but chains the original as
+            # __cause__, which is the only reliable way to tell "the
+            # daemon is wedged" apart from "the CLI errored".
+            if isinstance(exc.__cause__, _ts_subprocess.TimeoutExpired):
+                return (
+                    "timeout",
+                    f"`tailscale {' '.join(args)}` did not answer within "
+                    f"{TS_PROBE_BUDGET}s",
+                )
+            return ("error", str(exc))
+
+        if proc.returncode == 0:
+            return ("ok", proc.stdout or "")
+
+        stderr = (proc.stderr or "").strip()
+        classified = ts_mod._classify_stderr(stderr)
+        if isinstance(classified, ts_mod.TailscaleDaemonUnreachable):
+            return ("down", stderr)
+        if isinstance(classified, ts_mod.TailscaleNotLoggedIn):
+            return ("logged_out", stderr)
+        # `tailscale status` phrases a dead daemon as "failed to connect
+        # to local Tailscale service; is Tailscale running?". There is
+        # no socket path in that string, so ``_classify_stderr`` cannot
+        # recognise it. Observed on macOS with the app not launched.
+        low = stderr.lower()
+        if "failed to connect to local tailscale" in low or "is tailscale running" in low:
+            return ("down", stderr)
+        return ("error", stderr)
+
+    def _ts_funnel_ports(raw: str) -> list[int]:
+        """Local ports the running Funnel forwards to.
+
+        Mirrors the parse in ``integrations.tailscale.funnel_status``
+        (``Web.<host>.Handlers.<path>.Proxy`` looks like
+        ``http://127.0.0.1:9090``). It is re-derived here rather than
+        calling ``funnel_status()`` because that helper runs the CLI on
+        the module's 8s default timeout, and no doctor probe is allowed
+        to block for that long.
+        """
+        try:
+            data = json.loads((raw or "").strip() or "{}")
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(data, dict):
+            return []
+        ports: set[int] = set()
+        for _host, conf in (data.get("Web") or {}).items():
+            for _path, handler in ((conf or {}).get("Handlers") or {}).items():
+                proxy = (handler or {}).get("Proxy") or ""
+                if ":" not in proxy:
+                    continue
+                tail = proxy.rsplit(":", 1)[-1].split("/")[0]
+                digits = "".join(ch for ch in tail if ch.isdigit())
+                if digits:
+                    ports.add(int(digits))
+        return sorted(ports)
+
+    ts_logged_in = False
+    ts_dns_name = ""
+    # Tri-state on purpose: None means "we could not find out", which is
+    # different from False ("there is no funnel"). The coherence row
+    # below refuses to accuse the operator of anything on unknown data.
+    ts_funnel_serves_brain: bool | None = None
+
+    ts_binary = shutil.which("tailscale") if ts_mod is not None else None
+
+    if ts_mod is None:
+        pass  # already reported above; nothing else is probeable
+    elif not ts_binary:
+        if ts_remote_mode:
+            _fail(
+                "Tailscale binary",
+                f"not installed, but access mode is '{AccessMode.TAILSCALE.value}' "
+                f"({AccessMode.TAILSCALE.label}), so remote pairing cannot work",
+                f"Install Tailscale: {ts_install_cmd}   then run: feral access remote-up",
+            )
+        else:
+            # Not having Tailscale is the *expected* state for the
+            # WiFi-pairing majority. Say what it would be for, and stop.
+            _info(
+                "Tailscale binary",
+                f"not installed. Only needed for '{AccessMode.TAILSCALE.label}' "
+                f"pairing (install: {ts_install_cmd})",
+            )
+    else:
+        _pass("Tailscale binary", ts_binary)
+
+        # ── daemon ──
+        state, payload = _ts_probe(["status", "--json"])
+        if state == "ok":
+            _pass("Tailscale daemon", "tailscaled responding")
+        elif state == "logged_out":
+            # The daemon answered; it just has no account. That is the
+            # next row's story, not a daemon problem.
+            _pass("Tailscale daemon", "tailscaled responding")
+        elif state == "down":
+            if ts_remote_mode:
+                _fail(
+                    "Tailscale daemon",
+                    "installed but tailscaled is not running",
+                    "Start Tailscale (open the Tailscale app, or `sudo tailscaled` "
+                    "on Linux), then: tailscale up",
+                )
+            else:
+                _info("Tailscale daemon", "not running. Start Tailscale if you want remote pairing")
+        elif state == "timeout":
+            # Distinct from "not installed" and distinct from "down":
+            # the socket is there and something is holding it.
+            if ts_remote_mode:
+                _fail(
+                    "Tailscale daemon",
+                    f"{payload}. The daemon is installed but wedged",
+                    "Restart Tailscale (quit the menu-bar app and reopen it, or "
+                    "`sudo launchctl kickstart -k system/com.tailscale.tailscaled`), "
+                    "then re-run: feral doctor",
+                )
+            else:
+                _warn(
+                    "Tailscale daemon",
+                    f"{payload}. The daemon is installed but wedged",
+                    "Restart Tailscale (quit the menu-bar app and reopen it), "
+                    "then re-run: feral doctor",
+                )
+        elif state == "missing":  # pragma: no cover - race with the which() above
+            _info("Tailscale daemon", "binary disappeared mid-probe")
+        else:
+            detail = payload or "unknown error"
+            if ts_remote_mode:
+                _fail(
+                    "Tailscale daemon",
+                    f"`tailscale status` failed: {detail[:200]}",
+                    "Run `tailscale status` yourself to see the full error, "
+                    "then restart Tailscale",
+                )
+            else:
+                _warn(
+                    "Tailscale daemon",
+                    f"`tailscale status` failed: {detail[:200]}",
+                    "Run `tailscale status` yourself to see the full error",
+                )
+
+        # ── logged-in account ──
+        if state in ("ok", "logged_out"):
+            backend = ""
+            ts_tailnet = ""
+            if state == "ok":
+                try:
+                    ts_data = json.loads((payload or "").strip() or "{}")
+                except (ValueError, TypeError):
+                    ts_data = {}
+                if not isinstance(ts_data, dict):
+                    ts_data = {}
+                backend = str(ts_data.get("BackendState") or "")
+                self_node = ts_data.get("Self") or {}
+                ts_dns_name = str(self_node.get("DNSName") or "").rstrip(".")
+                ts_tailnet = str((ts_data.get("CurrentTailnet") or {}).get("Name") or "")
+
+            if state == "ok" and backend in ("Running", "Starting"):
+                ts_logged_in = True
+                detail = ts_dns_name or "logged in"
+                if ts_tailnet:
+                    detail += f"  (tailnet {ts_tailnet})"
+                _pass("Tailscale account", detail)
+            elif state == "ok" and backend == "Stopped":
+                # Authenticated but administratively down (`tailscale
+                # down`). Funnel will not carry traffic in this state,
+                # and the phone sees a connection that never completes.
+                if ts_remote_mode:
+                    _fail(
+                        "Tailscale account",
+                        "logged in but Tailscale is stopped, so no traffic is carried",
+                        "Run: tailscale up",
+                    )
+                else:
+                    _info("Tailscale account", "logged in but stopped (`tailscale up` to connect)")
+            else:
+                # Logged out: either the CLI said so on stderr, or the
+                # JSON reports NeedsLogin / NoState.
+                if ts_remote_mode:
+                    _fail(
+                        "Tailscale account",
+                        "logged out. A logged-out node has no tailnet name to pair against",
+                        "Run: tailscale up   (opens the browser login), "
+                        "then: feral access remote-up",
+                    )
+                else:
+                    _info("Tailscale account", "logged out. Run `tailscale up` if you want remote pairing")
+
+        # ── funnel serving the brain port ──
+        if ts_logged_in:
+            fstate, fpayload = _ts_probe(["funnel", "status", "--json"])
+            if fstate == "ok":
+                funnel_ports = _ts_funnel_ports(fpayload)
+                ts_funnel_serves_brain = port in funnel_ports
+                if ts_funnel_serves_brain:
+                    public = ts_mod.funnel_url(port, dns_name=ts_dns_name) or "(unknown URL)"
+                    _pass("Tailscale Funnel", f"serving :{port} at {public}")
+                elif funnel_ports:
+                    # A funnel exists but points somewhere else, so the
+                    # brain is not the thing on the public URL.
+                    other = ", ".join(f":{p}" for p in funnel_ports)
+                    if ts_remote_mode:
+                        _fail(
+                            "Tailscale Funnel",
+                            f"forwarding {other}, not the brain port :{port}",
+                            "Re-point Funnel at the brain: feral access remote-up",
+                        )
+                    else:
+                        _info("Tailscale Funnel", f"forwarding {other} (not the brain port :{port})")
+                else:
+                    if ts_remote_mode:
+                        _fail(
+                            "Tailscale Funnel",
+                            f"no funnel is serving the brain port :{port}",
+                            "Run: feral access remote-up",
+                        )
+                    else:
+                        _info("Tailscale Funnel", "not enabled, remote pairing is off")
+            elif fstate == "timeout":
+                if ts_remote_mode:
+                    _fail(
+                        "Tailscale Funnel",
+                        f"{fpayload}. Cannot confirm the brain is reachable remotely",
+                        "Restart Tailscale, then re-run: feral doctor",
+                    )
+                else:
+                    _warn(
+                        "Tailscale Funnel",
+                        f"{fpayload}",
+                        "Restart Tailscale, then re-run: feral doctor",
+                    )
+            else:
+                detail = fpayload or "unknown error"
+                if ts_remote_mode:
+                    _fail(
+                        "Tailscale Funnel",
+                        f"could not read funnel status: {detail[:200]}",
+                        "Run `tailscale funnel status` yourself to see the full error",
+                    )
+                else:
+                    _info("Tailscale Funnel", f"could not read funnel status: {detail[:120]}")
+
+    # ── mode coherence: what settings.json promises vs what is live ──
+    #
+    # This is the row that would have caught the original incident: the
+    # pair QR is built from ``access.tailscale.tailnet_url``, so a
+    # remote-mode brain with an empty or stale URL hands the phone an
+    # address that answers nothing, while every other probe stays green.
+    if cfg_for_access is not None and ts_mod is not None:
+        try:
+            ts_stored_url = cfg_for_access.access_remote_url
+        except Exception as exc:  # pragma: no cover - defensive
+            ts_stored_url = ""
+            _warn("Remote access coherence", f"could not read access settings: {exc}")
+
+        if ts_remote_mode:
+            if not ts_stored_url:
+                _fail(
+                    "Remote access coherence",
+                    f"access mode is '{AccessMode.TAILSCALE.value}' but no Funnel URL "
+                    "is stored (access.tailscale.tailnet_url is empty), so the pair QR "
+                    "has nothing to point at",
+                    "Publish a Funnel URL with `feral access remote-up`, or switch to "
+                    "Same WiFi in Settings",
+                )
+            elif ts_funnel_serves_brain is True:
+                _pass("Remote access coherence", f"remote mode → {ts_stored_url}")
+            elif ts_funnel_serves_brain is False:
+                _fail(
+                    "Remote access coherence",
+                    f"settings advertise {ts_stored_url} but no funnel is serving "
+                    f":{port}. Phones will be handed a dead URL",
+                    "Re-publish the funnel with `feral access remote-up`, or clear the "
+                    "stale URL with `feral access remote-down`",
+                )
+            else:
+                # Funnel state unknown (daemon down, probe timed out).
+                # The rows above already carry the actionable failure;
+                # repeating it here in red would be noise.
+                _info(
+                    "Remote access coherence",
+                    f"stored remote URL {ts_stored_url}; live funnel state unknown (see above)",
+                )
+        elif ts_funnel_serves_brain is True:
+            # A funnel is publishing the brain to the internet while the
+            # operator's stated intent is loopback/LAN. Nothing is
+            # broken, but nobody asked for this exposure.
+            _warn(
+                "Remote access coherence",
+                f"a Funnel is publishing :{port} to the internet, but access mode is "
+                f"'{access_mode.value}' ({access_mode.label})",
+                "Stop the funnel with `feral access remote-down`, or switch to "
+                "Tailscale mode so the pair URL matches",
+            )
+
     # ── 8. Browser runtime (Chrome + CDP + Playwright) ──
     #
     # The actual runtime path is `BrowserController.connect_over_cdp` to

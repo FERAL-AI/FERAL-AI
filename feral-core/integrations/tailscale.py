@@ -158,13 +158,44 @@ def _run(args: list[str], *, timeout: float = 8.0) -> subprocess.CompletedProces
             text=True,
             timeout=timeout,
             check=False,
+            # Closed, not inherited. `tailscale funnel` prompts for
+            # confirmation when Funnel is not yet enabled on the tailnet:
+            # it prints an enable URL and waits. With stdin inherited
+            # from a daemon or an API request there is nothing to read,
+            # so it blocked until the timeout and the operator was told
+            # only that something "timed out". With stdin closed the CLI
+            # gets EOF and exits, and its message reaches us.
+            stdin=subprocess.DEVNULL,
         )
     except FileNotFoundError as exc:
         raise TailscaleNotInstalled(str(exc)) from exc
     except subprocess.TimeoutExpired as exc:
+        # TimeoutExpired carries whatever the process wrote before we
+        # gave up. Discarding it is how a user with Tailscale installed,
+        # running and logged in was told "timed out after 20.0s" while
+        # the actual answer, usually an enable-Funnel URL, sat unread in
+        # this exception.
+        partial_out = _as_text(exc.stdout)
+        partial_err = _as_text(exc.stderr)
+        classified = _classify_stderr(partial_err) or _classify_stderr(partial_out)
+        if classified is not None:
+            raise classified from exc
+        detail = (partial_err or partial_out).strip()
         raise TailscaleSubprocessFailure(
             f"tailscale {' '.join(args)} timed out after {timeout}s"
+            + (f", and said: {detail[:400]}" if detail else
+               ". It produced no output, which usually means it was waiting "
+               "on input that never came.")
         ) from exc
+
+
+def _as_text(raw) -> str:
+    """Decode subprocess output that may be bytes or str, never raising."""
+    if raw is None:
+        return ""
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", "replace")
+    return str(raw)
 
 
 def _classify_stderr(stderr: str) -> Optional[TailscaleError]:
