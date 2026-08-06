@@ -518,8 +518,15 @@ only those three files, on a separate branch, and pushed nothing.
 
 ## What changed on the brain that you need to know
 
-All on branch `fix/pairing-access-2026-08` in the ASOS repo, not yet
-released.
+All on branch `fix/pairing-access-2026-08` in the ASOS repo, **not yet
+released**. Spelling out what that means in practice, because it is easy
+to read the list below as describing the brain you can actually probe:
+the brain running on your machine came back up on released code after the
+reboot, so **none of items 1 to 5 are live right now.** A live probe of
+`/api/devices/pair/url` returns `?t=<token>` with no `p=` at all, and the
+1001 frame is not emitted. Anything you build against them cannot be
+exercised end to end until that branch ships. Verify with a probe before
+concluding your code is wrong.
 
 1. **`/v1/node` now sends an HUP error frame (code 1001, name
    `unauthorized`) before `ws.close(4003)`.** Previously a rejected
@@ -568,8 +575,14 @@ From the approved plan's iOS section. Numbering is the plan's.
   failure. It also discards the `@discardableResult` from
   `FeralPairingService.complete`.
 - **S10, Bonjour discovery.** `NWBrowser` on `_feral._tcp`. The plist key
-  is already declared. Note the brain-side mDNS TXT records are Stage 1
-  and may not be there yet; check before building against them.
+  is already declared, and mDNS is **live now**: `dns-sd -B _feral._tcp`
+  returns real instances. But the TXT record carries only `version`,
+  `name`, and `hostname` (`services/mdns.py:115-119`). **There is no
+  `brain_id` in it.** So discovery works and acting on a discovery does
+  not: you cannot match a discovered service back to a stored credential
+  by brain id, which is exactly what an S3 brain-id-keyed store wants.
+  Hold S10 until the TXT records carry `brain_id`, or it is discovery you
+  cannot act on.
 - **S11, register the `feral://` URL scheme.** `CFBundleURLTypes` exists
   in the plist already for Google Sign-In. Add a second dict to the
   existing array; do not create a second `CFBundleURLTypes` key.
