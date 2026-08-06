@@ -25,6 +25,31 @@ def _outfit_from_temp(t: float) -> str:
     return "t-shirt, sunscreen"
 
 
+# Two spellings are in use: proactive_engine reads "hrv_ms", ideas_engine
+# reads "hrv". Accept both rather than pick a winner here, which would make
+# the briefing disagree with whichever engine it did not match.
+_HRV_METRIC_IDS = ("hrv_ms", "hrv")
+
+
+def _trend_direction(values: list[float], window: int = 7) -> str:
+    """Direction over the last *window* readings, or "stable".
+
+    BaselineEngine.check_trend answers the same question but persists a
+    BaselineAlert as a side effect. This is a GET, so it does the arithmetic
+    without writing: a briefing must not manufacture alert history simply by
+    being requested.
+    """
+    tail = values[-window:]
+    if len(tail) < 2:
+        return "unknown"
+    diffs = [tail[i + 1] - tail[i] for i in range(len(tail) - 1)]
+    if all(d > 0 for d in diffs):
+        return "upward"
+    if all(d < 0 for d in diffs):
+        return "downward"
+    return "stable"
+
+
 # ── Briefing ─────────────────────────────────────────────────────────────────
 
 @router.get("/briefing")
@@ -33,6 +58,13 @@ async def get_briefing():
     if not state.orchestrator:
         raise HTTPException(503, "Orchestrator not initialized")
 
+    # Sections whose lookup raised. An empty section is not the same question
+    # as a broken one, and for the whole life of this endpoint the response
+    # could not tell them apart: every block below failed permanently and
+    # reported its failure at debug, so a briefing of empty fields looked
+    # exactly like a quiet morning.
+    degraded: list[str] = []
+
     briefing: dict = {
         "greeting": "",
         "sleep": None,
@@ -40,43 +72,75 @@ async def get_briefing():
         "weather": None,
         "goals": [],
         "vip_emails": [],
+        "degraded": degraded,
     }
 
+    # get_all_baselines returns BaselineMetric dataclasses, not dicts, as
+    # api/routes/baseline.py has always known (it calls asdict on them). The
+    # old .get("metric") raised AttributeError on the first element, so
+    # "sleep" was None in every briefing ever served. There is no "value" or
+    # "trend" field either: the rolling average is .mean and direction has to
+    # be derived from .values.
     try:
         if state.baseline_engine:
             metrics = state.baseline_engine.get_all_baselines()
-            hrv = next((m for m in metrics if m.get("metric") == "hrv_ms"), None)
-            if hrv:
+            hrv = next((m for m in metrics if m.metric_id in _HRV_METRIC_IDS), None)
+            if hrv is not None:
                 briefing["sleep"] = {
-                    "hrv_ms": hrv.get("value"),
-                    "trend": hrv.get("trend", "stable"),
+                    "hrv_ms": hrv.mean,
+                    "trend": _trend_direction(hrv.values),
+                    "samples": len(hrv.values),
                 }
     except Exception as e:
-        logger.debug("sleep recap unavailable: %s", e)
+        logger.warning("briefing: sleep recap unavailable: %s", e)
+        degraded.append("sleep")
 
+    # IntentCompiler exposes get_today_actions(); there is no today(). The old
+    # call raised AttributeError, and the shape was wrong on top of that:
+    # get_today_actions returns the action list directly, not {"actions": [...]}.
     try:
-        if hasattr(state, "intent_compiler") and state.intent_compiler:
-            today = state.intent_compiler.today()
-            briefing["agenda"] = today.get("actions", [])[:3]
+        if getattr(state, "intent_compiler", None):
+            briefing["agenda"] = state.intent_compiler.get_today_actions()[:3]
     except Exception as e:
-        logger.debug("agenda unavailable: %s", e)
+        logger.warning("briefing: agenda unavailable: %s", e)
+        degraded.append("agenda")
 
+    # Likewise list_active() does not exist; the method is list_plans(), which
+    # returns every plan rather than only the active ones, so the status
+    # filter the old name implied has to be applied here. Keys are plan_id and
+    # intent, so p["id"] would have been a KeyError even had the call landed.
     try:
-        if hasattr(state, "intent_compiler") and state.intent_compiler:
-            plans = state.intent_compiler.list_active()
+        if getattr(state, "intent_compiler", None):
+            plans = state.intent_compiler.list_plans()
             briefing["goals"] = [
-                {"id": p["id"], "title": p.get("goal", ""), "progress": p.get("progress", 0)}
-                for p in plans[:3]
-            ]
+                {
+                    "id": p["plan_id"],
+                    "title": p.get("intent", ""),
+                    "progress": p.get("progress", 0),
+                }
+                for p in plans
+                if p.get("status") == "active"
+            ][:3]
     except Exception as e:
-        logger.debug("goals unavailable: %s", e)
+        logger.warning("briefing: goals unavailable: %s", e)
+        degraded.append("goals")
 
-    try:
-        if hasattr(state, "email_watcher") and state.email_watcher:
-            if hasattr(state.email_watcher, "get_recent_vip"):
-                briefing["vip_emails"] = state.email_watcher.get_recent_vip(limit=3)
-    except Exception as e:
-        logger.debug("vip emails unavailable: %s", e)
+    # EmailWatcher has no get_recent_vip, here or anywhere in the tree, so the
+    # hasattr guard makes this a permanent no-op: the field reads "no VIP mail"
+    # when the truth is that nothing ever looks. Kept guarded rather than
+    # deleted because the surface consumes the key, and reported so the empty
+    # list is not mistaken for a quiet inbox. Implementing VIP recall is its
+    # own change.
+    if getattr(state, "email_watcher", None) is not None:
+        getter = getattr(state.email_watcher, "get_recent_vip", None)
+        if getter is None:
+            degraded.append("vip_emails:not_implemented")
+        else:
+            try:
+                briefing["vip_emails"] = getter(limit=3)
+            except Exception as e:
+                logger.warning("briefing: vip emails unavailable: %s", e)
+                degraded.append("vip_emails")
 
     # Weather (optional — requires OPENWEATHER_API_KEY). Vault uses
     # ``retrieve(key_name)`` — there is no ``get`` method — so we fall through
@@ -109,7 +173,8 @@ async def get_briefing():
                         "outfit_hint": _outfit_from_temp(data["main"]["feels_like"]),
                     }
         except Exception as e:
-            logger.debug("weather unavailable: %s", e)
+            logger.warning("briefing: weather unavailable: %s", e)
+            degraded.append("weather")
 
     now = datetime.now()
     hour = now.hour

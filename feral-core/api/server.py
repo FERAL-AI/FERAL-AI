@@ -924,6 +924,46 @@ def execute_routine_job(job):
         flow_id = payload.get("flow_id")
         flow_steps = payload.get("steps")
 
+        # A TRIGGERED routine is meant to fire when its condition holds. Nothing
+        # evaluates that condition: skills/registry.py writes trigger_event and
+        # condition into the payload, and no reader exists anywhere in the tree,
+        # so JobType.TRIGGERED is created with cron_expr "every 1m" and the
+        # action runs unconditionally, once a minute, forever.
+        #
+        # On this install that produced two routines with 4,766 runs each since
+        # 2026-06-24. One is smart_home_hue.get_states, a read, which failed DNS
+        # 4,763 times. The other is messaging_sms.telegram_send gated on
+        # "heart_rate_bpm > 160 && inferred_state == 'stressed'", and it is a
+        # send. It has been inert only because messaging_sms is not a registered
+        # skill: installing that skill would have started sending a stress alert
+        # every sixty seconds, indefinitely, on a condition that was never true.
+        #
+        # So the action does not fire while the gate is unenforceable. Recording
+        # this as "skipped" with the condition attached keeps the routine visible
+        # instead of deleting it, and the run history now says what is actually
+        # happening. Evaluating conditions needs a biometric trigger bus, which
+        # is its own change.
+        trigger_condition = payload.get("condition")
+        # JobType subclasses str, but str(JobType.TRIGGERED) is
+        # "JobType.TRIGGERED", not "triggered". Compare the value, and unwrap
+        # first so a job carrying a raw string from a non-DB path matches too.
+        _job_type = getattr(job, "job_type", "")
+        _job_type = getattr(_job_type, "value", _job_type)
+        if _job_type == "triggered":
+            state.cron_service.record_run_finish(
+                run_id,
+                "skipped",
+                {
+                    "trigger_event": payload.get("trigger_event"),
+                    "condition": trigger_condition,
+                    "reason": "trigger_conditions_not_evaluated",
+                },
+                "triggered routines are not fired: no evaluator for the "
+                "condition, so firing on the 1m poll would run the action "
+                "unconditionally",
+            )
+            return
+
         # Workflow branch: a routine can launch a workflow pack each time it
         # fires, reusing the exact instantiate semantics the REST route uses.
         if workflow_id:
@@ -1070,10 +1110,35 @@ def execute_routine_job(job):
             state.cron_service.record_run_finish(run_id, "success", {"prompt": prompt}, None)
             return
 
+        # Reaching here means nothing dispatched. That was recorded as
+        # "success" with "No skill or prompt configured", which was both a
+        # false outcome and, in the common case, a false diagnosis: the most
+        # frequent way to arrive here is a routine that DOES configure a skill
+        # whose id is not in the registry, so the branch above declines to run
+        # and execution falls off the end. The run history then shows an
+        # unbroken column of green for a routine that has never once acted.
+        #
+        # Report what is actually missing, and never as success.
+        # Most specific first. A missing endpoint is a defect in the routine
+        # itself and is true whatever the registry is doing, so diagnosing the
+        # registry ahead of it would send the operator to the wrong place.
+        if skill_id and not endpoint:
+            reason = f"skill '{skill_id}' is configured without an endpoint"
+        elif skill_id and not state.skill_registry:
+            reason = (
+                f"skill '{skill_id}' is configured but the skill registry is "
+                f"unavailable"
+            )
+        elif skill_id:
+            reason = (
+                f"skill '{skill_id}' is configured but not registered; "
+                f"install or enable it, or delete this routine"
+            )
+        else:
+            reason = "no skill, prompt, workflow or flow configured"
+        logger.warning("Routine %s did not run: %s", job.id, reason)
         state.cron_service.record_run_finish(
-            run_id, "success",
-            {"message": "No skill or prompt configured; routine logged."},
-            None,
+            run_id, "error", {"reason": reason}, reason,
         )
     except Exception as exc:
         logger.exception("Routine execution error for job %s", job.id)

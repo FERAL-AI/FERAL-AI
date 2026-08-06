@@ -205,19 +205,36 @@ class SkillRegistry:
                 event = getattr(tdef, 'event', '') or getattr(tdef, 'trigger', '') or getattr(tdef, 'id', '')
                 if not event:
                     continue
-                desc = f"[auto] {manifest.skill_id}: trigger on {event}"
-                if self._auto_routine_exists(svc, desc):
-                    continue
-                payload = {
-                    "skill": manifest.skill_id,
-                    "endpoint": getattr(tdef, 'action_endpoint_id', None) or getattr(tdef, 'endpoint', None) or default_ep,
-                    "trigger_event": event,
-                    "condition": getattr(tdef, 'condition', None),
-                }
-                svc.create_job(JobType.TRIGGERED, "every 1m", desc, payload, "")
-                logger.info("Auto-created routine for trigger: %s in skill %s", event, manifest.skill_id)
+                # A manifest trigger says "run this action when the condition
+                # holds". There is no evaluator for that condition anywhere in
+                # the tree, so this used to create a JobType.TRIGGERED job with
+                # cron_expr "every 1m" and stash the condition in the payload
+                # where nothing read it. The result was not a trigger, it was
+                # an unconditional once-a-minute poll of the action.
+                #
+                # That is not a safe thing to create blind. The two such jobs on
+                # the first install to hit this ran 4,766 times each; one of
+                # them was a Telegram send gated on a high-stress reading, and
+                # it stayed quiet only because the skill was never registered.
+                #
+                # So do not create the job. The manifest keeps its trigger and
+                # this becomes a no-op that says why, which is recoverable the
+                # moment a trigger bus exists. Creating a poll that ignores the
+                # condition is not a step toward that.
+                logger.info(
+                    "Skill %s declares trigger %r, which is not auto-created: "
+                    "no evaluator exists for trigger conditions, and a 1m poll "
+                    "would run the action unconditionally",
+                    manifest.skill_id, event,
+                )
+                continue
         except Exception as e:
-            logger.debug("Skip auto-routine creation for %s: %s", manifest.skill_id, e)
+            # Not debug. Failing here means the skill's scheduled routines were
+            # never created, which presents later as a routine that simply does
+            # not exist, with nothing to connect it back to this.
+            logger.warning(
+                "Auto-routine creation failed for %s: %s", manifest.skill_id, e
+            )
 
     def load_from_file(self, path: str | Path):
         """Load a skill manifest from a JSON file."""

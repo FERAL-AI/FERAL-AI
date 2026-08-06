@@ -59,11 +59,17 @@ def test_ambient_briefing_does_not_500_without_vault_key(monkeypatch):
         def get_all_baselines(self):
             return []
 
+    # These names are the ones IntentCompiler actually exposes. The fakes
+    # here used to implement today() and list_active(), which exist on no
+    # class in the tree: they were shaped like the route's bug rather than
+    # like the collaborator, so this test passed for as long as the endpoint
+    # was broken. tests/test_ambient_briefing_real_apis.py now drives the
+    # real engines for the same reason.
     class FakeIntentCompiler:
-        def today(self):
-            return {"actions": []}
+        def get_today_actions(self, tz_name=None):
+            return []
 
-        def list_active(self):
+        def list_plans(self):
             return []
 
     class FakeOrchestrator:
@@ -84,3 +90,7 @@ def test_ambient_briefing_does_not_500_without_vault_key(monkeypatch):
     assert "greeting" in result
     # Weather stays None when no key is present; we never raised.
     assert result.get("weather") is None
+    # And nothing swallowed an error on the way. Not raising was never
+    # sufficient: every block caught its own failure, so the endpoint could
+    # not 500 no matter how broken it was.
+    assert result.get("degraded") == []

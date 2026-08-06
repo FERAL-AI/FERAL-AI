@@ -86,17 +86,27 @@ async def test_briefing_returns_structure(_patched_app):
 
 
 async def test_briefing_includes_sleep_when_hrv_present(_patched_app):
+    # BaselineEngine.get_all_baselines returns BaselineMetric dataclasses.
+    # This mock used to return dicts shaped {"metric", "value", "trend"},
+    # which the engine has never produced, and asserted the route read them
+    # with .get() — so the test passed on exactly the bug that made the real
+    # endpoint raise AttributeError and report an empty sleep block forever.
+    # The rolling average is .mean and direction is derived from .values;
+    # there is no "value" or "trend" field to read.
+    from agents.baseline_engine import BaselineMetric
+
     app, mock = _patched_app
     mock.baseline_engine.get_all_baselines.return_value = [
-        {"metric": "hrv_ms", "value": 42, "trend": "improving"},
+        BaselineMetric(metric_id="hrv_ms", values=[40.0, 42.0, 44.0], mean=42.0),
     ]
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/api/ambient/briefing")
     body = resp.json()
     assert body["sleep"] is not None
-    assert body["sleep"]["hrv_ms"] == 42
-    assert body["sleep"]["trend"] == "improving"
+    assert body["sleep"]["hrv_ms"] == 42.0
+    assert body["sleep"]["trend"] == "upward"
+    assert body["degraded"] == []
 
 
 async def test_briefing_503_without_orchestrator(_patched_app):
