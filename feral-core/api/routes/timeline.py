@@ -3,6 +3,7 @@ FERAL Timeline API — Chronological life view
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from fastapi import APIRouter, HTTPException, Query
@@ -10,6 +11,8 @@ from fastapi import APIRouter, HTTPException, Query
 from api.state import state
 
 router = APIRouter()
+
+_push_logger = logging.getLogger("feral.api.push")
 
 
 # RC polish: the WebUI shipped a filter dropdown whose values
@@ -350,31 +353,104 @@ async def register_push_device(body: dict):
     if not state.push_channel:
         return {"error": "Push channel not initialized"}
     try:
-        state.push_channel.register_device(
+        registered = state.push_channel.register_device(
             user_id=body.get("user_id", "default"),
             token=body["token"],
             platform=body.get("platform", "fcm"),
         )
-        return {"success": True}
+        # Echo the stored platform back. The channel normalizes aliases
+        # ("ios" -> "apns"), and a client that posted an unrecognized value
+        # was silently filed under fcm with no way to notice.
+        return {"success": True, "platform": registered.get("platform")}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
 @router.post("/api/push/send")
 async def send_push(body: dict):
-    """Send a push notification to a user."""
+    """Send a push notification to every device registered for a user.
+
+    Returns ``{success, sent, failed, degraded, results}``. ``degraded`` is
+    a list of human-readable reasons the send did not fully land, following
+    the same convention as /api/ambient/briefing and /api/ideas/refresh.
+
+    This endpoint has never once succeeded: it awaited ``PushChannel
+    .broadcast``, which was a plain ``def`` returning ``list[dict]``, so
+    every call raised ``TypeError: object list can't be used in 'await'
+    expression`` and was swallowed by the except below into a generic
+    ``{"success": False}``. ``broadcast`` is now a coroutine that offloads
+    its blocking httpx calls to a worker thread. The old response also
+    returned the raw per-device list, in which "no devices registered" and
+    "delivered to 3 devices" were both just a JSON array, so a caller could
+    not tell delivery from silence.
+    """
     if not state.push_channel:
-        return {"error": "Push channel not initialized"}
+        return {
+            "success": False,
+            "sent": 0,
+            "failed": 0,
+            "degraded": ["push channel not initialized"],
+            "results": [],
+            "error": "Push channel not initialized",
+        }
+
+    user_id = body.get("user_id", "default")
+    degraded: list[str] = []
+
+    creds = state.push_channel.credentials_status()
+    if not creds.get("any"):
+        # Say it up front. Without credentials every per-device result would
+        # come back with its own opaque error and the operator would be left
+        # guessing whether the tokens or the config were at fault.
+        degraded.append(
+            "no push credentials configured "
+            "(set FERAL_FIREBASE_CREDENTIALS for Android and/or FERAL_APNS_KEY_PATH for iOS)"
+        )
+
     try:
-        result = await state.push_channel.broadcast(
-            user_id=body.get("user_id", "default"),
+        results = await state.push_channel.broadcast(
+            user_id=user_id,
             title=body.get("title", "FERAL"),
             body=body.get("body", ""),
             data=body.get("data"),
         )
-        return result
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        _push_logger.warning("push broadcast for user=%s raised: %s", user_id, e)
+        return {
+            "success": False,
+            "sent": 0,
+            "failed": 0,
+            "degraded": degraded + [f"{type(e).__name__}: {e}"],
+            "results": [],
+            "error": str(e),
+        }
+
+    sent = sum(1 for r in results if r.get("success"))
+    failed = len(results) - sent
+
+    if not results:
+        degraded.append(f"no devices registered for user_id={user_id!r}")
+    for r in results:
+        if not r.get("success"):
+            degraded.append(
+                f"{r.get('platform', 'unknown')} device "
+                f"…{r.get('token_suffix', '??????')}: {r.get('error', 'unknown error')}"
+            )
+
+    if degraded:
+        _push_logger.warning(
+            "push send for user=%s delivered %d/%d: %s",
+            user_id, sent, len(results), "; ".join(degraded),
+        )
+
+    return {
+        # Nothing delivered is not a success, whatever the reason was.
+        "success": sent > 0,
+        "sent": sent,
+        "failed": failed,
+        "degraded": degraded,
+        "results": results,
+    }
 
 
 @router.get("/api/autonomy")

@@ -8,6 +8,7 @@ Gracefully degrades when credentials are not configured.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -28,6 +29,36 @@ def _db_path() -> Path:
     return base / "push_tokens.db"
 
 
+# Aliases an iOS/Android client would plausibly send. The send path only ever
+# tested ``platform == "apns"`` and fell through to FCM for everything else,
+# so a device registered as "ios" (the obvious value for an iOS app to post)
+# would have had its APNs token handed to Firebase and silently rejected.
+_PLATFORM_ALIASES = {
+    "apns": "apns",
+    "ios": "apns",
+    "iphone": "apns",
+    "fcm": "fcm",
+    "android": "fcm",
+    "firebase": "fcm",
+}
+
+
+def _normalize_platform(platform: str) -> str:
+    """Map a client-supplied platform string onto a transport we implement."""
+    key = (platform or "").strip().lower()
+    resolved = _PLATFORM_ALIASES.get(key)
+    if resolved is None:
+        # Keep the historical fcm default so an existing registration keeps
+        # working, but stop doing it silently -- routing an unknown platform
+        # to Firebase is a guess, and the operator should see the guess.
+        logger.warning(
+            f"Unknown push platform {platform!r}; defaulting to fcm. "
+            f"Known values: {sorted(set(_PLATFORM_ALIASES))}"
+        )
+        return "fcm"
+    return resolved
+
+
 class PushChannel:
     """Push notification dispatcher for FCM (Android) and APNs (iOS)."""
 
@@ -37,6 +68,7 @@ class PushChannel:
         self._apns_team_id: str = os.environ.get("FERAL_APNS_TEAM_ID", "")
         self._apns_key_id: str = os.environ.get("FERAL_APNS_KEY_ID", "")
         self._apns_environment: str = os.environ.get("FERAL_APNS_ENVIRONMENT", "production")
+        self._apns_topic: str = os.environ.get("FERAL_APNS_BUNDLE_ID", "com.feral.app")
         self._firebase_project_id: Optional[str] = None
         self._firebase_token: Optional[str] = None
         self._firebase_token_expiry: float = 0.0
@@ -94,6 +126,9 @@ class PushChannel:
     # ─── Device Registration ───
 
     def register_device(self, user_id: str, token: str, platform: str = "fcm") -> dict[str, Any]:
+        # Normalize at the door so the stored row is already a transport name.
+        # Otherwise every read path has to re-guess what "ios" meant.
+        platform = _normalize_platform(platform)
         now = time.time()
         with self._lock:
             self._conn.execute(
@@ -125,27 +160,106 @@ class PushChannel:
         data: Optional[dict[str, str]] = None,
         platform: str = "fcm",
     ) -> dict[str, Any]:
-        if platform == "apns":
+        """Deliver one notification. BLOCKING: opens a real httpx connection.
+
+        Stays synchronous on purpose -- ``_send_fcm`` / ``_send_apns`` use the
+        sync ``httpx.Client``, so this must never be called directly from the
+        event loop. Async callers go through ``broadcast``, which offloads it.
+        """
+        return self._send_one(device_token, title, body, data, platform)
+
+    def _send_one(
+        self,
+        device_token: str,
+        title: str,
+        body: str,
+        data: Optional[dict[str, str]],
+        platform: str,
+    ) -> dict[str, Any]:
+        resolved = _normalize_platform(platform)
+        if resolved == "apns":
             return self._send_apns(device_token, title, body, data)
         return self._send_fcm(device_token, title, body, data)
 
-    def broadcast(
+    def _broadcast_blocking(
+        self,
+        tokens: list[dict[str, Any]],
+        title: str,
+        body: str,
+        data: Optional[dict[str, str]],
+    ) -> list[dict[str, Any]]:
+        """Fan out to every device, sequentially, on ONE worker thread.
+
+        Sequential rather than one thread per device because the bearer-token
+        caches (``_firebase_token`` / ``_apns_token``) are read-modify-written
+        without holding ``_lock``; concurrent sends would race them into
+        duplicate OAuth refreshes on the very first configured send.
+        """
+        results: list[dict[str, Any]] = []
+        for entry in tokens:
+            result = self._send_one(
+                entry["token"], title, body, data, entry["platform"],
+            )
+            # Copy rather than mutate: the result dict belongs to the send
+            # path, and annotating it in place aliases every caller that
+            # reuses a dict. Only the last 6 chars go in -- a device token
+            # is a credential and must not be echoed back over the API.
+            results.append({**result, "token_suffix": str(entry["token"])[-6:]})
+        return results
+
+    async def broadcast(
         self,
         user_id: str,
         title: str,
         body: str,
         data: Optional[dict[str, str]] = None,
     ) -> list[dict[str, Any]]:
-        """Send push notification to all registered devices for a user."""
+        """Send a push notification to all registered devices for a user.
+
+        Async on purpose. This used to be a plain ``def`` returning a list
+        while its only production caller (``POST /api/push/send`` in
+        api/routes/timeline.py) awaited it, so every request that ever hit
+        that endpoint died on ``TypeError: object list can't be used in
+        'await' expression``. Nothing caught it because the route swallows
+        exceptions into an error dict and ``device_tokens`` has never had a
+        row in it, so the path was never exercised.
+
+        Making the coroutine the real signature -- instead of dropping the
+        ``await`` at the call site -- is the fix that stays fixed: the route
+        is async, so a sync ``broadcast`` would be re-awaited by the next
+        person who reads it, and ``inspect.iscoroutinefunction`` now gives
+        tests something enforceable to assert on.
+
+        The blocking network IO is pushed onto a worker thread. Calling
+        ``send_push`` inline would park the whole brain's event loop for up
+        to the 10s httpx timeout per device.
+        """
         tokens = self.get_tokens(user_id)
         if not tokens:
-            logger.info(f"No device tokens for user={user_id}")
-            return [{"success": False, "error": "no registered devices"}]
-        results: list[dict[str, Any]] = []
-        for entry in tokens:
-            result = self.send_push(entry["token"], title, body, data, platform=entry["platform"])
-            results.append(result)
-        return results
+            # WARN, not INFO: the caller asked for a delivery and got none.
+            # An empty result list is indistinguishable from a successful
+            # send unless somebody says so out loud.
+            logger.warning(f"Push requested for user={user_id} but no device tokens are registered")
+            return []
+        return await asyncio.to_thread(
+            self._broadcast_blocking, tokens, title, body, data,
+        )
+
+    def credentials_status(self) -> dict[str, Any]:
+        """Report which transports could actually deliver right now.
+
+        The route needs this to answer honestly when a send returns zero
+        successes: "no credentials" and "Apple rejected the token" are
+        different answers and the response shape has to distinguish them.
+        """
+        fcm_ready = bool(self._firebase_project_id)
+        apns_ready = bool(self._apns_key_path and Path(self._apns_key_path).exists()
+                          and self._apns_team_id and self._apns_key_id)
+        return {
+            "fcm": fcm_ready,
+            "apns": apns_ready,
+            "any": fcm_ready or apns_ready,
+        }
 
     # ─── FCM v1 HTTP API ───
 
@@ -177,11 +291,11 @@ class PushChannel:
         self, token: str, title: str, body: str, data: Optional[dict[str, str]],
     ) -> dict[str, Any]:
         if not self._firebase_project_id:
-            return {"success": False, "error": "Firebase project not configured"}
+            return {"success": False, "platform": "fcm", "error": "Firebase project not configured"}
 
         bearer = self._get_fcm_bearer_token()
         if not bearer:
-            return {"success": False, "error": "Could not obtain FCM bearer token"}
+            return {"success": False, "platform": "fcm", "error": "Could not obtain FCM bearer token"}
 
         url = f"https://fcm.googleapis.com/v1/projects/{self._firebase_project_id}/messages:send"
         message: dict[str, Any] = {
@@ -204,10 +318,10 @@ class PushChannel:
             return {"success": False, "platform": "fcm", "status_code": resp.status_code, "error": resp.text[:300]}
         except ImportError:
             logger.warning("httpx not installed — cannot send FCM push")
-            return {"success": False, "error": "httpx not installed"}
+            return {"success": False, "platform": "fcm", "error": "httpx not installed"}
         except Exception as exc:
             logger.error(f"FCM push error: {exc}")
-            return {"success": False, "error": str(exc)}
+            return {"success": False, "platform": "fcm", "error": str(exc)}
 
     # ─── APNs HTTP/2 ───
 
@@ -252,17 +366,25 @@ class PushChannel:
         self, token: str, title: str, body: str, data: Optional[dict[str, str]],
     ) -> dict[str, Any]:
         if not self._apns_key_path or not Path(self._apns_key_path).exists():
-            return {"success": False, "error": "APNs key not configured"}
+            return {"success": False, "platform": "apns", "error": "APNs key not configured"}
 
         bearer = self._get_apns_token()
         if not bearer:
-            return {"success": False, "error": "Could not obtain APNs bearer token"}
+            return {"success": False, "platform": "apns", "error": "Could not obtain APNs bearer token"}
+
+        # apns-topic must be the app's real bundle id or Apple answers 400
+        # BadTopic. The only way to set it used to be smuggling "bundle_id"
+        # through the notification data, which then also leaked into the
+        # payload as a user-visible custom key. Prefer explicit config.
+        topic = (data or {}).get("bundle_id") or self._apns_topic
 
         payload: dict[str, Any] = {
             "aps": {"alert": {"title": title, "body": body}, "sound": "default"},
         }
         if data:
             for k, v in data.items():
+                if k == "bundle_id":
+                    continue  # routing metadata, not payload
                 payload[k] = v
 
         if self._apns_environment == "sandbox":
@@ -275,7 +397,7 @@ class PushChannel:
             url = f"https://{host}/3/device/{token}"
             headers = {
                 "Authorization": f"bearer {bearer}",
-                "apns-topic": data.get("bundle_id", "com.feral.app") if data else "com.feral.app",
+                "apns-topic": topic,
                 "apns-push-type": "alert",
                 "apns-priority": "10",
             }
@@ -288,7 +410,7 @@ class PushChannel:
             return {"success": False, "platform": "apns", "status_code": resp.status_code, "error": resp.text[:300]}
         except ImportError:
             logger.warning("httpx with h2 not available — cannot send APNs push")
-            return {"success": False, "error": "httpx with HTTP/2 support not installed"}
+            return {"success": False, "platform": "apns", "error": "httpx with HTTP/2 support not installed"}
         except Exception as exc:
             logger.error(f"APNs push error: {exc}")
-            return {"success": False, "error": str(exc)}
+            return {"success": False, "platform": "apns", "error": str(exc)}
