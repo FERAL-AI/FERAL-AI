@@ -1,10 +1,96 @@
 # Changelog
 
-<!-- feral-version: 2026.8.6 -->
+<!-- feral-version: 2026.8.7 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.7] - 2026-08-06 - stop reporting success that was never earned
+
+One theme runs through this release. Across memory, routines, boot and
+the HTTP surface, the system reported health it had not earned, and each
+report was believed because nothing contradicted it.
+
+### Security
+
+- **The `cron` surface had no deny list.** `SURFACE_DENY_LISTS` covered
+  every other surface, and `is_tool_allowed` returns True for a surface
+  it cannot find, so the one surface that runs with no human present was
+  the one with no restrictions. `coding_tools__bash`,
+  `desktop_control__shell_command` and `code_interpreter__run_python`
+  were all permitted to a scheduled routine. An absent key is worse than
+  a wrong entry: it fails open, emits nothing, and leaves the policy file
+  reading as complete.
+
+  The list alone would have been decorative. A DENY was overridable by
+  `payload["auto_confirm"]`, which is set by the same routine payload
+  that names the tool, so a routine could grant itself the waiver.
+  Surface denies are now non-overridable alongside physical-safety
+  denies.
+
+### Fixed
+
+- **Semantic search could not say "nothing matches that."** The vector
+  leg rejected results below a raw cosine of 0.25, and on a real
+  11,996-chunk store every chunk cleared that floor for every query,
+  including `asdfgh zxcvbn qwerty`. The floor was not too low, it was
+  measuring the wrong thing: embeddings occupy a narrow cone, so raw
+  cosine is dominated by a direction every document shares. Subtracting
+  the corpus mean separates the populations, and nonsense now returns
+  zero results instead of a confident wrong memory.
+
+- **Search returned the same memory five times.** No diversity step
+  existed, so a corpus containing many near-identical episodes could fill
+  every slot with one sentence.
+
+- **The vector backend label was a default, not a probe.** Status
+  surfaces reported `sqlite_vec` whenever they could not tell, while
+  `/internal/memory/stats` already knew the extension had not loaded and
+  queries were being served by a numpy scan.
+
+- **A routine that did nothing recorded success**, with a message
+  blaming a missing configuration that was usually present. One routine
+  collected 4,765 such successes without ever acting.
+
+- **Triggered routines fired unconditionally.** They were created with a
+  one-minute poll and a condition nothing has ever read, so the action
+  ran regardless. One was a messaging send gated on a stress reading,
+  inert only because its skill was not installed.
+
+- **`/api/ambient/briefing` had never returned data in any field**, and
+  every failure was logged at debug, so an empty briefing looked like a
+  quiet morning. `wind_down` called a method that existed nowhere, so the
+  evening recap reported an empty day however much was finished.
+
+- **Twenty-one route handlers turned a lost answer into an empty one.**
+  `/api/jobs` was the worst: five aggregators each returned `[]` on
+  failure, so a dead source and an idle system were byte-identical.
+
+- **`POST /api/push/send` had never once succeeded**: it awaited a
+  synchronous function, and the route's bare except swallowed the
+  TypeError. A device registering as `ios` also had its APNs token
+  routed to Firebase.
+
+- **Boot graded construction, not function.** `OK` meant the constructor
+  did not raise. `LLMProvider` reported OK while every call it made
+  returned 401.
+
+### Added
+
+- **Proactive alerts can reach a human who is not at a screen.** Delivery
+  went to open browser sessions and nowhere else, so with no tab open the
+  message was destroyed. Escalation is gated at IMPORTANT and above,
+  chosen from the observed distribution: of 2,441 real alerts, 2,384 were
+  break reminders and 32 concerned the user's body.
+
+- **Routines that have stopped working are now noticed.** Nothing had
+  ever read `routine_runs` back. One routine failed 4,824 times out of
+  4,824 over six weeks while still enabled and firing every minute.
+
+- **Every boot states which copy of the code it is running.** A full day
+  of committed fixes appeared to do nothing because the process imported
+  an installed copy while the edits lived in the working tree.
 
 ## [2026.8.6] - 2026-08-06 - tell the operator why Funnel failed
 
