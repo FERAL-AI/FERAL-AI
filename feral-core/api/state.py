@@ -299,6 +299,9 @@ class BrainState:
                 os.environ[env_key] = env_value
         self.sessions: dict[str, WebSocket] = {}
         self.daemons: dict[str, WebSocket] = {}
+        # trigger_id -> last escalation timestamp, so a signal that keeps
+        # re-firing does not become a stream of notifications.
+        self._escalation_last_sent: dict[str, float] = {}
         # Audit-r9 fix — operator report 2026-05-10:
         # > "the chat and memory should be the same for my phone chat
         # >  and the webui for feral brain on the local brain right?"
@@ -1983,6 +1986,7 @@ class BrainState:
                     "voice_text": msg.voice_text,
                 }
                 await self.broadcast_event("proactive_alert", alert)
+                await self._escalate_when_nobody_is_watching(msg)
 
             self.proactive.on_message(_proactive_delivery)
             # A6 — only start the proactive loop when enabled. Before
@@ -2111,6 +2115,22 @@ class BrainState:
 
         self._boot_report.total_elapsed_ms = (time.time() - _boot_start) * 1000
         self._boot_report.log_summary()
+
+        # State which copy of the code this is, every boot. A full afternoon of
+        # verified fixes was committed and the brain restarted with no effect,
+        # because `feral start` imported an installed copy under site-packages
+        # while the edits sat in the git tree. Nothing on any surface said so;
+        # the only symptom was a bug that had been proven fixed still
+        # happening. One grep-able line makes "is my change actually running"
+        # answerable instead of a guess.
+        try:
+            import sys as _sys
+
+            from observability.provenance import describe
+
+            logger.info("Code: %s", describe(_sys.modules[__name__]).one_line())
+        except Exception as exc:
+            logger.warning("Could not determine code provenance: %s", exc)
 
         stats = await self.memory.stats()
         demo_tag = " [DEMO MODE]" if self._demo else ""
@@ -2850,6 +2870,123 @@ class BrainState:
                 dead.append(sid)
         for sid in dead:
             self.sessions.pop(sid, None)
+
+    # Escalation is deliberately rare. See _escalate_when_nobody_is_watching.
+    _ESCALATION_COOLDOWN_S = 1800.0
+
+    async def _escalate_when_nobody_is_watching(self, msg) -> None:
+        """Deliver an important alert to a human who has no browser open.
+
+        Until now every proactive decision went to ``broadcast_event``, which
+        writes to open WebSocket sessions and nothing else. With no tab open
+        the message was simply destroyed: not queued, not retried, not stored.
+        This install produced 2,441 of them and the user saw the ones he
+        happened to be looking at.
+
+        The reason this is safe to turn on is the priority gate. Of those
+        2,441 fires, 2,384 were focus_break, break_reminder and screen_error,
+        all SUGGESTION, and forwarding those would be exactly the
+        notification spam that trains people to mute an app. The remaining 32
+        were hr_elevated and baseline_hr (IMPORTANT) plus spo2_low
+        (CRITICAL), which is the set worth interrupting someone for. So the
+        gate is IMPORTANT and above, chosen from the observed distribution
+        rather than picked as a round number.
+
+        No LLM call is made here: the message is already composed by the
+        engine, so escalation costs one HTTP send and nothing per token.
+        """
+        try:
+            from agents.proactive_engine import Priority
+        except Exception:
+            return
+
+        # Someone is already looking at a live surface, so the browser push
+        # was delivery. Escalating on top of it would be a duplicate.
+        if self.sessions:
+            return
+
+        priority = getattr(msg, "priority", None)
+        if priority is None or priority.value < Priority.IMPORTANT.value:
+            return
+
+        # Per-trigger cooldown. hr_elevated can re-fire for as long as the
+        # heart rate stays up, and a genuinely worrying signal repeated every
+        # fifteen seconds is indistinguishable from spam.
+        now = time.time()
+        last = self._escalation_last_sent.get(msg.trigger_id, 0.0)
+        if now - last < self._ESCALATION_COOLDOWN_S:
+            return
+
+        target = self._escalation_target()
+        if target is None:
+            # Say this once per cooldown rather than on every alert, and say
+            # what to configure. Silence here would recreate the original bug
+            # one layer down.
+            self._escalation_last_sent[msg.trigger_id] = now
+            logger.warning(
+                "Proactive alert %r (%s) had nowhere to go: no browser session "
+                "is open and no escalation channel is configured. Set "
+                "notifications.escalate_to.{channel,chat_id} in settings.json "
+                "to receive these.",
+                msg.trigger_id, priority.name,
+            )
+            return
+
+        channel, chat_id = target
+        text = f"{msg.title}\n\n{msg.body}".strip()
+        try:
+            await channel.send_direct(chat_id, text)
+        except Exception as exc:
+            logger.warning(
+                "Proactive escalation of %r failed: %s", msg.trigger_id, exc,
+            )
+            return
+
+        self._escalation_last_sent[msg.trigger_id] = now
+        logger.info(
+            "Escalated proactive alert %r (%s) to %s",
+            msg.trigger_id, priority.name, channel.channel_type,
+        )
+
+    def _escalation_target(self):
+        """The channel and chat id to escalate to, or None.
+
+        Prefers an explicitly configured destination. Falls back to a channel
+        that already has a live conversation, because a user who has messaged
+        the bot has demonstrated a reachable address, and requiring them to
+        copy a numeric chat id out of Telegram to receive a health alert is
+        the kind of setup step that means the feature is never switched on.
+        """
+        mgr = getattr(self, "channel_manager", None)
+        if mgr is None:
+            return None
+
+        cfg = {}
+        try:
+            if self.config:
+                cfg = dict(self.config._merged.get("notifications", {}) or {})
+        except Exception:
+            cfg = {}
+        escalate_to = cfg.get("escalate_to") or {}
+
+        wanted = escalate_to.get("channel")
+        chat_id = escalate_to.get("chat_id")
+        if wanted and chat_id:
+            channel = mgr.get_channel(wanted)
+            if channel is not None:
+                return channel, str(chat_id)
+
+        for channel_type in (mgr.active_channels() or []):
+            channel = mgr.get_channel(channel_type)
+            if channel is None:
+                continue
+            try:
+                chats = channel.active_chat_ids() or []
+            except Exception:
+                continue
+            if chats:
+                return channel, str(chats[0])
+        return None
 
     async def send_to_daemon(self, node_id: str, msg: FeralMessage):
         ws = self.daemons.get(node_id)
