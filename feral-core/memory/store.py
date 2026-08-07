@@ -76,6 +76,8 @@ from memory.context_builder import (
     llm_summarize as context_llm_summarize,
     search_all as context_search_all,
 )
+import numpy as np
+
 from memory.embeddings import (
     EmbeddingDimensionMismatch,
     EmbeddingProvider,
@@ -101,6 +103,49 @@ from memory.wiki import (
 )
 
 logger = logging.getLogger("feral.memory")
+
+
+# ── Semantic relevance floor ────────────────────────────────────────────────
+#
+# The old floor was a raw cosine of 0.25 and it never rejected anything. On
+# the reporter's 11,996-chunk store every single chunk cleared it for every
+# query, including "asdfgh zxcvbn qwerty", so search could not say "nothing
+# matches" and always returned its limit in results however irrelevant.
+#
+# The cause is anisotropy, which is a property of the embedding model rather
+# than a bug in this store: sentence embeddings do not spread over the sphere,
+# they occupy a narrow cone. Measured on that corpus, the mean vector has norm
+# 0.799 and the average chunk sits at cosine 0.799 from it. Every pair of
+# vectors therefore shares a large constant component, and cos(query, doc) is
+# dominated by that shared direction rather than by meaning. Raw cosines land
+# in a narrow band near 0.53 whatever you ask, so no absolute threshold in that
+# space can separate a hit from a miss. It is not that 0.25 was the wrong
+# number; any single number is wrong there.
+#
+# Subtracting the corpus mean before comparing removes the shared component and
+# leaves the part that carries meaning. Same corpus, same queries:
+#
+#                                        raw max   centered max
+#   "CuteBot lights"       (present)       0.878        0.759
+#   "heart rate"           (present)       0.774        0.774
+#   "how does the relay work" (absent)     0.636        0.350
+#   "asdfgh zxcvbn qwerty"    (nonsense)   0.696        0.343
+#
+# Raw, nonsense outscores a real question. Centered, the two populations
+# separate: over five queries with a true answer in the corpus and five
+# without, real hits bottomed out at 0.512 and non-hits topped out at 0.423.
+# 0.47 is the midpoint of that empty band, so it is the maximum-margin choice
+# on the evidence rather than a round number.
+_CENTERED_SEMANTIC_FLOOR = 0.47
+
+# Used only when centring is not possible. Kept at the historical value so a
+# store too small to have a meaningful centre behaves exactly as before.
+_RAW_SEMANTIC_FLOOR = 0.25
+
+# Below this many chunks the mean vector is dominated by whichever handful of
+# documents happens to exist, so centring would subtract noise. A new install
+# searching twenty memories keeps the old behaviour.
+_MIN_CHUNKS_FOR_CENTERING = 200
 
 _SCHEMA_VERSION = 6  # v2026.5.34: D11 decay + D12 sync HLC columns
 
@@ -291,6 +336,11 @@ class MemoryStore:
         #: Surfaced by the memory backend endpoint so a degraded
         #: semantic search cannot masquerade as "nothing matched".
         self._vector_leg_error: str | None = None
+        # Corpus mean vector, cached with the chunk count it was built from.
+        # Recomputed when the corpus grows enough to move it; see
+        # _centered_similarity for why it exists at all.
+        self._centroid = None
+        self._centroid_n = 0
         self.db_path = db_path
         self._working: dict[str, deque[dict]] = {}
         self._working_max = 50
@@ -1410,6 +1460,135 @@ class MemoryStore:
 
         return {"id": eid, "event_type": event_type, "summary": summary, "created_at": now}
 
+    def _centered_similarity(self, query_vec, blobs, min_chunks=None):
+        """Cosine against the corpus with its shared direction removed.
+
+        Returns per-blob scores comparable to _CENTERED_SEMANTIC_FLOOR, or
+        None when the corpus is too small for a mean vector to mean anything,
+        in which case the caller falls back to raw cosine and the old floor.
+
+        Embeddings occupy a narrow cone rather than the whole sphere, so every
+        vector here shares a large common component and raw cosine measures
+        mostly that. Subtracting the corpus mean from both sides leaves the
+        part that actually distinguishes documents. This is the standard
+        remedy for anisotropy and it is what makes a relevance threshold
+        possible at all: see the block comment on _CENTERED_SEMANTIC_FLOOR for
+        the measurements on the store where this was found.
+        """
+        # min_chunks is lowered by callers that already hold a centre and only
+        # need a few rows scored against it, rather than deriving one.
+        floor_n = _MIN_CHUNKS_FOR_CENTERING if min_chunks is None else min_chunks
+        if len(blobs) < floor_n:
+            return None
+        try:
+            mat = np.frombuffer(b"".join(blobs), dtype=np.float32)
+            mat = mat.reshape(len(blobs), -1)
+            q = np.asarray(query_vec, dtype=np.float32).ravel()
+            if mat.shape[1] != q.shape[0]:
+                return None
+
+            # Zero vectors are real: four of this store's chunks are all-zero
+            # from embedding failures. They must not drag the mean, and they
+            # can never be a hit, so they are scored -1 rather than dropped,
+            # which would break the caller's positional zip.
+            norms = np.linalg.norm(mat, axis=1)
+            live = norms > 0
+            if int(live.sum()) < floor_n:
+                return None
+
+            unit = np.zeros_like(mat)
+            unit[live] = mat[live] / norms[live][:, None]
+
+            centroid = self._centroid
+            # Only the full-corpus call may define the centre. A caller that
+            # passes min_chunks is scoring a handful of rows the index already
+            # chose, and deriving a "corpus mean" from fifteen documents would
+            # subtract those documents from themselves and score everything
+            # near zero.
+            may_derive = min_chunks is None
+            stale = (
+                centroid is None
+                or centroid.shape[0] != unit.shape[1]
+                # Rebuild once the corpus has moved by more than 5 percent, so
+                # a growing store does not keep a stale centre while a single
+                # new episode does not trigger a recompute.
+                or abs(len(blobs) - self._centroid_n) > max(50, self._centroid_n * 0.05)
+            )
+            if stale and may_derive:
+                centroid = unit[live].mean(axis=0)
+                self._centroid = centroid
+                self._centroid_n = len(blobs)
+            elif centroid is None or centroid.shape[0] != unit.shape[1]:
+                return None
+
+            docs = unit - centroid
+            dn = np.linalg.norm(docs, axis=1)
+            dn[dn == 0] = 1.0
+            docs /= dn[:, None]
+
+            qn = np.linalg.norm(q)
+            if qn == 0:
+                return None
+            qc = (q / qn) - centroid
+            qcn = np.linalg.norm(qc)
+            if qcn == 0:
+                return None
+            qc /= qcn
+
+            scores = docs @ qc
+            scores[~live] = -1.0
+            return scores
+        except Exception as exc:
+            # Falling back to raw cosine is worse but not wrong, and a broken
+            # relevance floor must not take out search entirely.
+            logger.warning("Centered similarity unavailable, using raw: %s", exc)
+            return None
+
+    async def _centered_filter(self, conn, query_vec, chunk_ids):
+        """Centered scores for specific chunk ids, keyed by id.
+
+        The sqlite-vec index ranks by raw cosine, which is fine because the
+        shared component is near-constant so it barely perturbs the order.
+        What raw cosine cannot do is answer "is this good enough to return",
+        so the returned handful is re-scored here against the corpus centre.
+        """
+        if not chunk_ids:
+            return {}
+        try:
+            async with conn.execute(
+                "SELECT embedding FROM memory_chunks "
+                "WHERE source_table = 'episodes' AND embedding IS NOT NULL"
+            ) as cur:
+                corpus = [r["embedding"] for r in await cur.fetchall()]
+
+            placeholders = ",".join("?" for _ in chunk_ids)
+            async with conn.execute(
+                f"SELECT id, embedding FROM memory_chunks WHERE id IN ({placeholders})",
+                tuple(chunk_ids),
+            ) as cur:
+                rows = await cur.fetchall()
+        except Exception as exc:
+            logger.warning("Centered re-scoring failed, keeping raw hits: %s", exc)
+            return {cid: 1.0 for cid in chunk_ids}
+
+        if len(corpus) < _MIN_CHUNKS_FOR_CENTERING:
+            return {cid: 1.0 for cid in chunk_ids}
+
+        ids = [r["id"] for r in rows]
+        # Derive the centre from the whole corpus first, then score only the
+        # handful the index returned against it.
+        self._centered_similarity(query_vec, corpus)
+        scores = self._centered_similarity(
+            query_vec, [r["embedding"] for r in rows], min_chunks=1,
+        )
+        if scores is None:
+            return {cid: 1.0 for cid in chunk_ids}
+        return {
+            cid: float(s)
+            for cid, s in zip(ids, scores)
+            if float(s) > _CENTERED_SEMANTIC_FLOOR
+        }
+
     async def episode_search_hybrid(
         self,
         query: str,
@@ -1488,9 +1667,16 @@ class MemoryStore:
 
                 if self._vec_index.indexed:
                     hits = await self._vec_index.search_cosine(query_vec, limit=limit * 3)
+                    # Rank order from the index is usable, but its raw cosines
+                    # cannot be thresholded (see _relevance_floor). Re-score
+                    # the returned handful against the corpus centre.
+                    keep = await self._centered_filter(
+                        conn, query_vec, [cid for cid, _ in hits],
+                    )
                     for chunk_id, sim in hits:
-                        if sim < 0.25:
+                        if chunk_id not in keep:
                             continue
+                        sim = keep[chunk_id]
                         eid = chunk_id.rsplit("_c", 1)[0]
                         if eid not in vec_results or sim > vec_results[eid]["vec_score"]:
                             vec_results[eid] = {"id": eid, "vec_score": sim}
@@ -1500,17 +1686,21 @@ class MemoryStore:
                         "WHERE source_table = 'episodes' AND embedding IS NOT NULL"
                     ) as cur:
                         chunks = await cur.fetchall()
+                    blobs = [c["embedding"] for c in chunks]
                     # One blocked matmul instead of a Python loop of
                     # blob_to_vec + cosine_similarity. See
                     # cosine_similarity_bulk for the measured numbers
                     # (286ms -> 23ms at 100k chunks).
-                    sims = cosine_similarity_bulk(
-                        query_vec, [c["embedding"] for c in chunks]
-                    )
+                    sims = self._centered_similarity(query_vec, blobs)
+                    if sims is None:
+                        sims = cosine_similarity_bulk(query_vec, blobs)
+                        floor = _RAW_SEMANTIC_FLOOR
+                    else:
+                        floor = _CENTERED_SEMANTIC_FLOOR
                     for c, sim in zip(chunks, sims):
                         sim = float(sim)
                         eid = c["source_id"]
-                        if sim > 0.25 and (eid not in vec_results or sim > vec_results[eid]["vec_score"]):
+                        if sim > floor and (eid not in vec_results or sim > vec_results[eid]["vec_score"]):
                             vec_results[eid] = {"id": eid, "vec_score": sim}
             except EmbeddingDimensionMismatch as exc:
                 # Not transient, and not recoverable by retrying: the
