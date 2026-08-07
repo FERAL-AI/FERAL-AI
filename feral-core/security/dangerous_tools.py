@@ -17,6 +17,8 @@ Surfaces
 - ``http_api``: remote, minimally trusted — block shell, Docker, and arbitrary JS in browser.
 - ``websocket``: interactive channel — still block host-level Docker exec.
 - ``local_cli``: operator-controlled — no static denies (policy can still require approval).
+- ``cron``: scheduled routines, nobody present. http_api's denies plus arbitrary
+  code eval. Device/robot skills stay allowed; that is what routines are for.
 
 Naming compatibility
 --------------------
@@ -121,6 +123,70 @@ SURFACE_DENY_LISTS: dict[str, set[str]] = {
         "docker.exec",
     },
     "local_cli": set(),
+    # `cron` is the scheduled-routine surface: `execute_routine_job` in
+    # api/server.py pre-flights a routine's skill+endpoint through
+    # `resolve_policy(..., surface="cron")`, which calls `is_tool_allowed`
+    # first.
+    #
+    # This key did not exist. `is_tool_allowed` returns True for any surface
+    # with no deny entry (see its docstring: "Unknown surfaces are treated as
+    # unrestricted"), so the cron pre-flight allowed EVERYTHING:
+    # `is_tool_allowed("shell__exec", "cron")` was True, as was
+    # `agentic_computer_use__execute_task`. A routine could therefore run
+    # tools that are hard-denied on every other remote surface, at 3am, with
+    # nobody present to see it happen. An absent key fails open silently, so
+    # nothing anywhere logged a refusal.
+    #
+    # The floor is http_api's list: if a tool is too dangerous for a remote
+    # HTTP caller who is at least sitting at the keyboard, it is worse on an
+    # unattended timer where no one can intervene mid-run.
+    #
+    # Deliberately NOT denied: device/robot skills (`cutebot__*`,
+    # `smart_home*`), calendar/health reads, and messaging. Scheduling those
+    # is the entire point of routines, and the operator's nightly CuteBot
+    # jobs (line-follow, spin, lights) depend on them. Per-tool risk on that
+    # path is handled by the CONFIRM tier plus the routine's explicit
+    # `auto_confirm`, not by surface deny.
+    "cron": {
+        # Legacy dotted form, kept for backward-compat with external/MCP callers.
+        "system.run",
+        "docker.exec",
+        "browser.evaluate",
+        "shell.exec",
+        "process.spawn",
+        "fs.delete",
+        "fs.remove",
+        "filesystem.delete",
+        "file.delete",
+        # Modern internal tool ids that bypass the dotted lookup. Listed
+        # explicitly so matching does not depend on the candidate-form
+        # transform alone (defence in depth against future renames).
+        "desktop_control__shell_command",
+        "desktop_control__shell",
+        "computer_use__bash",
+        "computer_use__write_file",
+        "computer_use__edit_file",
+        "code_interpreter__execute",
+        "coding_tools__bash",
+        "coding_tools__write_file",
+        "coding_tools__edit_file",
+        # VLM-driven autonomous loop: it emits `shell` actions and drives the
+        # desktop from screenshots. Nothing about that is safe to start on a
+        # schedule with no operator watching the screen.
+        "agentic_computer_use__execute_task",
+        # The registered code_interpreter endpoints are `run_python` /
+        # `run_node`; `code_interpreter__execute` above matches no endpoint in
+        # skills/manifests/code_interpreter.json, so denying only that id
+        # would have left real arbitrary-code eval reachable from cron.
+        "code_interpreter__run_python",
+        "code_interpreter__run_node",
+        # `workspace_scripts.run` writes a script to
+        # ~/.feral/workspace/scripts and executes it; `rerun` replays a saved
+        # one with caller-supplied args. Same arbitrary-code-eval class as
+        # code_interpreter, so it is denied on the unattended surface too.
+        "workspace_scripts__run",
+        "workspace_scripts__rerun",
+    },
     # PR 11: MCP is a *remote-callable* surface. External MCP clients
     # (Claude Desktop, Cursor, …) can pull FERAL's skill list and invoke
     # any tool we publish. Without surface gating, projecting all skills

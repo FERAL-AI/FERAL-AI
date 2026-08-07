@@ -1030,7 +1030,20 @@ def execute_routine_job(job):
                 decision is not None
                 and (decision.sources or {}).get("cutebot_speed_limit")
             )
-            deny_overridden = auto_confirm and not hard_physical_deny
+            # A surface deny is not overridable either. `surface="cron"` now
+            # has a deny list (shell, docker exec, browser eval, FS delete,
+            # arbitrary code eval); if auto_confirm could wave those through,
+            # the list would be decorative, because auto_confirm is set by the
+            # same routine payload that names the tool. auto_confirm means
+            # "the user pre-approved a CONFIRM-tier action", not "the user may
+            # opt into running a shell at 3am unattended".
+            hard_surface_deny = bool(
+                decision is not None
+                and (decision.sources or {}).get("surface_deny")
+            )
+            deny_overridden = (
+                auto_confirm and not hard_physical_deny and not hard_surface_deny
+            )
             if decision is not None and decision.level == LEVEL_DENY and not deny_overridden:
                 state.cron_service.record_run_finish(
                     run_id, "skipped", {"policy": decision.to_dict()},
