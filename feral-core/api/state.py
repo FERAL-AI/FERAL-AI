@@ -1972,6 +1972,10 @@ class BrainState:
                 health_aggregator=self.health_aggregator,
                 baseline_engine=self.baseline_engine,
                 cost_guard=self.proactive_cost_guard,
+                # So the engine can notice a routine that has been firing and
+                # failing for weeks with nobody told. CronService is created
+                # earlier in boot than this.
+                cron_service=self.cron_service,
             )
 
             async def _proactive_delivery(msg):

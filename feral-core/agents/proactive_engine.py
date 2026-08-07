@@ -96,8 +96,12 @@ class ProactiveEngine:
         config: dict | None = None,
         cost_guard=None,
         cost_model: str = "gpt-4o-mini",
+        cron_service=None,
     ):
         self._perception = perception
+        # Read-only, for the stalled-routine check. Optional so every existing
+        # construction of this engine keeps working.
+        self._cron_service = cron_service
         self._memory = memory
         self._orchestrator = orchestrator
         self._llm = llm
@@ -514,6 +518,9 @@ class ProactiveEngine:
             except Exception as e:
                 logger.debug("Baseline check failed: %s", e)
 
+        # --- Routines that have stopped working ---
+        self._check_stalled_routines(messages)
+
         # --- LLM-based evaluation (additive, runs last) ---
         await self._evaluate_with_llm(frames, messages)
 
@@ -698,6 +705,99 @@ class ProactiveEngine:
                 ],
             },
         )
+
+    # A routine is only reported once a day, and only after a fortnight of
+    # failing, because the whole point is to catch the slow silent death of
+    # something the user set up and forgot, not to chirp about a flaky morning.
+    _STALLED_ROUTINE_WINDOW_S = 14 * 86400
+    _STALLED_ROUTINE_MIN_RUNS = 20
+
+    def _check_stalled_routines(self, messages: list) -> None:
+        """Report routines that have been running and achieving nothing.
+
+        Nothing has ever watched routine outcomes. record_run_finish writes
+        every result to routine_runs and no code path has ever read it back to
+        raise, so on this install one routine failed DNS 4,824 times out of
+        4,824 over six weeks and another failed on an unconnected calendar 23
+        times out of 23, and the user learned about both from a manual
+        database query during an audit.
+
+        That is the exact shape of failure the user described: a routine that
+        fires at something it is not connected to, wastes the run, and nobody
+        is told. A scheduled task is a promise the machine made, and quietly
+        breaking it every minute for six weeks is worse than never having
+        offered.
+
+        Reported at IMPORTANT so it escalates off the screen. This costs one
+        SQL query on the proactive tick and never calls a model.
+        """
+        if not self._can_fire("routine_stalled"):
+            return
+
+        svc = getattr(self, "_cron_service", None)
+        conn = getattr(svc, "_conn", None)
+        if conn is None:
+            return
+
+        try:
+            rows = conn.execute(
+                """
+                SELECT r.job_id AS job_id,
+                       COUNT(*) AS runs,
+                       SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) AS wins,
+                       MAX(r.error) AS last_error
+                  FROM routine_runs r
+                  JOIN scheduled_jobs j ON j.id = r.job_id
+                 WHERE r.started_at > ?
+                   AND j.enabled = 1
+                 GROUP BY r.job_id
+                HAVING wins = 0 AND runs >= ?
+                 ORDER BY runs DESC
+                """,
+                (time.time() - self._STALLED_ROUTINE_WINDOW_S,
+                 self._STALLED_ROUTINE_MIN_RUNS),
+            ).fetchall()
+        except Exception as exc:
+            # Not debug: a watcher that cannot watch is precisely the class of
+            # silence this trigger exists to end.
+            logger.warning("Stalled-routine check failed: %s", exc)
+            return
+
+        if not rows:
+            return
+
+        worst = rows[0]
+        job_id = worst["job_id"] if hasattr(worst, "keys") else worst[0]
+        runs = worst["runs"] if hasattr(worst, "keys") else worst[1]
+        last_error = (worst["last_error"] if hasattr(worst, "keys") else worst[3]) or ""
+
+        name = f"Routine {job_id}"
+        try:
+            row = conn.execute(
+                "SELECT description FROM scheduled_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row and (row["description"] if hasattr(row, "keys") else row[0]):
+                name = row["description"] if hasattr(row, "keys") else row[0]
+        except Exception:
+            pass
+
+        others = ""
+        if len(rows) > 1:
+            others = f" ({len(rows) - 1} other routine(s) are failing too.)"
+        reason = f" Last error: {last_error[:120]}" if last_error else ""
+
+        body = (
+            f"'{name}' has run {runs} times without succeeding once. "
+            f"It is still enabled and still firing.{reason}{others}"
+        )
+        messages.append(ProactiveMessage(
+            trigger_id="routine_stalled",
+            priority=Priority.IMPORTANT,
+            title="A routine has stopped working",
+            body=body,
+            voice_text=f"{name} has failed {runs} times in a row.",
+            action="Show routines",
+        ))
 
     def _can_fire(self, trigger_id: str) -> bool:
         state = self._trigger_states.get(trigger_id)
