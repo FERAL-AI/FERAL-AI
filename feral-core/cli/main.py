@@ -1766,7 +1766,31 @@ def cmd_doctor():
         _memory_cfg = (_load_settings_for_vec() or {}).get("memory") or {}
         _vec_backend = _memory_cfg.get("backend") or "sqlite_vec"
         if _vec_backend == "sqlite_vec":
-            _pass("Memory vector backend", "sqlite_vec (built-in default)")
+            # Selecting sqlite_vec in settings.json is not the same as
+            # running it. sqlite-vec is a loadable EXTENSION, and an
+            # interpreter built without ``enable_load_extension``
+            # (pyenv's default on macOS, which is what this machine has)
+            # can never load it: ``indexed`` stays False for the whole
+            # process and every vector query is answered by a numpy
+            # brute-force scan instead. Reporting a green "sqlite_vec
+            # (built-in default)" for that host told the operator a
+            # backend was running that was not, and hid the O(n) scan
+            # behind a checkmark. Probe the real loader.
+            from memory.vector_index_backends.sqlite_vec import (
+                sqlite_vec_available as _sqlite_vec_available,
+            )
+            if _sqlite_vec_available():
+                _pass("Memory vector backend", "sqlite_vec (built-in default, vec0 index active)")
+            else:
+                _warn(
+                    "Memory vector backend",
+                    "sqlite_vec is selected but the sqlite-vec extension cannot load on "
+                    "this interpreter, so vector search runs as numpy_fallback: a "
+                    "brute-force scan that is correct but O(n) per query",
+                    "Rebuild Python with PYTHON_CONFIGURE_OPTS="
+                    '"--enable-loadable-sqlite-extensions" (pyenv), or use a '
+                    "python.org / Homebrew interpreter, then restart the brain",
+                )
         elif _vec_backend == "chroma":
             try:
                 import chromadb  # noqa: F401

@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import sqlite3
 import time
 from collections import deque
@@ -1594,6 +1595,22 @@ class MemoryStore:
             merged.append(info)
 
         merged.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+        # Near-duplicate suppression runs BEFORE the MMR rerank, and on
+        # the candidate pool rather than on the truncated result set, so
+        # MMR still has a surplus to diversify over and so the filter
+        # also applies when the pool is smaller than ``limit`` (the case
+        # MMR returns early on). See
+        # ``_suppress_near_duplicate_episodes`` for the measurements.
+        #
+        # ``max_kept`` caps how deep the scan goes. MMR can only prefer
+        # a deeper candidate over a shallower one when their relevance
+        # differs by less than its own penalty ceiling
+        # (0.3 * 0.5 / 0.7 = 0.214), so representatives far below the
+        # head can never be selected anyway, and scanning for them costs
+        # seconds on the unbounded numpy-fallback pool.
+        merged = self._suppress_near_duplicate_episodes(
+            merged, max_kept=max(limit * 5, 50),
+        )
         results = self._mmr_rerank_episodes(merged, limit)
         self._track_access([r["id"] for r in results])
         return results
@@ -1764,6 +1781,137 @@ class MemoryStore:
         if "hlc_string" in keys:
             out["hlc_string"] = row["hlc_string"] or ""
         return out
+
+    # ── Near-duplicate suppression ──────────────────────────────────
+    #
+    # Why this exists: on a real store (12,296 episodes, this user's
+    # ~/.feral/memory.db) a background routine wrote the same handful of
+    # robot commands thousands of times. 843 episodes are the literal
+    # string "set the CuteBot lights to green for 2 seconds, then turn
+    # them off", 820 are "flash red on the CuteBot", 246 are "CuteBot:
+    # set_lights (r=0, g=0, b=0)". Measured before this pass existed,
+    # ``episode_search_hybrid("coffee machine upkeep", limit=5)``
+    # returned FIVE copies of that same lights sentence: the whole
+    # result set was one memory, repeated, and anything actually about
+    # the query was pushed off the end.
+    #
+    # ``_mmr_rerank_episodes`` does not catch this. It measures
+    # diversity only by ``session_id`` with a fixed 0.3 * 0.5 = 0.15
+    # penalty, and it returns early (no rerank at all) whenever the
+    # candidate pool is not larger than ``limit``. Both failure modes
+    # are live here: the 843 lights episodes all sit in ONE session, so
+    # the penalty applies uniformly and never reorders them past a
+    # weaker but different memory, while the repeated chat greetings
+    # ("Hi" appears 26 times across 21 distinct sessions) look
+    # maximally diverse to a session-based penalty.
+    #
+    # Threshold, measured rather than guessed. Similarity is token-set
+    # Jaccard over the lowercased alphanumeric tokens of the episode
+    # summary. On the corpus above:
+    #
+    #   * unrelated pairs (random cross-template, n=19,796):
+    #     p50=0.128, p95=0.333, p99=0.500
+    #   * pairs that CO-OCCUR in the top-50 of one real query, i.e. the
+    #     topically related hard case this pass actually sees
+    #     (n=6,969): p50=0.058, p90=0.323, p99=0.600
+    #   * genuine variants of one sentence (same text once digits are
+    #     masked, differing only in a parameter, n=164): min 0.826
+    #
+    # So there is an empty band between ~0.60 and ~0.826, and 0.80 sits
+    # inside it: above the 99th percentile of every "different memory"
+    # population, below the floor of every observed "same sentence,
+    # different number" pair. At 0.85 we start MISSING real duplicates
+    # (31.7% of those variants score below it); at 0.60 the suppression
+    # rate on co-occurring unrelated pairs triples (1.03% vs 0.29%).
+    # Every one of the 20 co-occurring pairs still suppressed at 0.80
+    # was inspected and every one is a genuine restatement of the same
+    # memory ("A developer working at a computer workstation with
+    # multiple code editor windows..." twice, reworded by the captioner)
+    # that the digit-masking label had simply failed to group.
+    #
+    # Only the summary is compared, never ``detail``: for chat episodes
+    # ``detail`` is a constant JSON envelope ({"source": "phone_surface",
+    # "mode": ..., "channel": "chat", ...}) that is byte-identical across
+    # completely unrelated messages, so folding it in drags every short
+    # chat turn toward every other one. Measured on 3,444 chat-episode
+    # pairs that have DIFFERENT summaries: 1 pair (0.03%) is suppressed
+    # at 0.80 on the summary alone, 84 pairs (2.4%) are suppressed once
+    # ``detail`` is concatenated in. "??" and "What's my heart rate"
+    # score 0.000 on the summary and 0.292 with the envelope attached.
+    NEAR_DUPLICATE_JACCARD = 0.80
+
+    _DEDUP_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+    @classmethod
+    def _dedup_tokens(cls, episode: dict) -> frozenset[str]:
+        """Token set used for near-duplicate comparison. Summary first,
+        falling back to ``detail`` only when a row has no summary at all
+        (otherwise the row would look identical to every other
+        summary-less row)."""
+        text = (episode.get("summary") or "").strip()
+        if not text:
+            text = str(episode.get("detail") or "")
+        return frozenset(cls._DEDUP_TOKEN_RE.findall(text.lower()))
+
+    @classmethod
+    def _suppress_near_duplicate_episodes(
+        cls,
+        results: list[dict],
+        threshold: float | None = None,
+        max_kept: int | None = None,
+    ) -> list[dict]:
+        """Drop results that restate a higher-scoring result.
+
+        ``results`` must already be sorted best-first; the first member
+        of each near-duplicate cluster is therefore the highest-scoring
+        one and is the representative that survives. Nothing is written:
+        this is a read-path filter, the suppressed episodes stay in the
+        store untouched and are still returned by any query where they
+        are the best answer.
+
+        The survivor carries ``duplicates_suppressed``, the number of
+        results it absorbed from the scanned prefix, so a caller can
+        tell "one memory" from "one memory that happened 843 times"
+        instead of silently losing that.
+
+        ``max_kept`` bounds the work, and it is not a nicety. Cost is
+        O(kept x scanned) frozenset intersections, and the candidate
+        pool is NOT the ``limit * 3`` per leg that the indexed path
+        produces: when ``_vec_index.indexed`` is False the vector leg
+        above scans every embedded chunk and admits everything over
+        cosine 0.25, with no top-k cut at all. On the reporter's store
+        that is 8,581 candidates for a ``limit=5`` query. Timed on that
+        exact pool, this pass costs 9,424ms unbounded and 4.3ms at
+        ``max_kept=50``, for byte-identical top-5 output. Stopping once
+        ``max_kept`` distinct representatives are in hand still hands
+        the MMR rerank several times ``limit`` to diversify over.
+        """
+        cutoff = cls.NEAR_DUPLICATE_JACCARD if threshold is None else threshold
+        kept: list[dict] = []
+        kept_tokens: list[frozenset[str]] = []
+        for ep in results:
+            if max_kept is not None and len(kept) >= max_kept:
+                break
+            tokens = cls._dedup_tokens(ep)
+            duplicate_of = None
+            for i, seen in enumerate(kept_tokens):
+                if not tokens and not seen:
+                    duplicate_of = i
+                    break
+                inter = len(tokens & seen)
+                if not inter:
+                    continue
+                union = len(tokens) + len(seen) - inter
+                if union and inter / union >= cutoff:
+                    duplicate_of = i
+                    break
+            if duplicate_of is None:
+                kept.append(ep)
+                kept_tokens.append(tokens)
+            else:
+                rep = kept[duplicate_of]
+                rep["duplicates_suppressed"] = rep.get("duplicates_suppressed", 0) + 1
+        return kept
 
     @staticmethod
     def _mmr_rerank_episodes(results: list[dict], limit: int, diversity: float = 0.3) -> list[dict]:

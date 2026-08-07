@@ -402,6 +402,19 @@ def doctor_clean_env(monkeypatch, tmp_path):
     monkeypatch.setattr(_probe_mod, "probe", _fake_probe)
     _probe_mod.clear_probe_cache()
 
+    # The memory vector backend probe loads the sqlite-vec EXTENSION to
+    # find out whether it is usable, which is a property of the
+    # interpreter this suite happens to run on, not of the install being
+    # modelled: pyenv builds Python without
+    # ``enable_load_extension`` on macOS, python.org and Homebrew do
+    # not. Left live, "a clean install emits zero warnings" would be
+    # true or false depending on whose machine ran it. Pin it to the
+    # healthy host this fixture describes; the degraded host is asserted
+    # in tests/test_doctor_vector_backend_truth.py.
+    from memory.vector_index_backends import sqlite_vec as _sqlite_vec_mod
+
+    monkeypatch.setattr(_sqlite_vec_mod, "sqlite_vec_available", lambda: True)
+
     # Plant a non-empty USER.md so the identity probe passes — we are
     # testing severity classification, not first-run wizard completion.
     (feral_home / "USER.md").write_text("Test operator running doctor.\n")

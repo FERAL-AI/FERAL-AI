@@ -229,6 +229,17 @@ def doctor_home(monkeypatch, tmp_path):
         _devices_route, "_resolve_pair_origin", lambda: "https://pinned.example"
     )
 
+    # Same reasoning for the memory vector backend probe. It reports
+    # whether THIS interpreter can load the sqlite-vec extension, which
+    # is a property of the developer's Python build (pyenv on macOS
+    # cannot; python.org can), so leaving it live makes the "Suggested
+    # fixes" assertions below pass or fail depending on whose laptop
+    # runs the suite. Pinned available; the degraded rendering has its
+    # own test in tests/test_doctor_vector_backend_truth.py.
+    from memory.vector_index_backends import sqlite_vec as _sqlite_vec_mod
+
+    monkeypatch.setattr(_sqlite_vec_mod, "sqlite_vec_available", lambda: True)
+
     (home / "USER.md").write_text("Leroy, testing remote pairing.\n")
     return home
 

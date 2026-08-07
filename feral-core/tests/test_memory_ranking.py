@@ -88,13 +88,21 @@ async def test_bm25_ordering_is_not_inverted(db_path):
     e1..e4 mention "wallet" with strictly decreasing term frequency
     relative to document length, so BM25 orders them e1 > e2 > e3 > e4.
     The ``abs(rank)`` bug produced exactly the reverse.
+
+    The summaries carry a distinct marker word ("alpha", "bravo", …)
+    because ``episode_search_hybrid`` now suppresses near-duplicate
+    results: e1..e3 originally all had the summary "wallet", which the
+    de-dup pass correctly collapses into one row, and this test is about
+    BM25 ordering rather than de-duplication. The marker is one token in
+    the summary of every row, so the term frequency gradient in the
+    detail column (6 / 3 / 1 occurrences) is untouched.
     """
     now = time.time()
     await _seed(db_path, [
-        ("e1", "wallet", "wallet wallet wallet wallet wallet wallet", now, 1.0),
-        ("e2", "wallet", "wallet wallet wallet", now, 1.0),
-        ("e3", "wallet", "wallet", now, 1.0),
-        ("e4", "wallet " + "unrelated filler prose " * 40,
+        ("e1", "wallet alpha", "wallet wallet wallet wallet wallet wallet", now, 1.0),
+        ("e2", "wallet bravo", "wallet wallet wallet", now, 1.0),
+        ("e3", "wallet charlie", "wallet", now, 1.0),
+        ("e4", "wallet delta " + "unrelated filler prose " * 40,
          "more filler prose " * 40, now, 1.0),
     ] + _distractors(24, now))
 
@@ -113,15 +121,24 @@ async def test_bm25_ordering_is_not_inverted(db_path):
 async def test_healthy_memory_outranks_nearly_forgotten_one(db_path):
     """(b) ``decay_factor`` is retention: higher must rank higher.
 
-    Two rows, identical text and identical age, differing only in
+    Two rows, equivalent text and identical age, differing only in
     retention. The bug put ``decay_factor`` in the exponent, so the
     nearly-forgotten row decayed *slower* and won by ~423x.
+
+    The two summaries differ by one word for the same reason as the BM25
+    test above: with the literally identical summary "wallet" the
+    near-duplicate suppression in ``episode_search_hybrid`` drops the
+    lower-scoring row before this test can read its score, and the
+    property under test is the retention ordering, not de-duplication.
+    Both rows keep the same term frequency and the same length, so BM25
+    still ranks them equal and ``decay_factor`` remains the only
+    difference the score can come from.
     """
     now = time.time()
     age = now - 30 * 24 * HOUR
     await _seed(db_path, [
-        ("healthy", "wallet", "wallet", age, 0.90),
-        ("forgotten", "wallet", "wallet", age, 0.06),
+        ("healthy", "wallet ledger", "wallet", age, 0.90),
+        ("forgotten", "wallet receipt", "wallet", age, 0.06),
     ] + _distractors(24, now))
 
     store = MemoryStore(db_path=db_path)

@@ -56,10 +56,73 @@ def _backend_available(backend_id: str) -> bool:
     return importlib.util.find_spec(dep) is not None
 
 
-def _runtime_backend_id() -> str:
-    """The backend the RUNNING brain actually stores vectors in."""
+# Identity of the engine that answers a vector query when the configured
+# backend's index is not usable. This is not a hypothetical: the store
+# does not fail closed. When ``_vec_index.indexed`` is False,
+# ``MemoryStore.episode_search_hybrid`` scans ``memory_chunks`` with
+# ``cosine_similarity_bulk`` instead of touching the backend at all, so
+# it is a different engine with different latency and different recall,
+# and reporting the configured backend's name for it is a lie. The name
+# is not invented here: ``memory/backends/sqlite_vec.py`` already
+# publishes ``vec_index_mode: "numpy_fallback"`` off the same
+# ``indexed`` flag, so this is the vocabulary the codebase already uses
+# for the state, and it was only the API surface that hid it.
+VECTOR_FALLBACK_ID = "numpy_fallback"
+
+
+def _runtime_vector_state() -> tuple[str, str, str | None]:
+    """``(constructed_backend_id, effective_backend_id, degraded_reason)``.
+
+    ``constructed`` is the backend object :class:`MemoryStore` was
+    handed at boot, which is the right thing to judge "restart to apply"
+    against. ``effective`` is what actually serves a query.
+
+    The two differ whenever the index could not be brought up, which on
+    this class of host is the NORMAL case, not an exotic one: a Python
+    built without ``enable_load_extension`` (pyenv's default on macOS)
+    cannot load the sqlite-vec extension at all, so ``indexed`` is False
+    for the entire process and every vector query is served by the numpy
+    brute-force scan. Measured on this machine: ``_backend_id`` is
+    ``'sqlite_vec'`` while ``_vec_index.indexed`` is False.
+
+    The previous implementation was
+    ``str(getattr(mem, "_backend_id", "sqlite_vec") or "sqlite_vec")``,
+    which collapsed three different situations (no store yet, missing
+    attribute, and extension-never-loaded) into the name of a backend
+    that was not running. ``/internal/memory/stats`` had already worked
+    out the truth from ``indexed`` and published it as
+    ``degraded_semantic_search``, so the same process was reporting
+    "sqlite_vec is active" and "semantic search is degraded because
+    sqlite-vec is not loaded" side by side.
+    """
     mem = getattr(state, "memory", None)
-    return str(getattr(mem, "_backend_id", "sqlite_vec") or "sqlite_vec")
+    if mem is None:
+        # The old code answered "sqlite_vec" here, which was a guess
+        # about a store that does not exist yet. We do not know, so the
+        # value says that rather than naming a backend.
+        return "unknown", "unknown", "memory store not constructed"
+    constructed = str(getattr(mem, "_backend_id", "") or "") or "unknown"
+    vec_index = getattr(mem, "_vec_index", None)
+    if vec_index is None:
+        return constructed, VECTOR_FALLBACK_ID, "no vector index attached to the store"
+    if not bool(getattr(vec_index, "indexed", False)):
+        return constructed, VECTOR_FALLBACK_ID, (
+            f"the '{constructed}' index is not queryable (indexed=False), so "
+            "vector search is served by a numpy brute-force scan over "
+            "memory_chunks (correct, but O(n) per query)"
+        )
+    return constructed, constructed, None
+
+
+def _runtime_backend_id() -> str:
+    """The engine the RUNNING brain actually answers vector queries with.
+
+    Returns :data:`VECTOR_FALLBACK_ID` rather than the configured
+    backend's name when that backend's index never came up. Callers that
+    need "which backend was configured/constructed" want
+    :func:`_runtime_vector_state`, not this.
+    """
+    return _runtime_vector_state()[1]
 
 
 async def _preflight_backend(backend_id: str) -> tuple[bool, str | None]:
@@ -253,6 +316,15 @@ async def get_memory_backend():
     configured backend failed to construct at boot, ``boot_error`` /
     ``fell_back`` explain why (e.g. ``chromadb`` not installed) so the
     dashboard can show an actionable message instead of a silent lie.
+
+    ``runtime`` / ``active_store`` report the engine that answers a
+    query, which is ``numpy_fallback`` when the configured backend's
+    index never came up (see :func:`_runtime_vector_state`).
+    ``pending_unapplied`` is deliberately judged against the
+    *constructed* backend instead, because "sqlite_vec is configured and
+    was constructed but its extension cannot load" is not fixed by a
+    restart, and flagging it as pending would send the operator round a
+    loop that changes nothing.
     """
     from api.state import MEMORY_BACKEND_STATUS
 
@@ -266,12 +338,15 @@ async def get_memory_backend():
         except Exception as exc:  # noqa: BLE001 — surface for ops, default for prod
             logger.warning("get_memory_backend: settings.json read failed: %s", exc)
 
-    runtime = _runtime_backend_id()
+    constructed, runtime, degraded_reason = _runtime_vector_state()
     return {
         "backend": current,
         "runtime": runtime,
         "active_store": runtime,
-        "pending_unapplied": current != runtime,
+        "constructed_backend": constructed,
+        "vector_index_degraded": degraded_reason is not None,
+        "vector_index_degraded_reason": degraded_reason,
+        "pending_unapplied": constructed != "unknown" and current != constructed,
         "fell_back": bool(MEMORY_BACKEND_STATUS.get("fell_back")),
         "boot_error": MEMORY_BACKEND_STATUS.get("error"),
         "available": {name: _backend_available(name) for name in _known_backends()},
@@ -345,20 +420,32 @@ async def set_memory_backend(body: dict):
     existing.setdefault("memory", {})["backend"] = backend
     settings_path.write_text(json.dumps(existing, indent=2))
 
-    runtime = _runtime_backend_id()
-    note = (
-        "Saved. Restart the Brain (`feral restart`) to load the new "
-        f"backend. Existing embeddings stay in '{runtime}'; semantic "
-        "search re-populates as new content is embedded."
-        if backend != runtime
-        else "Saved. This backend is already active."
-    )
+    # Same split as the GET route: the "restart to apply" question is
+    # about the CONSTRUCTED backend, while the operator-facing note has
+    # to name the engine that is really answering queries. Saying
+    # "already active" about a sqlite_vec whose extension cannot load
+    # would tell the operator their vector search is fine when it is a
+    # numpy scan.
+    constructed, runtime, degraded_reason = _runtime_vector_state()
+    if backend != constructed:
+        note = (
+            "Saved. Restart the Brain (`feral restart`) to load the new "
+            f"backend. Existing embeddings stay in '{runtime}'; semantic "
+            "search re-populates as new content is embedded."
+        )
+    elif degraded_reason:
+        note = f"Saved. '{backend}' is the selected backend, but {degraded_reason}."
+    else:
+        note = "Saved. This backend is already active."
     return {
         "ok": True,
         "backend": backend,
         "runtime": runtime,
         "active_store": runtime,
-        "pending_unapplied": backend != runtime,
+        "constructed_backend": constructed,
+        "vector_index_degraded": degraded_reason is not None,
+        "vector_index_degraded_reason": degraded_reason,
+        "pending_unapplied": constructed != "unknown" and backend != constructed,
         "note": note,
     }
 
@@ -567,11 +654,19 @@ async def memory_stats():
     # ``memory_chunks``; re-use it to avoid a second SQLite round-trip.
     chunk_count = int(base.get("embedded_chunks", 0) or 0)
 
+    # ``active_vector_store`` and ``degraded_semantic_search`` are now
+    # derived from the SAME ``indexed`` probe, so this payload can no
+    # longer say "active_vector_store: sqlite_vec" next to
+    # "degraded_semantic_search: true", which is exactly what it said
+    # on this machine, where the extension cannot load at all.
+    constructed, active, degraded_reason = _runtime_vector_state()
     base["observability"] = {
         "sqlite_vec_loaded": sqlite_vec_loaded,
         "embedding_provider": embed_provider,
         "chunk_count": chunk_count,
-        "active_vector_store": _runtime_backend_id(),
+        "active_vector_store": active,
+        "configured_vector_store": constructed,
+        "vector_index_degraded_reason": degraded_reason,
         "degraded_semantic_search": (not sqlite_vec_loaded) and chunk_count > 0,
     }
     return base
