@@ -1,10 +1,78 @@
 # Changelog
 
-<!-- feral-version: 2026.8.7 -->
+<!-- feral-version: 2026.8.8 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.8] - 2026-08-08 - see the screen, remember the site, film the session
+
+### Fixed
+
+- **A failed embedding-model load was retried on every call.** Where the
+  package imports but the model is not cached and the hub is unreachable,
+  constructing a local backend blocks for the full download timeout.
+  Whether that can succeed is a property of the process, not of one
+  provider, but the failure was cached per instance for fastembed and not
+  at all for sentence-transformers, so every provider re-paid it and on
+  that path every single embed call did. Memoized process-wide: measured
+  over 20 providers and 3 embeds each, 40.34s becomes 1.01s.
+
+  This is also what made CI red rather than slow. In one matrix run, 50
+  stalls of about 39 seconds accounted for 33 of the job's 45 minutes
+  while the other 5,788 tests took 4.1 minutes between them, so the job
+  was cancelled with no named failure. CI had failed 72 of its last 100
+  runs and is now green.
+
+- **Vision stopped recording on 2026-07-30 and nothing said so.** It was
+  never disabled: the screen loop ran for nine days, screenshots
+  succeeded, and every observation was discarded. Prompts demand "Return
+  ONLY valid JSON" and the newly configured local model answers with a
+  perfectly good English caption instead, so the parser returned None and
+  a correct description of the screen was treated as no observation, at
+  debug level. Prose is now kept as the description, and a loop producing
+  nothing warns instead of reporting healthy.
+
+- **Relay tests had never once passed in CI.** websockets 14.0 changed
+  what `serve` hands the handler, and the pinned 15.0.1 has no `.path` at
+  all. Local 13.1 resolves to the legacy implementation, so these passed
+  on a developer machine and only there.
+
+- **soak-nightly was arithmetic, not slowness**: two 60-minute tests run
+  sequentially against a 90-minute timeout. Cancelled 99 nights out of
+  100. Now one test per matrix job, with the full hour of soak preserved.
+
+- **A helper that reports whether the running code is a checkout or an
+  installed copy said "editable" while running a copy.** It tested the
+  path after rewriting it to the git root, and since site-packages sits
+  under the home directory, the git walk answered with an unrelated
+  repository rooted there and reported its commit as the running version.
+
+### Added
+
+- **Skill manifest trigger conditions are finally read.** Manifests have
+  always declared `TriggerDefinition(condition, ...)` and nothing in the
+  tree ever parsed those strings, which is why triggered routines
+  degenerated into unconditional one-minute polls. A hand-written
+  tokenizer and recursive-descent parser now evaluates them, with no
+  eval, exec or literal_eval anywhere on the path: injection does not
+  tokenize into anything the grammar accepts. Missing fields evaluate to
+  unknown rather than false, so an absent sensor cannot satisfy a
+  "less than" test. A satisfied condition notifies and does not actuate.
+
+- **Browser sessions can be recorded to video.** CDP screencast with
+  per-frame timestamps, so playback runs at real speed. A missing ffmpeg
+  keeps the frames and says so rather than losing the recording.
+  Redaction happens before capture, since masking afterwards leaves
+  unmasked pixels on disk in the meantime.
+
+- **The browser remembers what each site taught it.** Notes scoped host,
+  then registrable domain, then global, captured when an interaction
+  fails in a way that is diagnostic of a site rather than of the
+  environment, and recalled on the next visit. Nothing stored is
+  executable. Seeded from browser-use/browser-harness's interaction
+  guides under MIT, with attribution recorded in THIRD_PARTY_NOTICES.md.
 
 ## [2026.8.7] - 2026-08-06 - stop reporting success that was never earned
 
