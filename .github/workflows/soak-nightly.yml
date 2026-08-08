@@ -8,6 +8,32 @@ name: Soak — nightly
 # This workflow uses continue-on-error so a flaky overnight run never
 # blocks the morning's main CI; failures still surface in the workflow
 # summary and uploaded artifacts.
+#
+# ── Why every job below runs exactly ONE soak test ────────────────────
+# Soak duration is per-test, not per-job: each test soaks for
+# FERAL_SOAK_DURATION_MIN and pytest runs them sequentially. The old
+# `voice-soak` job ran the whole file, so its wall clock was
+# (number of tests) × duration:
+#
+#   2 voice tests × 60 min = 120 min of soak, against timeout-minutes: 90
+#
+# That cannot pass, and it did not: 99 of the last 100 scheduled runs
+# were cancelled at the 90-minute mark. The evidence is in the job log
+# for run 31151684787 — test_openai_realtime_soak alone reported
+# `PASS: elapsed=3600.0s` at t+60min, then test_gemini_live_soak started
+# its own 60-minute soak and the runner killed the job at t+90min.
+#
+# Fanning the tests out over a matrix keeps the full 60 minutes of soak
+# per protocol (no coverage lost) and brings each job's wall clock to
+# duration + ~2 min of install, so the budget is honest.
+#
+# The same arithmetic sinks channels-soak the moment its secrets exist:
+# 3 tests × 1440 min = 72 hours in one job, with timeout-minutes: 1500
+# (25 h). Both numbers are above the 6-hour hard ceiling GitHub enforces
+# on a hosted-runner job, so the job would be killed regardless of what
+# timeout-minutes says. It only looks green today because all three
+# tests skip for want of tokens. See the note on that job below.
+# ─────────────────────────────────────────────────────────────────────
 
 on:
   schedule:
@@ -15,16 +41,24 @@ on:
   workflow_dispatch:
     inputs:
       duration-min:
-        description: "Soak duration in minutes (overrides default)"
+        description: "Soak duration in minutes, per test (overrides default)"
         required: false
         default: "60"
 
 jobs:
   voice-soak:
-    name: Voice soak (fake WS peers)
+    name: Voice soak — ${{ matrix.test }}
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 90
+    # One test per job, so this is duration (60) + install headroom,
+    # not duration × number of tests.
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - test_openai_realtime_soak
+          - test_gemini_live_soak
     defaults:
       run:
         working-directory: feral-core
@@ -46,27 +80,50 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p ../soak-artifacts
-          pytest tests/test_voice_soak.py -k soak --runsoak --no-cov -s -v \
-            2>&1 | tee ../soak-artifacts/voice-soak.log
+          pytest "tests/test_voice_soak.py::${{ matrix.test }}" \
+            --runsoak --no-cov -s -v \
+            2>&1 | tee "../soak-artifacts/voice-soak-${{ matrix.test }}.log"
 
       - name: Upload voice soak logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: voice-soak-logs
-          path: soak-artifacts/voice-soak.log
+          name: voice-soak-logs-${{ matrix.test }}
+          path: soak-artifacts/voice-soak-${{ matrix.test }}.log
           if-no-files-found: warn
 
   channels-soak:
-    name: Channels soak (env-gated)
+    name: Channels soak (env-gated) — ${{ matrix.test }}
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 1500
+    # ── SCOPE CHANGE, flagged deliberately ───────────────────────────
+    # Was: one job, timeout-minutes 1500, FERAL_SOAK_DURATION_MIN 1440.
+    # A GitHub-hosted runner kills any job at 6 hours, so a 24-hour
+    # soak has never been runnable here and never will be; the 1500
+    # was decorative. Split one-test-per-job and set the duration to
+    # 300 minutes (5 h), the longest soak that actually fits under the
+    # ceiling with room for install and teardown.
+    #
+    # This is a real reduction in soak length (24 h → 5 h per channel)
+    # and needs an owner decision: accept 5 h on hosted runners, or
+    # move this job to a self-hosted runner where the 6-hour cap does
+    # not apply and restore 1440. Do not "fix" it by raising
+    # timeout-minutes again — the ceiling is enforced by the runner,
+    # not by this field.
+    # ─────────────────────────────────────────────────────────────────
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - test_telegram_channel_soak
+          - test_slack_channel_soak
+          - test_discord_channel_soak
     defaults:
       run:
         working-directory: feral-core
     env:
-      FERAL_SOAK_DURATION_MIN: ${{ github.event.inputs.duration-min || '1440' }}
+      FERAL_SOAK_DURATION_MIN: ${{ github.event.inputs.duration-min || '300' }}
       FERAL_SOAK_INTERVAL_SEC: "30"
       FERAL_SOAK_TELEGRAM_TOKEN: ${{ secrets.FERAL_SOAK_TELEGRAM_TOKEN }}
       FERAL_SOAK_TELEGRAM_CHAT_ID: ${{ secrets.FERAL_SOAK_TELEGRAM_CHAT_ID }}
@@ -88,13 +145,14 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p ../soak-artifacts
-          pytest tests/test_channels_soak.py -k soak --runsoak --no-cov -s -v \
-            2>&1 | tee ../soak-artifacts/channels-soak.log
+          pytest "tests/test_channels_soak.py::${{ matrix.test }}" \
+            --runsoak --no-cov -s -v \
+            2>&1 | tee "../soak-artifacts/channels-soak-${{ matrix.test }}.log"
 
       - name: Upload channels soak logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: channels-soak-logs
-          path: soak-artifacts/channels-soak.log
+          name: channels-soak-logs-${{ matrix.test }}
+          path: soak-artifacts/channels-soak-${{ matrix.test }}.log
           if-no-files-found: warn

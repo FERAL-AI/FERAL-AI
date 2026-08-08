@@ -27,6 +27,48 @@ async def runtime():
     os.unlink(flow_path)
 
 
+# The runner is a poller: ``TaskFlowRuntime._runner_loop`` sleeps 1.0s
+# whenever it finds no ready flow, so a freshly created flow waits up to
+# a full second before it is even picked up. On top of that the first
+# ``note.save`` in a process pays for the embedding backend warming up,
+# which on a cold CI runner includes a model-fetch attempt that has to
+# fail before the numpy fallback takes over.
+#
+# The old budgets (5s and 7s) were therefore racing the runtime's own
+# poll granularity plus a network timeout, and lost on a loaded runner:
+# `assert 'running' == 'completed'` on 2026-08-06, job 92525495791.
+#
+# The property under test is "the flow reaches completed and the note is
+# stored", not "within five seconds". So the ceiling below is an
+# anti-hang guard, deliberately far above the real cost (~1-2s locally),
+# not a latency assertion. If a flow ever genuinely needs 30s, that is a
+# bug worth failing on. Raising this further is not the fix; making the
+# runner event-driven would be.
+_FLOW_COMPLETION_CEILING_SEC = 30.0
+
+
+async def _await_flow_status(taskflow, flow_id, expected, *,
+                             ceiling=_FLOW_COMPLETION_CEILING_SEC):
+    """Poll until the flow reaches ``expected``; return the final record.
+
+    Reports the last status actually seen when it times out, so a
+    failure says which state the flow got stuck in instead of just
+    re-printing the mismatch.
+    """
+    deadline = time.monotonic() + ceiling
+    latest = None
+    while time.monotonic() < deadline:
+        latest = taskflow.get_flow(flow_id)
+        if latest and latest["status"] == expected:
+            return latest
+        await asyncio.sleep(0.05)
+    seen = latest["status"] if latest else "<flow disappeared>"
+    raise AssertionError(
+        f"flow {flow_id} was {seen!r}, never reached {expected!r} "
+        f"within {ceiling}s"
+    )
+
+
 @pytest.mark.asyncio
 async def test_taskflow_runs_steps_and_completes(runtime):
     taskflow, store = runtime
@@ -40,16 +82,8 @@ async def test_taskflow_runs_steps_and_completes(runtime):
     )
     flow_id = flow["id"]
 
-    deadline = time.time() + 5
-    latest = flow
-    while time.time() < deadline:
-        latest = taskflow.get_flow(flow_id)
-        if latest and latest["status"] == "completed":
-            break
-        await asyncio.sleep(0.1)
+    await _await_flow_status(taskflow, flow_id, "completed")
 
-    assert latest is not None
-    assert latest["status"] == "completed"
     notes = await store.search("taskflow wrote this note", limit=5)
     assert len(notes) >= 1
 
@@ -67,13 +101,7 @@ async def test_taskflow_waiting_step_resumes(runtime):
     )
     flow_id = flow["id"]
 
-    deadline = time.time() + 7
-    latest = flow
-    while time.time() < deadline:
-        latest = taskflow.get_flow(flow_id)
-        if latest and latest["status"] == "completed":
-            break
-        await asyncio.sleep(0.2)
-
-    assert latest is not None
-    assert latest["status"] == "completed"
+    # This flow contains a 1s `sleep` step, so it costs the runner's poll
+    # interval twice: once to pick the flow up, once to resume it after
+    # the wait. Same ceiling, same reasoning as above.
+    await _await_flow_status(taskflow, flow_id, "completed")

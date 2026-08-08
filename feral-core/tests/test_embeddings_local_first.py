@@ -14,6 +14,8 @@ the run must stay at zero outbound calls under
 from __future__ import annotations
 
 import importlib.util
+import sys
+import types
 
 import numpy as np
 import pytest
@@ -25,6 +27,7 @@ from memory.embeddings import (
     EmbeddingProvider,
     VectorIndex,
     cosine_similarity,
+    reset_local_backend_failures,
     sqlite_vec_available,
 )
 
@@ -250,6 +253,20 @@ class TestExistingBehaviourPreserved:
 
 
 class TestFastembedLoaderIsQuietWhenMissing:
+    @pytest.fixture(autouse=True)
+    def _isolate_backend_memo(self):
+        """Keep the process-wide load memo out of these tests, and them
+        out of it.
+
+        Clearing before means the assertions are about the loader rather
+        than about which test ran first. Clearing after means the fake
+        always-failing backends installed below cannot leave a recorded
+        failure that makes a later test skip a load it should attempt.
+        """
+        reset_local_backend_failures()
+        yield
+        reset_local_backend_failures()
+
     def test_missing_fastembed_warns_once_not_per_call(self, monkeypatch, caplog):
         """_fallback_embed can hit the loader on every embed of a degrade
         window, so a failed import must not log per call."""
@@ -261,6 +278,72 @@ class TestFastembedLoaderIsQuietWhenMissing:
             pytest.skip("fastembed is installed in this environment")
         assert results == [False] * 5
         assert sum("fastembed lazy load failed" in r.message for r in caplog.records) == 1
+
+    def test_a_failed_load_is_not_retried_by_the_next_provider(self, monkeypatch):
+        """The second provider in a process must not re-pay the load.
+
+        Constructing a local backend blocks for the full model-download
+        timeout when the package is importable but the model is not
+        cached (~39s on a CI runner). Caching that failure per instance
+        meant every new EmbeddingProvider paid it again, which is what
+        pushed the CI matrix job past its timeout: 50 stalls, 33 of the
+        job's 45 minutes.
+        """
+        attempts = {"n": 0}
+
+        fake = types.ModuleType("fastembed")
+
+        def _TextEmbedding(*_a, **_k):
+            attempts["n"] += 1
+            raise RuntimeError("Could not load model from any source")
+
+        fake.TextEmbedding = _TextEmbedding
+        monkeypatch.setitem(sys.modules, "fastembed", fake)
+        monkeypatch.setenv("FERAL_EMBED_PROVIDER", "hash")
+
+        assert EmbeddingProvider()._ensure_fastembed_model() is False
+        assert attempts["n"] == 1
+
+        # Four more providers, each asking several times.
+        for _ in range(4):
+            p = EmbeddingProvider()
+            assert [p._ensure_fastembed_model() for _ in range(3)] == [False] * 3
+
+        assert attempts["n"] == 1, (
+            f"the loader ran {attempts['n']} times; a failed load must be "
+            "remembered for the whole process, not per provider"
+        )
+
+    def test_a_failed_sentence_transformers_load_is_not_retried_per_call(
+        self, monkeypatch
+    ):
+        """Same property for the sentence-transformers backend.
+
+        This one had no negative caching at all: a failed load left
+        ``self._model`` as None, which is exactly the condition that
+        triggers a retry, so it re-ran the constructor on every embed.
+        """
+        attempts = {"n": 0}
+
+        fake = types.ModuleType("sentence_transformers")
+
+        def _SentenceTransformer(*_a, **_k):
+            attempts["n"] += 1
+            raise RuntimeError("hub unreachable")
+
+        fake.SentenceTransformer = _SentenceTransformer
+        monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+        monkeypatch.setenv("FERAL_EMBED_PROVIDER", "hash")
+
+        for _ in range(3):
+            p = EmbeddingProvider()
+            for _ in range(5):
+                assert p._ensure_local_model() is False
+
+        assert attempts["n"] == 1, (
+            f"the loader ran {attempts['n']} times; it must run once per "
+            "process, not once per embed"
+        )
 
 
 # ──────────────────────────────────────────────────────────────────

@@ -30,6 +30,7 @@ import json
 import os
 import resource
 import socket
+import sys
 import time
 from contextlib import asynccontextmanager
 
@@ -66,13 +67,19 @@ def _free_port() -> int:
 def _rss_kb() -> int:
     """Resident set size of the current process, in KB.
 
-    On Linux ru_maxrss is in KB; on macOS it is in bytes — normalise.
+    On Linux ru_maxrss is in KB; on macOS it is in bytes.
+
+    The unit is a property of the platform, so branch on the platform.
+    The previous version guessed from magnitude ("> 10**9 must be
+    bytes"), which is wrong for exactly the processes this test cares
+    about: a 112 MB interpreter on macOS reports 117_243_904 bytes,
+    sails under the 10**9 line, and gets reported as 117 GB. Every
+    macOS run then failed the growth budget on the first sample. It
+    never showed up in CI because CI is Linux, where the raw value is
+    already KB.
     """
     raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    # Heuristic: macOS ru_maxrss is bytes (huge number for any process); a
-    # sub-100MB process on Linux reports < 100_000 KB. If the value is
-    # implausibly large for KB, treat it as bytes.
-    if raw > 10 ** 9:
+    if sys.platform == "darwin":
         return raw // 1024
     return raw
 

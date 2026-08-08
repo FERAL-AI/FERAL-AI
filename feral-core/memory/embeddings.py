@@ -82,6 +82,7 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import time
 from collections.abc import Sequence
 from typing import Any, Optional
@@ -111,6 +112,60 @@ CHUNK_OVERLAP = 80
 FASTEMBED_MODEL = "BAAI/bge-small-en-v1.5"
 
 _VALID_PROVIDER_MODES = ("auto", "local", "openai", "hash")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Process-wide "this local backend cannot load here" memo
+# ──────────────────────────────────────────────────────────────────────
+# Constructing either local backend can block for the full model-download
+# timeout when the package is present but the model is not cached and the
+# hub is unreachable. Measured on GitHub's ubuntu runners: ~39s per
+# attempt.
+#
+# Whether a backend can load is a property of the PROCESS (is the package
+# importable, is the model cached, is the hub reachable), not of one
+# EmbeddingProvider instance. Caching the failure per instance therefore
+# re-pays that timeout for every provider the process constructs, and the
+# sentence-transformers path below did not cache it at all, so it re-paid
+# it on every single embed call.
+#
+# That is what made CI red rather than slow: in the 2026-08-06 matrix run
+# (job 92525495791) 50 separate stalls of ~39s accounted for 33.3 of the
+# job's 45 minutes, while the other 5788 tests took 4.1 minutes between
+# them. The job hit its ceiling and was cancelled with no named failure.
+# The suite's own outbound-network guard did not catch it: that guard
+# patches httpx, and these downloads go out over requests/urllib3.
+#
+# Note the failure once, globally, and let every later caller fall
+# straight through to the hash embedding.
+_LOCAL_BACKEND_FAILURES: dict[str, str] = {}
+_LOCAL_BACKEND_LOCK = threading.Lock()
+
+
+def _local_backend_failed(key: str) -> Optional[str]:
+    """The recorded failure reason for ``key``, or None if untried/ok."""
+    with _LOCAL_BACKEND_LOCK:
+        return _LOCAL_BACKEND_FAILURES.get(key)
+
+
+def _note_local_backend_failure(key: str, exc: BaseException) -> None:
+    """Record, once per process, that ``key`` cannot be constructed."""
+    with _LOCAL_BACKEND_LOCK:
+        first = key not in _LOCAL_BACKEND_FAILURES
+        _LOCAL_BACKEND_FAILURES[key] = str(exc)
+    if first:
+        logger.warning("%s lazy load failed: %s", key, exc)
+
+
+def reset_local_backend_failures() -> None:
+    """Forget every recorded backend failure.
+
+    For tests that need a provider to genuinely re-attempt a load, and
+    for a caller that has just installed or warmed a model and wants the
+    process to notice without a restart.
+    """
+    with _LOCAL_BACKEND_LOCK:
+        _LOCAL_BACKEND_FAILURES.clear()
 
 
 def _tokenize_rough(text: str) -> list[str]:
@@ -1304,11 +1359,7 @@ class EmbeddingProvider:
                 if self._fastembed_model is not None or self._ensure_fastembed_model():
                     return self._fastembed_embed(text)
             if self._model is None:
-                try:
-                    from sentence_transformers import SentenceTransformer
-                    self._model = SentenceTransformer("all-MiniLM-L6-v2")
-                except Exception:
-                    self._model = None
+                self._ensure_local_model()
             if self._model is not None and self._dim == LOCAL_DIM:
                 return self._local_embed(text)
             # dim mismatch or unavailable — fall through to hash so the index keeps shape
@@ -1326,10 +1377,14 @@ class EmbeddingProvider:
         """
         if self._fastembed_model is not None:
             return True
-        if self._fastembed_unavailable:
-            # One attempt, one warning. _fallback_embed can reach this on
-            # every single embed during a degrade window, and a retry-plus-log
-            # per call would both spam the log and re-pay the import failure.
+        # One attempt, one warning, PER PROCESS. _fallback_embed can reach
+        # this on every single embed during a degrade window, and a
+        # retry-plus-log per call would both spam the log and re-pay the
+        # load failure — which costs a full model-download timeout, not an
+        # import error, whenever the package is present but the model is
+        # not cached. See _LOCAL_BACKEND_FAILURES.
+        if self._fastembed_unavailable or _local_backend_failed("fastembed"):
+            self._fastembed_unavailable = True
             return False
         try:
             from fastembed import TextEmbedding
@@ -1337,8 +1392,9 @@ class EmbeddingProvider:
             return True
         except Exception as exc:  # noqa: BLE001 — degrade to hash, never crash
             self._fastembed_unavailable = True
-            logger.warning("fastembed lazy load failed: %s", exc)
+            _note_local_backend_failure("fastembed", exc)
             return False
+
 
     def _fastembed_embed(self, text: str) -> np.ndarray:
         if self._fastembed_model is None and not self._ensure_fastembed_model():
@@ -1370,15 +1426,28 @@ class EmbeddingProvider:
         Idempotent. Returns ``True`` once a usable model is loaded.
         Construction is deferred out of ``__init__`` so boot never blocks
         on the (slow, first-run-downloads) model load; the cost is paid
-        on the first real embed instead (typically a background task)."""
+        on the first real embed instead (typically a background task).
+
+        A failure is remembered process-wide (see _LOCAL_BACKEND_FAILURES)
+        rather than not at all. Before, every caller that reached here
+        after a failure re-ran the constructor, because a failed load
+        leaves ``self._model`` as ``None`` — exactly the state that
+        triggers the retry. Where the package imports but the model is
+        not cached, that constructor is a network download, so the retry
+        cost a full download timeout per embed rather than an import
+        error.
+        """
         if self._model is not None:
             return True
+        if _local_backend_failed("sentence-transformers"):
+            return False
         try:
             from sentence_transformers import SentenceTransformer
             self._model = SentenceTransformer("all-MiniLM-L6-v2")
             return True
         except Exception as exc:  # noqa: BLE001 — degrade to hash, never crash
-            logger.warning("sentence-transformers lazy load failed: %s", exc)
+            self._model = None
+            _note_local_backend_failure("sentence-transformers", exc)
             return False
 
     def _local_embed(self, text: str) -> np.ndarray:

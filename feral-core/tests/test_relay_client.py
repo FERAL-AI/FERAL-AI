@@ -110,8 +110,30 @@ class FakeEdge:
             await self._server.wait_closed()
             self._server = None
 
+    @staticmethod
+    def _request_path(ws) -> str:
+        """The requested path, across both ``websockets`` server APIs.
+
+        ``websockets.serve`` changed what it hands the handler in 14.0:
+        the legacy implementation passes a ``WebSocketServerProtocol``
+        carrying ``.path``, the asyncio implementation (the default from
+        14.0 on) passes a ``ServerConnection`` where the path lives at
+        ``.request.path`` and ``.path`` does not exist at all.
+
+        Reading only ``.path`` made every FakeEdge connection look like
+        an unknown path under the pinned ``websockets==15.0.1``, so the
+        edge closed with 1008 and no hello was ever recorded. Locally,
+        where an older ``websockets`` resolves ``serve`` to the legacy
+        implementation, the same code passed. Ask both, newest first.
+        """
+        request = getattr(ws, "request", None)
+        path = getattr(request, "path", None)
+        if path is None:
+            path = getattr(ws, "path", None)
+        return path or ""
+
     async def _handle(self, ws):
-        path = getattr(ws, "path", "")
+        path = self._request_path(ws)
         if path == rc.CONTROL_PATH:
             await self._control(ws)
         elif path.startswith("/v1/stream/"):

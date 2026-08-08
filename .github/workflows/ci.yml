@@ -54,7 +54,17 @@ jobs:
     needs: lint
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # A green run of this job costs 6-8 minutes (measured across the 10
+    # successful matrix jobs in the last 100 runs). The failures were not
+    # slow runs, they were stalls: 34 of 68 matrix job executions burned
+    # to the 45-minute ceiling and were cancelled with no named failure.
+    # The stall is fixed at source (memory/embeddings.py now remembers a
+    # failed local-model load process-wide instead of re-paying its
+    # ~39s download timeout per provider and per embed), and
+    # --timeout below turns any future one into a named test.
+    # 30 minutes is ~4x the real cost, so a breach means something is
+    # wrong rather than something is busy.
+    timeout-minutes: 30
     strategy:
       matrix:
         # Deliberately NOT 3.14 here, even though 3.14 is the version
@@ -103,7 +113,17 @@ jobs:
         # -p no:randomly: deterministic collection order in CI (the
         # pytest-randomly [dev] plugin is a local order-dep surfacer,
         # OFF by default in CI — see feral-core/pyproject.toml policy).
-        run: pytest tests/ -p no:randomly -x -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=50
+        #
+        # --timeout=300 --timeout-method=thread: the PR fast lane has had
+        # a per-test ceiling since PR #157; this job never did, so a test
+        # that blocked on the network took the whole job down as an
+        # unattributed 45-minute cancellation. That is how the embedding
+        # model-load stall stayed invisible for weeks. 300s rather than
+        # the fast lane's 60s because this job also runs tests/perf,
+        # whose benchmarks legitimately take minutes. thread method for
+        # the same reason as the fast lane: signal-based interruption
+        # fights asyncio's own signal handling on Linux runners.
+        run: pytest tests/ -p no:randomly -x -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=50 --timeout=300 --timeout-method=thread
 
       - name: Upload coverage
         if: always()
@@ -241,9 +261,29 @@ jobs:
         run: python3 scripts/check_webui_v2_contract.py
 
       - name: Ensure committed bundles are fresh
+        # Two corrections over the previous version of this step:
+        #
+        # 1. It also diffed `feral-client-v2/dist`, which is listed in
+        #    feral-client-v2/.gitignore and has never had a tracked file.
+        #    `git diff -- <ignored path>` is always empty, so that half of
+        #    the check did nothing and the error message told people to
+        #    commit a directory git refuses to track. Only
+        #    feral-core/webui_v2 is bundled into the wheel and only it is
+        #    tracked, so only it is checked.
+        #
+        # 2. `git diff` does not see untracked files. Vite names its
+        #    output `assets/index-<contenthash>.js`, so a rebuild deletes
+        #    one file and creates a differently-named one. The new file
+        #    lands untracked and invisible to `git diff`; the check only
+        #    caught this because index.html happens to reference the
+        #    hash. Any change that did not move index.html would have
+        #    slipped a stale bundle through. `git status --porcelain`
+        #    sees added, deleted and modified alike.
         run: |
-          if ! git diff --exit-code -- feral-client-v2/dist feral-core/webui_v2; then
-            echo "::error::Stale bundled assets detected. Run scripts/build_webui_v2.sh and commit feral-client-v2/dist + feral-core/webui_v2."
+          DIRTY="$(git status --porcelain -- feral-core/webui_v2)"
+          if [ -n "$DIRTY" ]; then
+            echo "$DIRTY"
+            echo "::error::Stale bundled assets detected. Run scripts/build_webui_v2.sh, then 'git add -A feral-core/webui_v2' and commit."
             exit 1
           fi
 
