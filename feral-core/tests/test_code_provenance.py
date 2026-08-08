@@ -43,6 +43,53 @@ class TestDescribesTheRealTree:
         assert describe(m).editable is True
 
 
+class TestAnInstalledCopyIsNotCalledEditable:
+    """The regression this file already existed to prevent, which the first
+    version of describe() committed anyway.
+
+    It asked git for the work tree first and then tested THAT path for
+    editability. Running from site-packages, the git walk found an unrelated
+    repository rooted at the user's home directory (one exists on this
+    machine and it shadows everything), so describe() reported that
+    repository's commit and called the install editable. The one case the
+    helper exists to catch was the one case it got backwards, and it said so
+    confidently.
+    """
+
+    @staticmethod
+    def _installed_module():
+        import os
+        import site
+
+        class FakeInstalled:
+            __file__ = os.path.join(site.getsitepackages()[0], "api", "state.py")
+
+        return FakeInstalled()
+
+    def test_a_module_under_site_packages_is_not_editable(self):
+        assert describe(self._installed_module()).editable is False
+
+    def test_it_does_not_borrow_a_commit_from_an_unrelated_repo(self):
+        """site-packages sits under the home directory. If a git repo is
+        rooted there, a naive rev-parse answers with it, and reporting that
+        commit as the running version is worse than reporting none: it looks
+        like a real answer."""
+        p = describe(self._installed_module())
+        assert p.commit is None
+        assert "site-packages" in p.root
+
+    def test_the_line_warns_that_edits_will_not_apply(self):
+        line = describe(self._installed_module()).one_line()
+        assert "installed copy" in line
+        assert "NOT apply" in line
+
+    def test_it_reports_the_installed_version_instead_of_a_commit(self):
+        """A copy has no useful commit, but the version it was built from is
+        exactly what you compare against the tag you just cut."""
+        line = describe(self._installed_module()).one_line()
+        assert "feral-ai" in line
+
+
 class TestTheLineAnOperatorReads:
     def test_an_installed_copy_says_edits_will_not_apply(self):
         """The whole point. This is the state that wasted the afternoon, and

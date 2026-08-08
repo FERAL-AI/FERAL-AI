@@ -27,6 +27,16 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+def _installed_version() -> Optional[str]:
+    """Version of the installed distribution, or None if it is not one."""
+    try:
+        from importlib.metadata import version
+
+        return version("feral-ai")
+    except Exception:
+        return None
+
+
 @dataclass
 class CodeProvenance:
     root: str
@@ -38,6 +48,11 @@ class CodeProvenance:
         """A single log line an operator can grep after a restart."""
         if self.commit:
             rev = self.commit + ("+dirty" if self.dirty else "")
+        elif self.editable is False:
+            # A copy has no useful commit, but the version it was built from
+            # is exactly what the operator needs to compare against the tag
+            # they just cut.
+            rev = f"feral-ai {_installed_version() or 'version unknown'}"
         else:
             rev = "no git metadata"
         install = ""
@@ -92,18 +107,30 @@ def describe(module: Optional[object] = None) -> CodeProvenance:
     if module is None:
         module = describe.__module__ and __import__(__name__, fromlist=["*"])
     path = getattr(module, "__file__", None) or __file__
-    root = os.path.dirname(os.path.dirname(os.path.abspath(path)))
+    import_dir = os.path.dirname(os.path.dirname(os.path.abspath(path)))
 
-    toplevel = _git(root, "rev-parse", "--show-toplevel")
-    if toplevel:
-        root = toplevel
-        commit = _git(root, "rev-parse", "--short", "HEAD")
-        # --porcelain is empty exactly when the tree is clean.
-        status = _git(root, "status", "--porcelain")
-        dirty = bool(status)
-    else:
-        commit, dirty = None, False
+    # Decide this from where the module was IMPORTED from, before any git
+    # lookup rewrites the path. The first version of this asked git for the
+    # work tree first and then tested that answer for editability, which got
+    # it backwards in the one case the whole helper exists to catch: running
+    # an installed copy out of site-packages, it reported "editable install".
+    editable = _is_editable(import_dir)
+
+    # Only ask git when the code really is a checkout. site-packages lives
+    # under the user's home directory, and a git repository rooted at
+    # ~ (which exists on at least one machine here) makes `rev-parse
+    # --show-toplevel` from site-packages answer with that unrelated
+    # repository. Reporting its commit as the running version is worse than
+    # reporting no commit at all, because it looks like a real answer.
+    commit, dirty, root = None, False, import_dir
+    if editable is not False:
+        toplevel = _git(import_dir, "rev-parse", "--show-toplevel")
+        if toplevel and _is_editable(toplevel) is not False:
+            root = toplevel
+            commit = _git(root, "rev-parse", "--short", "HEAD")
+            # --porcelain is empty exactly when the tree is clean.
+            dirty = bool(_git(root, "status", "--porcelain"))
 
     return CodeProvenance(
-        root=root, commit=commit, dirty=dirty, editable=_is_editable(root),
+        root=root, commit=commit, dirty=dirty, editable=editable,
     )
