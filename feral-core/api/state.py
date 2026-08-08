@@ -426,6 +426,10 @@ class BrainState:
         self.genui_engine: Optional[GenUIEngine] = None
         self.service_providers: Optional[ServiceProviderRegistry] = None
         self.browser: Optional[BrowserController] = None
+        # Last URL we know the browser was on. Used only to scope a captured
+        # site observation when get_page_info() cannot answer (page mid-
+        # navigation, CDP hiccup) — see _current_browser_url.
+        self._browser_last_url: str = ""
         self.approval_manager = None
         self.cron_service = None
         self.scheduler = None
@@ -2642,6 +2646,116 @@ class BrainState:
     }
 
     async def _execute_browser_action(self, endpoint_id: str, args: dict) -> dict:
+        """Run a browser action, with per-domain recall on the way in and
+        capture on the way out.
+
+        This is the single hook that joins the browser controller to the
+        site-knowledge store (``memory.browser_domain_memory``). It lives here
+        rather than inside ``skills/impl/browser_use.py`` so the CDP driver
+        stays a driver, and so this does not collide with concurrent work in
+        that file.
+
+        Two behaviours, both cheap:
+
+        * After a successful ``navigate`` we attach ``domain_knowledge`` — a
+          short markdown briefing of what FERAL already knows about that
+          specific site — to the tool result. SITE-SPECIFIC only: the
+          general interaction techniques are excluded here on purpose. They
+          apply to every page, so replaying all of them on every navigation
+          would spend the context budget that the page snapshot needs, for
+          knowledge that is not yet actionable. A first visit to an unknown
+          site therefore costs nothing.
+        * After a FAILED action we classify the error. Only errors that say
+          something about the *site* (overlay intercepting clicks, custom
+          dropdown, cross-origin frame, detached node) are recorded; errors
+          about the browser itself ("Cannot connect to Chrome") are dropped.
+          We then attach the knowledge for that one failure topic — which
+          pulls in both this site's history with it ("seen 3x here") and the
+          matching general technique. That is the moment the technique is
+          actionable, so that is when it is worth its tokens.
+
+        Nothing is recorded on the happy path, and the current URL is only
+        fetched when a capture is actually going to happen.
+
+        Stored knowledge is prose. It is never executed, here or anywhere.
+        """
+        result = await self._dispatch_browser_action(endpoint_id, args)
+
+        try:
+            from memory.browser_domain_memory import (
+                capture_failure,
+                classify_failure,
+                get_store,
+                is_capturable_endpoint,
+            )
+        except Exception:
+            return result
+
+        if not isinstance(result, dict):
+            return result
+
+        succeeded = bool(result.get("success", "error" not in result))
+
+        try:
+            if succeeded and endpoint_id == "navigate":
+                url = str((args or {}).get("url") or result.get("url") or "")
+                if url:
+                    self._browser_last_url = url
+                    recall = get_store().recall(url, limit=8, include_global=False)
+                    if recall.get("briefing"):
+                        result["domain_knowledge"] = recall["briefing"]
+                        result["domain_knowledge_scope"] = recall.get("scope_chain")
+            elif not succeeded:
+                error_text = result.get("error") or ""
+                if not error_text and isinstance(result.get("failed"), dict):
+                    error_text = " | ".join(str(v) for v in result["failed"].values())
+                # Classify BEFORE spending a CDP round trip on the page URL:
+                # most failures are not diagnostic and cost nothing.
+                # Endpoint gate first: tracing, HAR, screencast/recording,
+                # screenshot and download failures are about the harness, not
+                # the site, and those code paths belong to other work.
+                signature = (
+                    classify_failure(str(error_text))
+                    if is_capturable_endpoint(endpoint_id)
+                    else None
+                )
+                if signature:
+                    url = await self._current_browser_url(args)
+                    if url:
+                        store = get_store()
+                        capture_failure(
+                            store,
+                            url=url,
+                            endpoint_id=endpoint_id,
+                            args=args or {},
+                            result=result,
+                        )
+                        recall = store.recall(url, limit=4, topic=signature.code)
+                        if recall.get("briefing"):
+                            result["domain_knowledge"] = recall["briefing"]
+                            result["domain_knowledge_scope"] = recall.get("scope_chain")
+        except Exception as exc:
+            # Site knowledge is an enhancement. It must never turn a working
+            # browser action into a failed one.
+            logger.debug("browser domain memory hook skipped: %s", exc)
+
+        return result
+
+    async def _current_browser_url(self, args: Optional[dict] = None) -> str:
+        """Best-effort current page URL for scoping a captured observation."""
+        if args and args.get("url"):
+            return str(args["url"])
+        try:
+            info = await self.browser.get_page_info()
+            url = str((info or {}).get("url") or "")
+        except Exception:
+            url = ""
+        if url:
+            self._browser_last_url = url
+            return url
+        return str(getattr(self, "_browser_last_url", "") or "")
+
+    async def _dispatch_browser_action(self, endpoint_id: str, args: dict) -> dict:
         """Execute a browser action when called by the agent."""
         if not self.browser:
             return {"error": "Browser not available"}

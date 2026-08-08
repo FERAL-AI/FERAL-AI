@@ -1,0 +1,184 @@
+{
+  "skill_id": "browser_memory",
+  "version": "1.0.0",
+  "author": "feral-core",
+  "brand": {
+    "name": "Browser Site Memory",
+    "primary_color": "#0EA5E9",
+    "secondary_color": "#0369A1",
+    "logo_url": "",
+    "icon_set": "sf_symbols"
+  },
+  "description": "What FERAL has learned about individual websites. Recall per-domain browser knowledge (which dropdowns are fake, which buttons sit under overlays, which steps hide in cross-origin iframes) before automating a site, and file new observations after. Everything stored here is prose data that the agent reads; nothing stored here is ever executed.",
+  "trigger_phrases": [
+    "what do you know about this site",
+    "site notes",
+    "browser site memory",
+    "domain knowledge",
+    "what did we learn about this website"
+  ],
+  "categories": [
+    "browser",
+    "automation",
+    "memory"
+  ],
+  "auth": {
+    "type": "none"
+  },
+  "endpoints": [
+    {
+      "id": "recall",
+      "method": "PYTHON",
+      "url": "",
+      "description": "Look up everything FERAL already knows about a site BEFORE automating it. Call this with the target URL as the first step of any browser task so you do not rediscover known traps. Returns host-specific notes first, then registrable-domain notes, then general interaction techniques.",
+      "params": [
+        {
+          "name": "url",
+          "type": "string",
+          "required": true,
+          "description": "Target URL or hostname, e.g. https://admin.shopify.com/store/x or admin.shopify.com"
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "required": false,
+          "description": "Restrict to one topic, e.g. not_native_select, cross_origin_iframe, dialogs, uploads, click_intercepted"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "description": "Max notes to return (default 12)",
+          "default": "12"
+        }
+      ],
+      "returns_description": "{host, domain, scope_chain, notes[], briefing} — briefing is a short markdown block written for the agent to read.",
+      "ui_hint": "detail_card"
+    },
+    {
+      "id": "remember",
+      "method": "PYTHON",
+      "url": "",
+      "description": "File a durable note about a site you just worked out by hand: the real selector for a custom widget, the hidden step in a checkout, the order a form must be filled in. Stored as prose and replayed to you on the next visit. It is never executed, so describe the technique rather than shipping a script.",
+      "params": [
+        {
+          "name": "url",
+          "type": "string",
+          "required": true,
+          "description": "URL or hostname the note applies to. Defaults to host scope (admin.shopify.com), which is usually what you want. Pass 'domain:example.com' to apply it to every subdomain, or 'global' for a technique true of all sites."
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": true,
+          "description": "One-line summary, e.g. 'Country dropdown is a listbox overlay, not a select'"
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "required": true,
+          "description": "The actual knowledge: what fails, why, and what to do instead."
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "required": false,
+          "description": "Short topic key for grouping, e.g. not_native_select, login, checkout, uploads",
+          "default": "note"
+        },
+        {
+          "name": "tags",
+          "type": "array",
+          "required": false,
+          "description": "Optional freeform tags",
+          "items": {
+            "type": "string"
+          }
+        }
+      ],
+      "returns_description": "{note_id, scope_key, created, observed_count}",
+      "ui_hint": "detail_card"
+    },
+    {
+      "id": "search",
+      "method": "PYTHON",
+      "url": "",
+      "description": "Full-text-ish search across every site note, when you know the symptom but not the site.",
+      "params": [
+        {
+          "name": "query",
+          "type": "string",
+          "required": true,
+          "description": "Text to match against titles, bodies, topics and hostnames"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "description": "Max results (default 20)",
+          "default": "20"
+        }
+      ],
+      "returns_description": "{count, notes[]}",
+      "ui_hint": "list"
+    },
+    {
+      "id": "list_domains",
+      "method": "PYTHON",
+      "url": "",
+      "description": "List every site FERAL has notes about, with note and observation counts.",
+      "params": [],
+      "returns_description": "{count, scopes[]}",
+      "ui_hint": "list"
+    },
+    {
+      "id": "stats",
+      "method": "PYTHON",
+      "url": "",
+      "description": "Size and shape of the site-knowledge store, including how many recurring failures are ready to propose to Tool Genesis.",
+      "params": [],
+      "returns_description": "{db_path, notes, scopes, total_observations, by_kind, genesis_candidates}",
+      "ui_hint": "detail_card"
+    },
+    {
+      "id": "genesis_candidates",
+      "method": "PYTHON",
+      "url": "",
+      "description": "Recurring per-site failures that have been seen enough times to be worth building a real helper for. Returns PROPOSAL TEXT ONLY for a human to review: it does not generate code and does not execute anything. Building an actual tool from one of these must go through Tool Genesis approval.",
+      "params": [
+        {
+          "name": "min_observations",
+          "type": "integer",
+          "required": false,
+          "description": "Minimum times the failure must have been seen (default 3)",
+          "default": "3"
+        }
+      ],
+      "returns_description": "{count, candidates[]} — each candidate carries requires_human_approval=true and auto_execute=false.",
+      "ui_hint": "list"
+    },
+    {
+      "id": "forget",
+      "method": "PYTHON",
+      "url": "",
+      "description": "Delete one site note by id, for when a site changes and the note is now wrong.",
+      "params": [
+        {
+          "name": "note_id",
+          "type": "string",
+          "required": true,
+          "description": "note_id from recall/search"
+        }
+      ],
+      "returns_description": "{forgotten: bool}",
+      "ui_hint": "detail_card"
+    }
+  ],
+  "flows": [],
+  "crons": [],
+  "triggers": [],
+  "permissions": [],
+  "requires_daemon": false,
+  "daemon_node_type": null,
+  "max_calls_per_hour": 600
+}

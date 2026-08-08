@@ -154,6 +154,13 @@ try:
 except ImportError:
     pass
 
+try:
+    # Per-domain browser knowledge (recall/remember). Deliberately NOT part of
+    # skills/impl/browser_use.py: the store must be loadable without a browser.
+    import skills.impl.browser_memory  # noqa: F401 (@register_skill side effect)
+except ImportError:
+    pass
+
 
 # robot_action uses WS_EXECUTE — handled natively by SkillExecutor via the
 # daemon WebSocket, which is the only path that reaches real hardware and
