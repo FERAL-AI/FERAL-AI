@@ -7,6 +7,7 @@ Real browser automation via Chrome DevTools Protocol.
 - ARIA accessibility snapshots for agent-readable page structure
 - Playwright bridge for reliable click/type/fill interactions
 - Screenshot pipeline: resize + compress for VLM analysis
+- Session video recording via CDP screencast + ffmpeg assembly
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import statistics
 import time
 from pathlib import Path
 from typing import Optional, Callable
@@ -28,6 +31,74 @@ CDP_PORT = int(os.getenv("FERAL_CDP_PORT", "9222"))
 CDP_HOST = os.getenv("FERAL_CDP_HOST", "localhost")
 MAX_SCREENSHOT_WIDTH = 1920
 JPEG_QUALITY = 75
+
+# ── Session video recording ──────────────────────────────────────────
+#
+# Recording defaults. JPEG rather than PNG because a screencast of a
+# 1280x800 viewport at 30fps is ~100x larger as PNG and the frames are
+# only ever re-encoded into a lossy video anyway.
+RECORDING_FRAME_QUALITY = 70
+RECORDING_MAX_WIDTH = 1280
+RECORDING_MAX_HEIGHT = 800
+# ~3 minutes at 30fps. The cap exists because Page.screencastFrame has no
+# natural end: a forgotten recording would otherwise fill the user's disk.
+RECORDING_MAX_FRAMES = 5400
+# Chrome's screencast is variable-rate: it emits a frame when the page
+# repaints, not on a clock. A frame held for longer than this is almost
+# always the page sitting idle, and replaying that idle time verbatim
+# makes the video mostly dead air, so it is clamped.
+RECORDING_MAX_FRAME_SECONDS = 5.0
+RECORDING_MIN_FRAME_SECONDS = 1.0 / 60.0
+RECORDING_FALLBACK_FPS = 12.0
+RECORDING_REDACTION_STYLE_ID = "feral-recording-redaction"
+
+# Text scrubbed out of anything a recording persists to disk.
+#
+# The three classes below (email addresses, UUID-shaped identifiers, and
+# explicit tenant/user/object id parameters) are the ones that actually
+# leak from browser recordings, which is the same set that
+# browser-use/browser-harness (MIT) scrubs before exporting a video, in
+# src/browser_harness/video.py and recorder.py. The rules here were
+# written independently against that observation; no code was copied.
+_SENSITIVE_TEXT = re.compile(
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+    r"|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
+    r"|(?:tenant|user|object|account|org)[_-]?id=[^&#\s]+",
+    re.IGNORECASE,
+)
+# Credential-bearing query/fragment params. An OAuth redirect that lands
+# mid-recording would otherwise write a live token into manifest.json.
+_URL_SECRET_PARAMS = re.compile(
+    r"([?&#](?:code|access_token|id_token|refresh_token|token|api_?key"
+    r"|client_secret|client_info|session_state|signature|sig|auth"
+    r"|authorization|password|secret)=)[^&#]*",
+    re.IGNORECASE,
+)
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def redact_recording_text(value: object) -> str:
+    """Scrub secrets and identities out of text bound for a recording manifest.
+
+    Applied unconditionally, not opt-in: a manifest is the part of a
+    recording people paste into a ticket, so it must never be the thing
+    that carries a token or a tenant id out of the machine. Pixel-level
+    masking is separate and opt-in via ``redact_selectors``.
+    """
+    text = str(value or "")
+    text = _URL_SECRET_PARAMS.sub(r"\1[REDACTED]", text)
+    return _SENSITIVE_TEXT.sub("[REDACTED]", text)
+
+
+def safe_recording_name(name: str) -> str:
+    """Reduce a caller-supplied recording name to a single path segment.
+
+    A recording id becomes a directory name, so ``../`` or an absolute
+    path in it would write frames outside the FERAL data home. That is
+    exactly the exposure this feature must not create.
+    """
+    cleaned = _UNSAFE_NAME.sub("-", str(name or "")).strip("-.")
+    return cleaned[:64]
 
 
 class CDPConnection:
@@ -48,17 +119,45 @@ class CDPConnection:
     def connected(self) -> bool:
         return self._connected
 
-    async def connect(self) -> bool:
-        """Connect to Chrome CDP endpoint."""
+    @property
+    def is_page_target(self) -> bool:
+        """True when the socket is attached to a tab rather than the browser.
+
+        ``/json/version`` hands back the *browser* endpoint, and a
+        browser-level socket does not implement the ``Page`` domain at
+        all: ``Page.enable`` comes back as "wasn't found". Anything that
+        needs ``Page.*`` (screencast, printToPDF, captureScreenshot) has
+        to check this rather than trusting ``connected``.
+        """
+        return "/devtools/page/" in (self._page_ws_url or "")
+
+    async def connect(self, prefer_page: bool = False) -> bool:
+        """Connect to Chrome CDP endpoint.
+
+        ``prefer_page`` resolves a tab target first instead of the
+        browser endpoint. It is opt-in so existing callers keep the
+        browser-level socket they already depend on.
+        """
         try:
             import httpx
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"http://{self._host}:{self._port}/json/version",
-                    timeout=5.0,
-                )
-                info = resp.json()
-                self._page_ws_url = info.get("webSocketDebuggerUrl")
+            if prefer_page:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        f"http://{self._host}:{self._port}/json",
+                        timeout=5.0,
+                    )
+                    pages = [t for t in resp.json() if t.get("type") == "page"]
+                    if pages:
+                        self._page_ws_url = pages[0].get("webSocketDebuggerUrl")
+
+            if not self._page_ws_url:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        f"http://{self._host}:{self._port}/json/version",
+                        timeout=5.0,
+                    )
+                    info = resp.json()
+                    self._page_ws_url = info.get("webSocketDebuggerUrl")
 
             if not self._page_ws_url:
                 async with httpx.AsyncClient() as client:
@@ -188,6 +287,9 @@ class BrowserController:
         self._har_context = None
         self._har_prev_page = None
         self._har_path: Optional[Path] = None
+        # Session video recording (CDP screencast) bookkeeping
+        self._recording: Optional[dict] = None
+        self._recording_listener: Optional[Callable[[dict], object]] = None
 
     @property
     def connected(self) -> bool:
@@ -255,7 +357,6 @@ class BrowserController:
     async def _auto_launch_chrome(self) -> bool:
         """Try to launch Chrome/Chromium with remote debugging enabled."""
         import platform
-        import shutil
         system = platform.system()
 
         candidates = []
@@ -770,6 +871,14 @@ class BrowserController:
                 await self.stop_tracing()
             except Exception:
                 pass
+        # Same reasoning for an in-flight screencast: the frames are
+        # already on disk, so flush the manifest rather than leaving a
+        # recording that can never be assembled.
+        if getattr(self, "_recording", None) is not None:
+            try:
+                await self.stop_recording()
+            except Exception:
+                pass
         await self._cdp.disconnect()
         if self._browser:
             try:
@@ -929,6 +1038,641 @@ class BrowserController:
             "size_bytes": out_path.stat().st_size if out_path.exists() else 0,
             "url": download.url,
         }
+
+    # ── Session video recording (CDP screencast) ─────────────────────
+    #
+    # The browser skill could already emit screenshots, a PDF, a
+    # Playwright trace and a HAR, but none of those is a video, so there
+    # was no way to film someone using the brain.
+    #
+    # ``Page.startScreencast`` is the right primitive: Chrome pushes an
+    # encoded frame every time the page repaints, over the CDP socket we
+    # already hold. No screen-capture process, no window-manager
+    # permissions, no second browser.
+    #
+    # It is variable-rate by construction, so frames are persisted with
+    # their capture timestamps and assembled through ffmpeg's concat
+    # demuxer with per-frame durations. Assuming a constant framerate
+    # would speed up idle stretches and slow down bursts, i.e. it would
+    # not show what the user actually saw.
+
+    @property
+    def _recordings_root(self) -> Path:
+        """Root for session recordings, under the FERAL data home.
+
+        Recordings are the most sensitive artefact this skill produces:
+        every pixel the operator saw, including anything already logged
+        in. They therefore never leave the user's own data directory,
+        and the directory is 0700 so other accounts on a shared machine
+        cannot read them.
+        """
+        from config.loader import feral_data_home
+        root = feral_data_home() / "browser" / "recordings"
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(root, 0o700)
+        except OSError:
+            # Non-POSIX filesystems reject the mode; the path is still
+            # inside the user's home, which is the load-bearing part.
+            pass
+        return root
+
+    async def start_recording(
+        self,
+        *,
+        name: str = "",
+        quality: int = RECORDING_FRAME_QUALITY,
+        max_width: int = RECORDING_MAX_WIDTH,
+        max_height: int = RECORDING_MAX_HEIGHT,
+        every_nth_frame: int = 1,
+        max_frames: int = RECORDING_MAX_FRAMES,
+        redact_selectors: Optional[list] = None,
+    ) -> dict:
+        """Start recording the current tab to JPEG frames on disk.
+
+        ``redact_selectors`` is opt-in pixel masking: each CSS selector is
+        blurred out in the live page for the duration of the recording, so
+        the sensitive region never reaches a frame at all. Post-hoc masking
+        was rejected because it leaves the unmasked pixels on disk in the
+        meantime.
+        """
+        if self._recording is not None:
+            return {
+                "success": False,
+                "error": f"Already recording {self._recording['recording_id']}. Call stop_recording first.",
+            }
+        cdp, owned = await self._screencast_cdp()
+        if cdp is None:
+            return {
+                "success": False,
+                "error": (
+                    "CDP not connected to a page target. Video recording needs Chrome "
+                    f"started with --remote-debugging-port={CDP_PORT} and at least one "
+                    "open tab."
+                ),
+            }
+
+        recording_id = safe_recording_name(name) or (
+            f"rec-{time.strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:6]}"
+        )
+        directory = self._recordings_root / recording_id
+        if directory.exists():
+            if owned:
+                await cdp.disconnect()
+            return {"success": False, "error": f"Recording {recording_id} already exists at {directory}."}
+        frames_dir = directory / "frames"
+        frames_dir.mkdir(parents=True)
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            pass
+
+        page = await self._page_identity(cdp)
+        selectors = [str(s) for s in (redact_selectors or []) if str(s).strip()]
+        masked = await self._apply_recording_mask(cdp, selectors) if selectors else False
+
+        state = {
+            "recording_id": recording_id,
+            "directory": directory,
+            "frames_dir": frames_dir,
+            "cdp": cdp,
+            "owns_cdp": owned,
+            "started_at": time.time(),
+            "next_index": 1,
+            "frames": [],
+            "max_frames": max(1, int(max_frames)),
+            "truncated": False,
+            "write_errors": 0,
+            "ack_errors": 0,
+            "redact_selectors": selectors,
+            "mask_applied": masked,
+            "start_url": redact_recording_text(page.get("url", "")),
+            "start_title": redact_recording_text(page.get("title", "")),
+            "quality": int(quality),
+        }
+        self._recording = state
+
+        listener = self._on_screencast_frame
+        cdp.add_event_listener(listener)
+        self._recording_listener = listener
+
+        try:
+            await cdp.send_command("Page.enable")
+            await cdp.send_command("Page.startScreencast", {
+                "format": "jpeg",
+                "quality": max(1, min(int(quality), 100)),
+                "maxWidth": max(1, int(max_width)),
+                "maxHeight": max(1, int(max_height)),
+                "everyNthFrame": max(1, int(every_nth_frame)),
+            })
+        except Exception as e:
+            self._recording = None
+            self._detach_recording_listener(cdp)
+            if masked:
+                await self._clear_recording_mask(cdp)
+            if owned:
+                await cdp.disconnect()
+            return {"success": False, "error": f"Page.startScreencast failed: {e}"}
+
+        return {
+            "success": True,
+            "recording_id": recording_id,
+            "directory": str(directory),
+            "max_frames": state["max_frames"],
+            "redact_selectors": selectors,
+            "mask_applied": masked,
+            "start_url": state["start_url"],
+            "message": (
+                "Recording started. Frames land under the FERAL data home; "
+                "call stop_recording to assemble the video."
+            ),
+        }
+
+    async def stop_recording(
+        self,
+        *,
+        assemble: bool = True,
+        output_format: str = "mp4",
+    ) -> dict:
+        """Stop the screencast, write the manifest, and assemble the video."""
+        state = self._recording
+        if state is None:
+            return {"success": False, "error": "No active recording."}
+
+        # Clear the handle first so late frames are dropped instead of
+        # racing the manifest write.
+        self._recording = None
+        cdp = state["cdp"]
+        try:
+            await cdp.send_command("Page.stopScreencast")
+        except Exception as e:
+            logger.warning("Page.stopScreencast failed for %s: %s", state["recording_id"], e)
+        self._detach_recording_listener(cdp)
+        # Frame writes run as tasks off the CDP receive loop, so give the
+        # ones already in flight a moment to land before counting them.
+        await asyncio.sleep(0.25)
+        if state.get("mask_applied"):
+            await self._clear_recording_mask(cdp)
+        if state.get("owns_cdp"):
+            await cdp.disconnect()
+
+        state["stopped_at"] = time.time()
+        manifest = self._build_manifest(state)
+        manifest_path = state["directory"] / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+        result = {
+            "success": True,
+            "recording_id": state["recording_id"],
+            "directory": str(state["directory"]),
+            "manifest_path": str(manifest_path),
+            "frame_count": len(manifest["frames"]),
+            "duration_seconds": manifest["duration_seconds"],
+            "truncated": state["truncated"],
+            "write_errors": state["write_errors"],
+            "ack_errors": state["ack_errors"],
+            "video_path": "",
+            "degraded": "",
+        }
+        if state["truncated"]:
+            logger.warning(
+                "Recording %s hit the %d-frame cap; the tail of the session was not captured.",
+                state["recording_id"], state["max_frames"],
+            )
+            result["degraded"] = "frame_cap_reached"
+
+        if not assemble:
+            return result
+
+        assembled = await self.assemble_recording(
+            recording_id=state["recording_id"], output_format=output_format
+        )
+        result["video_path"] = assembled.get("video_path", "")
+        result["assembled"] = assembled
+        if assembled.get("degraded"):
+            result["degraded"] = assembled["degraded"]
+        if not assembled.get("success"):
+            result["error"] = assembled.get("error", "")
+        return result
+
+    async def assemble_recording(
+        self,
+        recording_id: str,
+        *,
+        output_format: str = "mp4",
+        overwrite: bool = False,
+    ) -> dict:
+        """Assemble a stored recording's frames into a video file.
+
+        Split out from ``stop_recording`` so a recording captured on a
+        machine without ffmpeg is not lost: the frames and manifest stay
+        on disk and this can be re-run after ffmpeg is installed.
+        """
+        recording_id = safe_recording_name(recording_id)
+        if not recording_id:
+            return {"success": False, "error": "recording_id is required.", "degraded": ""}
+        directory = self._recordings_root / recording_id
+        manifest_path = directory / "manifest.json"
+        if not manifest_path.is_file():
+            return {
+                "success": False,
+                "error": f"No recording manifest at {manifest_path}.",
+                "degraded": "",
+            }
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            return {"success": False, "error": f"Unreadable manifest: {e}", "degraded": ""}
+
+        frames = manifest.get("frames") or []
+        if not frames:
+            return {
+                "success": False,
+                "error": f"Recording {recording_id} captured 0 frames; nothing to assemble.",
+                "degraded": "",
+            }
+
+        fmt = str(output_format or "mp4").lower()
+        if fmt not in ("mp4", "webm"):
+            return {"success": False, "error": "output_format must be mp4 or webm.", "degraded": ""}
+        output = directory / f"{recording_id}.{fmt}"
+        if output.exists() and not overwrite:
+            return {
+                "success": True,
+                "video_path": str(output),
+                "size_bytes": output.stat().st_size,
+                "frame_count": len(frames),
+                "duration_seconds": manifest.get("duration_seconds", 0.0),
+                "degraded": "",
+                "message": "Video already assembled; pass overwrite to rebuild.",
+            }
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            # Never pretend a video exists. The frames are real work and
+            # stay on disk, but the caller has to know why there is no
+            # file to play and what to install.
+            logger.warning(
+                "ffmpeg not found on PATH. Recording %s is preserved as %d JPEG frames "
+                "in %s but no video could be assembled. Install ffmpeg "
+                "(macOS: `brew install ffmpeg`) and re-run assemble_recording.",
+                recording_id, len(frames), directory / "frames",
+            )
+            return {
+                "success": False,
+                "degraded": "ffmpeg_missing",
+                "missing_dependency": "ffmpeg",
+                "video_path": "",
+                "frames_dir": str(directory / "frames"),
+                "frame_count": len(frames),
+                "duration_seconds": manifest.get("duration_seconds", 0.0),
+                "error": (
+                    "ffmpeg is not installed, so the frames could not be assembled into a "
+                    "video. The recording is intact at "
+                    f"{directory}; install ffmpeg (macOS: `brew install ffmpeg`, "
+                    "Debian/Ubuntu: `apt install ffmpeg`) and call assemble_recording again."
+                ),
+            }
+
+        concat_path = directory / "frames.txt"
+        try:
+            concat_path.write_text(self._build_concat_script(directory, frames), encoding="utf-8")
+        except OSError as e:
+            return {"success": False, "error": f"Could not write concat script: {e}", "degraded": ""}
+
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "concat", "-safe", "0", "-i", str(concat_path),
+            # libx264 refuses odd dimensions under yuv420p, and Chrome
+            # happily hands back an odd-height viewport.
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-fps_mode", "vfr", "-pix_fmt", "yuv420p",
+        ]
+        if fmt == "mp4":
+            command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                        "-movflags", "+faststart"]
+        else:
+            command += ["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "34"]
+        command.append(str(output))
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _out, err = await asyncio.wait_for(proc.communicate(), timeout=600)
+        except asyncio.TimeoutError:
+            logger.warning("ffmpeg timed out assembling recording %s", recording_id)
+            return {
+                "success": False,
+                "degraded": "ffmpeg_timeout",
+                "video_path": "",
+                "error": "ffmpeg did not finish within 600s.",
+            }
+        except OSError as e:
+            logger.warning("ffmpeg could not be executed for recording %s: %s", recording_id, e)
+            return {
+                "success": False,
+                "degraded": "ffmpeg_failed",
+                "missing_dependency": "ffmpeg",
+                "video_path": "",
+                "error": f"ffmpeg could not be executed: {e}",
+            }
+
+        if proc.returncode != 0 or not output.exists():
+            detail = (err or b"").decode("utf-8", "replace").strip()[-800:]
+            logger.warning(
+                "ffmpeg exited %s assembling recording %s: %s",
+                proc.returncode, recording_id, detail,
+            )
+            return {
+                "success": False,
+                "degraded": "ffmpeg_failed",
+                "video_path": "",
+                "frames_dir": str(directory / "frames"),
+                "frame_count": len(frames),
+                "error": f"ffmpeg exited {proc.returncode}: {detail}",
+            }
+
+        return {
+            "success": True,
+            "degraded": "",
+            "recording_id": recording_id,
+            "video_path": str(output),
+            "size_bytes": output.stat().st_size,
+            "frame_count": len(frames),
+            "duration_seconds": manifest.get("duration_seconds", 0.0),
+            "format": fmt,
+        }
+
+    async def list_recordings(self, limit: int = 20) -> dict:
+        """List stored session recordings, newest first."""
+        root = self._recordings_root
+        found = []
+        for child in root.iterdir():
+            manifest_path = child / "manifest.json"
+            if not child.is_dir() or not manifest_path.is_file():
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            videos = sorted(
+                str(p) for p in child.iterdir()
+                if p.suffix.lower() in (".mp4", ".webm")
+            )
+            found.append({
+                "recording_id": manifest.get("recording_id", child.name),
+                "directory": str(child),
+                "started_at": manifest.get("started_at"),
+                "duration_seconds": manifest.get("duration_seconds", 0.0),
+                "frame_count": len(manifest.get("frames") or []),
+                "start_url": manifest.get("start_url", ""),
+                "videos": videos,
+            })
+        found.sort(key=lambda item: item.get("started_at") or 0, reverse=True)
+        bounded = max(1, min(int(limit or 20), 200))
+        return {"success": True, "recordings": found[:bounded], "total": len(found), "root": str(root)}
+
+    async def _on_screencast_frame(self, msg: dict) -> None:
+        """Persist one screencast frame and acknowledge it.
+
+        The ack is the whole trick. Chrome buffers only a couple of
+        unacknowledged screencast frames and then stops emitting
+        entirely, so a recorder that skips ``Page.screencastFrameAck``
+        captures the first few frames and nothing else. The ack is
+        therefore sent before any work that can fail or block.
+        """
+        if msg.get("method") != "Page.screencastFrame":
+            return
+        state = self._recording
+        if state is None:
+            return
+        params = msg.get("params") or {}
+        session_id = params.get("sessionId")
+
+        over_cap = state["next_index"] > state["max_frames"]
+        if over_cap:
+            state["truncated"] = True
+            index = 0
+        else:
+            index = state["next_index"]
+            state["next_index"] += 1
+
+        if session_id is not None:
+            try:
+                await state["cdp"].send_command(
+                    "Page.screencastFrameAck", {"sessionId": session_id}, timeout=15.0
+                )
+            except Exception as e:
+                state["ack_errors"] += 1
+                logger.warning(
+                    "screencastFrameAck failed for %s (frames will stop arriving): %s",
+                    state["recording_id"], e,
+                )
+        if over_cap:
+            return
+
+        filename = f"{index:06d}.jpg"
+        try:
+            data = base64.b64decode(params.get("data") or "")
+        except Exception:
+            state["write_errors"] += 1
+            return
+        if not data:
+            state["write_errors"] += 1
+            return
+        try:
+            await asyncio.to_thread((state["frames_dir"] / filename).write_bytes, data)
+        except OSError as e:
+            state["write_errors"] += 1
+            logger.warning("Could not write frame %s of %s: %s", filename, state["recording_id"], e)
+            return
+
+        meta = params.get("metadata") or {}
+        timestamp = meta.get("timestamp")
+        state["frames"].append({
+            "index": index,
+            "file": filename,
+            # Chrome reports the capture time in epoch seconds. Falling
+            # back to arrival time keeps ordering sane on the CDP stubs
+            # and Chrome builds that omit it.
+            "timestamp": float(timestamp) if isinstance(timestamp, (int, float)) else time.time(),
+            "device_width": meta.get("deviceWidth"),
+            "device_height": meta.get("deviceHeight"),
+            "scroll_offset_y": meta.get("scrollOffsetY"),
+            "size_bytes": len(data),
+        })
+
+    async def _screencast_cdp(self) -> tuple:
+        """Return (connection, we_opened_it) for a page-attached CDP socket.
+
+        The controller's own socket usually comes from ``/json/version``,
+        which is the browser-level target, and the browser target does
+        not implement the ``Page`` domain at all: ``Page.startScreencast`` on it
+        fails with "wasn't found". Rather than change what every other
+        endpoint connects to, recording opens its own short-lived socket
+        against a tab and closes it on stop. CDP allows several clients
+        per target, so this does not disturb the existing session.
+        """
+        existing = self._cdp
+        if getattr(existing, "connected", False) and getattr(existing, "is_page_target", False):
+            return existing, False
+        host = getattr(existing, "_host", CDP_HOST)
+        port = getattr(existing, "_port", CDP_PORT)
+        page_cdp = CDPConnection(host=host, port=port)
+        try:
+            if await page_cdp.connect(prefer_page=True) and page_cdp.is_page_target:
+                return page_cdp, True
+        except Exception as e:
+            logger.warning("Could not open a page-level CDP socket for recording: %s", e)
+        try:
+            await page_cdp.disconnect()
+        except Exception:
+            pass
+        return None, False
+
+    def _detach_recording_listener(self, cdp) -> None:
+        listener = self._recording_listener
+        self._recording_listener = None
+        if listener is None:
+            return
+        try:
+            cdp._event_listeners.remove(listener)
+        except (ValueError, AttributeError):
+            pass
+
+    @staticmethod
+    async def _page_identity(cdp) -> dict:
+        """URL and title of the tab being recorded, read over ``cdp``."""
+        try:
+            result = await cdp.send_command("Runtime.evaluate", {
+                "expression": "JSON.stringify({url: location.href, title: document.title})",
+                "returnByValue": True,
+            })
+            value = result.get("result", {}).get("value")
+            return json.loads(value) if isinstance(value, str) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    async def _apply_recording_mask(cdp, selectors: list) -> bool:
+        """Blur the given selectors in the live page for the recording.
+
+        Masking happens in the page, not in post-production, because a
+        post-hoc mask still leaves the unmasked pixels sitting in
+        ``frames/`` in the meantime.
+        """
+        css = ", ".join(selectors) + " { filter: blur(14px) !important; }"
+        script = (
+            "(function(){"
+            f"var id = {json.dumps(RECORDING_REDACTION_STYLE_ID)};"
+            "var old = document.getElementById(id); if (old) old.remove();"
+            "var el = document.createElement('style'); el.id = id;"
+            f"el.textContent = {json.dumps(css)};"
+            "document.documentElement.appendChild(el); return true;"
+            "})()"
+        )
+        try:
+            await cdp.send_command("Runtime.evaluate", {
+                "expression": script, "returnByValue": True,
+            })
+            return True
+        except Exception as e:
+            logger.warning("Recording redaction mask could not be applied: %s", e)
+            return False
+
+    @staticmethod
+    async def _clear_recording_mask(cdp) -> None:
+        script = (
+            "(function(){"
+            f"var el = document.getElementById({json.dumps(RECORDING_REDACTION_STYLE_ID)});"
+            "if (el) el.remove(); return true;"
+            "})()"
+        )
+        try:
+            await cdp.send_command("Runtime.evaluate", {
+                "expression": script, "returnByValue": True,
+            })
+        except Exception as e:
+            logger.warning("Recording redaction mask could not be removed: %s", e)
+
+    def _build_manifest(self, state: dict) -> dict:
+        """Build the on-disk manifest, ordered and with per-frame offsets."""
+        frames = sorted(state["frames"], key=lambda f: f["index"])
+        base = frames[0]["timestamp"] if frames else state["started_at"]
+        for frame in frames:
+            frame["offset_seconds"] = round(max(0.0, frame["timestamp"] - base), 6)
+        durations = self._frame_durations(frames)
+        for frame, duration in zip(frames, durations):
+            frame["duration_seconds"] = duration
+        return {
+            "schema_version": 1,
+            "recording_id": state["recording_id"],
+            "started_at": round(state["started_at"], 6),
+            "stopped_at": round(state.get("stopped_at", time.time()), 6),
+            "duration_seconds": round(sum(durations), 3),
+            "frame_count": len(frames),
+            "truncated": state["truncated"],
+            "write_errors": state["write_errors"],
+            "ack_errors": state["ack_errors"],
+            "quality": state["quality"],
+            "start_url": state["start_url"],
+            "start_title": state["start_title"],
+            "redact_selectors": state["redact_selectors"],
+            "mask_applied": state["mask_applied"],
+            "frames": frames,
+        }
+
+    @staticmethod
+    def _frame_durations(frames: list) -> list:
+        """Per-frame hold times derived from real capture timestamps.
+
+        Screencast frames arrive when the page repaints, so a fixed
+        framerate would compress the pauses and stretch the bursts. The
+        clamps keep a single stalled frame from becoming minutes of a
+        frozen picture, and keep a duplicate timestamp from producing a
+        zero-length entry ffmpeg would drop.
+        """
+        if not frames:
+            return []
+        durations = []
+        for current, following in zip(frames, frames[1:]):
+            gap = float(following["timestamp"]) - float(current["timestamp"])
+            durations.append(round(
+                min(max(gap, RECORDING_MIN_FRAME_SECONDS), RECORDING_MAX_FRAME_SECONDS), 6
+            ))
+        if durations:
+            tail = statistics.median(durations)
+        else:
+            tail = 1.0 / RECORDING_FALLBACK_FPS
+        durations.append(round(
+            min(max(tail, RECORDING_MIN_FRAME_SECONDS), RECORDING_MAX_FRAME_SECONDS), 6
+        ))
+        return durations
+
+    @staticmethod
+    def _build_concat_script(directory: Path, frames: list) -> str:
+        """Render an ffmpeg concat demuxer script with per-frame durations.
+
+        Absolute paths because the concat demuxer resolves relative
+        entries against the script's own directory, which silently
+        breaks the moment a recording is moved.
+        """
+        lines = ["ffconcat version 1.0"]
+        for frame in frames:
+            path = str(directory / "frames" / frame["file"]).replace("'", r"'\''")
+            lines.append(f"file '{path}'")
+            duration = frame.get("duration_seconds") or (1.0 / RECORDING_FALLBACK_FPS)
+            lines.append(f"duration {float(duration):.6f}")
+        # The concat demuxer ignores the duration of the final entry
+        # unless the file is repeated, which otherwise truncates the last
+        # frame to nothing.
+        if frames:
+            last = str(directory / "frames" / frames[-1]["file"]).replace("'", r"'\''")
+            lines.append(f"file '{last}'")
+        return "\n".join(lines) + "\n"
 
     # ── Cookie / Session Persistence ─────────────────────────────────
 
@@ -1311,6 +2055,27 @@ def get_browser_skill_manifest() -> dict:
             ]},
             {"id": "set_download_path", "description": "Configure browser file download directory", "params": [
                 {"name": "path", "type": "string", "required": False, "description": "Download directory path (default: ~/.feral/browser/downloads)"},
+            ]},
+            {"id": "start_recording", "description": "Start recording the current tab to video via CDP screencast. Frames are stored under the FERAL data home; call stop_recording to assemble.", "params": [
+                {"name": "name", "type": "string", "required": False, "description": "Recording id (default: timestamped)"},
+                {"name": "quality", "type": "integer", "required": False, "description": "JPEG frame quality 1-100 (default 70)"},
+                {"name": "max_width", "type": "integer", "required": False, "description": "Max frame width in px (default 1280)"},
+                {"name": "max_height", "type": "integer", "required": False, "description": "Max frame height in px (default 800)"},
+                {"name": "every_nth_frame", "type": "integer", "required": False, "description": "Capture every Nth repaint (default 1)"},
+                {"name": "max_frames", "type": "integer", "required": False, "description": "Frame cap before truncation (default 5400)"},
+                {"name": "redact_selectors", "type": "array", "required": False, "description": "CSS selectors to blur in the page for the whole recording, so sensitive regions never reach a frame"},
+            ]},
+            {"id": "stop_recording", "description": "Stop the active recording, write its manifest, and assemble the video. Reports a `degraded` reason instead of a video path when ffmpeg is missing.", "params": [
+                {"name": "assemble", "type": "boolean", "required": False, "description": "Assemble the video now (default true)"},
+                {"name": "output_format", "type": "string", "required": False, "description": "mp4 or webm (default mp4)"},
+            ]},
+            {"id": "assemble_recording", "description": "Assemble a stored recording's frames into a video at real capture speed. Re-runnable after installing ffmpeg.", "params": [
+                {"name": "recording_id", "type": "string", "required": True, "description": "Recording id from start_recording/list_recordings"},
+                {"name": "output_format", "type": "string", "required": False, "description": "mp4 or webm (default mp4)"},
+                {"name": "overwrite", "type": "boolean", "required": False, "description": "Rebuild an existing video file"},
+            ]},
+            {"id": "list_recordings", "description": "List stored session recordings, newest first", "params": [
+                {"name": "limit", "type": "integer", "required": False, "description": "Max recordings to return (default 20)"},
             ]},
         ],
     }
