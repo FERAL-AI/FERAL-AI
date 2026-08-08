@@ -218,12 +218,15 @@ class SkillRegistry:
                 # it stayed quiet only because the skill was never registered.
                 #
                 # So do not create the job. The manifest keeps its trigger and
-                # this becomes a no-op that says why, which is recoverable the
-                # moment a trigger bus exists. Creating a poll that ignores the
-                # condition is not a step toward that.
+                # this becomes a no-op that says why. Conditions ARE evaluated
+                # now, by agents/trigger_conditions.py on the ProactiveEngine's
+                # 15s tick, which notifies and does not dispatch the declared
+                # action. Reviving the 1m cron poll would re-create the exact
+                # unconditional-firing shape, so it stays dead.
                 logger.info(
                     "Skill %s declares trigger %r, which is not auto-created: "
-                    "no evaluator exists for trigger conditions, and a 1m poll "
+                    "conditions are evaluated on the proactive loop "
+                    "(agents/trigger_conditions.py), not by a 1m poll that "
                     "would run the action unconditionally",
                     manifest.skill_id, event,
                 )

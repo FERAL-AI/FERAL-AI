@@ -23,11 +23,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Awaitable, Optional
 
@@ -97,8 +96,13 @@ class ProactiveEngine:
         cost_guard=None,
         cost_model: str = "gpt-4o-mini",
         cron_service=None,
+        skill_registry=None,
     ):
         self._perception = perception
+        # Read-only. Source of manifest TriggerDefinitions for
+        # ``_evaluate_manifest_triggers``. Nothing on this path executes a
+        # skill: see that method's docstring for why.
+        self._skill_registry = skill_registry
         # Read-only, for the stalled-routine check. Optional so every existing
         # construction of this engine keeps working.
         self._cron_service = cron_service
@@ -518,6 +522,16 @@ class ProactiveEngine:
             except Exception as e:
                 logger.debug("Baseline check failed: %s", e)
 
+        # --- Manifest-declared triggers ---
+        # Contained so one malformed manifest cannot cost the tick its
+        # remaining checks (stalled routines, delivery). Logged at warning,
+        # never at debug: a trigger evaluator that has silently stopped
+        # evaluating is indistinguishable from a gate that always passes.
+        try:
+            self._evaluate_manifest_triggers(frames, messages, now)
+        except Exception as exc:
+            logger.warning("Manifest trigger evaluation failed: %s", exc, exc_info=True)
+
         # --- Routines that have stopped working ---
         self._check_stalled_routines(messages)
 
@@ -798,6 +812,131 @@ class ProactiveEngine:
             voice_text=f"{name} has failed {runs} times in a row.",
             action="Show routines",
         ))
+
+    # Namespace for manifest-declared trigger ids, so they can never collide
+    # with the hardcoded trigger ids above (a skill is free to call its
+    # trigger "hr_elevated") and so a fired alert names its origin.
+    MANIFEST_TRIGGER_PREFIX = "manifest"
+
+    def _manifest_trigger_defs(self) -> list[tuple[str, Any]]:
+        """(skill_id, TriggerDefinition) for every trusted manifest trigger.
+
+        Trust clamp, same rule as skills/result_budget.py: only manifests
+        that ship in feral-core/skills/manifests/ are honoured. A manifest
+        is untrusted input, and a marketplace skill that declares
+        `condition: "biometric.heart_rate_bpm > 0"` would otherwise get a
+        notification every cooldown forever, which is the spam half of the
+        4,766-run incident even with no action attached.
+        """
+        registry = self._skill_registry
+        if registry is None:
+            return []
+        try:
+            from skills.result_budget import builtin_skill_ids
+            trusted = builtin_skill_ids()
+        except Exception as exc:
+            logger.warning("manifest triggers disabled, trust check failed: %s", exc)
+            return []
+
+        out: list[tuple[str, Any]] = []
+        for skill_id, manifest in (getattr(registry, "skills", {}) or {}).items():
+            if skill_id not in trusted:
+                continue
+            for tdef in (getattr(manifest, "triggers", None) or []):
+                if getattr(tdef, "condition", ""):
+                    out.append((skill_id, tdef))
+        return out
+
+    def _evaluate_manifest_triggers(self, frames: list, messages: list, now: float) -> None:
+        """Evaluate manifest TriggerDefinitions and NOTIFY. Never execute.
+
+        This is the reader that never existed. Manifests have declared
+        `triggers[].condition` since the schema was written, and no code
+        anywhere read those strings, so skills/registry.py turned each one
+        into a JobType.TRIGGERED routine polling "every 1m" with the
+        condition parked in a payload nobody looked at. The action ran
+        unconditionally: 4,766 runs each on two routines, one of them a
+        Telegram send gated on a stress reading that was never checked.
+
+        What fires here is a ProactiveMessage and nothing else.
+        `action_flow_id` / `action_endpoint_id` are reported in the body
+        and deliberately NOT dispatched: `action_payload` stays empty so
+        `_deliver` skips `_execute_automation` entirely, and this method
+        imports no executor. Connecting a brand-new evaluator straight to
+        a send, with no soak time, is how the original incident happened.
+        Wiring the action is a separate change that has to go through the
+        cron/surface safety pre-flight in api/server.py.
+        """
+        defs = self._manifest_trigger_defs()
+        if not defs:
+            return
+
+        from agents.trigger_conditions import (
+            build_biometric_namespace,
+            evaluate_condition,
+        )
+
+        namespace = None
+        for skill_id, tdef in defs:
+            raw_id = getattr(tdef, "id", "") or "unnamed"
+            trigger_id = f"{self.MANIFEST_TRIGGER_PREFIX}:{skill_id}:{raw_id}"
+
+            # Honour the manifest's own cooldown_seconds. setdefault (not
+            # assignment) so record_dismiss's exponential back-off is not
+            # reset to the manifest value on the next tick.
+            cooldown = getattr(tdef, "cooldown_seconds", None)
+            try:
+                cooldown = float(cooldown)
+            except (TypeError, ValueError):
+                cooldown = float(self._nag_cooldown_s)
+            if cooldown <= 0:
+                cooldown = float(self._nag_cooldown_s)
+            self._trigger_states.setdefault(trigger_id, TriggerState(cooldown_s=cooldown))
+
+            if not self._can_fire(trigger_id):
+                continue
+
+            if namespace is None:
+                namespace = build_biometric_namespace(
+                    frames=frames,
+                    baseline_engine=self._baseline,
+                    now=now,
+                    fresh_window_s=_FRESH_WINDOW_S,
+                )
+
+            result = evaluate_condition(
+                getattr(tdef, "condition", ""),
+                namespace,
+                trigger_id=trigger_id,
+            )
+            if not result.satisfied:
+                continue
+
+            action = (
+                getattr(tdef, "action_flow_id", None)
+                or getattr(tdef, "action_endpoint_id", None)
+                or "none declared"
+            )
+            logger.info(
+                "manifest trigger fired (observation only): %s condition=%r seen=%s action=%s",
+                trigger_id, result.condition, result.describe(), action,
+            )
+            messages.append(ProactiveMessage(
+                trigger_id=trigger_id,
+                priority=Priority.IMPORTANT,
+                title=f"Trigger matched: {raw_id}",
+                body=(
+                    f"The '{raw_id}' trigger declared by skill '{skill_id}' matched.\n"
+                    f"Condition: {result.condition}\n"
+                    f"Readings: {result.describe()}\n"
+                    f"Declared action: {action}. It was NOT run. Manifest "
+                    "triggers are evaluation and notification only."
+                ),
+                voice_text=(
+                    f"A condition from your {skill_id} skill just matched: "
+                    f"{result.describe()}."
+                ),
+            ))
 
     def _can_fire(self, trigger_id: str) -> bool:
         state = self._trigger_states.get(trigger_id)

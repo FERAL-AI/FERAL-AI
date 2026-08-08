@@ -1976,6 +1976,12 @@ class BrainState:
                 # failing for weeks with nobody told. CronService is created
                 # earlier in boot than this.
                 cron_service=self.cron_service,
+                # Read-only source of manifest `triggers[].condition`. Those
+                # strings had no reader anywhere in the tree, which is why
+                # they became unconditional 1m polls. The engine evaluates
+                # them against the biometric namespace and notifies; it does
+                # not dispatch the declared action.
+                skill_registry=self.skill_registry,
             )
 
             async def _proactive_delivery(msg):

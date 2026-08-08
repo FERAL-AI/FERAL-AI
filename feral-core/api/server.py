@@ -941,8 +941,15 @@ def execute_routine_job(job):
         # So the action does not fire while the gate is unenforceable. Recording
         # this as "skipped" with the condition attached keeps the routine visible
         # instead of deleting it, and the run history now says what is actually
-        # happening. Evaluating conditions needs a biometric trigger bus, which
-        # is its own change.
+        # happening.
+        #
+        # Conditions are evaluated as of agents/trigger_conditions.py, on the
+        # ProactiveEngine's 15s tick, and that path notifies only. This refusal
+        # stays: legacy TRIGGERED rows still carry cron_expr "every 1m" with no
+        # evaluated gate at fire time, and connecting an evaluator that has had
+        # no soak time to a send is the incident above. Any future wiring of the
+        # declared action must go through the surface="cron" pre-flight below,
+        # which auto_confirm may not waive.
         trigger_condition = payload.get("condition")
         # JobType subclasses str, but str(JobType.TRIGGERED) is
         # "JobType.TRIGGERED", not "triggered". Compare the value, and unwrap
