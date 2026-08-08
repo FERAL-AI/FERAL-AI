@@ -17,7 +17,6 @@ Multiple analysis modes:
 """
 
 from __future__ import annotations
-import base64
 import json
 import logging
 import os
@@ -97,6 +96,10 @@ class SceneAnalyzer:
         self._cache: dict[str, dict] = {}
         self._history: dict[str, list[dict]] = {}
         self._max_history = 5
+        # Set once per model the first time we have to salvage a prose
+        # reply, so the "this VLM ignores the JSON contract" warning is
+        # logged loudly once instead of every ``_cooldown`` seconds.
+        self._prose_fallback_warned: set[str] = set()
 
     def _init_vlm_client(self):
         """Initialize a dedicated VLM client if a separate provider is configured."""
@@ -171,14 +174,33 @@ class SceneAnalyzer:
         try:
             result_text = await self._call_vlm(messages)
             if not result_text:
+                # Was a bare ``return None``. An empty reply is how a
+                # dead/misconfigured VLM presents (the shared LLM's
+                # failover chain exhausting on 401s returns "" rather
+                # than raising), and swallowing it silently is what let
+                # the screen pipeline go quiet for days while every log
+                # line still said the loop was running.
+                logger.warning(
+                    "Scene [%s] [%s]: VLM returned an empty reply (%s), "
+                    "no observation produced",
+                    mode, node_id, self._describe_vlm(),
+                )
                 return None
 
             result = self._parse_json(result_text)
+            if result is None:
+                result = self._salvage_prose(result_text, mode)
             if result:
                 self._cache[node_id] = result
                 self._push_history(node_id, result)
                 desc = result.get("scene_description", result.get("primary_content", "?"))
                 logger.info(f"Scene [{mode}] [{node_id}]: {str(desc)[:60]}")
+            else:
+                logger.warning(
+                    "Scene [%s] [%s]: VLM reply was neither JSON nor usable "
+                    "prose (%s), no observation produced",
+                    mode, node_id, self._describe_vlm(),
+                )
             return result
 
         except Exception as e:
@@ -364,6 +386,66 @@ class SceneAnalyzer:
         except json.JSONDecodeError:
             logger.debug("VLM returned non-JSON scene description")
             return None
+
+    def _describe_vlm(self) -> str:
+        """Human-readable name of whatever actually served the call."""
+        if self._vlm_client:
+            return f"{self._vlm_client['type']}/{self._vlm_client.get('model', '?')}"
+        return "shared LLM provider"
+
+    def _salvage_prose(self, text: str, mode: str) -> Optional[dict]:
+        """Recover a usable observation from a VLM that ignored the JSON contract.
+
+        Every prompt in this module ends with "Return ONLY valid JSON",
+        and small local VLMs simply do not comply. ``moondream`` served
+        from Ollama answers the scene prompt with a paragraph of prose;
+        ``_parse_json`` then returned None, ``analyze_frame`` returned
+        None, and ScreenLoop treated a perfectly good caption as "no
+        observation". ~9,500 screen episodes stopped dead the day the
+        install switched ``vision.provider`` to ollama/moondream, with
+        the only trace a debug-level "VLM returned non-JSON" line.
+
+        The caption itself is exactly what the consumers want, so keep
+        it rather than discarding it. The structured extras (objects,
+        text, counts) genuinely aren't available from a prose reply, so
+        they come back empty instead of invented.
+        """
+        cleaned = (text or "").strip()
+        if len(cleaned) < 8:
+            # Too short to be a description. A stray "{}", "null" or a
+            # truncated token is not an observation.
+            return None
+        if cleaned[0] in "{[":
+            # Looks like it was MEANT to be JSON and came back malformed
+            # or truncated. Salvaging that as a caption would put raw
+            # braces into episodic memory, so refuse it.
+            return None
+
+        model = self._describe_vlm()
+        if model not in self._prose_fallback_warned:
+            self._prose_fallback_warned.add(model)
+            logger.warning(
+                "VLM %s does not honour the JSON contract; using its prose "
+                "reply as scene_description and leaving structured fields "
+                "empty. Switch vision.model to a JSON-capable VLM to get "
+                "detected_objects/text_in_scene back.",
+                model,
+            )
+
+        salvaged: dict = {
+            "scene_description": cleaned,
+            "detected_objects": [],
+            "text_in_scene": [],
+            "prose_fallback": True,
+        }
+        if mode == "ocr":
+            salvaged["primary_content"] = cleaned
+        if mode == "query":
+            # ``_analyze_scene_background`` reads ``answer`` first in
+            # query mode, so populate it or the reply reaches nobody.
+            salvaged["answer"] = cleaned
+            salvaged["confidence"] = 0.5
+        return salvaged
 
     def _push_history(self, node_id: str, result: dict):
         if node_id not in self._history:

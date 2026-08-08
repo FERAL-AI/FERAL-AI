@@ -23,7 +23,7 @@ import io
 import logging
 import platform
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
@@ -57,6 +57,12 @@ _TRANSITION_KEYWORDS = {
 }
 
 DOWNSCALE_WIDTH = 640
+
+# How many consecutive description-less ticks before the loop shouts.
+# At the default 8s interval this is ~2.5 minutes of capturing frames
+# and learning nothing, which is well past "the VLM was briefly busy"
+# and firmly into "vision is broken and nobody has been told".
+_BLIND_TICK_ALERT_EVERY = 20
 
 
 # ── Transition Detection ────────────────────────────────────────────
@@ -261,6 +267,7 @@ class ScreenLoop:
 
         self._capture_count = 0
         self._error_count = 0
+        self._blind_ticks = 0
         self._last_description = ""
         self._tmp_path = Path(f"/tmp/feral_screen_loop_{id(self)}.png")
 
@@ -277,6 +284,10 @@ class ScreenLoop:
             "interval": self._interval,
             "captures": self._capture_count,
             "errors": self._error_count,
+            # Non-zero means the loop is capturing but seeing nothing.
+            # ``captures`` alone reads as healthy in that state, which is
+            # how the vision outage stayed invisible.
+            "blind_ticks": self._blind_ticks,
             "last_description": self._last_description,
             "budget_pauses": self._budget_pause_count,
             "budget_paused": bool(
@@ -369,16 +380,42 @@ class ScreenLoop:
         # completion side and 0 on the prompt side (image tokens are
         # priced separately in the catalog).
         if self._cost_guard is not None:
-            await self._cost_guard.record(
-                model=self._cost_model,
-                prompt_tokens=0,
-                completion_tokens=_VISION_RESERVATION_TOKENS,
-            )
+            # Bookkeeping MUST NOT be able to destroy an observation we
+            # already paid the VLM for. This await used to run bare, and
+            # a CostBudget whose asyncio.Lock was bound to another event
+            # loop raised RuntimeError here on every single tick: 1,548
+            # ticks between 2026-07-07 and 2026-07-26 captured a frame,
+            # called the VLM, and then threw the description away before
+            # reaching the episode save below.
+            try:
+                await self._cost_guard.record(
+                    model=self._cost_model,
+                    prompt_tokens=0,
+                    completion_tokens=_VISION_RESERVATION_TOKENS,
+                )
+            except Exception as exc:
+                logger.warning("Screen loop cost accounting failed: %s", exc)
 
         if not description:
+            # A screenshot that produces no description is a blind tick.
+            # Silently returning here is how the pipeline went quiet for
+            # a week while ``stats["captures"]`` kept climbing and the
+            # loop reported healthy, so count the run of blind ticks and
+            # escalate to WARNING once it is long enough to mean the VLM
+            # is broken rather than momentarily unlucky.
+            self._blind_ticks += 1
+            if self._blind_ticks % _BLIND_TICK_ALERT_EVERY == 0:
+                logger.warning(
+                    "Screen loop has captured %d consecutive frames with no "
+                    "scene description (%.0fs of blind capture). The vision "
+                    "model is producing nothing usable; no screen episodes "
+                    "are being recorded",
+                    self._blind_ticks, self._blind_ticks * self._interval,
+                )
             self._update_perception_frame(image_b64, mime)
             return
 
+        self._blind_ticks = 0
         self._last_description = description
         if detected is None:
             detected = self._extract_objects(description)

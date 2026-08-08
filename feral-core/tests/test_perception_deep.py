@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import math
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -169,6 +168,136 @@ async def test_screen_loop_tick_delegates_to_scene_analyzer():
     assert call_kw.kwargs.get("node_id") == "node-a"
     assert frame.scene_description == "Spreadsheet in Numbers"
     assert frame.detected_objects == ["table", "chart"]
+
+
+@pytest.mark.asyncio
+async def test_screen_loop_records_episode_when_cost_accounting_raises():
+    """Bookkeeping must not destroy an observation we already paid for.
+
+    Regression: ``_tick`` awaited ``cost_guard.record()`` bare, and a
+    CostBudget whose asyncio.Lock was bound to another event loop raised
+    RuntimeError there on every tick. 1,548 ticks between 2026-07-07 and
+    2026-07-26 captured a frame, called the VLM, then threw the
+    description away before reaching the episode save.
+    """
+    perception = MagicMock(spec=PerceptionEngine)
+    frame = PerceptionFrame()
+    perception.get_frame.return_value = frame
+    memory = MagicMock()
+    memory.episode_save = AsyncMock()
+
+    scene = MagicMock()
+    scene.available = True
+    scene.analyze_frame = AsyncMock(
+        return_value={"scene_description": "Debugging a crash in the IDE"}
+    )
+
+    guard = MagicMock()
+    guard.allow.return_value = True
+    guard.is_paused = False
+    guard.record = AsyncMock(
+        side_effect=RuntimeError("Lock is bound to a different event loop")
+    )
+
+    loop = ScreenLoop(
+        perception=perception,
+        memory=memory,
+        scene_analyzer=scene,
+        cost_guard=guard,
+        interval=5.0,
+        session_id="screen_loop",
+    )
+    loop._detector._previous = "Reading a long email in a mail client"
+    loop._tmp_path.write_bytes(b"\xff\xd8\xff\xe0" + bytes(300))
+
+    with patch("perception.screen_loop._capture_screenshot", new_callable=AsyncMock, return_value=True):
+        with patch(
+            "perception.screen_loop._downscale_and_encode",
+            return_value=("bbb", "image/jpeg"),
+        ):
+            await loop._tick()
+
+    try:
+        loop._tmp_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    memory.episode_save.assert_awaited_once()
+    saved = memory.episode_save.await_args.kwargs
+    assert saved["summary"] == "Screen: Debugging a crash in the IDE"
+    assert saved["event_type"].startswith("screen_")
+    assert frame.scene_description == "Debugging a crash in the IDE"
+
+
+@pytest.mark.asyncio
+async def test_screen_loop_warns_when_capturing_but_seeing_nothing(caplog):
+    """A loop that captures forever and describes nothing must say so.
+
+    Regression: when the VLM produced no description ``_tick`` silently
+    returned while ``stats["captures"]`` kept climbing, so the loop
+    reported healthy for a week of recording zero episodes.
+    """
+    from perception.screen_loop import _BLIND_TICK_ALERT_EVERY
+
+    perception = MagicMock(spec=PerceptionEngine)
+    perception.get_frame.return_value = PerceptionFrame()
+
+    scene = MagicMock()
+    scene.available = True
+    scene.analyze_frame = AsyncMock(return_value=None)
+
+    loop = ScreenLoop(perception=perception, scene_analyzer=scene, interval=8.0)
+    loop._tmp_path.write_bytes(b"\xff\xd8\xff\xe0" + bytes(300))
+
+    with patch("perception.screen_loop._capture_screenshot", new_callable=AsyncMock, return_value=True):
+        with patch(
+            "perception.screen_loop._downscale_and_encode",
+            return_value=("bbb", "image/jpeg"),
+        ):
+            with caplog.at_level("WARNING", logger="feral.perception.screen"):
+                for _ in range(_BLIND_TICK_ALERT_EVERY):
+                    await loop._tick()
+
+    try:
+        loop._tmp_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    assert loop.stats["blind_ticks"] == _BLIND_TICK_ALERT_EVERY
+    assert any("consecutive frames with no" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_screen_loop_blind_tick_counter_resets_on_a_real_description():
+    perception = MagicMock(spec=PerceptionEngine)
+    perception.get_frame.return_value = PerceptionFrame()
+
+    scene = MagicMock()
+    scene.available = True
+    scene.analyze_frame = AsyncMock(return_value=None)
+
+    loop = ScreenLoop(perception=perception, scene_analyzer=scene, interval=8.0)
+    loop._tmp_path.write_bytes(b"\xff\xd8\xff\xe0" + bytes(300))
+
+    with patch("perception.screen_loop._capture_screenshot", new_callable=AsyncMock, return_value=True):
+        with patch(
+            "perception.screen_loop._downscale_and_encode",
+            return_value=("bbb", "image/jpeg"),
+        ):
+            await loop._tick()
+            assert loop.stats["blind_ticks"] == 1
+
+            scene.analyze_frame = AsyncMock(
+                return_value={"scene_description": "Writing a document in Pages"}
+            )
+            await loop._tick()
+
+    try:
+        loop._tmp_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    assert loop.stats["blind_ticks"] == 0
 
 
 @pytest.mark.asyncio
