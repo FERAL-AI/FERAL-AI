@@ -27,6 +27,7 @@ from starlette.routing import compile_path
 from version import VERSION as __version__
 from models.protocol import (
     HUP_VERSION,
+    VIDEO_FRAME_MAX_BYTES,
     FeralMessage,
     TextCommandPayload,
     UIEventPayload,
@@ -34,6 +35,7 @@ from models.protocol import (
     TextResponsePayload,
     DeviceRegisterPayload,
     AudioChunkPayload,
+    decoded_b64_size,
     parse_message,
 )
 from config.runtime import brain_bind_host, brain_port, brain_public_base_url
@@ -1819,9 +1821,21 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
 
                 elif msg.type == "vision_frame":
                     frame_payload = raw.get("payload", {})
-                    frame_b64_len = len(frame_payload.get("data_b64", ""))
-                    if frame_b64_len > VISION_MAX_FRAME_KB * 1024:
-                        logger.warning(f"Rejecting oversized frame from webclient {session_id[:8]}: {frame_b64_len}B")
+                    # F-03: decoded bytes, not base64 characters, so a
+                    # "512 KiB" setting means 512 KiB of image.
+                    #
+                    # No error frame here, unlike the daemon socket. This
+                    # handler speaks FeralMessage(type="error"), which the web
+                    # client renders as a chat notice plus a global toast
+                    # (feral-client-v2/src/pages/Chat.jsx), and a browser
+                    # camera loop would emit one per frame. There is no HUP
+                    # error-code channel on this socket. Recorded under F-03.
+                    frame_bytes = decoded_b64_size(frame_payload.get("data_b64", ""))
+                    if frame_bytes > VISION_MAX_FRAME_KB * 1024:
+                        logger.warning(
+                            f"Rejecting oversized frame from webclient "
+                            f"{session_id[:8]}: {frame_bytes}B decoded"
+                        )
                     else:
                         virtual_node = f"webclient_{session_id[:8]}"
                         state.vision_buffer.push(virtual_node, frame_payload)
@@ -2015,6 +2029,22 @@ async def _send_protocol_error(ws: WebSocket, code: int, message: str, *, name: 
         })
     except Exception:
         pass
+
+
+async def _send_frame_too_large(ws: WebSocket, reason: str) -> None:
+    """Emit the HUP §8 ``4020 frame_too_large`` error frame (F-03).
+
+    The string "HUP error 4020" used to appear only inside log messages and
+    docstrings; grep confirmed the code was never sent to anyone. An over-cap
+    frame was dropped in silence and the device believed it had sent
+    successfully, which is why nobody ever reported the 4/3 measurement bug.
+
+    HUP_SPEC.md §8 additionally says the brain closes the socket on 4020. It
+    is not closed here: a single over-cap frame from an encoder with the wrong
+    bitrate would drop a live voice or vision session, and the daemon now has
+    the information it needs to correct itself. Recorded under F-03.
+    """
+    await _send_protocol_error(ws, 4020, reason, name="frame_too_large")
 
 
 def _extract_protocol_bearer(protocols_header: str) -> str:
@@ -2300,9 +2330,20 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 frame_payload = raw.get("payload", {})
                 if "data_b64" not in frame_payload and "image_b64" in frame_payload:
                     frame_payload["data_b64"] = frame_payload["image_b64"]
-                frame_b64_len = len(frame_payload.get("data_b64", ""))
-                if frame_b64_len > VISION_MAX_FRAME_KB * 1024:
-                    logger.warning(f"Rejecting oversized frame from {node_id}: {frame_b64_len}B")
+                # F-03: VISION_MAX_FRAME_KB is a KiB budget for the image, so
+                # it must be compared against DECODED bytes. Comparing base64
+                # characters made a "512 KiB" setting mean 384 KiB.
+                frame_bytes = decoded_b64_size(frame_payload.get("data_b64", ""))
+                if frame_bytes > VISION_MAX_FRAME_KB * 1024:
+                    logger.warning(
+                        f"Rejecting oversized frame from {node_id}: "
+                        f"{frame_bytes}B decoded (HUP error 4020)"
+                    )
+                    await _send_frame_too_large(
+                        ws,
+                        f"vision_frame decoded to {frame_bytes} bytes; "
+                        f"cap is {VISION_MAX_FRAME_KB * 1024}",
+                    )
                 else:
                     effective_node = node_id or frame_payload.get("node_id", "unknown")
                     state.vision_buffer.push(effective_node, frame_payload)
@@ -3279,9 +3320,19 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 data_b64 = frame_payload.get("data_b64") or frame_payload.get("image_b64", "")
                 if data_b64:
                     frame_payload["data_b64"] = data_b64
-                    frame_b64_len = len(data_b64)
-                    if frame_b64_len > VISION_MAX_FRAME_KB * 1024:
-                        logger.warning(f"Rejecting oversized frame from {node_id}: {frame_b64_len}B")
+                    # F-03: decoded bytes, not base64 characters. Same budget
+                    # as the vision_frame branch above.
+                    frame_bytes = decoded_b64_size(data_b64)
+                    if frame_bytes > VISION_MAX_FRAME_KB * 1024:
+                        logger.warning(
+                            f"Rejecting oversized frame from {node_id}: "
+                            f"{frame_bytes}B decoded (HUP error 4020)"
+                        )
+                        await _send_frame_too_large(
+                            ws,
+                            f"frame decoded to {frame_bytes} bytes; "
+                            f"cap is {VISION_MAX_FRAME_KB * 1024}",
+                        )
                     else:
                         effective_node = node_id or frame_payload.get("node_id", "unknown")
                         state.vision_buffer.push(effective_node, frame_payload)
@@ -3291,12 +3342,20 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
             elif msg.type == "video_frame":
                 # HUP v1.1 §5.4.2 — route video frames into the vision buffer,
                 # same sink as the legacy vision_frame branch above.
-                _handle_video_frame(node_id, raw.get("payload", {}), msg.msg_id)
+                # F-03: the handler returns a reason when it refuses the frame
+                # for size. It cannot send: it is sync and never gets `ws`.
+                # Before this, "HUP error 4020" existed only inside the log
+                # line, so the daemon's send reported success.
+                reason = _handle_video_frame(node_id, raw.get("payload", {}), msg.msg_id)
+                if reason:
+                    await _send_frame_too_large(ws, reason)
 
             elif msg.type == "audio_frame":
                 # HUP v1.1 §5.4.1 — route audio frames into the audio pipeline
                 # when available; otherwise log and move on.
-                _handle_audio_frame(node_id, raw.get("payload", {}))
+                reason = _handle_audio_frame(node_id, raw.get("payload", {}))
+                if reason:
+                    await _send_frame_too_large(ws, reason)
 
             elif msg.type == "glasses_frame":
                 # HUP v1.3.0 §5.4.3 — smart-glasses (or glasses-equivalent
@@ -3304,7 +3363,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # dedicated per-device circular buffer at
                 # ``state.glasses_buffer`` which the orchestrator's
                 # vision-context-attach (Lane 08) reads.
-                _handle_glasses_frame(node_id, raw.get("payload", {}), msg.msg_id)
+                reason = _handle_glasses_frame(node_id, raw.get("payload", {}), msg.msg_id)
+                if reason:
+                    await _send_frame_too_large(ws, reason)
 
             elif msg.type == "device_announce":
                 # HUP v1.3.0 §5.4.4 — peripheral discovery from a scanning
@@ -3322,9 +3383,13 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 de_payload = raw.get("payload", {}) or {}
                 ev_type = de_payload.get("event_type", "")
                 if ev_type == "audio_frame":
-                    _handle_audio_frame(node_id, de_payload)
+                    reason = _handle_audio_frame(node_id, de_payload)
+                    if reason:
+                        await _send_frame_too_large(ws, reason)
                 elif ev_type == "video_frame":
-                    _handle_video_frame(node_id, de_payload, msg.msg_id)
+                    reason = _handle_video_frame(node_id, de_payload, msg.msg_id)
+                    if reason:
+                        await _send_frame_too_large(ws, reason)
                 elif ev_type in {
                     "heart_rate", "spo2", "skin_temperature", "steps",
                     "temperature", "accelerometer", "gesture",
@@ -3551,8 +3616,12 @@ _BASELINE_PER_SOURCE_VITALS: frozenset[str] = frozenset({
 })
 
 
-AUDIO_FRAME_MAX_BYTES = 64 * 1024  # HUP_SPEC.md §5.4.1 cap
-VIDEO_FRAME_MAX_BYTES = 512 * 1024  # HUP_SPEC.md §5.4.2 cap (matches existing VISION_MAX_FRAME_KB)
+# HUP_SPEC.md §5.4.1 cap, on DECODED bytes. Stays here rather than in
+# models/protocol.py because no payload model governs `audio_frame`: the type
+# is not in MESSAGE_TYPES, so there is nothing in the model layer to keep it in
+# sync with. `VIDEO_FRAME_MAX_BYTES` is the opposite case and is imported from
+# models/protocol.py at the top of this file (F-03).
+AUDIO_FRAME_MAX_BYTES = 64 * 1024
 
 
 def _unwrap_hup_frame(raw_payload: dict) -> dict:
@@ -3581,26 +3650,40 @@ def _unwrap_hup_frame(raw_payload: dict) -> dict:
     return merged
 
 
-def _handle_video_frame(node_id, frame_payload: dict, msg_id=None) -> None:
+def _handle_video_frame(node_id, frame_payload: dict, msg_id=None) -> str | None:
     """Dispatch a HUP v1.1 ``video_frame`` payload into the vision buffer.
 
     Shares the existing vision-buffer sink with the legacy ``vision_frame``
-    branch so downstream perception code stays unchanged. Over-cap frames
-    are dropped with a warning per HUP_SPEC.md error code 4020.
+    branch so downstream perception code stays unchanged.
+
+    Returns ``None`` when the frame was handled, or a human-readable reason
+    when it was refused for exceeding the cap. The caller in
+    :func:`daemon_session` turns that reason into an HUP §8 error frame with
+    code 4020. The reason is returned rather than sent from here because this
+    function is sync and never receives the socket; making it async and
+    threading ``ws`` through would be a larger change for the same result
+    (F-03).
 
     Accepts both the flat and nested ``device_event`` payload shapes
-    via :func:`_unwrap_hup_frame` — the HUP v1.1 Python SDK serialises
+    via :func:`_unwrap_hup_frame`. The HUP v1.1 Python SDK serialises
     its frames nested under ``payload.data`` while the legacy direct
     ``vision_frame`` path carries them flat.
     """
     frame_payload = _unwrap_hup_frame(frame_payload)
     data_b64 = frame_payload.get("data_b64", "") or ""
-    if len(data_b64) > VIDEO_FRAME_MAX_BYTES:
+    # F-03: the cap is DECODED bytes (HUP_SPEC.md §5.4.2), not base64
+    # characters. Measuring len(data_b64) made the effective ceiling 384 KiB
+    # and dropped legal 400 KiB JPEGs.
+    decoded_bytes = decoded_b64_size(data_b64)
+    if decoded_bytes > VIDEO_FRAME_MAX_BYTES:
         logger.warning(
-            "Rejecting oversized video_frame from %s: %dB > %dB (HUP error 4020)",
-            node_id, len(data_b64), VIDEO_FRAME_MAX_BYTES,
+            "Rejecting oversized video_frame from %s: %dB decoded > %dB (HUP error 4020)",
+            node_id, decoded_bytes, VIDEO_FRAME_MAX_BYTES,
         )
-        return
+        return (
+            f"video_frame decoded to {decoded_bytes} bytes; "
+            f"cap is {VIDEO_FRAME_MAX_BYTES}"
+        )
 
     effective_node = node_id or frame_payload.get("node_id", "unknown")
     state.vision_buffer.push(effective_node, frame_payload)
@@ -3620,23 +3703,36 @@ def _handle_video_frame(node_id, frame_payload: dict, msg_id=None) -> None:
     if msg_id and state.orchestrator:
         state.orchestrator.resolve_pending_frame(msg_id, frame_payload)
 
+    return None
 
-def _handle_audio_frame(node_id, frame_payload: dict) -> None:
+
+def _handle_audio_frame(node_id, frame_payload: dict) -> str | None:
     """Dispatch a HUP v1.1 ``audio_frame`` payload into the audio pipeline.
+
+    Returns ``None`` when the frame was handled, or a rejection reason the
+    caller emits as an HUP §8 error frame with code 4020. See
+    :func:`_handle_video_frame` for why the reason is returned rather than
+    sent from here.
 
     Accepts both SDK-nested and flat payload shapes via
     :func:`_unwrap_hup_frame`. Falls back to a debug log when
-    ``state.audio`` does not expose an ``ingest_frame`` hook — the
+    ``state.audio`` does not expose an ``ingest_frame`` hook: the
     Brain boot tolerates the pipeline being absent, so we must too.
     """
     frame_payload = _unwrap_hup_frame(frame_payload)
     data_b64 = frame_payload.get("data_b64", "") or ""
-    if len(data_b64) > AUDIO_FRAME_MAX_BYTES:
+    # F-03: DECODED bytes (HUP_SPEC.md §5.4.1), not base64 characters. The
+    # character count made this 64 KiB cap an effective 48 KiB one.
+    decoded_bytes = decoded_b64_size(data_b64)
+    if decoded_bytes > AUDIO_FRAME_MAX_BYTES:
         logger.warning(
-            "Rejecting oversized audio_frame from %s: %dB > %dB (HUP error 4020)",
-            node_id, len(data_b64), AUDIO_FRAME_MAX_BYTES,
+            "Rejecting oversized audio_frame from %s: %dB decoded > %dB (HUP error 4020)",
+            node_id, decoded_bytes, AUDIO_FRAME_MAX_BYTES,
         )
-        return
+        return (
+            f"audio_frame decoded to {decoded_bytes} bytes; "
+            f"cap is {AUDIO_FRAME_MAX_BYTES}"
+        )
 
     effective_node = node_id or frame_payload.get("node_id", "unknown")
     audio = getattr(state, "audio", None)
@@ -3652,29 +3748,49 @@ def _handle_audio_frame(node_id, frame_payload: dict) -> None:
             effective_node,
         )
 
+    return None
 
-def _handle_glasses_frame(node_id, frame_payload: dict, msg_id=None) -> None:
+
+def _handle_glasses_frame(node_id, frame_payload: dict, msg_id=None) -> str | None:
     """Dispatch a HUP v1.3.0 ``glasses_frame`` payload into the glasses
     buffer.
 
     Shares the 512 KiB-per-frame decoded cap with ``_handle_video_frame``
-    (HUP §2). Over-cap frames are dropped with HUP error code 4020. The
-    buffer (``state.glasses_buffer``) is a per-``device_id`` ring; the
-    orchestrator's vision-context-attach reads it freshness-gated.
+    (HUP §2). The buffer (``state.glasses_buffer``) is a per-``device_id``
+    ring; the orchestrator's vision-context-attach reads it freshness-gated.
+
+    Returns ``None`` when the frame was handled, or a rejection reason the
+    caller emits as an HUP §8 error frame with code 4020. Only the cap
+    returns a reason: a missing buffer or a raising ``ingest`` is a brain-side
+    problem, not a protocol violation by the daemon, so those still drop
+    quietly rather than blaming the sender.
+
+    Note that ``glasses_frame`` is registered in ``MESSAGE_TYPES`` and
+    ``GlassesFramePayload`` applies the same decoded cap (F-02), so on the
+    daemon socket an over-cap frame is normally refused at parse time with a
+    1003 ``bad_payload``. The check here is the second line, for callers that
+    reach the handler without going through ``parse_message``.
 
     Tolerant of both flat payloads (canonical ``glasses_frame`` envelope)
     and nested ``device_event``-style payloads via
-    :func:`_unwrap_hup_frame` — symmetric with the ``video_frame`` /
+    :func:`_unwrap_hup_frame`, symmetric with the ``video_frame`` /
     ``audio_frame`` handlers.
     """
     frame_payload = _unwrap_hup_frame(frame_payload)
     data_b64 = frame_payload.get("data_b64", "") or ""
-    if len(data_b64) > VIDEO_FRAME_MAX_BYTES:
+    # F-03: DECODED bytes (HUP_SPEC.md §5.4.3), not base64 characters. The
+    # character count is what made this handler disagree with the model layer
+    # for every frame between 384 and 512 KiB.
+    decoded_bytes = decoded_b64_size(data_b64)
+    if decoded_bytes > VIDEO_FRAME_MAX_BYTES:
         logger.warning(
-            "Rejecting oversized glasses_frame from %s: %dB > %dB (HUP error 4020)",
-            node_id, len(data_b64), VIDEO_FRAME_MAX_BYTES,
+            "Rejecting oversized glasses_frame from %s: %dB decoded > %dB (HUP error 4020)",
+            node_id, decoded_bytes, VIDEO_FRAME_MAX_BYTES,
         )
-        return
+        return (
+            f"glasses_frame decoded to {decoded_bytes} bytes; "
+            f"cap is {VIDEO_FRAME_MAX_BYTES}"
+        )
 
     effective_node = node_id or frame_payload.get("node_id", "unknown")
     buf = getattr(state, "glasses_buffer", None)
@@ -3684,14 +3800,14 @@ def _handle_glasses_frame(node_id, frame_payload: dict, msg_id=None) -> None:
             "wired; dropping. (boot wiring at api/state.py)",
             effective_node,
         )
-        return
+        return None
     try:
         buf.ingest(frame_payload, node_id=effective_node)
     except Exception as exc:
         logger.warning(
             "glasses_buffer.ingest raised for %s: %s", effective_node, exc
         )
-        return
+        return None
 
     if msg_id and state.orchestrator:
         # Allow orchestrators that explicitly requested a frame
@@ -3700,6 +3816,8 @@ def _handle_glasses_frame(node_id, frame_payload: dict, msg_id=None) -> None:
             state.orchestrator.resolve_pending_frame(msg_id, frame_payload)
         except Exception:  # noqa: BLE001 — best-effort signal
             pass
+
+    return None
 
 
 async def _handle_device_announce(node_id, frame_payload: dict) -> None:

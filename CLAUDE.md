@@ -57,6 +57,8 @@ grep -rn "pattern" --include=*.py . | grep -vE '^build/|^dist/'
 
 Also: `grep -r` launched from the repo root does *not* descend into `feral-core/build`, so root-level totals are wrong in both directions. Prefer `find … -print0 | xargs -0 grep`.
 
+For tools, this trap is worse than a skewed count — it takes them to zero. `mypy` without `--exclude '^build/'` does not degrade, it **refuses to start**: `Duplicate module named "agents"`. Any tool that resolves modules by name will do the same.
+
 **2. A git repo exists at `$HOME`.** Running git from an unexpected directory can resolve to it and report a completely different working tree. Always use `git -C /Users/mahmoudomar/Desktop/thoera-mac/ASOS …` or confirm with `git rev-parse --show-toplevel`.
 
 **3. Tests can pass while production is broken.** Test doubles in `tests/` have drifted from real signatures — that is the root cause of F-01 in `AUDIT-FIXES.md`. A green suite is not evidence a call site works. Check the real definition.

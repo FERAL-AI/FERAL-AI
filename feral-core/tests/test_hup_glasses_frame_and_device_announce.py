@@ -127,7 +127,11 @@ def test_handle_glasses_frame_writes_to_buffer(monkeypatch):
 
 
 def test_handle_glasses_frame_rejects_oversize(monkeypatch, caplog):
-    """Decoded-size cap is the same 512 KiB as video_frame."""
+    """Decoded-size cap is the same 512 KiB as video_frame.
+
+    F-03: the payload must now DECODE to more than the cap. The old
+    ``"A" * (cap + 16)`` is only ~384 KiB of image and is legal.
+    """
     from api import server as srv
 
     buf = MagicMock()
@@ -135,13 +139,15 @@ def test_handle_glasses_frame_rejects_oversize(monkeypatch, caplog):
     fake_state.glasses_buffer = buf
     monkeypatch.setattr(srv, "state", fake_state)
 
-    too_big = "A" * (srv.VIDEO_FRAME_MAX_BYTES + 16)
+    too_big = _b64(srv.VIDEO_FRAME_MAX_BYTES + 16)
     with caplog.at_level("WARNING"):
-        srv._handle_glasses_frame(
+        reason = srv._handle_glasses_frame(
             "n1", {"device_id": "d", "data_b64": too_big}
         )
     buf.ingest.assert_not_called()
     assert any("Rejecting oversized glasses_frame" in r.message for r in caplog.records)
+    # The returned reason is what daemon_session sends as HUP error 4020.
+    assert reason and "glasses_frame" in reason
 
 
 def test_handle_glasses_frame_tolerates_missing_buffer(monkeypatch):

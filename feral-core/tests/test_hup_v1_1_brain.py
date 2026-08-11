@@ -141,6 +141,9 @@ def test_video_frame_nested_payload_unwraps(server_module):
 
 
 def test_video_frame_over_cap_is_dropped(server_module):
+    # F-03: the cap is DECODED bytes, so the payload has to decode to more
+    # than the cap. This used to be ``"x" * (cap + 8)``, which is only
+    # ~384 KiB decoded and is now legal, as it always should have been.
     server, pushed, *_ = server_module
     payload = {
         "event_type": "video_frame",
@@ -148,10 +151,12 @@ def test_video_frame_over_cap_is_dropped(server_module):
         "width": 640,
         "height": 480,
         "sequence": 2,
-        "data_b64": "x" * (server.VIDEO_FRAME_MAX_BYTES + 8),
+        "data_b64": _b64(server.VIDEO_FRAME_MAX_BYTES + 8),
     }
-    server._handle_video_frame("feral-glasses-test", payload, msg_id="m2")
+    reason = server._handle_video_frame("feral-glasses-test", payload, msg_id="m2")
     assert pushed == []
+    # The reason is what daemon_session turns into the HUP 4020 error frame.
+    assert reason and "video_frame" in reason
 
 
 def test_audio_frame_lands_in_audio_pipeline(server_module):
@@ -192,6 +197,7 @@ def test_audio_frame_nested_payload_unwraps(server_module):
 
 
 def test_audio_frame_over_cap_is_dropped(server_module):
+    # F-03: decoded bytes, see the video_frame case above.
     server, _pushed, ingested, *_ = server_module
     payload = {
         "event_type": "audio_frame",
@@ -199,10 +205,11 @@ def test_audio_frame_over_cap_is_dropped(server_module):
         "sample_rate": 24000,
         "channels": 1,
         "sequence": 6,
-        "data_b64": "x" * (server.AUDIO_FRAME_MAX_BYTES + 4),
+        "data_b64": _b64(server.AUDIO_FRAME_MAX_BYTES + 4),
     }
-    server._handle_audio_frame("feral-band-test", payload)
+    reason = server._handle_audio_frame("feral-band-test", payload)
     assert ingested == []
+    assert reason and "audio_frame" in reason
 
 
 def test_audio_frame_no_pipeline_does_not_raise(server_module, monkeypatch):

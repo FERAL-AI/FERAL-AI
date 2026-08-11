@@ -103,9 +103,9 @@ def test_glasses_frame_rejects_hostile_scalars(field, value):
 def test_glasses_frame_rejects_oversized_decoded_payload():
     """900000 decoded bytes against a 512 KiB cap, the audit's number.
 
-    The cap is measured on DECODED bytes, not on base64 characters. See
-    the F-03 note in AUDIT-FIXES.md: ``api/server.py`` still measures
-    characters, so the two disagree until F-03 lands.
+    The cap is measured on DECODED bytes, not on base64 characters.
+    ``api/server.py`` measures the same quantity since F-03 landed, and
+    imports this constant rather than declaring its own.
     """
     with pytest.raises(ValidationError) as exc:
         GlassesFramePayload(**_ok_glasses_frame(data_b64=_b64(900000)))
@@ -123,9 +123,10 @@ def test_glasses_frame_accepts_a_frame_at_exactly_the_cap():
 def test_glasses_frame_cap_is_measured_on_decoded_bytes_not_characters():
     """A blob whose base64 text exceeds the cap but decodes under it passes.
 
-    This is the exact discrepancy F-03 describes at ``api/server.py:3672``.
-    400 KiB of JPEG is 400 KiB decoded (legal) but ~533 KiB of base64
-    characters (which the server's character-counting check rejects).
+    This is the discrepancy F-03 describes: 400 KiB of JPEG is 400 KiB
+    decoded (legal) but ~533 KiB of base64 characters, which every
+    character-counting check in ``api/server.py`` used to reject.
+    ``tests/test_frame_size_cap_decoded_bytes.py`` pins the server side.
     """
     decoded = 400 * 1024
     payload = _ok_glasses_frame(data_b64=_b64(decoded))

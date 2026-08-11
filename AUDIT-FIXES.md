@@ -221,16 +221,16 @@ is clean.
   is a different type and is not in `MESSAGE_TYPES`. Applying 64 KiB here
   would reject a two-second 24 kHz pcm16 chunk (96,000 bytes).
 
-**F-03 divergence — this is now live and must be stated.** The model measures
-`glasses_frame` `data_b64` on **decoded bytes** (512 KiB). `api/server.py:3672`
-measures **base64 characters** against the same 512 KiB constant, so its
-effective ceiling is 384 KiB. Until F-03 lands the two disagree for frames
-between 384 and 512 KiB decoded: the model accepts them and the server handler
-drops them with a log-only warning. A 400 KiB JPEG is exactly this case. F-02
-deliberately did not touch `api/server.py`; `VIDEO_FRAME_MAX_BYTES` now exists
-in `models/protocol.py` (the canonical home per CLAUDE.md) with the same value
-as the server's own copy, so F-03's fix is to import it and measure decoded
-bytes at all four sites (`:1823`, `:2304`, `:3283`, `:3672`).
+**F-03 divergence — CLOSED by F-03.** While it was live: the model measured
+`glasses_frame` `data_b64` on **decoded bytes** (512 KiB) and `api/server.py`
+measured **base64 characters** against the same 512 KiB constant, so its
+effective ceiling was 384 KiB and the two disagreed for every frame between
+384 and 512 KiB decoded. A 400 KiB JPEG was exactly this case. F-02
+deliberately did not touch `api/server.py` and left `VIDEO_FRAME_MAX_BYTES` in
+`models/protocol.py` (the canonical home per CLAUDE.md) as a second copy of
+the server's own literal. F-03 deleted the server's copy, imports the
+canonical one, and measures decoded bytes at all six sites. The model and the
+handler can no longer disagree: there is one constant and one measurement.
 
 Original finding follows.
 
@@ -295,16 +295,177 @@ Every constraint sits in the component an attacker controls.
 
 ### F-03 · Frame size cap measures base64 characters, not decoded bytes
 
-**Status:** open. **Now also diverges from the model layer** — F-02 added a
-decoded-byte cap to `GlassesFramePayload` and left these four sites alone, so
-`models/protocol.py` and `api/server.py` currently measure different
-quantities against the same 512 KiB number. Import `VIDEO_FRAME_MAX_BYTES`
-from `models/protocol.py` rather than redeclaring it at `server.py:3555`.
+**Status:** FIXED. Not committed: left in the working tree for review.
+
+**Citation corrected: there are six sites, not four, and the finding missed
+two of them.** The finding lists `server.py:3672` plus `:1823, :2304, :3283`
+as if all four were one shape. They are two families, and two members of the
+second family were never cited:
 
 ```
-feral-core/api/server.py:3672    if len(data_b64) > VIDEO_FRAME_MAX_BYTES:   # 512 * 1024
-also: server.py:1823, :2304, :3283
+# Family A: cap is `VISION_MAX_FRAME_KB * 1024`, variable named frame_b64_len
+feral-core/api/server.py:1823   client_session  vision_frame (webclient)
+feral-core/api/server.py:2304   daemon_session  vision_frame
+feral-core/api/server.py:3283   daemon_session  frame
+
+# Family B: cap is a *_MAX_BYTES constant, measured as len(data_b64)
+feral-core/api/server.py:3598   _handle_video_frame                    ← UNCITED
+feral-core/api/server.py:3636   _handle_audio_frame (AUDIO_FRAME_MAX_BYTES)  ← UNCITED
+feral-core/api/server.py:3672   _handle_glasses_frame                  (the cited one)
 ```
+
+All six measured base64 characters against a cap whose name and log line mean
+decoded bytes. All six are fixed.
+
+(An earlier pass through this file recorded the same two families with the
+letters swapped. Read the file:line lists, not the letters.)
+
+**That earlier pass argued the `frame_b64_len` sites `:1823, :2304, :3283`
+"are not the same defect" because the variable honestly says what it measures.
+That is wrong and it is corrected here.** The variable is honest; the cap is
+not. It is
+`VISION_MAX_FRAME_KB`, sourced from the operator setting `vision.max_frame_kb`
+via `FERAL_VISION_MAX_FRAME_KB`, defaulting to 512. An operator who sets 512
+is budgeting 512 KiB of image, and the log line reports the number as `B`. A
+character comparison silently turned that into 384 KiB, which is the same
+defect with a different constant.
+
+**Measured before the fix** (decoded size, base64 size, outcome):
+
+```
+300 KB image -> b64 400 KB | before: accepted | correct: accepted
+400 KB image -> b64 533 KB | before: DROPPED  | correct: accepted
+500 KB image -> b64 666 KB | before: DROPPED  | correct: accepted
+```
+
+**Second defect in the same item: 4020 was never sent.** `grep -n 4020` over
+the tree found the string only inside log messages and docstrings. An
+over-cap frame was dropped in silence and the device's send reported success,
+which is why this was never reported as a bug: nothing anywhere told the
+sender its frames were being discarded.
+
+**The fix.**
+
+- `models/protocol.py` gains `decoded_b64_size()` and keeps
+  `VIDEO_FRAME_MAX_BYTES` as the only declaration. `api/server.py` imports
+  both; its own `VIDEO_FRAME_MAX_BYTES = 512 * 1024` literal is deleted. A
+  test asserts by AST that the server does not redeclare it, so the two
+  copies cannot come back.
+- `decoded_b64_size` computes the decoded length arithmetically rather than
+  calling `b64decode`, because these checks run once per frame at camera
+  frame rate and decoding would allocate a full copy of every frame purely to
+  measure it. The model layer's `_decoded_size_guard` still decodes, because
+  it is a validator and must also reject a blob that is not base64 at all.
+  They agree on every well-formed input.
+- `AUDIO_FRAME_MAX_BYTES` stays in `api/server.py` with a comment saying why:
+  `audio_frame` is not in `MESSAGE_TYPES`, so no model governs it and there is
+  nothing in the model layer for it to drift from. Moving it would have been
+  symmetry for its own sake.
+- `_handle_video_frame`, `_handle_audio_frame` and `_handle_glasses_frame`
+  now return `str | None`: a rejection reason, or `None` when handled. They
+  are sync and never receive the socket, so they cannot send. Returning a
+  reason was chosen over making them async and threading `ws` through: it is
+  the smaller change and it keeps them directly testable. Their five call
+  sites in `daemon_session` await the new `_send_frame_too_large(ws, reason)`.
+- Only the cap returns a reason. A missing `glasses_buffer` or a raising
+  `ingest` is a brain-side problem, not a protocol violation by the daemon,
+  so those still drop quietly rather than blaming the sender.
+
+**Where 4020 is emitted, and where it is not:**
+
+| Site | Now measures | 4020 emitted |
+|---|---|---|
+| `:1823` webclient `vision_frame` | decoded bytes | **no**, see below |
+| `:2304` daemon `vision_frame` | decoded bytes | yes |
+| `:3283` daemon `frame` | decoded bytes | yes |
+| `:3598` `_handle_video_frame` | decoded bytes | yes, at both call sites (`video_frame`, `device_event`) |
+| `:3636` `_handle_audio_frame` | decoded bytes | yes, at both call sites (`audio_frame`, `device_event`) |
+| `:3672` `_handle_glasses_frame` | decoded bytes | yes |
+
+`:1823` is inside `client_session`, and `ws` *is* in scope there, so this is a
+judgement call rather than missing plumbing. It is left silent because that
+socket has no HUP error-code channel: it speaks
+`FeralMessage(type="error", payload={"text": ...})`, which
+`feral-client-v2/src/pages/Chat.jsx:602` renders as an inline chat notice plus
+a global toast. A browser camera loop sending over-cap frames would fire one
+per frame. Rate-limiting it would be inventing plumbing this item did not ask
+for. It is fixed for measurement only.
+
+**Deviation from HUP_SPEC.md, deliberate, needs its own decision.**
+`HUP_SPEC.md:925` says of 4020: "Brain closes the socket; daemon MUST
+reconnect with a saner encoder bitrate." The socket is **not** closed here. A
+single over-cap frame from a mis-configured encoder would drop a live voice or
+vision session, and the daemon now has what it needs to correct itself. The
+spec and the implementation therefore disagree on this point; reconciling them
+is a wire-contract change across four SDKs and is not in scope for F-03.
+
+**Note on `glasses_frame` specifically.** It is registered in `MESSAGE_TYPES`,
+and since F-02 `GlassesFramePayload` applies the same decoded cap,
+so on the daemon socket an over-cap glasses frame is refused at `parse_message`
+with a 1003 `bad_payload` before the handler runs. The handler's own check is
+the second line, for callers that do not go through `parse_message`. The
+other five sites have no model-layer counterpart and were genuinely silent.
+
+**Behaviour change, intended and stated.** Frames between 384 and 512 KiB
+decoded were dropped and will now be accepted: that is the documented cap
+working correctly. Over-cap frames that were dropped in silence now draw a
+4020 error frame. Nothing that succeeds today starts failing.
+
+**Tests.** New file `feral-core/tests/test_frame_size_cap_decoded_bytes.py`,
+14 tests: **14/14 fail against the unfixed source, 14/14 pass after.** The
+failures were the stated ones, not collection errors: 400 KiB frames not
+buffered, over-cap frames returning `None` instead of a reason, and the socket
+answering 1002 (the trailing probe) where 4020 was expected, which is the
+silence made visible. Each WS test sends an unknown-type message after the
+over-cap frame so the unfixed tree fails on content rather than hanging on a
+`receive_json` that never returns.
+
+**Three existing tests were changed, and this is worth flagging.** They
+encoded the defect: `"x" * (VIDEO_FRAME_MAX_BYTES + 8)` is ~384 KiB decoded,
+so they asserted that a legal frame gets dropped. They now build their
+payloads with `_b64(cap + n)` and assert the returned reason.
+
+```
+feral-core/tests/test_hup_v1_1_brain.py                       test_video_frame_over_cap_is_dropped
+feral-core/tests/test_hup_v1_1_brain.py                       test_audio_frame_over_cap_is_dropped
+feral-core/tests/test_hup_glasses_frame_and_device_announce.py  test_handle_glasses_frame_rejects_oversize
+```
+
+Two stale docstrings in `tests/test_protocol_field_constraints.py` that said
+the server "still measures characters" were corrected in the same change.
+
+**Proof, real numbers.** `python -m pytest tests/ -q -p no:cacheprovider
+-p no:randomly --no-cov` is **7428 passed, 29 skipped, 0 failed** (332s), run
+twice with the same result. `ruff check --select=E,F,W
+--ignore=E501,E402,F401,W291,W293 .` prints "All checks passed!".
+
+One caveat about the tree, not about this fix: an intermediate full run showed
+three failures in `tests/test_embedding_loop_liveness.py`, which is untracked
+F-04 work sitting in this same working tree alongside a modified
+`memory/embeddings.py`. They pass standalone and passed in both clean runs
+above; they are timing-sensitive liveness assertions, and nothing in F-03
+touches `memory/`.
+
+**Siblings.** `decoded_b64_size` is now the only size measurement in
+`api/server.py`: `grep -n "len(data_b64)\|frame_b64_len"` over the file
+returns one hit, and it is inside an explanatory comment. `feral-nodes/python-node-sdk` already decoded before
+comparing, so the SDK never had this bug.
+
+Original finding follows.
+
+**Citation corrected 2026-08-11 — the original site list was wrong twice over.** Independently re-verified:
+
+```
+# Family A — the actual defect. len(data_b64) is base64 CHARACTERS.
+feral-core/api/server.py:3598   if len(data_b64) > VIDEO_FRAME_MAX_BYTES:   # _handle_video_frame   ← UNCITED
+feral-core/api/server.py:3672   if len(data_b64) > VIDEO_FRAME_MAX_BYTES:   # _handle_glasses_frame
+feral-core/api/server.py:3636   audio_frame family                                                   ← UNCITED
+
+# Family B — a DIFFERENT constant, and the variable is honestly named.
+feral-core/api/server.py:1823, :2304, :3283   if frame_b64_len > VISION_MAX_FRAME_KB * 1024:
+```
+
+Family B is not the same defect: `frame_b64_len` says what it measures, so there is no docstring/code contradiction to fix. Treat it separately and decide on its own merits whether a base64-length cap is what is wanted there.
 
 `len(data_b64)` counts base64 characters while the docstring two lines above claims a decoded cap. Base64 inflates 4/3, so the effective ceiling is 384 KiB. A 400 KiB JPEG passes both SDK validators, reports a successful send, and is dropped by the brain with a log-only warning — HUP error 4020 is never returned.
 

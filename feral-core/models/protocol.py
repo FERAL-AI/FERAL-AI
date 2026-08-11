@@ -58,11 +58,34 @@ MAX_PATH_LEN = 4096
 #: Pixel dimension ceiling, mirroring the node SDK's ``width`` / ``height``.
 MAX_PIXELS = 8192
 #: Decoded (not base64-character) size cap for video-class frames.
-#: HUP_SPEC.md section 5.4.2 / 5.4.3. ``api/server.py`` defines its own copy
-#: with the same value and measures base64 CHARACTERS against it, so the two
-#: currently disagree by 4/3. That discrepancy is AUDIT-FIXES F-03 and is
-#: deliberately not fixed here.
+#: HUP_SPEC.md section 5.4.2 / 5.4.3. This is the only declaration: F-03 made
+#: ``api/server.py`` import it instead of keeping a second copy, because two
+#: copies is how the model layer and the handler came to measure different
+#: quantities against the same number.
 VIDEO_FRAME_MAX_BYTES = 512 * 1024
+
+
+def decoded_b64_size(value: str) -> int:
+    """Return the DECODED byte length of a base64 string.
+
+    Measuring ``len(value)`` instead is the F-03 defect: base64 inflates 4/3,
+    so a character count turned the 512 KiB cap into a 384 KiB one and a legal
+    400 KiB JPEG was dropped with a log-only warning.
+
+    Computed arithmetically rather than by ``b64decode`` because the frame
+    handlers in ``api/server.py`` call this once per frame at camera frame
+    rate, and decoding would allocate a full copy of every frame purely to
+    measure it. Embedded whitespace (MIME-wrapped base64) is stripped first so
+    the arithmetic stays exact for that shape too.
+    """
+    if not value:
+        return 0
+    if "\n" in value or "\r" in value or " " in value:
+        value = "".join(value.split())
+        if not value:
+            return 0
+    padding = 2 if value.endswith("==") else 1 if value.endswith("=") else 0
+    return (len(value) * 3) // 4 - padding
 
 
 def _decoded_size_guard(value: str, cap: int, label: str) -> str:
@@ -71,6 +94,11 @@ def _decoded_size_guard(value: str, cap: int, label: str) -> str:
     Measuring the encoded string instead is the F-03 defect: base64 inflates
     4/3, so a character count turns a 512 KiB cap into a 384 KiB one and
     silently drops legal 400 KiB JPEGs.
+
+    This decodes rather than calling :func:`decoded_b64_size` because it is a
+    validator and must also reject a blob that is not base64 at all. The two
+    agree on every well-formed input, which is the only input that reaches
+    the handlers.
     """
     import base64
 
