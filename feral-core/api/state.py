@@ -787,7 +787,14 @@ class BrainState:
                     loop = _aio.get_running_loop()
                 except RuntimeError:
                     return  # no loop (e.g. during boot) — broadcast is optional
-                loop.create_task(self.broadcast_event(event_name, payload))
+                # AUDIT-FIXES F-06: the loop keeps only a weak reference to a
+                # task, so a bare create_task here could be collected before
+                # the broadcast reached the client and the UI would silently
+                # miss the state change. register_background_task holds a
+                # strong reference and drops it on completion.
+                self.register_background_task(
+                    loop.create_task(self.broadcast_event(event_name, payload))
+                )
                 # Kick IdeasEngine whenever something enters waiting_user so
                 # the "Right now" pane renders a fresh nudge within seconds.
                 if (
@@ -825,7 +832,12 @@ class BrainState:
                     loop = _aio.get_running_loop()
                 except RuntimeError:
                     return  # no loop (e.g. boot phase) — broadcast is optional
-                loop.create_task(self.broadcast_event(event_name, payload))
+                # AUDIT-FIXES F-06: same weak-reference hazard as the
+                # consciousness broadcast above; a collected task means a
+                # subdevice_update that never reaches any connected client.
+                self.register_background_task(
+                    loop.create_task(self.broadcast_event(event_name, payload))
+                )
 
             self.node_subdevices = NodeSubdeviceStore(
                 db_path=self.memory.db_path,
@@ -1885,7 +1897,14 @@ class BrainState:
                     loop = _aio.get_running_loop()
                 except RuntimeError:
                     return
-                loop.create_task(self.broadcast_event("ideas_updated", {"count": len(_ideas)}))
+                # AUDIT-FIXES F-06: referenced so the collector cannot take
+                # the broadcast mid-flight and strand the "Right now" pane
+                # on a stale idea count.
+                self.register_background_task(
+                    loop.create_task(
+                        self.broadcast_event("ideas_updated", {"count": len(_ideas)})
+                    )
+                )
 
             try:
                 _settings = self.config.get_settings() if hasattr(self.config, "get_settings") else {}

@@ -267,6 +267,12 @@ class Supervisor:
         self._recent_cap = 200
         self._orchestrator = None
         self._orig: dict[str, Any] = {}
+        # AUDIT-FIXES F-06. The broadcaster coroutine below is scheduled
+        # fire-and-forget; the loop references tasks only weakly, so without
+        # this set a supervisor_event (a refusal, an approval prompt) could
+        # be collected before it reached the oversight UI. The done-callback
+        # discard keeps the set bounded by in-flight broadcasts.
+        self._bg_tasks: set[asyncio.Task] = set()
 
     # ── Kill switch ──────────────────────────────────────────────
 
@@ -449,7 +455,9 @@ class Supervisor:
                     "payload": event.to_dict(),
                 })
                 if asyncio.iscoroutine(coro):
-                    asyncio.create_task(coro)
+                    task = asyncio.create_task(coro, name="supervisor-broadcast")
+                    self._bg_tasks.add(task)
+                    task.add_done_callback(self._bg_tasks.discard)
             except Exception as exc:
                 logger.debug("Broadcast supervisor_event failed: %s", exc)
 

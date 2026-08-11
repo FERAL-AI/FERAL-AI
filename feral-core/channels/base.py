@@ -84,6 +84,15 @@ class Channel(ABC):
         self._bot_username: Optional[str] = None
         # Populated to True once the channel has successfully talked to its API
         self._connected: bool = False
+        # AUDIT-FIXES F-06. Strong references to the connection tasks the
+        # subclasses schedule fire-and-forget (Discord gateway, Slack socket
+        # mode, their heartbeats and their reconnect retries). The event
+        # loop holds tasks only weakly, so a bare ``ensure_future`` here is
+        # collectible the moment ``start()`` returns and drops its frame:
+        # the channel reports itself started, the socket never opens, and
+        # nothing is logged. Discard-on-done keeps the set bounded to the
+        # handful of live connections a channel actually has.
+        self._bg_tasks: set[asyncio.Task] = set()
         # -A11 runtime containment: repeated loop failures trip a fuse so
         # a broken channel instance disables itself cleanly instead of
         # wedging forever and spamming logs.
@@ -102,6 +111,15 @@ class Channel(ABC):
         self._runtime_failures: int = 0
         self._degraded: bool = False
         self._degraded_reason: str = ""
+
+    def _track_bg_task(self, task: "asyncio.Future") -> "asyncio.Future":
+        """Hold a strong reference to a fire-and-forget task. See F-06.
+
+        Returns the task unchanged so call sites stay one-liners.
+        """
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     async def send_direct(self, to: str, text: str, reply_to: Optional[str] = None) -> dict:
         """Outbound send used by the messaging_channels skill.
@@ -646,7 +664,7 @@ class DiscordChannel(Channel):
         )
 
         self._connected = True
-        asyncio.ensure_future(self._gateway_connect())
+        self._track_bg_task(asyncio.ensure_future(self._gateway_connect()))
         logger.info("Discord channel started (Gateway mode)")
 
     async def _gateway_connect(self):
@@ -672,7 +690,11 @@ class DiscordChannel(Channel):
                     },
                 }))
 
-                asyncio.ensure_future(self._heartbeat_loop(ws, heartbeat_interval))
+                self._track_bg_task(
+                    asyncio.ensure_future(
+                        self._heartbeat_loop(ws, heartbeat_interval)
+                    )
+                )
                 self._record_runtime_success()
 
                 async for raw in ws:
@@ -689,7 +711,9 @@ class DiscordChannel(Channel):
                     return
                 await asyncio.sleep(self._next_backoff_seconds())
                 if self._running:
-                    asyncio.ensure_future(self._gateway_connect())
+                    self._track_bg_task(
+                        asyncio.ensure_future(self._gateway_connect())
+                    )
 
     async def _heartbeat_loop(self, ws, interval: float):
         while self._running:
@@ -827,7 +851,7 @@ class SlackChannel(Channel):
             logger.warning("Slack auth.test failed: %s", e)
 
         if app_token:
-            asyncio.ensure_future(self._socket_mode(app_token))
+            self._track_bg_task(asyncio.ensure_future(self._socket_mode(app_token)))
             logger.info("Slack channel started (Socket Mode)")
         else:
             logger.info("Slack channel started (outbound only — add app_token for incoming)")
@@ -882,7 +906,9 @@ class SlackChannel(Channel):
                     return
                 await asyncio.sleep(self._next_backoff_seconds())
                 if self._running:
-                    asyncio.ensure_future(self._socket_mode(app_token))
+                    self._track_bg_task(
+                        asyncio.ensure_future(self._socket_mode(app_token))
+                    )
 
     async def _handle_slack_message(self, event: dict):
         channel_id = event.get("channel", "")

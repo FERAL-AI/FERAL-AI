@@ -114,6 +114,15 @@ class CDPConnection:
         self._connected = False
         self._page_ws_url: Optional[str] = None
         self._event_listeners: list[Callable[[dict], None]] = []
+        # AUDIT-FIXES F-06. Strong references to the async event-listener
+        # dispatches fired from ``_receive_loop``. This is the highest-churn
+        # site in the sweep (one task per CDP event per async listener), so
+        # it is exactly the shape where retaining tasks unconditionally
+        # would leak. The done-callback discard is what makes it safe: the
+        # set only ever holds listeners that have not finished, and the loop
+        # keeps tasks weakly, so without it a listener could be collected
+        # mid-flight and the event silently dropped.
+        self._bg_tasks: set[asyncio.Task] = set()
 
     @property
     def connected(self) -> bool:
@@ -251,7 +260,11 @@ class CDPConnection:
                             try:
                                 maybe_coro = listener(msg)
                                 if asyncio.iscoroutine(maybe_coro):
-                                    asyncio.create_task(maybe_coro)
+                                    _t = asyncio.create_task(
+                                        maybe_coro, name="cdp-event-listener",
+                                    )
+                                    self._bg_tasks.add(_t)
+                                    _t.add_done_callback(self._bg_tasks.discard)
                             except Exception:
                                 continue
                 except json.JSONDecodeError:

@@ -61,6 +61,13 @@ class SubagentRegistry:
         self._runner: Optional[SubagentRunner] = None
         self._parent_kinds: dict[str, str] = {}
         self._suppression: dict[str, dict[str, bool]] = {}
+        # AUDIT-FIXES F-06. The reaper below is fire-and-forget and it is
+        # the only thing that removes cancelled children from
+        # ``_by_parent``. The loop holds tasks only weakly, so a collected
+        # reaper leaks the parent's child records for the life of the
+        # process and ``cancel_children`` keeps re-cancelling dead tasks.
+        # Discard-on-done bounds the set to in-flight reaps.
+        self._bg_tasks: set[asyncio.Task] = set()
 
     # ── Wiring (boot + tests) ────────────────────────────────────
 
@@ -247,7 +254,11 @@ class SubagentRegistry:
         except RuntimeError:
             self._by_parent.pop(parent_id, None)
             return len(targets)
-        loop.create_task(self._reap(parent_id, targets))
+        task = loop.create_task(
+            self._reap(parent_id, targets), name=f"subagent-reap-{parent_id}",
+        )
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
         return len(targets)
 
     async def _reap(self, parent_id: str, targets: list[dict]) -> None:

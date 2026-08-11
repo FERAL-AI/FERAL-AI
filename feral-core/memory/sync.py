@@ -543,7 +543,22 @@ class SyncEngine:
         self._io_paused = False
         self._io_pause_reason = ""
 
+        # AUDIT-FIXES F-06. Strong references to the fire-and-forget mDNS
+        # resolve tasks the async peer listener schedules. The event loop
+        # holds tasks only weakly, so the previous bare create_task could be
+        # collected between the zeroconf callback and the reply arriving,
+        # dropping a peer that is on the network. Same shape as
+        # ``MemoryStore._bg_tasks``; the done-callback discard keeps the set
+        # bounded by the number of in-flight resolves.
+        self._bg_tasks: set[asyncio.Task] = set()
+
         logger.info(f"SyncEngine initialized: node={node_id}, wal={wal_path}")
+
+    def _track_bg_task(self, task: asyncio.Task) -> asyncio.Task:
+        """Hold a strong reference to a fire-and-forget task. See F-06."""
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     @property
     def io_paused(self) -> bool:
@@ -1039,7 +1054,12 @@ class SyncEngine:
                 # service info via the async API so the loop stays
                 # responsive even on slow networks.
                 def add_service(self, zc, type_, name):
-                    asyncio.create_task(self._async_resolve(zc, type_, name))
+                    engine._track_bg_task(
+                        asyncio.create_task(
+                            self._async_resolve(zc, type_, name),
+                            name=f"mdns-resolve-{name}",
+                        )
+                    )
 
                 async def _async_resolve(self, zc, type_, name):
                     # `zc` here is the inner sync `Zeroconf` instance

@@ -15,6 +15,13 @@ from typing import Optional
 import httpx
 
 logger = logging.getLogger("feral.integrations.ha")
+
+# AUDIT-FIXES F-06. ``_close_later`` is a staticmethod with no instance to
+# hang state off, so the strong references live at module level. The loop
+# keeps tasks only weakly: a collected ``aclose()`` leaves the replaced
+# httpx client's connection pool open, which is the socket leak this helper
+# exists to prevent. Discard-on-done bounds the set to in-flight closes.
+_close_tasks: set = set()
 ws_logger = logging.getLogger("feral.integrations.ha.ws")
 
 # Where a Home Assistant lives when nobody has said otherwise.
@@ -191,7 +198,11 @@ class HomeAssistantIntegration:
     def _close_later(client: httpx.AsyncClient) -> None:
         """Close a replaced HTTP client without blocking a sync caller."""
         try:
-            asyncio.get_running_loop().create_task(client.aclose())
+            task = asyncio.get_running_loop().create_task(
+                client.aclose(), name="ha-client-close",
+            )
+            _close_tasks.add(task)
+            task.add_done_callback(_close_tasks.discard)
         except RuntimeError:
             # No loop here; the client never opened a connection pool it
             # could leak from a sync context.

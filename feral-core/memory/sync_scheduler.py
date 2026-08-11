@@ -149,6 +149,20 @@ class SyncScheduler:
         # engine's _peers dict so :meth:`SyncEngine.sync_with_peer`
         # can find them too.
         self._manual_peers: dict[str, str] = {}
+        # AUDIT-FIXES F-06 (not in the original citation list; found by the
+        # AST sweep). Strong references to the per-peer sync tasks kicked
+        # off by the cadence tick and by heartbeat reconnect. The loop keeps
+        # tasks only weakly, so a sync suspended on network I/O could be
+        # collected: the peer's PeerStatus is left mid-flight, nothing
+        # records a failure, and the operator sees a peer that never syncs.
+        # Discard-on-done bounds the set to peers currently syncing.
+        self._bg_tasks: set[asyncio.Task] = set()
+
+    def _track_bg_task(self, task: asyncio.Task) -> asyncio.Task:
+        """Hold a strong reference to a fire-and-forget sync. See F-06."""
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -215,9 +229,11 @@ class SyncScheduler:
                 continue
             # Per-peer lock — kick off the sync without blocking other
             # peers, but never let two overlap for the same peer.
-            asyncio.create_task(
-                self._sync_one_peer(peer_id, trigger="cadence"),
-                name=f"sync-{peer_id}",
+            self._track_bg_task(
+                asyncio.create_task(
+                    self._sync_one_peer(peer_id, trigger="cadence"),
+                    name=f"sync-{peer_id}",
+                )
             )
 
     # ── Per-peer sync ───────────────────────────────────────────────────
@@ -375,9 +391,11 @@ class SyncScheduler:
         status.consecutive_heartbeat_misses = 0
         status.backoff_until = 0.0
         logger.info("heartbeat: %s reconnected → immediate re-sync", peer_id)
-        asyncio.create_task(
-            self._sync_one_peer(peer_id, trigger="heartbeat_reconnect"),
-            name=f"sync-{peer_id}-rc",
+        self._track_bg_task(
+            asyncio.create_task(
+                self._sync_one_peer(peer_id, trigger="heartbeat_reconnect"),
+                name=f"sync-{peer_id}-rc",
+            )
         )
 
     # ── Operator surface ────────────────────────────────────────────────

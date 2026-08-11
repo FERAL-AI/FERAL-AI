@@ -477,6 +477,50 @@ async def save_credentials(body: dict):
             cfg = getattr(existing, "config", {}) if existing else {}
             return cfg if isinstance(cfg, dict) else {}
 
+        def _start_channel_bg(channel_type: str, cfg: dict) -> None:
+            """Start a messaging channel in the background, referenced.
+
+            AUDIT-FIXES F-06. These three call sites used a bare
+            ``asyncio.create_task(...)``. The event loop holds only a weak
+            reference to a task, so once this request handler returned and
+            dropped its frame, nothing referenced the start-up coroutine and
+            the collector was free to take it mid-flight (verified
+            reproducible: a suspended task whose awaited future is reachable
+            only through the task itself is destroyed by ``gc.collect()``
+            and its remaining steps never run).
+
+            That failure is invisible from the outside: the route has
+            already answered ``{"ok": true, "keys_saved": [...]}``, so the
+            user is told their Telegram/Slack/WhatsApp token was accepted
+            while the channel silently never came up.
+
+            ``state.register_background_task`` is the registry the rest of
+            this file already uses (see the proactive/vision toggles above);
+            it holds a strong reference until the task finishes and drops it
+            on completion. The done-callback additionally *retrieves* the
+            exception, which the registry's plain ``set.discard`` does not,
+            so a channel that fails to start now says so in the log instead
+            of relying on asyncio's never-retrieved warning at collection
+            time.
+            """
+            task = asyncio.create_task(
+                state.channel_manager.start_channel(channel_type, cfg),
+                name=f"channel-start-{channel_type}",
+            )
+            state.register_background_task(task)
+
+            def _report(t: "asyncio.Task") -> None:
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    logger.warning(
+                        "Channel %s failed to start after credential save: %s",
+                        channel_type, exc, exc_info=exc,
+                    )
+
+            task.add_done_callback(_report)
+
         # Telegram / Discord: single bot token.
         for env_key, channel_type in (
             ("FERAL_TELEGRAM_BOT_TOKEN", "telegram"),
@@ -489,11 +533,9 @@ async def save_credentials(body: dict):
                 continue
             existing_cfg = _existing_cfg(channel_type)
             if existing_cfg.get("bot_token", "").strip() != token.strip():
-                asyncio.create_task(
-                    state.channel_manager.start_channel(
-                        channel_type,
-                        {"bot_token": token, "enabled": True},
-                    ),
+                _start_channel_bg(
+                    channel_type,
+                    {"bot_token": token, "enabled": True},
                 )
 
         # Slack: either bot/app token update should refresh channel config.
@@ -507,15 +549,13 @@ async def save_credentials(body: dict):
                     or existing_cfg.get("app_token", "").strip() != app_token.strip()
                 )
                 if changed:
-                    asyncio.create_task(
-                        state.channel_manager.start_channel(
-                            "slack",
-                            {
-                                "bot_token": bot_token,
-                                "app_token": app_token,
-                                "enabled": True,
-                            },
-                        ),
+                    _start_channel_bg(
+                        "slack",
+                        {
+                            "bot_token": bot_token,
+                            "app_token": app_token,
+                            "enabled": True,
+                        },
                     )
 
         # WhatsApp: access token + phone id are required; app secret is optional
@@ -537,16 +577,14 @@ async def save_credentials(body: dict):
                     or existing_cfg.get("app_secret", "").strip() != str(app_secret).strip()
                 )
                 if changed:
-                    asyncio.create_task(
-                        state.channel_manager.start_channel(
-                            "whatsapp",
-                            {
-                                "access_token": access_token,
-                                "phone_number_id": phone_number_id,
-                                "app_secret": app_secret,
-                                "enabled": True,
-                            },
-                        ),
+                    _start_channel_bg(
+                        "whatsapp",
+                        {
+                            "access_token": access_token,
+                            "phone_number_id": phone_number_id,
+                            "app_secret": app_secret,
+                            "enabled": True,
+                        },
                     )
 
     return {

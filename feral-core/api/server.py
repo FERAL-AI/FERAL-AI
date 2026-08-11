@@ -1815,8 +1815,14 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                     state.change_detector.force_trigger(target_node, "user_request")
                     latest = state.vision_buffer.latest(target_node)
                     if latest and state.scene and state.scene.available:
-                        asyncio.ensure_future(
-                            _analyze_scene_background(target_node, latest, mode="query", query=query_text)
+                        # AUDIT-FIXES F-06: ensure_future carries the same
+                        # weak-reference hazard as create_task. A collected
+                        # analysis means the user asked "what do you see"
+                        # and simply never got an answer.
+                        state.register_background_task(
+                            asyncio.ensure_future(
+                                _analyze_scene_background(target_node, latest, mode="query", query=query_text)
+                            )
                         )
 
                 elif msg.type == "vision_frame":
@@ -1850,8 +1856,11 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                         )
                         if change_event and state.scene and state.scene.available:
                             mode = "tracking" if change_event.trigger_reason == "scene_change" else "general"
-                            asyncio.ensure_future(
-                                _analyze_scene_background(virtual_node, frame_payload, mode=mode)
+                            # AUDIT-FIXES F-06, see the vision_query branch.
+                            state.register_background_task(
+                                asyncio.ensure_future(
+                                    _analyze_scene_background(virtual_node, frame_payload, mode=mode)
+                                )
                             )
 
                 elif msg.type == "biometric":
@@ -2357,8 +2366,11 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     )
                     if change_event and state.scene and state.scene.available:
                         mode = "tracking" if change_event.trigger_reason == "scene_change" else "general"
-                        asyncio.ensure_future(
-                            _analyze_scene_background(effective_node, frame_payload, mode=mode)
+                        # AUDIT-FIXES F-06, see the vision_query branch.
+                        state.register_background_task(
+                            asyncio.ensure_future(
+                                _analyze_scene_background(effective_node, frame_payload, mode=mode)
+                            )
                         )
 
                     if state.orchestrator:
@@ -2371,8 +2383,11 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 state.change_detector.force_trigger(target_node, "user_request")
                 latest = state.vision_buffer.latest(target_node)
                 if latest and state.scene and state.scene.available:
-                    asyncio.ensure_future(
-                        _analyze_scene_background(target_node, latest, mode="query", query=query_text)
+                    # AUDIT-FIXES F-06, see the vision_query branch above.
+                    state.register_background_task(
+                        asyncio.ensure_future(
+                            _analyze_scene_background(target_node, latest, mode="query", query=query_text)
+                        )
                     )
 
             elif msg.type == "gesture":
@@ -3696,8 +3711,11 @@ def _handle_video_frame(node_id, frame_payload: dict, msg_id=None) -> str | None
     )
     if change_event and state.scene and state.scene.available:
         mode = "tracking" if change_event.trigger_reason == "scene_change" else "general"
-        asyncio.ensure_future(
-            _analyze_scene_background(effective_node, frame_payload, mode=mode)
+        # AUDIT-FIXES F-06, see the vision_query branch.
+        state.register_background_task(
+            asyncio.ensure_future(
+                _analyze_scene_background(effective_node, frame_payload, mode=mode)
+            )
         )
 
     if msg_id and state.orchestrator:

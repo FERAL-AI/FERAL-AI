@@ -95,6 +95,12 @@ class BudgetLoopGuard:
         # the banner is sticky on the client side so we don't need a
         # frame per tick to keep it visible.
         self._emit_throttle_s: float = 60.0
+        # AUDIT-FIXES F-06. Strong references to the fire-and-forget
+        # cost_cap_hit broadcasts scheduled in ``_emit_cap_hit``. The loop
+        # keeps tasks only weakly, so a collected task means the user is
+        # never told their budget stopped the run, and the throttle above
+        # then suppresses the next attempt for a full minute.
+        self._bg_tasks: set[asyncio.Task] = set()
 
     @property
     def call_site(self) -> str:
@@ -272,7 +278,9 @@ class BudgetLoopGuard:
                 # running here).
                 try:
                     loop = asyncio.get_running_loop()
-                    loop.create_task(result)
+                    task = loop.create_task(result, name="cost-cap-broadcast")
+                    self._bg_tasks.add(task)
+                    task.add_done_callback(self._bg_tasks.discard)
                 except RuntimeError:
                     # No running loop (sync caller, e.g. CronService);
                     # best-effort: schedule on a new event loop only

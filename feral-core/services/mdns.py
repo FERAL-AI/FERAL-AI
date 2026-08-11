@@ -29,6 +29,15 @@ logger = logging.getLogger("feral.services.mdns")
 _registration: Optional[tuple] = None
 _async_registration: Optional[tuple] = None
 
+# AUDIT-FIXES F-06. ``stop_advertisement`` is a sync function with no
+# instance to hang state off, so the strong references to its fire-and-forget
+# unregister task live here at module level. The loop keeps tasks only
+# weakly: a collected task means the brain's service record is never
+# withdrawn from the network and clients keep dialling a dead address until
+# the record TTLs out. Discard-on-done keeps this bounded (in practice it
+# holds at most one entry).
+_shutdown_tasks: set = set()
+
 PHONE_BRIDGE_SERVICE_TYPE = "_feral-phone._tcp.local."
 
 
@@ -348,7 +357,11 @@ def stop_advertisement():
         try:
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(_stop_async_registration(zc, info))
+                _task = loop.create_task(
+                    _stop_async_registration(zc, info), name="mdns-unregister",
+                )
+                _shutdown_tasks.add(_task)
+                _task.add_done_callback(_shutdown_tasks.discard)
             except RuntimeError:
                 inner = getattr(zc, "zeroconf", None)
                 if inner is not None:

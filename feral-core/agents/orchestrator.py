@@ -640,7 +640,12 @@ class Orchestrator:
                 self._compaction_inflight[session_id] = False
 
         try:
-            asyncio.ensure_future(_run())
+            # AUDIT-FIXES F-06: ensure_future has the same weak-reference
+            # hazard as create_task. A collected compaction task leaves
+            # ``_compaction_inflight[session_id]`` stuck True, because the
+            # flag is only cleared in _run's finally, so the session never
+            # compacts again for the life of the process.
+            self._track_background_task(asyncio.ensure_future(_run()))
         except RuntimeError:
             pass
 
@@ -1772,8 +1777,12 @@ class Orchestrator:
 
         self._evict_stale_sessions()
         if self.learner:
-            asyncio.ensure_future(
-                self.learner.on_message(session_id, "user", turn.get("text", ""))
+            # AUDIT-FIXES F-06: referenced so the self-learning write cannot
+            # be collected mid-flight and drop the turn.
+            self._track_background_task(
+                asyncio.ensure_future(
+                    self.learner.on_message(session_id, "user", turn.get("text", ""))
+                )
             )
         # Phase 3 (audit-r10) — persist primary thread snapshot so the
         # operator's last 50 turns survive brain restart.
@@ -3181,8 +3190,11 @@ class Orchestrator:
                             {"role": "assistant", "text": response_text},
                         )
                     if self.learner:
-                        asyncio.ensure_future(
-                            self.learner.on_message(session_id, "user", text)
+                        # AUDIT-FIXES F-06, same as the non-stream branch.
+                        self._track_background_task(
+                            asyncio.ensure_future(
+                                self.learner.on_message(session_id, "user", text)
+                            )
                         )
                     return response_text
             except Exception as e:

@@ -75,7 +75,7 @@ For tools, this trap is worse than a skewed count — it takes them to zero. `my
 - **Version literals are synced by `scripts/sync_versions.py`** across 17 file+regex locations and gated by `.github/workflows/version-coherence.yml`. Run `python scripts/sync_versions.py --check` after touching any version.
 - **Do not add a bare `except Exception: pass`.** There are already 1,702 broad handlers and ~210 silent swallows; they are the repo's dominant defect class. If you must catch broadly, log with context and re-raise or return a typed error.
 - **Async discipline:** never call blocking I/O inside `async def`. Use `asyncio.to_thread` (85 existing call sites) or the async-native API. `subprocess.run` inside a route handler is a bug.
-- **Background tasks must be referenced.** Use `state.register_background_task(...)` or hold the task in a `set[asyncio.Task]` — see `agents/orchestrator.py:210-218`. A bare `asyncio.create_task(...)` can be garbage-collected mid-flight.
+- **Background tasks must be referenced.** Use `state.register_background_task(...)` or hold the task in a `set[asyncio.Task]` with an `add_done_callback(the_set.discard)` so it stays bounded (see `agents/orchestrator.py:210-218`). A bare `asyncio.create_task(...)` **or `asyncio.ensure_future(...)`** can be garbage-collected mid-flight; the loop holds tasks only weakly. `tests/test_background_task_references.py` AST-scans for both and will fail the build on a new one.
 - **No em dashes** in code, comments, commit messages, or docs.
 
 ## Where the truth is written down

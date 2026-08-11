@@ -796,6 +796,13 @@ class RealtimeProxy:
     ):
         self._sessions: dict[str, RealtimeSession] = {}
         self._node_to_session: dict[str, str] = {}
+        # AUDIT-FIXES F-06. Strong references to the two fire-and-forget
+        # side-channels this proxy schedules: the voice-turn hooks
+        # (active-subject tracker + memory refresh) and the episode_save for
+        # a voice tool call. The loop keeps tasks only weakly, so either can
+        # be collected mid-flight, and both are memory writes: the user's
+        # voice turn simply never gets remembered, with nothing logged.
+        self._bg_tasks: set[asyncio.Task] = set()
         self._skill_registry = skill_registry
         self._skill_executor = skill_executor
         self._memory = memory
@@ -1251,9 +1258,12 @@ class RealtimeProxy:
             # above, and the receive loop is strictly serial, so an
             # await here stalls every subsequent OpenAI event for the
             # session.
-            asyncio.create_task(
-                self._apply_voice_turn_hooks(session_id, text[len("[user] "):])
+            _t = asyncio.create_task(
+                self._apply_voice_turn_hooks(session_id, text[len("[user] "):]),
+                name="voice-turn-hooks",
             )
+            self._bg_tasks.add(_t)
+            _t.add_done_callback(self._bg_tasks.discard)
 
     async def _apply_voice_turn_hooks(self, session_id: str, clean: str) -> None:
         """Run the orchestrator side-channels for a final user turn.
@@ -1665,9 +1675,12 @@ class RealtimeProxy:
                 )
 
         try:
-            asyncio.create_task(_runner())
+            _t = asyncio.create_task(_runner(), name="voice-episode-save")
         except RuntimeError:
             await _runner()
+        else:
+            self._bg_tasks.add(_t)
+            _t.add_done_callback(self._bg_tasks.discard)
 
     async def _handle_speech_started(self, session_id: str):
         """User started speaking — cancel current response and notify client."""

@@ -306,6 +306,11 @@ class GeminiRealtimeProxy:
     ):
         self._sessions: dict[str, GeminiRealtimeSession] = {}
         self._node_to_session: dict[str, str] = {}
+        # AUDIT-FIXES F-06, parity with RealtimeProxy. Strong references to
+        # the per-turn memory refresh and the voice-tool episode_save. Both
+        # are fire-and-forget memory writes and the loop holds tasks only
+        # weakly, so a collected task loses the turn with nothing logged.
+        self._bg_tasks: set[asyncio.Task] = set()
         self._skill_registry = skill_registry
         self._skill_executor = skill_executor
         self._memory = memory
@@ -617,9 +622,12 @@ class GeminiRealtimeProxy:
             try:
                 from agents.orchestrator import Orchestrator as _Orch
                 if _Orch._R_MEMORY.search(text) and self._memory:
-                    asyncio.create_task(
-                        self._refresh_memory_context(session_id, text)
+                    _t = asyncio.create_task(
+                        self._refresh_memory_context(session_id, text),
+                        name="gemini-memory-refresh",
                     )
+                    self._bg_tasks.add(_t)
+                    _t.add_done_callback(self._bg_tasks.discard)
             except Exception:
                 logger.debug(
                     "gemini: per-turn memory refresh schedule failed",
@@ -840,9 +848,12 @@ class GeminiRealtimeProxy:
                 )
 
         try:
-            asyncio.create_task(_runner())
+            _t = asyncio.create_task(_runner(), name="gemini-episode-save")
         except RuntimeError:
             await _runner()
+        else:
+            self._bg_tasks.add(_t)
+            _t.add_done_callback(self._bg_tasks.discard)
 
     async def _handle_speech_started(self, session_id: str):
         gs = self._sessions.get(session_id)

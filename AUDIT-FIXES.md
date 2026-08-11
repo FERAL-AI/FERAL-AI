@@ -606,10 +606,13 @@ The first can stall every concurrent coroutine for two minutes against a slow or
 pairs were present and every line number was still exact, which is unusual for
 this audit and worth recording: nothing in this class had drifted.
 
-**Count correction: nineteen, not fourteen.** An AST sweep of `feral-core`
-(excluding `build/`, `dist/`, `tests/`) for `*.create_task(...)` appearing as a
-whole expression statement, which is exactly "the Task was produced and
-immediately dropped", found five sites the audit missed:
+**Count correction: thirty-two, not fourteen.** Nineteen `create_task` plus a
+thirteen-site sibling the finding does not name, `asyncio.ensure_future`.
+
+An AST sweep of `feral-core` (excluding `build/`, `dist/`, `tests/`) for
+`*.create_task(...)` appearing as a whole expression statement, which is exactly
+"the Task was produced and immediately dropped", found five sites the audit
+missed:
 
 ```
 integrations/home_assistant.py:194   asyncio.get_running_loop().create_task(client.aclose())
@@ -626,34 +629,68 @@ proxies are those same two spellings, so that gap was enumeration, not pattern.
 (`get_running_loop().create_task(...)`, a call receiver rather than a name).
 
 A second sweep for the adjacent shape, `t = create_task(...)` assigned to a
-local that is never read again, found **zero** sites, so nineteen is the whole
-class.
+local that is never read again, found **zero** sites.
+
+**The sibling: `asyncio.ensure_future`, thirteen more sites.** Found by running
+`ruff --select=RUF006`, which the CI gate does not enable. `ensure_future` on a
+coroutine constructs a Task by exactly the same route and the loop references it
+exactly as weakly, so it is the same defect under a different name:
+
+```
+channels/base.py:649, :675, :692   Discord gateway connect, its heartbeat, its reconnect
+channels/base.py:830, :885         Slack socket-mode connect and its reconnect
+agents/orchestrator.py:643         F2 auto-compaction
+agents/orchestrator.py:1775, :3184 self-learning on_message (non-stream and stream)
+api/server.py:1818, :1853, :2360, :2374, :3699   vision scene analysis
+```
+
+`channels/base.py:649` and `:830` matter most: they are the layer *underneath*
+the three `config.py` sites the finding does cite. `start_channel("slack", ...)`
+scheduled `_socket_mode` with a bare `ensure_future`, so fixing `config.py`
+alone would have left the channel's actual socket collectible one frame later.
+The finding's own stated symptom, "a channel that fails to start does so
+silently", was reachable through both.
+
+`agents/orchestrator.py:643` is the worst of the rest: `_run`'s `finally` is the
+only thing that clears `_compaction_inflight[session_id]`, so a collected
+compaction task leaves that flag stuck `True` and the session never compacts
+again for the life of the process.
+
+Thirty-two is the whole class. `RUF006` now reports one hit repo-wide, the
+deliberately-unreferenced task inside the meta-test that proves the probe works.
 
 **Mechanism, per site.** No third mechanism was invented.
 
 - `state.register_background_task(...)` where the object can reach it:
-  `api/routes/config.py` (3, the channel-startup sites) and `api/state.py`
-  (3, the websocket broadcasts). `api/routes/config.py` already used this
-  registry for the proactive and vision toggles at `:182` and `:203`.
+  `api/routes/config.py` (3, the channel-startup sites), `api/state.py`
+  (3, the websocket broadcasts) and `api/server.py` (5, the vision analyses).
+  `api/routes/config.py` already used this registry for the proactive and
+  vision toggles at `:182` and `:203`, and `api/server.py` for its own
+  boot-time tasks.
+- `Orchestrator._track_background_task`, the registry that file already owns,
+  for its 3 `ensure_future` sites.
 - An instance-level `set[asyncio.Task]` with an `add_done_callback(discard)`,
   the `memory/store.py` shape, everywhere else: `memory/sync.py`,
   `memory/sync_scheduler.py`, `agents/supervisor.py`, `cost/loop_guard.py`,
   `agents/subagent_spawner.py`, `skills/impl/browser_use.py`,
-  `voice/realtime_proxy.py`, `voice/gemini_realtime.py`.
+  `voice/realtime_proxy.py`, `voice/gemini_realtime.py`, and `channels/base.py`
+  where the set and a `_track_bg_task` helper went on the `Channel` ABC so all
+  five subclass sites share one mechanism.
 - A module-level set, same discard idiom, at the two sites with no instance to
   hang state off: `services/mdns.py` (`stop_advertisement` is a module
   function) and `integrations/home_assistant.py` (`_close_later` is a
   `staticmethod`).
 
-**The one site where retaining unconditionally would leak.**
+**The sites where retaining unconditionally would leak.**
 `skills/impl/browser_use.py:254` schedules one task per CDP event per async
-listener, in a receive loop that runs for the life of a browser session. An
-unbounded registry there would be a real leak. The done-callback discard is
-what makes it safe: the set only ever holds listeners that have not finished.
-The same reasoning applies, at lower volume, to the mDNS resolves and the
-per-peer syncs. Nothing was left unreferenced.
+listener, in a receive loop that runs for the life of a browser session; the
+five `api/server.py` vision analyses fire per frame on a live websocket. An
+unbounded registry at either would be a real leak. The done-callback discard is
+what makes it safe: the set only ever holds tasks that have not finished. The
+same reasoning applies, at lower volume, to the mDNS resolves and the per-peer
+syncs. No site was left unreferenced on this ground.
 
-**Nothing deferred.** None of the nineteen sites falls in a file another lane
+**Nothing deferred.** None of the thirty-two sites falls in a file another lane
 holds.
 
 **Also fixed the silent half of the config finding.** `register_background_task`
@@ -673,24 +710,38 @@ call site kept a reference the future survives, the test completes it, and the
 coroutine's second half runs. Two meta-tests pin that the probe can both fail
 and pass, so it cannot silently stop discriminating.
 
-Against unfixed `63b054aa1`: **4 failed, 5 passed**. The three behavioural tests
-(Telegram channel start via the real `POST /api/config/credentials` handler, the
-supervisor event broadcast, the scheduler's heartbeat re-sync) each failed
-reporting the task collected mid-flight, and the AST guard failed listing all
-nineteen sites. After the fix: **9 passed**.
+Against unfixed `63b054aa1` (run in a clean `git worktree` of HEAD so the
+baseline could not be contaminated by other lanes' in-flight edits):
+**5 failed, 5 passed**. The four behavioural tests each failed reporting the task
+collected mid-flight:
+
+```
+test_channel_startup_task_survives_gc        POST /api/config/credentials, real handler
+test_supervisor_broadcast_task_survives_gc   Supervisor._record broadcaster
+test_discord_gateway_task_survives_gc        DiscordChannel.start, the ensure_future sibling
+test_sync_scheduler_reconnect_task_survives_gc
+```
+
+and the AST guard failed listing all thirty-two sites. After the fix:
+**10 passed**.
 
 The channel-startup test binds the real `BrainState.register_background_task` to
 its stand-in state rather than reimplementing it, so it exercises the production
 registry. That is trap 3 in `CLAUDE.md` applied to this fix.
 
 **Guard against reintroduction:** `test_no_unreferenced_create_task`, modelled
-on `tests/test_double_contracts.py`. A ruff rule was not used: `RUF006` covers
-only `asyncio.create_task` spelled as an attribute of a module named `asyncio`,
-which would have missed eight of the nineteen (`loop.create_task`,
-`get_running_loop().create_task`), and the gate runs `--select=E,F,W` anyway.
+on `tests/test_double_contracts.py`. `RUF006` alone was not sufficient: it
+matches only `asyncio.create_task` / `asyncio.ensure_future` spelled as an
+attribute of a module named `asyncio`, so it missed eight of the nineteen
+`create_task` sites (`loop.create_task`, `get_running_loop().create_task`), and
+the CI gate runs `--select=E,F,W` anyway. It was, however, what surfaced the
+`ensure_future` sibling, and it is worth a line in S-1: two of this audit's
+findings so far were mechanically discoverable by a linter or type checker the
+gate does not run.
 
-**Proved:** `python -m pytest tests/ -q` → **7447 passed, 29 skipped**, 0 failed
-(372s). `ruff check --select=E,F,W --ignore=E501,E402,F401,W291,W293 .` → clean.
+**Proved:** `python -m pytest tests/ -q -p no:cacheprovider -p no:randomly
+--no-cov` → **7448 passed, 29 skipped**, 0 failed (324s).
+`ruff check --select=E,F,W --ignore=E501,E402,F401,W291,W293 .` → clean.
 
 Original finding (kept for reference; the site list is incomplete, see above):
 
