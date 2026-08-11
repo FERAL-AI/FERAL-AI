@@ -1185,7 +1185,14 @@ class EmbeddingProvider:
 
     async def _embed_batch_uncached(self, texts: list[str]) -> list[np.ndarray]:
         if self.degraded or self._provider is None:
-            return [self._fallback_embed(t) for t in texts]
+            # _fallback_embed is blocking too: it can reach
+            # _ensure_local_model, whose own docstring notes that
+            # construction triggers a ~130 MB download. The finding
+            # names that risk but cites the wrong lines; this is where
+            # it is reachable from the loop. See AUDIT-FIXES F-04.
+            return await asyncio.to_thread(
+                lambda: [self._fallback_embed(t) for t in texts]
+            )
         if self._provider == "openai":
             try:
                 vecs = await self._openai_batch(texts)
@@ -1195,16 +1202,24 @@ class EmbeddingProvider:
                 fallback = self._classify_and_record_openai_error(exc)
                 if not fallback:
                     raise
-                return [self._fallback_embed(t) for t in texts]
+                return await asyncio.to_thread(
+                    lambda: [self._fallback_embed(t) for t in texts]
+                )
+        # Same offload as _embed_impl, and it matters more here: the
+        # sentence-transformers branch pays the blocking cost once per
+        # text, so a batch of 200 held the loop for 200 forward passes.
+        # One thread hop covers the whole batch rather than one per item.
         if self._provider == "fastembed":
-            return self._fastembed_batch(texts)
+            return await asyncio.to_thread(self._fastembed_batch, texts)
         if self._provider == "sentence_transformers":
-            return [self._local_embed(t) for t in texts]
+            return await asyncio.to_thread(
+                lambda: [self._local_embed(t) for t in texts]
+            )
         return [self._hash_embed(t, self._dim) for t in texts]
 
     async def _embed_impl(self, text: str) -> np.ndarray:
         if self.degraded or self._provider is None:
-            return self._fallback_embed(text)
+            return await asyncio.to_thread(self._fallback_embed, text)
         if self._provider == "openai":
             try:
                 vec = await self._openai_embed(text)
@@ -1214,11 +1229,26 @@ class EmbeddingProvider:
                 fallback = self._classify_and_record_openai_error(exc)
                 if not fallback:
                     raise
-                return self._fallback_embed(text)
+                return await asyncio.to_thread(self._fallback_embed, text)
+        # Both local branches are CPU-bound and synchronous:
+        # _local_embed ends in SentenceTransformer.encode(), a full
+        # transformer forward pass, and _fastembed_embed runs an ONNX
+        # session. Called inline from this async function they hold the
+        # event loop for their whole duration, so voice streaming,
+        # websocket heartbeats and every concurrent request stop dead.
+        # _detect_provider defaults to "auto", which resolves to exactly
+        # these two, so this was the default install rather than an
+        # exotic configuration. See AUDIT-FIXES F-04.
+        #
+        # _ensure_local_model is reachable from inside these and can
+        # trigger a model download, so the worst case being moved off the
+        # loop is not milliseconds, it is the length of a fetch.
         if self._provider == "fastembed":
-            return self._fastembed_embed(text)
+            return await asyncio.to_thread(self._fastembed_embed, text)
         if self._provider == "sentence_transformers":
-            return self._local_embed(text)
+            return await asyncio.to_thread(self._local_embed, text)
+        # _hash_embed is pure arithmetic over a short string and stays
+        # inline: a thread hop would cost more than the work.
         return self._hash_embed(text, self._dim)
 
     # ── OpenAI HTTP path ────────────────────────────────────────────
