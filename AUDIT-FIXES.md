@@ -92,7 +92,38 @@ feral-core/tests/test_sync_scheduler.py:43  async def sync_with_peer(self, peer_
 
 ### F-16 · The computer-use VLM has never initialised
 
-**Status:** open · **P0** · surfaced while fixing F-01
+**Status:** FIXED — commit below.
+
+**Re-verified.** `LLMProvider.__init__` takes `(self)`; the call passed three kwargs.
+Confirmed by `inspect.signature`, and mypy reported all three as `call-arg`.
+
+**The audit's question answered:** there is no lying test double here. Nothing under
+`tests/` so much as names `_get_vlm` — the path had zero coverage. Unlike F-01, this
+hid through absence rather than through a drifted stub.
+
+**Fix.** `LLMProvider()` then `await llm.switch_provider(provider, model=, api_key=)`,
+which is the real configuration API. `switch_provider` is async, so `_get_vlm` is now
+async; its single caller was already inside `async def _execute_task`.
+
+`FERAL_VLM_PROVIDER` and `FERAL_VLM_MODEL` are documented knobs that were read into
+locals and then discarded with the TypeError, so neither has ever taken effect. A test
+now pins both reaching the provider.
+
+**"Not configured" vs "failed to construct" are now separate.** The missing-key case
+returns `None` silently and early, because the caller already renders an actionable
+503 for it. Everything after that point runs with a key present, so a failure there is
+never a configuration problem, and it logs at warning with `exc_info=True` saying so.
+The old code collapsed both into one silent `None`, which is why a dead capability
+presented as "Set OPENAI_API_KEY" to users who had already set it. That message is
+the reason this was never reported as a bug.
+
+New tests fail 5/6 against the unfixed source and pass 6/6 after.
+
+**Siblings:** every other `LLMProvider(` construction in the tree is zero-arg. With
+this fixed, the real `call-arg` count is **zero**; the three remaining are the false
+positives documented in `mypy-baseline.txt`.
+
+Original finding follows.
 
 ```
 feral-core/skills/impl/agentic_computer_use.py:272   LLMProvider(provider=..., model=..., api_key=...)

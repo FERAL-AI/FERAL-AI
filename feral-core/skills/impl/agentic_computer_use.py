@@ -206,7 +206,7 @@ class AgenticComputerUseSkill(BaseSkill):
         max_steps = min(int(args.get("max_steps", MAX_ITERATIONS)), MAX_ITERATIONS)
         steps_log: list[dict] = []
 
-        llm = self._get_vlm(vault)
+        llm = await self._get_vlm(vault)
         if not llm:
             return {"success": False, "status_code": 503, "data": None, "error": "No VLM available. Set OPENAI_API_KEY or FERAL_VLM_PROVIDER."}
 
@@ -254,24 +254,50 @@ class AgenticComputerUseSkill(BaseSkill):
             "error": "Max iterations reached without completing task",
         }
 
-    def _get_vlm(self, vault: dict) -> Optional[Any]:
-        """Get an LLM provider that supports vision."""
-        try:
-            from agents.llm_provider import LLMProvider
-            api_key = (
-                vault.get("OPENAI_API_KEY")
-                or os.getenv("OPENAI_API_KEY")
-                or vault.get("ANTHROPIC_API_KEY")
-                or os.getenv("ANTHROPIC_API_KEY")
-            )
-            if not api_key:
-                return None
+    async def _get_vlm(self, vault: dict) -> Optional[Any]:
+        """Get an LLM provider that supports vision.
 
-            provider = os.getenv("FERAL_VLM_PROVIDER", "openai")
-            model = os.getenv("FERAL_VLM_MODEL", "gpt-4o")
-            return LLMProvider(provider=provider, model=model, api_key=api_key)
-        except Exception as e:
-            logger.warning(f"Failed to initialize VLM: {e}")
+        This used to call ``LLMProvider(provider=, model=, api_key=)``.
+        ``LLMProvider.__init__`` takes ``(self)`` and accepts none of those,
+        so the call raised TypeError every single time, the except below
+        turned it into ``None``, and the caller rendered that as "No VLM
+        available. Set OPENAI_API_KEY". A user who had set the key was told
+        to set the key, which is why a dead capability was never reported as
+        a bug. See AUDIT-FIXES F-16.
+
+        Configuration goes through ``switch_provider``, which is the real
+        API for this and is async, hence this method is now async too. The
+        only caller was already inside ``async def _execute_task``.
+        """
+        from agents.llm_provider import LLMProvider
+
+        api_key = (
+            vault.get("OPENAI_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+            or vault.get("ANTHROPIC_API_KEY")
+            or os.getenv("ANTHROPIC_API_KEY")
+        )
+        # Genuinely not configured. Not an error, and deliberately silent:
+        # the caller already returns an actionable 503 for this case.
+        if not api_key:
+            return None
+
+        provider = os.getenv("FERAL_VLM_PROVIDER", "openai")
+        model = os.getenv("FERAL_VLM_MODEL", "gpt-4o")
+        try:
+            llm = LLMProvider()
+            await llm.switch_provider(provider, model=model, api_key=api_key)
+            return llm
+        except Exception as exc:
+            # Reached only with a key present, so this is never a
+            # configuration problem and must not be reported as one. Kept
+            # narrow-in-meaning by the early return above: everything that
+            # lands here is a real failure to build a provider.
+            logger.warning(
+                "VLM construction failed for provider=%s model=%s: %s. "
+                "This is not a missing API key; a key was supplied.",
+                provider, model, exc, exc_info=True,
+            )
             return None
 
     async def _capture_screen(self) -> Optional[str]:
