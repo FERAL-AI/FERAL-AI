@@ -40,8 +40,15 @@ class _StubEngine:
         """Queue results that sync_with_peer will pop per call."""
         self._script[peer_id] = list(results)
 
-    async def sync_with_peer(self, peer_id: str, passphrase: str = "") -> dict:
-        self._calls.append((peer_id, passphrase))
+    async def sync_with_peer(self, peer_id: str) -> dict:
+        # Signature mirrors the real SyncEngine.sync_with_peer, which is
+        # keyword-only after peer_id and has no passphrase. This double
+        # used to declare passphrase="", which the engine has never
+        # accepted, so the whole scheduled-sync path raised TypeError in
+        # production while this file stayed green. See AUDIT-FIXES F-01
+        # and tests/test_sync_scheduler_engine_contract.py, which asserts
+        # this signature against the real one so it cannot drift again.
+        self._calls.append((peer_id, ""))
         if peer_id not in self._script or not self._script[peer_id]:
             return {"success": False, "reason": "no_script"}
         return self._script[peer_id].pop(0)

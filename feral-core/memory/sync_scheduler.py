@@ -236,12 +236,40 @@ class SyncScheduler:
             status.last_attempt = time.time()
             m = _metrics()
             try:
+                # No passphrase argument: SyncEngine.sync_with_peer is
+                # keyword-only and has never had one. Passing it raised
+                # TypeError on every scheduled sync, and the broad handler
+                # below filed that as an ordinary peer failure, so the
+                # feature reported a flaky network for about 40 releases
+                # while never once running. See AUDIT-FIXES F-01.
+                #
+                # It is not threaded through either, because the engine
+                # already has the better value. _handshake_and_exchange
+                # reads memory.sync.SYNC_PASSPHRASE, which
+                # ensure_sync_passphrase() resolves at boot as env, then
+                # vault, then freshly generated and persisted. This module's
+                # own _passphrase() reads os.environ alone, so handing it
+                # over would send an empty passphrase on any install whose
+                # secret lives in the vault, which is the normal case.
                 result = await asyncio.wait_for(
-                    self.engine.sync_with_peer(peer_id, passphrase=_passphrase()),
+                    self.engine.sync_with_peer(peer_id),
                     timeout=self.config.peer_timeout_seconds + 5.0,  # generous outer cap
                 )
             except asyncio.TimeoutError as exc:
                 return self._record_failure(status, "timeout", str(exc), trigger, m)
+            except TypeError as exc:
+                # Calling our own engine wrongly is not a peer being
+                # unreachable. Sharing the "exception" bucket is what made
+                # F-01 invisible: the failure counter, the backoff and the
+                # metrics all described a network problem that did not
+                # exist. Logged at exception level so the traceback names
+                # the call site rather than only the message.
+                logger.exception(
+                    "scheduler: sync_with_peer rejected our arguments for "
+                    "peer=%s. This is a bug in FERAL, not a peer failure.",
+                    peer_id,
+                )
+                return self._record_failure(status, "internal_error", str(exc), trigger, m)
             except Exception as exc:
                 return self._record_failure(status, "exception", str(exc), trigger, m)
 
@@ -446,6 +474,8 @@ class SyncScheduler:
             logger.debug("wal_size emit failed: %s", exc)
 
 
-def _passphrase() -> str:
-    """Read the sync passphrase from env. Indirected for tests."""
-    return os.environ.get("FERAL_SYNC_PASSPHRASE", "")
+# _passphrase() was removed with the call site that was its only caller.
+# It read os.environ alone, while the engine resolves env, then vault,
+# then a freshly generated secret. Leaving a helper here that returns the
+# weaker value is an invitation to thread it back into sync_with_peer,
+# which is the bug in AUDIT-FIXES F-01. The engine owns this value.
