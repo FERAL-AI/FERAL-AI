@@ -140,7 +140,49 @@ This is the same shape as F-01 — wrong kwargs, swallowed by a broad handler �
 
 ### F-02 · Input validation lives on the client, not the server
 
-**Status:** open
+**Status:** BLOCKED — awaiting a decision. Re-verified and reproduced; not fixed.
+
+**Re-verified.** Exactly as described. The brain declares `device_id: str`,
+`width/height: Optional[int]`, `sequence: Optional[int]`, `data_b64: str` bare. The SDK
+bounds all of them and base64-decodes against the 512 KiB cap.
+
+**Reproduced.** Constructed directly against the brain's own model:
+
+```
+device_id=''  width=-5  height=1000000000  sequence=-42
+decoded payload bytes=900000        (cap is 512 KiB)
+DeviceAnnouncePayload rssi_dbm=-9999
+```
+
+All accepted. The SDK docstring's claim to "mirror" the brain is false in the
+direction that matters.
+
+**The rejection path already exists and is sound.** `parse_message` validates against
+`PAYLOAD_MODELS`, and `api/server.py:2200` turns a `ValidationError` into a HUP §8
+error frame (1003) while keeping the socket alive. So adding constraints does not
+require new plumbing; it changes what that plumbing fires on.
+
+**Compatibility evidence gathered.** Real paired devices on this install carry UUID
+`device_id`s (36 chars), so `min_length=1, max_length=128` would not affect them.
+
+**Why this is blocked, three separate stop conditions:**
+
+1. **Wire format, four languages.** `models/protocol.py` is the canonical schema and
+   the hard rule says stop.
+2. **It makes something that currently "works" start erroring.** A device sending an
+   out-of-bounds value is accepted today and would receive a 1003 frame instead. That
+   is the point of the fix, but it is a live behaviour change for already-paired
+   hardware, and it cannot be verified from here against real glasses firmware.
+3. **The scope is 53 models, not 2.** An audit of every `*Payload` class in
+   `protocol.py` finds **53 with zero field constraints**, including
+   `BiometricPayload`, `AudioChunkPayload`, `ExecuteCommandPayload` and
+   `DeviceRegisterPayload`. The finding says to "audit the other payload types while
+   you are there"; the answer is that the gap is universal, so "while you are there"
+   is its own project.
+
+**Also note:** the `data_b64` size cap overlaps F-03. Fixing it in the model and at
+`server.py:3672` independently would produce two caps measuring different things
+again. These two items should be decided together.
 
 ```
 feral-core/models/protocol.py:838-845                        brain — no constraints
