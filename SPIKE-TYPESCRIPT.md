@@ -90,7 +90,53 @@ several have no Node story whatsoever.
 
 ### E-4 · Does bundling a Python interpreter win the same prize?
 
-**Status:** running
+**Status:** **SOLVED.** It wins the prize, with zero source changes.
+
+FERAL's own unmodified `sqlite_vec_available()`, same machine, only the
+interpreter varies:
+
+```
+pyenv 3.11.11  (what ships today) -> False
+bundled 3.11.13 (uv / pbs 20260807) -> True
+```
+
+Independently reproduced. The bundled build reaches `dlopen` for real (verified
+with a bogus path, so it is wired rather than stubbed), `vec_version()` returns
+`v0.1.9`, and indexed `MATCH ... k=3` KNN order matches a full scan. The pyenv
+SQLite is *newer* than the bundled one, which isolates the cause to the CPython
+compile flag alone.
+
+Size: interpreter 58 MB on disk, 26 MiB published. With sqlite-vec, numpy and
+aiosqlite, trimmed: 60 MB on disk, 20 MB gzipped, so about a 24 MB dmg against
+today's 3.7 MB. That understates it though: `fastembed` became a base dependency
+in 2026.8.3 and pulls 38 MB of wheels, onnxruntime alone being 18 MB. A
+realistic bundle is 150 to 250 MB, dominated by onnxruntime. **A TypeScript
+FERAL doing local embeddings ships `onnxruntime-node` and lands in the same
+place**, so bundle size is not a differentiator between the two options.
+
+Of the four broken releases the audit cites, bundling prevents two
+(2026.4.11 tflite-runtime on 3.12, 2026.8.3 Pillow/fastembed on 3.14: both are
+literally "the user's Python is version X"). It partly covers 2026.6.14, where
+the credit belongs to locking, which this repo already has. It does nothing for
+2026.8.2, where the TestPyPI canary silently skipped the publish. **That last
+one is a pipeline defect a rewrite does not fix either, and `npm publish` has
+the identical failure class, so it should be struck from the rewrite's
+justification.**
+
+Honest limits, recorded rather than glossed: bundling adds a channel rather than
+removing one, so `pip install feral-ai` keeps every failure it has today and all
+prevention is desktop-only. It introduces a 4-way build matrix where one pure
+wheel covers everything now, and makes self-update the project's problem.
+
+**UNVERIFIED and it could downgrade this verdict:** no codesigning or
+notarization was tested. macOS hardened runtime with library validation can
+refuse to `dlopen` a library not signed by the same team ID, which is exactly
+the pattern `vec0.dylib` uses. Fixable with signed dylibs plus
+`disable-library-validation`, but it must be proven on a real notarized build
+before anyone relies on this.
+
+One citation correction: the `include_router` regression is **2026.6.14**
+(`CHANGELOG.md:751`), not 2026.6.13, which is a Gmail App Password release.
 
 The control experiment. Ship a relocatable interpreter and the sqlite-vec
 failure disappears without changing language.
