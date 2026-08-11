@@ -55,7 +55,40 @@ Ordered by how cheaply each could end the discussion.
 
 ### E-1 · Can Node load sqlite-vec?
 
-**Status:** running
+**Status:** **WORKS, and it dismantles the argument it was meant to support.**
+
+`npm install better-sqlite3 sqlite-vec` installs 4 packages in 2 seconds.
+better-sqlite3 13.0.3 has **no install script at all** and ships 8 platform
+prebuilds, proven by installing with `--ignore-scripts` on an empty cache and
+running with `PATH=/usr/bin:/bin`: still loads, no `build/` directory ever
+created. So Node does not trade "how you compiled Python" for "do you have a
+C++ toolchain". That worry was unfounded.
+
+**But then the premise collapsed.** sqlite-vec 0.1.9 builds no ANN index; it is
+a brute-force scan, confirmed by perfectly linear scaling. Measured on this
+machine, top-5 over 384-dim vectors:
+
+| corpus | numpy | sqlite-vec vec0 |
+|---|---|---|
+| 12k | **0.46 ms** | 7.08 ms |
+| 50k | **2.42 ms** | 28.53 ms |
+| 100k | **3.97 ms** | 56.99 ms |
+
+Both linear, numpy roughly an order of magnitude faster, and both return
+identical top-5 rowids and distances to 7 decimals.
+
+**So the "degraded" fallback is the faster path.** `embeddings.py` calls numpy
+degraded at :8, :290 and :425, and tells users to rebuild CPython to escape it.
+That advice is backwards on speed. The honest remaining argument for sqlite-vec
+is memory: numpy holds the whole matrix resident (18 MB at 12k, ~154 MB at
+100k) while sqlite-vec streams from disk. That is a real consideration at a
+million chunks and irrelevant at twelve thousand.
+
+One genuine inefficiency did surface: FERAL's full path measures 12.20 ms where
+raw numpy is 2.26 ms, and the gap is Python `bytes` materialisation that the
+function's own docstring already identifies. Cacheable. Not a language problem.
+
+**Unverified:** sqlite-vec ships no musl prebuild; no Alpine machine here.
 
 The strongest argument for leaving Python. `memory/embeddings.py:411-420`
 records that a CPython without `--enable-loadable-sqlite-extensions` can never
@@ -68,7 +101,31 @@ a C++ toolchain". Same class of failure, new hat.
 
 ### E-2 · Are the vectors compatible?
 
-**Status:** running
+**Status:** **WORKS WITH CAVEATS.** The stored vectors are reusable.
+
+`@huggingface/transformers` 4.2.0 (the `@xenova` package is frozen at 2.17.2),
+backed by onnxruntime-node, loads the official `BAAI/bge-small-en-v1.5`.
+
+Cosine between Python fastembed and Node, same sentences:
+
+* `pooling: 'cls'` -> min **0.99999893** across 5 sentences, and **0.99999487**
+  across a 300-sentence near-duplicate corpus
+* `pooling: 'mean'` -> 0.9312 to 0.9569, **incompatible**
+
+CLS is the correct choice: fastembed's `_post_process_onnx_output` takes
+`embeddings[:, 0]` then normalises. transformers.js defaults to
+`pooling: 'none'`, so this has to be selected deliberately and **the wrong
+choice degrades silently**, which is precisely the failure mode that hid a dead
+semantic index for months in this codebase.
+
+Querying Node embeddings against Python's existing stored vectors gives 98.3%
+identical top-5 ordering, 99.9% overlap. A full Node re-embed scores no better.
+So the 12,000 stored vectors would carry over: no re-embed on upgrade.
+
+Throughput is a tie, 281.4 versus 281.5 sentences/sec batched.
+
+Footprint is not: Node `node_modules` 407 MB (onnxruntime-node 210 MB,
+transformers 141 MB, pulls in `sharp`) against ~101 MB for the Python side.
 
 Can Node produce vectors interchangeable with the 12,000 already stored by
 fastembed's `BAAI/bge-small-en-v1.5`? Embed identical sentences both sides and
