@@ -140,7 +140,101 @@ This is the same shape as F-01 — wrong kwargs, swallowed by a broad handler �
 
 ### F-02 · Input validation lives on the client, not the server
 
-**Status:** BLOCKED — awaiting a decision. Re-verified and reproduced; not fixed.
+**Status:** FIXED — see the record below. The block was cleared by an owner
+decision, recorded here so it is not re-litigated:
+
+- **Scope: every model in `models/protocol.py`, inbound and outbound.** The
+  owner was shown that roughly half are outbound and that constraining those
+  buys no security while costing cross-language churn, and chose all of them
+  anyway. The real count is **59 models, not 53** — the audit's 53 counted
+  only classes named `*Payload`, missing `FeralMessage`, `AttachmentRef`,
+  `HealthReadingModel`, `HealthSeriesModel` and `HealthUpdateDataModel`.
+- **Behaviour on violation: REJECT, never clamp.** The 1003 error frame at
+  `api/server.py:2200` already keeps the socket alive and names the field.
+
+**What landed.** All 59 models now carry at least one bound. Of the 236 fields
+whose type can take one (`str` / `int` / `float` / `list`, excluding `bool`,
+`Literal` and `dict`, which are already closed by their type), **177 are
+constrained and 59 are deliberately bare**, each with the reason written at
+the field. The bounds are structural only: identifier lengths, non-negative
+counters and durations, the pixel range, the lat/lon domain, list caps, and a
+decoded-size cap on the one base64 blob that has a documented one. No semantic
+ceiling was invented.
+
+`GlassesFramePayload` and `DeviceAnnouncePayload` mirror the node SDK
+**exactly** — `device_id` 1-128, `width`/`height` 1-8192, `sequence >= 0`, a
+512 KiB decoded cap, `rssi_dbm` in [-127, 20] — and no stricter, so a frame
+the SDK builds can never be refused by the brain.
+`tests/test_protocol_field_constraints.py` compares the two models' pydantic
+metadata field by field, so the SDK docstring's "mirrors the brain" claim is
+now enforced rather than asserted.
+
+**Three bounds that looked obviously correct and are wrong.** Each is now a
+passing test so nobody "completes" the sweep by adding them:
+
+- `LocationUpdatePayload.accuracy_m` / `heading_deg` / `speed_mps` — a `ge=0`
+  here would reject a large share of real iPhone fixes. CoreLocation reports
+  **-1** for each when the value is unavailable.
+- `GlassesStatusPayload.battery_level` — `ge=0` would reject **this model's
+  own declared default of -1**, the "unknown" sentinel.
+- `BiometricPayload.*` — 220 bpm and 43 C are both real readings.
+
+**Two bounds withdrawn after checking the brain's own emitters**, before the
+suite ever ran:
+
+- `FeralMessage.session_id` was capped at 128, then raised to 1024.
+  `api/routes/conversations.py:163` composes a session id as
+  `f"{session_id}:{branch_name}:{uuid[:6]}"` where `branch_name` is
+  unvalidated request-body text, and sub-agents append `:sub:<n>:<uuid>` per
+  nesting level. 128 would have refused every frame of a branched conversation.
+- `BudgetExceededPayload.call_site` lost its `min_length=1`.
+  `agents/orchestrator.py:2161` builds it as
+  `str(budget.get("call_site") or call_site)`, so an empty label is reachable,
+  and a `ValidationError` on that path would turn a budget banner into an
+  exception on the refusal path itself.
+
+**No test broke.** The full suite went 7411 passed / 29 skipped / 0 failed
+(7374 pre-existing passes, unchanged), so there was never an occasion to be
+tempted into editing one. The new file fails **28 of 37** against the unfixed
+source and passes 37/37 after. `ruff check --select=E,F,W --ignore=E501,E402,F401,W291,W293 .`
+is clean.
+
+**Deliberately not adopted from the SDK, with reasons:**
+
+- `NodeRegisterPayload.node_id`'s `^[A-Za-z0-9._:-]{1,128}$` pattern. A
+  character class is a stronger claim than a length bound and the Swift and
+  Kotlin bridges are not known to honour it; adopting it could disconnect
+  paired hardware over a character the brain has never objected to. The length
+  half is adopted.
+- `le=120_000` on `timeout_ms`. `agents/tool_runner.py:735` already dispatches
+  30,000 ms and `hardware/mesh.py:330` computes the value from arbitrary
+  seconds, so an upper bound risks refusing the brain's own commands. `ge=0`
+  only.
+
+**Blobs left uncapped, and why:**
+
+- `VisionFramePayload.data_b64` — its cap is `VISION_MAX_FRAME_KB`
+  (`api/state.py:82`), which operators tune via `FERAL_VISION_MAX_FRAME_KB`.
+  A hard 512 KiB in the model would silently override that setting.
+- `AudioChunkPayload.data_b64` / `TTSChunkPayload` / `AudioResponsePayload` —
+  the only documented audio cap governs the HUP `audio_frame` envelope, which
+  is a different type and is not in `MESSAGE_TYPES`. Applying 64 KiB here
+  would reject a two-second 24 kHz pcm16 chunk (96,000 bytes).
+
+**F-03 divergence — this is now live and must be stated.** The model measures
+`glasses_frame` `data_b64` on **decoded bytes** (512 KiB). `api/server.py:3672`
+measures **base64 characters** against the same 512 KiB constant, so its
+effective ceiling is 384 KiB. Until F-03 lands the two disagree for frames
+between 384 and 512 KiB decoded: the model accepts them and the server handler
+drops them with a log-only warning. A 400 KiB JPEG is exactly this case. F-02
+deliberately did not touch `api/server.py`; `VIDEO_FRAME_MAX_BYTES` now exists
+in `models/protocol.py` (the canonical home per CLAUDE.md) with the same value
+as the server's own copy, so F-03's fix is to import it and measure decoded
+bytes at all four sites (`:1823`, `:2304`, `:3283`, `:3672`).
+
+Original finding follows.
+
+**Status when filed:** BLOCKED — awaiting a decision. Re-verified and reproduced; not fixed.
 
 **Re-verified.** Exactly as described. The brain declares `device_id: str`,
 `width/height: Optional[int]`, `sequence: Optional[int]`, `data_b64: str` bare. The SDK
@@ -201,7 +295,11 @@ Every constraint sits in the component an attacker controls.
 
 ### F-03 · Frame size cap measures base64 characters, not decoded bytes
 
-**Status:** open
+**Status:** open. **Now also diverges from the model layer** — F-02 added a
+decoded-byte cap to `GlassesFramePayload` and left these four sites alone, so
+`models/protocol.py` and `api/server.py` currently measure different
+quantities against the same 512 KiB number. Import `VIDEO_FRAME_MAX_BYTES`
+from `models/protocol.py` rather than redeclaring it at `server.py:3555`.
 
 ```
 feral-core/api/server.py:3672    if len(data_b64) > VIDEO_FRAME_MAX_BYTES:   # 512 * 1024

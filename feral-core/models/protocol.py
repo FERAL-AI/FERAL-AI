@@ -16,16 +16,91 @@ HUP_VERSION = "1.3.0"
 
 
 # ─────────────────────────────────────────────
+# Structural field bounds (AUDIT-FIXES F-02)
+# ─────────────────────────────────────────────
+# Every model below used to declare its fields bare, so the brain accepted
+# ``device_id=""``, ``width=-5``, ``height=1000000000``, ``sequence=-42`` and a
+# 900,000-byte decoded frame against a documented 512 KiB cap. Meanwhile the
+# Python node SDK bounded all of them, so every constraint lived in the
+# component an attacker controls. See AUDIT-FIXES.md F-02.
+#
+# The bounds are STRUCTURAL only: identifier lengths, non-negative counters,
+# pixel ranges, coordinate domains and decoded blob caps. No semantic ceiling
+# (heart rate, skin temperature, battery percent) is invented here. Real
+# hardware reports surprising values, and this file already documents two
+# out-of-range sentinels in its own defaults (``GlassesStatusPayload.
+# battery_level = -1``), so a wrong semantic ceiling would turn a working
+# device into a rejected one.
+#
+# A violation is REJECTED, never clamped: ``parse_message`` raises
+# ``ValidationError`` and ``api/server.py`` converts it into a HUP section 8
+# error frame (code 1003) that keeps the socket alive and names the field.
+
+#: Hardware / session / correlation identifiers. 128 matches the node SDK's
+#: ``device_id`` bound; real paired devices on this install carry 36-char UUIDs.
+MAX_ID_LEN = 128
+#: Session identifiers get their own, far looser bound. They are NOT opaque
+#: ids: the brain composes them by concatenation, and one of the segments is
+#: a user-supplied ``branch_name`` (``api/routes/conversations.py`` builds
+#: ``f"{session_id}:{branch_name}:{uuid[:6]}"``, and sub-agents append
+#: ``:sub:<n>:<uuid>`` per nesting level). A 128-char cap here would refuse
+#: every frame belonging to a conversation branched under a long name.
+MAX_SESSION_ID_LEN = 1024
+#: Short human-facing labels: names, models, tool names, provider tags.
+MAX_NAME_LEN = 256
+#: Opaque credentials (session tokens). Generous; they are not free text.
+MAX_TOKEN_LEN = 4096
+#: Capability / sensor / tag style lists. Generous by design: the point is to
+#: refuse a million-element list, not to guess how many sensors a node has.
+MAX_LIST_ITEMS = 512
+#: Filesystem path fields. Linux PATH_MAX is 4096.
+MAX_PATH_LEN = 4096
+#: Pixel dimension ceiling, mirroring the node SDK's ``width`` / ``height``.
+MAX_PIXELS = 8192
+#: Decoded (not base64-character) size cap for video-class frames.
+#: HUP_SPEC.md section 5.4.2 / 5.4.3. ``api/server.py`` defines its own copy
+#: with the same value and measures base64 CHARACTERS against it, so the two
+#: currently disagree by 4/3. That discrepancy is AUDIT-FIXES F-03 and is
+#: deliberately not fixed here.
+VIDEO_FRAME_MAX_BYTES = 512 * 1024
+
+
+def _decoded_size_guard(value: str, cap: int, label: str) -> str:
+    """Reject a base64 blob whose DECODED size exceeds ``cap``.
+
+    Measuring the encoded string instead is the F-03 defect: base64 inflates
+    4/3, so a character count turns a 512 KiB cap into a 384 KiB one and
+    silently drops legal 400 KiB JPEGs.
+    """
+    import base64
+
+    try:
+        decoded = base64.b64decode(value, validate=False)
+    except Exception as exc:
+        raise ValueError(f"data_b64 is not valid base64: {exc}") from exc
+    if len(decoded) > cap:
+        raise ValueError(
+            f"{label} data_b64 decoded to {len(decoded)} bytes; cap is {cap}"
+        )
+    return value
+
+
+# ─────────────────────────────────────────────
 # The Universal Message Envelope
 # ─────────────────────────────────────────────
 
 class FeralMessage(BaseModel):
     """Every message in the system uses this envelope."""
-    msg_id: str = Field(default_factory=lambda: str(uuid4()))
-    session_id: str = ""
-    timestamp_ms: int = Field(default_factory=lambda: int(time() * 1000))
+    msg_id: str = Field(default_factory=lambda: str(uuid4()), max_length=MAX_ID_LEN)
+    session_id: str = Field(default="", max_length=MAX_SESSION_ID_LEN)
+    # ge=0: a unix epoch in milliseconds is never negative. A device with a
+    # broken clock sending a negative timestamp used to be accepted and then
+    # ordered ahead of every real message in the timeline.
+    timestamp_ms: int = Field(default_factory=lambda: int(time() * 1000), ge=0)
     hop: Literal["client", "brain", "daemon", "skill"] = "client"
-    type: str  # Discriminator — see payload types below
+    # Discriminator (see payload types below). Bounded because it is looked up
+    # in MESSAGE_TYPES and logged verbatim on a miss.
+    type: str = Field(..., min_length=1, max_length=MAX_NAME_LEN)
     payload: dict = Field(default_factory=dict)
 
 
@@ -34,11 +109,22 @@ class FeralMessage(BaseModel):
 # ─────────────────────────────────────────────
 
 class AudioChunkPayload(BaseModel):
-    """Streaming audio from client to brain."""
-    encoding: str = "opus"
-    sample_rate: int = 24000
-    channels: int = 1
-    chunk_index: int = 0
+    """Streaming audio from client to brain.
+
+    ``data_b64`` carries no decoded-size cap on purpose. The only documented
+    audio cap in this system is ``AUDIO_FRAME_MAX_BYTES`` (64 KiB), and it
+    governs the HUP ``audio_frame`` envelope, which is a different message
+    type that is not registered in ``MESSAGE_TYPES``. Applying it here would
+    be inventing a bound: a two-second 24 kHz pcm16 chunk is 96,000 bytes and
+    would start being rejected. See the F-02 note in AUDIT-FIXES.md.
+    """
+    encoding: str = Field(default="opus", max_length=32)
+    # ge=1 rather than a range: a zero or negative sample rate is nonsense,
+    # but no upper bound is invented here because the SDK's 8k-96k range
+    # belongs to the HUP ``audio_frame`` envelope, not to this one.
+    sample_rate: int = Field(default=24000, ge=1)
+    channels: int = Field(default=1, ge=1)
+    chunk_index: int = Field(default=0, ge=0)
     is_final: bool = False
     data_b64: str = ""
 
@@ -52,32 +138,55 @@ class AttachmentRef(BaseModel):
     resolves the ref through :class:`memory.uploads.UploadStore`
     when a tool needs the on-disk path.
     """
-    upload_id: str
-    filename: str = ""
-    content_type: str = ""
-    size_bytes: int = 0
-    sha256: str = ""
+    # ``upload_id`` is joined onto a filesystem path under $FERAL_HOME/uploads,
+    # so an empty or unbounded value is worth refusing at the wire.
+    upload_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    filename: str = Field(default="", max_length=MAX_NAME_LEN)
+    content_type: str = Field(default="", max_length=MAX_NAME_LEN)
+    size_bytes: int = Field(default=0, ge=0)
+    # A hex sha256 digest is exactly 64 characters.
+    sha256: str = Field(default="", max_length=64)
 
 
 class TextCommandPayload(BaseModel):
     """Text input (for web/CLI clients that type instead of speak).
 
     PR 10: an optional ``attachments`` list lets the composer ship
-    file references alongside the prompt without inlining bytes."""
+    file references alongside the prompt without inlining bytes.
+
+    ``text`` is deliberately unbounded. It is a user's prompt, and pasting a
+    long document into the composer is a supported thing to do; any character
+    ceiling here would be a guess that silently truncates real work.
+    """
     text: str
     context: Optional[dict] = None
-    attachments: Optional[list[AttachmentRef]] = None
+    attachments: Optional[list[AttachmentRef]] = Field(
+        default=None, max_length=MAX_LIST_ITEMS
+    )
 
 
 class BiometricPayload(BaseModel):
-    """Sensor data from glasses or phone."""
+    """Sensor data from glasses or phone.
+
+    Every numeric field here is deliberately left unbounded (F-02). A ceiling
+    on heart rate, SpO2, skin temperature or UV index would be a SEMANTIC
+    guess: 220 bpm during a sprint and 43 C in a sauna are both real, and this
+    protocol already uses out-of-range sentinels for "unknown" elsewhere
+    (``GlassesStatusPayload.battery_level = -1``). A wrong ceiling would turn
+    a working device into a rejected one, which is strictly worse than the
+    unbounded int it replaces. Only the structural bounds are applied.
+    """
     heart_rate_bpm: Optional[int] = None
     spo2_pct: Optional[int] = None
-    accel_xyz: Optional[list[float]] = None
+    # Three axes. The field name is the contract and every consumer indexes
+    # [0]/[1]/[2]; an unbounded float list here is a free allocation vector.
+    accel_xyz: Optional[list[float]] = Field(default=None, max_length=3)
     temperature_c: Optional[float] = None
     uv_index: Optional[int] = None
     gps: Optional[dict] = None  # {"lat": float, "lon": float}
-    inferred_state: Optional[str] = None  # "resting", "walking", "running", "stressed"
+    inferred_state: Optional[str] = Field(
+        default=None, max_length=MAX_NAME_LEN
+    )  # "resting", "walking", "running", "stressed"
 
 
 class UIEventPayload(BaseModel):
@@ -89,11 +198,13 @@ class UIEventPayload(BaseModel):
     third-party apps can't dispatch to skill endpoints they didn't
     declare in their surface's ``action_contract``.
     """
-    screen_id: str
+    screen_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     event: Literal["tap", "toggle", "slider", "text_input", "dismiss"]
-    action_id: str
+    # Routed through AppRegistry.validate_action, so it is an identifier the
+    # brain looks up, never free text.
+    action_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     value: Optional[Any] = None
-    app_id: Optional[str] = None
+    app_id: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
 
 
 # ─────────────────────────────────────────────
@@ -101,12 +212,15 @@ class UIEventPayload(BaseModel):
 # ─────────────────────────────────────────────
 
 class ChatRequestPayload(BaseModel):
-    """Phone text/vision query request routed through the orchestrator."""
-    session_id: str
+    """Phone text/vision query request routed through the orchestrator.
+
+    ``text`` is unbounded for the same reason as ``TextCommandPayload.text``.
+    """
+    session_id: str = Field(..., min_length=1, max_length=MAX_SESSION_ID_LEN)
     text: str
     reply_mode: Literal["stream", "final"] = "final"
     channel: Literal["chat", "vision_ask"] = "chat"
-    reply_to: Optional[str] = None
+    reply_to: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
     # Phase 1 (audit-r10 overhaul plan) — device_target tells the brain
     # WHERE the requested action should run. The orchestrator's
     # ExecutionSurfacePolicy dispatches Mac-side skills when
@@ -129,21 +243,27 @@ class ChatResponsePayload(BaseModel):
     string instead of rendering an empty assistant bubble. The
     daemon_session ``chat_request`` branch sets it to ``None`` on
     success, the orchestrator's exception text on failure.
+
+    ``session_id`` carries a length cap but no ``min_length``: the brain
+    builds this frame as a hand-written dict in ``api/server.py`` rather than
+    through this model, so there is no way to prove from here that it never
+    emits an empty session id, and refusing one would drop a real reply.
+    ``error`` is the operator-visible failure text and stays unbounded.
     """
-    session_id: str
+    session_id: str = Field(..., max_length=MAX_SESSION_ID_LEN)
     text: str
     reply_mode: Literal["stream", "final"] = "final"
     channel: Literal["chat", "vision_ask"] = "chat"
-    reply_to: Optional[str] = None
+    reply_to: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
     error: Optional[str] = None
 
 
 class VoiceSessionStartPayload(BaseModel):
     """Phone voice session bootstrap metadata."""
-    stream_id: str
-    sample_rate: int
-    channels: int
-    language_hint: str = "en-US"
+    stream_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    sample_rate: int = Field(..., ge=1)
+    channels: int = Field(..., ge=1)
+    language_hint: str = Field(default="en-US", max_length=64)
     mode: Literal["push_to_talk", "hold_to_talk", "vad"] = "push_to_talk"
     interrupt_policy: Literal["barge_in", "strict_turn"] = "barge_in"
     camera_linked: bool = False
@@ -160,38 +280,41 @@ class VoiceInterruptPayload(BaseModel):
       VoiceInterruptPayload.stream_id: Field required
     from dropping the interrupt frame entirely.
     """
-    stream_id: Optional[str] = None
-    reason: str = "user_interrupt"
+    stream_id: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
+    reason: str = Field(default="user_interrupt", max_length=MAX_NAME_LEN)
 
 
 class GenUIPushActionPayload(BaseModel):
     """Action button attached to a GenUI push card."""
-    id: str
-    label: str
+    id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    label: str = Field(..., max_length=MAX_NAME_LEN)
     value: dict = Field(default_factory=dict)
 
 
 class GenUIPushPayload(BaseModel):
     """Brain-originated mobile GenUI push payload."""
     kind: Literal["notification", "interactive"]
-    app_id: str
-    surface_id: str
-    push_id: str = ""
-    screen_id: str = ""
-    title: str
+    app_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    surface_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    push_id: str = Field(default="", max_length=MAX_ID_LEN)
+    screen_id: str = Field(default="", max_length=MAX_ID_LEN)
+    title: str = Field(..., max_length=MAX_NAME_LEN)
+    # ``body`` is notification prose and stays unbounded.
     body: str = ""
-    actions: list[GenUIPushActionPayload] = Field(default_factory=list)
+    actions: list[GenUIPushActionPayload] = Field(
+        default_factory=list, max_length=MAX_LIST_ITEMS
+    )
     sdui: Optional[dict] = None
 
 
 class GenUIEventPayload(BaseModel):
     """Phone-originated GenUI interaction routed to app action handlers."""
-    app_id: str
-    surface_id: str
-    event_type: str
-    action_id: str
+    app_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    surface_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    event_type: str = Field(..., min_length=1, max_length=MAX_NAME_LEN)
+    action_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     value: Optional[Any] = None
-    screen_id: Optional[str] = None
+    screen_id: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
 
 
 class LocationUpdatePayload(BaseModel):
@@ -205,15 +328,23 @@ class LocationUpdatePayload(BaseModel):
     + lifecycle alignment with the rest of the peer streams.
 
     HUP v1.3.1 addition.
+
+    ``accuracy_m`` / ``heading_deg`` / ``speed_mps`` are deliberately left
+    unbounded. CoreLocation reports **-1** for each of them when the value is
+    unavailable (indoors, no motion, no compass), and the iOS companion
+    forwards the fix verbatim. A ``ge=0`` bound would look obviously correct
+    and would reject a large share of real iPhone fixes. ``altitude_m`` is
+    genuinely negative below sea level. Only ``lat`` / ``lon`` are bounded,
+    to the coordinate system's own domain rather than to a guess.
     """
-    node_id: str
-    lat: float
-    lon: float
+    node_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    lat: float = Field(..., ge=-90.0, le=90.0)
+    lon: float = Field(..., ge=-180.0, le=180.0)
     accuracy_m: Optional[float] = None
     altitude_m: Optional[float] = None
     heading_deg: Optional[float] = None
     speed_mps: Optional[float] = None
-    source: str = "browser_node"
+    source: str = Field(default="browser_node", max_length=MAX_NAME_LEN)
     ts: Optional[float] = None
 
 
@@ -252,10 +383,10 @@ class PeripheralBridgeDevicePayload(BaseModel):
     ``PERIPHERAL_KIND_ALIASES``).
     """
 
-    device_id: str
+    device_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     kind: Literal["glasses", "watch", "band"]
     protocol: Literal["web_bluetooth", "native_bridge", "none"]
-    capabilities: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
     status: Literal["connected", "connecting", "disconnected"] = "connecting"
     manifest: dict = Field(default_factory=dict)
 
@@ -276,19 +407,20 @@ class PeripheralBridgeDevicePayload(BaseModel):
 
 class PeripheralBridgeRegisterPayload(BaseModel):
     """Phone bridge registration/update payload."""
-    bridge_id: str
+    bridge_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     platform: Literal["ios", "android"]
-    devices: list[PeripheralBridgeDevicePayload]
-    expires_at: str
+    devices: list[PeripheralBridgeDevicePayload] = Field(..., max_length=MAX_LIST_ITEMS)
+    # ISO-8601 timestamp string.
+    expires_at: str = Field(..., max_length=64)
 
 
 class BackchannelRequestPayload(BaseModel):
     """Structured operator-review request from phone."""
-    device_id: str
-    kind: str
+    device_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    kind: str = Field(..., min_length=1, max_length=MAX_NAME_LEN)
     payload: dict = Field(default_factory=dict)
-    request_id: str = Field(default_factory=lambda: str(uuid4()))
-    status: str = "pending"
+    request_id: str = Field(default_factory=lambda: str(uuid4()), max_length=MAX_ID_LEN)
+    status: str = Field(default="pending", max_length=64)
 
 
 # ─────────────────────────────────────────────
@@ -335,33 +467,49 @@ class TranscriptPayload(BaseModel):
     All three are optional: older brains omit them and older clients
     ignore them, so the wire stays backward compatible in both
     directions.
+
+    ``confidence`` is deliberately unbounded. It is a provider-reported
+    score and this brain routes 16 of them; Deepgram normalises to [0, 1] but
+    nothing verifies that the other STT backends do, and this frame is
+    brain-to-client, so a bound buys no security while a wrong one drops the
+    transcript entirely.
     """
     text: str
     is_partial: bool = False
     confidence: float = 1.0
-    role: Optional[str] = "assistant"
-    item_id: Optional[str] = None
-    previous_item_id: Optional[str] = None
-    seq: Optional[int] = None
+    role: Optional[str] = Field(default="assistant", max_length=32)
+    item_id: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
+    previous_item_id: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
+    # Brain-assigned per-session monotonic counter, so never negative.
+    seq: Optional[int] = Field(default=None, ge=0)
 
 
 class SDUIPayload(BaseModel):
     """Server-Driven UI — the generated interface."""
-    screen_id: str = Field(default_factory=lambda: str(uuid4()))
-    ttl_seconds: int = 300
+    screen_id: str = Field(default_factory=lambda: str(uuid4()), max_length=MAX_ID_LEN)
+    ttl_seconds: int = Field(default=300, ge=0)
     root: dict  # The SDUI tree (see genui/schema/)
 
 
 class SDUIPatchPayload(BaseModel):
-    """Partial update to an existing generated screen."""
-    screen_id: str
+    """Partial update to an existing generated screen.
+
+    ``patches`` is unbounded: it is brain-generated and its length is a
+    function of how much of the screen changed, which nothing here can
+    predict without risking a dropped update.
+    """
+    screen_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     patches: list[dict]  # [{"path": "children.0.value", "op": "replace", "value": "new text"}]
 
 
 class TTSChunkPayload(BaseModel):
-    """Streaming audio from brain to client (text-to-speech)."""
-    chunk_index: int = 0
-    encoding: str = "mp3"
+    """Streaming audio from brain to client (text-to-speech).
+
+    ``data_b64`` is brain-generated TTS output with no documented cap, so
+    none is invented here.
+    """
+    chunk_index: int = Field(default=0, ge=0)
+    encoding: str = Field(default="mp3", max_length=32)
     data_b64: str = ""
     is_final: bool = False
 
@@ -369,13 +517,13 @@ class TTSChunkPayload(BaseModel):
 class TextResponsePayload(BaseModel):
     """Plain text response (for CLI/chat clients)."""
     text: str
-    tool_calls: Optional[list[dict]] = None
+    tool_calls: Optional[list[dict]] = Field(default=None, max_length=MAX_LIST_ITEMS)
     # Per-turn attribution, same contract as ``StreamDeltaPayload`` below.
     # This is the path a DEFAULT install actually uses for chat, because
     # ``features.streaming`` defaults to False, so it needs the fields at
     # least as much as the streaming one does. ``usage`` here is summed
     # across every LLM round the turn made, not just the final one.
-    model: str = ""
+    model: str = Field(default="", max_length=MAX_NAME_LEN)
     usage: dict = Field(default_factory=dict)
 
 
@@ -398,7 +546,7 @@ class StreamDeltaPayload(BaseModel):
     # without it, and then reports no usage). The Responses API reports it on
     # the terminal event with no opt-in. Anthropic splits it across
     # ``message_start`` (input) and ``message_delta`` (output).
-    model: str = ""
+    model: str = Field(default="", max_length=MAX_NAME_LEN)
     usage: dict = Field(default_factory=dict)
 
 
@@ -410,12 +558,15 @@ class ToolStartPayload(BaseModel):
     it in prose. ``args_preview`` is a short, redacted JSON string
     suitable for a one-line display — not the full argument blob.
     """
-    tool: str
-    call_id: str = ""
-    skill_id: str = ""
-    endpoint_id: str = ""
-    args_preview: str = ""
-    display_name: str = ""
+    tool: str = Field(..., max_length=MAX_NAME_LEN)
+    call_id: str = Field(default="", max_length=MAX_ID_LEN)
+    skill_id: str = Field(default="", max_length=MAX_ID_LEN)
+    endpoint_id: str = Field(default="", max_length=MAX_ID_LEN)
+    # The orchestrator truncates this to 160 characters before sending
+    # (agents/orchestrator.py). 4096 is a generous structural ceiling that
+    # cannot clip anything the brain actually emits.
+    args_preview: str = Field(default="", max_length=4096)
+    display_name: str = Field(default="", max_length=MAX_NAME_LEN)
 
 
 class ToolResultPayload(BaseModel):
@@ -425,8 +576,8 @@ class ToolResultPayload(BaseModel):
     uses this to clear the active-tool chip and (optionally) record a
     per-turn activity row.
     """
-    tool: str
-    call_id: str = ""
+    tool: str = Field(..., max_length=MAX_NAME_LEN)
+    call_id: str = Field(default="", max_length=MAX_ID_LEN)
     success: bool = True
     error: str = ""
     # Machine-readable reason the call did not run, when it was DECLINED
@@ -438,8 +589,8 @@ class ToolResultPayload(BaseModel):
     # threw" identically, as a red failure. The client keys its refused
     # state off this code and never off the error prose, which is
     # user-facing copy that changes.
-    error_code: str = ""
-    latency_ms: float = 0.0
+    error_code: str = Field(default="", max_length=64)
+    latency_ms: float = Field(default=0.0, ge=0.0)
     # Human-readable excerpt of what the tool returned, for the chat UI's
     # result renderer. OPT-IN per endpoint via ``emit_result_preview`` in the
     # skill manifest, and default OFF: tool results routinely carry vault
@@ -454,10 +605,15 @@ class ToolResultPayload(BaseModel):
 
 
 class GesturePayload(BaseModel):
-    """Gesture detected by a hardware daemon (glasses IMU, camera, etc.)."""
-    gesture: str  # "nod", "shake", "look_up", "look_down", "double_tap"
+    """Gesture detected by a hardware daemon (glasses IMU, camera, etc.).
+
+    ``confidence`` is left unbounded for the same reason as
+    ``TranscriptPayload.confidence``: it is a detector-reported score whose
+    normalisation this file cannot verify.
+    """
+    gesture: str = Field(..., min_length=1, max_length=64)  # "nod", "shake", "look_up", ...
     confidence: float = 1.0
-    source: str = "imu"  # "imu", "camera", "touch"
+    source: str = Field(default="imu", max_length=64)  # "imu", "camera", "touch"
 
 
 class RefusalPayload(BaseModel):
@@ -469,10 +625,12 @@ class RefusalPayload(BaseModel):
     actionable ``retry_hint`` (e.g. "resume supervisor in Settings →
     Oversight"). Pinned by Lane 08 WS6.
     """
+    # ``reason`` and ``retry_hint`` are user-facing prose and stay unbounded;
+    # truncating a refusal explanation removes the only thing the user gets.
     reason: str
     retry_hint: str = ""
-    source: str = "supervisor"  # supervisor | policy | autonomy | ...
-    kind: str = ""  # command | command_stream | ui_event | ...
+    source: str = Field(default="supervisor", max_length=64)  # supervisor | policy | ...
+    kind: str = Field(default="", max_length=64)  # command | command_stream | ui_event | ...
 
 
 class BudgetExceededPayload(BaseModel):
@@ -483,16 +641,23 @@ class BudgetExceededPayload(BaseModel):
     Lane 12 renders this as a yellow banner: "Chat budget reached
     ($X.XX / hour). Resets at HH:MM." Pinned by Lane 08 WS8.
     """
-    call_site: str
-    cap_dollars: float = 0.0
-    current_dollars: float = 0.0
-    window: str = "hour"  # hour | day
-    reset_at: float = 0.0  # unix epoch seconds when the cap resets
+    # Length cap only, no ``min_length``. The orchestrator builds this frame
+    # as ``str(budget.get("call_site") or call_site)`` (agents/orchestrator.py),
+    # so an empty label is reachable, and a ValidationError there would turn a
+    # budget banner into an exception on the refusal path.
+    call_site: str = Field(..., max_length=MAX_NAME_LEN)
+    cap_dollars: float = Field(default=0.0, ge=0.0)
+    current_dollars: float = Field(default=0.0, ge=0.0)
+    window: str = Field(default="hour", max_length=32)  # hour | day
+    reset_at: float = Field(default=0.0, ge=0.0)  # unix epoch seconds when the cap resets
 
 
 class ErrorPayload(BaseModel):
-    """Something went wrong."""
-    code: str
+    """Something went wrong.
+
+    ``message`` is operator-facing prose and stays unbounded.
+    """
+    code: str = Field(..., max_length=64)
     message: str
     recoverable: bool = True
 
@@ -516,8 +681,12 @@ class TimelinePayload(BaseModel):
     to query but failed (no token, no client, exception) lands here
     as ``{"source": ..., "reason": ...}`` so the UI can render an
     honest chip instead of a silently missing section.
+
+    ``entries`` is unbounded on purpose: it is the brain's own fusion result
+    and its length is the answer to the user's question ("what did I do last
+    month?"), so any cap here would silently truncate a correct reply.
     """
-    session_id: str = ""
+    session_id: str = Field(default="", max_length=MAX_SESSION_ID_LEN)
     query: str = ""
     window: dict = Field(default_factory=dict)
     entries: list[dict] = Field(default_factory=list)
@@ -540,19 +709,26 @@ class NodeRegisterPayload(BaseModel):
     isn't rejected by pydantic before the /v1/node handler even sees
     it. `manufacturer` and `model` are optional v1.1 fields the
     Devices UI surfaces.
+
+    The node SDK additionally pins ``node_id`` to
+    ``^[A-Za-z0-9._:-]{1,128}$``. That character class is NOT mirrored here:
+    it is a stronger claim than a length bound, and non-SDK nodes (the Swift
+    and Kotlin bridges) are not known to honour it, so adopting it would
+    disconnect already-paired hardware over a character this brain has never
+    objected to. The length half of the SDK's bound is adopted.
     """
-    node_id: str
+    node_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     node_type: Literal[
         "desktop", "server", "rpi", "robot", "glasses", "phone",
         "tablet", "actuator", "sensor", "wearable", "camera",
         "vehicle", "appliance", "browser_camera", "browser_node",
     ]
-    os: str = ""
-    platform: str = ""  # "ios", "android", "linux", "macos"
-    manufacturer: str = ""
-    model: str = ""
-    firmware_version: str = ""
-    capabilities: list[str] = []  # ["applescript", "keyboard", "filesystem", "camera", "gpio"]
+    os: str = Field(default="", max_length=MAX_NAME_LEN)
+    platform: str = Field(default="", max_length=MAX_NAME_LEN)  # "ios", "android", ...
+    manufacturer: str = Field(default="", max_length=MAX_NAME_LEN)
+    model: str = Field(default="", max_length=MAX_NAME_LEN)
+    firmware_version: str = Field(default="", max_length=MAX_NAME_LEN)
+    capabilities: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
     # Phase 4 (audit-r10 overhaul) — structured skill manifests the
     # node publishes alongside its flat capability list. Each entry
     # is `{"id", "name", "description", "actions": [{"name",
@@ -565,22 +741,36 @@ class NodeRegisterPayload(BaseModel):
     # node SDK is the source of truth for the manifest shape — the
     # brain is a passive consumer that re-emits whatever the node
     # published. Validation lives in the registry, not here.
-    skills: list[dict] = []
+    skills: list[dict] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
 
 
 class ExecuteCommandPayload(BaseModel):
-    """Brain tells daemon to do something."""
-    command_id: str = Field(default_factory=lambda: str(uuid4()))
-    executor: str  # "applescript", "shell", "keyboard", "gpio"
+    """Brain tells daemon to do something.
+
+    ``action`` is the script body and is deliberately unbounded: an
+    AppleScript or shell payload has no natural length.
+    """
+    command_id: str = Field(default_factory=lambda: str(uuid4()), max_length=MAX_ID_LEN)
+    executor: str = Field(..., min_length=1, max_length=64)  # "applescript", "shell", ...
     action: str  # The actual command/script
     args: dict = Field(default_factory=dict)
-    timeout_ms: int = 5000
+    # ge=0 only. The node SDK's ``le=120_000`` on the equivalent HUP field is
+    # NOT adopted: this brain already dispatches a 30,000 ms tool timeout and
+    # computes others from arbitrary seconds (agents/tool_runner.py,
+    # hardware/mesh.py), so an upper bound risks refusing the brain's own
+    # commands. Recorded under F-02 rather than guessed at.
+    timeout_ms: int = Field(default=5000, ge=0)
     requires_confirmation: bool = False
 
 
 class ExecuteResultPayload(BaseModel):
-    """Daemon reports back the result."""
-    command_id: str
+    """Daemon reports back the result.
+
+    ``exit_code`` is unbounded in both directions: POSIX reports a
+    signal-terminated process as a negative code, and stdout/stderr are
+    program output with no natural ceiling.
+    """
+    command_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     status: Literal["success", "failure", "denied", "timeout"]
     stdout: str = ""
     stderr: str = ""
@@ -592,20 +782,33 @@ class ExecuteResultPayload(BaseModel):
 # ─────────────────────────────────────────────
 
 class VisionFramePayload(BaseModel):
-    """Daemon pushes a captured camera frame to the brain."""
-    node_id: str
-    frame_id: str = Field(default_factory=lambda: str(uuid4()))
+    """Daemon pushes a captured camera frame to the brain.
+
+    ``data_b64`` carries NO decoded-size cap here, unlike
+    ``GlassesFramePayload``. The cap that governs this frame is
+    ``VISION_MAX_FRAME_KB`` (``api/state.py``), which is operator-tunable via
+    ``FERAL_VISION_MAX_FRAME_KB``. Hard-coding 512 KiB into the model would
+    override that setting and reject frames on any install that raised it, so
+    the runtime check stays the single source of truth. Recorded under F-02.
+    """
+    node_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    frame_id: str = Field(default_factory=lambda: str(uuid4()), max_length=MAX_ID_LEN)
     encoding: Literal["jpeg", "png", "webp"] = "jpeg"
-    resolution: list[int] = Field(default_factory=lambda: [640, 480])  # [width, height]
+    # Exactly [width, height]; every consumer indexes [0] and [1].
+    resolution: list[int] = Field(
+        default_factory=lambda: [640, 480], min_length=2, max_length=2
+    )
     data_b64: str = ""
-    timestamp: float = Field(default_factory=time)
+    timestamp: float = Field(default_factory=time, ge=0.0)
     metadata: dict = Field(default_factory=dict)  # scene_brightness, faces_detected, etc.
 
 
 class VisionRequestPayload(BaseModel):
     """Brain requests a frame capture from a daemon's camera."""
-    resolution: str = "640x480"
-    quality: int = 80  # JPEG quality 1-100
+    resolution: str = Field(default="640x480", max_length=32)
+    # 1-100 is the JPEG quality scale itself, already documented on this line
+    # before F-02; it is a format constant, not an invented ceiling.
+    quality: int = Field(default=80, ge=1, le=100)  # JPEG quality 1-100
     reason: str = ""
 
 
@@ -614,12 +817,20 @@ class VisionRequestPayload(BaseModel):
 # ─────────────────────────────────────────────
 
 class DeviceRegisterPayload(BaseModel):
-    """Hardware device (glasses, robot, etc.) registers with the brain."""
-    device_id: str
+    """Hardware device (glasses, robot, etc.) registers with the brain.
+
+    ``battery_pct`` is left unbounded here even though the node SDK bounds
+    the same-named field on ``node_heartbeat``. That bound is only adopted
+    where the SDK already enforces it; on this envelope nothing does, and
+    this file's own ``GlassesStatusPayload.battery_level = -1`` shows the
+    protocol uses out-of-range battery sentinels for "unknown".
+    """
+    device_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     device_type: Literal["glasses", "phone", "watch", "robot", "camera", "sensor_hub"]
-    name: str = ""
-    sensors: list[str] = []  # ["heart_rate", "spo2", "accelerometer", "uv", "temperature", "camera"]
-    firmware_version: str = ""
+    name: str = Field(default="", max_length=MAX_NAME_LEN)
+    # ["heart_rate", "spo2", "accelerometer", "uv", "temperature", "camera"]
+    sensors: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    firmware_version: str = Field(default="", max_length=MAX_NAME_LEN)
     battery_pct: Optional[int] = None
 
 
@@ -640,56 +851,67 @@ class SensorTelemetryPayload(BaseModel):
     ``AUDIT-r14/round3/findings/lane8-daemon-shell-and-healthkit.md``
     §B3 for the migration plan.
     """
-    node_id: str
+    node_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     sensor: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
         validation_alias=AliasChoices("sensor", "sensor_type"),
     )
     data: dict  # Sensor-specific values
-    timestamp: str = ""
-    source: str = "feral_glasses"
+    timestamp: str = Field(default="", max_length=64)
+    source: str = Field(default="feral_glasses", max_length=MAX_NAME_LEN)
 
 
 class SensorBatchPayload(BaseModel):
     """Multiple sensor readings in one message."""
-    node_id: str
+    node_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     readings: dict  # {"heart_rate": {...}, "spo2": {...}, ...}
-    timestamp: str = ""
-    source: str = "feral_glasses"
+    timestamp: str = Field(default="", max_length=64)
+    source: str = Field(default="feral_glasses", max_length=MAX_NAME_LEN)
 
 
 class GlassesStatusPayload(BaseModel):
-    """Phone reports glasses connection status."""
-    node_id: str
+    """Phone reports glasses connection status.
+
+    ``battery_level`` stays unbounded: **-1 is this model's own default** and
+    means "unknown". A ``ge=0`` bound would reject the value the brain itself
+    declares, which is the exact failure mode F-02 warns about.
+    """
+    node_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     glasses_connected: bool = False
     battery_level: int = -1
-    glasses_model: str = "FERAL"
+    glasses_model: str = Field(default="FERAL", max_length=MAX_NAME_LEN)
 
 
 class SkillApprovalPayload(BaseModel):
     """User approved/rejected a proposed skill."""
-    skill_id: str
+    skill_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     approved: bool = False
 
 
 class ConfirmationResponsePayload(BaseModel):
     """User responded to a permission confirmation."""
-    action: str
+    action: str = Field(..., min_length=1, max_length=MAX_NAME_LEN)
     approved: bool = False
 
 
 class PermissionRequestPayload(BaseModel):
     """Agent requests folder access from the user."""
-    request_id: str = Field(default_factory=lambda: str(uuid4())[:8])
-    path: str
+    request_id: str = Field(
+        default_factory=lambda: str(uuid4())[:8], max_length=MAX_ID_LEN
+    )
+    # This is a filesystem path the brain will ask permission to open.
+    path: str = Field(..., min_length=1, max_length=MAX_PATH_LEN)
     operation: Literal["read", "write", "readwrite"] = "read"
     reason: str = ""
 
 
 class PermissionResponsePayload(BaseModel):
     """User grants or denies folder access."""
-    request_id: str
+    request_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     granted: bool = False
-    mode: str = "read"
+    mode: str = Field(default="read", max_length=32)
 
 
 # ─────────────────────────────────────────────
@@ -698,18 +920,22 @@ class PermissionResponsePayload(BaseModel):
 
 class VoiceConfigPayload(BaseModel):
     """Client/node declares voice capabilities and selected mode."""
-    node_id: str = ""
+    node_id: str = Field(default="", max_length=MAX_ID_LEN)
     supports_realtime: bool = False
     mode: Literal["realtime", "whisper", "auto", "disabled"] = "auto"
-    preferred_model: str = ""
-    sample_rate: int = 24000
-    encoding: str = "pcm16"
+    preferred_model: str = Field(default="", max_length=MAX_NAME_LEN)
+    sample_rate: int = Field(default=24000, ge=1)
+    encoding: str = Field(default="pcm16", max_length=32)
 
 class AudioResponsePayload(BaseModel):
-    """Brain sends audio back to a node (realtime TTS or Whisper TTS)."""
+    """Brain sends audio back to a node (realtime TTS or Whisper TTS).
+
+    ``data_b64`` is brain-generated audio with no documented cap, so none is
+    invented (see ``AudioChunkPayload``).
+    """
     data_b64: str = ""
-    encoding: str = "pcm16"
-    sample_rate: int = 24000
+    encoding: str = Field(default="pcm16", max_length=32)
+    sample_rate: int = Field(default=24000, ge=1)
     is_final: bool = False
 
 class VoiceStatusPayload(BaseModel):
@@ -725,9 +951,11 @@ class VoiceStatusPayload(BaseModel):
     ``openai_realtime_quota``, ``no_tts_provider``).
     """
     state: Literal["available", "degraded", "unavailable"] = "available"
-    reason: str = ""
-    provider: str = ""
-    fallback_provider: str = ""
+    # ``reason`` / ``cause`` are machine tags; ``detail`` / ``summary`` /
+    # ``recommendation`` are operator-facing prose and stay unbounded.
+    reason: str = Field(default="", max_length=MAX_NAME_LEN)
+    provider: str = Field(default="", max_length=MAX_NAME_LEN)
+    fallback_provider: str = Field(default="", max_length=MAX_NAME_LEN)
     detail: str = ""
     #: Live microphone mute state for the session, stamped onto EVERY
     #: voice_status frame by ``VoiceRouter._emit_voice_status``. Clients
@@ -740,7 +968,7 @@ class VoiceStatusPayload(BaseModel):
     #: ``recommendation`` says what to do about it. All three are empty
     #: when there is nothing to diagnose, and ``cause="unknown"`` when
     #: the cause genuinely could not be determined -- never a guess.
-    cause: str = ""
+    cause: str = Field(default="", max_length=MAX_NAME_LEN)
     summary: str = ""
     recommendation: str = ""
     #: True when a user who chose local/private voice would be served
@@ -750,13 +978,13 @@ class VoiceStatusPayload(BaseModel):
 class VisionQueryPayload(BaseModel):
     """User explicitly asks about what the camera sees."""
     query: str = "What do you see?"
-    node_id: str = ""
+    node_id: str = Field(default="", max_length=MAX_ID_LEN)
     force: bool = True
 
 
 class HandoffRequestPayload(BaseModel):
     """Client asks to move working-memory context to another device class."""
-    to_node_type: str = "desktop"
+    to_node_type: str = Field(default="desktop", max_length=64)
     history_depth: int = Field(default=20, ge=1, le=500)
 
 
@@ -766,22 +994,30 @@ class HandoffRequestPayload(BaseModel):
 
 class NodeAckPayload(BaseModel):
     """Brain acknowledges a node_register (HUP_SPEC §5.2)."""
-    node_id: str = ""
-    session_token: str = ""
-    hup_version: str = HUP_VERSION
-    heartbeat_ms: int = 10000
-    server_time: float = Field(default_factory=time)
-    capabilities: list[str] = []
-    granted_capabilities: list[str] = []
-    denied_capabilities: list[str] = []
+    node_id: str = Field(default="", max_length=MAX_ID_LEN)
+    session_token: str = Field(default="", max_length=MAX_TOKEN_LEN)
+    hup_version: str = Field(default=HUP_VERSION, max_length=32)
+    heartbeat_ms: int = Field(default=10000, ge=0)
+    server_time: float = Field(default_factory=time, ge=0.0)
+    capabilities: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    granted_capabilities: list[str] = Field(
+        default_factory=list, max_length=MAX_LIST_ITEMS
+    )
+    denied_capabilities: list[str] = Field(
+        default_factory=list, max_length=MAX_LIST_ITEMS
+    )
 
 
 class HUPActionRequestPayload(BaseModel):
     """Brain dispatches an action to a daemon (HUP_SPEC §5.5)."""
-    action_id: str = Field(default_factory=lambda: str(uuid4())[:8])
-    name: str = ""
+    action_id: str = Field(
+        default_factory=lambda: str(uuid4())[:8], max_length=MAX_ID_LEN
+    )
+    name: str = Field(default="", max_length=MAX_NAME_LEN)
     params: dict = Field(default_factory=dict)
-    timeout_ms: int = 5000
+    # See ExecuteCommandPayload.timeout_ms for why the SDK's le=120_000 is
+    # not adopted.
+    timeout_ms: int = Field(default=5000, ge=0)
     requires_confirmation: bool = False
     # Phase 1 — device_target lets the orchestrator address a specific
     # node-type when fanning out actions (e.g. "phone" for native
@@ -795,25 +1031,31 @@ class HUPActionRequestPayload(BaseModel):
 
 class HUPActionResponsePayload(BaseModel):
     """Daemon responds to an hup_action_request (HUP_SPEC §5.6)."""
-    action_id: str = ""
-    request_id: str = ""
+    action_id: str = Field(default="", max_length=MAX_ID_LEN)
+    request_id: str = Field(default="", max_length=MAX_ID_LEN)
     success: bool = True
     result: dict = Field(default_factory=dict)
     error: Optional[str] = None
-    duration_ms: int = 0
+    duration_ms: int = Field(default=0, ge=0)
 
 
 class NodeHeartbeatPayload(BaseModel):
-    """Daemon heartbeat (HUP_SPEC §5.3)."""
-    ts: float = Field(default_factory=time)
-    battery_pct: Optional[int] = None
+    """Daemon heartbeat (HUP_SPEC §5.3).
+
+    ``battery_pct`` mirrors the node SDK's own ``ge=0, le=100`` on this exact
+    field, so an SDK node can never be rejected by it. ``rssi`` is left bare
+    because the SDK leaves it bare too; the bounded radio field on this wire
+    is ``DeviceAnnouncePayload.rssi_dbm``.
+    """
+    ts: float = Field(default_factory=time, ge=0.0)
+    battery_pct: Optional[int] = Field(default=None, ge=0, le=100)
     rssi: Optional[int] = None
 
 
 class NodeByePayload(BaseModel):
     """Graceful disconnect (HUP_SPEC §5.7)."""
-    reason: str = "shutdown"
-    restart_in_s: int = 0
+    reason: str = Field(default="shutdown", max_length=MAX_NAME_LEN)
+    restart_in_s: int = Field(default=0, ge=0)
 
 
 class GlassesFramePayload(BaseModel):
@@ -833,15 +1075,34 @@ class GlassesFramePayload(BaseModel):
     verbatim into the buffer; the orchestrator may use it for cost
     accounting (e.g. cheaper vision tier for ``camera_fallback`` than
     ``w610``) but the wire itself doesn't gate on it.
+
+    **Bounds mirror the Python node SDK exactly** (F-02). The SDK at
+    ``feral-nodes/python-node-sdk/src/feral_node_sdk/schemas.py`` already
+    declared ``device_id`` 1-128, ``width`` / ``height`` 1-8192,
+    ``sequence >= 0`` and a decoded 512 KiB cap, while claiming in its
+    docstring to "mirror the brain". It did not: the brain accepted
+    ``device_id=""``, ``width=-5``, ``height=1000000000``, ``sequence=-42``
+    and a 900,000-byte frame. Mirroring is exact and no stricter, so a frame
+    the SDK builds can never be refused here;
+    ``tests/test_protocol_field_constraints.py`` enforces the equality.
     """
-    device_id: str
+    device_id: str = Field(..., min_length=1, max_length=128)
     timestamp: float = Field(default_factory=time)
     encoding: Literal["jpeg", "png", "webp"] = "jpeg"
     data_b64: str
-    width: Optional[int] = None
-    height: Optional[int] = None
+    width: Optional[int] = Field(default=None, ge=1, le=MAX_PIXELS)
+    height: Optional[int] = Field(default=None, ge=1, le=MAX_PIXELS)
     source: str = "glasses"
-    sequence: Optional[int] = None
+    sequence: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator("data_b64")
+    @classmethod
+    def _data_b64_decoded_size(cls, v: str) -> str:
+        # Measured on DECODED bytes. api/server.py:3672 measures base64
+        # CHARACTERS against the same constant, so its effective ceiling is
+        # 384 KiB and the two now disagree for frames between 384 and 512
+        # KiB. That is AUDIT-FIXES F-03 and is fixed there, not here.
+        return _decoded_size_guard(v, VIDEO_FRAME_MAX_BYTES, "glasses_frame")
 
 
 class DeviceAnnouncePayload(BaseModel):
@@ -851,9 +1112,15 @@ class DeviceAnnouncePayload(BaseModel):
     exposing per-vendor BLE APIs. The brain upserts a knowledge-graph
     entity keyed by ``device_id`` with ``category=device`` so device
     queries land via the same memory tool path as everything else.
+
+    **Bounds mirror the Python node SDK exactly** (F-02): ``device_id``
+    1-128 and ``rssi_dbm`` in [-127, 20], the physical dBm range a BLE
+    scanner can report. The brain previously accepted ``rssi_dbm=-9999``.
+    Every other field is left exactly as bare as the SDK leaves it, so
+    neither side can reject a frame the other builds.
     """
     scanner_node_id: str = ""
-    device_id: str
+    device_id: str = Field(..., min_length=1, max_length=128)
     device_kind: Literal[
         "bluetooth_le",
         "bluetooth_classic",
@@ -865,7 +1132,7 @@ class DeviceAnnouncePayload(BaseModel):
     ] = "unknown"
     name: str = ""
     manufacturer: str = ""
-    rssi_dbm: Optional[int] = None
+    rssi_dbm: Optional[int] = Field(default=None, ge=-127, le=20)
     advertised_services: list[str] = Field(default_factory=list)
     first_seen: Optional[float] = None
     last_seen: Optional[float] = None
@@ -886,31 +1153,42 @@ class HealthReadingModel(BaseModel):
     (``whoop``, ``oura``, ``jw_health_glasses``). No source id is
     translated on this wire.
     """
-    metric: str
+    metric: str = Field(..., min_length=1, max_length=64)
+    # ``value`` is unbounded: it holds every canonical metric, from a resting
+    # heart rate to a step count, so no single range is meaningful.
     value: float
-    unit: str = ""
-    label: str = ""
-    precision: int = 0
-    category: str = "vitals"
-    source: str = ""
-    ts: float = Field(default_factory=time)
+    unit: str = Field(default="", max_length=32)
+    label: str = Field(default="", max_length=MAX_NAME_LEN)
+    # Decimal places used by the renderer.
+    precision: int = Field(default=0, ge=0, le=10)
+    category: str = Field(default="vitals", max_length=64)
+    source: str = Field(default="", max_length=64)
+    ts: float = Field(default_factory=time, ge=0.0)
 
 
 class HealthSeriesModel(BaseModel):
-    """A dated series of one metric, for a chart."""
-    metric: str
-    label: str = ""
-    unit: str = ""
-    precision: int = 0
-    category: str = "vitals"
-    source: str = ""
+    """A dated series of one metric, for a chart.
+
+    ``points`` is unbounded: its length is the requested window, which the
+    caller chooses.
+    """
+    metric: str = Field(..., min_length=1, max_length=64)
+    label: str = Field(default="", max_length=MAX_NAME_LEN)
+    unit: str = Field(default="", max_length=32)
+    precision: int = Field(default=0, ge=0, le=10)
+    category: str = Field(default="vitals", max_length=64)
+    source: str = Field(default="", max_length=64)
     points: list[dict] = Field(default_factory=list)
 
 
 class HealthUpdateDataModel(BaseModel):
-    """``health_update.payload.data``."""
-    sources: list[str] = Field(default_factory=list)
-    window_days: int = 0
+    """``health_update.payload.data``.
+
+    ``readings`` / ``series`` are unbounded: both are brain-assembled answers
+    whose length is set by the query window.
+    """
+    sources: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    window_days: int = Field(default=0, ge=0)
     note: str = ""
     readings: list[HealthReadingModel] = Field(default_factory=list)
     series: list[HealthSeriesModel] = Field(default_factory=list)
@@ -933,9 +1211,9 @@ class HealthUpdatePayload(BaseModel):
     series); both carry the same canonical reading shape so one renderer
     handles both.
     """
-    node_id: str = ""
+    node_id: str = Field(default="", max_length=MAX_ID_LEN)
     event_type: Literal["health_summary", "vitals_trend"] = "health_summary"
-    ts: float = Field(default_factory=time)
+    ts: float = Field(default_factory=time, ge=0.0)
     data: HealthUpdateDataModel = Field(default_factory=HealthUpdateDataModel)
 
 
