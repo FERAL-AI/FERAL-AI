@@ -50,8 +50,9 @@ class _FakeChannelManager:
     def __init__(self, channel):
         self._channel = channel
 
-    def get_channel(self, name: str):
-        return self._channel if name == "whatsapp" else None
+    # Mirrors ChannelManager.get_channel(channel_type). See F-01.
+    def get_channel(self, channel_type: str):
+        return self._channel if channel_type == "whatsapp" else None
 
 
 def _make_whatsapp_channel(app_secret: str):

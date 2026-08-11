@@ -20,8 +20,10 @@ class _FakeOrchestrator:
         self.reply = reply
         self.prompts = []
 
-    async def handle_command(self, session_id, prompt, context=None):
-        self.prompts.append(prompt)
+    # Mirrors Orchestrator.handle_command(session_id, text, context).
+    # Real callers already use text=; this double answered to prompt=.
+    async def handle_command(self, session_id, text, context=None):
+        self.prompts.append(text)
         return self.reply
 
 

@@ -53,7 +53,11 @@ class _RecordingOrchestrator:
 
 
 class _FakeSkillExecutor:
-    async def execute(self, name, args, skill, endpoint):
+    # Parameter names mirror SkillExecutor.execute (tool_name, not name).
+    # A double that renames a parameter passes every positional call and
+    # fails the moment a caller switches to a keyword, which is how F-01
+    # stayed hidden for 40 releases.
+    async def execute(self, tool_name, args, skill, endpoint):
         return {"success": True, "data": {"ok": True, "echo": args}, "error": None}
 
 

@@ -53,8 +53,9 @@ def server_module(monkeypatch):
     sessions: list[str] = ["sid-1"]
 
     class FakeVisionBuffer:
-        def push(self, node_id, payload):
-            pushed.append((node_id, payload))
+        # Mirrors VisionBuffer.push(node_id, frame). See F-01.
+        def push(self, node_id, frame):
+            pushed.append((node_id, frame))
 
     class FakePerception:
         def update_vision(self, *_a, **_k):
