@@ -5,7 +5,14 @@ Provides vector embeddings for semantic memory search.
 
 Vector Index Strategy:
   1. Try sqlite-vec extension → vec0 virtual table with vec_distance_cosine
-  2. Fall back to numpy brute-force scan (degraded, still works)
+  2. Otherwise a numpy scan over ``memory_chunks``
+
+Neither of those is the "good" one and neither is broken. See
+:func:`cosine_similarity_bulk` for the measurements: sqlite-vec 0.1.9 builds
+no ANN index, so both paths are linear in the corpus and return identical
+top-k, and the numpy path is the faster of the two at every size measured.
+What sqlite-vec buys is resident memory, because it leaves the vectors on
+disk. Pick on that basis, not on a promised speedup.
 
 Embedding Providers (local-first, see ``FERAL_EMBED_PROVIDER`` below):
   1. fastembed BAAI/bge-small-en-v1.5 (384d) — default when importable
@@ -287,10 +294,10 @@ def cosine_similarity_bulk(
     sqlite-vec is an *extension*, and it cannot load on an interpreter built
     without ``enable_load_extension`` (pyenv on macOS builds it out by
     default, confirmed on this machine, see ``_try_load_sqlite_vec``). So the
-    numpy brute-force scan is not an exotic degraded path, it is the DEFAULT
-    path for a large share of installs, and every one of those scans used to
-    run as a Python per-row loop of ``blob_to_vec`` + ``cosine_similarity``,
-    i.e. one ``np.frombuffer`` + one ``.copy()`` + one dot product per row.
+    numpy scan is not an exotic path, it is the DEFAULT path for a large
+    share of installs, and every one of those scans used to run as a Python
+    per-row loop of ``blob_to_vec`` + ``cosine_similarity``, i.e. one
+    ``np.frombuffer`` + one ``.copy()`` + one dot product per row.
 
     Measured on this machine, 384-dim float32, same blobs and same query in
     one process, per-row loop versus THIS function (not versus a bare
@@ -312,9 +319,38 @@ def cosine_similarity_bulk(
     The floor for the arithmetic alone at 100k x 384 is ~9ms (3.9ms for the
     matvec, 5.4ms for the row norms). The other ~14ms is ~9ms of width
     guard and ~11ms of ``b"".join`` decode, overlapped by blocking. Both are
-    the price of reading rows that arrive as a Python list of ``bytes``; the
-    only way to remove them is to stop round-tripping vectors through
-    SQLite BLOBs, i.e. to make sqlite-vec or another index load.
+    the price of reading rows that arrive as a Python list of ``bytes``.
+    The full-corpus caller removes them a different way, by keeping the
+    decoded matrix between queries: see ``MemoryStore._centered_corpus``.
+
+    This is not the slow path
+    -------------------------
+    Earlier revisions of this file, of ``feral doctor`` and of the setup
+    wizard called this scan "degraded" and told the user to rebuild CPython
+    with ``--enable-loadable-sqlite-extensions`` to escape it. That advice
+    was wrong on performance and is gone.
+
+    sqlite-vec 0.1.9 (the pinned version) builds no ANN index. A vec0
+    ``MATCH`` is itself a full scan, so BOTH paths are O(n) and the choice
+    was never linear-versus-sublinear. Measured on this machine, top-5 over
+    384-dim vectors, same corpus, identical results to seven decimals:
+
+    ======  =========  ===============
+    corpus  numpy      sqlite-vec vec0
+    ======  =========  ===============
+     12000     0.46ms   7.08ms
+     50000     2.42ms   10.98 - 28.53ms
+    100000     3.97ms   56.99ms
+    ======  =========  ===============
+
+    So numpy is roughly an order of magnitude FASTER, and rebuilding the
+    interpreter to reach vec0 buys a slowdown.
+
+    The honest argument for sqlite-vec is resident memory, not latency.
+    numpy holds the whole matrix (~18MB at 12k rows, ~154MB at 100k);
+    sqlite-vec leaves the vectors on disk. On a large store that is the
+    trade worth making, and the rebuild instructions are still printed for
+    exactly that reason. Nothing here is broken without it.
 
     Ragged and mismatched input
     ---------------------------
@@ -415,16 +451,24 @@ def _try_load_sqlite_vec(conn: sqlite3.Connection) -> bool:
     # sqlite-vec" succeeds, the import succeeds, and the extension can
     # still never load. Observed on pyenv 3.11.11 with SQLite 3.51.0.
     #
-    # Worth a distinct message rather than folding into the generic
-    # handler: the other branches are fixed by installing something, and
-    # this one is only fixed by rebuilding or replacing the interpreter.
+    # Logged at INFO, not WARNING, and phrased as a fact rather than a
+    # defect. This used to warn that search had fallen back to a scan that
+    # is "correct, but O(n) per query" and tell the operator to rebuild
+    # CPython. Measured, vec0 is also O(n) and is ~10x SLOWER than the numpy
+    # path at every corpus size tested (see cosine_similarity_bulk), so that
+    # warning sent people to rebuild their interpreter for a regression.
+    # The rebuild line stays, attached to the reason that survives
+    # measurement: memory, on a large store.
     if not hasattr(conn, "enable_load_extension"):
-        logger.warning(
+        logger.info(
             "sqlite-vec cannot load: this Python was built without loadable "
-            "SQLite extension support, so vector search falls back to a "
-            "numpy brute-force scan (correct, but O(n) per query). Rebuild "
-            "with PYTHON_CONFIGURE_OPTS=\"--enable-loadable-sqlite-extensions\" "
-            "(pyenv) or use a python.org / Homebrew interpreter.",
+            "SQLite extension support. Vector search runs over numpy instead, "
+            "which is correct and, at every corpus size measured, faster; "
+            "sqlite-vec's advantage is that it keeps vectors on disk rather "
+            "than in RAM (~18MB at 12k chunks, ~154MB at 100k). If that "
+            "memory matters on your store, rebuild with PYTHON_CONFIGURE_OPTS="
+            "\"--enable-loadable-sqlite-extensions\" (pyenv) or use a "
+            "python.org / Homebrew interpreter.",
         )
         _SQLITE_VEC_AVAILABLE = False
         return False
@@ -466,8 +510,13 @@ def sqlite_vec_available() -> bool:
 
 class VectorIndex:
     """
-    Indexed vector search using sqlite-vec (vec0 virtual table)
-    with automatic fallback to brute-force numpy scan.
+    Vector search over a sqlite-vec vec0 virtual table, with an automatic
+    numpy scan when the extension cannot load.
+
+    Neither is the "real" one. sqlite-vec 0.1.9 builds no ANN index, so
+    both are full scans returning the same top-k; the numpy path measures
+    faster and the vec0 path holds less in RAM. See
+    :func:`cosine_similarity_bulk`.
     """
 
     _VEC0_DIM_RE = re.compile(r"FLOAT\s*\[\s*(\d+)\s*\]", re.IGNORECASE)

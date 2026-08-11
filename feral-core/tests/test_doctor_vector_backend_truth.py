@@ -9,8 +9,17 @@ Selecting sqlite_vec is not the same as running it. sqlite-vec is a
 loadable SQLite EXTENSION, and an interpreter built without
 ``enable_load_extension`` (pyenv's default on macOS) can never load it:
 ``SQLiteVecIndex.indexed`` stays False and every vector query is served
-by a numpy brute-force scan instead. On such a host the checkmark named
-a backend that was not running and hid an O(n)-per-query scan behind it.
+over numpy instead. On such a host the checkmark named a backend that
+was not running.
+
+It must not be a warning either. Doctor used to render this state yellow
+and put "rebuild CPython with --enable-loadable-sqlite-extensions" in
+"Suggested fixes:". Measured on this machine, sqlite-vec 0.1.9 builds no
+ANN index, both paths are O(n), and numpy runs 0.46ms vs vec0's 7.08ms
+at 12k chunks (3.97ms vs 56.99ms at 100k) for identical top-5. The
+prescribed fix was a 10x slowdown, so the row is now informational and
+the rebuild is offered for the reason that survives measurement:
+resident memory on a large store.
 
 These tests drive the real ``cmd_doctor`` with the extension probe
 pinned in both directions.
@@ -82,20 +91,44 @@ def test_doctor_does_not_greencheck_an_unloadable_sqlite_vec(doctor_env, run_doc
     assert not row.startswith("✔"), (
         f"doctor passed a backend whose extension cannot load: {row}"
     )
-    assert row.startswith("⚠"), row
+    assert row.startswith("ℹ"), row
     # It has to name what is ACTUALLY running, not just withhold the tick.
     assert "numpy_fallback" in row
     assert "cannot load" in row
 
 
-def test_doctor_offers_the_interpreter_fix_not_a_backend_switch(doctor_env, run_doctor):
-    """The remediation for this state is rebuilding/replacing Python.
-    Telling the operator to switch backends or restart would not help."""
+def test_doctor_does_not_prescribe_an_interpreter_rebuild_as_a_fix(
+    doctor_env, run_doctor
+):
+    """The measured numbers say numpy is the faster path, so this state is
+    not a defect and must not appear under "Suggested fixes:". Sending a
+    user to rebuild CPython here buys them a ~10x slowdown."""
     out = run_doctor(sqlite_vec_loads=False)
 
-    assert "Suggested fixes:" in out
-    fixes = out.split("Suggested fixes:", 1)[1]
-    assert "enable-loadable-sqlite-extensions" in fixes
+    fixes = out.split("Suggested fixes:", 1)[1] if "Suggested fixes:" in out else ""
+    assert "enable-loadable-sqlite-extensions" not in fixes, (
+        "doctor is still prescribing an interpreter rebuild as a remedy"
+    )
+
+
+def test_doctor_still_tells_the_operator_how_to_get_sqlite_vec(doctor_env, run_doctor):
+    """Not over-corrected into silence: an operator whose store is large
+    enough for resident memory to matter still needs the instructions, and
+    the reason has to be memory rather than speed."""
+    row = _row(run_doctor(sqlite_vec_loads=False), "Memory vector backend")
+
+    assert "enable-loadable-sqlite-extensions" in row
+    assert "memory" in row.lower()
+
+
+def test_doctor_does_not_call_the_numpy_path_slow_or_degraded(doctor_env, run_doctor):
+    """The wording is the defect being fixed. "degraded" and a bare
+    "O(n) per query" both told the user the wrong thing: vec0 is O(n)
+    too, and measures slower."""
+    row = _row(run_doctor(sqlite_vec_loads=False), "Memory vector backend")
+
+    assert "degraded" not in row.lower(), row
+    assert "O(n) per query" not in row, row
 
 
 def test_doctor_still_passes_when_the_extension_loads(doctor_env, run_doctor):

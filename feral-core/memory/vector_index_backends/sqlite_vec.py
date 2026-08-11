@@ -63,7 +63,11 @@ def sqlite_vec_available() -> bool:
         return _SQLITE_VEC_AVAILABLE
     mod = _sqlite_vec_module()
     if mod is None:
-        logger.info("sqlite-vec not installed — sqlite_vec backend will run in degraded mode")
+        logger.info(
+            "sqlite-vec not installed, so this backend stays a no-op and the "
+            "vector leg is answered over numpy, which is correct and measured "
+            "faster (see memory.embeddings.cosine_similarity_bulk)"
+        )
         _SQLITE_VEC_AVAILABLE = False
         return False
     try:
@@ -75,7 +79,12 @@ def sqlite_vec_available() -> bool:
         logger.info("sqlite-vec available — vec0 virtual table will be used for vector search")
         return True
     except Exception as exc:
-        logger.info("sqlite-vec load failed (%s) — backend will run in degraded mode", exc)
+        logger.info(
+            "sqlite-vec load failed (%s), so this backend stays a no-op and the "
+            "vector leg is answered over numpy, which is correct and measured "
+            "faster (see memory.embeddings.cosine_similarity_bulk)",
+            exc,
+        )
         _SQLITE_VEC_AVAILABLE = False
         return False
 

@@ -34,11 +34,18 @@ Honest reporting of sqlite-vec
 load. Loading any SQLite extension needs an interpreter built with
 ``--enable-loadable-sqlite-extensions``, which pyenv omits on macOS by
 default: ``sqlite3.Connection`` then has no ``enable_load_extension``
-and the extension can never load, no matter how it was installed.
-FERAL stays correct (``VectorIndex`` falls back to a numpy brute-force
-scan) but the fallback is O(n) per query. This step reports the package
-and the extension separately and never claims the second from the
-first.
+and the extension can never load, no matter how it was installed. This
+step reports the package and the extension separately and never claims
+the second from the first.
+
+Honest about what it costs, too. This step used to tell the user the
+numpy path was "O(n) per query" and hand them a CPython rebuild.
+sqlite-vec 0.1.9 builds no ANN index, so a vec0 ``MATCH`` is also a full
+scan; measured on this machine at 384 dims, top-5, numpy runs 0.46ms vs
+vec0's 7.08ms at 12k chunks and 3.97ms vs 56.99ms at 100k, for identical
+results. The rebuild was a slowdown. What sqlite-vec actually saves is
+resident memory (numpy holds ~18MB at 12k rows, ~154MB at 100k), so that
+is what the instructions are now attached to.
 """
 
 from __future__ import annotations
@@ -402,13 +409,15 @@ def _report_sqlite_vec(console, embeddings_mod) -> None:
     installed = importlib.util.find_spec("sqlite_vec") is not None
     if not installed:
         console.print(
-            "  [yellow]![/] sqlite-vec is not installed, so vector search uses a "
-            "numpy brute-force scan (correct, but O(n) per query). "
-            "pip install sqlite-vec"
+            "  [cyan]i[/] sqlite-vec is not installed, so vector search runs over "
+            "numpy. That is the faster path at every corpus size measured; "
+            "sqlite-vec keeps vectors on disk instead of in RAM, which is worth "
+            "it on a large store. pip install sqlite-vec"
             if _RICH_AVAILABLE else
-            "  ! sqlite-vec is not installed, so vector search uses a numpy "
-            "brute-force scan (correct, but O(n) per query). "
-            "pip install sqlite-vec"
+            "  i sqlite-vec is not installed, so vector search runs over numpy. "
+            "That is the faster path at every corpus size measured; sqlite-vec "
+            "keeps vectors on disk instead of in RAM, which is worth it on a "
+            "large store. pip install sqlite-vec"
         )
         return
 
@@ -434,22 +443,28 @@ def _report_sqlite_vec(console, embeddings_mod) -> None:
         )
         return
 
-    # The common macOS/pyenv case. Installing harder does not fix it, so
-    # do not suggest that; the fix is the interpreter.
+    # The common macOS/pyenv case. Installing harder does not fix it, so do
+    # not suggest that; only the interpreter can change it. Reported as a
+    # fact and not a problem, because measurement says the path it leaves
+    # you on is the faster one.
     console.print(
-        "  [yellow]![/] sqlite-vec: package installed, extension does NOT "
+        "  [cyan]i[/] sqlite-vec: package installed, extension does NOT "
         "load. This Python was built without loadable SQLite extension "
-        "support (pyenv omits it on macOS by default). Memory search still "
-        "works, on a numpy brute-force scan that is O(n) per query. To fix: "
-        "rebuild with PYTHON_CONFIGURE_OPTS="
-        "\"--enable-loadable-sqlite-extensions\", or use a python.org / "
-        "Homebrew interpreter."
+        "support (pyenv omits it on macOS by default). Memory search runs "
+        "over numpy, which is correct and measured faster than vec0 at "
+        "every corpus size tested. sqlite-vec's advantage is holding "
+        "vectors on disk rather than in RAM (~18MB at 12k chunks, ~154MB "
+        "at 100k). If that memory matters on your store: rebuild with "
+        "PYTHON_CONFIGURE_OPTS=\"--enable-loadable-sqlite-extensions\", or "
+        "use a python.org / Homebrew interpreter."
         if _RICH_AVAILABLE else
-        "  ! sqlite-vec: package installed, extension does NOT load. This "
+        "  i sqlite-vec: package installed, extension does NOT load. This "
         "Python was built without loadable SQLite extension support (pyenv "
-        "omits it on macOS by default). Memory search still works, on a "
-        "numpy brute-force scan that is O(n) per query. To fix: rebuild "
-        "with PYTHON_CONFIGURE_OPTS="
+        "omits it on macOS by default). Memory search runs over numpy, "
+        "which is correct and measured faster than vec0 at every corpus "
+        "size tested. sqlite-vec's advantage is holding vectors on disk "
+        "rather than in RAM (~18MB at 12k chunks, ~154MB at 100k). If that "
+        "memory matters on your store: rebuild with PYTHON_CONFIGURE_OPTS="
         "\"--enable-loadable-sqlite-extensions\", or use a python.org / "
         "Homebrew interpreter."
     )

@@ -1771,25 +1771,38 @@ def cmd_doctor():
             # interpreter built without ``enable_load_extension``
             # (pyenv's default on macOS, which is what this machine has)
             # can never load it: ``indexed`` stays False for the whole
-            # process and every vector query is answered by a numpy
-            # brute-force scan instead. Reporting a green "sqlite_vec
-            # (built-in default)" for that host told the operator a
-            # backend was running that was not, and hid the O(n) scan
-            # behind a checkmark. Probe the real loader.
+            # process and every vector query is answered over numpy
+            # instead. Reporting a green "sqlite_vec (built-in default)"
+            # for that host told the operator a backend was running that
+            # was not, so this still cannot be a tick. Probe the real
+            # loader.
+            #
+            # It is an _info and not a _warn, and there is no suggested
+            # fix. This row used to say the scan was "correct but O(n) per
+            # query" and put an interpreter rebuild in "Suggested fixes:".
+            # Measured on this machine, sqlite-vec 0.1.9 builds no ANN
+            # index, so vec0 is O(n) as well, and top-5 over 384-dim
+            # vectors runs 0.46ms (numpy) vs 7.08ms (vec0) at 12k chunks
+            # and 3.97ms vs 56.99ms at 100k. The fix we were prescribing
+            # was a 10x slowdown. sqlite-vec's real advantage is keeping
+            # vectors on disk, so the rebuild is named in the detail line
+            # for operators whose store is big enough for that to matter.
             from memory.vector_index_backends.sqlite_vec import (
                 sqlite_vec_available as _sqlite_vec_available,
             )
             if _sqlite_vec_available():
                 _pass("Memory vector backend", "sqlite_vec (built-in default, vec0 index active)")
             else:
-                _warn(
+                # Kept to one console line on purpose: this row is
+                # informational, and a five-line essay in `feral doctor`
+                # reads like an alarm no matter what the words say.
+                _info(
                     "Memory vector backend",
-                    "sqlite_vec is selected but the sqlite-vec extension cannot load on "
-                    "this interpreter, so vector search runs as numpy_fallback: a "
-                    "brute-force scan that is correct but O(n) per query",
-                    "Rebuild Python with PYTHON_CONFIGURE_OPTS="
-                    '"--enable-loadable-sqlite-extensions" (pyenv), or use a '
-                    "python.org / Homebrew interpreter, then restart the brain",
+                    "sqlite_vec selected, extension cannot load here, so vector search "
+                    "runs as numpy_fallback (measured faster, same results). sqlite-vec "
+                    "only buys memory (~154MB at 100k chunks stays on disk); for that, "
+                    'rebuild with PYTHON_CONFIGURE_OPTS="--enable-loadable-sqlite-'
+                    'extensions"',
                 )
         elif _vec_backend == "chroma":
             try:

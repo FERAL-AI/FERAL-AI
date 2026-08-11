@@ -37,6 +37,7 @@ import re
 import sqlite3
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -146,6 +147,52 @@ _RAW_SEMANTIC_FLOOR = 0.25
 # documents happens to exist, so centring would subtract noise. A new install
 # searching twenty memories keeps the old behaviour.
 _MIN_CHUNKS_FOR_CENTERING = 200
+
+# ── Corpus matrix cache ─────────────────────────────────────────────────────
+#
+# The centred document matrix does not depend on the query. Only the final
+# mat-vec does. Measured on a copy of the reporter's 11,613-chunk store
+# (384 dims, this machine):
+#
+#   SELECT every embedding BLOB     23.3 ms
+#   join + decode + centre           9.1 ms
+#   ------------------------------------------
+#   rebuilt on EVERY query          32.4 ms
+#   the mat-vec that actually uses the query    0.35 ms
+#
+# So 99% of the vector leg was recomputing a constant. The matrix is built
+# once and kept, and the change detector below decides when it is no longer
+# the corpus.
+#
+# The cost of keeping it is resident memory: n * dim * 4 bytes, which is
+# 17.8 MB on that store and 154 MB at 100k chunks. Above this cap the matrix
+# is still built and used for the query, it is simply not retained, so a very
+# large store degrades to the old per-query cost instead of to an OOM. 100k
+# chunks fits; that is deliberate, since it is the largest corpus anyone has
+# reported.
+_CORPUS_CACHE_MAX_BYTES = 256 * 1024 * 1024
+
+
+@dataclass
+class _CenteredCorpus:
+    """The query-independent half of a centred vector scan, kept between
+    queries.
+
+    ``docs`` holds one unit-length row per chunk with the corpus centre
+    already subtracted and the row renormalised, which is exactly what
+    ``_centered_similarity`` used to build and throw away every query.
+    Scoring a query against it is one mat-vec.
+
+    ``docs`` is the ONLY matrix retained. It is produced by mutating the
+    unit-normalised matrix in place rather than by allocating a second one,
+    so a store never holds two copies of its corpus.
+    """
+
+    source_ids: list[str]
+    docs: "np.ndarray"
+    live: "np.ndarray"
+    centroid: "np.ndarray"
+    fingerprint: tuple
 
 _SCHEMA_VERSION = 6  # v2026.5.34: D11 decay + D12 sync HLC columns
 
@@ -341,6 +388,18 @@ class MemoryStore:
         # _centered_similarity for why it exists at all.
         self._centroid = None
         self._centroid_n = 0
+        # Centred corpus matrix, rebuilt only when the corpus changes. See
+        # _CORPUS_CACHE_MAX_BYTES for the measurement that motivated it and
+        # _corpus_fingerprint for how a change is detected.
+        self._corpus_cache: Optional[_CenteredCorpus] = None
+        # Fingerprint of the corpus the last time the centroid was refreshed,
+        # used by the sqlite-vec path, which needs the centre but must NOT
+        # retain the matrix (saving that memory is the whole point of having
+        # an index).
+        self._centroid_fingerprint: Optional[tuple] = None
+        # Bumped only when the fingerprint query itself fails, so an
+        # unreadable fingerprint can never compare equal to a cached one.
+        self._corpus_epoch = 0
         self.db_path = db_path
         self._working: dict[str, deque[dict]] = {}
         self._working_max = 50
@@ -1460,6 +1519,103 @@ class MemoryStore:
 
         return {"id": eid, "event_type": event_type, "summary": summary, "created_at": now}
 
+    def _centered_docs(self, blobs, dim, min_chunks=None):
+        """Build the centred document matrix. Nothing here uses the query.
+
+        Returns ``(docs, live, centroid)`` or None. Split out of
+        _centered_similarity so the result can be cached: it is the same
+        matrix for every query and it cost 9.1ms to rebuild on the
+        reporter's 11,613-chunk store, against 0.35ms for the mat-vec that
+        actually consumes the query.
+
+        Embeddings occupy a narrow cone rather than the whole sphere, so
+        every vector here shares a large common component and raw cosine
+        measures mostly that. Subtracting the corpus mean from both sides
+        leaves the part that actually distinguishes documents. This is the
+        standard remedy for anisotropy and it is what makes a relevance
+        threshold possible at all: see the block comment on
+        _CENTERED_SEMANTIC_FLOOR for the measurements on the store where
+        this was found.
+        """
+        # min_chunks is lowered by callers that already hold a centre and only
+        # need a few rows scored against it, rather than deriving one.
+        floor_n = _MIN_CHUNKS_FOR_CENTERING if min_chunks is None else min_chunks
+        if len(blobs) < floor_n:
+            return None
+        mat = np.frombuffer(b"".join(blobs), dtype=np.float32)
+        mat = mat.reshape(len(blobs), -1)
+        if mat.shape[1] != dim:
+            return None
+
+        # Zero vectors are real: four of this store's chunks are all-zero
+        # from embedding failures. They must not drag the mean, and they
+        # can never be a hit, so they are scored -1 rather than dropped,
+        # which would break the caller's positional zip.
+        norms = np.linalg.norm(mat, axis=1)
+        live = norms > 0
+        if int(live.sum()) < floor_n:
+            return None
+
+        unit = np.zeros_like(mat)
+        unit[live] = mat[live] / norms[live][:, None]
+
+        centroid = self._centroid
+        # Only the full-corpus call may define the centre. A caller that
+        # passes min_chunks is scoring a handful of rows the index already
+        # chose, and deriving a "corpus mean" from fifteen documents would
+        # subtract those documents from themselves and score everything
+        # near zero.
+        may_derive = min_chunks is None
+        stale = (
+            centroid is None
+            or centroid.shape[0] != unit.shape[1]
+            # Rebuild once the corpus has moved by more than 5 percent, so
+            # a growing store does not keep a stale centre while a single
+            # new episode does not trigger a recompute.
+            or abs(len(blobs) - self._centroid_n) > max(50, self._centroid_n * 0.05)
+        )
+        if stale and may_derive:
+            centroid = unit[live].mean(axis=0)
+            self._centroid = centroid
+            self._centroid_n = len(blobs)
+        elif centroid is None or centroid.shape[0] != unit.shape[1]:
+            return None
+
+        # In place, so ``unit`` IS ``docs``. The old ``unit - centroid``
+        # allocated a second full matrix (17.8 MB on the reporter's store)
+        # only to drop the first one a line later. Same float32 arithmetic,
+        # same result, one allocation.
+        unit -= centroid
+        docs = unit
+        dn = np.linalg.norm(docs, axis=1)
+        dn[dn == 0] = 1.0
+        docs /= dn[:, None]
+        return docs, live, centroid
+
+    @staticmethod
+    def _score_centered(docs, live, centroid, query_vec):
+        """Score a prepared centred matrix against one query. One mat-vec.
+
+        Returns scores comparable to _CENTERED_SEMANTIC_FLOOR, or None when
+        the query itself cannot be centred, in which case the caller falls
+        back to raw cosine and the old floor.
+        """
+        q = np.asarray(query_vec, dtype=np.float32).ravel()
+        if q.shape[0] != centroid.shape[0]:
+            return None
+        qn = np.linalg.norm(q)
+        if qn == 0:
+            return None
+        qc = (q / qn) - centroid
+        qcn = np.linalg.norm(qc)
+        if qcn == 0:
+            return None
+        qc /= qcn
+
+        scores = docs @ qc
+        scores[~live] = -1.0
+        return scores
+
     def _centered_similarity(self, query_vec, blobs, min_chunks=None):
         """Cosine against the corpus with its shared direction removed.
 
@@ -1467,82 +1623,181 @@ class MemoryStore:
         None when the corpus is too small for a mean vector to mean anything,
         in which case the caller falls back to raw cosine and the old floor.
 
-        Embeddings occupy a narrow cone rather than the whole sphere, so every
-        vector here shares a large common component and raw cosine measures
-        mostly that. Subtracting the corpus mean from both sides leaves the
-        part that actually distinguishes documents. This is the standard
-        remedy for anisotropy and it is what makes a relevance threshold
-        possible at all: see the block comment on _CENTERED_SEMANTIC_FLOOR for
-        the measurements on the store where this was found.
+        Uncached: every call rebuilds the matrix. Kept for the small-row
+        callers (the sqlite-vec path re-scores the handful of ids the index
+        returned, where there is nothing worth caching). The full-corpus
+        scan goes through :meth:`_centered_corpus` instead.
         """
-        # min_chunks is lowered by callers that already hold a centre and only
-        # need a few rows scored against it, rather than deriving one.
-        floor_n = _MIN_CHUNKS_FOR_CENTERING if min_chunks is None else min_chunks
-        if len(blobs) < floor_n:
-            return None
         try:
-            mat = np.frombuffer(b"".join(blobs), dtype=np.float32)
-            mat = mat.reshape(len(blobs), -1)
             q = np.asarray(query_vec, dtype=np.float32).ravel()
-            if mat.shape[1] != q.shape[0]:
+            built = self._centered_docs(blobs, int(q.shape[0]), min_chunks)
+            if built is None:
                 return None
-
-            # Zero vectors are real: four of this store's chunks are all-zero
-            # from embedding failures. They must not drag the mean, and they
-            # can never be a hit, so they are scored -1 rather than dropped,
-            # which would break the caller's positional zip.
-            norms = np.linalg.norm(mat, axis=1)
-            live = norms > 0
-            if int(live.sum()) < floor_n:
-                return None
-
-            unit = np.zeros_like(mat)
-            unit[live] = mat[live] / norms[live][:, None]
-
-            centroid = self._centroid
-            # Only the full-corpus call may define the centre. A caller that
-            # passes min_chunks is scoring a handful of rows the index already
-            # chose, and deriving a "corpus mean" from fifteen documents would
-            # subtract those documents from themselves and score everything
-            # near zero.
-            may_derive = min_chunks is None
-            stale = (
-                centroid is None
-                or centroid.shape[0] != unit.shape[1]
-                # Rebuild once the corpus has moved by more than 5 percent, so
-                # a growing store does not keep a stale centre while a single
-                # new episode does not trigger a recompute.
-                or abs(len(blobs) - self._centroid_n) > max(50, self._centroid_n * 0.05)
-            )
-            if stale and may_derive:
-                centroid = unit[live].mean(axis=0)
-                self._centroid = centroid
-                self._centroid_n = len(blobs)
-            elif centroid is None or centroid.shape[0] != unit.shape[1]:
-                return None
-
-            docs = unit - centroid
-            dn = np.linalg.norm(docs, axis=1)
-            dn[dn == 0] = 1.0
-            docs /= dn[:, None]
-
-            qn = np.linalg.norm(q)
-            if qn == 0:
-                return None
-            qc = (q / qn) - centroid
-            qcn = np.linalg.norm(qc)
-            if qcn == 0:
-                return None
-            qc /= qcn
-
-            scores = docs @ qc
-            scores[~live] = -1.0
-            return scores
+            docs, live, centroid = built
+            return self._score_centered(docs, live, centroid, query_vec)
         except Exception as exc:
             # Falling back to raw cosine is worse but not wrong, and a broken
             # relevance floor must not take out search entirely.
             logger.warning("Centered similarity unavailable, using raw: %s", exc)
             return None
+
+    async def _corpus_fingerprint(self, conn, source_table: str = "episodes"):
+        """Cheap change detector for the embedding corpus.
+
+        Returns a tuple that differs whenever the corpus may have changed,
+        and is stable while it has not. This is what lets the centred matrix
+        be cached instead of rebuilt per query, so it has to be both cheap
+        and honest.
+
+        Cheap. Measured on the reporter's store, this machine:
+
+            SELECT COUNT(*), MAX(rowid) ... WHERE source_table=?   0.39 ms
+            (for comparison) SELECT every embedding BLOB          23.3 ms
+
+        The COUNT is 0.39ms only because ``idx_chunks_source`` covers it.
+        Adding ``AND embedding IS NOT NULL`` makes it read every table row
+        and costs 16ms, which would eat most of what the cache saves, so
+        the predicate is deliberately left off: the count is used to detect
+        change, never as the number of usable vectors.
+
+        Honest, per writer. Both values are read from SQLite rather than
+        from process state, so a write from any connection or any other
+        process counts:
+
+        * INSERT of a new chunk moves COUNT and MAX(rowid).
+        * INSERT OR REPLACE of an existing chunk (the embed queue, at
+          ``memory/embeddings.py``) deletes and reinserts, taking a fresh
+          rowid, so MAX(rowid) moves.
+        * DELETE (``memory/decay.py``) moves COUNT.
+        * UPDATE of an embedding in place moves NEITHER, and is therefore
+          not detected. The only such writer is ``feral memory reembed``
+          (``cli/memory_cmd.py``), which runs in its own process and already
+          ends by printing "Restart the brain to pick it up." That contract
+          predates this cache; the cache does not weaken it.
+
+        ``PRAGMA data_version`` was tried here and rejected. It reports
+        commits by other connections on ANY table, and ``_bump_access``
+        commits an ``UPDATE episodes`` after every single search, so it
+        changed on essentially every query and the cache never hit.
+        """
+        try:
+            async with conn.execute(
+                "SELECT COUNT(*), MAX(rowid) FROM memory_chunks "
+                "WHERE source_table = ?",
+                (source_table,),
+            ) as cur:
+                row = await cur.fetchone()
+            count = int(row[0] or 0) if row else 0
+            max_rowid = int(row[1] or 0) if row else 0
+        except Exception as exc:
+            # A fingerprint that cannot be read must never produce a stale
+            # answer, so return a value that can never equal a cached one.
+            logger.debug("Corpus fingerprint unavailable: %s", exc)
+            self._corpus_epoch += 1
+            return (source_table, -1, -1, self._corpus_epoch)
+        return (source_table, count, max_rowid, 0)
+
+    async def _centered_corpus(self, conn, source_table: str = "episodes"):
+        """The centred matrix for the whole corpus, built at most once per
+        change to it.
+
+        Returns a :class:`_CenteredCorpus`, or None when centring is not
+        possible (corpus too small, mixed dimensions, no embeddings), in
+        which case the caller falls back to raw cosine and the old floor.
+        """
+        fingerprint = await self._corpus_fingerprint(conn, source_table)
+        cached = self._corpus_cache
+        if cached is not None and cached.fingerprint == fingerprint:
+            return cached
+
+        if fingerprint[1] < _MIN_CHUNKS_FOR_CENTERING and fingerprint[1] >= 0:
+            # Cannot possibly clear the centring floor, because the count is
+            # taken without the NOT NULL predicate and so is an upper bound
+            # on the number of usable vectors. Skip the 23ms fetch entirely.
+            self._corpus_cache = None
+            return None
+
+        async with conn.execute(
+            "SELECT source_id, embedding FROM memory_chunks "
+            "WHERE source_table = ? AND embedding IS NOT NULL",
+            (source_table,),
+        ) as cur:
+            rows = await cur.fetchall()
+        if not rows:
+            self._corpus_cache = None
+            return None
+
+        source_ids = [r["source_id"] for r in rows]
+        blobs = [r["embedding"] for r in rows]
+        dim = len(blobs[0]) // 4
+        try:
+            built = self._centered_docs(blobs, dim)
+        except Exception as exc:
+            logger.warning("Centered similarity unavailable, using raw: %s", exc)
+            built = None
+        # Release the blob list and the buffer ``np.frombuffer`` viewed before
+        # the caller does anything else, so peak RSS during a rebuild is not
+        # the matrix plus a second copy of it as bytes.
+        del blobs, rows
+        if built is None:
+            self._corpus_cache = None
+            return None
+
+        docs, live, centroid = built
+        entry = _CenteredCorpus(
+            source_ids=source_ids,
+            docs=docs,
+            live=live,
+            centroid=centroid,
+            fingerprint=fingerprint,
+        )
+        self._centroid_fingerprint = fingerprint
+        if docs.nbytes <= _CORPUS_CACHE_MAX_BYTES:
+            self._corpus_cache = entry
+        else:
+            # Used for this query, then dropped. See _CORPUS_CACHE_MAX_BYTES.
+            self._corpus_cache = None
+            logger.info(
+                "Corpus matrix is %.0f MB (%d chunks), above the %.0f MB cache "
+                "cap, so it is rebuilt per query. Installing sqlite-vec would "
+                "keep the vectors on disk instead.",
+                docs.nbytes / 1e6, len(source_ids),
+                _CORPUS_CACHE_MAX_BYTES / 1e6,
+            )
+        return entry
+
+    async def _ensure_centroid(self, conn, source_table: str = "episodes") -> bool:
+        """Make ``self._centroid`` reflect the current corpus. Returns False
+        when the corpus cannot be centred at all.
+
+        For callers that need the centre but not the matrix. When the corpus
+        fingerprint is unchanged the centre provably has not moved, so this
+        is two cheap queries and nothing else. When it has changed, the
+        matrix is built exactly as before and dropped on return.
+        """
+        fingerprint = await self._corpus_fingerprint(conn, source_table)
+        if self._centroid is not None and self._centroid_fingerprint == fingerprint:
+            return True
+        if 0 <= fingerprint[1] < _MIN_CHUNKS_FOR_CENTERING:
+            return False
+
+        async with conn.execute(
+            "SELECT embedding FROM memory_chunks "
+            "WHERE source_table = ? AND embedding IS NOT NULL",
+            (source_table,),
+        ) as cur:
+            blobs = [r["embedding"] for r in await cur.fetchall()]
+        if not blobs:
+            return False
+        try:
+            built = self._centered_docs(blobs, len(blobs[0]) // 4)
+        except Exception as exc:
+            logger.warning("Centered similarity unavailable, using raw: %s", exc)
+            return False
+        if built is None:
+            return False
+        self._centroid_fingerprint = fingerprint
+        return True
 
     async def _centered_filter(self, conn, query_vec, chunk_ids):
         """Centered scores for specific chunk ids, keyed by id.
@@ -1555,11 +1810,14 @@ class MemoryStore:
         if not chunk_ids:
             return {}
         try:
-            async with conn.execute(
-                "SELECT embedding FROM memory_chunks "
-                "WHERE source_table = 'episodes' AND embedding IS NOT NULL"
-            ) as cur:
-                corpus = [r["embedding"] for r in await cur.fetchall()]
+            # The centre is refreshed only when the corpus has actually
+            # changed. This used to re-read every embedding in the store and
+            # rebuild the whole matrix on EVERY indexed query (23.3ms + 9.1ms
+            # on the reporter's 11,613-chunk store) purely to recompute a mean
+            # vector that had not moved. The matrix is deliberately NOT
+            # retained here: keeping the corpus out of RAM is the reason to
+            # run an index at all.
+            centred = await self._ensure_centroid(conn)
 
             placeholders = ",".join("?" for _ in chunk_ids)
             async with conn.execute(
@@ -1571,13 +1829,11 @@ class MemoryStore:
             logger.warning("Centered re-scoring failed, keeping raw hits: %s", exc)
             return {cid: 1.0 for cid in chunk_ids}
 
-        if len(corpus) < _MIN_CHUNKS_FOR_CENTERING:
+        if not centred:
             return {cid: 1.0 for cid in chunk_ids}
 
         ids = [r["id"] for r in rows]
-        # Derive the centre from the whole corpus first, then score only the
-        # handful the index returned against it.
-        self._centered_similarity(query_vec, corpus)
+        # Score only the handful the index returned against that centre.
         scores = self._centered_similarity(
             query_vec, [r["embedding"] for r in rows], min_chunks=1,
         )
@@ -1681,25 +1937,39 @@ class MemoryStore:
                         if eid not in vec_results or sim > vec_results[eid]["vec_score"]:
                             vec_results[eid] = {"id": eid, "vec_score": sim}
                 else:
-                    async with conn.execute(
-                        "SELECT source_id, embedding FROM memory_chunks "
-                        "WHERE source_table = 'episodes' AND embedding IS NOT NULL"
-                    ) as cur:
-                        chunks = await cur.fetchall()
-                    blobs = [c["embedding"] for c in chunks]
-                    # One blocked matmul instead of a Python loop of
-                    # blob_to_vec + cosine_similarity. See
-                    # cosine_similarity_bulk for the measured numbers
-                    # (286ms -> 23ms at 100k chunks).
-                    sims = self._centered_similarity(query_vec, blobs)
-                    if sims is None:
-                        sims = cosine_similarity_bulk(query_vec, blobs)
-                        floor = _RAW_SEMANTIC_FLOOR
-                    else:
+                    # The centred matrix is built once and reused until the
+                    # corpus changes; only the mat-vec below depends on the
+                    # query. Rebuilding it per query cost 32.4ms of the 39ms
+                    # this whole call took on the reporter's store, against
+                    # 0.35ms for the mat-vec. See _CORPUS_CACHE_MAX_BYTES.
+                    corpus = await self._centered_corpus(conn)
+                    sims = None
+                    if corpus is not None:
+                        sims = self._score_centered(
+                            corpus.docs, corpus.live, corpus.centroid, query_vec,
+                        )
+                    if sims is not None:
+                        source_ids = corpus.source_ids
                         floor = _CENTERED_SEMANTIC_FLOOR
-                    for c, sim in zip(chunks, sims):
+                    else:
+                        # Corpus too small to centre, or a query that cannot
+                        # be centred. Raw cosine over the blobs, old floor.
+                        # One blocked matmul instead of a Python loop of
+                        # blob_to_vec + cosine_similarity. See
+                        # cosine_similarity_bulk for the measured numbers
+                        # (286ms -> 23ms at 100k chunks).
+                        async with conn.execute(
+                            "SELECT source_id, embedding FROM memory_chunks "
+                            "WHERE source_table = 'episodes' AND embedding IS NOT NULL"
+                        ) as cur:
+                            chunks = await cur.fetchall()
+                        source_ids = [c["source_id"] for c in chunks]
+                        sims = cosine_similarity_bulk(
+                            query_vec, [c["embedding"] for c in chunks],
+                        )
+                        floor = _RAW_SEMANTIC_FLOOR
+                    for eid, sim in zip(source_ids, sims):
                         sim = float(sim)
-                        eid = c["source_id"]
                         if sim > floor and (eid not in vec_results or sim > vec_results[eid]["vec_score"]):
                             vec_results[eid] = {"id": eid, "vec_score": sim}
             except EmbeddingDimensionMismatch as exc:
@@ -3030,7 +3300,12 @@ class MemoryStore:
             "active_working_sessions": working_sessions,
             "embedded_chunks": counts["embedded_chunks"],
             "vec_index_count": vec_count,
-            "vec_index_mode": self._backend_id + (" (indexed)" if self._vec_index.indexed else " (degraded)"),
+            # "(numpy scan)", not "(degraded)". Both paths are full scans
+            # (sqlite-vec 0.1.9 builds no ANN index) and the numpy one is the
+            # faster of the two at every corpus size measured, so the old
+            # word named a defect that is not there. See
+            # memory.embeddings.cosine_similarity_bulk for the numbers.
+            "vec_index_mode": self._backend_id + (" (indexed)" if self._vec_index.indexed else " (numpy scan)"),
             "embedding_provider": self._embedder.provider_name,
             "embed_queue_pending": getattr(self._embed_queue, "pending", 0),
             "knowledge_graph": kg_stats,

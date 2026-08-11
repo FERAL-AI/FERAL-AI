@@ -880,3 +880,169 @@ Verified during the audit and found sound. Listed so nobody re-investigates.
 - **No secrets are committed.** `.env` is gitignored and absent from `git log --all`; a history scan for key formats finds only test fixtures. (The untracked working-copy `.env` does hold live credentials and sits at the repo root — one `git add -f` from exposure.)
 - **Dependency management is genuinely strong.** Committed lockfile with 135 pins, explicit upper bounds with written rationale, an unconstrained smoke matrix, a TestPyPI canary. Do not "improve" it without reading the inline comments in `pyproject.toml` explaining why each bound exists.
 - **`genui/a2ui_protocol.py` has zero importers.** It is dead code and contradicts `genui/generator.py` on component names. Delete rather than reconcile.
+
+---
+
+## F-17 · Memory search: the advice was backwards, and the scan was rebuilt per query
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+Two defects, one root: nobody had measured the path they were telling users
+to escape.
+
+### 1. The "degraded, rebuild CPython" advice was wrong on performance
+
+`memory/embeddings.py` called the numpy path "degraded", and `feral doctor`
+and the setup wizard both told the operator to rebuild their interpreter
+with `--enable-loadable-sqlite-extensions` to get off it.
+
+**sqlite-vec 0.1.9 (the pinned version) builds no ANN index.** A vec0
+`MATCH` is itself a full scan, so both paths are O(n) and the choice was
+never linear-versus-sublinear. Measured on this machine, top-5 over 384-dim
+vectors, identical results to seven decimals:
+
+| corpus | numpy | sqlite-vec vec0 |
+|---|---|---|
+| 12,000 | 0.46 ms | 7.08 ms |
+| 50,000 | 2.42 ms | 10.98 - 28.53 ms |
+| 100,000 | 3.97 ms | 56.99 ms |
+
+The prescribed fix was a ~10x slowdown. The honest argument for sqlite-vec
+is resident memory (numpy holds ~18 MB at 12k rows, ~154 MB at 100k), so
+the rebuild instructions are kept and re-attached to that reason.
+
+Corrected, every site found by grep (`build/lib/` is the duplicate tree from
+trap 1 and was left alone):
+
+- `memory/embeddings.py:8` module docstring, "(degraded, still works)".
+- `memory/embeddings.py` `cosine_similarity_bulk`, "not an exotic degraded
+  path" plus a new measured comparison table, which is now the one place the
+  numbers live and everything else cites.
+- `memory/embeddings.py` `_try_load_sqlite_vec`, the WARNING telling users to
+  rebuild. Now INFO, reason changed to memory.
+- `memory/embeddings.py` `VectorIndex` class docstring.
+- `cli/main.py` `feral doctor`. Was `_warn` with the rebuild in
+  "Suggested fixes:"; now `_info` with no suggested fix. It still refuses to
+  green-tick, because the operator did configure a backend that is not
+  running and that remains worth saying.
+- `cli/setup/steps/memory.py` module docstring and both `_report_sqlite_vec`
+  branches.
+- `api/routes/memory.py` `_runtime_vector_state` reason string, and the
+  `/internal/memory/stats` docstring. **Wire field names
+  (`degraded_semantic_search`, `vector_index_degraded*`) were NOT renamed** -
+  four languages consume this payload. The docstring now says the name
+  oversells what the field means.
+- `memory/store.py` stats: `vec_index_mode` "(degraded)" -> "(numpy scan)".
+- `memory/vector_index_backends/base.py` Protocol docstring, which also
+  claimed `indexed=False` fell back to "FTS5 keyword search". It does not;
+  the vector leg still runs, over numpy.
+- `memory/vector_index_backends/sqlite_vec.py`, two "degraded mode" lines.
+
+`tests/test_doctor_vector_backend_truth.py` asserted the old wording and was
+updated with it: it now pins that the rebuild is NOT offered as a fix, that
+the instructions are still reachable, and that the row says neither
+"degraded" nor "O(n) per query".
+
+### 2. The corpus matrix was rebuilt from BLOBs on every query
+
+`_centered_similarity` re-read every embedding and rebuilt its float32
+matrix per query. None of that work depends on the query. Measured on a copy
+of the real store (`~/.feral/memory.db`, 11,613 episode chunks, 384 dims;
+copied with its `-wal`/`-shm`, the live file was never opened):
+
+```
+SELECT every embedding BLOB   23.3 ms
+join + decode + centre         9.1 ms
+------------------------------------
+vector leg                    32.4 ms   every query
+the mat-vec that uses the query 0.35 ms
+```
+
+**Fix.** `MemoryStore._centered_corpus` builds the centred matrix once and
+keeps it, keyed on a fingerprint of the corpus. `_centered_similarity` was
+split into a query-independent half (`_centered_docs`) and a one-mat-vec
+scoring half (`_score_centered`), so the cached matrix is produced by the
+same arithmetic in the same order as before and the scores are bit-identical
+rather than merely close.
+
+**Memory.** One matrix, never two. `docs = unit - centroid` allocated a
+second full matrix and dropped the first a line later; it is now an in-place
+`unit -= centroid`. The blob list and the joined buffer are released before
+the caller runs. Above `_CORPUS_CACHE_MAX_BYTES` (256 MB, so 100k chunks
+still fits) the matrix is used and then dropped rather than retained, so a
+very large store degrades to the old cost instead of to an OOM.
+
+**Invalidation.** `SELECT COUNT(*), MAX(rowid) FROM memory_chunks WHERE
+source_table = ?`, 0.39 ms, because `idx_chunks_source` covers it. Adding
+`AND embedding IS NOT NULL` makes it read every table row and costs 16 ms,
+which would eat most of the saving, so the count is used to detect change
+and never as a number of usable vectors. Both values are read from SQLite,
+so writes from any connection or process count.
+
+`PRAGMA data_version` was tried and **rejected**: it reports commits by
+other connections on any table, and `_bump_access` commits an
+`UPDATE episodes` after every single search, so it changed on essentially
+every query and the cache never hit. Recording this because it is the
+obvious first choice and it does not work here.
+
+The one writer this does not catch is an in-place `UPDATE ... SET embedding`,
+which only `feral memory reembed` does. It runs in its own process and
+already ends by printing "Restart the brain to pick it up." That contract
+predates the cache.
+
+**Measured, before -> after, on the real-store copy** (40 queries drawn from
+the store's own episode summaries, 3 repeats, `time.time` frozen so the
+recency prior cannot move):
+
+| | before | after |
+|---|---|---|
+| `episode_search_hybrid`, median | 45.31 ms | 8.61 ms |
+| vector leg alone, warm | 32.4 ms | 1.02 ms |
+| matrix assemblies / 121 queries | 121 | 1 |
+| peak RSS | 174.5 MB | 137.7 MB |
+
+Peak RSS *falls* because the old code allocated three full matrices per
+query and churned them; the new code holds one 17.8 MB matrix and stops
+allocating.
+
+**Results unchanged: 36 distinct queries, 227 returned rows, zero
+differences** in id, order, or `relevance_score` to 9 decimals.
+
+**Test written first.** `tests/test_memory_corpus_matrix_cache.py` asserts
+the assembly *count* and the cache *identity*, not latency, because a
+latency assertion is flaky on a shared machine. Against the unfixed source
+it fails 3/5 ("corpus matrix rebuilt 3 times for 3 queries"); after, 5/5.
+It also pins invalidation, including an end-to-end "a new episode is
+findable immediately" case, because a cache that never invalidates silently
+stops returning new memories.
+
+### Siblings
+
+**Fixed here, same defect:** `_centered_filter`, the *indexed* path, re-read
+the entire corpus and rebuilt the whole matrix on every query purely to
+recompute a centroid that had not moved. It now refreshes the centre only
+when the fingerprint changes, and deliberately does **not** retain the
+matrix, because keeping the corpus out of RAM is the reason to run an index.
+Verified with a stubbed vec0 backend over the real store: median 43.74 ->
+8.28 ms, corpus assemblies 1 instead of 121, 206 rows identical, peak RSS
+200.0 -> 192.6 MB (no matrix retained).
+
+**Found, not fixed, same shape.** Each fetches every blob and rebuilds a
+matrix per call. All are sub-millisecond on this store, so fixing them would
+add a second and third resident matrix to save ~0.3 ms, and each needs its
+own invalidation key:
+
+- `memory/notes_legacy.py:203`, notes corpus, 386 chunks, 0.27 ms/fetch.
+- `memory/knowledge_graph.py:672`, `entity_search_hybrid`, 312 entities,
+  0.37 ms/fetch.
+- `memory/knowledge_graph.py:992`, `_find_similar_entity`. **The one most
+  likely to bite:** it is on the ingest path, not the query path, so it is
+  O(entities) per entity resolved and therefore quadratic over a batch.
+  Worth its own item once the entity table is larger than 312 rows.
+- `memory/backends/sqlite_vec.py:172`, the pluggable-backend record scan.
+
+**Proof:** `python -m pytest tests/ -q -p no:cacheprovider -p no:randomly
+--no-cov` -> **7455 passed, 29 skipped, 0 failed** (341s). `ruff check
+--select=E,F,W --ignore=E501,E402,F401,W291,W293 .` -> **All checks passed**.
+Run on pyenv 3.11.11 via `PYENV_VERSION`, because `.python-version` is
+pinned to an interpreter that is not installed yet by concurrent work.

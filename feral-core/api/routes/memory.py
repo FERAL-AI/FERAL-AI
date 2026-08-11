@@ -106,10 +106,18 @@ def _runtime_vector_state() -> tuple[str, str, str | None]:
     if vec_index is None:
         return constructed, VECTOR_FALLBACK_ID, "no vector index attached to the store"
     if not bool(getattr(vec_index, "indexed", False)):
+        # The reason names the engine and stops. It used to end "(correct,
+        # but O(n) per query)", which read as an apology and pointed at the
+        # wrong thing: sqlite-vec 0.1.9 builds no ANN index, so vec0 is a
+        # full scan too, and it measures ~10x slower than this path (see
+        # memory.embeddings.cosine_similarity_bulk). The field is still
+        # reported because the operator asked for one engine and got
+        # another, which is worth knowing on its own.
         return constructed, VECTOR_FALLBACK_ID, (
             f"the '{constructed}' index is not queryable (indexed=False), so "
-            "vector search is served by a numpy brute-force scan over "
-            "memory_chunks (correct, but O(n) per query)"
+            "vector search is served by a numpy scan over memory_chunks; "
+            "results are identical and, at measured corpus sizes, faster. "
+            "sqlite-vec would trade that for lower resident memory"
         )
     return constructed, constructed, None
 
@@ -636,6 +644,14 @@ async def memory_stats():
     Adds visibility into the running brain's vector configuration so
     operators can detect ``degraded_semantic_search`` (no sqlite-vec)
     and missing embedding providers without grepping logs.
+
+    ``degraded_semantic_search`` is a wire field and keeps its name, but
+    the name oversells it: it means "the configured index is not the
+    engine answering queries", not "semantic search is worse". The numpy
+    engine it falls back to returns identical results and measures faster
+    at every corpus size tested (see
+    ``memory.embeddings.cosine_similarity_bulk``). Read it as a
+    configuration fact, not a health alarm.
     """
     base = (await state.memory.stats()) if state.memory else {}
     if not isinstance(base, dict):

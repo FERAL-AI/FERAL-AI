@@ -49,11 +49,16 @@ class VectorIndexBackend(Protocol):
     """The minimal async contract every vector index backend must satisfy.
 
     ``indexed`` reports whether the backend has an index up and running
-    (e.g. the sqlite-vec extension loaded successfully). ``False`` means
-    a degraded mode where ``upsert`` is a no-op and ``search_cosine``
-    returns ``[]``; ``MemoryStore`` then falls back to its FTS5 keyword
-    search. This degradation policy is uniform across backends — silent
-    skip rather than crash on first use.
+    (e.g. the sqlite-vec extension loaded successfully). ``False`` puts
+    the backend in a no-op mode where ``upsert`` does nothing and
+    ``search_cosine`` returns ``[]``. This policy is uniform across
+    backends: silent skip rather than crash on first use.
+
+    ``False`` does NOT mean semantic search is lost. ``MemoryStore``
+    answers the vector leg over numpy instead (see
+    ``memory.embeddings.cosine_similarity_bulk``), which returns the same
+    ranking and measures faster than vec0 at every corpus size tested;
+    the FTS5 keyword leg runs alongside it either way.
 
     ``count`` is exposed as an awaitable so backends backed by remote
     services (Qdrant via ``AsyncQdrantClient``) can return live counts
