@@ -36,7 +36,33 @@
 #       Verified in pdf_reader.py:37, plan.py:101, code_interpreter.py:370.
 #     mcp/registry.py:267  "Missing named argument url for MCPServerConfig"
 #       url has a default of "". Verified by constructing the model without
-#       it. This is the pydantic-plugin gap above.
+#       it.
+#
+# MEASURED FOLLOW-UP on that last one. The cause is narrower than "the plugin
+# is off". mypy models pydantic v2 through dataclass_transform and does NOT
+# need the plugin for most of it. Exactly one declaration style defeats it:
+#
+#     a: str = Field("", description="x")          -> mypy calls it REQUIRED
+#     b: str = Field(default="", description="x")  -> understood
+#     c: str = ""                                  -> understood
+#     d: str = Field(..., description="x")         -> correctly required
+#
+# Only the positional-default form is misread, and only ever as call-arg:
+# probing all four styles emits no assignment, attr-defined or arg-type. So
+# this cannot be inflating the 149/147/145 populations that make up most of
+# this baseline.
+#
+# 62 fields in the tree use the misread form, 9 of them in models/protocol.py.
+# They yield a single false positive today because call-arg fires only where
+# typed code constructs a model by keyword and omits that field; nearly
+# everything here is parsed from dicts instead. But they are latent: every
+# future keyword construction mints another one, which is precisely what
+# would make a call-arg gate fire on correct code and get switched off.
+#
+# Cheap remedy, no plugin and no mypy upgrade: rewrite those 62 to
+# Field(default=...). Mechanical, no runtime change, and it is what makes
+# promoting call-arg to a failing check honest. Its own item, not a
+# drive-by.
 #
 # No "# type: ignore" comments were added for the false positives. CLAUDE.md
 # records 52 existing unvalidated suppressions from an earlier unrecorded mypy
