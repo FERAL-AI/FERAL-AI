@@ -922,7 +922,20 @@ Reserved codes:
 | 1006 | `payload_too_large`   | Frame > 1 MiB or decoded base64 > 512 KiB.                       |
 | 1007 | `timeout`             | Action deadline exceeded.                                        |
 | 1099 | `internal`            | Brain-side bug. Daemon should retry with backoff.                |
-| 4020 | `frame_too_large`     | v1.1+: `audio_frame.data_b64` > 64 KiB decoded, or `video_frame.data_b64` > 512 KiB decoded. Brain closes the socket; daemon MUST reconnect with a saner encoder bitrate. |
+| 4020 | `frame_too_large`     | v1.1+: `audio_frame.data_b64` > 64 KiB decoded, or `video_frame.data_b64` > 512 KiB decoded. Brain drops the frame and returns this error; the session stays open. Daemon SHOULD lower its encoder bitrate. |
+
+> **4020 does not close the socket, by design.** This table previously said
+> the brain closes it and the daemon must reconnect. The implementation has
+> never done that, and the spec was amended to match rather than the other
+> way round: a single oversized frame is a transient encoder problem, and
+> tearing down the session would drop a live voice or vision stream along
+> with it. Reconnecting also does nothing to make the next frame smaller,
+> so the close bought no protection for either side. Dropping the frame and
+> naming the cap lets the daemon lower its bitrate and keep talking.
+>
+> Amending prose is one edit. Changing the brain to close the socket would
+> have been a wire-contract break across four SDK languages in exchange for
+> worse behaviour. See AUDIT-FIXES F-03.
 
 Codes `>= 2000` are reserved for vendor-private extensions.
 

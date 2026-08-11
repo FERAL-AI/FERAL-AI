@@ -2048,10 +2048,13 @@ async def _send_frame_too_large(ws: WebSocket, reason: str) -> None:
     frame was dropped in silence and the device believed it had sent
     successfully, which is why nobody ever reported the 4/3 measurement bug.
 
-    HUP_SPEC.md §8 additionally says the brain closes the socket on 4020. It
-    is not closed here: a single over-cap frame from an encoder with the wrong
-    bitrate would drop a live voice or vision session, and the daemon now has
-    the information it needs to correct itself. Recorded under F-03.
+    The socket is deliberately NOT closed. HUP_SPEC.md §8 used to say the
+    brain closes it and the daemon must reconnect; the spec has been amended
+    to match this behaviour rather than the reverse. A single over-cap frame
+    is a transient encoder problem, closing would drop a live voice or vision
+    session with it, and reconnecting does nothing to make the next frame
+    smaller. The daemon now has what it needs to lower its bitrate and keep
+    talking. See HUP_SPEC.md §8 and AUDIT-FIXES F-03.
     """
     await _send_protocol_error(ws, 4020, reason, name="frame_too_large")
 
