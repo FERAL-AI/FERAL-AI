@@ -19,6 +19,7 @@ Read-only, LAN-public — same posture as ``/api/capabilities``.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import platform
 import subprocess
@@ -34,6 +35,10 @@ from security.macos_permissions import (
 logger = logging.getLogger("feral.api.system_permissions")
 
 router = APIRouter(tags=["system"])
+
+# Wall-clock budget for `open <deeplink>`. Named so the timeout-and-kill
+# behaviour is testable without a 3s test.
+OPEN_DEEPLINK_TIMEOUT_S = 3
 
 
 @router.get("/api/system/permissions")
@@ -112,13 +117,27 @@ async def open_system_permission(body: dict = Body(...)):
         return {"ok": False, "reason": "Not running on macOS"}
 
     try:
-        subprocess.run(
-            ["open", deeplink],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            check=False,
+        # AUDIT-FIXES F-05. subprocess.run(timeout=3) ran on the event loop
+        # thread: a wedged LaunchServices froze every concurrent coroutine
+        # for the full three seconds. The exit code is still ignored, as
+        # check=False did.
+        open_cmd = ["open", deeplink]
+        proc = await asyncio.create_subprocess_exec(
+            *open_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=OPEN_DEEPLINK_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            # subprocess.run kills the child before raising TimeoutExpired;
+            # without this an `open` that never returns is leaked per call.
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            raise subprocess.TimeoutExpired(open_cmd, OPEN_DEEPLINK_TIMEOUT_S) from None
         return {"ok": True}
     except Exception as exc:
         logger.warning("open_system_permission: open failed: %s", exc)

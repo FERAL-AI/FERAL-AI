@@ -445,7 +445,11 @@ class CodeInterpreterSkill(BaseSkill):
                 "error": str(e),
             }
         finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            # AUDIT-FIXES F-05. Same class as the subprocess sites: blocking
+            # filesystem I/O on the loop thread. The run directory holds the
+            # artifacts the executed code produced, so an interpreter run can
+            # make this arbitrarily large. Offloaded, not removed.
+            await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
 
     def _collect_artifacts(self, run_dir: Path, *, script_name: str, run_id: str) -> list[dict]:
         artifacts: list[dict] = []

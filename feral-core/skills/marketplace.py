@@ -6,6 +6,7 @@ Skills are downloaded, validated, and registered with the SkillRegistry.
 """
 
 from __future__ import annotations
+import asyncio
 import json
 import logging
 import os
@@ -29,6 +30,10 @@ from skills.package import (
 logger = logging.getLogger("feral.marketplace")
 
 DEFAULT_REGISTRY_URL = market_registry_url()
+
+# Wall-clock budget for `git pull` in the update path. Named so the
+# timeout-and-kill behaviour is testable without a 30s test.
+GIT_PULL_TIMEOUT_S = 30
 
 GITHUB_INDEX_URL = os.getenv(
     "FERAL_MARKETPLACE_GITHUB",
@@ -242,10 +247,39 @@ class MarketplaceClient:
         if git_dir.exists():
             import subprocess
             try:
-                subprocess.run(
-                    ["git", "pull", "--ff-only"],
-                    cwd=str(pkg_dir), capture_output=True, text=True, check=True, timeout=30,
+                # AUDIT-FIXES F-05. subprocess.run(timeout=30) here ran on the
+                # event loop thread, so a slow remote stalled every other
+                # coroutine for up to 30s. check=True has no equivalent on
+                # create_subprocess_exec, so the CalledProcessError is raised
+                # by hand below to keep the returned error string identical.
+                pull_cmd = ["git", "pull", "--ff-only"]
+                proc = await asyncio.create_subprocess_exec(
+                    *pull_cmd,
+                    cwd=str(pkg_dir),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
+                try:
+                    stdout_b, stderr_b = await asyncio.wait_for(
+                        proc.communicate(), timeout=GIT_PULL_TIMEOUT_S
+                    )
+                except asyncio.TimeoutError:
+                    # Kill the child, as subprocess.run's timeout did. An
+                    # abandoned `git pull` would keep writing into the skill
+                    # directory we are about to re-read.
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except ProcessLookupError:
+                        pass
+                    raise subprocess.TimeoutExpired(pull_cmd, GIT_PULL_TIMEOUT_S) from None
+                if proc.returncode != 0:
+                    raise subprocess.CalledProcessError(
+                        proc.returncode if proc.returncode is not None else -1,
+                        pull_cmd,
+                        output=stdout_b.decode(errors="replace") if stdout_b else "",
+                        stderr=stderr_b.decode(errors="replace") if stderr_b else "",
+                    )
                 pkg = SkillPackage(pkg_dir)
                 if pkg.load() and self._skill_registry:
                     self._skill_registry.register(pkg.manifest)

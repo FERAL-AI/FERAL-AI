@@ -17,6 +17,7 @@ POST   /api/apps/{app_id}/dispatch            — validate + execute an action (
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shutil
@@ -39,6 +40,23 @@ from genui.permissions_policy import PolicyViolation
 logger = logging.getLogger("feral.api.apps")
 
 router = APIRouter(tags=["apps"])
+
+# Wall-clock budget for `git clone` in the install path. Named so the
+# timeout-and-kill behaviour is testable without a 120s test.
+GIT_CLONE_TIMEOUT_S = 120
+
+
+async def _terminate(proc: asyncio.subprocess.Process) -> None:
+    """Kill a child that outran its timeout and reap it.
+
+    asyncio.wait_for only cancels the await, it does not touch the process,
+    so skipping this leaks a running `git clone` for every timed-out install.
+    """
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        return
+    await proc.wait()
 
 
 def _require_registry():
@@ -376,14 +394,31 @@ async def install_app(req: InstallRequest, unsigned: Optional[bool] = None):
     if req.git_url:
         tmp = Path(tempfile.mkdtemp(prefix="feral-app-clone-"))
         try:
-            result = subprocess.run(
-                ["git", "clone", "--depth", "1", req.git_url, str(tmp)],
-                capture_output=True, text=True, timeout=120,
+            # AUDIT-FIXES F-05. This was subprocess.run(timeout=120) inside an
+            # async handler, so a slow or hostile remote froze the whole event
+            # loop for up to two minutes: voice streaming, websocket
+            # heartbeats and every other in-flight request stopped with it.
+            clone_cmd = ["git", "clone", "--depth", "1", req.git_url, str(tmp)]
+            proc = await asyncio.create_subprocess_exec(
+                *clone_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            if result.returncode != 0:
+            try:
+                _, stderr_b = await asyncio.wait_for(
+                    proc.communicate(), timeout=GIT_CLONE_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                # subprocess.run kills the child before raising. Without this
+                # the abandoned clone keeps writing into `tmp` while the
+                # finally block below deletes it.
+                await _terminate(proc)
+                raise subprocess.TimeoutExpired(clone_cmd, GIT_CLONE_TIMEOUT_S) from None
+            if proc.returncode != 0:
+                stderr = stderr_b.decode(errors="replace") if stderr_b else ""
                 raise HTTPException(
                     status_code=400,
-                    detail=f"git clone failed: {result.stderr.strip()[:400]}",
+                    detail=f"git clone failed: {stderr.strip()[:400]}",
                 )
             try:
                 app = _install_with_signing(registry, str(tmp), req=req)
@@ -394,7 +429,10 @@ async def install_app(req: InstallRequest, unsigned: Optional[bool] = None):
             dep_report = await _enforce_skill_dependencies_or_rollback(registry, app)
             return {"success": True, "app": _manifest_summary(app), "skill_dependencies": dep_report}
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            # AUDIT-FIXES F-05. Same defect as the clone above: this deletes a
+            # freshly cloned repository, so it is thousands of unlink() calls
+            # on the loop thread. Offloaded, not removed.
+            await asyncio.to_thread(shutil.rmtree, tmp, ignore_errors=True)
 
     if req.registry_id:
         try:

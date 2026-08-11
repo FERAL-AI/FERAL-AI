@@ -494,7 +494,97 @@ Worse: `_ensure_local_model` is reachable from the same sync path and its docstr
 
 ### F-05 · Blocking `subprocess.run` inside async route handlers
 
-**Status:** open
+**Status:** FIXED, uncommitted, in the working tree.
+
+**All three cited sites re-verified present and fixed.** All three were
+`subprocess.run` inside `async def`, exactly as cited.
+
+**Citation correction: the sweep the finding asks for finds seven sites, not
+three.** An AST scan for blocking calls inside `async def` across `feral-core`
+(excluding `build/`, `dist/`, `tests/`) returns:
+
+```
+# Fixed — six sites.
+feral-core/api/routes/apps.py:379                 subprocess.run  git clone, timeout=120   (cited)
+feral-core/api/routes/apps.py:397                 shutil.rmtree   of the fresh clone       ← UNCITED
+feral-core/skills/marketplace.py:245              subprocess.run  git pull,  timeout=30    (cited)
+feral-core/api/routes/system_permissions.py:115   subprocess.run  open,      timeout=3     (cited)
+feral-core/security/docker_sandbox.py:199         shutil.rmtree   sandbox tmpdir           ← UNCITED
+feral-core/skills/impl/code_interpreter.py:448    shutil.rmtree   run dir                  ← UNCITED
+
+# Examined and rejected — not this defect.
+feral-core/skills/impl/browser_use.py:403         subprocess.Popen in async _auto_launch_chrome
+```
+
+`apps.py:397` is the one that matters most among the uncited: it is in the
+*same* `async def` as the cited clone, in the `finally` block, deleting a
+directory that a `git clone` has just filled, so it is thousands of `unlink()`
+calls on the loop thread rather than one syscall.
+
+`browser_use.py:403` is **not** the same defect and was deliberately left
+alone. `Popen` spawns and returns immediately; it never waits for the child.
+The blocking cost is `fork`/`exec` only, not the lifetime of the process, so
+converting it would buy nothing. (That file is also being edited concurrently
+for another item; nothing here touches it.)
+
+**How the subprocess conversions preserve semantics.** Each is now
+`asyncio.create_subprocess_exec` + `await asyncio.wait_for(proc.communicate(),
+timeout=...)`, with the same timeout values, now named constants
+(`GIT_CLONE_TIMEOUT_S = 120`, `GIT_PULL_TIMEOUT_S = 30`,
+`OPEN_DEEPLINK_TIMEOUT_S = 3`) so the timeout path is testable in under a
+second. `wait_for` only cancels the *await*, it does not touch the child, so
+each timeout path kills and reaps the process before raising: without that,
+every timed-out install leaks a running `git clone`. The exception raised on
+timeout is still `subprocess.TimeoutExpired` with the same argv and timeout,
+so callers and the resulting HTTP behaviour are unchanged.
+`marketplace.py` used `check=True`, which `create_subprocess_exec` has no
+equivalent for, so `subprocess.CalledProcessError` is raised by hand with the
+same returncode and argv; its `str()` is what lands in the returned
+`{"success": False, "error": ...}`, and that string is pinned by a test.
+`system_permissions.py` used `check=False`, so the exit code is still ignored.
+The three `shutil.rmtree` sites became `await asyncio.to_thread(shutil.rmtree,
+..., ignore_errors=True)`, keeping `ignore_errors` where it was already set.
+No endpoint changed what it returns, what it raises, or any log message.
+
+**Tests.** New file `feral-core/tests/test_blocking_calls_loop_liveness.py`,
+10 tests: **9/10 fail against the unfixed source, 10/10 pass after.** The
+tenth is a stated preservation guard (the `check=True` error string) that
+passes both ways on purpose. The failures are the stated ones, not collection
+errors:
+
+```
+ticked only 0 times during a 0.2s git clone       apps.py clone
+ticked only 0 times during a 0.2s git pull        marketplace.py pull
+ticked only 0 times while waiting on `open`       system_permissions.py
+rmtree ran on the event loop thread               apps.py, docker_sandbox.py, code_interpreter.py
+module has no attribute GIT_CLONE_TIMEOUT_S       the three kill-the-child tests
+```
+
+Liveness is measured the way `tests/perf/test_memory_latency.py` and
+`tests/test_embedding_loop_liveness.py` do it: count the ticks of a 1 ms pulse
+coroutine running alongside the work, rather than timing wall clock. The
+`to_thread` sites additionally assert the work ran on a different thread,
+because a wrapper that awaits something trivial and then still calls the
+blocking function inline would satisfy a tick count on a fast machine. The
+subprocess tests put a fake `git` / `open` shell script first on `PATH`, so
+they need no network and no real git while still exercising the real spawn,
+argv, exit code and stderr capture; the kill tests have that script touch a
+marker file *after* its sleep and assert the marker never appears.
+
+**One existing test was changed.** `tests/test_phase11_desktop_control.py::
+TestOpenSystemPermission::test_known_key_triggers_open` patched
+`api.routes.system_permissions.subprocess` and asserted `subprocess.run` was
+called. It asserted the mechanism, which is what this fix replaces; it now
+stubs `asyncio.create_subprocess_exec` and makes the same assertions about
+argv, status and body. As a side effect it no longer spawns a real `open`
+against System Settings on the developer's machine.
+
+**Proof, real numbers.** `python -m pytest tests/ -q -p no:cacheprovider
+-p no:randomly --no-cov` is **7447 passed, 29 skipped, 0 failed** (325s).
+`ruff check --select=E,F,W --ignore=E501,E402,F401,W291,W293 .` prints
+"All checks passed!".
+
+Original finding follows.
 
 ```
 feral-core/api/routes/apps.py:379                git clone, timeout=120   ← worst
@@ -510,7 +600,99 @@ The first can stall every concurrent coroutine for two minutes against a slow or
 
 ### F-06 · Unreferenced background tasks can be garbage-collected
 
-**Status:** open
+**Status:** FIXED.
+
+**Re-verified 2026-08-11 against `63b054aa1`.** All fourteen cited `file:line`
+pairs were present and every line number was still exact, which is unusual for
+this audit and worth recording: nothing in this class had drifted.
+
+**Count correction: nineteen, not fourteen.** An AST sweep of `feral-core`
+(excluding `build/`, `dist/`, `tests/`) for `*.create_task(...)` appearing as a
+whole expression statement, which is exactly "the Task was produced and
+immediately dropped", found five sites the audit missed:
+
+```
+integrations/home_assistant.py:194   asyncio.get_running_loop().create_task(client.aclose())
+memory/sync_scheduler.py:218         per-peer sync, cadence tick
+memory/sync_scheduler.py:378         per-peer sync, heartbeat reconnect
+voice/gemini_realtime.py:620         per-turn memory refresh
+voice/realtime_proxy.py:1254         voice-turn hooks
+```
+
+The audit's list only covered `asyncio.create_task` and `loop.create_task`
+spelled as bare names; the four it missed in `sync_scheduler.py` and the voice
+proxies are those same two spellings, so that gap was enumeration, not pattern.
+`home_assistant.py:194` is genuinely a different spelling
+(`get_running_loop().create_task(...)`, a call receiver rather than a name).
+
+A second sweep for the adjacent shape, `t = create_task(...)` assigned to a
+local that is never read again, found **zero** sites, so nineteen is the whole
+class.
+
+**Mechanism, per site.** No third mechanism was invented.
+
+- `state.register_background_task(...)` where the object can reach it:
+  `api/routes/config.py` (3, the channel-startup sites) and `api/state.py`
+  (3, the websocket broadcasts). `api/routes/config.py` already used this
+  registry for the proactive and vision toggles at `:182` and `:203`.
+- An instance-level `set[asyncio.Task]` with an `add_done_callback(discard)`,
+  the `memory/store.py` shape, everywhere else: `memory/sync.py`,
+  `memory/sync_scheduler.py`, `agents/supervisor.py`, `cost/loop_guard.py`,
+  `agents/subagent_spawner.py`, `skills/impl/browser_use.py`,
+  `voice/realtime_proxy.py`, `voice/gemini_realtime.py`.
+- A module-level set, same discard idiom, at the two sites with no instance to
+  hang state off: `services/mdns.py` (`stop_advertisement` is a module
+  function) and `integrations/home_assistant.py` (`_close_later` is a
+  `staticmethod`).
+
+**The one site where retaining unconditionally would leak.**
+`skills/impl/browser_use.py:254` schedules one task per CDP event per async
+listener, in a receive loop that runs for the life of a browser session. An
+unbounded registry there would be a real leak. The done-callback discard is
+what makes it safe: the set only ever holds listeners that have not finished.
+The same reasoning applies, at lower volume, to the mDNS resolves and the
+per-peer syncs. Nothing was left unreferenced.
+
+**Nothing deferred.** None of the nineteen sites falls in a file another lane
+holds.
+
+**Also fixed the silent half of the config finding.** `register_background_task`
+retains the task but its `set.discard` callback does not *retrieve* the
+exception, so a channel that fails to start would still only surface through
+asyncio's never-retrieved warning at collection time, which is the very event
+that was unreliable. The three channel sites now attach a done-callback that
+logs the failure with `exc_info`, so "the route said `ok: true` and the channel
+never came up" produces a log line.
+
+**The failing test is a real collection, not a set-existence check.**
+`tests/test_background_task_references.py`. The probe coroutine awaits a future
+that is published only through a `weakref.WeakValueDictionary`, so the task, its
+frame, and that future form a cycle with no external root. `gc.collect()`
+destroys it and CPython prints "Task was destroyed but it is pending!". If the
+call site kept a reference the future survives, the test completes it, and the
+coroutine's second half runs. Two meta-tests pin that the probe can both fail
+and pass, so it cannot silently stop discriminating.
+
+Against unfixed `63b054aa1`: **4 failed, 5 passed**. The three behavioural tests
+(Telegram channel start via the real `POST /api/config/credentials` handler, the
+supervisor event broadcast, the scheduler's heartbeat re-sync) each failed
+reporting the task collected mid-flight, and the AST guard failed listing all
+nineteen sites. After the fix: **9 passed**.
+
+The channel-startup test binds the real `BrainState.register_background_task` to
+its stand-in state rather than reimplementing it, so it exercises the production
+registry. That is trap 3 in `CLAUDE.md` applied to this fix.
+
+**Guard against reintroduction:** `test_no_unreferenced_create_task`, modelled
+on `tests/test_double_contracts.py`. A ruff rule was not used: `RUF006` covers
+only `asyncio.create_task` spelled as an attribute of a module named `asyncio`,
+which would have missed eight of the nineteen (`loop.create_task`,
+`get_running_loop().create_task`), and the gate runs `--select=E,F,W` anyway.
+
+**Proved:** `python -m pytest tests/ -q` → **7447 passed, 29 skipped**, 0 failed
+(372s). `ruff check --select=E,F,W --ignore=E501,E402,F401,W291,W293 .` → clean.
+
+Original finding (kept for reference; the site list is incomplete, see above):
 
 ```
 feral-core/api/routes/config.py:492, :510, :540   channel startup (Telegram / Slack / WhatsApp)

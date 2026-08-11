@@ -196,7 +196,11 @@ class DockerSandbox:
                 return await self._run_in_docker(tmpdir, argv_inner)
             return await self._run_on_host(script_path, argv_inner, tmpdir)
         finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+            # AUDIT-FIXES F-05. rmtree is blocking filesystem I/O on the loop
+            # thread, and the directory holds whatever the sandboxed run
+            # wrote, so its cost is set by untrusted code. Offloaded, not
+            # removed: the temp dir must still be deleted on every path.
+            await asyncio.to_thread(shutil.rmtree, tmpdir, ignore_errors=True)
 
     async def _run_in_docker(self, host_dir: str, argv_inner: list[str]) -> dict[str, Any]:
         cmd = self._docker_base_cmd()

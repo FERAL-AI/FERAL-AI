@@ -371,17 +371,35 @@ class TestOpenSystemPermission:
         return TestClient(app)
 
     @patch("api.routes.system_permissions.platform")
-    @patch("api.routes.system_permissions.subprocess")
-    def test_known_key_triggers_open(self, mock_subprocess, mock_platform, client):
+    def test_known_key_triggers_open(self, mock_platform, client, monkeypatch):
+        # AUDIT-FIXES F-05 changed the mechanism, not the contract: the route
+        # spawns `open` with asyncio instead of subprocess.run, because
+        # subprocess.run blocked the event loop for its whole 3s timeout.
+        # The endpoint's status and body are unchanged.
+        import asyncio
+
         mock_platform.system.return_value = "Darwin"
+        spawned: dict = {}
+
+        class _Proc:
+            returncode = 0
+
+            async def communicate(self):
+                return (b"", b"")
+
+        async def _fake_exec(*argv, **kwargs):
+            spawned["argv"] = argv
+            return _Proc()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+
         resp = client.post(
             "/api/system/permissions/open",
             json={"permission_key": "accessibility"},
         )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
-        mock_subprocess.run.assert_called_once()
-        args = mock_subprocess.run.call_args[0][0]
+        args = spawned["argv"]
         assert args[0] == "open"
         assert "Privacy_Accessibility" in args[1]
 
