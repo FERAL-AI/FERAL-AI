@@ -137,7 +137,55 @@ dimension change silently disabled semantic recall for months.
 
 ### E-3 · What has no Node equivalent at all?
 
-**Status:** running
+**Status:** **THREE HARD LOSSES**, and one large surprise.
+
+All package data read live from npm and PyPI on 2026-08-11, nothing installed.
+
+**Would not exist on day one:**
+
+1. **Apple Silicon GPU local LLM inference.** `mlx-lm` has no usable Node
+   counterpart: the candidates are 13 weekly downloads with no README and all 11
+   versions published across two days, or stale since 2025-04, or Bun-only.
+   `MLXEngine` would be deleted.
+2. **CTranslate2 local STT.** `faster-whisper-ts` is **Linux-CPU only**, builds
+   from source at postinstall, tiny and base models only, and its README
+   explicitly defers prebuilt binaries. `ctranslate2`'s NAPI exposes only
+   `translateBatch`, no Whisper API.
+3. **Enforced child rlimits.** Node's `child_process` documentation has zero
+   hits for "preexec" and zero for "rlimit", fetched live. No fork-time hook
+   exists, so `posix.setrlimit` affects only the caller. Sandbox tier 3 degrades
+   to a `ulimit` shell prelude.
+4. Plus **fuel-metered WASM**: memory caps survive, CPU metering does not.
+
+**Degraded rather than lost:** wake word moves from native onnxruntime to WASM
+on an always-on path; macOS local STT moves from a prebuilt wheel to compiling
+whisper.cpp at install; the GUI automation library's upstream is 404 on npm and
+the surviving fork is 17 months stale.
+
+**Genuine parity, verified:** `fastembed` exists on npm from the same author
+with bge-small-en-v1.5 as its default, `onnxruntime-node` 1.27.0 exactly matches
+the pinned Python version, Silero VAD ports 1:1 because `voice/vad.py` already
+drives `InferenceSession` directly, and node-pty, flock, llama.cpp, keyring,
+argon2, zeroconf and the whole web stack are fine.
+
+**The surprise, and it cuts the other way.** Node is not a new dependency here,
+it is an existing hidden one:
+
+* FERAL already ships a **119,121,584-byte Node v22.11.0 binary** inside the
+  Playwright wheel. Playwright-Python is a stdio bridge to the real Node driver.
+* **12** default MCP servers launch as `npx -y @modelcontextprotocol/server-*`,
+  behind an explicit `shutil.which("npx")` gate.
+* Playwright-Python is structurally one patch behind npm, and its PyPI history
+  shows minors only, zero patch releases.
+* `skills/impl/browser_use.py` is 2,094 lines of hand-rolled CDP plus a
+  Playwright bridge, where `page.newCDPSession()` does the transport in-process.
+
+**Audit claims re-checked:** "10,711 of 169,780 lines import ML or numeric
+libraries" is directionally right but understated by about 45%; the real figure
+is 15,559 lines across 21 files, 9.1% of 170,631. The claim that scipy, sklearn,
+pandas, networkx, cv2, librosa, soundfile, faiss, matplotlib, nltk, spacy and
+tiktoken are all absent **holds**: zero import sites, zero lockfile entries, and
+no torch or transformers either.
 
 `faster-whisper`, `openwakeword`, `mlx-lm`, Silero VAD through onnxruntime, and
 `pty`/`fcntl`/`termios`/`resource` for the process supervisor. The audit claims
