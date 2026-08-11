@@ -195,7 +195,30 @@ several have no Node story whatsoever.
 
 ### E-4 · Does bundling a Python interpreter win the same prize?
 
-**Status:** **SOLVED.** It wins the prize, with zero source changes.
+**Status:** **SOLVED, but only on the corrected interpreter.** My first verdict
+here was premature and is corrected below.
+
+> ### Correction, and it matters
+>
+> I reported E-4 as decisive after probing one thing: sqlite-vec loads. The
+> interpreter I validated, python-build-standalone 3.11.13, **has FTS5
+> disabled**. `memory/store.py` creates `notes_fts USING fts5` unguarded, so
+> that is not a degraded search path, it is `MemoryStore` failing to boot.
+>
+> | interpreter | load_extension | fts5 |
+> |---|---|---|
+> | pyenv 3.11.11, ships today | no | yes |
+> | pbs 3.11.13, my first "solution" | yes | **no** |
+> | pbs 3.11.15, sqlite 3.53.1 | yes | yes |
+>
+> Every pbs build reachable from uv 0.7.20 has FTS5 off. Release 20260807
+> re-enables it, and fetching it requires uv 0.12 or newer, whose version
+> manifest is baked into the binary.
+>
+> So bundling still wins the prize, but the earlier verdict would have shipped
+> users a brain that cannot start. I tested for the thing I was looking for and
+> not for the thing I might break, which is the exact error this file was
+> written to guard against.
 
 FERAL's own unmodified `sqlite_vec_available()`, same machine, only the
 interpreter varies:
