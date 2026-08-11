@@ -50,21 +50,21 @@ jobs:
         run: ruff check --output-format=github --select=E,F,W --ignore=E501,E402,F401,W291,W293 .
 
   typecheck:
-    # AUDIT-FIXES S-1. Non-blocking on purpose: the baseline is 719 errors
-    # in 204 files, so failing the build today would only teach people to
+    # AUDIT-FIXES S-1. Non-blocking on purpose: the baseline is 683 errors
+    # in 202 files, so failing the build today would only teach people to
     # ignore it. It runs so the number is visible and can be ratcheted down
     # deliberately, one error code at a time.
     #
-    # The exclusions are not optional. feral-core/build/lib is a complete
-    # duplicate of the source tree, and mypy refuses to start at all with
-    # "Duplicate module named 'agents'" rather than degrading. See trap 1 in
-    # CLAUDE.md.
+    # The build/ exclusion is not optional and now lives in mypy.ini:
+    # feral-core/build/lib is a complete duplicate of the source tree, and
+    # mypy refuses to start at all with "Duplicate module named 'agents'"
+    # rather than degrading. See trap 1 in CLAUDE.md.
     #
-    # The pydantic mypy plugin is deliberately NOT enabled: it crashes on
-    # mypy 1.20.2 with "module 'mypy.expandtype' has no attribute
-    # 'ExpandTypeVisitor'". Without it, mypy does not understand pydantic
-    # Field defaults, which is why some call-arg reports on models are
-    # false positives. Recorded in mypy-baseline.txt.
+    # The pydantic plugin IS enabled, via feral-core/mypy.ini. An earlier
+    # note here claimed it crashes on mypy 1.20.2; that did not reproduce
+    # and was most likely a stale .mypy_cache. Without it, mypy reads
+    # Field("", ...) as required and reports call-arg at every construction
+    # that omits the field, in 62 places.
     name: Brain — mypy (non-blocking)
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -85,9 +85,11 @@ jobs:
 
       - name: Run mypy
         run: |
-          mypy --ignore-missing-imports \
-               --exclude '^build/' --exclude '^dist/' . \
-               | tee mypy-current.txt || true
+          # Config lives in feral-core/mypy.ini so this matches a local run.
+          # It enables the pydantic plugin, without which Field("", ...) is
+          # read as a required field and every construction that omits it is
+          # reported as call-arg.
+          mypy . | tee mypy-current.txt || true
           echo "--- baseline comparison ---"
           baseline=$(grep -cE '^\S+\.py:[0-9]+: error:' mypy-baseline.txt || echo 0)
           current=$(grep -cE '^\S+\.py:[0-9]+: error:' mypy-current.txt || echo 0)

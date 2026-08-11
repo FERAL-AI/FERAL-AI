@@ -840,10 +840,14 @@ degrades the tool to zero rather than to a wrong number.
   `BaseSkill` *subclass*; mypy narrows to `type[BaseSkill]`, which does require `skill_id`,
   but every concrete subclass defines `__init__(self)` and passes it to `super()`. Verified
   in `pdf_reader.py:37`, `plan.py:101`, `code_interpreter.py:370`.
-- False positive: `mcp/registry.py:267`. `url` has a default of `""`; the model constructs
-  fine without it. Cause is that the pydantic mypy plugin **crashes** on mypy 1.20.2
-  (`AttributeError: module 'mypy.expandtype' has no attribute 'ExpandTypeVisitor'`), so
-  `Field()` defaults are not modelled. Plugin deliberately left off.
+- ~~False positive: `mcp/registry.py:267`~~ **RESOLVED.** `url` has a default of `""`.
+  I originally reported that the pydantic mypy plugin crashes on mypy 1.20.2 and left it
+  disabled, planning 62 mechanical `Field("", ...)` -> `Field(default=...)` edits instead.
+  **That was wrong.** Re-tested on the owner's prompt: the plugin loads and runs clean on
+  mypy 1.20.2 with pydantic 2.13.3 across the whole tree. The earlier crash does not
+  reproduce and was most likely a stale `.mypy_cache` from a run without the plugin.
+  Enabling it removes this false positive, drops the baseline 719 -> 683, costs one config
+  line, and makes the 62 edits unnecessary. Config now in `feral-core/mypy.ini`.
 
 So S-1 fixed no call-arg errors directly: the only real ones belong to F-16. Saying so is more
 useful than manufacturing three edits.
