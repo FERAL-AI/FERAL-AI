@@ -80,19 +80,30 @@ The worst is verified:
 This is the strongest available argument for S-1: the type checker finds this class
 mechanically, and it is the class that hid for 40 releases.
 
+Original finding (superseded by the record above, kept for reference):
+
 ```
 feral-core/memory/sync.py:1202            def sync_with_peer(self, peer_id, *, max_attempts, connect_timeout, handshake_timeout, backoff_base)
 feral-core/memory/sync_scheduler.py:240   self.engine.sync_with_peer(peer_id, passphrase=_passphrase())
 feral-core/tests/test_sync_scheduler.py:43  async def sync_with_peer(self, peer_id: str, passphrase: str = "")
 ```
 
-The engine method takes keyword-only arguments and has no `passphrase`. The scheduler passes one. Every scheduled sync raises `TypeError`, and the `except Exception` at `sync_scheduler.py:245` records it as an ordinary peer failure. The parameter was removed in `ba55caf4d` (v2026.5.34), roughly 40 releases ago. The test double still declares it, which is why the suite is green.
+---
 
-**Verify:** read all three lines. Then `git -C . log -1 ba55caf4d`.
+### F-16 · The computer-use VLM has never initialised
 
-**Decide before fixing:** was `passphrase` meant to be dropped, or meant to be threaded through? Read the commit. The fix is either removing the kwarg at the call site or restoring the parameter on the engine — these are not equivalent, and the CRDT sync handshake may depend on it.
+**Status:** open · **P0** · surfaced while fixing F-01
 
-**Done when:** a test drives the real `SyncEngine` (not `_StubEngine`) through `sync_scheduler` and passes; the stub's signature is derived from or asserted against the real one so it cannot drift again; `_record_failure` distinguishes a programming error from a peer error.
+```
+feral-core/skills/impl/agentic_computer_use.py:272   LLMProvider(provider=..., model=..., api_key=...)
+feral-core/agents/llm_provider.py:494+13             def __init__(self):
+```
+
+Independently confirmed: `LLMProvider.__init__` takes `(self)` and accepts none of those three keyword arguments. The call raises `TypeError`, which the surrounding `except Exception` at `:273` catches, logs at warning level, and converts into `return None`. The caller treats `None` as "no VLM configured", so the feature degrades silently rather than failing.
+
+This is the same shape as F-01 — wrong kwargs, swallowed by a broad handler — but the consequence is larger: an entire capability is dead, and the log line reads like a missing API key rather than a bug.
+
+**Done when:** the call matches the real constructor, a test asserts the VLM actually initialises, and the handler distinguishes "not configured" from "failed to construct". Check whether `agentic_computer_use` has any passing test that would have caught this; if it does, the test double is lying the way `_StubEngine` was.
 
 ---
 
@@ -241,6 +252,45 @@ Related and worth fixing together: `CHANGELOG.md:305` claims "CI now tests Pytho
 ## Systemic work — after the defect list
 
 Do these in order. Each makes the next cheaper.
+
+**S-1 · Status: DONE (scoped) — commit below.**
+
+`.github/workflows/ci.yml` gains a non-blocking `typecheck` job; `feral-core/mypy-baseline.txt`
+is the committed baseline. **719 errors in 204 files** (mypy 1.20.2, Python 3.11).
+
+*Citation check:* the audit says 324 errors in 103 files "at default settings". I measure
+719/204 with `--ignore-missing-imports --exclude '^build/'`. Not necessarily a contradiction,
+since the flags and scope differ, but 324 should not be quoted as the baseline. The reproducible
+command is recorded in the baseline header.
+
+**The exclusions are load-bearing.** Without `--exclude '^build/'` mypy does not run at all:
+`Duplicate module named "agents"` / `errors prevented further checking`. Trap 1 in CLAUDE.md
+degrades the tool to zero rather than to a wrong number.
+
+**call-arg: 6 repo-wide, and only 3 are real.**
+
+- Real, and they are F-16's: `skills/impl/agentic_computer_use.py:272` (`provider`, `model`,
+  `api_key`). Fixed under F-16 rather than here, to keep one item per commit.
+- False positive: `skills/registry.py:120` and `:329`. The call is `obj()` where `obj` is a
+  `BaseSkill` *subclass*; mypy narrows to `type[BaseSkill]`, which does require `skill_id`,
+  but every concrete subclass defines `__init__(self)` and passes it to `super()`. Verified
+  in `pdf_reader.py:37`, `plan.py:101`, `code_interpreter.py:370`.
+- False positive: `mcp/registry.py:267`. `url` has a default of `""`; the model constructs
+  fine without it. Cause is that the pydantic mypy plugin **crashes** on mypy 1.20.2
+  (`AttributeError: module 'mypy.expandtype' has no attribute 'ExpandTypeVisitor'`), so
+  `Field()` defaults are not modelled. Plugin deliberately left off.
+
+So S-1 fixed no call-arg errors directly: the only real ones belong to F-16. Saying so is more
+useful than manufacturing three edits.
+
+No `# type: ignore` was added for the false positives. CLAUDE.md records 52 existing unvalidated
+suppressions; a false positive documented in the baseline is auditable, one silenced in source
+is not.
+
+Once F-16 lands, call-arg is at zero, which makes it the cheapest code to promote from warning
+to failure, and it is the class that hid F-01.
+
+Original plan text follows.
 
 **S-1 · Turn on the type checker.** Add `mypy --ignore-missing-imports` to `ci.yml` as a **non-blocking** job, then ratchet down. Baseline is 324 errors in 103 files at default settings — reproduce it before changing anything. 111 are the `AttributeError` class (`attr-defined` + `union-attr`); 6 are `call-arg`, the class that produced F-01. Annotations already cover 92.5% of parameters, so this is configuration, not annotation work. Note the 52 existing `# type: ignore[code]` comments in source are unvalidated suppressions from an earlier unrecorded mypy run.
 
