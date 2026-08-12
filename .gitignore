@@ -4,6 +4,17 @@ venv/
 env/
 .env
 
+# Repo-local uv, downloaded by scripts/ensure_uv.sh when the machine's uv
+# is older than the version that can fetch the pinned interpreter.
+.uv/
+
+# `.python-version` is deliberately NOT used by this repo and must never
+# be committed: pyenv reads it, and a pin naming an interpreter pyenv does
+# not have makes every bare `python3`, `ruff`, `pytest` etc. inside the
+# tree fall through to some unrelated interpreter. The pin lives in
+# `.python-pin`, which only this repo's tooling reads. See CLAUDE.md.
+.python-version
+
 # Python Built-ins
 __pycache__/
 *.py[cod]

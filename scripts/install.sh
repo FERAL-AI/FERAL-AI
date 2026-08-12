@@ -30,18 +30,45 @@ echo -e "${NC}"
 
 # ─── Check Python ───────────────────────────────────────
 
+# Two requirements, not one. The version check alone used to be the whole
+# gate, and it lets through interpreters FERAL cannot run on: the memory
+# store creates five `CREATE VIRTUAL TABLE ... USING fts5` tables while it
+# is being constructed, so an interpreter whose SQLite was built without
+# FTS5 does not degrade, the brain fails at boot. Not hypothetical:
+# python-build-standalone 3.11.13 links SQLite 3.49.1 and has no FTS5.
+# Catching it here costs one subprocess and saves a confusing first run.
 PYTHON=""
-for cmd in python3 python; do
-    if command -v "$cmd" &> /dev/null; then
-        ver=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "0.0")
-        major=$(echo "$ver" | cut -d. -f1)
-        minor=$(echo "$ver" | cut -d. -f2)
-        if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
-            PYTHON="$cmd"
-            break
-        fi
+PYTHON_NO_FTS5=""
+for cmd in python3 python python3.13 python3.12 python3.11; do
+    command -v "$cmd" &> /dev/null || continue
+    ver=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "0.0")
+    major=$(echo "$ver" | cut -d. -f1)
+    minor=$(echo "$ver" | cut -d. -f2)
+    [ "$major" -ge 3 ] && [ "$minor" -ge 11 ] || continue
+    if "$cmd" -c "import sqlite3; sqlite3.connect(':memory:').execute('CREATE VIRTUAL TABLE t USING fts5(x)')" >/dev/null 2>&1; then
+        PYTHON="$cmd"
+        break
     fi
+    # Remember it so the failure message can be specific about why an
+    # otherwise new-enough interpreter was rejected.
+    [ -z "$PYTHON_NO_FTS5" ] && PYTHON_NO_FTS5="$cmd"
 done
+
+if [ -z "$PYTHON" ] && [ -n "$PYTHON_NO_FTS5" ]; then
+    sqlite_ver=$("$PYTHON_NO_FTS5" -c "import sqlite3; print(sqlite3.sqlite_version)" 2>/dev/null || echo "unknown")
+    echo -e "${RED}  Your Python is new enough but its SQLite has no FTS5.${NC}"
+    echo ""
+    echo "    interpreter: $(command -v "$PYTHON_NO_FTS5") ($("$PYTHON_NO_FTS5" --version 2>&1 | awk '{print $2}'))"
+    echo "    sqlite:      $sqlite_ver (built without FTS5)"
+    echo ""
+    echo "  FERAL's memory store creates FTS5 tables at startup, so it cannot"
+    echo "  run on this interpreter. No pip install can fix it: the feature is"
+    echo "  compiled into SQLite. Install a different Python and re-run:"
+    echo "    macOS:  brew install python@3.12"
+    echo "    Ubuntu: sudo apt install python3.12"
+    echo "    Other:  https://python.org/downloads"
+    exit 1
+fi
 
 if [ -z "$PYTHON" ]; then
     echo -e "${RED}  Python 3.11+ is required.${NC}"
@@ -53,7 +80,7 @@ if [ -z "$PYTHON" ]; then
     exit 1
 fi
 
-echo -e "  ${GREEN}✓${NC} Python $($PYTHON --version 2>&1 | awk '{print $2}')"
+echo -e "  ${GREEN}✓${NC} Python $($PYTHON --version 2>&1 | awk '{print $2}') (SQLite $($PYTHON -c 'import sqlite3; print(sqlite3.sqlite_version)' 2>/dev/null), FTS5 available)"
 
 # ─── Create Virtual Environment ──────────────────────────
 

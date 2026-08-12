@@ -137,7 +137,10 @@ function showError(msg) {
       <div class="error-title">${msg}</div>
       <div class="error-hint">
         Make sure the FERAL brain server is reachable.<br/>
-        Set <code>FERAL_CORE_DIR</code> if the brain lives outside the default layout.
+        The app normally uses the copy of the brain and the Python runtime
+        bundled inside it. Set <code>FERAL_CORE_DIR</code> to point at a
+        different <code>feral-core</code>, or <code>FERAL_PYTHON</code> to
+        point at a specific interpreter (it must have SQLite FTS5).
       </div>
       <button class="btn" type="button" id="retry">Retry</button>
     </div>

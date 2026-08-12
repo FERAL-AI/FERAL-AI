@@ -9,7 +9,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "build:dmg": "tauri build --target universal-apple-darwin"
+    "build:dmg": "tauri build --target universal-apple-darwin",
+    "stage:bundle": "bash scripts/stage_bundle.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0"
