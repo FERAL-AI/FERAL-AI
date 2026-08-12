@@ -60,6 +60,16 @@ CLI_MAIN_PATH = Path(__file__).resolve().parent.parent / "cli" / "main.py"
 ALLOWED_FAIL_LABELS: set[str] = {
     # Python version below the supported floor (3.11).
     "Python version",
+    # The interpreter's SQLite was built without FTS5. MemoryStore and
+    # KnowledgeGraph create five `CREATE VIRTUAL TABLE ... USING fts5`
+    # tables during construction, so the brain raises SQLiteFeatureError
+    # at boot and never serves a request. Same bar as "Python version":
+    # nothing works until the operator changes interpreter.
+    # NOTE the deliberate asymmetry with the sibling row "SQLite loadable
+    # extensions", which is _info and appears in no allowlist: that one
+    # only costs resident memory, and F-17 measured the numpy path it
+    # falls back to as the faster of the two.
+    "SQLite FTS5",
     # The `feral-ai` wheel itself failed to import.
     "FERAL package",
     # `~/.feral` (or whatever FERAL_HOME points at) is missing.
@@ -130,6 +140,12 @@ ALLOWED_FAIL_LABELS: set[str] = {
 }
 
 ALLOWED_WARN_LABELS: set[str] = {
+    # The FTS5 / loadable-extension probes themselves raised. Yellow and
+    # not red on purpose: this is "doctor could not determine the answer",
+    # which is a different statement from "the feature is missing". The
+    # missing-feature branches are "SQLite FTS5" (_fail) and "SQLite
+    # loadable extensions" (_info), and neither routes through here.
+    "SQLite build features",
     # Source install where `pip show feral-ai` returns nothing — the
     # brain runs fine but `feral --version` will print "unknown".
     "FERAL package",

@@ -1127,6 +1127,30 @@ class ToolRunner:
         args = tool_call["args"]
         logger.info(f"  LLM Tool call: {tool_name}({json.dumps(args)[:200]})")
 
+        # A tool call whose arguments failed to parse must not be
+        # dispatched as an argument-free call. The four parse sites in
+        # ``llm_provider`` used to swallow the JSONDecodeError and hand
+        # over ``{}``, so the skill answered with whatever it says about
+        # missing required fields and the model, seeing a tool problem
+        # rather than its own truncated output, re-issued the same call.
+        # The live store holds 61 consecutive ``web_search__web_search``
+        # rows on 2026-05-15, every one with ``args = {}``, every one
+        # answered "Missing search query", with the anti-loop guard
+        # firing at streaks of 5, 6 and 7.
+        args_error = str(tool_call.get("args_error") or "")
+        if args_error:
+            reason = (
+                f"The arguments for {tool_name} could not be read: {args_error}. "
+                "Nothing was executed. Re-issue the call with valid JSON "
+                "arguments; if the argument list is long, send fewer fields."
+            )
+            logger.warning("Tool dispatch refused for %s: %s", tool_name, reason)
+            return make_tool_error_envelope(
+                tool_call_id=tool_call.get("id", ""),
+                error_code="unparsable_arguments",
+                reason=reason,
+            )
+
         # Plan mode, before every other branch. See `enforce_plan_mode`.
         plan_refusal = self.enforce_plan_mode(tool_name, session_id)
         if plan_refusal is not None:

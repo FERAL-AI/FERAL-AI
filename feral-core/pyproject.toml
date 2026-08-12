@@ -224,6 +224,39 @@ groq = [
 ]
 local = [
     "llama-cpp-python>=0.3.0,<1.0",
+    # `agents/local_inference.create_local_engine()` returns MLXEngine, not
+    # LlamaCppEngine, when `platform.system() == "Darwin" and
+    # platform.machine() == "arm64"`. The marker below mirrors that condition
+    # exactly, because `mlx` has no wheel for Intel Macs or Linux and an
+    # unmarked requirement would make `feral-ai[local]` uninstallable
+    # everywhere else. Until this line existed there was no supported way to
+    # install the engine that is chosen by default on the flagship platform;
+    # users were told `pip install mlx-lm` outside the packaging system.
+    #
+    # Bound to 0.31.x deliberately. mlx-lm is 0.x and has already broken this
+    # call site once inside a minor release: sampling moved out of `temp=` and
+    # behind `sampler=make_sampler(temp=...)`, and `generate_step` is
+    # keyword-only with no `**kwargs`, so the old call raised TypeError rather
+    # than degrading. `<1.0` would be a meaningless bound for a package that
+    # reshapes its generate API between minors.
+    # `tests/test_optional_backend_dependencies.py` binds the call against the
+    # installed signature wherever mlx_lm is importable; that test is the
+    # ratchet for moving this bound.
+    "mlx-lm>=0.31.0,<0.32; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+# The documented `FERAL_EMBED_FALLBACK=local` mode (see memory/embeddings.py)
+# loads sentence-transformers all-MiniLM-L6-v2. It is an extra and NOT a
+# runtime dependency, and NOT in `[all]`, on purpose: the comment on
+# `fastembed` in `dependencies` above records the measurement, ~226MB installed
+# for the fastembed stack against ~2.5GB for a torch-backed
+# sentence-transformers one. That is the whole reason fastembed is the default.
+# This extra exists so the fallback is reachable at all, not so it is common.
+#
+# Bound checked against 2.2.0, 3.0.0, 4.0.0 and 5.7.0: every one of them
+# exports `SentenceTransformer` and accepts `encode(..., normalize_embeddings=)`,
+# which are the only two API points memory/embeddings.py uses.
+embeddings-local = [
+    "sentence-transformers>=2.2,<6.0",
 ]
 wasm = [
     "wasmtime>=22.0.0,<50.0",
@@ -304,12 +337,51 @@ voice-local = [
     "onnxruntime>=1.16.0,<2.0",
     "pywhispercpp>=1.3.0,<2.0",
 ]
+# PLATFORM CEILING, read before touching this or `[all]`.
+#
+# openwakeword's metadata carries `tflite-runtime <3,>=2.8.0 ;
+# platform_system == "Linux"`. tflite-runtime publishes wheels for cp38-cp311
+# and NO sdist, so on Linux this extra resolves only up to CPython 3.11:
+#
+#   pip download "tflite-runtime>=2.8.0,<3" --no-deps --only-binary=:all: \
+#     --python-version 3.12 --platform manylinux2014_x86_64
+#   ERROR: No matching distribution found for tflite-runtime<3,>=2.8.0
+#
+# 2.14.0 is the newest release and it is from 2023, so this is not a bound
+# waiting on an upstream refresh. 3.12, 3.13 and 3.14 are all out.
+#
+# macOS is unaffected: the marker is Linux-only, so `feral-ai[wake]` installs
+# and works on macOS 3.12+. Do not "fix" this by weakening the extra; that
+# would cost macOS users the feature to describe a Linux limit.
+#
+# This is why openwakeword was removed from `[all]` in 2026.4.11, and why it
+# must stay out: `[all]` is what `scripts/install.sh` runs and what the
+# pre-publish install smoke installs on 3.11 / 3.12 / 3.14.
+# `tests/test_wake_extra_python_ceiling.py` holds that line.
 wake = [
     "openwakeword>=0.6.0,<1.0",
     "onnxruntime>=1.16.0,<2.0",
 ]
 desktop = [
     "pyautogui>=0.9.54,<1.0",
+]
+# `feral doctor` has printed `pip install 'feral-ai[macos-extras]'` for
+# releases, and this extra did not exist. pip does not fail on an unknown
+# extra: it warns to stderr and installs the base package, so users ran the
+# command, saw no error, and got nothing (F-11 in AUDIT-FIXES.md).
+#
+# These are the bindings the Calendar / Reminders / Contacts / Full Disk Access
+# probes in `security/macos_permissions.py` import. They are NOT base
+# dependencies because they are only needed when the operator actually uses
+# those surfaces; `pyobjc-framework-Quartz` and `-ApplicationServices` are in
+# `dependencies` because Accessibility and Screen Recording always probe.
+#
+# Version bounds match the two PyObjC frameworks already pinned in
+# `dependencies`, because PyObjC ships every framework binding from one
+# release train and mixing majors across that train is not supported upstream.
+macos-extras = [
+    "pyobjc-framework-EventKit>=10.0,<13.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Contacts>=10.0,<13.0; sys_platform == 'darwin'",
 ]
 browser = [
     "playwright>=1.40.0,<2.0",

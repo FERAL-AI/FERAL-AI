@@ -8,6 +8,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
 
+from agents.token_estimate import estimate_message_tokens, estimate_tokens
+
 logger = logging.getLogger("feral.context_engine")
 
 
@@ -185,16 +187,21 @@ class DefaultContextEngine(ContextEngine):
     @staticmethod
     def _prune_to_budget(messages: list[dict], target_tokens: int) -> list[dict]:
         """Drop oldest messages until under budget, preserving tool-call/result pairs."""
-        total = sum(len(str(m.get("content", ""))) // 4 for m in messages)
+        # Was `len(str(content)) // 4`, which is calibrated for English prose
+        # only. Measured against cl100k/o200k, that read Chinese at 0.21x its
+        # real token count and emoji at 0.09x, so this loop decided a context
+        # five times over the window was inside it and pruned nothing. See
+        # agents/token_estimate.py for the corpus and the weights.
+        total = estimate_message_tokens(messages)
         result = list(messages)
         while total > target_tokens and len(result) > 2:
             removed = result.pop(0)
-            total -= len(str(removed.get("content", ""))) // 4
+            total -= estimate_tokens(removed.get("content", ""))
         return result
 
     @staticmethod
     def _estimate_tokens(messages: list[dict]) -> int:
-        return sum(len(str(m.get("content", ""))) // 4 for m in messages)
+        return estimate_message_tokens(messages)
 
 
 # Global registry

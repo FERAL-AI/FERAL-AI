@@ -1,0 +1,147 @@
+{
+  "_comment": [
+    "Canonical node-key filename fixture (F-08), specified in HUP_SPEC.md §4.1.",
+    "",
+    "Asserted verbatim by BOTH",
+    "  feral-nodes/python-node-sdk/tests/test_key_filename_canonical.py",
+    "  feral-nodes/ts-node-sdk/tests/keyFilename.test.ts",
+    "so the two SDKs cannot name the same node's key file differently again.",
+    "",
+    "The algorithm, restated from HUP_SPEC.md §4.1 step 5:",
+    "  1. sanitised = node_id with every character outside [A-Za-z0-9._:-]",
+    "     replaced by '_'. The class is exactly the brain's NodeRegisterPayload",
+    "     node_id pattern, and it is ASCII: 'é' is not a member even though",
+    "     Python's str.isalnum() says it is a letter.",
+    "  2. If sanitised == node_id and 1 <= len(node_id) <= 128, the filename is",
+    "     sanitised + '.key'. Every node id the brain accepts takes this branch,",
+    "     so no already-paired node changes filename.",
+    "  3. Otherwise the filename is sanitised[:128] + '-' +",
+    "     sha256(utf8(node_id)).hexdigest()[:8] + '.key'. The suffix is what",
+    "     makes step 1 injective again: replacement alone maps both 'a b' and",
+    "     'a_b' to 'a_b.key'.",
+    "",
+    "Every 'before' pair below was measured on the pre-fix source."
+  ],
+  "cases": [
+    {
+      "name": "plain",
+      "node_id": "wristband-01",
+      "filename": "wristband-01.key",
+      "before_python": "wristband-01.key",
+      "before_ts": "wristband-01.key",
+      "why": "already legal; both SDKs agreed and the filename must not move"
+    },
+    {
+      "name": "colons",
+      "node_id": "acme:wb:001",
+      "filename": "acme:wb:001.key",
+      "before_python": "acme:wb:001.key",
+      "before_ts": "acme:wb:001.key",
+      "why": "':' is in the allowed class; unchanged"
+    },
+    {
+      "name": "all_allowed_punctuation",
+      "node_id": "a.b_c-d",
+      "filename": "a.b_c-d.key",
+      "before_python": "a.b_c-d.key",
+      "before_ts": "a.b_c-d.key",
+      "why": "the full punctuation set survives untouched"
+    },
+    {
+      "name": "space",
+      "node_id": "sensor 01",
+      "filename": "sensor_01-46977d17.key",
+      "before_python": "sensor01.key",
+      "before_ts": "sensor_01.key",
+      "why": "the audit's headline case: a node paired through one SDK re-paired under the other"
+    },
+    {
+      "name": "underscore_lookalike",
+      "node_id": "sensor_01",
+      "filename": "sensor_01.key",
+      "before_python": "sensor_01.key",
+      "before_ts": "sensor_01.key",
+      "why": "must NOT collide with 'sensor 01'. Under the old TS rule it did: both were sensor_01.key"
+    },
+    {
+      "name": "non_ascii_letter",
+      "node_id": "café",
+      "filename": "caf_-850f7dc4.key",
+      "before_python": "café.key",
+      "before_ts": "caf_.key",
+      "why": "Python's str.isalnum() is Unicode-aware and kept 'é'; the TS class is ASCII and dropped it"
+    },
+    {
+      "name": "space_collision_a",
+      "node_id": "a b",
+      "filename": "a_b-c8687a08.key",
+      "before_python": "ab.key",
+      "before_ts": "a_b.key",
+      "why": "pairs with space_collision_b to prove the mapping is injective"
+    },
+    {
+      "name": "space_collision_b",
+      "node_id": "a_b",
+      "filename": "a_b.key",
+      "before_python": "a_b.key",
+      "before_ts": "a_b.key",
+      "why": "the old TS rule mapped this and 'a b' onto one file; the old Python rule mapped 'a b' onto 'ab.key' instead"
+    },
+    {
+      "name": "all_punctuation",
+      "node_id": "!!!",
+      "filename": "___-e84c538e.key",
+      "before_python": ".key",
+      "before_ts": "___.key",
+      "why": "Python dropped every character and wrote a hidden file literally named '.key', which EVERY all-punctuation node id shared"
+    },
+    {
+      "name": "empty",
+      "node_id": "",
+      "filename": "-e3b0c442.key",
+      "before_python": ".key",
+      "before_ts": ".key",
+      "why": "both SDKs wrote the same hidden '.key' file as the all-punctuation case above"
+    },
+    {
+      "name": "cjk",
+      "node_id": "日本語ノード",
+      "filename": "______-a30a928b.key",
+      "before_python": "日本語ノード.key",
+      "before_ts": "______.key",
+      "why": "the TS form collided with every other 6-character non-ASCII node id"
+    },
+    {
+      "name": "emoji",
+      "node_id": "😀",
+      "filename": "_-f0443a34.key",
+      "before_python": ".key",
+      "before_ts": "__.key",
+      "why": "astral plane, and a SECOND independent divergence the audit does not name: the TS regex had no 'u' flag, so it matched per UTF-16 unit and made a surrogate pair two underscores, where Python's re matches per code point and makes one"
+    },
+    {
+      "name": "traversal_attempt",
+      "node_id": "../../etc/passwd",
+      "filename": ".._.._etc_passwd-3754d6cb.key",
+      "before_python": "....etcpasswd.key",
+      "before_ts": ".._.._etc_passwd.key",
+      "why": "'/' is outside the allowed class in both rules, so neither SDK ever escaped the keys directory. Pinned so that stays true."
+    },
+    {
+      "name": "max_length",
+      "node_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "filename": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.key",
+      "before_python": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.key",
+      "before_ts": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.key",
+      "why": "128 characters is the brain's ceiling and still takes the unchanged branch"
+    },
+    {
+      "name": "over_max_length",
+      "node_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "filename": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-0ec9eb33.key",
+      "before_python": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.key",
+      "before_ts": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.key",
+      "why": "129 characters is truncated and hashed, so an over-long id can never produce a filename the filesystem refuses"
+    }
+  ]
+}

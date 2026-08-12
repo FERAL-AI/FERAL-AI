@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Awaitable, Optional
 
+from agents.token_estimate import estimate_tokens
+
 logger = logging.getLogger("feral.proactive")
 
 
@@ -609,7 +611,7 @@ class ProactiveEngine:
                 await self._cost_guard.record(
                     model=self._cost_model,
                     prompt_tokens=200,
-                    completion_tokens=min(300, len(text) // 4 + 1),
+                    completion_tokens=min(300, estimate_tokens(text) + 1),
                 )
 
             text = text.strip()

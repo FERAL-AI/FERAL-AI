@@ -896,7 +896,15 @@ def cmd_serve(host: str | None = None, port: int | None = None, tls: bool = Fals
     try:
         import uvicorn  # noqa: F401
     except ImportError:
-        print("uvicorn not installed. Run: pip install 'feral-ai[all]'")
+        # Was "pip install 'feral-ai[all]'". uvicorn[standard] is a BASE
+        # dependency (pyproject.toml `dependencies`), so no extra supplies it
+        # and [all] would not have helped. Reaching here means the install is
+        # incomplete, which needs a repair, not an extra.
+        print(
+            "uvicorn is not importable, but it is a base dependency of "
+            "feral-ai, so this install is incomplete.\n"
+            "Repair it with: pip install --force-reinstall feral-ai"
+        )
         sys.exit(1)
 
     core_root = str(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1620,6 +1628,75 @@ def cmd_doctor():
         _pass("Python version", ver_str)
     else:
         _fail("Python version", f"{ver_str} (need >= 3.11)", "Install Python 3.11+: https://python.org")
+
+    # ── 1b. Interpreter SQLite build features ──
+    #
+    # Two rows, deliberately, because they are two independent build
+    # flags with opposite severities and doctor previously reported
+    # neither directly. It only reported the *consequence* of the second
+    # one, inside "Memory vector backend" (section 6b), which meant:
+    #
+    #   * a missing FTS5 was invisible until the brain crashed at boot
+    #     with `sqlite3.OperationalError: no such module: fts5` from
+    #     inside memory/store.py. `feral doctor` on that host printed a
+    #     green "Python version 3.11.13" and never mentioned SQLite.
+    #     Reproduced on python-build-standalone 3.11.13 / SQLite 3.49.1.
+    #   * the loadable-extension state was only visible when the operator
+    #     had *selected* sqlite_vec, and the row conflated "interpreter
+    #     cannot load extensions" (a rebuild) with "sqlite-vec is not
+    #     installed" (a pip install).
+    #
+    # Severities are not symmetric and must not be made so. FTS5 is
+    # required: without it MemoryStore and KnowledgeGraph cannot create
+    # their five virtual tables and the brain does not start, so this is
+    # the one _fail. Loadable extensions are optional: per the F-17
+    # measurements the numpy vector scan is faster than vec0 (0.46ms vs
+    # 7.08ms for top-5 over 12k 384-dim vectors), so their absence is an
+    # _info with no suggested fix. tests/test_doctor_vector_backend_truth.py
+    # pins that the rebuild never enters "Suggested fixes:"; the remedy
+    # rides in the detail line instead, for the one reason that survived
+    # measurement, which is resident memory on a large store.
+    try:
+        from memory.sqlite_features import (
+            FTS5_REMEDY as _FTS5_REMEDY,
+            LOADABLE_EXTENSIONS_REMEDY as _LOADEXT_REMEDY,
+            fts5_available as _fts5_available,
+            loadable_extensions_available as _loadext_available,
+        )
+        import sqlite3 as _sqlite3_probe
+
+        _sqlite_ver = _sqlite3_probe.sqlite_version
+        if _fts5_available():
+            _pass(
+                "SQLite FTS5",
+                f"available (SQLite {_sqlite_ver}), used for keyword search over notes, "
+                "episodes, knowledge, wiki and entities",
+            )
+        else:
+            _fail(
+                "SQLite FTS5",
+                f"MISSING from SQLite {_sqlite_ver}, so the brain cannot start. "
+                "MemoryStore and KnowledgeGraph create five FTS5 virtual tables "
+                "at boot",
+                _FTS5_REMEDY,
+            )
+
+        if _loadext_available():
+            _pass(
+                "SQLite loadable extensions",
+                "available, so sqlite-vec can be loaded and vectors can live in a "
+                "vec0 table instead of resident numpy",
+            )
+        else:
+            _info(
+                "SQLite loadable extensions",
+                "not built into this interpreter, so sqlite-vec can never load "
+                "and the vector leg runs over numpy (measured faster, same "
+                "results). It only costs resident memory (~154MB at 100k "
+                f"chunks); if that matters, {_LOADEXT_REMEDY}",
+            )
+    except Exception as exc:
+        _warn("SQLite build features", f"could not verify: {exc}")
 
     # ── 2. FERAL package importable ──
     try:
@@ -2952,6 +3029,20 @@ def cmd_wake_test():
         print("  openwakeword not installed.")
         print("  Install: pip install 'feral-ai[wake]'")
         print("  (Downloads ~50 MB model on first use)")
+        # On Linux, openwakeword requires tflite-runtime, which ships wheels
+        # only up to CPython 3.11 and has no sdist. Without this note the user
+        # is told to run a command that cannot resolve, and pip's own error
+        # names tflite-runtime rather than anything they recognise.
+        if sys.platform.startswith("linux") and sys.version_info >= (3, 12):
+            print()
+            print(
+                f"  NOTE: that command cannot succeed on this interpreter. "
+                f"On Linux, openwakeword requires tflite-runtime, whose newest "
+                f"release (2.14.0) publishes no wheel for Python "
+                f"{sys.version_info.major}.{sys.version_info.minor} and no "
+                f"source distribution."
+            )
+            print("  Use CPython 3.11 on Linux, or run the wake word on macOS.")
         sys.exit(1)
 
     from perception.wake_word import WakeWordDetector, WakeWordConfig
@@ -3266,6 +3357,34 @@ def _apply_connection_args(args):
 
 
 def main():
+    """Console-script entry point.
+
+    A thin wrapper so one specific failure never reaches the user as a
+    traceback: an interpreter whose SQLite has no FTS5. MemoryStore and
+    KnowledgeGraph raise ``SQLiteFeatureError`` while being constructed,
+    which is deep inside boot, so every `feral` command that touches
+    memory used to end in a wall of frames whose last line was
+    ``sqlite3.OperationalError: no such module: fts5``. The message the
+    guard raises is already written for a human; printing it alone, with
+    a pointer at `feral doctor`, is the whole difference between "FERAL
+    crashed" and "my interpreter is wrong".
+
+    Deliberately narrow. Every other exception still gets its traceback,
+    because for anything else the traceback is the diagnostic.
+    """
+    try:
+        return _main()
+    except Exception as exc:
+        from memory.sqlite_features import SQLiteFeatureError
+
+        if not isinstance(exc, SQLiteFeatureError):
+            raise
+        print(f"\nFERAL cannot start on this interpreter.\n\n{exc}\n", file=sys.stderr)
+        print("Run `feral doctor` for the full interpreter report.\n", file=sys.stderr)
+        return 1
+
+
+def _main():
     # ── R2-002 — pure-local fast path ─────────────────────────────────
     # `feral --version` MUST print the version + exit 0 in <100ms with
     # NO network calls. We short-circuit BEFORE the heavy argparse tree

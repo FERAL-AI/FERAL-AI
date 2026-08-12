@@ -20,6 +20,8 @@ import os
 import time
 from typing import Optional, TYPE_CHECKING
 
+from agents.token_estimate import estimate_tokens
+
 if TYPE_CHECKING:
     from agents.llm_provider import LLMProvider
     from cost.loop_guard import BudgetLoopGuard
@@ -168,7 +170,7 @@ class Learner:
             if self._cost_guard is not None:
                 await self._cost_guard.record(
                     model=self._cost_model,
-                    prompt_tokens=max(50, len(conversation_text) // 4),
+                    prompt_tokens=max(50, estimate_tokens(conversation_text)),
                     completion_tokens=300,
                 )
         except Exception as e:
@@ -226,8 +228,8 @@ class Learner:
             if self._cost_guard is not None:
                 await self._cost_guard.record(
                     model=self._cost_model,
-                    prompt_tokens=max(50, len(prompt) // 4),
-                    completion_tokens=min(256, len(summary or "") // 4 + 1),
+                    prompt_tokens=max(50, estimate_tokens(prompt)),
+                    completion_tokens=min(256, estimate_tokens(summary or "") + 1),
                 )
             if summary and len(summary) > 10:
                 await self.memory.episode_save(

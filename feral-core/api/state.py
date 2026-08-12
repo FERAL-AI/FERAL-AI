@@ -1853,6 +1853,25 @@ class BrainState:
             self.browser = BrowserController()
             self._register_browser_skill()
 
+        with boot_subsystem(self._boot_report, "SkillImplementationAudit"):
+            # Last point at which the registry is complete: shipped
+            # manifests, the hardcoded WEATHER_SKILL, ~/.feral/skills and
+            # the browser manifest built just above. Anything registered
+            # as an implementation but named by no manifest is loaded
+            # code that nothing can call, and until now nothing said so.
+            from skills.impl import (
+                FAILED_IMPLEMENTATIONS,
+                report_unreachable_implementations,
+            )
+            if FAILED_IMPLEMENTATIONS:
+                logger.warning(
+                    "%d skill implementation(s) failed to load and are "
+                    "unavailable: %s",
+                    len(FAILED_IMPLEMENTATIONS),
+                    ", ".join(f"{k} ({v})" for k, v in sorted(FAILED_IMPLEMENTATIONS.items())),
+                )
+            report_unreachable_implementations(self.skill_registry.skills.keys())
+
         # The sandbox object imports cleanly even when the Docker daemon is
         # unreachable, and then nothing can execute. This was the one
         # subsystem that checked, via sixteen lines of mark_degraded

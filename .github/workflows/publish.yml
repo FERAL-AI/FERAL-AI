@@ -2,21 +2,29 @@ name: Release
 
 # Staged release pipeline.
 #
-#   build  → stage  → publish
+#   build  → install_smoke ┐
+#                          ├→ publish
+#          → stage         ┘
 #
 # Flow summary:
-#   1. build   : build wheel+sdist, run a pre-publish in-tree smoke test,
-#                upload the dist/ as a workflow artifact. Nothing leaves
-#                GitHub Actions in this job.
-#   2. stage   : download the artifact, publish to TestPyPI (or the
-#                configured staging index), install from that staging
-#                index in a clean venv, and run the runtime smoke again
-#                against the *uploaded* wheel. Gated by environment
-#                `testpypi-stage` so maintainers can require manual
-#                approval before a canary upload.
-#   3. publish : gated by environment `pypi` so maintainers keep the
-#                manual-approval safety net on the production push.
-#                Publishes to PyPI and creates the GitHub Release.
+#   1. build         : build wheel+sdist, run a pre-publish in-tree smoke test,
+#                      upload the dist/ as a workflow artifact. Nothing leaves
+#                      GitHub Actions in this job.
+#   2. install_smoke : install that wheel with `[all]` on 3.11 / 3.12 / 3.14
+#                      and assert the `feral` console script runs. Calls
+#                      install-smoke.yml. Unconstrained on purpose, so it can
+#                      catch a marker-dependent resolution the 3.11 lockfile
+#                      cannot (this is how 2026.8.3 shipped broken).
+#   3. stage         : download the artifact, publish to TestPyPI (or the
+#                      configured staging index), install from that staging
+#                      index in a clean venv, and run the runtime smoke again
+#                      against the *uploaded* wheel. Gated by environment
+#                      `testpypi-stage` so maintainers can require manual
+#                      approval before a canary upload.
+#   4. publish       : requires 2 and 3 to have passed, and is gated by
+#                      environment `pypi` so maintainers keep the
+#                      manual-approval safety net on the production push.
+#                      Publishes to PyPI and creates the GitHub Release.
 #
 # Triggers:
 #   - tag push `v*` runs the full pipeline end-to-end.
@@ -126,6 +134,24 @@ jobs:
           path: feral-core/dist/
           if-no-files-found: error
           retention-days: 7
+
+  install_smoke:
+    # The pre-publish gate. Installs the wheel this run just built, with
+    # `[all]`, on 3.11 / 3.12 / 3.14, and asserts the console script runs.
+    #
+    # This used to live in install-smoke.yml behind `workflow_run: [Release]`,
+    # which fires AFTER publish, so it could only report a bad release. It also
+    # tolerated every failure with `|| true` and installed no extras. See F-09.
+    #
+    # It runs in parallel with `stage` rather than after it, because `stage` is
+    # gated on a manual environment approval and there is no reason to make a
+    # maintainer approve a canary for a wheel that cannot be installed.
+    name: Install smoke (pre-publish gate)
+    needs: build
+    uses: ./.github/workflows/install-smoke.yml
+    with:
+      dist_artifact: feral-ai-dist
+      expected_version: ${{ needs.build.outputs.version }}
 
   stage:
     name: Canary publish to TestPyPI + install smoke
@@ -270,10 +296,12 @@ jobs:
 
   publish:
     name: Publish to PyPI + create GitHub Release
-    needs: [build, stage]
-    # Production publish requires a successful canary stage.
+    needs: [build, install_smoke, stage]
+    # Production publish requires a successful canary stage AND a wheel that
+    # installs with [all] on every supported Python.
     if: >-
       needs.build.result == 'success' &&
+      needs.install_smoke.result == 'success' &&
       needs.stage.result == 'success' &&
       (github.event_name != 'workflow_dispatch' || inputs.dry_run != true)
     runs-on: ubuntu-latest

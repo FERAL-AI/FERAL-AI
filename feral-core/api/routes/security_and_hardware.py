@@ -270,7 +270,13 @@ async def mock_roomba_start(body: dict | None = None):
     interchangeably:
 
     ``{success: True, data: {started: True, entity_id, service:
-    "vacuum.start", duration_ms}}``
+    "vacuum.start", duration_ms, simulated: True, note}}``
+
+    ``simulated`` and ``note`` are the difference between shape parity
+    and impersonation: the mock is enabled by default
+    (``FERAL_MOCK_ROOMBA`` defaults to "1"), so without them a caller
+    cannot distinguish "a vacuum started cleaning" from "there is no
+    vacuum and nothing happened".
 
     Lane 11 SLA: < 500 ms on commodity hardware. Live verify in PR
     body asserts the elapsed time fits inside this budget.

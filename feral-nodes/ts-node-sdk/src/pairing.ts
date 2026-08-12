@@ -1,7 +1,8 @@
 /*
  * Client side of the 6-digit pairing flow (HUP_SPEC.md §4.1).
  * Generates a code, announces it to the brain, polls for the API key,
- * and persists the key to ~/.feral/node-keys/<node_id>.key (mode 0600).
+ * and persists the key to ~/.feral/node-keys/<safe>.key (mode 0600), where
+ * <safe> is keyFilename() as specified in HUP_SPEC.md §4.1.
  */
 
 import { promises as fs } from "fs";
@@ -9,13 +10,71 @@ import * as os from "os";
 import * as path from "path";
 import * as http from "http";
 import * as https from "https";
+import * as crypto from "crypto";
 import { URL } from "url";
 
 const KEYS_DIR = path.join(os.homedir(), ".feral", "node-keys");
 
+// Exactly the brain's NodeRegisterPayload node_id class. The Python SDK used
+// to test membership with str.isalnum(), which is Unicode-aware, so "café"
+// was written verbatim there while this class produced "caf_".
+//
+// The `u` flag is load-bearing and was missing before. Without it the class
+// matches per UTF-16 code unit, so an astral-plane character is a surrogate
+// pair and becomes TWO underscores; Python's re matches per code point and
+// produces one. "😀" was `__.key` here and `_.key` in Python for that reason
+// alone, which is a second, independent way these two disagreed.
+const DISALLOWED_IN_KEY_FILENAME = /[^A-Za-z0-9._:-]/gu;
+const MAX_NODE_ID_LENGTH = 128;
+const DISAMBIGUATOR_LENGTH = 8;
+
+/**
+ * Canonical key filename for `nodeId`. See HUP_SPEC.md §4.1 step 5.
+ *
+ * Mirrored by `key_filename()` in
+ * feral-nodes/python-node-sdk/src/feral_node_sdk/pairing.py and pinned by the
+ * shared fixture table at feral-nodes/spec-fixtures/node_key_filename.json.
+ *
+ * The two SDKs each derived this by hand from the spec's prose and got
+ * different answers, so a node paired through one silently re-paired under the
+ * other: "sensor 01" was sensor_01.key here and sensor01.key in Python.
+ *
+ * Both old rules also mapped distinct node ids onto one file, which is the
+ * worse half. This one replaced disallowed characters, so "a b" and "a_b"
+ * shared a_b.key and every 6-character non-ASCII id shared ______.key. The
+ * hash suffix is what makes the mapping injective again; replacement alone is
+ * still many-to-one.
+ *
+ * The suffix is applied only when sanitising changed something, so every node
+ * id the brain accepts keeps the filename both SDKs already write and no
+ * working pairing moves.
+ */
+export function keyFilename(nodeId: string): string {
+  const sanitised = nodeId.replace(DISALLOWED_IN_KEY_FILENAME, "_");
+  if (
+    sanitised === nodeId
+    && nodeId.length >= 1
+    && nodeId.length <= MAX_NODE_ID_LENGTH
+  ) {
+    return `${sanitised}.key`;
+  }
+  // `sanitised` is always pure ASCII here, because every non-ASCII character is
+  // outside the allowed class and has been replaced. That is why slicing by
+  // UTF-16 units matches Python's slicing by code points, and why the length
+  // test above agrees with Python's len() on the branch that returns early.
+  // Truncated before hashing so an over-long node id cannot produce a filename
+  // the filesystem refuses; the hash still covers the whole id.
+  const digest = crypto.createHash("sha256").update(nodeId, "utf8").digest("hex");
+  return `${sanitised.slice(0, MAX_NODE_ID_LENGTH)}-${digest.slice(0, DISAMBIGUATOR_LENGTH)}.key`;
+}
+
+/** Absolute path of the key file for `nodeId`. */
+export function keyPathForNodeId(nodeId: string): string {
+  return path.join(KEYS_DIR, keyFilename(nodeId));
+}
+
 function keyPath(nodeId: string): string {
-  const safe = nodeId.replace(/[^A-Za-z0-9._:-]/g, "_");
-  return path.join(KEYS_DIR, `${safe}.key`);
+  return keyPathForNodeId(nodeId);
 }
 
 export async function loadKey(nodeId: string): Promise<string | null> {

@@ -1,0 +1,296 @@
+{
+  "_comment": [
+    "Corpus for F-13. Token counts measured with tiktoken 0.8.0 on the two",
+    "encodings OpenAI actually ships; real_tokens is the WORSE of the two,",
+    "because agents/llm_provider.py routes to 16 providers and an estimate that",
+    "gates a budget has to hold for the worst of them.",
+    "",
+    "Build the sample with unit * repeat. Regenerate with the snippet in",
+    "tests/test_token_estimate_never_undercounts.py, which also re-derives these",
+    "numbers from live tiktoken whenever it is importable.",
+    "",
+    "tiktoken is NOT in requirements.lock, so CI skips the live check."
+  ],
+  "cases": [
+    {
+      "name": "english_prose",
+      "unit": "The quick brown fox jumps over the lazy dog. ",
+      "repeat": 40,
+      "why": "4 chars/token is calibrated for exactly this and nothing else",
+      "chars": 1800,
+      "tokens": {
+        "cl100k_base": 401,
+        "o200k_base": 401
+      },
+      "real_tokens": 401,
+      "chars_div_4": 450,
+      "estimate": 628
+    },
+    {
+      "name": "python_code",
+      "unit": "def compute(self, x: int) -> dict[str, Any]:\n    return {'a': x*2}\n",
+      "repeat": 25,
+      "why": "punctuation does not merge; code runs ~2.9 chars/token",
+      "chars": 1675,
+      "tokens": {
+        "cl100k_base": 575,
+        "o200k_base": 575
+      },
+      "real_tokens": 575,
+      "chars_div_4": 418,
+      "estimate": 855
+    },
+    {
+      "name": "json_blob",
+      "unit": "{\"user_id\": 12345, \"items\": [{\"sku\": \"AB-9912\", \"qty\": 3}]}",
+      "repeat": 20,
+      "why": "tool results are JSON and they are the densest ASCII in the tree",
+      "chars": 1180,
+      "tokens": {
+        "cl100k_base": 540,
+        "o200k_base": 540
+      },
+      "real_tokens": 540,
+      "chars_div_4": 295,
+      "estimate": 736
+    },
+    {
+      "name": "base64",
+      "unit": "aGVsbG8gd29ybGQgdGhpcyBpcyBiYXNlNjQ=",
+      "repeat": 40,
+      "why": "random alnum does not BPE-merge; ~1.4 chars/token",
+      "chars": 1440,
+      "tokens": {
+        "cl100k_base": 1041,
+        "o200k_base": 841
+      },
+      "real_tokens": 1041,
+      "chars_div_4": 360,
+      "estimate": 1080
+    },
+    {
+      "name": "uuids",
+      "unit": "b1946ac92492d2347c6235b4d2611184 ",
+      "repeat": 60,
+      "why": "same shape as base64: long runs are not words",
+      "chars": 1980,
+      "tokens": {
+        "cl100k_base": 1081,
+        "o200k_base": 1081
+      },
+      "real_tokens": 1081,
+      "chars_div_4": 495,
+      "estimate": 1398
+    },
+    {
+      "name": "chinese",
+      "unit": "这是一个关于人工智能的长篇技术文档。",
+      "repeat": 60,
+      "why": "the worst case: //4 sees a fifth of the real size",
+      "chars": 1080,
+      "tokens": {
+        "cl100k_base": 1260,
+        "o200k_base": 720
+      },
+      "real_tokens": 1260,
+      "chars_div_4": 270,
+      "estimate": 1404
+    },
+    {
+      "name": "japanese",
+      "unit": "これは人工知能に関する技術文書です。",
+      "repeat": 60,
+      "why": "",
+      "chars": 1080,
+      "tokens": {
+        "cl100k_base": 1020,
+        "o200k_base": 780
+      },
+      "real_tokens": 1020,
+      "chars_div_4": 270,
+      "estimate": 1404
+    },
+    {
+      "name": "korean",
+      "unit": "이것은 인공지능에 관한 기술 문서입니다.",
+      "repeat": 50,
+      "why": "",
+      "chars": 1100,
+      "tokens": {
+        "cl100k_base": 950,
+        "o200k_base": 650
+      },
+      "real_tokens": 950,
+      "chars_div_4": 275,
+      "estimate": 1215
+    },
+    {
+      "name": "arabic",
+      "unit": "هذا مستند تقني عن الذكاء الاصطناعي. ",
+      "repeat": 50,
+      "why": "",
+      "chars": 1800,
+      "tokens": {
+        "cl100k_base": 1301,
+        "o200k_base": 701
+      },
+      "real_tokens": 1301,
+      "chars_div_4": 450,
+      "estimate": 2025
+    },
+    {
+      "name": "russian",
+      "unit": "Это технический документ об искусственном интеллекте. ",
+      "repeat": 40,
+      "why": "Cyrillic is the best-covered non-Latin script, so it is the over-count risk",
+      "chars": 2160,
+      "tokens": {
+        "cl100k_base": 1041,
+        "o200k_base": 401
+      },
+      "real_tokens": 1041,
+      "chars_div_4": 540,
+      "estimate": 1429
+    },
+    {
+      "name": "greek",
+      "unit": "Αυτό είναι ένα τεχνικό έγγραφο για την τεχνητή νοημοσύνη. ",
+      "repeat": 35,
+      "why": "",
+      "chars": 2030,
+      "tokens": {
+        "cl100k_base": 1821,
+        "o200k_base": 772
+      },
+      "real_tokens": 1821,
+      "chars_div_4": 507,
+      "estimate": 2314
+    },
+    {
+      "name": "hebrew",
+      "unit": "זהו מסמך טכני על בינה מלאכותית. ",
+      "repeat": 50,
+      "why": "two-byte like Cyrillic but ~1 token/char; why whitespace is not free",
+      "chars": 1600,
+      "tokens": {
+        "cl100k_base": 1651,
+        "o200k_base": 701
+      },
+      "real_tokens": 1651,
+      "chars_div_4": 400,
+      "estimate": 1765
+    },
+    {
+      "name": "hindi",
+      "unit": "यह कृत्रिम बुद्धिमत्ता के बारे में एक तकनीकी दस्तावेज है। ",
+      "repeat": 35,
+      "why": "",
+      "chars": 2030,
+      "tokens": {
+        "cl100k_base": 1996,
+        "o200k_base": 631
+      },
+      "real_tokens": 1996,
+      "chars_div_4": 507,
+      "estimate": 2289
+    },
+    {
+      "name": "thai",
+      "unit": "นี่คือเอกสารทางเทคนิคเกี่ยวกับปัญญาประดิษฐ์ ",
+      "repeat": 40,
+      "why": "",
+      "chars": 1760,
+      "tokens": {
+        "cl100k_base": 1720,
+        "o200k_base": 760
+      },
+      "real_tokens": 1720,
+      "chars_div_4": 440,
+      "estimate": 2248
+    },
+    {
+      "name": "vietnamese",
+      "unit": "Đây là một tài liệu kỹ thuật về trí tuệ nhân tạo. ",
+      "repeat": 40,
+      "why": "",
+      "chars": 2000,
+      "tokens": {
+        "cl100k_base": 1001,
+        "o200k_base": 562
+      },
+      "real_tokens": 1001,
+      "chars_div_4": 500,
+      "estimate": 1580
+    },
+    {
+      "name": "emoji",
+      "unit": "😀🎉🚀🔥",
+      "repeat": 200,
+      "why": "the extreme: //4 sees a ninth of the real size",
+      "chars": 800,
+      "tokens": {
+        "cl100k_base": 2200,
+        "o200k_base": 1200
+      },
+      "real_tokens": 2200,
+      "chars_div_4": 200,
+      "estimate": 2400
+    },
+    {
+      "name": "mixed_scripts",
+      "unit": "hello world 中文内容 def f(): pass 😀 ",
+      "repeat": 60,
+      "why": "a realistic multilingual chat turn",
+      "chars": 1980,
+      "tokens": {
+        "cl100k_base": 601,
+        "o200k_base": 541
+      },
+      "real_tokens": 601,
+      "chars_div_4": 495,
+      "estimate": 1218
+    },
+    {
+      "name": "urls",
+      "unit": "https://example.com/a/b/c?x=1&y=2#frag ",
+      "repeat": 60,
+      "why": "",
+      "chars": 2340,
+      "tokens": {
+        "cl100k_base": 1021,
+        "o200k_base": 1021
+      },
+      "real_tokens": 1021,
+      "chars_div_4": 585,
+      "estimate": 1518
+    },
+    {
+      "name": "whitespace",
+      "unit": "   \n\n\t  ",
+      "repeat": 200,
+      "why": "",
+      "chars": 1600,
+      "tokens": {
+        "cl100k_base": 400,
+        "o200k_base": 400
+      },
+      "real_tokens": 400,
+      "chars_div_4": 400,
+      "estimate": 481
+    },
+    {
+      "name": "tiny",
+      "unit": "hi",
+      "repeat": 1,
+      "why": "floor case",
+      "chars": 2,
+      "tokens": {
+        "cl100k_base": 1,
+        "o200k_base": 1
+      },
+      "real_tokens": 1,
+      "chars_div_4": 0,
+      "estimate": 1
+    }
+  ]
+}

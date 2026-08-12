@@ -108,7 +108,14 @@ async def test_start_records_episode_via_memory():
     assert "metadata" not in kwargs
     assert kwargs["session_id"] == "mock-roomba"
     assert kwargs["event_type"] == "actuator"
-    assert "mock_roomba started" in kwargs["summary"]
+    # The summary names the action, the device, and that it is simulated.
+    # Recall and the timeline render ``summary``, not ``detail``, so a
+    # summary that read like a real vacuum cycle was the one place a demo
+    # event was indistinguishable from a real one. See
+    # tests/test_simulated_device_is_labelled.py.
+    assert "started" in kwargs["summary"]
+    assert "mock_roomba" in kwargs["summary"]
+    assert "simulated" in kwargs["summary"].lower()
     # Structured context is embedded in ``detail`` for semantic recall.
     detail = json.loads(kwargs["detail"])
     assert detail["category"] == "actuator"

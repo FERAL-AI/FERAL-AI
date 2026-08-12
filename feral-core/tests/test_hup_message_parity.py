@@ -31,7 +31,18 @@ import pytest
 # Paths are resolved relative to ASOS/ — the brain test runner cwd is
 # `feral-core/`, the bridges live alongside under `feral-nodes/`.
 ASOS_ROOT = Path(__file__).resolve().parent.parent.parent
-IOS_BRIDGE = ASOS_ROOT / "feral-nodes" / "ios-bridge" / "FeralBrainClient.swift"
+# F-15: this used to read feral-nodes/ios-bridge/FeralBrainClient.swift, an
+# unbuilt duplicate that was 170 lines behind the copy Package.swift compiles.
+# Checking parity against a file nothing builds is how the Android bridge came
+# to be documented against a superseded pairing shape.
+IOS_BRIDGE = (
+    ASOS_ROOT
+    / "feral-nodes"
+    / "ios-app"
+    / "Sources"
+    / "FeralBridge"
+    / "FeralBrainClient.swift"
+)
 ANDROID_BRIDGE = (
     ASOS_ROOT
     / "feral-nodes"

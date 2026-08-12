@@ -1,6 +1,42 @@
 name: Install Smoke Test
 
+# Proves that what a user types actually works on every supported Python.
+#
+# Two modes:
+#
+#   * `workflow_call` with `dist_artifact`: the PRE-PUBLISH GATE. Installs the
+#     wheel `publish.yml` just built, with `[all]`, on the full matrix. It runs
+#     before anything reaches PyPI, and `publish` depends on it.
+#   * `workflow_run` / `workflow_dispatch`: post-release verification against
+#     the real PyPI release. Kept because installing from PyPI exercises the
+#     index and the sdist/wheel selection, which the artifact path does not.
+#
+# It used to be the second mode only, and it could not fail: every
+# verification command ended in `|| true`, so a wheel whose `feral` entry point
+# raised on import passed. It also installed bare `feral-ai` while
+# `scripts/install.sh` installs `feral-ai[all]`, so the command CI ran was
+# never the command users run. See F-09 in AUDIT-FIXES.md.
+
 on:
+  workflow_call:
+    inputs:
+      dist_artifact:
+        description: >-
+          Name of an uploaded dist/ artifact to install instead of pulling
+          from PyPI. Set this to gate a release on its own wheel.
+        required: false
+        type: string
+        default: ''
+      expected_version:
+        description: 'Assert importlib.metadata reports exactly this version.'
+        required: false
+        type: string
+        default: ''
+      include_macos:
+        description: 'Run the macOS lanes too (higher cost).'
+        required: false
+        type: boolean
+        default: false
   workflow_run:
     workflows: [Release]
     types: [completed]
@@ -14,177 +50,234 @@ on:
 
 jobs:
   smoke-linux:
+    # `github.event_name` inside a called workflow is the CALLER's event, so
+    # the `push` arm is what lets this gate a tag-triggered release. Without
+    # it the job would silently skip and the gate would pass vacuously.
     if: >-
+      github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
     strategy:
+      fail-fast: false
       matrix:
         # See ci.yml: 3.14 is the version 2026.8.3 broke on, and an
         # install smoke that cannot install on it is the wrong shape.
         python: ['3.11', '3.12', '3.14']
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-
-      - name: Install from PyPI
-        run: pip install feral-ai
-
-      - name: Verify CLI
-        run: |
-          feral --help || true
-          python -c "import importlib.metadata; print('Version:', importlib.metadata.version('feral-ai'))" || true
-
-      - name: Verify v2 bundle is in the wheel
-        # Guards the regression that shipped 2026.4.17: a wheel whose
-        # webui-v2 directory was silently dropped by setuptools because
-        # the dir name had a hyphen + no __init__.py. Without this gate
-        # every "pip install -U feral-ai" user falls back to the v1 UI.
-        shell: bash
-        run: |
-          python - <<'PY'
-          import sys
-          from pathlib import Path
-
-          # The wheel installs top-level packages (webui_v2/ is a sibling
-          # of api/, agents/, etc.) into site-packages. Walk up from any
-          # one of them to find site-packages, then assert webui_v2 has
-          # the v2 bundle.
-          import api
-          site = Path(api.__file__).resolve().parent.parent
-          v2 = site / "webui_v2"
-          assert v2.is_dir(), f"webui_v2/ missing from installed wheel at {site}"
-          index = v2 / "index.html"
-          assert index.exists(), f"webui_v2/index.html missing from wheel at {v2}"
-          assets = v2 / "assets"
-          assert assets.is_dir(), f"webui_v2/assets/ missing from wheel at {v2}"
-          css = list(assets.glob("*.css"))
-          js = list(assets.glob("*.js"))
-          assert css, f"no .css found in {assets}"
-          assert js, f"no .js found in {assets}"
-          html = index.read_text(encoding="utf-8")
-          assert "FERAL" in html, f"v2 index.html missing FERAL marker: {html[:200]}"
-          assert "v2" in html.lower(), f"v2 index.html missing v2 marker: {html[:200]}"
-          print(f"OK webui_v2 bundle present at {v2}")
-          print(f"   index.html: {index.stat().st_size} B")
-          print(f"   assets: {len(css)} css, {len(js)} js")
-          PY
-
-      - name: Verify Brain serves v2 at /
-        # End-to-end gate: boot the installed Brain and curl / to prove
-        # the v2 index.html is actually served, not the v1 fallback.
-        shell: bash
-        run: |
-          python -m uvicorn api.server:app --host 127.0.0.1 --port 9100 &
-          UVI_PID=$!
-          # Wait up to 60s for the Brain to finish booting (35 subsystems).
-          for i in {1..30}; do
-            if curl -sf http://127.0.0.1:9100/health > /dev/null 2>&1; then break; fi
-            sleep 2
-          done
-          BODY=$(curl -s http://127.0.0.1:9100/)
-          echo "${BODY}" | head -20
-          echo "${BODY}" | grep -q "FERAL" || { echo "v2 marker 'FERAL' missing from /"; kill $UVI_PID; exit 1; }
-          echo "${BODY}" | grep -qi "v2" || { echo "v2 marker 'v2' missing from /"; kill $UVI_PID; exit 1; }
-          # v1 ships leaflet; v2 does not. Catching a leaflet reference
-          # would mean we fell back to v1 — release fails loudly.
-          if echo "${BODY}" | grep -q "leaflet"; then
-            echo "ERROR: leaflet asset found at / — Brain fell back to v1"
-            kill $UVI_PID
-            exit 1
-          fi
-          echo "OK Brain serves v2 bundle at /"
-          kill $UVI_PID
-          wait || true
-
-  smoke-macos:
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.include_macos == true
-    strategy:
-      matrix:
-        # See ci.yml: 3.14 is the version 2026.8.3 broke on, and an
-        # install smoke that cannot install on it is the wrong shape.
-        python: ['3.11', '3.12', '3.14']
-    runs-on: macos-latest
     timeout-minutes: 25
     steps:
+      - uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Install from PyPI
-        run: pip install feral-ai
+      - name: Download dist artifact
+        if: inputs.dist_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.dist_artifact }}
+          path: dist/
 
-      - name: Verify CLI
+      - name: Install
+        shell: bash
+        env:
+          DIST_ARTIFACT: ${{ inputs.dist_artifact }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
         run: |
-          feral --help || true
-          python -c "import importlib.metadata; print('Version:', importlib.metadata.version('feral-ai'))" || true
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # Deliberately UNCONSTRAINED. `feral-core/requirements.lock` is a
+          # 3.11 resolution pinning pillow==11.3.0 while fastembed needs
+          # pillow>=12 on 3.14, so constraining this matrix would hide exactly
+          # the marker-dependent conflict that shipped 2026.8.3 broken.
+          if [ -n "${DIST_ARTIFACT}" ]; then
+            shopt -s nullglob
+            wheels=(dist/*.whl)
+            if [ "${#wheels[@]}" -ne 1 ]; then
+              echo "expected exactly one wheel in dist/, found ${#wheels[@]}" >&2
+              ls -la dist/ >&2
+              exit 1
+            fi
+            # pip accepts extras on a local wheel path.
+            python -m pip install "${wheels[0]}[all]"
+          elif [ -n "${EXPECTED_VERSION}" ]; then
+            python -m pip install "feral-ai[all]==${EXPECTED_VERSION}"
+          else
+            python -m pip install "feral-ai[all]"
+          fi
 
-      - name: Verify v2 bundle is in the wheel
-        # Guards the regression that shipped 2026.4.17: a wheel whose
-        # webui-v2 directory was silently dropped by setuptools because
-        # the dir name had a hyphen + no __init__.py. Without this gate
-        # every "pip install -U feral-ai" user falls back to the v1 UI.
+      - name: Verify the CLI entry point runs
+        # No `|| true`. This is the whole point of the job: a wheel whose
+        # console script raises on import must fail here.
         shell: bash
         run: |
-          python - <<'PY'
-          import sys
-          from pathlib import Path
+          set -euo pipefail
+          feral --help
 
-          # The wheel installs top-level packages (webui_v2/ is a sibling
-          # of api/, agents/, etc.) into site-packages. Walk up from any
-          # one of them to find site-packages, then assert webui_v2 has
-          # the v2 bundle.
-          import api
-          site = Path(api.__file__).resolve().parent.parent
-          v2 = site / "webui_v2"
-          assert v2.is_dir(), f"webui_v2/ missing from installed wheel at {site}"
-          index = v2 / "index.html"
-          assert index.exists(), f"webui_v2/index.html missing from wheel at {v2}"
-          assets = v2 / "assets"
-          assert assets.is_dir(), f"webui_v2/assets/ missing from wheel at {v2}"
-          css = list(assets.glob("*.css"))
-          js = list(assets.glob("*.js"))
-          assert css, f"no .css found in {assets}"
-          assert js, f"no .js found in {assets}"
-          html = index.read_text(encoding="utf-8")
-          assert "FERAL" in html, f"v2 index.html missing FERAL marker: {html[:200]}"
-          assert "v2" in html.lower(), f"v2 index.html missing v2 marker: {html[:200]}"
-          print(f"OK webui_v2 bundle present at {v2}")
-          print(f"   index.html: {index.stat().st_size} B")
-          print(f"   assets: {len(css)} css, {len(js)} js")
-          PY
-
-      - name: Verify Brain serves v2 at /
-        # End-to-end gate: boot the installed Brain and curl / to prove
-        # the v2 index.html is actually served, not the v1 fallback.
+      - name: Verify the [all] extras actually landed
+        # `pip install 'feral-ai[typo]'` warns and installs the base package,
+        # so requesting an extra proves nothing without this.
         shell: bash
         run: |
+          set -euo pipefail
+          python -m pip install packaging
+          python scripts/check_extras_installed.py feral-ai all
+
+      - name: Runtime smoke (bundle + /health + / contract)
+        # The same asserting script the release pipeline's build and canary
+        # stages run. This job used to hand-roll a weaker copy of these
+        # checks, which is how the two drifted.
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${EXPECTED_VERSION}" ]; then
+            python scripts/release_wheel_smoke.py \
+              --expected-version "${EXPECTED_VERSION}"
+          else
+            python scripts/release_wheel_smoke.py
+          fi
+
+      - name: Verify Brain serves v2 over a real HTTP server
+        # release_wheel_smoke.py uses TestClient, which never opens a socket.
+        # This step boots uvicorn and curls it, so the ASGI serving path and
+        # the static mount are exercised for real.
+        shell: bash
+        run: |
+          set -uo pipefail
           python -m uvicorn api.server:app --host 127.0.0.1 --port 9100 &
           UVI_PID=$!
+          trap 'kill "${UVI_PID}" 2>/dev/null || true' EXIT
           # Wait up to 60s for the Brain to finish booting (35 subsystems).
+          BOOTED=0
           for i in {1..30}; do
-            if curl -sf http://127.0.0.1:9100/health > /dev/null 2>&1; then break; fi
+            if curl -sf http://127.0.0.1:9100/health > /dev/null 2>&1; then
+              BOOTED=1
+              break
+            fi
             sleep 2
           done
+          if [ "${BOOTED}" -ne 1 ]; then
+            echo "Brain never answered /health within 60s" >&2
+            exit 1
+          fi
           BODY=$(curl -s http://127.0.0.1:9100/)
           echo "${BODY}" | head -20
-          echo "${BODY}" | grep -q "FERAL" || { echo "v2 marker 'FERAL' missing from /"; kill $UVI_PID; exit 1; }
-          echo "${BODY}" | grep -qi "v2" || { echo "v2 marker 'v2' missing from /"; kill $UVI_PID; exit 1; }
+          echo "${BODY}" | grep -q "FERAL" || { echo "v2 marker 'FERAL' missing from /" >&2; exit 1; }
+          echo "${BODY}" | grep -qi "v2" || { echo "v2 marker 'v2' missing from /" >&2; exit 1; }
           # v1 ships leaflet; v2 does not. Catching a leaflet reference
-          # would mean we fell back to v1 — release fails loudly.
+          # would mean we fell back to v1; release fails loudly.
           if echo "${BODY}" | grep -q "leaflet"; then
-            echo "ERROR: leaflet asset found at / — Brain fell back to v1"
-            kill $UVI_PID
+            echo "ERROR: leaflet asset found at /: Brain fell back to v1" >&2
             exit 1
           fi
           echo "OK Brain serves v2 bundle at /"
-          kill $UVI_PID
-          wait || true
+
+  smoke-macos:
+    # `inputs` is empty on workflow_run, so this stays opt-in there and is
+    # opt-in for callers too: publish.yml does not pay for macOS on every tag.
+    if: inputs.include_macos == true
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.14']
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Download dist artifact
+        if: inputs.dist_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.dist_artifact }}
+          path: dist/
+
+      - name: Install
+        shell: bash
+        env:
+          DIST_ARTIFACT: ${{ inputs.dist_artifact }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # Unconstrained for the same reason as the Linux lane above.
+          if [ -n "${DIST_ARTIFACT}" ]; then
+            shopt -s nullglob
+            wheels=(dist/*.whl)
+            if [ "${#wheels[@]}" -ne 1 ]; then
+              echo "expected exactly one wheel in dist/, found ${#wheels[@]}" >&2
+              ls -la dist/ >&2
+              exit 1
+            fi
+            python -m pip install "${wheels[0]}[all]"
+          elif [ -n "${EXPECTED_VERSION}" ]; then
+            python -m pip install "feral-ai[all]==${EXPECTED_VERSION}"
+          else
+            python -m pip install "feral-ai[all]"
+          fi
+
+      - name: Verify the CLI entry point runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          feral --help
+
+      - name: Verify the [all] extras actually landed
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install packaging
+          python scripts/check_extras_installed.py feral-ai all
+
+      - name: Runtime smoke (bundle + /health + / contract)
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${EXPECTED_VERSION}" ]; then
+            python scripts/release_wheel_smoke.py \
+              --expected-version "${EXPECTED_VERSION}"
+          else
+            python scripts/release_wheel_smoke.py
+          fi
+
+      - name: Verify Brain serves v2 over a real HTTP server
+        shell: bash
+        run: |
+          set -uo pipefail
+          python -m uvicorn api.server:app --host 127.0.0.1 --port 9100 &
+          UVI_PID=$!
+          trap 'kill "${UVI_PID}" 2>/dev/null || true' EXIT
+          BOOTED=0
+          for i in {1..30}; do
+            if curl -sf http://127.0.0.1:9100/health > /dev/null 2>&1; then
+              BOOTED=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "${BOOTED}" -ne 1 ]; then
+            echo "Brain never answered /health within 60s" >&2
+            exit 1
+          fi
+          BODY=$(curl -s http://127.0.0.1:9100/)
+          echo "${BODY}" | head -20
+          echo "${BODY}" | grep -q "FERAL" || { echo "v2 marker 'FERAL' missing from /" >&2; exit 1; }
+          echo "${BODY}" | grep -qi "v2" || { echo "v2 marker 'v2' missing from /" >&2; exit 1; }
+          if echo "${BODY}" | grep -q "leaflet"; then
+            echo "ERROR: leaflet asset found at /: Brain fell back to v1" >&2
+            exit 1
+          fi
+          echo "OK Brain serves v2 bundle at /"

@@ -113,8 +113,50 @@ key) from **steady-state auth** (how it authenticates each WS session).
    and returns `{"token":"<api-key>","device_id":"..."}`.
 4. The daemon polls `GET /api/devices/pair/status?code=417392` (or receives
    the token over mDNS — see §4.3) until it gets the token.
-5. The daemon persists the token to `~/.feral/node-keys/<node_id>.key`
-   (mode `0600`) and forgets the 6-digit code.
+5. The daemon persists the token to `~/.feral/node-keys/<safe>.key`
+   (mode `0600`) and forgets the 6-digit code. `<safe>` is **not** the raw
+   `node_id`, see §4.1.1.
+
+#### 4.1.1 Key filename derivation
+
+An SDK MUST derive `<safe>` from `node_id` as follows, and MUST NOT invent its
+own sanitisation. This section exists because it was previously left to prose:
+the Python SDK dropped disallowed characters, the TypeScript SDK replaced them
+with `_`, and this document said `<node_id>.key` with no sanitisation at all,
+so the same node paired through one SDK re-paired under the other.
+
+1. `sanitised` = `node_id` with every character **outside** the class
+   `[A-Za-z0-9._:-]` replaced by `_`. The class is exactly the `node_id`
+   pattern the brain accepts, and it is **ASCII**. Do not use a
+   Unicode-aware "is alphanumeric" test: `é` and `日` are letters to such a
+   test and are not members of this class. Replace per **code point**, not
+   per UTF-16 code unit, or an emoji becomes two `_` instead of one (in
+   JavaScript this means the `u` regex flag).
+2. If `sanitised == node_id` **and** `1 <= len(node_id) <= 128`, then
+   `<safe>` = `sanitised`. Every `node_id` the brain accepts takes this
+   branch, so a paired node's filename never moves.
+3. Otherwise `<safe>` = `sanitised` truncated to 128 characters, then `-`,
+   then the first 8 hex characters of `sha256(node_id` encoded UTF-8`)`.
+
+Step 3 is not decoration. Sanitising alone is many-to-one: without it `a b`
+and `a_b` both resolve to `a_b.key`, and every all-punctuation `node_id`
+resolves to a hidden file literally named `.key`. Two nodes sharing a key file
+means one silently overwrites the other's API key.
+
+`sanitised` is always pure ASCII after step 1, so truncation is unambiguous
+whether the SDK's language counts code points, UTF-16 units, or bytes.
+
+Conformance fixtures, which every SDK MUST pass:
+`feral-nodes/spec-fixtures/node_key_filename.json`.
+
+| `node_id` | `<safe>.key` |
+|---|---|
+| `wristband-01` | `wristband-01.key` |
+| `acme:wb:001` | `acme:wb:001.key` |
+| `sensor 01` | `sensor_01-46977d17.key` |
+| `sensor_01` | `sensor_01.key` |
+| `café` | `caf_-850f7dc4.key` |
+| `日本語ノード` | `______-a30a928b.key` |
 
 The pairing window is 5 minutes; codes expire after that or after one
 successful redemption, whichever comes first. Failed codes rate-limit at

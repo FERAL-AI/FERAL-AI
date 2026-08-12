@@ -1,0 +1,119 @@
+{
+  "_comment": [
+    "Shared fixture for the AppMessage payload cap (F-07). Asserted by BOTH",
+    "feral-core/tests/test_genui_payload_cap_utf8_bytes.py and",
+    "feral-client-v2/src/__tests__/pages/AppSurface.payloadCap.test.js so the",
+    "two halves of the guard cannot drift apart again.",
+    "",
+    "expected_bytes is the length in UTF-8 bytes of the COMPACT JSON encoding of",
+    "the payload: no space after ':' or ',', non-ASCII characters emitted as",
+    "themselves rather than as \\uXXXX escapes. That is the quantity the constant",
+    "is named after (MAX_PAYLOAD_BYTES) and it is the only measurement both",
+    "languages can produce identically.",
+    "",
+    "Hand-check for ascii_exact_at_cap: {\"a\":\"xxx...\"} is 1 brace + 3 for the",
+    "quoted key + 1 colon + 2 quotes + 65528 x's + 1 brace = 65536.",
+    "",
+    "'build' says how to construct the payload:",
+    "  repeat    -> { key: unit repeated count times }",
+    "  int_keys  -> { prefix+i: i  for i in 0..count-1 }",
+    "  literal   -> the object as written"
+  ],
+  "max_payload_bytes": 65536,
+  "cases": [
+    {
+      "name": "empty",
+      "why": "floor case; both sides must agree on the smallest payload",
+      "build": { "kind": "literal", "value": {} },
+      "expected_bytes": 2,
+      "expected_accepted": true
+    },
+    {
+      "name": "ascii_small",
+      "why": "plain ASCII, comfortably under the cap",
+      "build": { "kind": "literal", "value": { "action_id": "submit", "value": 12 } },
+      "expected_bytes": 33,
+      "expected_accepted": true
+    },
+    {
+      "name": "ascii_exact_at_cap",
+      "why": "pure ASCII at exactly the cap. Fails on the Python side today purely because json.dumps defaults to separators=(', ', ': '), so the one extra space after the colon makes it 65537. Nothing to do with ensure_ascii.",
+      "build": { "kind": "repeat", "key": "a", "unit": "x", "count": 65528 },
+      "expected_bytes": 65536,
+      "expected_accepted": true
+    },
+    {
+      "name": "ascii_one_over_cap",
+      "why": "preservation guard: one byte over must still be refused by both",
+      "build": { "kind": "repeat", "key": "a", "unit": "x", "count": 65529 },
+      "expected_bytes": 65537,
+      "expected_accepted": false
+    },
+    {
+      "name": "many_short_keys",
+      "why": "pure ASCII, 4518 keys. The separator inflation is 2 bytes per key, which alone carries this over the cap on the Python side today (65550) while the browser sees 56515.",
+      "build": { "kind": "int_keys", "prefix": "k", "count": 4518 },
+      "expected_bytes": 56515,
+      "expected_accepted": true
+    },
+    {
+      "name": "cjk_under_cap",
+      "why": "the case named in the audit: 11000 CJK characters. Python measured 66009 and refused it; the browser measured 11008 and allowed it. Both must now see 33008 and allow it.",
+      "build": { "kind": "repeat", "key": "a", "unit": "中", "count": 11000 },
+      "expected_bytes": 33008,
+      "expected_accepted": true
+    },
+    {
+      "name": "cjk_just_under_cap",
+      "why": "largest CJK payload that fits",
+      "build": { "kind": "repeat", "key": "a", "unit": "中", "count": 21842 },
+      "expected_bytes": 65534,
+      "expected_accepted": true
+    },
+    {
+      "name": "cjk_just_over_cap",
+      "why": "one character further must be refused by both",
+      "build": { "kind": "repeat", "key": "a", "unit": "中", "count": 21843 },
+      "expected_bytes": 65537,
+      "expected_accepted": false
+    },
+    {
+      "name": "cjk_far_over_cap",
+      "why": "the direction that matters for security: 30000 CJK characters is 90008 bytes but only 30002 UTF-16 units, so the browser guard waved it through today.",
+      "build": { "kind": "repeat", "key": "a", "unit": "中", "count": 30000 },
+      "expected_bytes": 90008,
+      "expected_accepted": false
+    },
+    {
+      "name": "emoji_small",
+      "why": "astral plane: 4 UTF-8 bytes, 2 UTF-16 units, 12 bytes of \\uXXXX escapes",
+      "build": { "kind": "repeat", "key": "a", "unit": "😀", "count": 1 },
+      "expected_bytes": 12,
+      "expected_accepted": true
+    },
+    {
+      "name": "emoji_far_over_cap",
+      "why": "20000 emoji is 80008 bytes but only 40002 UTF-16 units; the browser guard waved it through today",
+      "build": { "kind": "repeat", "key": "a", "unit": "😀", "count": 20000 },
+      "expected_bytes": 80008,
+      "expected_accepted": false
+    },
+    {
+      "name": "lone_surrogate",
+      "why": "reachable from JSON.parse / json.loads of \\ud800. JS well-formed JSON.stringify re-escapes it to 6 ASCII characters; Python must do the same rather than raising UnicodeEncodeError.",
+      "build": { "kind": "literal", "value": { "a": "\ud800" } },
+      "expected_bytes": 14,
+      "expected_accepted": true
+    },
+    {
+      "name": "mixed_scripts",
+      "why": "ASCII, CJK, emoji and an escape in one payload",
+      "build": {
+        "kind": "literal",
+        "value": { "en": "hello", "zh": "中文", "emoji": "😀", "quote": "a\"b" }
+      },
+      "expected_bytes": 58,
+      "expected_accepted": true
+    }
+  ]
+}

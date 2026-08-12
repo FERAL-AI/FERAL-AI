@@ -9,17 +9,35 @@ FERAL is in **public beta** and we are actively looking for contributors. Whethe
 
 Prerequisites:
 
-- **Python 3.11+** (3.11 / 3.12 / 3.13 supported in CI).
 - **Node.js 20+** (for `feral-client-v2`).
-- **Git**, **make**, a working C toolchain (Xcode CLT on macOS, `build-essential` on Debian-likes).
+- **Git**, **make**, **curl**, a working C toolchain (Xcode CLT on macOS, `build-essential` on Debian-likes).
+- No system Python is required. `make dev` fetches the pinned interpreter itself.
 
 Clone and bootstrap:
 
 ```bash
 git clone https://github.com/FERAL-AI/FERAL-AI.git
 cd FERAL-AI
-make dev                                 # creates .venv, installs feral-core in editable mode
+make dev                                 # builds .venv from .python-pin, installs feral-core[all,dev] editable
 ```
+
+`make dev` builds `.venv/` from the CPython version named in `.python-pin` (3.11.15, from python-build-standalone), installs `feral-core[all,dev]` with `--constraint feral-core/requirements.lock` (the same extras and constraint CI uses, so the local suite and CI agree), and finishes by printing the interpreter's real SQLite feature set:
+
+```
+  interpreter : /path/to/.venv/bin/python (Python 3.11.15)
+  sqlite      : 3.53.1
+  fts5        : OK
+  loadable ext: OK
+  Environment verified.
+```
+
+The pin is not a style preference. FERAL's memory store creates SQLite FTS5 virtual tables during construction, so an interpreter without FTS5 cannot run the brain at all, and `sqlite-vec` needs an interpreter built with `--enable-loadable-sqlite-extensions`. Common interpreters ship one and not the other (pyenv's macOS default has FTS5 but no extensions; python-build-standalone 3.11.13 has extensions but no FTS5). `make dev` fails rather than build an environment where the brain cannot boot.
+
+It needs `uv >= 0.12` and downloads a pinned copy into `.uv/` if your machine's uv is older or absent; your global `uv` is not touched. `make dev-reset` rebuilds `.venv`, `make dev-verify` reprints the report, `make clean-uv` drops the local uv.
+
+Always run Python through `.venv/bin/python` or the `make` targets. This repo deliberately ships **no** `.python-version`: pyenv reads that filename, and a pin it cannot satisfy makes every bare `python3`, `pip`, `pytest` and `ruff` inside the tree resolve to an unrelated interpreter with no error. `make dev` refuses to run if it finds one.
+
+CI runs 3.11 / 3.12 / 3.13; the pin applies to local development and to the desktop bundle.
 
 Or install the published package and run from anywhere:
 

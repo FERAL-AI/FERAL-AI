@@ -42,6 +42,20 @@ except ImportError:  # pragma: no cover — optional for offline subcommands
     httpx = None  # type: ignore
 
 
+# This used to read "Install feral-ai[cli]", which was wrong twice over. There
+# is no `cli` extra, and pip does not fail on an unknown one: it warns to
+# stderr and installs the base package, so the user saw no error and got
+# nothing. And httpx is a BASE dependency (pyproject.toml `dependencies`), so
+# no extra could ever have supplied it. Reaching here means the install is
+# incomplete, which is a different problem with a different remedy.
+_HTTPX_MISSING = (
+    "  httpx is required for `{command}` but is not importable.\n"
+    "  httpx is a base dependency of feral-ai, so this means the install is\n"
+    "  incomplete rather than missing an optional extra. Repair it with:\n"
+    "      pip install --force-reinstall feral-ai"
+)
+
+
 def _print(msg: str) -> None:
     print(msg, flush=True)
 
@@ -271,7 +285,7 @@ def _is_ignored(rel_path: str, patterns: list[str]) -> bool:
 
 def cmd_app_install(path: str, host: Optional[str] = None, port: Optional[str] = None) -> None:
     if httpx is None:
-        _print("  httpx is required for `feral app install`. Install feral-ai[cli].")
+        _print(_HTTPX_MISSING.format(command="feral app install"))
         sys.exit(1)
     source = Path(path).expanduser().resolve()
     if not source.is_dir():
@@ -416,7 +430,7 @@ def cmd_app_verify(manifest_path: str) -> None:
 
 def cmd_app_publish(path: str, registry: Optional[str] = None) -> None:
     if httpx is None:
-        _print("  httpx is required for `feral app publish`. Install feral-ai[cli].")
+        _print(_HTTPX_MISSING.format(command="feral app publish"))
         sys.exit(1)
     try:
         from cli.publish import (

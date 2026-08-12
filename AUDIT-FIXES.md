@@ -761,56 +761,666 @@ The repo already has the right pattern — `agents/orchestrator.py:210-218` and 
 
 ---
 
-## P1 — after the P0 set
+## P1: after the P0 set
+
+All of F-07 through F-15 were worked in one pass. Nothing is committed; the
+work is in the tree. Two items are DEFERRED because they land in files another
+lane owns, and both are recorded with what the owning lane needs to do.
+
+Proof for the whole set, run after the last change:
+`python -m pytest tests/ -q -p no:cacheprovider -p no:randomly --no-cov` →
+**7680 passed, 31 skipped, 0 failed** (440s), and
+`ruff check --select=E,F,W --ignore=E501,E402,F401,W291,W293 .` →
+**All checks passed!**. Run under `PYENV_VERSION=3.11.11` because
+`.python-version` pins an interpreter that is not installed in this tree.
+The same ruff line over `scripts/` and `feral-nodes/python-node-sdk/` is also
+clean. `feral-client-v2`: **97 files, 607 tests, all passing**.
+`feral-nodes/ts-node-sdk`: **25 passing**, `tsc --noEmit` clean.
+`feral-nodes/python-node-sdk`: **47 passing**.
+
+One caveat about the tree, not about this work: it is shared with other lanes
+and moved underneath this pass. An intermediate full run showed
+`tests/test_doctor_severity.py` and `tests/test_sqlite_interpreter_features.py`
+failing; both passed standalone, both concern `cli/main.py`'s doctor sections
+and an untracked `memory/sqlite_features.py` that another lane owns, and both
+pass in the final run above. Nothing here touches those files.
+
+---
 
 ### F-07 · Gen-UI payload cap disagrees between host and brain by 6x
 
+**Status:** FIXED. Not committed: left in the working tree.
+
+**Re-verified.** Present as described, at `genui/app_message_schema.py:112`
+(the finding says 113) and `AppSurface.types.ts:70`. Reproduced against both
+implementations with the audit's own payload:
+
 ```
-feral-core/genui/app_message_schema.py:113-119        json.dumps(v).encode("utf-8") → len
-feral-client-v2/src/pages/AppSurface.types.ts:69-70   JSON.stringify(payload).length
+{"a": "中" * 11000}
+  python  json.dumps(v).encode("utf-8")   66,009  -> REFUSED
+  js      JSON.stringify(payload).length  11,008  -> ACCEPTED
 ```
 
-Both use `MAX_PAYLOAD_BYTES = 64 * 1024`. Python's `json.dumps` defaults to `ensure_ascii=True`, emitting `\uXXXX` escapes — six ASCII bytes per BMP character, twelve per emoji. JavaScript counts UTF-16 code units.
+**The audit names one cause. There are three, and the second one it misses
+breaks pure ASCII.**
 
-Measured: `{"a": "中" * 11000}` is 66,009 bytes to Python (rejected) and 11,008 units to JavaScript (accepted). Any payload above ~10,900 non-ASCII characters passes the browser-side security guard and is refused by the brain.
+1. `ensure_ascii=True`, as stated: six bytes per BMP character, twelve per
+   astral one.
+2. **`separators`.** `json.dumps` defaults to `(', ', ': ')`; `JSON.stringify`
+   emits neither space. That is two bytes per key with no non-ASCII involved
+   anywhere. Measured: a pure-ASCII payload of **exactly** 65,536 bytes
+   (`{"a": "x" * 65528}`) measured 65,537 in Python and was refused while the
+   browser accepted it. A 1000-key object was 12,780 against 10,781.
+3. **Direction.** The audit frames this as the brain refusing what the browser
+   allows. The reverse is the security-relevant half and it is worse: the
+   browser guard, which is the half an attacker controls and whose stated job
+   is to stop an iframe flooding the host channel, counted UTF-16 units. 30,000
+   CJK characters is 90,008 bytes and 30,002 units, so it passed. 20,000 emoji
+   is 80,008 bytes and 40,002 units, so it passed.
 
-**Done when:** both sides measure the same quantity, and a shared fixture of non-ASCII payloads is asserted in both test suites.
+**Fix: both sides measure UTF-8 bytes of the compact JSON encoding**, which is
+the quantity the constant is named after. `payload_size_bytes()` in Python and
+`measurePayloadBytes()` in TypeScript; the validators now call them rather than
+inlining a measurement.
+
+`errors="backslashreplace"` on the Python encode is load-bearing and not
+cosmetic. `json.loads('{"a": "\ud800"}')` yields a lone surrogate, and
+`.encode("utf-8")` raises `UnicodeEncodeError` on one. That is a `ValueError`,
+so the validator's existing handler would have reported an acceptable payload
+as "not JSON-serialisable" while the browser accepted it, the same defect
+re-created. JavaScript's well-formed `JSON.stringify` re-escapes lone
+surrogates to six ASCII characters, which is exactly what `backslashreplace`
+produces, so both land on 14 bytes.
+
+**Deliberately not changed:** `allow_nan`. Python emits `NaN`/`Infinity` where
+JavaScript emits `null`, so the two differ by 1-4 bytes per non-finite number.
+A payload would need ~16k of them to matter, and a payload that arrived as JSON
+cannot contain one. Tightening it would make Python refuse what the browser
+accepts, which is the shape being fixed.
+
+**Shared fixture, asserted on both sides.** The done-when asks for exactly
+this. `feral-core/tests/fixtures/app_message_payload_sizes.json` holds 13 cases
+with their expected byte counts and verdicts; the TypeScript test reads that
+file rather than copying the numbers, because a copy is what let these drift.
+A Python test fails if the TS mirror stops reading it.
+
+**Tests.** `feral-core/tests/test_genui_payload_cap_utf8_bytes.py` (32):
+**21 fail against the unfixed source, 32/32 after.** Four of the failures are
+behavioural accept/reject verdicts, not size assertions.
+`feral-client-v2/src/__tests__/pages/AppSurface.payloadCap.test.js` (31):
+**20 fail before, 31/31 after**; three of those are the over-cap payloads the
+old guard waved through.
+
+**Not fixed, and it needs saying:** `feral-core/webui_v2/assets/index-*.js` is a
+checked-in build of `feral-client-v2` and still contains the old comparison.
+`scripts/build_webui_v2.sh` regenerates it and `scripts/release.py` runs that at
+release time, so it is rebuilt by the existing process rather than by hand. The
+fix does not reach an installed wheel until that runs.
+
+---
 
 ### F-08 · The two node SDKs write different key filenames for the same node
 
+**Status:** FIXED. Not committed: left in the working tree.
+
+**Re-verified** at both cited lines. Reproduced by running both rules over the
+same node ids:
+
 ```
-feral-nodes/python-node-sdk/src/feral_node_sdk/pairing.py:28   drops invalid chars
-feral-nodes/ts-node-sdk/src/pairing.ts:17                      replaces them with "_"
+node_id              python (before)        typescript (before)
+'sensor 01'          sensor01.key           sensor_01.key
+'café'               café.key               caf_.key
+'!!!'                .key                   ___.key
+''                   .key                   .key
+'a b'                ab.key                 a_b.key
+'日本語ノード'          日本語ノード.key         ______.key
 ```
 
-Both write to `~/.feral/node-keys/<safe>.key`, so this is a live collision. `"sensor 01"` becomes `sensor01.key` in one and `sensor_01.key` in the other; a node paired through one SDK silently re-pairs under the other. Python's `str.isalnum()` is Unicode-aware and the TS class is ASCII-only, so `café` yields `café.key` vs `caf_.key`. Python's drop-based collapse is also many-to-one, so two node ids can share a key file.
+**Scope corrections, three of them.**
 
-**Done when:** one algorithm, specified in `HUP_SPEC.md`, with the same fixture table tested on both sides.
+- **Three algorithms, not two.** `HUP_SPEC.md` §4.1 step 5 documented the path
+  as `~/.feral/node-keys/<node_id>.key` with no sanitisation at all. That is
+  the document the done-when calls the source of truth, and it described a
+  third behaviour neither SDK implements, the one a new SDK author would copy.
+- **Both sides are many-to-one, not just Python.** The audit attributes the
+  collapse to Python's dropping. TypeScript's replacement is equally
+  many-to-one: `"a b"` and `"a_b"` both resolved to `a_b.key`, and every
+  six-character non-ASCII node id resolved to `______.key`. Python's is worse
+  in kind, not in principle: every all-punctuation id and the empty id all
+  wrote to a hidden file literally named `.key`.
+- **A fourth divergence the audit does not name, found by the new test rather
+  than by reading.** The TypeScript regex had no `u` flag, so it matched per
+  UTF-16 code unit: an astral character is a surrogate pair and became **two**
+  underscores where Python's `re` produced one. `"😀"` was `__.key` against
+  `.key`. Found because the shared fixture asserted the emoji case on both
+  sides and my first fix passed in Python and failed in TypeScript.
+
+**Verified not a vulnerability, and pinned so it stays that way:** `/` is
+outside the allowed class in both rules, so neither SDK could ever escape the
+keys directory. `'../../etc/passwd'` produced `....etcpasswd.key` and
+`.._.._etc_passwd.key`. There is now a test per fixture case asserting the
+resolved path's parent is the keys directory.
+
+**One algorithm, specified in the spec.** New `HUP_SPEC.md` §4.1.1:
+
+1. Replace every character outside `[A-Za-z0-9._:-]` with `_`, **per code
+   point**. The class is exactly the brain's `NodeRegisterPayload.node_id`
+   pattern and it is ASCII; the spec now says out loud not to use a
+   Unicode-aware "is alphanumeric" test, which is what Python was doing.
+2. If that changed nothing and the length is 1-128, the filename is that.
+3. Otherwise truncate to 128, then append `-` and the first 8 hex characters of
+   `sha256(node_id)`.
+
+**Step 2 is why no paired hardware moves.** Every node id the brain accepts
+takes it, so `wristband-01`, `acme:wb:001` and `a.b_c-d` keep the byte-identical
+filename both SDKs already write. Only ids that were already colliding or
+already disagreeing get a new name. Step 3 is what makes the mapping injective;
+sanitising alone is not, which is the half that silently overwrote one node's
+API key with another's.
+
+**Checked and not affected:** the Swift (`ios-node-sdk`) and Kotlin
+(`android-bridge`) SDKs do not persist keys to `~/.feral/node-keys` at all , 
+they take the API key from the caller. So the audit's "two node SDKs" is right
+on the language dimension. `cli.py:_cmd_run` also calls `save_key`, so the
+daemon-run path was affected too, not only the pair flow.
+
+**Tests.** `feral-nodes/spec-fixtures/node_key_filename.json` holds 15 cases
+with the pre-fix output of *both* SDKs recorded alongside the canonical name,
+so the compatibility guard compares against measurement rather than against a
+restatement of the new rule. Both suites read that one file.
+`feral-nodes/python-node-sdk/tests/test_key_filename_canonical.py` (35):
+**12 fail before, 35/35 after.**
+`feral-nodes/ts-node-sdk/tests/keyFilename.test.ts` (20): **19 fail before,
+20/20 after**, `tsc --noEmit` clean. `ts-node-sdk` had vitest as a
+devDependency and no `test` script; added one, since the test is otherwise
+only reachable by typing the runner by hand.
+
+---
 
 ### F-09 · The install smoke test cannot fail, and runs after publishing
 
+**Status:** FIXED. Not committed: left in the working tree.
+
+**Re-verified.** All three claims hold. Reproduced the first one directly, with
+a stub `feral` on `PATH` that exits 1:
+
 ```
-.github/workflows/install-smoke.yml    feral --help || true
-                                       python -c "…" || true
-                                       on: workflow_run: [Release], types: [completed]
+$ feral --help || true; python -c "..." || true; echo $?
+ModuleNotFoundError: No module named 'mlx_lm'
+0                                   <- the step passes
+
+$ set -euo pipefail; feral --help; echo $?
+1                                   <- what it should have done
 ```
 
-Both verification commands end in `|| true`, so a wheel whose `feral` entry point raises on import passes. It installs `feral-ai` only, never an extra, while `scripts/install.sh` installs `feral-ai[all]`. And it runs *after* the release workflow, so a failure reports a bad release rather than preventing one.
+**Scope: four tolerated commands, not two.** The file has two jobs,
+`smoke-linux` and `smoke-macos`, and both carried all three defects. The audit
+describes the shape once.
 
-Related and worth fixing together: `CHANGELOG.md:305` claims "CI now tests Python 3.14", but `ci.yml:82` is `['3.11','3.12']`. `requirements.lock` is a Python 3.11 artifact pinning `pillow==11.3.0`, so it structurally cannot catch the marker-dependent conflict that shipped `2026.8.3` broken.
+**A fourth weakness, unstated:** the version command *printed* the installed
+version and never compared it, so even without `|| true` a stale cached release
+would have passed.
 
-**Done when:** the smoke job asserts rather than tolerates, installs `[all]`, and gates the publish instead of following it.
+**NOT REPRODUCIBLE, the "related and worth fixing together" half.** The audit
+says `CHANGELOG.md:305` claims "CI now tests Python 3.14" while `ci.yml:82` is
+`['3.11','3.12']`. The tree has moved. `ci.yml:120-132` now carries a written
+rationale for *deliberately* keeping 3.14 out of the brain pytest matrix, the
+3.11 lockfile pins `pillow==11.3.0` while fastembed needs `pillow>=12` on 3.14,
+so that job could not install and would be red for the wrong reason, and it
+points at `install-smoke.yml`, whose matrix is already `['3.11','3.12','3.14']`.
+The CHANGELOG sentence is true by way of the smoke job. No change made.
 
-### F-10 through F-15 · Smaller confirmed items
+**Fix, all three parts.**
 
-| ID | Defect | Location |
-|---|---|---|
-| F-10 | `mlx-lm` and `sentence-transformers` imported at runtime, declared in neither `dependencies` nor any of the 33 extras | `agents/local_inference.py`, `memory/embeddings.py:1445` |
-| F-11 | `pip install 'feral-ai[macos-extras]'` is printed to users; that extra does not exist, so pip installs nothing | `cli/main.py:2593` |
-| F-12 | `[wake]` pulls `tflite-runtime`, which has no wheel for Python 3.12+. Nothing gates it | `pyproject.toml:308` |
-| F-13 | Token budget uses `len(str(content)) // 4`, under-counting non-Latin and code-heavy content; can overflow provider limits | `agents/context_engine.py:197` |
-| F-14 | Desktop updater configured with `"pubkey": ""` and `"signingIdentity": null` — no shipping channel exists | `desktop/src-tauri/tauri.conf.json` |
-| F-15 | `FeralBrainClient.swift` exists in two directories and has diverged; `FeralSensorBridge.swift` is byte-identical in both | `feral-nodes/ios-bridge/` vs `ios-app/Sources/FeralBridge/` |
+- **Asserts.** Every `|| true` on a verification command is gone and every step
+  is `set -euo pipefail`. The one surviving `|| true`, on `wait` after killing
+  a background server, is reaping rather than verification, and the new test
+  allows it by name rather than by pattern.
+- **Installs what users install.** `feral-ai[all]`, matching
+  `scripts/install.sh`. And because pip warns rather than fails on an unknown
+  extra, requesting `[all]` proves nothing on its own, so a new
+  `scripts/check_extras_installed.py` asserts every requirement the extra pulls
+  in is actually present. Verified against the real distribution on this
+  machine: `[all]` OK, 17 requirements; `macos-extras` correctly failed as
+  undeclared (that is F-11, found by this script rather than by reading).
+- **Gates the publish.** `install-smoke.yml` gained a `workflow_call` trigger
+  and `publish.yml` gained an `install_smoke` job between `build` and
+  `publish`, installing the wheel this run just built and blocking `publish` on
+  it. It runs in parallel with `stage` rather than after, because `stage` sits
+  behind a manual environment approval and there is no reason to ask a
+  maintainer to approve a canary for a wheel that cannot be installed. The
+  post-release PyPI lane is kept: installing from the index exercises
+  index/sdist selection that the artifact path does not.
+
+**Two traps handled, both of which would have made the gate vacuous.**
+
+- Inside a called workflow `github.event_name` is the **caller's** event, so
+  the existing `if:` (which only allowed `workflow_dispatch` and
+  `workflow_run`) would have skipped every job on a tag push and the gate would
+  have passed by doing nothing. The condition now includes `push`.
+- The job id is `install_smoke`, not `install-smoke`: GitHub's expression
+  parser reads `-` in `needs.install-smoke.result` as subtraction.
+
+**The matrix is deliberately unconstrained**, and there is a test for it.
+Applying `--constraint requirements.lock` here would reintroduce the exact
+3.11-resolution conflict that shipped 2026.8.3 broken, as a green run.
+
+The two jobs also stopped hand-rolling a weaker copy of the bundle checks and
+now call `scripts/release_wheel_smoke.py`, the same asserting script the build
+and canary stages already run, with `--expected-version`.
+
+**Tests.** `feral-core/tests/test_install_smoke_gates_release.py` (8):
+**5 fail against the unfixed workflows, 8/8 after.** Re-run against the
+original file recovered from `git show HEAD:`, the tightened versions still
+fail 4 of 5; the fifth (the lockfile guard) passes both ways because the old
+file did not use the lockfile either, it guards reintroduction, and saying so
+is more useful than pretending it caught something.
+
+**Not verifiable from here, stated plainly:** GitHub Actions cannot be executed
+in this environment. The YAML parses, the job graph and shell logic are
+asserted structurally, and `scripts/check_extras_installed.py` was run for real
+against a real installed distribution. The workflows themselves have not been
+run.
+
+---
+
+### F-10 · `mlx-lm` and `sentence-transformers` declared by no extra
+
+**Status:** FIXED. Not committed: left in the working tree.
+
+**Re-verified, and the working hypothesis was wrong.** The brief said to treat
+the mlx half as a dead import path. It is not dead: `agents/llm_provider.py:809`
+calls `create_local_engine()`, and that factory returns `MLXEngine` whenever
+`platform.system() == "Darwin" and platform.machine() == "arm64"`. So the
+engine with no declared dependency is the one auto-selected on the flagship
+platform. (An earlier grep of mine missed the caller; trap 1 in CLAUDE.md.)
+
+**A second defect, unstated, and it changes the fix.** Declaring `mlx-lm` alone
+would have made things worse. Verified against the real package rather than
+inferred, `mlx-lm 0.31.3` installed into a scratch venv on this Apple Silicon
+machine:
+
+```
+mlx_lm.generate.generate_step(prompt, model, *, max_tokens, sampler, ...)
+  no `temp` parameter, no **kwargs
+
+>>> inspect.signature(generate_step).bind(None, None, max_tokens=512, temp=0.7)
+TypeError: got an unexpected keyword argument 'temp'
+
+>>> inspect.signature(generate_step).bind(None, None, max_tokens=512,
+...                                       sampler=make_sampler(temp=0.7))
+OK
+```
+
+`MLXEngine.generate` passed `temp=`, which `mlx_lm.generate` forwards through
+`stream_generate` into `generate_step`. Sampling moved behind
+`sampler=make_sampler(temp=...)`. This is the F-01 / F-16 shape again: wrong
+kwargs against a real signature.
+
+`MLXEngine.generate_stream` had the matching problem. `stream_generate` yields
+`GenerationResponse` dataclasses and the code `str()`-ed them:
+
+```
+response.text  -> 'hi'
+str(response)  -> "GenerationResponse(text='hi', token=1, logprobs=None, ..."
+```
+
+so it would have streamed dataclass reprs at the user. Both are fixed to
+`.text`, and the `ImportError` fallback is kept and corrected rather than
+dropped.
+
+So today the user gets "mlx-lm not installed. Run: pip install mlx-lm", which
+is actionable. Installed but mis-called they would have got a `TypeError` from
+inside a thread executor. Declaring the dependency and correcting the call site
+are one change, not two.
+
+**mlx half, declared.** `mlx-lm>=0.31.0,<0.32` in `[local]`, marked
+`sys_platform == 'darwin' and platform_machine == 'arm64'`, mirroring the
+factory's own condition exactly because `mlx` has no wheel for Intel Macs or
+Linux. Marker evaluated: darwin/arm64 True, linux/x86_64 False, darwin/x86_64
+False. The bound is patch-level within one minor on purpose: mlx-lm is 0.x and
+has already reshaped this API inside a minor, so `<1.0` would be a meaningless
+bound.
+
+**sentence-transformers half, an extra, deliberately not a dependency.**
+`pyproject.toml` carries a measured argument for fastembed (~226MB installed)
+over a torch-backed sentence-transformers stack (~2.5GB), and that is why
+fastembed is the default. Promoting it would contradict a written, measured
+decision. But the documented `FERAL_EMBED_FALLBACK=local` mode had no install
+path at all, so there is now an `embeddings-local` extra, and a test that keeps
+it out of `dependencies` and `[all]` so nobody "completes" the sweep.
+`sentence-transformers>=2.2,<6.0`: both API points the code uses
+(`SentenceTransformer`, `encode(..., normalize_embeddings=)`) were checked in
+the 2.2.0, 3.0.0, 4.0.0 and 5.7.0 artifacts rather than assumed.
+
+`memory/embeddings.py` was **not** edited, another lane owns it, and the fix
+did not require touching it.
+
+**Tests.** `feral-core/tests/test_optional_backend_dependencies.py` (7):
+**5 fail before, 6 pass + 1 skip after.** The stub mlx_lm is built from the
+signature recorded off 0.31.3, and a further test re-checks that recording
+against the installed package wherever `mlx_lm` is importable, the F-01
+"assert the double against the real thing" pattern. It skips on Linux CI, which
+is stated rather than hidden.
+
+---
+
+### F-11 · An install command that installs nothing
+
+**Status:** FIXED, except the one line in a file another lane owns.
+
+**Re-verified.** `macos-extras` is not among the declared extras. Line drift:
+the site is `cli/main.py:2675`, not 2593. Confirmed mechanically rather than by
+reading, with the script written for F-09:
+
+```
+$ python scripts/check_extras_installed.py feral-ai macos-extras
+✗ extra 'macos-extras' is not declared by the installed distribution
+  (declared: all, bedrock, browser, ... 33 of them)
+```
+
+pip does not fail on an unknown extra. It warns to stderr and installs the base
+package, so the user runs the command, sees no error, and gets nothing.
+
+**Scope: four sites, three shapes, not one site.** A sweep of every
+`feral-ai[...]` string in shipped Python, shell and docs:
+
+```
+cli/main.py:2675          feral-ai[macos-extras]   extra does not exist
+cli/app_commands.py:274   feral-ai[cli]            extra does not exist
+cli/app_commands.py:419   feral-ai[cli]            extra does not exist
+cli/main.py:899           feral-ai[all]            extra exists, cannot help
+```
+
+`[cli]` is wrong twice over: it does not exist, and the dependency it offers to
+supply is `httpx`, which is a **base** dependency (`pyproject.toml:42`). A user
+whose `import httpx` fails has an incomplete install; no extra can fix it and
+the advice sent them in a circle. `cli/main.py:899` is the same shape with a
+real extra: `uvicorn[standard]` is also a base dependency, so `[all]` was never
+going to help either.
+
+**Fix.** The three sites outside `cmd_doctor` now say the install is incomplete
+and give `pip install --force-reinstall feral-ai`, which is a command that can
+actually work.
+
+**The `macos-extras` line itself is inside `cmd_doctor()`, which another lane
+owns, so it was not edited.** It did not need to be: the extra is what was
+missing, not the message. `macos-extras` now exists, declaring
+`pyobjc-framework-EventKit` and `pyobjc-framework-Contacts` (darwin-marked) , 
+the bindings `security/macos_permissions.py` imports for the Calendar /
+Reminders / Contacts / Full Disk Access probes, which are declared nowhere
+else. Bounds match the two PyObjC frameworks already in `dependencies`, because
+PyObjC ships one release train. The doctor's printed command is now true.
+
+**For the lane that owns `cli/main.py`:** nothing is required. If you would
+rather the doctor named the packages directly, `security/macos_permissions.py:454`
+and `:590` already print raw `pip install pyobjc-framework-...` hints and could
+be pointed at the new extra for consistency.
+
+**Tests.** `feral-core/tests/test_advertised_extras_exist.py` (3):
+**2 fail before, 3/3 after.** It is the class guard, not a check of those four
+lines: any future hint naming an undeclared extra fails, and so does any hint
+offering an extra as the remedy for a base dependency.
+
+---
+
+### F-12 · The `[wake]` extra above Python 3.11
+
+**Status:** FIXED (documented, guarded and made legible). The audit's statement
+is imprecise in both directions and both corrections matter.
+
+**Re-verified, and the cited line is not what the finding says.**
+`pyproject.toml:308` is `"openwakeword>=0.6.0,<1.0"`. `tflite-runtime` is not a
+declared dependency anywhere in the tree; it arrives transitively, and its
+marker is the whole story:
+
+```
+openwakeword 0.6.0 metadata:
+  tflite-runtime <3,>=2.8.0 ; platform_system == "Linux"
+```
+
+**Narrower than stated: macOS is unaffected.** The marker is Linux-only, so
+`feral-ai[wake]` installs and works on macOS 3.12+. Confirmed on this machine:
+`[wake]` is installed and the extras check passes. macOS being the flagship
+platform is why this was never hit.
+
+**Wider than stated: there is no upgrade path.** `tflite-runtime` publishes
+wheels for cp38-cp311 and **no sdist at all**, so pip cannot even attempt a
+build, and 2.14.0 is the newest release and it is from 2023. Reproduced from
+this tree for all three:
+
+```
+$ pip download "tflite-runtime>=2.8.0,<3" --no-deps --only-binary=:all: \
+    --python-version 3.11 --platform manylinux2014_x86_64
+Saved tflite_runtime-2.14.0-cp311-cp311-manylinux2014_x86_64.whl
+
+$ ... --python-version 3.12 ...
+ERROR: No matching distribution found for tflite-runtime<3,>=2.8.0
+$ ... --python-version 3.14 ...
+ERROR: No matching distribution found for tflite-runtime<3,>=2.8.0
+```
+
+**"Nothing gates it" is the part with teeth, and it is now gated.**
+`openwakeword` was removed from `[all]` in 2026.4.11 for exactly this reason
+and nothing has stopped anyone putting it back, while `[all]` is what
+`scripts/install.sh` runs and, since F-09, what the pre-publish smoke installs
+on 3.11 / 3.12 / 3.14. There are now tests holding it out of both `[all]` and
+`dependencies`.
+
+**Deliberately not "fixed" by weakening the extra.** Adding a marker so the
+extra resolves empty on Linux 3.12+ would turn a loud pip failure into the
+F-11 silent-no-op, and stripping `openwakeword` would cost macOS users a
+working feature to describe a Linux limit. Today's behaviour, pip refuses, is
+correct; it was undocumented and untested.
+
+So: the `[wake]` extra gained the written rationale the repo's convention
+requires and had none, and `feral wake-test` no longer sends a Linux 3.12+ user
+to a command that cannot succeed without saying why (pip's own error names
+`tflite-runtime`, which means nothing to them).
+
+**Tests.** `feral-core/tests/test_wake_extra_python_ceiling.py` (4):
+**2 fail before, 4/4 after.** The other two pass both ways by design: they are
+the reintroduction guards on `[all]` and `dependencies`, and that is stated in
+the file.
+
+**Noted, not fixed:** `feral-client-v2/src/pages/Settings.jsx:1885` shows
+"Install feral-ai[wake] to enable." with no platform caveat. The client cannot
+know the brain's interpreter without a new field on the health payload, so it
+is out of scope here.
+
+---
+
+### F-13 · Token budget under-counts non-Latin and code-heavy content
+
+**Status:** FIXED. Not committed: left in the working tree.
+
+**Re-verified and measured** against the real tokenizers, `cl100k_base` and
+`o200k_base`, taking the worse of the two because the router talks to 16
+providers and a budget has to hold for the worst of them:
+
+```
+sample          chars    real   //4 said   ratio
+english prose    1800     401        450    1.12
+python code      1675     575        418    0.73
+JSON             1180     540        295    0.55
+Russian          2160    1041        540    0.52
+Chinese          1080    1260        270    0.21
+Japanese         1080    1020        270    0.26
+Hebrew           1600    1651        400    0.24
+emoji             800    2200        200    0.09
+```
+
+A Chinese conversation measured at a fifth of its real size, an emoji-heavy one
+at a ninth. `//4` is calibrated for English prose and for nothing else.
+
+**Scope: nine sites in five files, not the one line cited.**
+
+```
+agents/context_engine.py:188,192,197   context window budget   (cited: 197)
+agents/llm_provider.py:3951            USD budget, candidate routing
+agents/learner.py:171,229,230          cost ledger, _cost_guard.record
+agents/proactive_engine.py:612         cost ledger, _cost_guard.record
+memory/context_builder.py:42           DEFERRED, another lane owns the file
+```
+
+The five cost sites are the same defect with a different consequence: spend
+against a USD budget is under-reported by the same factor rather than a request
+being refused. Eight are fixed; the ninth is deferred below.
+
+Examined and rejected as unrelated: `perception/change_detector.py:179` (byte
+offset), `memory/store.py:1830,1891` (float32 blob width),
+`models/protocol.py:88` (base64 decoded size).
+
+**Fix.** New `agents/token_estimate.py`, one estimator, used by all eight.
+
+**The asymmetry is the design.** Under-counting produces a hard failure, a
+refused request, or a budget silently overshot. Over-counting produces earlier
+summarisation, which costs context but keeps working. So it is tuned never to
+fall below the real count, and it accepts up to ~2x over on English to get
+there. Every weight was measured, not guessed:
+
+- An alphanumeric run up to 12 characters is a word and merges near 4
+  characters per token; beyond that it is a hash, UUID or base64, which
+  measured 1.38 characters per token, so long runs are charged at 1.
+- Cyrillic is charged less than other two-byte scripts (0.7 against 1.3)
+  because the vocabularies cover it far better, Russian measured 2.07
+  characters per token where Hebrew measured 0.97. That is tokenizer coverage,
+  not a property of the script, and the comment says so.
+- Whitespace is charged 0.3 rather than 0. It usually merges into the next
+  token in Latin text, but Hebrew and Thai under-counted at 0.
+- Astral characters are charged 3; emoji measured 2.75 each.
+
+Result over 20 samples: **no under-counts, worst ratio 1.04, worst over-count
+2.03x**, against `//4`'s worst of 0.09.
+
+**A real tokenizer was considered and rejected**, with the reason recorded:
+`tiktoken` is correct for OpenAI only, it is not in `requirements.lock` (it is
+here solely as a transitive of `langchain-openai`), and a network count per
+estimate is worse than a heuristic on a hot path.
+
+`estimate_message_tokens` walks content blocks rather than stringifying them,
+mirroring `LLMProvider._message_char_count`; stringifying a block list would
+count the Python dict syntax around the text.
+
+**Tests.** `feral-core/tests/test_token_estimate_never_undercounts.py` (47):
+**3 fail before, 47/47 after.** The corpus lives in
+`tests/fixtures/token_estimate_corpus.json` with real token counts recorded, so
+the property is provable without tiktoken; a further test re-derives those
+counts from live tiktoken wherever it is importable and says out loud that it
+skips in CI. There is a test that the corpus still contains the hard cases and
+one that the estimator does not over-count English absurdly, because an
+estimator returning a huge number would pass everything else and summarise every
+conversation on its second turn. The end-to-end case drives the real
+`_prune_to_budget` with a Chinese conversation that it used to keep entirely.
+
+**DEFERRED: `memory/context_builder.py:42`**, `(max_tokens_budget // 4) *
+_CHARS_PER_TOKEN`. Another lane owns that file. It is the same class and the
+fix is the same one-line swap to `agents.token_estimate`.
+
+---
+
+### F-14 · Desktop updater has no shipping channel
+
+**Status:** DEFERRED, `desktop/src-tauri/` is owned by another lane. Verified
+and characterised here so the owning lane does not have to redo it.
+
+**Re-verified, exactly as cited.** `desktop/src-tauri/tauri.conf.json:82` is
+`"pubkey": ""` and `:73` is `"signingIdentity": null`.
+
+**Two things the audit does not say, and the second changes the conclusion.**
+
+1. **`tauri-plugin-updater` is not a dependency.** `Cargo.toml` lists only
+   `tauri-plugin-global-shortcut` and `tauri-plugin-autostart`. So the
+   `plugins.updater` block configures a plugin that is not compiled in: the app
+   has no updater at all, not merely an unsigned one. Meanwhile
+   `"createUpdaterArtifacts": "v1Compatible"` still tells the bundler to emit
+   update artifacts, for a plugin that is absent and a key that does not exist.
+2. **This is a recorded, deliberate pre-release state, not an oversight.**
+   `.github/workflows/desktop.yml` runs on `workflow_dispatch` only, uploads no
+   release asset, and its header says why: "not uploaded as a release asset yet
+   (needs Apple Developer ID + Windows Authenticode + Tauri updater keypair
+   first, TAURI_SIGNING_PRIVATE_KEY, ..., WINDOWS_CERT_P12, WINDOWS_CERT_PW)".
+   CLAUDE.md calls the desktop shell experimental.
+
+So "no shipping channel exists" is true and is the project's own position.
+The actionable residue is narrow: either drop `createUpdaterArtifacts` until
+the plugin and key exist, or add the plugin and key together. Both are one-line
+changes in files this lane must not touch.
+
+---
+
+### F-15 · `FeralBrainClient.swift` exists twice and has diverged
+
+**Status:** FIXED. Not committed: left in the working tree.
+
+**Re-verified.** Both copies are inside this repo, so this was actionable here:
+
+```
+feral-nodes/ios-bridge/FeralBrainClient.swift                    604 lines
+feral-nodes/ios-app/Sources/FeralBridge/FeralBrainClient.swift   774 lines
+```
+
+`FeralSensorBridge.swift` is byte-identical in both, as stated (`cmp` agrees).
+
+**The divergence is entirely one-way, which the audit does not say and which
+decides the fix.** `diff -u` is 161 added lines and one removed line, and that
+line is a `// MARK:` comment that was reworded. `ios-bridge/` is a strict
+subset, missing three things:
+
+- `UnifiedPairPayload` / `parsePairingPayload`. Brains at or above 2026.5.8
+  emit the unified v1 QR payload; the stale copy decodes only the legacy
+  `{host, port, apiKey, nodeName}` shape. **Anything built from it cannot pair
+  with a current brain.**
+- TLS certificate pinning via `FERAL_BRAIN_CERT_HASH`. The stale copy has no
+  `didReceive challenge` handler at all.
+- The `sendAudioChunk(_ data: Data)` overload.
+
+**Nothing built `ios-bridge/`.** `ios-app/Package.swift` declares one target at
+`path: "Sources/FeralBridge"`, and no manifest, project or script referenced
+the other directory. `git log` shows `ios-app/Sources/FeralBridge` received
+"phase 5: mobile consolidation, one iOS app, one Android app"; `ios-bridge/`
+did not, and was left behind by it.
+
+**Its only referents were documentation, and that is the damage.** Four
+non-test references pointed developers at the stale copy as the reference
+implementation, including `feral-nodes/android-bridge/README.md` and four
+KDoc comments in `FeralBrainClient.kt` citing it with line numbers as the
+cross-language contract. That is precisely the mechanism CLAUDE.md warns about:
+prose spec, hand-written SDKs, drift.
+
+**Fix.** Deleted the unbuilt subset; repointed all four documentation
+references and the four KDoc line-number citations at the built path, with the
+line numbers re-derived against the surviving file rather than carried over.
+
+Removing it removes no capability: it is a strict subset of a file that is
+compiled, and it is compiled by nothing.
+
+**One existing test had to change, and it is worth flagging.**
+`tests/test_hup_message_parity.py:34` read the **stale** copy as the iOS half
+of its Swift/Kotlin parity contract. So the gate meant to stop the SDKs
+drifting was itself checking parity against a file nothing builds, 170 lines
+behind. Repointed; it passes 13/13 against the current file, so the newer copy
+satisfies the same contract.
+
+**Checked and not affected: the separate iOS app at
+`~/Desktop/Theora-backend-ML`.** Inspected read-only; nothing modified, nothing
+pushed, `xcodegen` never run. It vendors neither file. It carries its own
+`ios/Theora/Feral/` implementation (`FeralPairingService.swift`,
+`FeralPairingPayload.swift`, `FeralHUPModels.swift`, ...), and that one already
+decodes the unified v1 payload, so it is current and independent.
+
+**Nothing is required in that repo for F-15.** Worth its own item, though, and
+not raised by this audit: it is a **third** hand-written Swift implementation of
+the same pairing and HUP surface, so it is a standing candidate for the same
+drift. S-3 (generate the protocol) is the structural answer.
+
+**Tests.** `feral-core/tests/test_ios_bridge_single_source.py` (7):
+**4 fail before, 7/7 after.** It is the class guard: any duplicated Swift source
+basename under `feral-nodes` fails it, sourced from `git ls-files` so build
+output cannot register as a copy, with `Package.swift` allowed by name because
+one manifest per SwiftPM package is correct. It also pins the three
+capabilities that made the choice of copy matter, so a future "consolidation"
+cannot quietly keep the weaker file.
 
 ---
 
@@ -1046,3 +1656,819 @@ own invalidation key:
 --select=E,F,W --ignore=E501,E402,F401,W291,W293 .` -> **All checks passed**.
 Run on pyenv 3.11.11 via `PYENV_VERSION`, because `.python-version` is
 pinned to an interpreter that is not installed yet by concurrent work.
+
+---
+
+## F-18 · The knowledge graph was dead in production: entities were never re-embedded
+
+**Status:** FIXED (uncommitted, in tree).
+
+Not from the audit list. Found by running the real store.
+
+### The failure, reproduced
+
+`~/.feral/memory.db` on this machine: `entities.embedding` held 312 rows of
+6144-byte (1536-dim, OpenAI-era) blobs while `memory_chunks.embedding` held
+11,999 rows of 1536-byte (384-dim, current fastembed BAAI/bge-small-en-v1.5)
+blobs. `feral memory reembed` had run at some point and fixed the chunks. It
+only ever knew about `memory_chunks`, so it never touched `entities`. That gap
+is the whole defect.
+
+`KnowledgeGraph.search_entities` embeds the query at 384 dims and compares it
+against the stored 1536-dim vectors, so `cosine_similarity_bulk` raised
+`EmbeddingDimensionMismatch` on **every** call. There was no handler at
+`memory/context_builder.py:365`, so it propagated out of
+`MemoryStore.search_all` into `gateway/protocol.py:373` (the `memory.search`
+RPC), `agents/taskflow.py:541` (the taskflow `memory.search` step) and
+`api/routes/memory.py:559`.
+
+Measured against a copy of the real store (copied with its `-wal`/`-shm`; the
+live file was never opened), running the unfixed source at `HEAD`:
+
+```
+search_entities('FERAL')     -> EmbeddingDimensionMismatch: query vector has 384
+                                dims but stored vector has 1536 (6144 bytes)
+... 8 of 8 queries identical
+search_all('FERAL')          -> EmbeddingDimensionMismatch  (same)
+... 8 of 8 queries identical
+```
+
+So one stale table took out episode, note and knowledge recall as well, and the
+only trace was a single throttled ERROR line whose advice ("clear the vector
+tables") named no command.
+
+### Every table carrying vectors, and its width
+
+Discovered by walking `sqlite_master`, not assumed. On the real store, active
+provider = fastembed, 384d:
+
+| table | column | rows with vectors | width | verdict |
+|---|---|---|---|---|
+| `entities` | `embedding` | 312 | 6144 B = **1536 floats** | stale, migrated |
+| `memory_chunks` | `embedding` | 11,999 | 1536 B = 384 floats | current |
+| `vec_chunks` | vec0 `FLOAT[384]` | 0 | 384 declared | ok |
+| `vec_entities` | vec0 `FLOAT[384]` | 0 | 384 declared | ok |
+
+Nothing else in the 54 tables holds a vector. The fts5 and vec0 shadow tables
+(`entities_fts_content`, `vec_entities_vector_chunks00`, ...) are owned by their
+virtual table and are excluded deliberately, with a test pinning that.
+
+### 1. The migration is a module now, and it discovers
+
+`memory/reembed.py`. A registry of `EmbeddingTable(table, id, text, embedding)`
+says what to rewrite and from which source text (`memory_chunks.text_content`,
+`entities.name`, matching what `_index_chunk` and `add_entity` actually embed).
+`scan_store` then walks every table for vector-shaped columns and reports any it
+cannot migrate, because a hard-coded list is exactly what caused this bug:
+`reembed_store` returns `ok: False` and the CLI exits non-zero when anything is
+left stale, rather than printing success over a still-broken store.
+
+Deliberate refusals, both tested:
+
+- A row whose source text is gone is set to NULL, not left stale. Readers filter
+  on `embedding IS NOT NULL`, so NULL costs one row's recall while a stale blob
+  keeps the whole table's vector leg raising.
+- The migration refuses to run on a degraded provider. `EmbeddingProvider` falls
+  back to a deterministic *hash* embedding, which has the right width and no
+  meaning; writing it would look like a successful migration while replacing the
+  store's semantics with noise.
+
+vec0 mirrors are handled too: their dimension is baked in at CREATE time and
+`CREATE VIRTUAL TABLE IF NOT EXISTS` is a silent no-op against a stale one, so a
+mismatched mirror is dropped and repopulated from the migrated source column.
+**Not exercised on this machine**: pyenv 3.11.11 is built without loadable
+extensions, so sqlite-vec cannot load and every vec0 path is inert here. The
+decision function (`vec0_declared_dim`, parsed from the DDL, which is the only
+place the dimension is recorded) is unit-tested; the drop/rebuild branch is not.
+
+**Sibling fixed:** `KnowledgeGraph._init_schema` created `vec_entities` with no
+declared-dimension guard, unlike `embeddings.SQLiteVecIndex._init` which has had
+one since `vec_chunks` shipped. The same provider switch would have left that
+index silently unwritable (every upsert rejected and swallowed at debug level).
+It now refuses a stale-dim index and names the command that rebuilds it.
+
+### 2. The failure is no longer hideable
+
+`search_all` was the interesting decision. Both obvious options are wrong.
+Propagating is what happened: one dead tier destroyed three healthy ones at three
+call sites. Wrapping it in `except Exception: return []` would be **worse**, and
+this is written in the code as a comment: an empty result set from a search
+function reads as "nothing matched", so a broken store looks like an empty one
+and nobody investigates. That is precisely how this survived to a release.
+
+So: per-tier isolation with a *declared* degradation. A failing tier is recorded
+in `store.last_search_degradations`, mirrored to `store._vector_leg_error` (which
+`/internal/memory/stats` already reports as `semantic_search: degraded`), and
+logged at ERROR with the command to run. If **every** tier fails the exception
+propagates, because at that point `[]` is a lie about the store's contents rather
+than a reduced answer.
+
+The KG degrades the *leg*, not the query: FTS entity hits are still returned, and
+`_link_entity` (the ingest path, inside `add_entity`) returns "no link" instead of
+raising, so knowledge ingest keeps working while the store waits for a migration.
+Both publish through `KnowledgeGraph.vector_leg_error`. The KG's ERROR line is
+throttled to once per distinct failure per instance, same shape as
+`embeddings._REPORTED_DIM_MISMATCHES`, since the state stays readable in the
+stats endpoint (18 log lines became 1 across 16 queries).
+
+Every message that used to say "clear the vector tables" now names
+`feral memory reembed`, and the two comments claiming "there is no re-embedding
+migration in this codebase" were false as of this change and were updated.
+
+### 3. knowledge_fts indexed the corpse
+
+`migrate_knowledge_to_kg` ends with `ALTER TABLE knowledge RENAME TO
+knowledge__deprecated`. SQLite rewrites every trigger that referenced the old
+name to follow the renamed table, so `knowledge_ai` / `knowledge_ad` /
+`knowledge_fts_update` all followed it, and `_init_db`'s
+`CREATE TRIGGER IF NOT EXISTS` statements were then no-ops because the names were
+taken. The recreated `knowledge` table got no FTS triggers at all. On the real
+store: `knowledge` 0 rows, `knowledge__deprecated` 29 rows, `knowledge_fts` 29
+rows of deprecated content.
+
+That is not merely stale. `_knowledge_search_flat` joins `knowledge_fts.rowid` to
+`knowledge.rowid`, and a recreated table restarts rowids at 1, so the first row
+written on the legacy path (`memory.kg.unified = false`, kept for chaos/recovery)
+inherits a deprecated row's search terms. Pinned by
+`test_stale_index_returns_the_wrong_row`, which fails against the unfixed source
+by returning a `Cairo` row for the query `cerulean`.
+
+`MemoryStore._repair_knowledge_fts` runs at boot, is idempotent, rebinds the
+three triggers to the live table and rebuilds the index from it (`knowledge_fts`
+stores its own content, so the fts5 `'rebuild'` command does not apply and the
+rows are replaced by hand). The deprecated rows are not destroyed, and they are
+not lost either: the F1 migration ported all of them into the KG. The cause is
+fixed too, so a fresh migration cannot recreate the state.
+
+### Proof on a copy of the real store
+
+Copied `~/.feral/memory.db` with its `-wal` and `-shm`; the live file was never
+opened. `FERAL_HOME` pointed at the copy, then the exact user-facing command:
+
+```
+$ feral memory reembed check
+  Provider: fastembed  (384d)
+  Stored vectors:
+    entities.embedding: 1536d x312   <- stale
+    memory_chunks.embedding: 384d x11999
+    vec_chunks (vec0 index): 384d  [ok]
+    vec_entities (vec0 index): 384d  [ok]
+  Dry run; nothing written. Run `feral memory reembed` to migrate.
+
+$ feral memory reembed
+    entities: 312 stale vector(s)
+    entities: 64/312 ... 312/312
+  entities: re-embedded 312, cleared 0 with no source text
+  Every stored vector now matches the active provider.
+  Restart the brain to pick it up.          (11.8s wall)
+```
+
+Entity search on that migrated copy, real queries, real rows:
+
+```
+'FERAL'            -> 'Feral' (0.748), 'feral launch' (0.666), 'FERAL brain' (0.638)
+'heart rate'       -> 'heart_rate 115bpm (Bluetooth Device)' (0.631), '95-100 bpm' (0.560)
+'whoop'            -> 'Whoop' (0.745), 'spo2 93% (WHOOP)' (0.562)
+'cute bot'         -> 'CuteBot' (0.647), 'Telegram bot' (0.562), 'cutebot.follow_line' (0.554)
+'bluetooth device' -> 'heart_rate 115bpm (Bluetooth Device)' (0.585), 'firmware' (0.515)
+8 of 8 queries answered; kg.vector_leg_error = None
+search_all: 8 of 8 answered (was 0 of 8), store._vector_leg_error = None
+build_graph_context('heart rate') returns a populated graph section again
+```
+
+`'cute bot' -> 'CuteBot'` and `'bluetooth device' -> 'firmware'` are the vector
+leg working, not FTS: on the same store *before* migration those queries return
+0 and 1 lexical hits respectively.
+
+Degradation was verified separately, fixed source against an **unmigrated** copy:
+8 of 8 entity queries return FTS hits instead of raising, 8 of 8 `search_all`
+calls answer, one ERROR line names `feral memory reembed`, and
+`_vector_leg_error` is populated so the stats endpoint reports
+`semantic_search: degraded`.
+
+### What a user runs
+
+```
+feral memory reembed check     # reports every table and width, writes nothing
+feral memory reembed           # migrates, then restart the brain
+```
+
+No feature was removed. The only behaviour change is that a tier failure inside
+`search_all` now degrades and is reported instead of aborting the call, and
+`feral memory reembed` exits non-zero when it cannot fully migrate.
+
+### Tests
+
+`tests/test_memory_reembed_all_tables.py` (11),
+`tests/test_memory_stale_vector_visibility.py` (12),
+`tests/test_knowledge_fts_live_table.py` (7). Against the unfixed source at
+`HEAD` (a pristine copy of the tree with only these files reverted, so the other
+agents' in-flight work was not disturbed): **29 failed, 1 passed**. The one pass
+is `test_the_reproduction_is_faithful`, which exists to guard the fixture. After:
+**30 passed**. Headline failures before the fix were on their own assertions, not
+on imports: `entities were left at the old provider's dimension` (`{24: 3} !=
+{8: 3}`), `EmbeddingDimensionMismatch` escaping `search_all`, and the FTS index
+returning `Cairo` for `cerulean`.
+
+**Proof:** `PYENV_VERSION=3.11.11 python3 -m pytest tests/ -q -p no:cacheprovider
+-p no:randomly --no-cov` -> **7591 passed, 30 skipped, 0 failed** (443s).
+`ruff check --select=E,F,W --ignore=E501,E402,F401,W291,W293 .` ->
+**All checks passed**.
+
+---
+
+## S-4 · Distribution: the interpreter is now pinned for dev and bundled for users
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+S-4 asked for a relocatable interpreter inside the Tauri bundle. Doing it
+surfaced three defects that had to be fixed first, because the bundle
+alone would not have worked and the obvious interpreter choice was wrong.
+
+### 1. The spike's interpreter cannot boot the brain
+
+An earlier bundling spike validated python-build-standalone **3.11.13**
+on `enable_load_extension` alone and stopped there. 3.11.13 links SQLite
+**3.49.1, which has no FTS5**:
+
+```
+$ .../cpython-3.11.13-.../bin/python3 -c "import sqlite3; print(sqlite3.sqlite_version); \
+    sqlite3.connect(':memory:').execute('create virtual table t using fts5(x)')"
+3.49.1
+sqlite3.OperationalError: no such module: fts5
+```
+
+`MemoryStore` reached that error unguarded during construction:
+
+```
+  File ".../memory/store.py", line 443, in __init__
+    self._init_db()
+  File ".../memory/store.py", line 890, in _init_db
+    conn.execute("""
+sqlite3.OperationalError: no such module: fts5
+```
+
+Bundling 3.11.13 would have shipped an app that installs, launches, and
+whose brain never starts. The features are independent and both must be
+checked. Measured, macOS arm64:
+
+| Interpreter | SQLite | FTS5 | loadable extensions |
+|---|---|---|---|
+| pyenv 3.11.11 | 3.51.0 | yes | no |
+| pbs 3.11.13 | 3.49.1 | **no** | yes |
+| pbs 3.11.15 | 3.53.1 | yes | yes |
+
+3.11.15 is the pin, in `.python-pin`, shared by `make dev` and the
+desktop bundle so the two cannot drift.
+
+### 2. The FTS5 assumption was unguarded in five places
+
+`memory/sqlite_features.py` is new: it probes both features separately,
+memoises, and exposes `require_fts5()`. `MemoryStore._init_db` and
+`KnowledgeGraph._init_schema` call it **before** their first statement,
+not lazily at the first `CREATE VIRTUAL TABLE`, because the old ordering
+committed `notes` (or `entities`, `entity_aliases`, `relations`) and their
+triggers first and then died, leaving a database whose triggers referenced
+a table that did not exist. Verified: after the guard, no `memory.db` is
+created at all.
+
+The resulting error names the interpreter, the SQLite version, what
+breaks and the remedy, and `feral serve` already renders it without a
+traceback:
+
+```
+🦝  Brain failed to start: FERAL's memory store requires SQLite FTS5, and this
+interpreter does not have it.
+  interpreter : .../venv1113/bin/python (Python 3.11.13)
+  sqlite      : 3.49.1 (built without FTS5)
+...
+Fix: Use an interpreter whose SQLite has FTS5. The repo pin (see .python-pin) is
+CPython 3.11.15 from python-build-standalone: ...
+```
+
+`tests/test_sqlite_interpreter_features.py` includes a structural test
+that fails if any module gains a `USING fts5` without importing the
+guard, so a sixth site cannot reintroduce this.
+
+### 3. `feral doctor` checked one feature and not the other
+
+Doctor had no FTS5 probe at all: on the 3.11.13 host it printed a green
+`Python version 3.11.13` and never mentioned SQLite. The loadable-extension
+state was only visible indirectly, inside `Memory vector backend`, where it
+was also conflated with "sqlite-vec is not installed": a rebuild versus a
+pip install.
+
+Two rows now, with deliberately different severities, which is the point:
+
+* `SQLite FTS5`: `_fail`, with the interpreter change in "Suggested fixes:".
+* `SQLite loadable extensions`: `_info`, no suggested fix. F-17 measured
+  the numpy path as the faster one, so prescribing a rebuild here is a
+  ~10x slowdown. The instructions stay in the detail line, attached to
+  resident memory, matching what `test_doctor_vector_backend_truth.py`
+  already pins for the vector row.
+
+### 4. The desktop app could only start the brain on the machine that built it
+
+`desktop/src-tauri/src/main.rs` resolved feral-core from
+`env!("CARGO_MANIFEST_DIR")`, which rustc expands at **compile** time, so
+the shipped binary carried the build machine's absolute source path and
+`.canonicalize()` returned Err everywhere else. It also spawned bare
+`python3` from the user's `PATH`.
+
+Both are now run-time resolutions (`FERAL_CORE_DIR` / bundled resource /
+bounded upward walk from the executable; `FERAL_PYTHON` / bundled
+interpreter / repo `.venv`), every interpreter candidate is FTS5-probed
+before use, `PATH` is never consulted, and failures name every candidate
+tried. `desktop/scripts/stage_bundle.sh` stages the payload and
+`tauri.conf.json` ships it.
+
+**Proof.** The built `FERAL.app` was copied to a directory with no FERAL
+checkout above it and launched with `FERAL_CORE_DIR` and `FERAL_PYTHON`
+unset and `PATH=/usr/bin:/bin`:
+
+```
+BRAIN_STARTED_BY_APP: True
+HEALTH: {"status":"ok","version":"2026.8.8", ...}
+BRAIN_COMMAND: .../isolated/FERAL.app/Contents/Resources/python/bin/python3 -m api.server
+BRAIN_CWD:     .../isolated/FERAL.app/Contents/Resources/feral-core
+```
+
+Caveat recorded honestly: the test machine is also the build machine, so
+this does not by itself prove the old `CARGO_MANIFEST_DIR` path would have
+failed here. What it does prove is that the app resolved to its own
+bundled payload and used nothing from the checkout. The compile-time
+dependency is covered by `resolution_uses_only_runtime_paths` in the Rust
+tests, which asserts two different runtime layouts produce two different
+answers.
+
+### 5. The pin file itself was breaking the repo
+
+The pin was initially placed in `.python-version`. **pyenv reads that
+filename**, and when it names a version pyenv does not have, pyenv's
+shims do not fail, they fall through. Measured inside this repo while
+such a file existed:
+
+```
+$ python3 -c "import aiosqlite"
+ModuleNotFoundError: No module named 'aiosqlite'
+$ python3 -c "import sys; print(sys.executable)"
+/opt/homebrew/opt/python@3.14/bin/python3.14
+$ ruff --version
+pyenv: version `3.11.15' is not installed ...
+pyenv: ruff: command not found                     # exit 127
+```
+
+It broke this session's own post-edit lint hook. Removing the file
+restored both immediately (`python3` -> 3.11.11, `ruff 0.15.10`, exit 0).
+The pin now lives in `.python-pin`, read only by this repo's tooling;
+`.python-version` is gitignored and `make dev` refuses to run while one
+exists.
+
+### Development environment
+
+`make dev` from a clean clone is one command and needs no pre-installed
+Python: `scripts/ensure_uv.sh` supplies a uv >= 0.12 (repo-local download
+into `.uv/` when the system uv is older, leaving it untouched), uv
+installs 3.11.15, `.venv/` is created and `feral-core[all,dev]` installed
+against `requirements.lock`. `dev-verify` now **fails** on a missing FTS5
+instead of warning.
+
+The extras were moved from `[llm,dev]` to `[all,dev]` to match CI exactly.
+With `[llm,dev]`, `tests/test_doctor_severity.py` fails two tests on a
+freshly built dev environment, because `feral doctor` correctly warns
+"Playwright (driver lib) not installed" and that test asserts a clean
+install emits no warnings. A green CI beside a red local run, caused by
+the environment rather than the code, is the same class of surprise this
+whole change is about. Verified that `[all,dev]` resolves on 3.11.15 with
+no source builds.
+
+Verified on a copy of the tree with no `.venv` and no `.uv`, and a `PATH`
+containing only uv 0.7.20: the script fetched uv 0.12.3 locally, built
+3.11.15, and the resulting environment booted a real brain
+(`/health` -> `{"status":"ok",...}`).
+
+### Files
+
+`memory/sqlite_features.py` (new), `memory/store.py`,
+`memory/knowledge_graph.py`, `cli/main.py`,
+`tests/test_sqlite_interpreter_features.py` (new),
+`tests/test_doctor_severity.py`, `Makefile`, `scripts/ensure_uv.sh` (new),
+`.python-pin` (new), `.gitignore`, `desktop/src-tauri/src/main.rs`,
+`desktop/src-tauri/tauri.conf.json`, `desktop/src-tauri/.gitignore` (new),
+`desktop/scripts/stage_bundle.sh` (new), `desktop/package.json`,
+`desktop/src/main.js`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`,
+`ONBOARDING.md`, `desktop/README.md`.
+
+---
+
+## F-18 · The tool-execution audit trail had one writer, and the traffic moved
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+**Re-verified 2026-08-12** against a copy of the live store
+(`~/.feral/memory.db`, copied to scratch; the brain may start at any time,
+so nothing was written under `~/.feral`).
+
+```
+execution_log rows                     206
+first row                              2026-04-23 14:24:33
+last row                               2026-05-21 15:16:47
+episodes rows after that date          6,348
+episodes with event_type='tool'        33, dated 2026-06-30 .. 2026-08-06
+```
+
+So the trail is dead exactly as reported, and the system was not idle:
+33 real tool calls executed in the gap and left an episode each.
+
+**The cause is not a break, it is a missing connection.** `log_execution`
+works. Called against a copy of the real store it inserts and reads back
+correctly. The row had exactly one writer, `Orchestrator`, in its two
+chat loops. Every other tool-execution path writes nothing:
+
+| path | writes execution_log (before) |
+|---|---|
+| `agents/orchestrator.py` non-streaming loop | yes |
+| `agents/orchestrator.py` streaming loop | yes |
+| `voice/realtime_proxy.py` | no |
+| `voice/gemini_realtime.py` | no |
+| `mcp/server.py` (external MCP clients) | no |
+| `api/routes/tools.py` | no |
+| `agents/multi_agent.py` | no |
+| `agents/direct_execution.py` | no |
+| `agents/ui_handlers.py`, `agents/refusal_handler.py` | no |
+
+The 33 episodes in the gap all carry `"source": "voice_realtime"`.
+`git log` confirms no commit ever removed a `log_execution` call: the
+writer was never there for those paths. What changed around 2026-05-21 is
+which path the traffic used.
+
+**Fix: write the row at the chokepoint, the same place the plan-mode gate
+already moved to.** `SkillExecutor.execute` is the one function all nine
+paths reach. New `memory/execution_audit.py` resolves the store through
+`sys.modules["api.state"]` (the pattern `SkillExecutor._gate` established,
+so `memory` gains no dependency on `api`) and writes the row.
+
+`Orchestrator` keeps its own writes, because the chat path also dispatches
+tools that never reach the executor: `mcp_*` tools, `daemon_*` commands,
+`subagent__spawn_subagent`, and every refusal that returns before
+dispatch. `claimed_by_caller()` keeps the two writers disjoint - a
+ContextVar, so it survives the `asyncio.gather` fan-out the orchestrator
+runs its tools through, since a Task copies the context at creation.
+
+**Voice, MCP and multi-agent now bind a `ToolCallContext`.** They called
+`SkillExecutor` with nothing bound, so `session_id` was `""`. That was
+already affecting more than the audit: `SkillExecutor._gate` reads the
+session from the same contextvar, so the approval gate was evaluating
+every voice, MCP and multi-agent tool call against session `""`. Voice
+re-checks plan mode itself, so plan mode held; `enforce_safety` did not.
+
+**Not silent when it cannot write.** No `api.state` at all means offline
+tooling (tests, CLI, an embedder) and stays quiet. `api.state` present
+with no store, or an insert that raises, logs once per process at warning
+naming the surface and the tool. A trail that stops with no log line is
+the whole finding.
+
+**Live proof** on a copy of the real store: 206 rows before, 207 after one
+voice-bound executor call, with `session_id='voice-live-proof'`; the
+claimed call wrote nothing.
+
+New tests fail 4/13 against the unfixed source and pass 13/13 after.
+
+**Files:** `memory/execution_audit.py` (new), `skills/executor.py`,
+`agents/orchestrator.py`, `agents/multi_agent.py`,
+`voice/realtime_proxy.py`, `voice/gemini_realtime.py`, `mcp/server.py`,
+`tests/test_execution_audit_trail.py` (new).
+
+---
+
+## F-19 · A tool call whose arguments failed to parse ran with no arguments
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+This is the cause of the reported `web_search` 61/61 failure rate, and it
+is the strongest single instance of the repo's defect class found in this
+pass.
+
+```
+skill_id=web_search  61 executions, 61 failures, 0 successes
+every row's args     '{}'
+every row's error    "Missing search query. Provide 'query' or 'q' parameter."
+all 61 on            2026-05-15
+anti-loop guard      fired at streaks of 5, 6 and 7
+```
+
+The skill accepts `query`, `q`, `search` or `text`. It received an empty
+dict 61 times. Four sites in `agents/llm_provider.py` did
+`json.loads(...) except: args = {}` with no log line: 481 (Responses API
+finaliser), 1043 (chat-completions `extract_response`), 2494 (SSE
+`[DONE]`), 2898 (Anthropic `message_stop`). A truncated or malformed
+arguments blob became a valid-looking argument-free call, the skill
+answered with its missing-field message, and the model read that as a
+tool problem rather than its own output being lost, so it re-issued.
+
+Not one bad reply from one model. The same shape on other days:
+`computer_use__bash` 7 of 8 calls with empty args (2026-05-12),
+`computer_use__write_file` 11 of 19 (2026-05-21),
+`desktop_control__shell_command` 6 of 14 (2026-05-21).
+
+**Fix.** One `parse_tool_arguments(raw, tool_name) -> (args, error)` used
+by all four sites. A parse failure logs at warning with the tool name and
+the raw string, and sets `args_error` on the tool call.
+`ToolRunner._execute_tool_call_for_llm_inner` refuses such a call before
+the safety gate and before dispatch, returning
+`error_code="unparsable_arguments"` with a reason that says nothing was
+executed and asks for the call to be re-issued. An absent or empty
+arguments string is still a legitimate no-argument call and is not
+flagged.
+
+Measured, same input, before and after:
+
+```
+PRE-FIX   extract_response -> [{'id':'call_1','name':'web_search__web_search','args':{}}]
+          dispatch reached the safety gate and went on to execute
+          (no log line anywhere)
+
+POST-FIX  WARNING feral.llm: tool-call arguments for web_search__web_search
+            did not parse (Unterminated string starting at: line 1 column 11);
+            the call would otherwise run with no arguments. raw='{"query": "unterminat'
+          WARNING feral.orchestrator.tool_runner: Tool dispatch refused ...
+          dispatch reached gate: []
+          result: error_code='unparsable_arguments'
+```
+
+New tests: 10, all failing against the unfixed source.
+
+**Files:** `agents/llm_provider.py`, `agents/tool_runner.py`,
+`tests/test_tool_argument_parse_failure.py` (new).
+
+---
+
+## F-20 · An approval prompt was recorded, and treated, as a failed tool call
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+The reported `workspace_scripts` 0/9 and `agentic_computer_use` 0/5 are
+partly untrue. Of those 14 "failures", 9 are
+`{"status": "pending_approval", ...}` envelopes. Nothing failed: FERAL
+asked the operator to approve a call.
+
+`tool_success = bool(result_data.get("success") or ...)` is False for an
+envelope with no `success` key, so a pending approval was written to
+`execution_log` as `failure` **and** fed to the no-progress guard as a
+failing call. The store shows the consequence: three consecutive
+`workspace_scripts__rerun` rows with identical args and three different
+`request_id` values, and four near-identical
+`agentic_computer_use__execute_task` rows. The model was told its call
+had failed and asked again, so one approval prompt became several.
+
+**Fix.** `memory.execution_audit.status_of` classifies
+`pending_approval` as its own status; both orchestrator loops use it for
+`result_status` and skip `budget.observe_tool` for a pending call. A
+pinning test shows that three pending envelopes reported as failures do
+trip `GUARD_STOP`, which is what the orchestrator used to do.
+
+The genuine failures in that group are real and honest: two
+`workspace_scripts__run` rows say "Sandbox required ... Docker sandbox
+unavailable" (correct, actionable), and one `agentic_computer_use` row is
+"No VLM available. Set OPENAI_API_KEY" - that one is F-16, already fixed.
+
+New tests: 6.
+
+**Files:** `agents/orchestrator.py`,
+`tests/test_pending_approval_is_not_failure.py` (new).
+
+---
+
+## F-21 · A failed skill call was stamped HTTP 200
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+Found while running down the reported `calendar_google` 0/3. The live
+store holds it verbatim, twice, on 2026-05-21:
+
+```json
+{"success": false, "status_code": 200, "data": null,
+ "error": "Unknown endpoint: upcoming_events"}
+```
+
+`SkillExecutor._execute_inner` normalised backing-implementation results
+with `result.get("status_code", 200)`. Nine integration modules
+(`calendar`, `spotify`, `notion`, `email`, `microsoft365`,
+`home_assistant`, `google_drive`, `google_contacts`, `messaging`, plus
+`health_platforms`) return `{"success": False, "error": "Unknown
+endpoint: ..."}` with no status code, so every one of their failures
+carried a 200. Anything branching on `status_code` rather than on
+`success` reads that as fine.
+
+The `upcoming_events` endpoint itself was renamed to `list_events` in
+v2026.5.38 (commit `ef146fc3c`), so the underlying call was a real,
+diagnosable failure wearing a success-shaped code.
+
+**Fix.** Default to 200 only when `success` is true, otherwise 500. An
+explicit status code from the implementation still wins in both
+directions.
+
+New tests: 14, one failing against the unfixed source (the other 13 pin
+the behaviour that must not regress and the shape in the integrations).
+
+**Files:** `skills/executor.py`,
+`tests/test_failure_envelope_status_code.py` (new).
+
+---
+
+## F-22 · 26 skill implementations loaded inside `except ImportError: pass`
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+**Re-verified.** `skills/impl/__init__.py` had 26 separate
+`try: import skills.impl.X / except ImportError: pass` blocks. A missing
+optional dependency removed the skill from the process with no log line,
+no metric and no record. `feral doctor` reported nothing, the model was
+never offered the tool, and the user was told FERAL could not do the
+thing. `agentic_computer_use` carries the VLM path and `external_agent`
+needs the ACP bridge, so either going missing is a shipped capability
+disappearing from a running install.
+
+**Fix.** One data-driven loop over `AUTOLOAD_MODULES`.
+`ImportError` is logged at warning and recorded in
+`FAILED_IMPLEMENTATIONS`; anything else is logged at error with a
+traceback, because a module that raises at import used to take the rest
+of the block with it. `load_report()` returns loaded / failed /
+unreachable, and `api/state.py` logs the failed set at boot.
+
+On this tree: 26 modules, 0 failures.
+
+New tests: 11 (1 skipped without a booted brain).
+
+**Files:** `skills/impl/__init__.py`, `api/state.py`,
+`tests/test_skill_impl_loader_visibility.py` (new).
+
+---
+
+## F-23 · `image_gen` is a complete implementation nothing can call
+
+**Status:** MADE VISIBLE, uncommitted. **Needs an owner decision - see below.**
+
+**Re-verified.** `skills/impl/image_gen.py` is 197 lines of DALL-E 3 with
+provider failover, and it registers itself with `@register_skill` on
+import. No manifest names `image_gen`: 38 manifests in
+`skills/manifests/`, none with that `skill_id`.
+`SkillRegistry.get_skill("image_gen")` returns None, and
+`SkillExecutor` looks the implementation up by the manifest's
+`skill_id`, so it can never be dispatched. The code is loaded, the
+capability is not, and nothing said so.
+
+**What was fixed here is the silence, not the capability.**
+`report_unreachable_implementations(registry.skills.keys())` runs at boot
+once the registry is complete and logs each unreachable implementation by
+name with the fix. It takes the live registry ids rather than reading the
+manifest directory, because the directory alone over-reports:
+`weather_current` comes from the hardcoded `WEATHER_SKILL` constant and
+`browser` is built at boot by `api.state._register_browser_skill`. Both
+look unreachable from the directory and are not. Measured on this tree
+with the real registry: `image_gen` is the only one.
+
+**Decision needed.** Writing `skills/manifests/image_gen.json` would turn
+on a capability that has never been live, which is not a defect fix and
+not mine to decide. The alternatives are (a) add the manifest and ship
+image generation, (b) delete `skills/impl/image_gen.py`. Doing neither
+leaves loaded code that nothing can reach, now at least announced at
+boot.
+
+---
+
+## F-24 · `POST /api/channels/start` answered `{"ok": true}` for channels that do not exist
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+**Re-verified.** `ChannelManager.CHANNEL_TYPES` holds four entries:
+telegram, discord, slack, whatsapp. Five channel classes ship in
+`channels/` and are in none of them: `feishu.py`, `matrix.py`,
+`signal.py`, `voice_call.py`, `zalo.py`. `pyproject.toml` declares
+`channel-matrix`, `channel-signal`, `channel-voice-call`,
+`channel-feishu` and `channel-zalo` extras (lines 346-361), so an
+operator has every reason to try one. `SignalChannel` documents itself as
+a stub and its `send()` logs "dropping message".
+
+`start_channel` returned None on every path - started, unknown type,
+degraded, never connected - and the route answered
+`{"ok": True, "channel": <type>}` regardless. Asking it to start
+`signal` logged "Unknown channel type: signal" server-side and reported
+success to the caller.
+
+**Fix.** `start_channel` returns a status:
+`{"started": True, ...}` or `{"started": False, "reason": ..., "detail": ...}`
+with `unknown_channel_type` naming the four that are available,
+`degraded` carrying the channel's own reason, and `did_not_start`. The
+route maps those to 404 / 502 and returns `ok: False`. A manager that
+predates the status return is tolerated rather than reported as a
+failure.
+
+New tests: 12, 11 failing against the unfixed source.
+
+**Not fixed, and deliberately not deleted:** the five orphaned classes
+(~437 lines) remain. They are a shipped shape for later contributors and
+`signal.py` carries a written ship-ready checklist. The operator-visible
+lie is closed; whether to wire them, or to drop them and their five
+pyproject extras, is an owner decision.
+
+**Files:** `channels/base.py`, `api/routes/channels.py`,
+`tests/test_channel_start_reports_truth.py` (new).
+
+---
+
+## F-25 · A simulated vacuum answered exactly like a real one
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+**Re-verified.** `hardware/mock_roomba.py` is enabled by default
+(`FERAL_MOCK_ROOMBA` defaults to `"1"`), is registered into
+`HardwareMesh` at boot by `api/state.py`, and is reachable at
+`POST /api/hardware/mock_roomba/start`.
+
+Its envelope was deliberately identical to
+`HomeAssistantIntegration.vacuum_start`, "so the orchestrator's tool
+dispatch path can use either backend interchangeably". That parity is the
+feature and was also the defect: `{"success": true, "data": {"started":
+true, "service": "vacuum.start"}}` is what a real vacuum returns, and no
+field distinguished it. The actuator episode it writes into memory read
+`mock_roomba started for vacuum.mock_roomba` - recall and the timeline
+render `summary`, so a demo event was indistinguishable from a real one
+in the one place a user reads.
+
+**The mock is kept.** It now says what it is: `simulated: True` and a
+`note` naming `FERAL_MOCK_ROOMBA=0` on `start`, `stop` and `status`, and
+`simulated vacuum started for ... (mock_roomba)` in the episode summary.
+The existing "wrong entity" truthfulness gate is unchanged. The mesh
+entry was already honest (`name: "Mock Roomba (demo)"`,
+`metadata.mock: True`).
+
+`tests/test_mock_roomba.py::test_start_records_episode_via_memory`
+asserted the old summary text and was updated to the new contract in the
+same change.
+
+New tests: 8.
+
+**Files:** `hardware/mock_roomba.py`,
+`api/routes/security_and_hardware.py`, `tests/test_mock_roomba.py`,
+`tests/test_simulated_device_is_labelled.py` (new).
+
+---
+
+## F-26 · Three silent-at-debug swallows that lose device and voice history
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+`episode_save` failures were caught and logged at `debug`, which is off
+in every normal deployment, so the loss was unobservable:
+
+```
+hardware/adapters/cutebot.py:545     "CuteBot episode_save failed"
+hardware/capability_skill.py:526     "%s episode_save failed"
+voice/realtime_proxy.py:1670         "episode_save for voice tool call raised"
+```
+
+The third is the one that matters most: it is the only trace the 33 voice
+tool calls in the F-18 gap left anywhere. All three now log at warning.
+
+Also fixed in the same shape: `api/routes/apps.py` `open_app` carried the
+comment "Caller still gets success:True for the render; say the push part
+did not land instead of leaving it to be inferred", and then said so only
+in the server log. The response now carries `pushed` and `push_error`, so
+a client whose surface push failed stops waiting for a surface that is
+not coming.
+
+**Files:** `hardware/adapters/cutebot.py`, `hardware/capability_skill.py`,
+`voice/realtime_proxy.py`, `api/routes/apps.py`.
+
+---
+
+## Leads checked and found sound - do not re-investigate
+
+- **`perception_query` 0/6 is honest.** Five of the six failures are
+  `{"status_code": 404, "error": "No camera is currently connected. Share
+  your phone's camera from the Devices page or plug in a FERAL-HUP
+  glasses daemon, then try again."}` and the sixth is a 504 naming the
+  camera that timed out. Actionable, specific, correct. Nothing to fix.
+
+- **`skills/impl/timeline_fusion.py` and `skills/impl/todo_store.py` are
+  not dead.** Reported as never imported. They are: `timeline_fusion` by
+  `skills/impl/notes_memory.py:29`, `agents/orchestrator.py:1565` and
+  `skills/impl/external_agent.py:379`; `todo_store` by
+  `skills/impl/feral_workflows.py:13`. They are helper modules, not
+  skills, which is why they are absent from the autoload list. **NOT
+  REPRODUCIBLE.**
+
+- **`except <handler>: return <success-shaped>` is close to absent.** An
+  AST sweep of every non-test `.py` outside `build/` and `dist/` for an
+  exception handler returning `True` or a dict with `success`/`ok`/
+  `started`/`enabled`/`valid` set True found 6 sites. All 6 are correct:
+  `security/session_auth.py:109` and `bridges/sessions.py:57` are
+  documented fail-safe defaults, `infra/supervisor.py:110` is
+  `PermissionError` on `os.kill(pid, 0)` (the process does exist),
+  `skills/impl/coding_tools.py:1023` is a working glob fallback, and the
+  two in `cli/main.py` are owned by another agent.
+
+- **No user-visible "not configured" message is produced from inside a
+  broad handler.** 47 such strings exist; none sit in an `except` body.
+  The one that did was F-16, already fixed.

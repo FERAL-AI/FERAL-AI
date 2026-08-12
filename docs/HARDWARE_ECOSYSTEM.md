@@ -308,7 +308,7 @@ A smartphone that bridges BLE peripherals and provides camera/GPS/health.
 - Type: `phone`
 - Capabilities: `camera`, `gps`, `health_sensors`, `notification`, `haptic`
 - Category: mixed
-- SDKs: `feral-nodes/ios-bridge/`, `feral-nodes/android-bridge/`
+- SDKs: `feral-nodes/ios-app/Sources/FeralBridge/`, `feral-nodes/android-bridge/`
 
 ## Building a Hardware Daemon
 
@@ -409,5 +409,5 @@ The edge adapter translates the device's native protocol into the daemon WebSock
 - Safety: `feral-core/security/safety_resolver.py` (additive `cutebot__drive` + `hwdev_*__drive` speed limit)
 - Server handler: `feral-core/api/server.py` (`/v1/node` WebSocket, `peripheral_bridge_register`)
 - Python SDK: `feral-nodes/python-node-sdk/`
-- iOS bridge: `feral-nodes/ios-bridge/`
+- iOS bridge: `feral-nodes/ios-app/Sources/FeralBridge/`
 - Android bridge: `feral-nodes/android-bridge/`

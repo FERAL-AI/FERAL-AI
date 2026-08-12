@@ -16,7 +16,8 @@ We pin three things here:
 * The maximum payload size (:data:`MAX_PAYLOAD_BYTES`). 64 KiB matches
   the upper bound the brain's ui_event hot path is willing to accept;
   anything larger is denied here so the iframe can't DoS the host
-  channel.
+  channel. It is measured by :func:`payload_size_bytes`, and *what* it
+  measures is load-bearing, see that function.
 
 The TypeScript mirror at ``feral-client-v2/src/pages/AppSurface.types.ts``
 must stay in lockstep — there's a comment in both files reminding
@@ -40,11 +41,48 @@ __all__ = [
     "AppMessageType",
     "AppMessageError",
     "MAX_PAYLOAD_BYTES",
+    "payload_size_bytes",
     "validate_app_message",
 ]
 
 
 MAX_PAYLOAD_BYTES = 64 * 1024  # 64 KiB hard cap — see module docstring.
+
+
+def payload_size_bytes(payload: dict[str, Any]) -> int:
+    """Size of ``payload`` in UTF-8 bytes of its compact JSON encoding.
+
+    This is the *one* quantity ``MAX_PAYLOAD_BYTES`` is measured in, and it is
+    mirrored by ``measurePayloadBytes`` in
+    ``feral-client-v2/src/pages/AppSurface.types.ts``. Every keyword below is
+    load-bearing, because the stdlib defaults made the two sides disagree by 6x:
+
+    * ``ensure_ascii=False``. The default ``True`` emits ``\\uXXXX`` escapes,
+      six bytes for a BMP character and twelve for an astral-plane one.
+      ``{"a": "中" * 11000}`` measured 66009 and was refused by the brain while
+      the browser measured 11008 UTF-16 units and let it through.
+    * ``separators=(",", ":")``. The default is ``(", ", ": ")``, two extra
+      bytes per key that ``JSON.stringify`` never emits. On its own that was
+      enough to refuse a pure-ASCII payload of exactly 65536 bytes, which
+      measured 65537.
+    * ``errors="backslashreplace"``. ``json.loads('{"a": "\\ud800"}')`` yields
+      a lone surrogate, and with ``ensure_ascii=False`` encoding one raises
+      UnicodeEncodeError. That is a ValidationError-shaped ValueError, so the
+      validator would have reported an acceptable payload as unserialisable.
+      JavaScript's well-formed ``JSON.stringify`` re-escapes lone surrogates to
+      the same six ASCII characters ``backslashreplace`` produces, so the two
+      sides land on the same count instead of one of them erroring.
+
+    Raises ``ValueError`` if the payload cannot be JSON-encoded at all.
+    """
+    return len(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8", "backslashreplace")
+    )
 
 
 class AppMessageType(str, Enum):
@@ -109,12 +147,12 @@ class AppMessage(BaseModel):
         if not isinstance(v, dict):
             raise ValueError("payload must be a dict")
         try:
-            blob = json.dumps(v, default=str).encode("utf-8")
-        except (TypeError, ValueError) as exc:
+            size = payload_size_bytes(v)
+        except (TypeError, ValueError, RecursionError) as exc:
             raise ValueError(f"payload must be JSON-serialisable: {exc}") from exc
-        if len(blob) > MAX_PAYLOAD_BYTES:
+        if size > MAX_PAYLOAD_BYTES:
             raise ValueError(
-                f"payload too large: {len(blob)} bytes "
+                f"payload too large: {size} bytes "
                 f"(max {MAX_PAYLOAD_BYTES})"
             )
         return v

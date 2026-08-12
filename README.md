@@ -49,7 +49,9 @@ It ships as `feral-core` (the brain runtime), `feral-client-v2` (web control sur
 
 ## Quick Start
 
-> **Requires Python 3.11+** on macOS 13+ or modern Linux (Ubuntu 22.04+, Fedora 40+, Arch). Windows is not supported as a host yet — use WSL2.
+> **Requires Python 3.11+ with SQLite FTS5** on macOS 13+ or modern Linux (Ubuntu 22.04+, Fedora 40+, Arch). Windows is not supported as a host yet, use WSL2.
+>
+> Almost every interpreter has FTS5, but not all: python-build-standalone 3.11.13, for example, ships SQLite 3.49.1 without it. FERAL's memory store creates FTS5 tables at boot, so it refuses to start on such an interpreter with a message naming it. Run `feral doctor` if you are unsure: it reports FTS5 and loadable-extension support as two separate rows.
 
 ### Recommended: one-line install
 
@@ -180,17 +182,33 @@ cd FERAL-AI
 make dev
 
 # brain (headless)
-feral serve
+.venv/bin/feral serve      # or: make serve
 
 # web client v2 (optional live dev)
 cd feral-client-v2
 npm run dev
 ```
 
+`make dev` is the only command you need. It builds `.venv/` from the CPython version in `.python-pin` (3.11.15, fetched from python-build-standalone), installs `feral-core[all,dev]` against `feral-core/requirements.lock` (the same extras and constraint CI uses), and ends by printing what it built:
+
+```
+  interpreter : /path/to/.venv/bin/python (Python 3.11.15)
+  sqlite      : 3.53.1
+  fts5        : OK
+  loadable ext: OK
+  Environment verified.
+```
+
+The pin exists because FERAL needs SQLite FTS5 (required: the memory store creates FTS5 tables at boot) and benefits from loadable SQLite extensions (optional: it gates `sqlite-vec`), and common interpreters ship one without the other. If `fts5` is not `OK`, `make dev` fails rather than leaving you with an environment where the brain cannot start.
+
+`make dev` needs `uv >= 0.12`; if your machine has an older one or none, it downloads a pinned copy into `.uv/` and leaves your system `uv` untouched. Other targets: `make dev-reset` rebuilds `.venv` from scratch, `make dev-verify` re-prints the report, `make clean-uv` removes the repo-local uv.
+
+Use `.venv/bin/python` (or the `make` targets, which route there for you) rather than a bare `python3`. This repo deliberately has **no** `.python-version` file: pyenv reads that name, and a pin it cannot satisfy silently redirects every `python3`, `pip` and `ruff` you run inside the tree.
+
 Run the tests locally:
 
 ```bash
-cd feral-core && python -m pytest tests/ --no-cov -q
+cd feral-core && ../.venv/bin/python -m pytest tests/ --no-cov -q
 cd ../feral-client-v2 && npm test
 ```
 

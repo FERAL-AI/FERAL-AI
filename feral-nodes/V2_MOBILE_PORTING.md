@@ -137,7 +137,7 @@ feeling. Everything else can migrate later.
 
 Until v2026.5.28 the Android bridge's `TheoraBrainClient.kt` was
 missing four outbound HUP message types and three inbound branches
-that iOS `feral-nodes/ios-bridge/FeralBrainClient.swift` already
+that iOS `feral-nodes/ios-app/Sources/FeralBridge/FeralBrainClient.swift` already
 shipped. That left Android phones unable to:
 
 - Send batched sensor frames (`sensor_batch`)

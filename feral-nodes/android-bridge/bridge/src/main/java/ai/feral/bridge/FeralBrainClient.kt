@@ -193,7 +193,7 @@ class FeralBrainClient(
 
     /**
      * Batched sensor frame — mirrors iOS `sendBatchSensorData(_:)` at
-     * `feral-nodes/ios-bridge/FeralBrainClient.swift:241-253`. Use when
+     * `feral-nodes/ios-app/Sources/FeralBridge/FeralBrainClient.swift:277-289`. Use when
      * multiple readings are produced in the same tick (e.g. glasses
      * sync flushing N samples at once) to avoid the per-reading round
      * trip cost of `sendSensorTelemetry`.
@@ -223,7 +223,7 @@ class FeralBrainClient(
 
     /**
      * Camera frame — mirrors iOS `sendCameraFrame(base64:source:)` at
-     * `feral-nodes/ios-bridge/FeralBrainClient.swift:309-321`. The
+     * `feral-nodes/ios-app/Sources/FeralBridge/FeralBrainClient.swift:432-443`. The
      * payload uses `image_b64` (base64-encoded JPEG/PNG) and a `source`
      * label (`rear`, `front`, `glasses`, etc.) the brain uses for
      * spatial reasoning.
@@ -245,7 +245,7 @@ class FeralBrainClient(
     /**
      * Skill approval — mirrors iOS `approveSkill(skillId:)` /
      * `rejectSkill(skillId:)` at
-     * `feral-nodes/ios-bridge/FeralBrainClient.swift:395-417`. Sent in
+     * `feral-nodes/ios-app/Sources/FeralBridge/FeralBrainClient.swift:526-548`. Sent in
      * response to a `skill_proposal` frame the brain pushed when the
      * orchestrator wanted to install a new skill mid-conversation.
      */
@@ -267,7 +267,7 @@ class FeralBrainClient(
 
     /**
      * Confirmation response — mirrors the inline response emitted by
-     * iOS at `feral-nodes/ios-bridge/FeralBrainClient.swift:482-494`
+     * iOS at `feral-nodes/ios-app/Sources/FeralBridge/FeralBrainClient.swift:610-624`
      * when the user resolves a `confirmation_required` prompt. Public
      * here too so callers without a `ConfirmationResponder` (e.g.
      * deferred UI flows) can reply asynchronously.

@@ -54,7 +54,7 @@ parity). The legacy `?api_key=` query auth is accepted by brains
 during the deprecation window (sunset `2026.7.0`). The bridge
 connects to `wss://host[:port]/v1/node` (or `ws://` for Mode A LAN
 with explicit opt-in) and handles the full HUP surface that iOS
-`feral-nodes/ios-bridge/FeralBrainClient.swift` exposes:
+`feral-nodes/ios-app/Sources/FeralBridge/FeralBrainClient.swift` exposes:
 
 Outbound message types:
 - `register` — node identity + capabilities

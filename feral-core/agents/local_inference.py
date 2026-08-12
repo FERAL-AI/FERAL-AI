@@ -146,6 +146,23 @@ class LocalLLMEngine(ABC):
         return clean_text.strip(), tool_calls
 
 
+def _mlx_sampler(temperature: float):
+    """Build the sampler mlx-lm wants for a given temperature.
+
+    mlx-lm used to take ``temp=`` on ``generate``/``stream_generate``. It now
+    forwards unrecognised kwargs into ``generate_step``, which is keyword-only,
+    has no ``temp`` and no ``**kwargs``, so the old call raised
+
+        TypeError: generate_step() got an unexpected keyword argument 'temp'
+
+    rather than ignoring the argument. Sampling moved behind an explicit
+    sampler callable, so temperature has to be baked into one here.
+    """
+    from mlx_lm.sample_utils import make_sampler
+
+    return make_sampler(temp=temperature)
+
+
 class MLXEngine(LocalLLMEngine):
     """Apple Silicon inference via mlx-lm."""
 
@@ -178,7 +195,7 @@ class MLXEngine(LocalLLMEngine):
             from mlx_lm import generate as mlx_generate
             return mlx_generate(
                 self._model, self._tokenizer, prompt=prompt,
-                max_tokens=max_tokens, temp=temperature,
+                max_tokens=max_tokens, sampler=_mlx_sampler(temperature),
             )
 
         loop = asyncio.get_event_loop()
@@ -189,17 +206,28 @@ class MLXEngine(LocalLLMEngine):
             await self.load_model()
 
         def _stream():
+            sampler = _mlx_sampler(temperature)
             try:
                 from mlx_lm import stream_generate
-                return list(stream_generate(
-                    self._model, self._tokenizer, prompt=prompt,
-                    max_tokens=max_tokens, temp=temperature,
-                ))
+                # stream_generate yields GenerationResponse dataclasses, not
+                # strings. This used to `str()` whatever came out, which turns
+                # each chunk into "GenerationResponse(text='hi', token=...)"
+                # and streams dataclass reprs at the user. `.text` is the
+                # segment.
+                return [
+                    response.text
+                    for response in stream_generate(
+                        self._model, self._tokenizer, prompt=prompt,
+                        max_tokens=max_tokens, sampler=sampler,
+                    )
+                ]
             except ImportError:
+                # Retained for an mlx-lm without stream_generate; generate()
+                # returns the whole completion as one string.
                 from mlx_lm import generate as mlx_generate
                 result = mlx_generate(
                     self._model, self._tokenizer, prompt=prompt,
-                    max_tokens=max_tokens, temp=temperature,
+                    max_tokens=max_tokens, sampler=sampler,
                 )
                 return [result]
 

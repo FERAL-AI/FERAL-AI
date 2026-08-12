@@ -3,15 +3,18 @@
 Implements the client side of the 6-digit-code flow described in
 `HUP_SPEC.md` §4.1: generate a code, poll the brain's pair-status endpoint
 until the user types the code, then persist the returned API key to
-``~/.feral/node-keys/<node_id>.key`` with mode 0600.
+``~/.feral/node-keys/<safe>.key`` with mode 0600, where ``<safe>`` is
+:func:`key_filename` as specified in `HUP_SPEC.md` §4.1.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import ssl
 import urllib.request
@@ -22,11 +25,53 @@ logger = logging.getLogger("feral_node_sdk.pairing")
 
 KEYS_DIR = Path.home() / ".feral" / "node-keys"
 
+# Exactly the brain's NodeRegisterPayload node_id class, and deliberately
+# ASCII. This used to be `c.isalnum() or c in "._-:"`, and str.isalnum() is
+# Unicode-aware, so "café" was written verbatim here while the TypeScript SDK
+# wrote "caf_" for the same node.
+_DISALLOWED_IN_KEY_FILENAME = re.compile(r"[^A-Za-z0-9._:-]")
+_MAX_NODE_ID_LENGTH = 128
+_DISAMBIGUATOR_LENGTH = 8
+
+
+def key_filename(node_id: str) -> str:
+    """Canonical key filename for ``node_id``. See `HUP_SPEC.md` §4.1 step 5.
+
+    Mirrored by ``keyFilename`` in ``feral-nodes/ts-node-sdk/src/pairing.ts``
+    and pinned by the shared fixture table at
+    ``feral-nodes/spec-fixtures/node_key_filename.json``.
+
+    The two SDKs each derived this by hand from the spec's prose and got
+    different answers, so a node paired through one silently re-paired under
+    the other: "sensor 01" was ``sensor01.key`` in Python and ``sensor_01.key``
+    in TypeScript.
+
+    Both old rules also mapped distinct node ids onto one file, which is the
+    worse half. Python dropped disallowed characters, so every all-punctuation
+    node id and the empty one all wrote to a hidden file literally named
+    ``.key``. TypeScript replaced them, so "a b" and "a_b" shared
+    ``a_b.key``. The hash suffix is what makes the mapping injective again;
+    without it, replacement alone is still many-to-one.
+
+    The suffix is applied only when sanitising changed something, so every node
+    id the brain accepts keeps the filename both SDKs already write and no
+    working pairing moves.
+    """
+    sanitised = _DISALLOWED_IN_KEY_FILENAME.sub("_", node_id)
+    if sanitised == node_id and 1 <= len(node_id) <= _MAX_NODE_ID_LENGTH:
+        return f"{sanitised}.key"
+    # Truncated before hashing so an over-long node id cannot produce a
+    # filename the filesystem refuses; the hash still covers the whole id.
+    digest = hashlib.sha256(node_id.encode("utf-8")).hexdigest()
+    return (
+        f"{sanitised[:_MAX_NODE_ID_LENGTH]}"
+        f"-{digest[:_DISAMBIGUATOR_LENGTH]}.key"
+    )
+
 
 def _key_path(node_id: str) -> Path:
     KEYS_DIR.mkdir(parents=True, exist_ok=True)
-    safe = "".join(c for c in node_id if c.isalnum() or c in "._-:")
-    return KEYS_DIR / f"{safe}.key"
+    return KEYS_DIR / key_filename(node_id)
 
 
 def load_key(node_id: str) -> Optional[str]:

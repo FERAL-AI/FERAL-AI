@@ -28,6 +28,40 @@ export const MAX_PAYLOAD_BYTES = 64 * 1024;
 
 const MAX_ID_LENGTH = 128;
 
+const PAYLOAD_ENCODER = new TextEncoder();
+
+/**
+ * Size of `payload` in UTF-8 bytes of its compact JSON encoding, or `null`
+ * if it cannot be serialised at all.
+ *
+ * This is the *one* quantity MAX_PAYLOAD_BYTES is measured in, and it is
+ * mirrored by `payload_size_bytes()` in feral-core/genui/app_message_schema.py.
+ *
+ * This half used to compare `JSON.stringify(payload).length`, which is UTF-16
+ * code units: one per BMP character, two per emoji. The brain counted UTF-8
+ * bytes of an `ensure_ascii=True` encoding, which is six bytes per BMP
+ * character and twelve per emoji. `{a: "中".repeat(11000)}` was 11008 here and
+ * 66009 there, so the brain refused payloads this guard had already approved.
+ *
+ * The gap ran the dangerous way too: 30000 CJK characters is 90008 bytes of
+ * payload and only 30002 UTF-16 units, so an oversize payload passed the guard
+ * whose stated job is to stop the iframe flooding the host channel.
+ *
+ * TextEncoder never sees a lone surrogate here: JSON.stringify has been
+ * well-formed since ES2019 and escapes them to six ASCII characters, which is
+ * what the Python side's `errors="backslashreplace"` produces.
+ */
+export function measurePayloadBytes(payload: unknown): number | null {
+  let serialised: string;
+  try {
+    serialised = JSON.stringify(payload);
+  } catch {
+    return null;
+  }
+  if (typeof serialised !== 'string') return null;
+  return PAYLOAD_ENCODER.encode(serialised).length;
+}
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 }
@@ -61,13 +95,8 @@ export function validateAppMessage(raw: unknown): AppMessage | null {
     return null;
   }
 
-  let serialised: string;
-  try {
-    serialised = JSON.stringify(payload);
-  } catch {
-    return null;
-  }
-  if (serialised.length > MAX_PAYLOAD_BYTES) return null;
+  const payloadBytes = measurePayloadBytes(payload);
+  if (payloadBytes === null || payloadBytes > MAX_PAYLOAD_BYTES) return null;
 
   // Reject unknown top-level keys to mirror Python's `extra="forbid"`.
   const allowedKeys = new Set(['type', 'payload', 'message_id', 'signed_with_key_id']);
