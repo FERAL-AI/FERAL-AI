@@ -235,10 +235,11 @@ def _report_dim_mismatch(dim_a: int, dim_b: int) -> None:
         "embedding_dimension_mismatch query_dim=%d stored_dim=%d — the "
         "stored vectors were written by a different embedding provider "
         "(OpenAI=%d, local=%d). Vector search is dead for this data "
-        "until the two agree: either set FERAL_EMBED_PROVIDER back to "
-        "the provider that wrote them, or clear the vector tables so "
-        "they are re-embedded at the current dimension. Keyword/FTS "
-        "search is unaffected.",
+        "until the two agree. FIX: run `feral memory reembed` (it "
+        "rewrites every stored vector at the active provider's "
+        "dimension; `feral memory reembed check` reports first without "
+        "writing), or set FERAL_EMBED_PROVIDER back to the provider "
+        "that wrote them. Keyword/FTS search is unaffected.",
         dim_a, dim_b, OPENAI_DIM, LOCAL_DIM,
     )
 
@@ -250,9 +251,11 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     # np.dot raises a shape ValueError, and the three numpy-scan callers all
     # wrap the loop in `except Exception: logger.debug(...)`, so switching
     # FERAL_EMBED_PROVIDER silently turns vector search into "returns nothing"
-    # with a debug line nobody reads. There is no re-embedding migration in
-    # this codebase, so the honest behaviour is to say so loudly and let the
-    # caller degrade to its FTS path rather than to guess at a conversion.
+    # with a debug line nobody reads. Guessing at a conversion between
+    # dimensions is not possible, so the honest behaviour is to say so
+    # loudly, name the migration that fixes it (`feral memory reembed`,
+    # implemented in memory/reembed.py) and let the caller degrade to its
+    # FTS path in the meantime.
     shape_a = getattr(a, "shape", None)
     shape_b = getattr(b, "shape", None)
     if shape_a is not None and shape_b is not None and shape_a != shape_b:
@@ -261,7 +264,8 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
         _report_dim_mismatch(dim_a, dim_b)
         raise EmbeddingDimensionMismatch(
             f"query vector has {dim_a} dims but stored vector has {dim_b}; "
-            "embedding provider changed and stored vectors were not re-embedded"
+            "embedding provider changed and stored vectors were not "
+            "re-embedded. Run `feral memory reembed`"
         )
 
     norm_a = np.linalg.norm(a)
@@ -357,8 +361,9 @@ def cosine_similarity_bulk(
     ``np.frombuffer(b"".join(blobs))`` over blobs of MIXED widths does not
     fail, it silently reinterprets the byte stream and returns confident
     garbage. That is a real state to be in: a provider switch (1536-dim
-    OpenAI vs 384-dim local) leaves the table holding both widths, because
-    there is no re-embedding migration in this codebase.
+    OpenAI vs 384-dim local) leaves the table holding both widths until
+    ``feral memory reembed`` is run, and a partly-completed migration
+    leaves it holding both by definition.
 
     So every blob's width is checked against the query's before any decode.
     If any row is the wrong width, the first such row (in input order) is
@@ -393,7 +398,7 @@ def cosine_similarity_bulk(
         raise EmbeddingDimensionMismatch(
             f"query vector has {dim} dims but stored vector has {stored_dim} "
             f"({bad_width} bytes); embedding provider changed and stored "
-            "vectors were not re-embedded"
+            "vectors were not re-embedded. Run `feral memory reembed`"
         )
 
     norm_q = float(np.linalg.norm(q))

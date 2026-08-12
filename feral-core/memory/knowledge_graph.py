@@ -28,7 +28,9 @@ import aiosqlite
 import numpy as np
 
 from memory.fts_query import fts5_match_query
+from memory.sqlite_features import require_fts5
 from memory.embeddings import (
+    EmbeddingDimensionMismatch,
     EmbeddingProvider,
     vec_to_blob,
     cosine_similarity_bulk,
@@ -76,7 +78,51 @@ class KnowledgeGraph:
         # entity index available? Set by :meth:`_init_schema` based
         # on extension load + CREATE VIRTUAL TABLE outcome.
         self._vec_entities_available: bool = False
+        # Non-transient reason the embedding leg of entity search is dead,
+        # or None. Read by MemoryStore / /internal/memory/stats, which is
+        # the only reason the operator ever finds out: a dead vector leg
+        # returns a SHORTER list, never an error, and a shorter list is
+        # indistinguishable from "nothing else matched".
+        self._vector_leg_error: str | None = None
+        # Distinct leg errors already logged at ERROR by this instance. The
+        # mismatch repeats on EVERY query (it is a property of the stored
+        # data, not of the query), so an unthrottled line would bury the
+        # log while adding nothing: the state stays readable in
+        # _vector_leg_error and in /internal/memory/stats. Same reasoning,
+        # and the same shape, as embeddings._REPORTED_DIM_MISMATCHES.
+        self._logged_leg_errors: set[str] = set()
         self._init_schema()
+
+    @property
+    def vector_leg_error(self) -> str | None:
+        """Why entity vector search is degraded, or None if it is not."""
+        return self._vector_leg_error
+
+    def _should_log_leg_error(self, exc: Exception) -> bool:
+        """True the first time this instance sees this exact failure."""
+        key = f"{type(exc).__name__}: {exc}"
+        if key in self._logged_leg_errors:
+            return False
+        self._logged_leg_errors.add(key)
+        return True
+
+    def _record_vector_leg_error(self, exc: Exception) -> None:
+        """Publish a dead vector leg everywhere an operator might look.
+
+        Mirrored onto the owning MemoryStore because that is what
+        ``/internal/memory/stats`` and ``feral doctor`` read
+        (``_semantic_health`` in api/routes/memory.py). Without the mirror
+        the KG could be dead while the endpoint reported
+        ``semantic_search: ok``, which is how this survived long enough to
+        reach a release.
+        """
+        self._vector_leg_error = str(exc)
+        store = self._store
+        if store is not None:
+            try:
+                store._vector_leg_error = str(exc)
+            except Exception as set_exc:  # pragma: no cover - attribute is plain
+                logger.debug("could not mirror vector_leg_error to store: %s", set_exc)
 
     async def _conn(self) -> aiosqlite.Connection:
         """Acquire an aiosqlite connection.
@@ -115,6 +161,15 @@ class KnowledgeGraph:
 
     def _init_schema(self):
         """Boot-time DDL. Sync because __init__ is sync."""
+        # Same guard as MemoryStore._init_db, and it is needed here too:
+        # KnowledgeGraph can be constructed standalone (unit tests and
+        # `feral memory` subcommands do), in which case this executescript
+        # is the first FTS5 statement the process runs. The entities_fts
+        # table is created mid-script at line 162, so without the guard a
+        # non-FTS5 interpreter commits `entities`, `entity_aliases` and
+        # `relations` and then dies with `no such module: fts5`.
+        require_fts5("FERAL's knowledge graph")
+
         conn = sqlite3.connect(self.db_path)
         try:
             conn.executescript("""
@@ -204,6 +259,35 @@ class KnowledgeGraph:
             try:
                 from memory.embeddings import sqlite_vec_available, _try_load_sqlite_vec
                 if sqlite_vec_available() and _try_load_sqlite_vec(conn):
+                    # A vec0 table's dimension is baked in at CREATE time and
+                    # `CREATE VIRTUAL TABLE IF NOT EXISTS` is a silent no-op
+                    # against one built at another dimension: every upsert is
+                    # then rejected (and swallowed at debug level by
+                    # _vec_upsert_entity) and every search returns nothing.
+                    # embeddings.SQLiteVecIndex._init has guarded this since
+                    # the vec_chunks index shipped; vec_entities never did,
+                    # so the same provider switch that stranded
+                    # entities.embedding at 1536 dims would also have left
+                    # this index quietly unwritable. Refuse it instead, and
+                    # name the command that repairs it.
+                    from memory.reembed import vec0_declared_dim
+                    row = conn.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='table' "
+                        "AND name='vec_entities'"
+                    ).fetchone()
+                    declared = vec0_declared_dim(row[0] if row else None)
+                    if declared is not None and declared != self._embedder.dimension:
+                        self._vec_entities_available = False
+                        logger.error(
+                            "KG vec0 entity index was built at dim=%d but the "
+                            "active embedding provider produces dim=%d, "
+                            "refusing to use it (entity search falls back to "
+                            "the numpy scan, which is correct and slower). "
+                            "FIX: run `feral memory reembed`, which rebuilds "
+                            "the index at the current dimension.",
+                            declared, self._embedder.dimension,
+                        )
+                        return
                     conn.execute(f"""
                         CREATE VIRTUAL TABLE IF NOT EXISTS vec_entities
                         USING vec0(
@@ -666,12 +750,43 @@ class KnowledgeGraph:
 
         # One blocked matmul instead of a Python loop of blob_to_vec +
         # cosine_similarity. See cosine_similarity_bulk for the measured
-        # numbers (286ms -> 23ms at 100k rows). A dimension mismatch still
-        # raises out of here exactly as the per-row loop did.
+        # numbers (286ms -> 23ms at 100k rows).
         vec_results = {}
-        sims = cosine_similarity_bulk(
-            query_vec, [e["embedding"] for e in all_entities]
-        )
+        try:
+            sims = cosine_similarity_bulk(
+                query_vec, [e["embedding"] for e in all_entities]
+            )
+        except EmbeddingDimensionMismatch as exc:
+            # This leg is dead until the store is migrated, and it will
+            # fail identically on every subsequent call, so retrying or
+            # re-raising per query buys nothing. Letting it propagate is
+            # what killed the whole knowledge graph in production: this
+            # method is called from MemoryStore.search_all (via
+            # context_builder), from the memory.search RPC
+            # (gateway/protocol.py), from the taskflow memory.search step
+            # and from /api/knowledge/entities, none of which caught it, so
+            # a stale entities table took out episode, note and knowledge
+            # recall as well. Measured on a copy of the real store: 5 of 5
+            # search_all calls raised.
+            #
+            # So the LEG degrades, not the query: the FTS results computed
+            # above are still returned, exact-name and alias lookups are
+            # unaffected, and the failure is published through
+            # _record_vector_leg_error rather than being swallowed. Silence
+            # here would be the actual bug; an empty list that looks like a
+            # normal answer is how this class of defect survives.
+            self._record_vector_leg_error(exc)
+            logger.log(
+                logging.ERROR if self._should_log_leg_error(exc) else logging.DEBUG,
+                "Entity vector search is DEAD: %s. entities.embedding was "
+                "written by a different embedding provider than the one now "
+                "configured, so semantic entity recall returns nothing and "
+                "the knowledge graph has degraded to FTS-only. FIX: run "
+                "`feral memory reembed` (check first with `feral memory "
+                "reembed check`), then restart the brain.",
+                exc,
+            )
+            sims = []
         for e, sim in zip(all_entities, sims):
             sim = float(sim)
             if sim > 0.3:
@@ -989,9 +1104,28 @@ class KnowledgeGraph:
         # maximum, which is the row the strictly-greater-than loop kept.
         best_match = None
         best_sim = 0.0
-        sims = cosine_similarity_bulk(
-            name_vec, [e["embedding"] for e in all_entities]
-        )
+        try:
+            sims = cosine_similarity_bulk(
+                name_vec, [e["embedding"] for e in all_entities]
+            )
+        except EmbeddingDimensionMismatch as exc:
+            # WRITE path, not a read path: this runs inside add_entity, so
+            # propagating would make every KG write raise, and knowledge
+            # ingest (knowledge_store -> add_entity) would stop entirely
+            # while the store waited for a migration. Fuzzy linking is an
+            # optimisation on top of the exact name / alias lookup that
+            # add_entity already did, so losing it costs near-duplicate
+            # entities ("Feral" vs "FERAL AI"), not correctness. Recorded
+            # loudly for the same reason as the read path.
+            self._record_vector_leg_error(exc)
+            logger.log(
+                logging.ERROR if self._should_log_leg_error(exc) else logging.DEBUG,
+                "Entity linking degraded to exact-name matching: %s. "
+                "New entities may duplicate existing ones until "
+                "`feral memory reembed` is run.",
+                exc,
+            )
+            return None
         if sims.size:
             top = int(np.argmax(sims))
             if float(sims[top]) > best_sim:

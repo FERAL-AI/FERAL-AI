@@ -5,6 +5,9 @@ Usage
     feral memory status          show which backend is active, counts, dim
     feral memory list            list known backend ids + whether deps are installed
     feral memory switch chroma   switch to the Chroma backend (persists to config)
+    feral memory reembed check   report every stored vector's width, write nothing
+    feral memory reembed         rewrite EVERY table's vectors at the active
+                                 provider's dimension (see memory/reembed.py)
 
 The config key is ``memory.backend`` in ``~/.feral/settings.json``.
 Switching is cheap: it's just a config change. The brain reloads the
@@ -288,56 +291,89 @@ def cmd_memory(action: str, backend_id: str | None, *, flags=None) -> None:
         provider selection, and every chunk written before it is
         orphaned.
 
-        Read-then-write per chunk, committing as it goes, so an
-        interrupted run leaves a partially migrated store that the next
-        run finishes rather than a corrupt one.
-        """
-        import asyncio
-        import sqlite3
+        Every table is covered, not just ``memory_chunks``. This command
+        used to inline a single-table loop, and that is how the knowledge
+        graph died on a real install: chunks were migrated to 384 dims and
+        ``entities`` was left at 1536, so every entity query raised. The
+        table list, the discovery pass that catches a table the list has
+        not been taught about, and the batching all live in
+        ``memory/reembed.py`` now.
 
+        ``feral memory reembed check`` reports without writing.
+        """
         from config.loader import feral_data_home
-        from memory.embeddings import EmbeddingProvider, vec_to_blob
+        from memory.reembed import DegradedProviderError, reembed_store
 
         db = feral_data_home() / "memory.db"
         if not db.exists():
             print(f"  No memory database at {db}")
             sys.exit(1)
 
-        embedder = EmbeddingProvider()
-        target_dim = embedder.dimension
-        print(f"  Provider: {embedder.provider_name}  ({target_dim}d)")
+        dry_run = (backend_id or "").strip().lower() in ("check", "--check", "dry-run")
 
-        conn = sqlite3.connect(str(db))
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT id, text_content, embedding FROM memory_chunks "
-            "WHERE embedding IS NOT NULL"
-        ).fetchall()
+        try:
+            report = reembed_store(
+                str(db), dry_run=dry_run, on_progress=lambda msg: print(msg),
+            )
+        except DegradedProviderError as exc:
+            print(f"  Refusing to re-embed: {exc}")
+            sys.exit(1)
 
-        stale = [r for r in rows if len(r["embedding"]) // 4 != target_dim]
-        print(f"  Chunks: {len(rows)} total, {len(stale)} written by a different provider")
-        if not stale:
-            print("  Nothing to do; every stored vector matches the active provider.")
-            conn.close()
+        scan = report["scan"]
+        print(f"  Provider: {report['provider']}  ({report['target_dim']}d)")
+        # This is the state the run STARTED from. Printed after the
+        # progress lines because the scan is part of the report, and
+        # labelled so nobody reads "stale" as the outcome.
+        print("  Stored vectors before this run:")
+        for col in scan.columns:
+            widths = ", ".join(
+                f"{dim}d x{count}" for dim, count in sorted(col.widths.items())
+            ) or "none"
+            flag = "" if col.healthy else "   <- stale"
+            known = "" if col.registered else "   <- NOT COVERED by this migration"
+            print(f"    {col.table}.{col.column}: {widths}{flag}{known}")
+        for vec in scan.vec0:
+            state = "ok" if vec.matches else "stale, will be rebuilt"
+            print(f"    {vec.table} (vec0 index): {vec.declared_dim}d  [{state}]")
+
+        if dry_run:
+            print(
+                "  Dry run; nothing written. "
+                + (
+                    "Run `feral memory reembed` to migrate."
+                    if scan.stale_total
+                    else "Every stored vector already matches the active provider."
+                )
+            )
             return
 
-        done = 0
-        for r in stale:
-            text = r["text_content"]
-            if not text:
-                continue
-            vec = asyncio.run(embedder.embed(text))
-            conn.execute(
-                "UPDATE memory_chunks SET embedding = ? WHERE id = ?",
-                (vec_to_blob(vec), r["id"]),
-            )
-            done += 1
-            if done % 200 == 0:
-                conn.commit()
-                print(f"    {done}/{len(stale)}")
-        conn.commit()
-        conn.close()
-        print(f"  Re-embedded {done} chunk(s). Restart the brain to pick it up.")
+        if not report["tables"] and not report["vec0"]:
+            print("  Nothing to do; every stored vector matches the active provider.")
+            return
+
+        for entry in report["tables"]:
+            if entry["stale"]:
+                print(
+                    f"  {entry['table']}: re-embedded {entry['updated']}, "
+                    f"cleared {entry['nulled']} with no source text"
+                )
+
+        if not report["ok"]:
+            # Exit non-zero rather than print a success line over a store
+            # that is still broken. A migration that reports success while
+            # a table stays stale is the exact failure mode being fixed.
+            left = report.get("scan_after") or scan
+            for col in left.columns:
+                if col.stale:
+                    print(
+                        f"  STILL STALE: {col.table}.{col.column} has {col.stale} "
+                        f"vector(s) at the wrong width"
+                        + ("" if col.registered else " and is not in the migration registry")
+                    )
+            sys.exit(1)
+
+        print("  Every stored vector now matches the active provider.")
+        print("  Restart the brain to pick it up.")
         return
 
     if action == "status":

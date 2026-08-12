@@ -70,6 +70,7 @@ except Exception:
 
 from config.loader import feral_data_home
 from memory.fts_query import STRICT as FTS_STRICT, fts5_match_query
+from memory.sqlite_features import require_fts5
 from memory.context_builder import (
     build_context_for_llm_async as context_build_context_for_llm_async,
     compact_session as context_compact_session,
@@ -383,6 +384,11 @@ class MemoryStore:
         #: Surfaced by the memory backend endpoint so a degraded
         #: semantic search cannot masquerade as "nothing matched".
         self._vector_leg_error: str | None = None
+        #: Per-tier failures from the last :meth:`search_all` call, as
+        #: ``[{"tier": ..., "error": ...}]``. Declared here rather than
+        #: only being set by the aggregator so a caller can distinguish
+        #: "no search has run yet" from "the last search was complete".
+        self.last_search_degradations: list[dict] = []
         # Corpus mean vector, cached with the chunk count it was built from.
         # Recomputed when the corpus grows enough to move it; see
         # _centered_similarity for why it exists at all.
@@ -865,6 +871,18 @@ class MemoryStore:
         local-first workloads — durable across crashes, half the fsync
         traffic of FULL.
         """
+        # Checked before the first statement, not lazily at the first
+        # CREATE VIRTUAL TABLE. Without FTS5 this method used to die at
+        # line 890 with `sqlite3.OperationalError: no such module: fts5`
+        # (reproduced on python-build-standalone 3.11.13 / SQLite 3.49.1,
+        # the build an earlier desktop-bundling spike selected). That
+        # traceback points at a triple-quoted string inside store.py and
+        # never names the interpreter, so it reads like a FERAL bug.
+        # It also fired *after* `notes` and its triggers were created,
+        # leaving a database whose triggers reference a missing FTS
+        # table. Failing first keeps the file untouched.
+        require_fts5("FERAL's memory store")
+
         conn = sqlite3.connect(self.db_path)
         try:
             try:
@@ -1119,9 +1137,89 @@ class MemoryStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_forgotten ON episodes(forgotten_at, decay_factor)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_last_accessed ON episodes(last_accessed_at)")
 
+            self._repair_knowledge_fts(conn)
+
             conn.commit()
         finally:
             conn.close()
+
+    @staticmethod
+    def _repair_knowledge_fts(conn: sqlite3.Connection) -> bool:
+        """Re-point ``knowledge_fts`` at the live ``knowledge`` table.
+
+        The F1 migration ends with ``ALTER TABLE knowledge RENAME TO
+        knowledge__deprecated``. SQLite rewrites every trigger that
+        referenced the old name to reference the new one, so
+        ``knowledge_ai`` / ``knowledge_ad`` / ``knowledge_fts_update`` all
+        followed the table into deprecation and kept maintaining
+        ``knowledge_fts`` from the corpse. ``_init_db`` then recreates an
+        empty ``knowledge`` table, but its ``CREATE TRIGGER IF NOT EXISTS``
+        statements are no-ops, because triggers with those names already
+        exist on the renamed table.
+
+        Found on the real store: ``knowledge`` 0 rows,
+        ``knowledge__deprecated`` 29 rows, ``knowledge_fts`` 29 rows
+        indexing the deprecated ones. That is not merely a stale index, it
+        is a WRONG-ANSWER generator: ``_knowledge_search_flat`` joins
+        ``knowledge_fts.rowid`` to ``knowledge.rowid``, and rowids in a
+        freshly recreated table restart at 1, so the first new row written
+        on the legacy path (``memory.kg.unified = false``) inherits the
+        deprecated row 1's search terms and is returned for queries that
+        match text it does not contain.
+
+        Idempotent: does nothing once the triggers are bound to
+        ``knowledge``. Returns True when it repaired something.
+        """
+        misbound = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name, tbl_name FROM sqlite_master WHERE type='trigger' "
+                "AND name IN ('knowledge_ai', 'knowledge_ad', 'knowledge_fts_update')"
+            ).fetchall()
+            if row[1] != "knowledge"
+        ]
+        if not misbound:
+            return False
+
+        for name in misbound:
+            conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge BEGIN
+                INSERT INTO knowledge_fts(rowid, subject, predicate, object)
+                VALUES (new.rowid, new.subject, new.predicate, new.object);
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS knowledge_ad AFTER DELETE ON knowledge BEGIN
+                DELETE FROM knowledge_fts WHERE rowid = old.rowid;
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS knowledge_fts_update AFTER UPDATE ON knowledge BEGIN
+                DELETE FROM knowledge_fts WHERE rowid = old.rowid;
+                INSERT INTO knowledge_fts(rowid, subject, predicate, object) VALUES (new.rowid, new.subject, new.predicate, new.object);
+            END
+        """)
+        # Rebuild the index from the live table. knowledge_fts stores its
+        # own content (it is not an external-content fts5 table), so the
+        # 'rebuild' command is unavailable and the rows have to be
+        # replaced by hand. The deprecated rows are not lost by this: the
+        # F1 migration already ported every one of them into the KG
+        # entities/relations tables, which is what knowledge_search reads
+        # when memory.kg.unified is on.
+        conn.execute("DELETE FROM knowledge_fts")
+        conn.execute(
+            "INSERT INTO knowledge_fts(rowid, subject, predicate, object) "
+            "SELECT rowid, subject, predicate, object FROM knowledge"
+        )
+        conn.commit()
+        logger.warning(
+            "Repaired knowledge_fts: %s were bound to a deprecated table and "
+            "have been re-pointed at the live `knowledge` table; the index was "
+            "rebuilt from it.",
+            ", ".join(sorted(misbound)),
+        )
+        return True
 
     @staticmethod
     def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
@@ -2876,6 +2974,20 @@ class MemoryStore:
                         await conn.execute(
                             "ALTER TABLE knowledge RENAME TO knowledge__deprecated"
                         )
+                        # SQLite rewrites the FTS triggers to follow the
+                        # renamed table, so knowledge_fts would go on being
+                        # maintained from the deprecated rows while the
+                        # recreated `knowledge` table got no triggers at all
+                        # (_init_db's CREATE TRIGGER IF NOT EXISTS sees the
+                        # names already taken). Drop them here, and empty the
+                        # index they filled, so the next boot rebinds both to
+                        # the live table. _repair_knowledge_fts fixes stores
+                        # that already went through the old code path.
+                        for trigger in (
+                            "knowledge_ai", "knowledge_ad", "knowledge_fts_update",
+                        ):
+                            await conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                        await conn.execute("DELETE FROM knowledge_fts")
                         await conn.commit()
                         deprecated = True
                         logger.info(

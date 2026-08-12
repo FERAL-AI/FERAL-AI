@@ -339,19 +339,72 @@ def heuristic_summarize(messages: list[dict]) -> str:
 
 
 async def search_all(store, query: str, limit: int = 10) -> list[dict]:
-    """Search across all memory tiers using hybrid ranking."""
-    results = []
+    """Search across all memory tiers using hybrid ranking.
 
-    episodes = await store.episode_search_hybrid(query, limit=limit)
-    for item in episodes:
+    Tier isolation, and why it is neither "propagate" nor "swallow"
+    ----------------------------------------------------------------
+    This is an aggregator over four independent tiers, and it had no error
+    handling at all. When ``entities.embedding`` was left at 1536 dims by a
+    partial re-embed, the entity tier raised
+    :class:`~memory.embeddings.EmbeddingDimensionMismatch` and took out the
+    three tiers that had just answered correctly, at all three call sites
+    that use this function (``gateway/protocol.py`` memory.search RPC,
+    ``agents/taskflow.py`` memory.search step, ``api/routes/memory.py``).
+    Measured on a copy of the real store: 5 of 5 queries raised, and
+    episode + note + knowledge recall was collateral damage.
+
+    Wrapping the whole thing in ``except Exception`` and returning ``[]``
+    would be worse than the crash. An empty result set from a search
+    function reads as "nothing matched", so the store looks *empty* rather
+    than *broken*, and nobody investigates. That is exactly how this bug
+    survived to a release.
+
+    So each tier is isolated and its failure is DECLARED three ways: an
+    ERROR log naming the fix, ``store._vector_leg_error`` (which
+    ``/internal/memory/stats`` and ``feral doctor`` already surface as
+    ``semantic_search: degraded``), and ``store.last_search_degradations``
+    for anything that wants the structured form. The list return type is
+    consumed by four languages, so the degradation is NOT smuggled into it
+    as a fake row.
+
+    If every tier fails, the exception propagates. At that point there is
+    no partial answer to give, and ``[]`` would be a lie about the store's
+    contents rather than a reduced answer.
+    """
+    results = []
+    degradations: list[dict] = []
+    tiers_attempted = 0
+
+    async def _tier(name: str, coro_factory):
+        """Run one tier; record and continue instead of killing the rest."""
+        nonlocal tiers_attempted
+        tiers_attempted += 1
+        try:
+            return await coro_factory()
+        except Exception as exc:
+            degradations.append({"tier": name, "error": f"{type(exc).__name__}: {exc}"})
+            logger.error(
+                "search_all: the %s tier failed and returned nothing for %r: "
+                "%s: %s. The other tiers still answered; this result set is "
+                "INCOMPLETE, not empty.",
+                name, query, type(exc).__name__, exc,
+            )
+            try:
+                store._vector_leg_error = f"{name} tier: {exc}"
+            except Exception:  # pragma: no cover - plain attribute
+                logger.debug("could not record degradation on store", exc_info=True)
+            return None
+
+    episodes = await _tier("episode", lambda: store.episode_search_hybrid(query, limit=limit))
+    for item in episodes or []:
         results.append({**item, "tier": "episode", "score": item.get("relevance_score", 0)})
 
-    notes = await store.search(query, limit=limit)
-    for note in notes:
+    notes = await _tier("note", lambda: store.search(query, limit=limit))
+    for note in notes or []:
         results.append({**note, "tier": "note", "score": note.get("relevance_score", 0.3)})
 
-    knowledge = await store.knowledge_search(query, limit=limit)
-    for item in knowledge:
+    knowledge = await _tier("knowledge", lambda: store.knowledge_search(query, limit=limit))
+    for item in knowledge or []:
         results.append(
             {
                 "tier": "knowledge",
@@ -362,8 +415,8 @@ async def search_all(store, query: str, limit: int = 10) -> list[dict]:
         )
 
     if store._kg:
-        entities = await store._kg.search_entities(query, limit=5)
-        for entity in entities:
+        entities = await _tier("entity", lambda: store._kg.search_entities(query, limit=5))
+        for entity in entities or []:
             results.append(
                 {
                     "tier": "entity",
@@ -372,6 +425,18 @@ async def search_all(store, query: str, limit: int = 10) -> list[dict]:
                     **entity,
                 }
             )
+
+    try:
+        store.last_search_degradations = degradations
+    except Exception:  # pragma: no cover - stores are plain objects
+        logger.debug("could not publish last_search_degradations", exc_info=True)
+    if degradations and len(degradations) == tiers_attempted:
+        # Nothing survived. Returning [] here would report an empty store.
+        raise RuntimeError(
+            "every memory tier failed for query "
+            f"{query!r}: "
+            + "; ".join(f"{d['tier']}: {d['error']}" for d in degradations)
+        )
 
     results.sort(key=lambda item: item.get("score", 0), reverse=True)
     return results[:limit]
