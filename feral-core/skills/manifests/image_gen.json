@@ -1,0 +1,71 @@
+{
+    "skill_id": "image_gen",
+    "version": "1.0.0",
+    "author": "feral-core",
+    "brand": {
+        "name": "Image Generation",
+        "primary_color": "#A55EEA",
+        "secondary_color": "#2D3436",
+        "logo_url": "",
+        "icon_set": "sf_symbols"
+    },
+    "description": "Generate an image from a text description. Returns a URL to the generated image. Requires an OpenAI API key; the skill reports a missing key rather than failing silently.",
+    "trigger_phrases": [
+        "generate an image",
+        "generate image",
+        "make an image",
+        "create an image",
+        "draw me",
+        "draw a picture",
+        "picture of",
+        "image of",
+        "render an image",
+        "illustrate"
+    ],
+    "categories": ["creative", "media"],
+    "auth": {
+        "type": "api_key",
+        "key_name": "OPENAI_API_KEY",
+        "required": true
+    },
+    "endpoints": [
+        {
+            "id": "generate",
+            "method": "POST",
+            "url": "skill://image_gen/generate",
+            "description": "Generate an image from a text prompt and return its URL.",
+            "params": [
+                {
+                    "name": "prompt",
+                    "type": "string",
+                    "required": true,
+                    "description": "What the image should show."
+                },
+                {
+                    "name": "size",
+                    "type": "string",
+                    "required": false,
+                    "description": "Image size, e.g. 1024x1024, 1792x1024, 1024x1792. Defaults to 1024x1024."
+                },
+                {
+                    "name": "style",
+                    "type": "string",
+                    "required": false,
+                    "description": "vivid or natural. Defaults to vivid."
+                },
+                {
+                    "name": "n",
+                    "type": "integer",
+                    "required": false,
+                    "description": "Number of images. Accepted but currently generates one; reserved for providers that support batching."
+                }
+            ]
+        }
+    ],
+    "flows": [],
+    "crons": [],
+    "triggers": [],
+    "permissions": ["network"],
+    "requires_daemon": false,
+    "max_calls_per_hour": 30
+}

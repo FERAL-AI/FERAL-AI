@@ -106,19 +106,24 @@ def test_image_gen_registers_an_implementation():
     assert impl.get_implementation("image_gen") is not None
 
 
-def test_image_gen_has_no_manifest_so_it_cannot_be_dispatched():
-    """The finding itself, asserted against the shipped tree."""
-    assert "image_gen" not in _shipped_manifest_skill_ids()
+def test_image_gen_is_dispatchable():
+    """Inverted, exactly as the previous version of this test instructed.
+
+    image_gen shipped 197 lines of working DALL-E 3 that registered an
+    implementation no manifest named, so SkillRegistry.get_skill returned
+    None and nothing could ever call it. It now has a manifest and is held
+    to the same manifest-and-backend contract as every other skill.
+    """
+    assert "image_gen" in _shipped_manifest_skill_ids()
 
 
-def test_the_registry_cannot_return_image_gen():
+def test_the_registry_returns_image_gen():
     from skills.registry import SkillRegistry
 
     registry = SkillRegistry()
     registry.load_builtin_skills()
-    assert registry.get_skill("image_gen") is None, (
-        "if this starts passing, image_gen gained a manifest and this test "
-        "should be inverted"
+    assert registry.get_skill("image_gen") is not None, (
+        "image_gen lost its manifest again and is unreachable"
     )
 
 

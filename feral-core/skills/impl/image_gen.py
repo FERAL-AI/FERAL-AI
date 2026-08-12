@@ -150,14 +150,23 @@ class ImageGenSkill(BaseSkill):
         super().__init__(skill_id="image_gen")
 
     async def execute(self, endpoint_id: str, args: Dict[str, Any], vault: Dict[str, str]) -> Dict[str, Any]:
-        if endpoint_id != "generate":
-            return {
-                "success": False,
-                "status_code": 404,
-                "data": None,
-                "error": f"Unknown endpoint_id: {endpoint_id}",
-            }
+        # Positive dispatch rather than a negative guard. The manifest and
+        # backend contract test parses execute() for `endpoint_id ==` chains
+        # to prove every declared endpoint is really implemented, and it
+        # cannot read `!=`. This skill was invisible to that check for as
+        # long as it had no manifest; now that it has one, it is held to the
+        # same contract as every other skill.
+        if endpoint_id == "generate":
+            return await self._generate(args, vault)
 
+        return {
+            "success": False,
+            "status_code": 404,
+            "data": None,
+            "error": f"Unknown endpoint_id: {endpoint_id}",
+        }
+
+    async def _generate(self, args: Dict[str, Any], vault: Dict[str, str]) -> Dict[str, Any]:
         api_key = self.get_api_key(vault, fallback_env="OPENAI_API_KEY")
         engine = ImageGenEngine(openai_key=api_key)
 
