@@ -259,6 +259,12 @@ def test_catalog_exposes_codex_without_api_key(tmp_path):
     assert isinstance(catalog.get_adapter("codex"), CodexProvider)
 
 
+def test_codex_provider_treats_empty_timeout_env_as_default(monkeypatch):
+    monkeypatch.setenv("FERAL_CODEX_TIMEOUT_SECONDS", "")
+    provider = CodexProvider()
+    assert provider.timeout_seconds == 300.0
+
+
 def test_codex_provider_rejects_api_key_auth_mode():
     client = CodexAppServerClient()
 

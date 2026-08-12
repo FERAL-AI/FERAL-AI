@@ -479,7 +479,7 @@ class CodexProvider(BaseProvider):
             )
         self.sandbox = requested_sandbox
         self.timeout_seconds = timeout_seconds or float(
-            os.getenv("FERAL_CODEX_TIMEOUT_SECONDS", "300")
+            os.getenv("FERAL_CODEX_TIMEOUT_SECONDS") or "300"
         )
         self.reasoning_effort = os.getenv("FERAL_CODEX_REASONING_EFFORT", "")
         self._client_factory = client_factory or CodexAppServerClient
