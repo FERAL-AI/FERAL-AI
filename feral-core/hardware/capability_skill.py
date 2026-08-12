@@ -523,7 +523,10 @@ class GenericHardwareSkill(BaseSkill):
                 importance=importance,
             )
         except Exception as exc:
-            logger.debug("%s episode_save failed: %s", self.device_id, exc)
+            # Warning, not debug: see the same handler in
+            # hardware/adapters/cutebot.py. A silently dropped device
+            # episode is history recall will never show again.
+            logger.warning("%s episode_save failed: %s", self.device_id, exc)
 
     async def announce_device(self) -> None:
         """Upsert a knowledge-graph entity for this device on registration.

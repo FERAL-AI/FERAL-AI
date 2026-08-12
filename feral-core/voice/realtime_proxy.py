@@ -34,6 +34,7 @@ from agents.tool_list import (
     openai_realtime_tool_choice,
     resolve_forced_tool_choice,
 )
+from skills.call_context import bind_context
 from voice.transcript_filter import should_commit_user_transcript
 from voice.transcript_order import TRANSCRIPT_ORDER
 
@@ -1527,7 +1528,20 @@ class RealtimeProxy:
         if _refusal is not None:
             result = _refusal
         else:
-            result = await self._skill_executor.execute(name, args, skill, endpoint)
+            # Bind the call context. Everything downstream that asks who
+            # is calling reads it from here: SkillExecutor's approval
+            # gate (which was evaluating voice calls against session ""),
+            # and the execution_log audit row, which is how a voice tool
+            # call gets into the trail at all. Voice executed 33 tool
+            # calls between 2026-06-30 and 2026-08-06 and none of them
+            # produced an audit row.
+            with bind_context(
+                session_id=session_id,
+                surface="voice",
+                tool_name=name,
+                call_id=call_id,
+            ):
+                result = await self._skill_executor.execute(name, args, skill, endpoint)
 
         if self._orchestrator is not None:
             latency_ms = (time.time() - t0) * 1000.0
@@ -1669,7 +1683,11 @@ class RealtimeProxy:
                     importance=importance,
                 )
             except Exception:
-                logger.debug(
+                # Warning, not debug. This is the path that recorded the
+                # 33 voice tool calls between 2026-06-30 and 2026-08-06;
+                # it is the only trace those calls left, so losing one at
+                # debug level loses it entirely.
+                logger.warning(
                     "realtime: episode_save for voice tool call raised",
                     exc_info=True,
                 )

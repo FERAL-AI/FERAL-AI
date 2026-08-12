@@ -20,13 +20,38 @@ async def list_channels():
 
 
 @router.post("/api/channels/start")
-async def start_channel(body: dict):
+async def start_channel(body: dict, response: Response):
+    """Start a messaging channel and report what actually happened.
+
+    This used to answer ``{"ok": True, "channel": <type>}`` no matter
+    what. Asking it to start ``signal`` logged "Unknown channel type"
+    server-side and reported success to the caller; so did a channel that
+    came up degraded or never connected. ``ChannelManager.start_channel``
+    now returns a status and this surfaces it.
+    """
     channel_type = body.get("type", "")
     config = body.get("config", {})
     if not state.channel_manager:
-        return {"error": "Channel manager not initialized"}
-    await state.channel_manager.start_channel(channel_type, config)
-    return {"ok": True, "channel": channel_type}
+        response.status_code = 503
+        return {"ok": False, "error": "Channel manager not initialized"}
+
+    outcome = await state.channel_manager.start_channel(channel_type, config)
+    # Tolerate a manager that predates the status return rather than
+    # calling an unknown result a failure.
+    if not isinstance(outcome, dict):
+        return {"ok": True, "channel": channel_type}
+
+    if outcome.get("started"):
+        return {"ok": True, "channel": channel_type}
+
+    reason = str(outcome.get("reason") or "start_failed")
+    response.status_code = 404 if reason == "unknown_channel_type" else 502
+    return {
+        "ok": False,
+        "channel": channel_type,
+        "reason": reason,
+        "error": outcome.get("detail") or f"{channel_type} did not start",
+    }
 
 
 @router.get("/api/channels/whatsapp/webhook")

@@ -54,6 +54,14 @@ logger = logging.getLogger("feral.hardware.mock_roomba")
 
 DEFAULT_ENTITY_ID = "vacuum.mock_roomba"
 
+# Stamped into every response this class produces. The mock exists so the
+# demo has a vacuum; it must never be mistaken for one.
+SIMULATED_NOTE = (
+    "Simulated device. No physical vacuum was commanded. Set "
+    "FERAL_MOCK_ROOMBA=0 to remove it, or connect a real vacuum through "
+    "Home Assistant."
+)
+
 
 def is_enabled() -> bool:
     """Honor ``FERAL_MOCK_ROOMBA`` (default on for demo reliability)."""
@@ -131,6 +139,16 @@ class MockRoomba:
                 "entity_id": target,
                 "service": "vacuum.start",
                 "duration_ms": int(elapsed * 1000),
+                # Shape parity with HomeAssistantIntegration.vacuum_start is
+                # the point of this class, and it is also the hazard: without
+                # these two fields the envelope for "a vacuum in this house
+                # started cleaning" is byte-identical to the envelope for
+                # "nothing happened, there is no vacuum". The mock is on by
+                # default (FERAL_MOCK_ROOMBA defaults to "1") and is reachable
+                # from POST /api/hardware/mock_roomba/start, so a caller that
+                # cannot tell the two apart is the normal case.
+                "simulated": True,
+                "note": SIMULATED_NOTE,
             },
         }
 
@@ -152,6 +170,8 @@ class MockRoomba:
                 "stopped": True,
                 "entity_id": target,
                 "service": "vacuum.stop",
+                "simulated": True,
+                "note": SIMULATED_NOTE,
             },
         }
 
@@ -163,6 +183,8 @@ class MockRoomba:
             "started_at": self.started_at,
             "stopped_at": self.stopped_at,
             "enabled": True,
+            "simulated": True,
+            "note": SIMULATED_NOTE,
         }
 
     async def _record_event(self, kind: str, ts: float, entity: str) -> None:
@@ -181,7 +203,11 @@ class MockRoomba:
             await episode_save(
                 session_id="mock-roomba",
                 event_type="actuator",
-                summary=f"mock_roomba {kind} for {entity}",
+                # "simulated" in the summary, not only in the JSON detail:
+                # recall and the timeline render the summary, so a demo
+                # event was indistinguishable from a real one in the one
+                # place a user actually reads.
+                summary=f"simulated vacuum {kind} for {entity} (mock_roomba)",
                 detail=json.dumps(
                     {
                         "category": "actuator",
@@ -197,7 +223,10 @@ class MockRoomba:
                 importance=0.5,
             )
         except Exception as exc:
-            logger.debug("mock_roomba episode_save failed: %s", exc)
+            # Warning, not debug: a dropped actuator episode is device
+            # history that recall will never surface again, and debug is
+            # off in every normal deployment.
+            logger.warning("mock_roomba episode_save failed: %s", exc)
 
 
 def register_with_mesh(mesh, mock: MockRoomba) -> None:
@@ -230,7 +259,7 @@ def register_with_mesh(mesh, mock: MockRoomba) -> None:
             },
         }
     except Exception as exc:
-        logger.debug("mock_roomba register_with_mesh failed: %s", exc)
+        logger.warning("mock_roomba register_with_mesh failed: %s", exc)
 
 
-__all__ = ["MockRoomba", "register_with_mesh", "is_enabled", "DEFAULT_ENTITY_ID"]
+__all__ = ["MockRoomba", "register_with_mesh", "is_enabled", "DEFAULT_ENTITY_ID", "SIMULATED_NOTE"]

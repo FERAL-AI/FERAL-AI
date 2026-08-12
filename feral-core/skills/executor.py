@@ -427,11 +427,52 @@ class SkillExecutor:
         import time as _time
         increment("feral.skill.invocations_total", attributes={"skill": skill.skill_id, "endpoint": endpoint.id})
         _t0 = _time.time()
+        _result: dict = {}
         try:
-            return await self._execute_inner(tool_name, args, skill, endpoint)
+            _result = await self._execute_inner(tool_name, args, skill, endpoint)
+            return _result
         finally:
-            observe("feral.skill.exec_latency_ms", (_time.time() - _t0) * 1000,
+            _elapsed_ms = (_time.time() - _t0) * 1000
+            observe("feral.skill.exec_latency_ms", _elapsed_ms,
                     {"skill": skill.skill_id, "endpoint": endpoint.id})
+            # Audit at the chokepoint, for the same reason the gate is
+            # here. ``execution_log`` had exactly one writer, in
+            # ``Orchestrator``, so every tool call made from voice, MCP,
+            # the REST tool route or a multi-agent run went unrecorded.
+            # The live store's last row is 2026-05-21 while the brain ran
+            # to 2026-08-07 and voice executed 33 tool calls in between.
+            await self._record_audit(tool_name, args, _result, _elapsed_ms)
+
+    async def _record_audit(
+        self, tool_name: str, args: dict, result: dict, latency_ms: float,
+    ) -> None:
+        """Write the ``execution_log`` row unless the caller writes it.
+
+        ``Orchestrator`` claims its own tool calls because the chat path
+        also dispatches tools that never reach this method (``mcp_*``,
+        ``daemon_*``, subagent spawns, and refusals that return before
+        dispatch). The claim keeps the two writers disjoint so a chat
+        tool call produces one row, not two.
+        """
+        from memory.execution_audit import caller_has_claimed, record_execution
+
+        if caller_has_claimed():
+            return
+        try:
+            from skills.call_context import current_context
+
+            ctx = current_context()
+            session_id, surface = ctx.session_id, ctx.surface
+        except Exception:
+            session_id, surface = "", ""
+        await record_execution(
+            session_id=session_id,
+            tool_name=tool_name,
+            args=args,
+            result=result,
+            latency_ms=latency_ms,
+            surface=surface,
+        )
 
     async def _execute_inner(
         self, tool_name: str, args: dict, skill: SkillManifest, endpoint: SkillEndpoint,
@@ -489,9 +530,22 @@ class SkillExecutor:
                 budget = budget_for(skill.skill_id, endpoint.id, skill)
                 if isinstance(result, dict) and "success" in result:
                     payload, note = self._sanitize_with_note(result.get("data"), budget)
+                    # Default 200 only when the call succeeded. Ten
+                    # integration modules (calendar, spotify, notion,
+                    # email, microsoft365, home_assistant, google_drive,
+                    # google_contacts, messaging, health_platforms)
+                    # return ``{"success": False, "error": ...}`` with no
+                    # status_code, and a flat ``.get(..., 200)`` stamped
+                    # HTTP 200 on all of them. The live store holds the
+                    # result: ``{"success": false, "status_code": 200,
+                    # "data": null, "error": "Unknown endpoint:
+                    # upcoming_events"}``. Anything that branches on
+                    # status_code rather than on success reads that as
+                    # fine.
+                    default_status = 200 if result.get("success") else 500
                     envelope = {
                         "success": result["success"],
-                        "status_code": result.get("status_code", 200),
+                        "status_code": result.get("status_code", default_status),
                         "data": payload,
                         "error": result.get("error"),
                     }

@@ -15,6 +15,7 @@ from typing import Optional, Callable
 from uuid import uuid4
 
 from agents.tool_display import tool_feedback_text
+from skills.call_context import bind_context
 from voice.transcript_filter import should_commit_user_transcript
 
 logger = logging.getLogger("feral.voice.gemini")
@@ -736,7 +737,16 @@ class GeminiRealtimeProxy:
         if _refusal is not None:
             result = _refusal
         else:
-            result = await self._skill_executor.execute(name, args, skill, endpoint)
+            # Parity with RealtimeProxy: bind the call context so the
+            # executor's approval gate sees the real session instead of
+            # "", and so the call reaches the execution_log audit trail.
+            with bind_context(
+                session_id=session_id,
+                surface="voice",
+                tool_name=name,
+                call_id=call_id,
+            ):
+                result = await self._skill_executor.execute(name, args, skill, endpoint)
 
         if self._orchestrator is not None:
             latency_ms = (time.time() - t0) * 1000.0

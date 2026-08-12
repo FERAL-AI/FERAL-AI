@@ -36,6 +36,7 @@ from models.protocol import (
     VisionRequestPayload,
 )
 from models.skill_manifest import SkillManifest
+from memory.execution_audit import claimed_by_caller, status_of as audit_status_of
 from skills.registry import SkillRegistry
 from skills.executor import SkillExecutor
 from skills.result_budget import serialize_tool_result
@@ -2722,6 +2723,7 @@ class Orchestrator:
         turn["base_len"] = len(history)
 
         from agents.iteration_budget import (
+            GUARD_OK,
             GUARD_STOP,
             GUARD_WARN,
             IterationBudget,
@@ -2954,9 +2956,15 @@ class Orchestrator:
                 async def _run_tool(tc: dict) -> dict:
                     async with sem:
                         t_start = time.time()
-                        result_data = await self._execute_tool_call_for_llm(
-                            session_id, tc, relevant_skills,
-                        )
+                        # Claim the audit row: this loop logs every tool
+                        # call below, including the mcp_/daemon_/subagent
+                        # branches and the refusals that never reach
+                        # SkillExecutor. Without the claim the executor
+                        # would write a second row for the same call.
+                        with claimed_by_caller():
+                            result_data = await self._execute_tool_call_for_llm(
+                                session_id, tc, relevant_skills,
+                            )
                         latency_ms = (time.time() - t_start) * 1000
                         return {
                             "tc": tc,
@@ -2984,7 +2992,9 @@ class Orchestrator:
                     result_data = tool_output["result"]
                     latency_ms = tool_output["latency_ms"]
 
-                    tool_success = bool(result_data.get("success") or result_data.get("status") == "command_sent_to_hardware_daemon")
+                    audit_status = audit_status_of(result_data)
+                    tool_pending = audit_status == "pending_approval"
+                    tool_success = audit_status == "success"
                     await self._emit_brain_event(session_id, "tool_exec", {"tool": tc["name"], "success": tool_success})
 
                     if self._tool_genesis:
@@ -2999,7 +3009,7 @@ class Orchestrator:
                             skill_id=skill_id,
                             endpoint_id=endpoint_id,
                             args=tc.get("args", {}),
-                            result_status="success" if tool_success else "failure",
+                            result_status=audit_status,
                             result_summary=json.dumps(result_data)[:300],
                             latency_ms=latency_ms,
                         )
@@ -3017,7 +3027,16 @@ class Orchestrator:
                             tc["name"], result_data, registry=self.skills,
                         ),
                     })
-                    guard_level = budget.observe_tool(
+                    # A tool waiting on the operator's approval is not a
+                    # failing tool. Feeding it to the no-progress guard
+                    # told the model its call had failed, so the model
+                    # re-issued it and one approval prompt became
+                    # several: the live store holds three consecutive
+                    # workspace_scripts__rerun rows with identical args
+                    # and three different request_ids, all recorded as
+                    # 'failure', plus four near-identical
+                    # agentic_computer_use__execute_task rows.
+                    guard_level = GUARD_OK if tool_pending else budget.observe_tool(
                         tc["name"], tc.get("args", {}), tool_success, result_data
                     )
                     if guard_level == GUARD_STOP:
@@ -3304,6 +3323,7 @@ class Orchestrator:
         if self.refusal_handler.is_ack_execution(text):
             pending_retry_addition = self.refusal_handler.ACK_EXECUTION_FAST_PATH_INSTRUCTION
         from agents.iteration_budget import (
+            GUARD_OK,
             GUARD_STOP,
             GUARD_WARN,
             IterationBudget,
@@ -3559,9 +3579,13 @@ class Orchestrator:
                 async def _stream_run(tc: dict) -> dict:
                     async with sem:
                         t_start = time.time()
-                        result_data = await self._execute_tool_call_for_llm(
-                            session_id, tc, relevant_skills,
-                        )
+                        # See the non-streaming loop: this path writes its
+                        # own execution_log row, so it claims the call and
+                        # the executor does not write a duplicate.
+                        with claimed_by_caller():
+                            result_data = await self._execute_tool_call_for_llm(
+                                session_id, tc, relevant_skills,
+                            )
                         latency_ms = (time.time() - t_start) * 1000
                         return {
                             "tc": tc,
@@ -3577,10 +3601,11 @@ class Orchestrator:
                     tc = output["tc"]
                     result_data = output["result"]
                     latency_ms = output["latency_ms"]
-                    stream_tool_success = bool(
-                        result_data.get("success")
-                        or result_data.get("status") == "command_sent_to_hardware_daemon"
-                    )
+                    # Parity with the non-streaming loop: pending
+                    # approval is its own status, not a failure.
+                    stream_audit_status = audit_status_of(result_data)
+                    stream_tool_pending = stream_audit_status == "pending_approval"
+                    stream_tool_success = stream_audit_status == "success"
                     await self._emit_tool_result(session_id, tc, result_data, latency_ms)
                     await self._emit_brain_event(
                         session_id, "tool_exec",
@@ -3599,7 +3624,7 @@ class Orchestrator:
                         await self.memory.log_execution(
                             session_id=session_id, skill_id=skill_id,
                             endpoint_id=endpoint_id, args=tc.get("args", {}),
-                            result_status="success" if stream_tool_success else "failure",
+                            result_status=stream_audit_status,
                             result_summary=json.dumps(result_data)[:300],
                             latency_ms=latency_ms,
                         )
@@ -3613,7 +3638,7 @@ class Orchestrator:
                             tc["name"], result_data, registry=self.skills,
                         ),
                     })
-                    guard_level = budget.observe_tool(
+                    guard_level = GUARD_OK if stream_tool_pending else budget.observe_tool(
                         tc["name"], tc.get("args", {}), stream_tool_success, result_data
                     )
                     if guard_level == GUARD_STOP:

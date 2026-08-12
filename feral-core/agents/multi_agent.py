@@ -26,6 +26,7 @@ from agents.turn_attribution import (
     model_of_llm_response,
 )
 
+from skills.call_context import bind_context
 from skills.result_budget import serialize_tool_result
 
 logger = logging.getLogger("feral.multi_agent")
@@ -316,7 +317,17 @@ class AgentWorker:
                                     if _gate is not None:
                                         result = _gate
                                     else:
-                                        result = await self._executor.execute(tc["name"], tc["args"], skill, endpoint)
+                                        # Bind so the executor's audit row
+                                        # carries the session. Without it a
+                                        # multi-agent tool call lands in
+                                        # execution_log with session "".
+                                        with bind_context(
+                                            session_id=session_id,
+                                            surface="multi_agent",
+                                            tool_name=tc["name"],
+                                            call_id=str(tc.get("id") or ""),
+                                        ):
+                                            result = await self._executor.execute(tc["name"], tc["args"], skill, endpoint)
                                     tool_results.append(result)
                                     if self._orchestrator is not None:
                                         try:

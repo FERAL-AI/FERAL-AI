@@ -65,6 +65,7 @@ from agents.multimodal_blocks import (
     tool_list_contains,
 )
 from agents.tool_list import OPENAI_TOOL_HARD_LIMIT, cap_tools_with_pins
+from agents.token_estimate import estimate_message_tokens
 
 # Cost-budget surface (Wave 1 Lane 04). The runtime gate lives on the
 # public chat entry points — see ``_budget_check`` /
@@ -462,6 +463,52 @@ def _cooldown_state_path() -> str:
         return ""
 
 
+def parse_tool_arguments(raw: Any, tool_name: str = "") -> tuple[dict, str]:
+    """Parse a model's tool-call ``arguments`` string.
+
+    Returns ``(args, error)``. ``error`` is ``""`` on success and a short
+    human-readable reason otherwise.
+
+    Why this exists instead of ``json.loads(...) except: args = {}``:
+    the four sites that did exactly that turned a truncated or malformed
+    arguments blob into an empty-but-valid call, with no log line. The
+    tool then ran with no arguments and returned whatever it says when
+    required fields are missing, which reads to the model as a tool
+    problem rather than its own output being lost.
+
+    Measured in the live store: 61 ``web_search__web_search`` rows on
+    2026-05-15, all with ``args = {}``, all answered "Missing search
+    query. Provide 'query' or 'q' parameter.", and the anti-loop guard
+    firing at streaks of 5, 6 and 7. 61 executions, 61 failures, zero
+    successes, and nothing anywhere said the arguments had failed to
+    parse. ``computer_use__bash`` shows the same shape (7 of 8 calls with
+    empty args on 2026-05-12), so it is not one bad model reply.
+    """
+    if isinstance(raw, dict):
+        return dict(raw), ""
+    raw_str = raw if isinstance(raw, str) else ""
+    if not raw_str.strip():
+        # A genuinely no-argument tool call. Common and correct.
+        return {}, ""
+    try:
+        parsed = json.loads(raw_str)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.warning(
+            "tool-call arguments for %s did not parse (%s); the call would "
+            "otherwise run with no arguments. raw=%r",
+            tool_name or "<unnamed tool>", exc, raw_str[:300],
+        )
+        return {}, f"arguments were not valid JSON ({exc})"
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "tool-call arguments for %s parsed to %s, not an object; the "
+            "call would otherwise run with no arguments. raw=%r",
+            tool_name or "<unnamed tool>", type(parsed).__name__, raw_str[:300],
+        )
+        return {}, f"arguments were a JSON {type(parsed).__name__}, not an object"
+    return parsed, ""
+
+
 def _finalise_tool_call(entry: dict) -> dict:
     """v2026.5.27 — convert an in-progress Responses-API tool-call
     accumulator into the shape the orchestrator / tool_runner expects.
@@ -479,15 +526,13 @@ def _finalise_tool_call(entry: dict) -> dict:
     back as ``function_call_output.call_id`` to thread the response.
     """
     args_str = entry.get("arguments", "") or "{}"
-    try:
-        args = json.loads(args_str)
-    except (json.JSONDecodeError, TypeError):
-        args = {}
+    args, args_error = parse_tool_arguments(args_str, entry.get("name", ""))
     return {
         "id": entry.get("call_id") or entry.get("item_id", ""),
         "name": entry.get("name", ""),
         "arguments": args_str,
         "args": args,
+        "args_error": args_error,
     }
 
 
@@ -1039,14 +1084,14 @@ class LLMProvider:
         parsed_tools = []
         for tc in tool_calls:
             func = tc.get("function", {})
-            try:
-                args = json.loads(func.get("arguments", "{}"))
-            except json.JSONDecodeError:
-                args = {}
+            args, args_error = parse_tool_arguments(
+                func.get("arguments", ""), func.get("name", ""),
+            )
             parsed_tools.append({
                 "id": tc.get("id", ""),
                 "name": func.get("name", ""),
                 "args": args,
+                "args_error": args_error,
             })
 
         return text, parsed_tools
@@ -2490,10 +2535,9 @@ class LLMProvider:
                 data_str = line[6:].strip()
                 if data_str == "[DONE]":
                     for _, tc in sorted(accumulated_tool_calls.items()):
-                        try:
-                            tc["args"] = json.loads(tc.get("arguments", "{}"))
-                        except json.JSONDecodeError:
-                            tc["args"] = {}
+                        tc["args"], tc["args_error"] = parse_tool_arguments(
+                            tc.get("arguments", ""), tc.get("name", ""),
+                        )
                         yield {"type": "tool_call_delta", "tool_call": tc}
                     await _record_stream_usage()
                     _done_event: dict = {"type": "done"}
@@ -2894,10 +2938,9 @@ class LLMProvider:
                         elif event_type == "message_stop":
                             await _record_anthropic_usage()
                             for tc in accumulated_tool_calls.values():
-                                try:
-                                    tc["args"] = json.loads(tc.get("arguments", "{}"))
-                                except json.JSONDecodeError:
-                                    tc["args"] = {}
+                                tc["args"], tc["args_error"] = parse_tool_arguments(
+                                    tc.get("arguments", ""), tc.get("name", ""),
+                                )
                                 # A tool-call counts as forward
                                 # progress for the failover guard:
                                 # we've already committed to this
@@ -3904,9 +3947,12 @@ class LLMProvider:
         messages: list[dict],
         kwargs: dict[str, Any],
     ) -> tuple[int, int]:
-        prompt_chars = self._message_char_count(messages)
-        # Coarse estimate used for candidate ordering only.
-        prompt_tokens = max(1, int(prompt_chars / 4) + 1)
+        # Coarse estimate used for candidate ordering only, but it prices the
+        # call against a USD budget, so under-counting overshoots the budget.
+        # `prompt_chars / 4` did that by up to 11x: measured against
+        # cl100k/o200k, emoji ran 0.09x and Chinese 0.21x of the real count.
+        # See agents/token_estimate.py.
+        prompt_tokens = max(1, estimate_message_tokens(messages))
         max_tokens = int(kwargs.get("max_tokens", 1024) or 1024)
         completion_tokens = max(1, min(max_tokens, 4096))
         return prompt_tokens, completion_tokens

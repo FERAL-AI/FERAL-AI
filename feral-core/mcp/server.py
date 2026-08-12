@@ -21,6 +21,8 @@ import logging
 import sys
 from typing import Any, Optional, TYPE_CHECKING
 
+from skills.call_context import bind_context
+
 if TYPE_CHECKING:
     from hardware.protocol import DeviceCapability, DeviceRegistry
     from memory.store import MemoryStore
@@ -377,9 +379,18 @@ class FeralMCPServer:
             return {"content": [{"type": "text", "text": f"Unknown FERAL skill endpoint: {feral_tool_id}"}], "isError": True}
 
         try:
-            result = await self._skill_executor.execute(
-                feral_tool_id, dict(arguments or {}), skill, endpoint,
-            )
+            # Bind a context so the call is attributable. This surface is
+            # FERAL exposed to external MCP clients, so an unattributed
+            # tool call here is the one that most needs a row in
+            # execution_log; before this the executor saw session "".
+            with bind_context(
+                session_id="mcp-external",
+                surface="mcp",
+                tool_name=feral_tool_id,
+            ):
+                result = await self._skill_executor.execute(
+                    feral_tool_id, dict(arguments or {}), skill, endpoint,
+                )
         except Exception as exc:
             logger.exception("MCP projected skill execution failed")
             return {"content": [{"type": "text", "text": f"FERAL skill {feral_tool_id} failed: {exc}"}], "isError": True}

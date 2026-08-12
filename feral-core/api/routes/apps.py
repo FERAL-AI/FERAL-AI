@@ -529,6 +529,8 @@ async def open_app(app_id: str, req: OpenSurfaceRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
     # Optional push over the active WebSocket.
+    pushed: bool | None = None
+    push_error = ""
     if req.session_id and state.sessions and req.session_id in state.sessions:
         try:
             from models.protocol import FeralMessage, SDUIPayload
@@ -549,12 +551,24 @@ async def open_app(app_id: str, req: OpenSurfaceRequest):
                 result,
                 title=f"{app_id} · {surface_id}",
             )
+            pushed = True
         except Exception as exc:
-            # Caller still gets success:True for the render; say the push part
-            # did not land instead of leaving it to be inferred.
+            # The render did succeed, so success stays True. But the
+            # caller asked for the surface to be mounted in its session
+            # and that did not happen. This comment used to claim the
+            # response said so; only the server log did, so a client
+            # whose push failed saw an unqualified success and waited for
+            # a surface that was never going to arrive.
             logger.warning("push to session failed: %s", exc)
+            pushed = False
+            push_error = str(exc)
 
-    return {"success": True, **result}
+    out = {"success": True, **result}
+    if pushed is not None:
+        out["pushed"] = pushed
+        if push_error:
+            out["push_error"] = push_error
+    return out
 
 
 class RenderSurfaceRequest(BaseModel):

@@ -542,7 +542,11 @@ class CuteBotAdapter:
                 importance=importance,
             )
         except Exception as exc:
-            logger.debug("CuteBot episode_save failed: %s", exc)
+            # Warning, not debug. A dropped actuator episode is robot
+            # history that recall can never surface again ("what did my
+            # robot do yesterday?"), and debug is off in every normal
+            # deployment, so the loss was unobservable.
+            logger.warning("CuteBot episode_save failed: %s", exc)
 
     async def start_telemetry_loop(
         self,

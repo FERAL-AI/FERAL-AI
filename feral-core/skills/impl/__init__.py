@@ -3,8 +3,14 @@ FERAL Skill Implementations
 ============================
 Concrete Python backing implementations for JSON skill schemas.
 """
-from typing import Dict, Type
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, Iterable, Optional, Type
+
 from skills.base import BaseSkill
+
+logger = logging.getLogger("feral.skills.impl")
 
 # Registry mapping skill_id -> Python Class implementation
 SKILL_IMPLEMENTATIONS: Dict[str, Type[BaseSkill]] = {}
@@ -16,7 +22,7 @@ def register_skill(skill_class: Type[BaseSkill]):
         instance = skill_class()
         SKILL_IMPLEMENTATIONS[instance.skill_id] = instance
         return skill_class
-    
+
     wrapper()
     return skill_class
 
@@ -28,138 +34,168 @@ def get_implementation(skill_id: str) -> BaseSkill | None:
     """Retrieve the instantiated python logic instance for a skill."""
     return SKILL_IMPLEMENTATIONS.get(skill_id)
 
-# Auto-load standard implementations below
-try:
-    import skills.impl.web_search
-except ImportError:
-    pass
 
-try:
-    import skills.impl.image_gen
-except ImportError:
-    pass
+# Auto-load standard implementations below.
+#
+# Every entry here used to be its own ``try: import ... except
+# ImportError: pass``, twenty-six of them. A missing optional dependency
+# removed the skill from the process with no log line, no metric and no
+# way for the operator to find out: ``feral doctor`` reported nothing,
+# the model was simply never offered the tool, and the user was told
+# FERAL could not do the thing. ``agentic_computer_use`` pulls the VLM
+# path and ``external_agent`` needs the ACP bridge, so either one going
+# missing is a capability disappearing from a running install.
+#
+# The loop below imports the same modules and records why each one
+# failed, so ``load_report()`` can answer "which skills are not here and
+# what is missing" instead of that answer existing nowhere.
+AUTOLOAD_MODULES: tuple[str, ...] = (
+    "web_search",
+    "image_gen",
+    "weather",
+    "pdf_reader",
+    "screen_capture",
+    "subagent",
+    "code_interpreter",
+    "desktop_automation",
+    "system_settings",
+    "coding_tools",
+    "gui_computer_use",
+    "agentic_computer_use",
+    "web_actions",
+    # Registers nothing itself: the `browser` manifest and instance are
+    # built at boot by api.state._register_browser_skill. Imported here
+    # so an import-time break in the CDP driver surfaces at boot.
+    "browser_use",
+    "messaging_channels",
+    "self_introspection",
+    "workspace_scripts",
+    "perception_query",
+    "feral_reminders",
+    "feral_routines",
+    "feral_workflows",
+    "notes_memory",
+    "plan",
+    # imported for the @register_skill side effect
+    "cutebot_skill",
+    # drives opencode / Claude Code / Codex over ACP
+    "external_agent",
+    # Per-domain browser knowledge (recall/remember). Deliberately NOT part
+    # of skills/impl/browser_use.py: the store must be loadable without a
+    # browser.
+    "browser_memory",
+)
 
-try:
-    import skills.impl.weather
-except ImportError:
-    pass
+# module name -> reason it is not loaded. Empty on a healthy install.
+FAILED_IMPLEMENTATIONS: Dict[str, str] = {}
 
-try:
-    import skills.impl.pdf_reader
-except ImportError:
-    pass
 
-try:
-    import skills.impl.screen_capture
-except ImportError:
-    pass
+def _autoload() -> None:
+    """Import each backing implementation, reporting the ones that fail.
 
-try:
-    import skills.impl.subagent
-except ImportError:
-    pass
+    ``ImportError`` is the expected failure (an optional dependency is
+    not installed) and is logged at warning, because a skill being gone
+    is exactly what nobody could see before. Anything else is a bug in
+    the module itself and is logged with a traceback.
+    """
+    import importlib
 
-try:
-    import skills.impl.code_interpreter
-except ImportError:
-    pass
+    for name in AUTOLOAD_MODULES:
+        try:
+            importlib.import_module(f"skills.impl.{name}")
+        except ImportError as exc:
+            FAILED_IMPLEMENTATIONS[name] = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "skill implementation '%s' is NOT loaded (%s). The skill will "
+                "not be callable and the model will not be offered it. Install "
+                "the missing dependency, or check 'failed' in "
+                "skills.impl.load_report().", name, exc,
+            )
+        except Exception as exc:
+            FAILED_IMPLEMENTATIONS[name] = f"{type(exc).__name__}: {exc}"
+            logger.error(
+                "skill implementation '%s' raised at import and is NOT loaded: "
+                "%s", name, exc, exc_info=True,
+            )
 
-try:
-    import skills.impl.desktop_automation
-except ImportError:
-    pass
 
-try:
-    import skills.impl.system_settings
-except ImportError:
-    pass
+def _manifest_skill_ids() -> set:
+    """skill_ids declared by the first-party manifest directory."""
+    manifest_dir = Path(__file__).resolve().parent.parent / "manifests"
+    ids: set = set()
+    try:
+        for path in manifest_dir.glob("*.json"):
+            ids.add(path.stem)
+            try:
+                ids.add(
+                    json.loads(path.read_text(encoding="utf-8")).get("skill_id", path.stem)
+                )
+            except Exception as exc:
+                logger.warning("skill manifest %s is not readable JSON: %s", path, exc)
+    except Exception as exc:
+        logger.warning("could not read skill manifests from %s: %s", manifest_dir, exc)
+    return ids
 
-try:
-    import skills.impl.coding_tools
-except ImportError:
-    pass
 
-try:
-    import skills.impl.gui_computer_use
-except ImportError:
-    pass
+def load_report(known_skill_ids: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+    """What loaded, what did not, and what is registered but unreachable.
 
-try:
-    import skills.impl.agentic_computer_use
-except ImportError:
-    pass
+    ``unreachable_no_manifest`` lists implementations that registered
+    successfully but that no manifest names.
+    ``SkillRegistry.get_skill`` returns None for a skill_id it holds no
+    manifest for, and ``SkillExecutor`` looks the implementation up by
+    the manifest's ``skill_id``, so such an implementation can never be
+    dispatched: the code is loaded, the capability is not.
 
-try:
-    import skills.impl.web_actions
-except ImportError:
-    pass
+    Pass ``known_skill_ids`` (``registry.skills.keys()``) whenever a live
+    registry exists. Without it this falls back to the shipped manifest
+    directory alone, which over-reports: ``weather_current`` comes from
+    the hardcoded ``WEATHER_SKILL`` constant and ``browser`` is built at
+    boot by ``api.state._register_browser_skill``, so both look
+    unreachable from the directory and are not.
+    """
+    reachable = (
+        {str(s) for s in known_skill_ids}
+        if known_skill_ids is not None
+        else _manifest_skill_ids()
+    )
+    unreachable = sorted(
+        skill_id for skill_id in SKILL_IMPLEMENTATIONS
+        if reachable and skill_id not in reachable
+    )
+    return {
+        "loaded": sorted(SKILL_IMPLEMENTATIONS),
+        "failed": dict(FAILED_IMPLEMENTATIONS),
+        "unreachable_no_manifest": unreachable,
+    }
 
-try:
-    import skills.impl.browser_use
-except ImportError:
-    pass
 
-try:
-    import skills.impl.messaging_channels
-except ImportError:
-    pass
+def report_unreachable_implementations(known_skill_ids: Iterable[str]) -> list:
+    """Log every registered implementation that no manifest can reach.
 
-try:
-    import skills.impl.self_introspection
-except ImportError:
-    pass
+    Called from boot once the registry is fully populated, because that
+    is the only point where the answer is true: manifests arrive from the
+    shipped directory, from a hardcoded constant, from ``~/.feral/skills``
+    and from ``api.state._register_browser_skill``.
 
-try:
-    import skills.impl.workspace_scripts
-except ImportError:
-    pass
+    ``image_gen`` is in this state today. ``skills/impl/image_gen.py`` is
+    a complete DALL-E 3 implementation with provider failover and it
+    registers itself on import, but no manifest names ``image_gen``, so
+    ``registry.get_skill("image_gen")`` returns None, the model is never
+    offered the tool, and nothing anywhere said so.
+    """
+    unreachable = load_report(known_skill_ids)["unreachable_no_manifest"]
+    for skill_id in unreachable:
+        logger.warning(
+            "skill implementation '%s' is registered but no manifest names it, "
+            "so SkillRegistry.get_skill never returns it and nothing can "
+            "dispatch it. Either add skills/manifests/%s.json or drop the "
+            "implementation.", skill_id, skill_id,
+        )
+    return unreachable
 
-try:
-    import skills.impl.perception_query
-except ImportError:
-    pass
 
-try:
-    import skills.impl.feral_reminders
-except ImportError:
-    pass
-
-try:
-    import skills.impl.feral_routines
-except ImportError:
-    pass
-
-try:
-    import skills.impl.feral_workflows
-except ImportError:
-    pass
-
-try:
-    import skills.impl.notes_memory
-except ImportError:
-    pass
-
-try:
-    import skills.impl.plan
-except ImportError:
-    pass
-
-try:
-    import skills.impl.cutebot_skill  # noqa: F401 (imported for @register_skill side effect)
-except ImportError:
-    pass
-
-try:
-    import skills.impl.external_agent  # noqa: F401 (drives opencode / Claude Code / Codex over ACP)
-except ImportError:
-    pass
-
-try:
-    # Per-domain browser knowledge (recall/remember). Deliberately NOT part of
-    # skills/impl/browser_use.py: the store must be loadable without a browser.
-    import skills.impl.browser_memory  # noqa: F401 (@register_skill side effect)
-except ImportError:
-    pass
+_autoload()
 
 
 # robot_action uses WS_EXECUTE — handled natively by SkillExecutor via the

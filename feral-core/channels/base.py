@@ -1142,11 +1142,35 @@ class ChannelManager:
         for ch in self._channels.values():
             ch.set_handler(handler)
 
-    async def start_channel(self, channel_type: str, config: dict):
+    async def start_channel(self, channel_type: str, config: dict) -> dict:
+        """Start a channel. Returns a status the caller can surface.
+
+        ``{"started": True, "channel": ...}`` on success, otherwise
+        ``{"started": False, "reason": <code>, "detail": <text>}``.
+
+        This used to return None on every path, success and failure
+        alike, and ``POST /api/channels/start`` answered
+        ``{"ok": True, "channel": <type>}`` regardless. Asking it to
+        start ``signal`` logged "Unknown channel type: signal" on the
+        server and told the operator it had worked. Five channel classes
+        ship in ``channels/`` (feishu, matrix, signal, voice_call, zalo)
+        and none of them are in ``CHANNEL_TYPES``, so that is the normal
+        outcome for any of the five, not an edge case. The same applied
+        to a channel that started degraded or did not come up.
+        """
         cls = self.CHANNEL_TYPES.get(channel_type)
         if not cls:
+            known = ", ".join(sorted(self.CHANNEL_TYPES))
             logger.warning(f"Unknown channel type: {channel_type}")
-            return
+            return {
+                "started": False,
+                "channel": channel_type,
+                "reason": "unknown_channel_type",
+                "detail": (
+                    f"'{channel_type}' is not a channel this build can start. "
+                    f"Available: {known}."
+                ),
+            }
 
         # Stop-before-replace. Previously ``self._channels[type] = channel``
         # silently orphaned the previous channel's long-poll / websocket
@@ -1172,12 +1196,17 @@ class ChannelManager:
 
         await channel.start()
         if getattr(channel, "_degraded", False):
+            reason = str(getattr(channel, "_degraded_reason", "") or "")
             logger.error(
                 "Channel %s entered DEGRADED state at start: %s",
-                channel_type,
-                getattr(channel, "_degraded_reason", ""),
+                channel_type, reason,
             )
-            return
+            return {
+                "started": False,
+                "channel": channel_type,
+                "reason": "degraded",
+                "detail": reason or f"{channel_type} started in a degraded state",
+            }
         if not bool(getattr(channel, "_running", False)) and not bool(getattr(channel, "_connected", False)):
             logger.warning(
                 "Channel %s did not start cleanly (running=%s connected=%s); not activating",
@@ -1185,8 +1214,17 @@ class ChannelManager:
                 bool(getattr(channel, "_running", False)),
                 bool(getattr(channel, "_connected", False)),
             )
-            return
+            return {
+                "started": False,
+                "channel": channel_type,
+                "reason": "did_not_start",
+                "detail": (
+                    f"{channel_type} did not come up (running=False, "
+                    f"connected=False). Check its credentials."
+                ),
+            }
         self._channels[channel_type] = channel
+        return {"started": True, "channel": channel_type}
 
     async def stop_all(self):
         for ch in self._channels.values():
