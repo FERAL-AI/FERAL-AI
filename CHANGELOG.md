@@ -1,10 +1,100 @@
 # Changelog
 
-<!-- feral-version: 2026.8.8 -->
+<!-- feral-version: 2026.8.9 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.9] - 2026-08-13 - a disconnected device says so
+
+### Fixed
+
+- **Absence was the only way the system could say "gone".** The
+  WebSocketDisconnect teardown pops `state.daemons` and unregisters from
+  `hardware_mesh`, so a phone that dropped stopped existing:
+  `/api/devices/connected` returned an empty list, the
+  `connected_devices` tool read the emptied registry and answered
+  "nothing is connected", and topology fell back to "Awaiting node". An
+  owner who had paired a phone was told he had never owned one, and the
+  last thing he saw was a green pulsing dot.
+
+  `api/device_view.py` joins live daemons against `node_subdevices`, the
+  only store that outlives a socket. `devices[]` is unchanged; `offline[]`
+  and `heartbeat_window_s` are new. The four surfaces that used to
+  disagree (UI, API, the tool, the prompt block) now derate on one clock.
+
+  That clock is 30s, taken from the protocol rather than invented: HUP
+  keepalive is `heartbeat_ms` (default 10000) with stale at 3x, which is
+  already `LIVENESS_WINDOWS["ble"]`. A test asserts the constant against
+  `NodeAckPayload.heartbeat_ms`.
+
+- **`DeviceTopology.jsx` hardcoded a live dot.** Line 161 rendered
+  `tone="live" pulse` unconditionally while line 181, twenty lines below,
+  read the real flag.
+
+- **The same glasses appeared six times.** `node_subdevices` is keyed
+  `(node_id, capability)` and the iOS SDK mints an install-scoped
+  `feral-iphone-<nonce>`, so six installs left seven rows. Grouping is
+  presentation-level and deletes nothing: a live database renders 1 phone
+  and 2 peripherals, the glasses carrying `observations=6`,
+  `also_seen_via=5`. A stable node id needs an iOS change and is not made
+  here, so device identity is not silently rewritten.
+
+- **43 of 61 "paired devices" were pairing codes, not devices.**
+  `/pair/url` and `/pair/qr` stamped `kind="browser"` when the token was
+  issued, so opening the pair screen recorded a device; `mark_claimed`
+  then discarded the claimant's identity, and `Pair.jsx` sent
+  `browser_node_v2`, a transport name an iPhone also sends. Tokens mint as
+  `pending`, the claim threads `platform` and `node_id`, and the kind is
+  resolved server-side from what actually claimed it. No rows deleted.
+
+- **Glasses frames were written and read by nothing.** The reader probed
+  `getattr(glasses_buffer, "get_glasses_buffer", lambda: None)`, a
+  function the module never defined, so it fell through on every turn.
+  Measured on a real brain: a frame landed with
+  `device_ids_with_frames() == ['w610-PROBE']` and the next voice turn
+  attached no image. Every frame a pair of glasses ever sent was
+  unreachable.
+
+- **One bad provider adapter could stop the brain from booting.**
+  `ProviderCatalog` builds every adapter from its own `__init__` and
+  caught only `ImportError`, so a `ValueError` from a constructor aborted
+  construction for all sixteen. Reachable through a typo in
+  `FERAL_CODEX_SANDBOX`, an env var documented in `.env.example`. Fixed at
+  both ends: the value falls back to `read-only` instead of raising, and
+  a failing constructor now costs one provider.
+
+### Added
+
+- **Codex provider (PR #206, Noah Zerkin).** Talks to
+  `codex app-server --stdio` over JSON-RPC and uses the signed-in ChatGPT
+  account. FERAL stores no credentials for it.
+
+  `danger-full-access` requires a second opt-in,
+  `FERAL_CODEX_ALLOW_DANGEROUS_SANDBOX=1`: Codex runs with
+  `approvalPolicy: "never"`, so that mode executes commands that never
+  reach `security/dangerous_tools.py`, and one env var reachable by
+  copying a `.env` was too little friction. The subprocess no longer
+  inherits `os.environ` wholesale; Codex authenticates itself and needs
+  none of FERAL's keys.
+
+- **Inactive skills stay visible in the prompt (PR #207, Noah Zerkin).**
+  They keep name, id and description, gaining "Registered, but not
+  callable this turn", instead of vanishing and reading as uninstalled.
+
+### Changed
+
+- `/api/devices/connected` gains `offline[]` and `heartbeat_window_s`.
+  Existing `devices[]` consumers are unaffected.
+- Devices report `brain_can_initiate: false`. The brain cannot start a
+  reconnection: there are no push tokens and pairing is phone-initiated.
+  Reported rather than papered over with a button that cannot work.
+
+### Coverage
+- pytest (feral-core): 7868 collected, 7837 passed, 31 skipped.
+- vitest (feral-client-v2): 614 passed across 98 files.
+
 
 ## [2026.8.8] - 2026-08-08 - see the screen, remember the site, film the session
 
