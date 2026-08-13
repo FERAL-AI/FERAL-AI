@@ -466,6 +466,67 @@ def _reset_glasses_buffer_registration():
         glasses.set_glasses_buffer(buf)
 
 
+@pytest.fixture(autouse=True)
+def _llm_provider_class_identity_is_stable():
+    """Fail loudly if something rebuilt the ``LLMProvider`` class.
+
+    Deliberately a fixture rather than an entry in
+    ``_SHARED_STATE_RESETTERS``: that list is drained inside a
+    ``try/except Exception: pass``, which is right for a resetter (a
+    missing optional subsystem must not break the test) and fatal for an
+    assertion, which would be swallowed exactly when it fired. This does
+    not reset anything, so it does not belong there.
+
+    ``importlib.reload`` re-executes a module in place: the module object
+    in ``sys.modules`` survives, but every class it defines is a new
+    object. Test modules import ``LLMProvider`` at collection time, before
+    any test runs, so after a reload they hold the old class while
+    production code that imports inside a function gets the new one, and
+    ``monkeypatch.setattr(LLMProvider, ...)`` patches a class nothing will
+    use. The stub is silently skipped and the real method runs.
+
+    That cost four tests in ``test_agentic_cu_vlm_init`` and, because the
+    real ``switch_provider`` then ran, a genuine call to OpenAI. It is
+    invisible at the failure site, which is the whole problem: the test
+    that breaks is nowhere near the reload that broke it. Checked rather
+    than repaired, because rebinding the class afterwards would leave two
+    live versions with instances of both already in flight.
+    """
+    import sys
+
+    def _current():
+        module = sys.modules.get("agents.llm_provider")
+        return getattr(module, "LLMProvider", None) if module else None
+
+    # Record the baseline on the way IN, not on the way out. Recorded at
+    # teardown, the very first test to reload the module would install the
+    # rebuilt class as the baseline and every later comparison would agree
+    # with it, so the check would pass precisely when it should not.
+    global _LLM_PROVIDER_CLASS
+    if _LLM_PROVIDER_CLASS is None:
+        _LLM_PROVIDER_CLASS = _current()
+
+    yield
+
+    current = _current()
+    if current is None or _LLM_PROVIDER_CLASS is None:
+        return
+
+    if current is not _LLM_PROVIDER_CLASS:
+        # Restore it, or every later test inherits the split too.
+        sys.modules["agents.llm_provider"].LLMProvider = _LLM_PROVIDER_CLASS
+        raise AssertionError(
+            "agents.llm_provider.LLMProvider was rebuilt mid-session, almost "
+            "certainly by importlib.reload(). Every test module that imported "
+            "the class at collection time now patches a stale object, so their "
+            "fakes are skipped and the real provider runs. Construct the class "
+            "normally instead of reloading the module."
+        )
+
+
+_LLM_PROVIDER_CLASS = None
+
+
 def _reset_rate_limit_store():
     """Per-client-IP request windows in the API rate limiter.
 

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -138,21 +137,32 @@ class TestFirstRunDetection:
 
 
 class TestLLMProviderSetConfig:
+    # These two used to call importlib.reload(agents.llm_provider) "so env
+    # reading doesn't bleed across tests". Neither assertion reads env, and
+    # the reload was not free: reload re-executes a module in place, so the
+    # module object survives but every class it defines is rebuilt. Any test
+    # module that did `from agents.llm_provider import LLMProvider` at import
+    # time -- which is collection time, before any test runs -- kept the old
+    # class, while production code importing inside a function got the new
+    # one. monkeypatch.setattr(LLMProvider, ...) then patched a class nothing
+    # would use.
+    #
+    # That is not theoretical. It is why four tests in
+    # test_agentic_cu_vlm_init.py failed only in full runs: the fake
+    # switch_provider was installed on the stale class, the real one ran, and
+    # the suite made a genuine call to OpenAI that came back 401.
+
     def test_set_config_stores_fallback_providers(self):
         from agents.llm_provider import LLMProvider
-        import importlib
-        # Ensure the module is freshly imported so env reading doesn't
-        # bleed across tests.
-        lp_mod = importlib.reload(__import__("agents.llm_provider", fromlist=["LLMProvider"]))
-        llm = lp_mod.LLMProvider()
+
+        llm = LLMProvider()
         llm.set_config({"fallback_providers": ["groq", "deepseek"]})
         assert llm._config.get("fallback_providers") == ["groq", "deepseek"]
 
     def test_set_catalog_is_stored(self):
         from agents.llm_provider import LLMProvider
-        import importlib
-        lp_mod = importlib.reload(__import__("agents.llm_provider", fromlist=["LLMProvider"]))
-        llm = lp_mod.LLMProvider()
+
+        llm = LLMProvider()
         sentinel = object()
         llm.set_catalog(sentinel)
         assert llm._catalog is sentinel
