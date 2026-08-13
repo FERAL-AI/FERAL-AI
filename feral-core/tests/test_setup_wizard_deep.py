@@ -188,6 +188,19 @@ async def test_wizard_step_progression_provider_then_model(fake_feral):
 
 
 @pytest.mark.asyncio
+async def test_model_step_accepts_freeform_id_when_catalog_is_empty(fake_feral):
+    """An offline or unavailable catalog must not leave config without a model."""
+    _storage, _root = fake_feral
+    w = OnboardWizard(MagicMock())
+    w.config["provider"] = "openai"
+    with patch("cli.setup_wizard.provider_models", return_value=[]):
+        with patch("cli.setup_wizard.provider_default_model", return_value=""):
+            with patch("cli.setup_wizard.Prompt.ask", return_value="gpt-4.1"):
+                await w._step_model()
+    assert w.config["model"] == "gpt-4.1"
+
+
+@pytest.mark.asyncio
 async def test_api_key_validation_succeeds_sets_cred_and_process_env(fake_feral):
     _storage, _root = fake_feral
     key = "sk-validated-key-12345678901234567890"

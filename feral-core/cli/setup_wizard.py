@@ -819,6 +819,15 @@ class OnboardWizard:
         models = provider_models(provider_id)
         default_model = provider_default_model(provider_id) or (models[0] if models else "")
         if not models:
+            self.c.print(Panel(
+                "[bold]Step 2 · Model[/]\n"
+                f"[dim]The catalog has no cached {provider['name']} models. Enter the provider model id.[/]",
+                style="blue",
+            ))
+            model = Prompt.ask("Enter model id", default=default_model or None)
+            if model:
+                self.config["model"] = model
+            self.c.print()
             return
 
         self.c.print(Panel(

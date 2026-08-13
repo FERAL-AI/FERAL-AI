@@ -248,6 +248,12 @@
         }
       }
     },
+    "codex": {
+      "endpoint": null,
+      "models": [],
+      "pricing": {},
+      "note": "Account-scoped model discovery is performed at runtime through Codex app-server; billing follows the signed-in ChatGPT plan rather than API token pricing."
+    },
     "anthropic": {
       "endpoint": "https://api.anthropic.com/v1/models",
       "curated_at": "2026-07-30",

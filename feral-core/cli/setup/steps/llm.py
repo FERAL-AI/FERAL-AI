@@ -85,8 +85,8 @@ async def run_provider_step(state: WizardState) -> None:
         console.print(
             "Pick the provider you want FERAL's brain to talk to. Local providers "
             "show [green]ready[/] when detected; cloud providers show "
-            "[yellow]needs API key[/] until you enter one — you can still pick them "
-            "and add the key next."
+            "[yellow]needs API key[/] when required. Codex uses your existing "
+            "ChatGPT sign-in instead of an API key."
         )
         hidden = _unsupported_provider_ids(catalog)
         if hidden:
@@ -159,6 +159,10 @@ async def run_provider_step(state: WizardState) -> None:
             cached = await catalog.list_models(chosen.id, live=True, force=True)
             if not cached.models:
                 _show_lmstudio_no_model(console)
+    elif desc.provider_id == "codex":
+        status = statuses.get(desc.provider_id)
+        if not (status and status.reachable):
+            _show_codex_instructions(console, status)
 
 
 def _apply_base_url(state: WizardState, desc, *, provider_changed: bool) -> None:
@@ -844,3 +848,13 @@ def _show_lmstudio_no_model(console) -> None:
     console.print("  LM Studio is running but no model is loaded.")
     console.print("  Open LM Studio → pick a model → Start the local server.")
     console.print("  Then re-run `feral setup`.")
+
+
+def _show_codex_instructions(
+    console, status: ProviderStatus | None = None
+) -> None:
+    console.print()
+    console.print("  Codex is not ready for ChatGPT-backed FERAL turns.")
+    if status and status.error:
+        console.print(f"  Probe: {status.error}")
+    console.print("  Install the Codex CLI, run `codex login`, then re-run `feral setup`.")
