@@ -11,7 +11,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, Smartphone, ShieldCheck, Zap, AlertTriangle } from "lucide-react";
 import { Navigate } from "react-router-dom";
-import BrowserNode from "../node/BrowserNode";
+import BrowserNode, { browserNodeId } from "../node/BrowserNode";
 import {
   clearPhoneBearer,
   getLatestPhoneBearer,
@@ -202,7 +202,19 @@ export default function Pair() {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ token, kind: "browser_node_v2" }),
+          // `kind` is the transport this page speaks, not what this
+          // device IS. An iPhone opening this page in Safari sends the
+          // same string a MacBook does, which is why the owner's phone
+          // was recorded as a browser connection he never made. Send
+          // the user agent too and let the brain resolve the real kind
+          // in one place (api/device_view.kind_from_platform), rather
+          // than sniffing here and disagreeing with the server.
+          body: JSON.stringify({
+            token,
+            kind: "browser_node_v2",
+            platform: navigator.userAgent || "",
+            node_id: browserNodeId(),
+          }),
         },
       );
       if (!claimRes.ok) {

@@ -33,6 +33,19 @@ function nowTs() {
   return Date.now() / 1000;
 }
 
+/**
+ * This browser's stable node id, minted once and kept in localStorage.
+ *
+ * Exported because the /pair page needs it BEFORE a BrowserNode exists:
+ * `/api/devices/pair/complete` writes `node_id` onto the pairing row, and
+ * that column is the only join between `paired_devices` and the HUP node
+ * that later connects. It was empty on all 61 rows of the audited
+ * install, so no pairing could ever be matched to a device.
+ */
+export function browserNodeId() {
+  return makeNodeId();
+}
+
 function makeNodeId() {
   try {
     const existing = localStorage.getItem("feral.browser_node_id");

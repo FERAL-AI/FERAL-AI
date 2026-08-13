@@ -7,7 +7,7 @@ import StatusDot from '../ui/StatusDot';
 import EmptyState from '../ui/EmptyState';
 import PairDeviceModal from '../components/PairDeviceModal';
 import PerceptionShare from '../components/PerceptionShare';
-import DeviceTopology from '../components/DeviceTopology';
+import DeviceTopology, { ageText } from '../components/DeviceTopology';
 import { apiJson, apiFetch } from '../lib/api';
 import { useFeralSocket } from '../hooks/useFeralSocket';
 
@@ -19,6 +19,14 @@ const PLACEHOLDER_NAMES = new Set([
 ]);
 
 function labelFor(row) {
+  // The brain now resolves this: `label` says what the row IS ("iPhone",
+  // "Browser", "Pairing code (unclaimed)") from the claimant's platform
+  // rather than from the transport that carried the token. Every one of
+  // the 61 rows on the audited install said kind='browser', including
+  // the ones an iPhone claimed, which is why a phone presented as a
+  // browser connection the owner never made. Client-side reconstruction
+  // stays below for older brains.
+  if (row?.label) return row.label;
   const raw = (row?.name || '').trim();
   if (raw && !PLACEHOLDER_NAMES.has(raw.toLowerCase())) return raw;
   const kind = row?.kind || row?.type;
@@ -67,6 +75,12 @@ function subdeviceTooltip(s) {
  */
 export default function Devices() {
   const [connected, setConnected] = useState([]);
+  // Nodes the brain knows about that are NOT holding a socket. Before
+  // `/api/devices/connected.offline[]` existed, a phone that dropped was
+  // popped from `state.daemons` and vanished from every pane on this
+  // page, so the last state the user saw for it was a live green dot and
+  // nothing ever contradicted that.
+  const [offline, setOffline] = useState([]);
   const [paired, setPaired] = useState([]);
   const [mesh, setMesh] = useState([]);
   // 2026-06-05 demo prep — Topology view also wants the live HR/SpO2
@@ -102,7 +116,10 @@ export default function Devices() {
         apiJson('/api/hardware/mesh'),
         apiJson('/api/dashboard'),
       ]);
-      if (c.status === 'fulfilled') setConnected(c.value?.devices || []);
+      if (c.status === 'fulfilled') {
+        setConnected(c.value?.devices || []);
+        setOffline(c.value?.offline || []);
+      }
       if (p.status === 'fulfilled') setPaired(p.value?.devices || []);
       if (m.status === 'fulfilled') setMesh(m.value?.nodes || []);
       if (d.status === 'fulfilled') {
@@ -260,7 +277,7 @@ export default function Devices() {
         {error && <div className="v2-chip v2-chip--error">{error}</div>}
         {loading && <EmptyState title="Scanning…" />}
 
-        {!loading && connected.length === 0 && visiblePaired.length === 0 && mesh.length === 0 && (
+        {!loading && connected.length === 0 && offline.length === 0 && visiblePaired.length === 0 && mesh.length === 0 && (
           <EmptyState
             title="No devices paired yet"
             hint="Pair an iPhone, wristband, smart glasses, or any HUP daemon. FERAL sees their sensors + fires their actuators."
@@ -272,7 +289,7 @@ export default function Devices() {
       <PerceptionShare />
 
       {!loading && (
-        <DeviceTopology connected={connected} latestHealth={latestHealth} />
+        <DeviceTopology connected={connected} offline={offline} latestHealth={latestHealth} />
       )}
 
       {connected.length > 0 && (
@@ -332,6 +349,71 @@ export default function Devices() {
                       </span>
                     ))}
                   </div>
+                )}
+              </Glass>
+            ))}
+          </div>
+        </Pane>
+      )}
+
+      {offline.length > 0 && (
+        <Pane title={`Disconnected (${offline.length})`}>
+          <p className="v2-p v2-p--muted">
+            Devices the brain knows about that are not reporting right now. They
+            used to disappear from this page entirely when their WebSocket
+            dropped, so the last thing you saw was a live dot. The brain cannot
+            reconnect them itself; only the device can start that.
+          </p>
+          <div className="v2-device-grid">
+            {offline.map((d, i) => (
+              <Glass
+                key={d.node_id || i}
+                level={0}
+                radius="md"
+                padding="md"
+                className="v2-device-card"
+                data-testid="v2-devices-offline-card"
+                onClick={() => setSelected({ ...d, _source: 'offline' })}
+                role="button"
+                tabIndex={0}
+              >
+                <header className="v2-device-head">
+                  <StatusDot tone="off" pulse={false} label={`${d.node_id} disconnected`} />
+                  <h3 className="v2-device-name">{d.name || d.node_id || 'Device'}</h3>
+                </header>
+                <div className="v2-device-meta">
+                  {d.type || 'unknown'}
+                  {' · disconnected'}
+                  {ageText(d.last_seen_age_s) ? ` · last seen ${ageText(d.last_seen_age_s)}` : ''}
+                </div>
+                {Array.isArray(d.also_known_as) && d.also_known_as.length > 0 && (
+                  <div className="v2-device-meta v2-p--muted" title={d.also_known_as.join('\n')}>
+                    {`Same device as ${d.also_known_as.length} earlier install${d.also_known_as.length === 1 ? '' : 's'}`}
+                  </div>
+                )}
+                {Array.isArray(d.subdevices) && d.subdevices.length > 0 && (
+                  <div className="v2-device-caps" style={{ marginTop: 6 }}>
+                    {d.subdevices.map((s, si) => (
+                      <span
+                        key={si}
+                        className="v2-chip"
+                        title={subdeviceTooltip(s)}
+                        data-testid="v2-device-subdevice-chip"
+                      >
+                        <StatusDot
+                          tone={s.live ? 'live' : 'off'}
+                          pulse={s.live}
+                          label={`${s.capability} ${s.live ? 'live' : 'stale'}`}
+                        />
+                        {s.name || s.capability}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {Array.isArray(d.reconnect?.steps) && d.reconnect.steps.length > 0 && (
+                  <ol className="v2-p v2-p--tiny v2-p--muted" style={{ marginTop: 8, paddingLeft: 16 }}>
+                    {d.reconnect.steps.map((step, si) => <li key={si}>{step}</li>)}
+                  </ol>
                 )}
               </Glass>
             ))}
@@ -459,9 +541,15 @@ function PairedPane({ paired, onSelect, onForget, onRefresh }) {
                 <StatusDot tone={claimed ? 'neutral' : 'off'} pulse={false} />
                 <h3 className="v2-device-name">{labelFor(d)}</h3>
               </header>
-              <div className="v2-device-meta">
+              <div className="v2-device-meta" title={d.explain || undefined}>
                 {(d.type || d.kind) || '—'}
                 {!claimed && <> · <span className="v2-chip v2-chip--warn">unclaimed</span></>}
+                {/* `is_device === false` is the brain saying "this row is
+                    a pairing code nobody ever redeemed", which is what 43
+                    of the owner's 61 rows actually are. Counting them as
+                    devices is what filled the list with browsers he never
+                    paired. */}
+                {d.is_device === false && <> · <span className="v2-chip v2-chip--muted">not a device</span></>}
               </div>
               {d.capabilities && (
                 <div className="v2-device-caps">

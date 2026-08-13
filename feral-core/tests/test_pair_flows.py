@@ -122,9 +122,15 @@ def test_pair_url_returns_unified_v1_payload(client):
     assert body["token"] in body["url"]
     assert body["brain_id"]
     assert body["expires"] > 0
-    # Record must exist with kind=browser so we can distinguish it later.
+    # Record must exist with kind="pending". It was "browser" until the
+    # devices-lane fix: this endpoint mints a token and the brain cannot
+    # know what will scan the QR, so asserting "a browser was paired"
+    # here was a lie. On the audited install it produced 61 rows of
+    # kind='browser' (43 never claimed by anything), which is why the
+    # owner saw browser connections he never made. The claimant declares
+    # what it is at /api/devices/pair/complete.
     rows = store.list_devices()
-    assert rows and rows[0]["kind"] == "browser"
+    assert rows and rows[0]["kind"] == "pending"
 
 
 def test_pair_qr_mode_validation(client):

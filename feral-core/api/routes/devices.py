@@ -11,6 +11,11 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from api.device_view import (
+    build_device_view,
+    describe_pairing_row,
+    node_type_from_id,
+)
 from api.middleware.rate_limit import code_claim_limiter
 from api.state import state
 from config.access_mode import LOOPBACK_HOSTS, AccessMode, coerce
@@ -487,22 +492,15 @@ def _infer_node_type(node_id: str, ws) -> str:
         mirror = getattr(state.skill_executor, "_daemon_types", {}).get(node_id)
         if mirror:
             return str(mirror).lower()
-    low = (node_id or "").lower()
-    if "glasses" in low or "w300" in low:
-        return "glasses"
-    if "wristband" in low or "watch" in low:
-        return "wearable"
-    if "browser" in low and "camera" in low:
-        return "browser_camera"
-    if "browser" in low:
-        return "browser_node"
-    # "phone" label is only reserved for daemons that explicitly declared
-    # it at register time (handled above via ws._feral_node_type). A
-    # substring heuristic was mislabelling random node_ids + making the UI
-    # show a phone that didn't exist.
-    if "robot" in low:
-        return "robot"
-    return "unknown"
+    # Single id heuristic, shared with the offline half of the tree in
+    # `api/device_view.py`. Keeping two copies is how the dashboard and
+    # the prompt ended up disagreeing about what a device was.
+    #
+    # "phone" is still never guessed from a loose substring; the only
+    # phone-shaped rule is this repo's own iOS SDK prefix
+    # (`feral-iphone-`, FeralBrainClient.swift:179), which is our
+    # namespace, not a guess.
+    return node_type_from_id(node_id)
 
 
 def _describe_device(node_id: str, ws) -> dict:
@@ -537,25 +535,44 @@ def _subdevices_for(node_id: str) -> list[dict]:
     return store.list_for_node(node_id)
 
 
+def _all_subdevice_rows() -> list[dict]:
+    store = getattr(state, "node_subdevices", None)
+    if store is None:
+        return []
+    return store.list_all()
+
+
 @router.get("/api/devices/connected")
 async def connected_devices():
-    """List **live HUP daemons only** with their real node_type.
+    """The whole device tree: what is live, and what dropped.
 
-    Selection-bound: every entry corresponds to an open WebSocket in
-    ``state.daemons``. Paired-but-offline nodes are intentionally
-    NOT included here — clients that need them should call
-    ``GET /api/dashboard`` (which surfaces both via ``devices[]`` and
-    paired/offline counts) or ``GET /api/devices/paired``.
+    ``devices[]`` is unchanged and still selection-bound to open
+    WebSockets in ``state.daemons``. Every existing client keeps
+    working. Two keys are added:
 
-    Each row carries ``subdevices: [...]`` — every sub-device the
-    parent node has ever reported, with a per-row ``live`` flag
-    computed from the provenance-specific heartbeat window. A row's
-    ``subdevices`` may legitimately contain rows whose ``live`` is
-    ``false`` even though the node itself is live (e.g. the iPhone
-    is connected but the Theora glasses BLE link dropped).
+    * ``offline[]``: nodes the brain knows about that are NOT holding
+      a socket right now, each with ``status: "disconnected"``,
+      ``last_seen`` and a ``reconnect`` block. This exists because the
+      disconnect teardown (``api/server.py`` ``except
+      WebSocketDisconnect``) pops ``state.daemons`` AND unregisters the
+      node from ``hardware_mesh``, so a phone that dropped previously
+      did not become "disconnected", it stopped existing. A UI cannot
+      render "your glasses went offline" from an empty list, and the
+      owner reported exactly that: devices that dropped still read as
+      connected because nothing ever said otherwise.
+    * ``heartbeat_window_s``: the single node staleness window
+      (3 x the HUP ``heartbeat_ms`` default), so no surface has to
+      pick its own number.
 
-    Empty list is a valid answer and means "no daemon WebSocket open
-    right now". It does NOT mean "nothing has ever paired".
+    Entries on both lists carry ``connected: bool``, ``last_seen`` and
+    ``subdevices[]``. Sub-devices are grouped per physical peripheral,
+    so one pair of glasses seen through six install-scoped node ids is
+    one row with ``also_seen_via`` naming the other five. Nothing is
+    deleted to achieve that.
+
+    Empty ``devices`` still means "no daemon WebSocket open right now".
+    Empty ``devices`` AND empty ``offline`` means "nothing has ever
+    paired".
     """
     if state.session_handoff:
         active = state.session_handoff.get_active_devices() or []
@@ -572,15 +589,21 @@ async def connected_devices():
                     ws = state.daemons.get(nid)
                     if ws is not None:
                         d = {**d, "type": _infer_node_type(nid, ws)}
-                d = {**d, "subdevices": _subdevices_for(nid)}
             cleaned.append(d)
-        return {"devices": cleaned}
+        view = build_device_view(
+            live_nodes=[d for d in cleaned if isinstance(d, dict)],
+            subdevice_rows=_all_subdevice_rows(),
+        )
+        # Preserve any non-dict rows the handoff manager returned rather
+        # than dropping them: this endpoint has never validated that
+        # shape and silently losing a row would be a new defect.
+        view["devices"].extend(d for d in cleaned if not isinstance(d, dict))
+        return view
 
-    return {
-        "devices": [
-            _describe_device(nid, ws) for nid, ws in state.daemons.items()
-        ]
-    }
+    return build_device_view(
+        live_nodes=[_describe_device(nid, ws) for nid, ws in state.daemons.items()],
+        subdevice_rows=_all_subdevice_rows(),
+    )
 
 
 @router.get("/api/devices/{node_id}/subdevices")
@@ -725,11 +748,20 @@ async def list_paired_devices(include_unclaimed: bool = False):
     already reads (``device_id``, ``name``, ``paired_at``, ``last_seen``,
     ``kind``, ``node_id``, ``claimed_at``, ``platform``,
     ``capabilities``) is still present; only the row count is filtered.
+
+    Three derived keys are added by ``describe_pairing_row``:
+    ``is_device`` (False for a token nobody ever claimed), ``label``
+    (what the thing IS, resolved from the claimant's platform rather
+    than from the transport that carried the token) and ``explain``.
+    The owner's install carries 61 rows, all ``kind='browser'``, 43 of
+    them never claimed. Those are pairing codes, not browsers he
+    paired. They are still returned; they are simply no longer counted
+    as devices.
     """
     store = state.device_pairing_store
     devices = store.list_devices(include_unclaimed=bool(include_unclaimed))
     safe = [
-        {
+        describe_pairing_row({
             "device_id": d["device_id"],
             "name": d["name"],
             "paired_at": d["paired_at"],
@@ -739,7 +771,7 @@ async def list_paired_devices(include_unclaimed: bool = False):
             "claimed_at": d.get("claimed_at"),
             "platform": d.get("platform", ""),
             "capabilities": d.get("capabilities", []),
-        }
+        })
         for d in devices
     ]
     return {"devices": safe}
@@ -757,6 +789,8 @@ async def pair_device(request: Request):
         {"kind": "browser",                 — browser-Node pair (Pair page)
          "platform": "...",                   includes user-agent hint
          "capabilities": [...] }
+        {"kind": "pending"}                 - token issued, claimant unknown
+                                              (what the QR / URL flows mint)
 
     All kinds accept an optional ``name`` label. Legacy body {name: ...}
     without ``kind`` is still honoured (falls back to kind="name").
@@ -767,7 +801,7 @@ async def pair_device(request: Request):
     body = await request.json() if await request.body() else {}
     name = body.get("name", "unnamed")
     kind = (body.get("kind") or "name").lower()
-    if kind not in {"name", "hup", "browser", "browser_node_v2"}:
+    if kind not in {"name", "hup", "browser", "browser_node_v2", "pending"}:
         raise HTTPException(status_code=400, detail=f"unknown pair kind: {kind}")
     node_id = body.get("node_id") or ""
     platform = body.get("platform") or ""
@@ -815,7 +849,13 @@ async def pair_device_qr(request: Request, name: str = "unnamed", mode: str = "w
         origin = _resolve_pair_origin()
     except PairUnavailable as exc:
         raise HTTPException(status_code=409, detail=exc.as_detail())
-    result = store.pair_device(name, kind="browser")
+    # kind="pending", NOT "browser". At QR-mint time the brain does not
+    # know what will scan it. Stamping "browser" here is what put 61
+    # rows of `kind='browser'` into the owner's paired_devices.db, 43 of
+    # them never claimed by anything: opening the pair screen recorded a
+    # browser pairing he never made. The claimant declares what it is at
+    # /api/devices/pair/complete.
+    result = store.pair_device(name, kind="pending")
     payload = _pair_payload(result, origin=origin)
 
     encoded = payload["url"]
@@ -862,9 +902,10 @@ async def pair_device_url(
         origin = _resolve_pair_origin()
     except PairUnavailable as exc:
         raise HTTPException(status_code=409, detail=exc.as_detail())
+    # See pair_device_qr: "pending" until a device claims the token.
     result = store.pair_device(
         name,
-        kind="browser",
+        kind="pending",
         require_pin=bool(pin),
     )
     payload = _pair_payload(result, origin=origin)
@@ -1062,9 +1103,20 @@ async def pair_device_complete(body: dict):
     Called by BrowserNode.js the moment its WebSocket register succeeds;
     the UI on the brain-side then shows "device connected" instead of
     "token issued, no attach yet".
+
+    ``kind`` here is the TRANSPORT the claimant speaks
+    (``browser_node_v2``), not what the claimant IS. An iPhone running
+    the /pair page in Safari sends exactly that string, which is why
+    the owner's phone was recorded as a browser connection he says he
+    never made. ``platform`` (the claimant's user agent) and
+    ``node_id`` are now threaded through so the row records the real
+    device. Both are optional: a client that sends only ``token``
+    behaves exactly as before.
     """
     token = (body or {}).get("token") or ""
     kind = ((body or {}).get("kind") or "").strip().lower()
+    platform = str((body or {}).get("platform") or "").strip()
+    claim_node_id = str((body or {}).get("node_id") or "").strip()
     if not token:
         raise HTTPException(status_code=400, detail="token required")
     store = state.device_pairing_store
@@ -1079,7 +1131,12 @@ async def pair_device_complete(body: dict):
             status_code=401,
             detail={"code": "pin_not_verified"},
         )
-    device_id = store.mark_claimed(token)
+    device_id = store.mark_claimed(
+        token,
+        kind=kind,
+        platform=platform,
+        node_id=claim_node_id,
+    )
     if device_id is None:
         raise HTTPException(status_code=404, detail="unknown pairing token")
 

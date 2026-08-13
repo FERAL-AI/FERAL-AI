@@ -46,19 +46,55 @@ function nodeVisual(node) {
 /** Pick an icon for a sub-device row. */
 function subVisual(sub) {
   const cap = (sub?.capability || '').toLowerCase();
+  // The brain's grouped record carries the peripheral's own reported
+  // name ("W300", "VITRO"). Prefer it: "Glasses" is what class of thing
+  // it is, "W300" is which one, and the user recognises the latter.
+  const name = (sub?.name || '').trim();
   if (cap.includes('glass') || cap.includes('hud') || cap.includes('w300')) {
-    return { Icon: Eye, label: 'Glasses' };
+    return { Icon: Eye, label: name || 'Glasses' };
   }
   if (cap.includes('wrist') || cap.includes('veepoo') || cap.includes('watch')) {
-    return { Icon: Watch, label: 'Wristband' };
+    return { Icon: Watch, label: name || 'Wristband' };
   }
   if (cap.includes('heart') || cap.includes('hr')) {
-    return { Icon: Heart, label: 'HR sensor' };
+    return { Icon: Heart, label: name || 'HR sensor' };
   }
   if (cap.includes('spo2') || cap.includes('oxy')) {
-    return { Icon: Wind, label: 'SpO2 sensor' };
+    return { Icon: Wind, label: name || 'SpO2 sensor' };
   }
-  return { Icon: Activity, label: sub?.capability || 'sensor' };
+  return { Icon: Activity, label: name || sub?.capability || 'sensor' };
+}
+
+/**
+ * "5 days ago" from the brain's `last_seen_age_s`. Returns '' when the
+ * brain did not supply an age, because inventing one from a missing
+ * field is how a surface ends up asserting freshness it cannot back.
+ */
+export function ageText(ageS) {
+  if (typeof ageS !== 'number' || !Number.isFinite(ageS) || ageS <= 0) return '';
+  if (ageS < 90) return `${Math.round(ageS)} s ago`;
+  if (ageS < 5400) return `${Math.round(ageS / 60)} min ago`;
+  if (ageS < 172800) return `${Math.round(ageS / 3600)} h ago`;
+  return `${Math.floor(ageS / 86400)} days ago`;
+}
+
+/**
+ * Hover text for a grouped peripheral chip. `observations` and
+ * `also_seen_via` exist because the brain collapses one physical
+ * peripheral seen through several install-scoped node ids into a
+ * single row; the detail stays reachable so grouping never hides
+ * history.
+ */
+function subTooltip(sub) {
+  const parts = [`${sub?.capability || 'peripheral'} · ${sub?.status || 'unknown'}`];
+  const age = ageText(sub?.last_seen_age_s);
+  if (age) parts.push(`last seen ${age}`);
+  if (sub?.via_node_id) parts.push(`via ${sub.via_node_id}`);
+  const n = sub?.observations;
+  if (typeof n === 'number' && n > 1) {
+    parts.push(`${n} observations across ${(sub.also_seen_via || []).length + 1} installs`);
+  }
+  return parts.join('\n');
 }
 
 /**
@@ -94,10 +130,19 @@ function liveBadges(latestHealth) {
  * `/api/devices/connected`; `latestHealth` is `/api/dashboard
  * .latest_health` (HR + SpO2 with fresh/stale flags).
  */
-export default function DeviceTopology({ connected = [], latestHealth = null }) {
+export default function DeviceTopology({ connected = [], offline = [], latestHealth = null }) {
+  // Live nodes first, then the ones that dropped. `offline` comes from
+  // the brain's new `/api/devices/connected.offline[]`: before it
+  // existed, a node that disconnected was popped from `state.daemons`
+  // and simply vanished from this orbit, so the last thing the operator
+  // ever saw for it was a green pulsing dot. Absence read as "no such
+  // device" instead of "your device dropped".
   const nodes = useMemo(
-    () => (Array.isArray(connected) ? connected : []),
-    [connected],
+    () => [
+      ...(Array.isArray(connected) ? connected : []),
+      ...(Array.isArray(offline) ? offline : []),
+    ],
+    [connected, offline],
   );
   const badges = useMemo(() => liveBadges(latestHealth), [latestHealth]);
 
@@ -144,10 +189,17 @@ export default function DeviceTopology({ connected = [], latestHealth = null }) 
           {nodes.map((node) => {
             const { Icon, label } = nodeVisual(node);
             const subs = Array.isArray(node.subdevices) ? node.subdevices : [];
+            // `connected !== false` and not `!!connected`: a brain that
+            // predates the flag omits it, and an old brain's live-only
+            // payload is genuinely all-live. Only an explicit false
+            // means "this node dropped".
+            const isLive = node.connected !== false;
+            const age = ageText(node.last_seen_age_s);
+            const olderInstalls = Array.isArray(node.also_known_as) ? node.also_known_as : [];
             return (
               <div
                 key={node.node_id || node.name || label}
-                className="v2-topology-branch"
+                className={`v2-topology-branch${isLive ? '' : ' is-offline'}`}
                 data-testid="v2-topology-branch"
               >
                 <div className="v2-topology-link" aria-hidden="true" />
@@ -158,13 +210,39 @@ export default function DeviceTopology({ connected = [], latestHealth = null }) 
                   className="v2-topology-node"
                 >
                   <header className="v2-device-head">
-                    <StatusDot tone="live" pulse />
+                    {/* Was a hardcoded `tone="live" pulse`. It was true
+                        only because this list held open sockets and
+                        nothing else; it is now fed disconnected nodes
+                        too, and a green pulsing dot on a phone that
+                        dropped five days ago is exactly the complaint. */}
+                    <StatusDot
+                      tone={isLive ? 'live' : 'off'}
+                      pulse={isLive}
+                      label={`${node.name || node.node_id || label} ${isLive ? 'connected' : 'disconnected'}`}
+                    />
                     <Icon size={14} />
                     <h3 className="v2-device-name">
                       {node.name || node.node_id || label}
                     </h3>
                   </header>
                   <div className="v2-device-meta">{label}</div>
+                  <div
+                    className={`v2-device-meta${isLive ? '' : ' v2-p--muted'}`}
+                    data-testid="v2-topology-node-state"
+                  >
+                    {isLive
+                      ? 'Connected'
+                      : `Disconnected${age ? ` · last seen ${age}` : ''}`}
+                  </div>
+                  {olderInstalls.length > 0 && (
+                    <div
+                      className="v2-device-meta v2-p--muted"
+                      data-testid="v2-topology-node-aka"
+                      title={olderInstalls.join('\n')}
+                    >
+                      {`Same device as ${olderInstalls.length} earlier install${olderInstalls.length === 1 ? '' : 's'}`}
+                    </div>
+                  )}
 
                   {subs.length > 0 && (
                     <div className="v2-topology-subs">
@@ -172,9 +250,10 @@ export default function DeviceTopology({ connected = [], latestHealth = null }) 
                         const sv = subVisual(s);
                         return (
                           <div
-                            key={si}
+                            key={s.capability ? `${s.capability}-${s.name || si}` : si}
                             className="v2-topology-sub"
                             data-testid="v2-topology-sub"
+                            title={subTooltip(s)}
                           >
                             <span className="v2-topology-sub-link" aria-hidden="true" />
                             <span className="v2-chip">
@@ -188,6 +267,22 @@ export default function DeviceTopology({ connected = [], latestHealth = null }) 
                           </div>
                         );
                       })}
+                    </div>
+                  )}
+
+                  {/* Deliberately text, not a button. The brain has no
+                      outbound channel to a node that is not holding a
+                      WebSocket, so a "Reconnect" control would do
+                      nothing. `reconnect.steps` is authored by the
+                      brain so the UI and the model say the same thing. */}
+                  {!isLive && Array.isArray(node.reconnect?.steps) && node.reconnect.steps.length > 0 && (
+                    <div
+                      className="v2-p v2-p--tiny v2-p--muted"
+                      data-testid="v2-topology-reconnect"
+                      title={node.reconnect.why || undefined}
+                      style={{ marginTop: 6 }}
+                    >
+                      {node.reconnect.steps[0]}
                     </div>
                   )}
                 </Glass>

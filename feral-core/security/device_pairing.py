@@ -1121,22 +1121,50 @@ class DevicePairingStore:
             return True
         return bool(row[1])
 
-    def mark_claimed(self, token: str) -> Optional[str]:
-        """Set ``claimed_at`` once a daemon actually attaches with *token*.
+    def mark_claimed(
+        self,
+        token: str,
+        *,
+        kind: str = "",
+        platform: str = "",
+        node_id: str = "",
+    ) -> Optional[str]:
+        """Set ``claimed_at`` once a daemon actually attaches with *token*,
+        and record WHAT claimed it.
 
         Used by /api/devices/pair/complete so the UI can distinguish
         tokens that were issued-but-never-used from live paired devices.
         Returns the device_id on success.
+
+        ``kind`` / ``platform`` / ``node_id`` describe the claimant and
+        are all optional, so a client that posts only the token keeps
+        the pre-existing behaviour exactly.
+
+        Why the claimant identity is written here and not at issue time:
+        the row's ``kind`` used to be stamped when the QR was generated,
+        where the brain cannot know what will scan it. Every one of the
+        61 rows in the owner's ``paired_devices.db`` says
+        ``kind='browser'`` with an empty ``node_id``, including the ones
+        an iPhone claimed, which is why his phone presented as a browser
+        connection he never made. ``platform`` (a user agent) is the
+        only evidence of what actually claimed the token, so it resolves
+        the kind; ``browser_node_v2`` is a transport name and is never
+        stored as a device kind.
+
+        A known kind is never downgraded to a guess: if the claimant
+        sends nothing identifying, the existing kind stands.
         """
         if not token:
             return None
+        from api.device_view import kind_from_platform
+
         lookup = _token_lookup(token)
         now = time.time()
         with self._lock:
             conn = self._conn()
             try:
                 row = conn.execute(
-                    "SELECT device_id, token_hash, expires_at "
+                    "SELECT device_id, token_hash, expires_at, kind, node_id, platform "
                     "FROM paired_devices WHERE token_lookup = ?",
                     (lookup,),
                 ).fetchone()
@@ -1149,12 +1177,39 @@ class DevicePairingStore:
                     return None
                 if row["expires_at"] is not None and row["expires_at"] <= int(now):
                     return None
+
+                existing_kind = (row["kind"] or "").strip().lower()
+                # "pending" and the transport aliases carry no device
+                # information, so they are the only values a claim is
+                # allowed to overwrite.
+                replaceable = existing_kind in ("", "pending", "browser_node_v2")
+                if platform:
+                    fallback = kind if kind and kind != "browser_node_v2" else "browser"
+                    resolved_kind = kind_from_platform(platform, fallback=fallback)
+                elif kind and kind != "browser_node_v2":
+                    resolved_kind = kind
+                else:
+                    resolved_kind = existing_kind or kind
+                new_kind = resolved_kind if replaceable else existing_kind
+
                 conn.execute(
-                    "UPDATE paired_devices SET claimed_at = ?, last_seen = ? "
-                    "WHERE device_id = ?",
-                    (now, now, row["device_id"]),
+                    "UPDATE paired_devices SET claimed_at = ?, last_seen = ?, "
+                    "kind = ?, platform = ?, node_id = ? WHERE device_id = ?",
+                    (
+                        now,
+                        now,
+                        new_kind,
+                        platform or (row["platform"] or ""),
+                        node_id or (row["node_id"] or ""),
+                        row["device_id"],
+                    ),
                 )
                 conn.commit()
+                logger.info(
+                    "Pair claimed device_id=%s kind=%s->%s node=%s",
+                    row["device_id"], existing_kind or "-", new_kind or "-",
+                    node_id or row["node_id"] or "-",
+                )
                 return row["device_id"]
             finally:
                 conn.close()
