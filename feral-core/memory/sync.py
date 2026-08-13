@@ -499,6 +499,54 @@ class SyncWAL:
         finally:
             conn.close()
 
+    def mark_synced_many(self, op_ids: list[str], peer_node: str) -> int:
+        """Record delivery of many operations to one peer, in one commit.
+
+        The per-op :meth:`mark_synced` opens and closes a connection per
+        call. A first sync against a fresh peer ships the entire WAL,
+        which on the real store is 16,184 operations, so the one-shot
+        version is the only one the exchange path can afford to use.
+        Returns the number of rows actually changed.
+        """
+        if not op_ids:
+            return 0
+        conn = sqlite3.connect(self._db_path)
+        try:
+            changed = 0
+            updates: list[tuple[str, str]] = []
+            # Chunked so the IN list stays under SQLITE_MAX_VARIABLE_NUMBER
+            # (999 on the conservative builds this ships against).
+            for start in range(0, len(op_ids), 500):
+                batch = op_ids[start : start + 500]
+                placeholders = ",".join("?" * len(batch))
+                rows = conn.execute(
+                    f"SELECT op_id, synced_to FROM sync_wal WHERE op_id IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                for op_id, raw in rows:
+                    try:
+                        synced = json.loads(raw or "[]")
+                    except (TypeError, ValueError):
+                        # A corrupt cell must not cost the whole batch;
+                        # rewriting it from a known-good base is strictly
+                        # better than leaving it unparseable forever.
+                        synced = []
+                    if not isinstance(synced, list):
+                        synced = []
+                    if peer_node in synced:
+                        continue
+                    synced.append(peer_node)
+                    updates.append((json.dumps(synced), op_id))
+            if updates:
+                conn.executemany(
+                    "UPDATE sync_wal SET synced_to=? WHERE op_id=?", updates
+                )
+                conn.commit()
+                changed = len(updates)
+            return changed
+        finally:
+            conn.close()
+
     @property
     def count(self) -> int:
         conn = sqlite3.connect(self._db_path)
@@ -1370,6 +1418,31 @@ class SyncEngine:
             remote_changes_msg = json.loads(remote_raw)
             remote_changes = remote_changes_msg.get("changes", [])
             applied = await self.apply_remote_changes(remote_changes)
+
+            # Record per-peer delivery. ``SyncWAL.mark_synced`` had zero
+            # callers anywhere in the tree (audit 2026-08-12): every one
+            # of the 16,184 operations in the real store's WAL carried
+            # ``synced_to = '[]'``, not because sync had never run but
+            # because the column was unwritable by construction. That
+            # made "which peers have this op?" unanswerable and left the
+            # WAL with no basis on which it could ever be pruned.
+            # Marked only after the peer's own change set came back,
+            # which is the point at which it has demonstrably processed
+            # ours. Failures here are logged, never fatal: the exchange
+            # itself already succeeded and HLC, not this column, is what
+            # drives what gets sent next time.
+            if changes_for_peer:
+                try:
+                    await asyncio.to_thread(
+                        self._wal.mark_synced_many,
+                        [op.op_id for op in changes_for_peer],
+                        peer_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "mark_synced_many failed for peer=%s over %d op(s): %s",
+                        peer_id, len(changes_for_peer), exc,
+                    )
 
             elapsed_ms = (time.time() - started_at) * 1000
             logger.info(

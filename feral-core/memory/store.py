@@ -1386,6 +1386,18 @@ class MemoryStore:
             await conn.commit()
         finally:
             await self._release(conn)
+        # ``conversations`` is in ``SyncEngine._SYNC_ALLOWED_TABLES``, so a
+        # peer is permitted to act on this row, and deleting a
+        # conversation is a privacy action a user expects to reach every
+        # brain they own. It was not logged: the audit of 2026-08-12 found
+        # 16,184 WAL operations of which 0 were deletes, on any table.
+        # (No insert flow replicates conversations yet, so today this is a
+        # no-op on the peer; it is logged anyway because the invariant
+        # under test is "every delete on a syncable table is logged", and
+        # an unlogged delete is invisible the moment that flow lands.)
+        await self._log_sync_async(
+            "conversations", "delete", conversation_id, {"id": conversation_id},
+        )
         return True
 
     async def snapshot_session(

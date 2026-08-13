@@ -15,21 +15,26 @@ Lane 11 owns ``feral-core/perception/glasses_buffer.py`` (HUP
 
 ```python
 class GlassesBuffer:
-    def push(self, device_id: str, frame: GlassesFrame) -> None: ...
+    def ingest(self, payload: dict, *, node_id: str = "") -> GlassesFrame | None: ...
     def latest(
         self,
         device_id: str | None = None,   # None = freshest across devices
         *,
-        max_age_s: float = 30.0,
+        max_age_s: float | None = None,  # default: buffer's 30 s gate
     ) -> GlassesFrame | None: ...
-    def device_ids(self) -> list[str]: ...
+    def device_ids_with_frames(self) -> list[str]: ...
 
-def get_glasses_buffer() -> GlassesBuffer: ...
+def get_glasses_buffer() -> GlassesBuffer | None: ...
 ```
 
+The three names above are what the module actually exports; this
+block previously documented `push` / `device_ids`, neither of which
+ever existed, which is how the missing `get_glasses_buffer` went
+unnoticed.
+
 This module imports it through a lazy lookup so we don't crash if
-Lane 11's PR hasn't merged yet — when the module is missing, we
-silently fall through (no attach, no exception).
+the buffer module is missing, but a lookup that fails now logs at
+WARNING instead of falling through silently.
 
 ## Parent acceptance reminder #1 (2026-05-22T18:40Z)
 
@@ -146,20 +151,49 @@ def is_vision_enabled() -> bool:
 # ──────────────────────────────────────────────────────────────────
 
 
+_MISSING_ACCESSOR_WARNED = False
+
+
 def _get_glasses_buffer() -> Any | None:
     """Return Lane 11's glasses buffer singleton or ``None``.
 
     Lazy import so the orchestrator boot path never hard-requires
     Lane 11's module. Production: ``perception.glasses_buffer`` is
-    available and serves real frames. Tests: this returns ``None`` by
-    default; tests inject a fake via :func:`attach_vision_context`'s
-    ``glasses_buffer`` keyword override.
+    available and serves real frames. Tests: tests inject a fake via
+    :func:`attach_vision_context`'s ``glasses_buffer`` keyword override.
+
+    The accessor lookup used to be
+    ``getattr(glasses_buffer, "get_glasses_buffer", lambda: None)()``.
+    The module never defined that symbol, so the default silently won
+    on every turn: the buffer had frames in it and this function
+    returned ``None`` anyway, for the whole life of the feature. A
+    getattr probe for a name that does not exist is indistinguishable
+    from "the feature is not installed", so the absence is now logged
+    once at WARNING with the fix in the message instead of vanishing.
     """
+    global _MISSING_ACCESSOR_WARNED
     try:
         from perception import glasses_buffer  # type: ignore
     except Exception:
+        logger.debug("perception.glasses_buffer import failed", exc_info=True)
         return None
-    return getattr(glasses_buffer, "get_glasses_buffer", lambda: None)()
+    accessor = getattr(glasses_buffer, "get_glasses_buffer", None)
+    if not callable(accessor):
+        if not _MISSING_ACCESSOR_WARNED:
+            _MISSING_ACCESSOR_WARNED = True
+            logger.warning(
+                "perception.glasses_buffer has no get_glasses_buffer(); no "
+                "glasses frame can ever be attached to a turn. Frames are "
+                "still being written to state.glasses_buffer and read by "
+                "nobody. Fix: export get_glasses_buffer() from "
+                "perception/glasses_buffer.py."
+            )
+        return None
+    try:
+        return accessor()
+    except Exception:
+        logger.warning("get_glasses_buffer() raised", exc_info=True)
+        return None
 
 
 def _frame_data_url(frame: Any) -> str:

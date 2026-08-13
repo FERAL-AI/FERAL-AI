@@ -79,9 +79,12 @@ def wired_server(monkeypatch):
         def should_analyze(self, *_a, **_k):
             return None
 
-    class FakeAudio:
-        def ingest_frame(self, node_id, payload):
-            ingested.append((node_id, payload))
+    class FakeVoiceRouter:
+        # Mirrors VoiceRouter.handle_audio_from_node. The previous double
+        # here defined ``ingest_frame``, which AudioPipeline does not, so
+        # this file asserted a call production could never make.
+        async def handle_audio_from_node(self, **kwargs):
+            ingested.append((kwargs["node_id"], kwargs))
 
     class FakeBaseline:
         def record(self, metric_id, value, category=None):
@@ -91,7 +94,8 @@ def wired_server(monkeypatch):
         vision_buffer = FakeVisionBuffer()
         perception = FakePerception()
         change_detector = FakeChangeDetector()
-        audio = FakeAudio()
+        audio = object()
+        voice_router = FakeVoiceRouter()
         scene = None
         orchestrator = None
         somatic_engine = None
@@ -194,7 +198,7 @@ def test_real_sdk_video_frame_payload_lands_in_vision_buffer(wired_server):
     assert frame["data_b64"]
 
 
-def test_real_sdk_audio_frame_payload_lands_in_audio_pipeline(wired_server):
+async def test_real_sdk_audio_frame_payload_lands_in_the_voice_router(wired_server):
     from feral_node_sdk import FeralNode
     from feral_node_sdk.schemas import AudioFramePayload, DeviceEventPayload
 
@@ -219,12 +223,12 @@ def test_real_sdk_audio_frame_payload_lands_in_audio_pipeline(wired_server):
     )
     wire_payload = _simulated_wire_payload(envelope)
     server = wired_server["server"]
-    server._handle_audio_frame(None, wire_payload)
+    await server._handle_audio_frame(None, wire_payload)
 
     assert len(wired_server["ingested"]) == 1
-    node_id, frame = wired_server["ingested"][0]
+    node_id, call = wired_server["ingested"][0]
     assert node_id == "feral-band-e2e"
-    assert frame["codec"] == "opus"
+    assert call["encoding"] == "opus"
 
 
 def test_real_sdk_heart_rate_device_event_reaches_perception(wired_server):

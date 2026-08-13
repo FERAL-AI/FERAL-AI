@@ -110,6 +110,27 @@ class IdentityLoader:
         # operator created on the web tab.
         self.calendar = calendar
         self.somatic_engine: SomaticEngine | None = somatic_engine
+        # Optional NodeSubdeviceStore, wired via
+        # `Orchestrator.set_subdevice_store` from BrainState. Without it
+        # the prompt's only hardware line was
+        # `Connected devices: ['feral-iphone-6053b3cdc4ed']`, a bare HUP
+        # node id. The peripherals BEHIND that node (the W300 glasses
+        # and the VITRO wristband, 7 rows with provenance=ble on the
+        # audited install) were rendered on the dashboard and in
+        # /api/devices/connected but never reached the model, so
+        # "are my glasses connected" had no grounded answer.
+        # `memory/node_subdevices.py` names "the orchestrator's prompt
+        # context" as a consumer of this store; this attribute is what
+        # finally makes that true.
+        self.subdevice_store = None
+        # Optional zero-arg callable returning the node ids that are
+        # holding a HUP WebSocket right now. Wired alongside the store
+        # by `Orchestrator.set_subdevice_store`. Without it the prompt
+        # can say a peripheral is or is not reporting but cannot say
+        # whether the phone carrying it is connected, and "glasses not
+        # reporting" reads very differently depending on whether the
+        # phone is in the user's hand or switched off.
+        self.live_node_ids = None
 
     @staticmethod
     def _agent_name_from_settings() -> str:
@@ -511,6 +532,14 @@ class IdentityLoader:
         if frame.connected_nodes:
             prompt += f"\nConnected devices: {frame.connected_nodes}\n"
 
+        # Connected hardware — the peripherals behind those nodes.
+        # `frame.connected_nodes` above is a list of HUP node ids and
+        # stops there; the BLE/cloud/host sub-devices each node owns
+        # live in NodeSubdeviceStore and had no path into the prompt.
+        hardware_section = self._build_connected_hardware_section()
+        if hardware_section:
+            prompt += f"\n{hardware_section}\n"
+
         # Somatic context — body-state adaptive behaviour
         if self.somatic_engine and session_id:
             somatic_section = self.somatic_engine.build_system_prompt_section(session_id)
@@ -580,6 +609,174 @@ class IdentityLoader:
         except Exception as exc:
             logger.debug("Memory context builder failed: %s", exc)
             return ""
+
+    def _build_connected_hardware_section(self) -> str:
+        """Render `## Connected Hardware` from the sub-device truth store.
+
+        Returns "" when no store is wired (a brain built without one,
+        and every existing test double), so this can never invent a
+        block out of nothing.
+
+        Three states, each stated explicitly, because collapsing any two
+        of them is how a user gets lied to:
+
+        * rows present and inside their heartbeat window -> "connected,
+          reporting now".
+        * rows present but past the window -> "not reporting". Hiding a
+          stale row would make "my glasses just dropped" read
+          identically to "you have never owned glasses".
+        * store present, zero rows -> "No peripherals have reported".
+          Emitting nothing here reads to the model as absence of
+          information rather than information about absence, and the
+          model then guesses.
+
+        A store that raises is reported in the prompt as unavailable AND
+        logged at warning. Swallowing it silently would rebuild the
+        original defect: a prompt that looks complete while carrying no
+        hardware truth at all.
+
+        Structure. The rows are grouped by the node that owns them and
+        by physical peripheral before rendering, because the flat list
+        this used to emit was actively misleading on the audited
+        install: 7 rows, of which 6 were the SAME pair of glasses seen
+        through 6 install-scoped `feral-iphone-*` node ids. The model
+        read six pairs of glasses and six phones. Glasses and the
+        wristband reach the brain THROUGH the phone, so they are
+        indented under it; a peripheral that is nobody's child is a
+        claim this brain cannot support.
+        """
+        store = self.subdevice_store
+        if store is None:
+            return ""
+
+        try:
+            rows = list(store.list_all())
+        except Exception as exc:
+            logger.warning(
+                "node_subdevices.list_all failed; the prompt cannot describe "
+                "connected hardware this turn: %s", exc, exc_info=True,
+            )
+            return (
+                "## Connected Hardware\n"
+                "Hardware status unavailable this turn (the sub-device store "
+                "could not be read). Do not claim anything is or is not "
+                "connected; call a device tool or tell the user the status "
+                "could not be read.\n"
+            )
+
+        if not rows:
+            return (
+                "## Connected Hardware\n"
+                "No peripherals have reported to this brain. Any HUP nodes "
+                "listed above are connected, but nothing is paired behind "
+                "them.\n"
+            )
+
+        from api.device_view import build_device_view
+
+        # getattr, not attribute access: existing tests build this class
+        # with `IdentityLoader.__new__` and set only `subdevice_store`,
+        # so a hard attribute read would turn a missing optional into an
+        # AttributeError that blanks the whole hardware block.
+        provider = getattr(self, "live_node_ids", None)
+        live_ids: list[str] = []
+        if callable(provider):
+            try:
+                live_ids = [str(n) for n in (provider() or [])]
+            except Exception as exc:
+                # Degrade to "no node is confirmed live" rather than
+                # guessing. Claiming a phone is connected on the
+                # strength of a failed lookup is the exact defect being
+                # fixed here.
+                logger.warning(
+                    "live node lookup failed; the prompt will describe every "
+                    "node as not reporting: %s", exc, exc_info=True,
+                )
+        view = build_device_view(
+            live_nodes=[{"node_id": nid} for nid in live_ids],
+            subdevice_rows=rows,
+        )
+
+        lines = ["## Connected Hardware"]
+        # Live nodes first: the model weights early lines more heavily,
+        # and a long tail of months-old installs would otherwise bury
+        # the phone the user is actually holding.
+        for node in view["devices"] + view["offline"]:
+            lines.append(self._hardware_node_line(node))
+            for sub in node["subdevices"]:
+                lines.append(self._hardware_peripheral_line(sub))
+
+        lines.append(
+            "Peripherals are indented under the node they reach the brain "
+            "through. The glasses and wristband speak BLE to the phone, not "
+            "to this brain. Report these verbatim when asked what is "
+            "connected. Anything marked \"not reporting\" or \"disconnected\" "
+            "is paired but silent. Say that, do not call it connected and do "
+            "not omit it. The brain cannot reconnect a node itself; only the "
+            "device can start that."
+        )
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _age_text(age_s) -> str:
+        """Human age for a last-seen stamp, or "" when there is none."""
+        if not isinstance(age_s, (int, float)) or age_s <= 0:
+            return ""
+        if age_s < 90:
+            return f"{int(age_s)} s ago"
+        if age_s < 5400:
+            return f"{int(age_s / 60)} min ago"
+        if age_s < 172800:
+            return f"{int(age_s / 3600)} h ago"
+        return f"{int(age_s / 86400)} days ago"
+
+    @classmethod
+    def _hardware_node_line(cls, node: dict) -> str:
+        node_id = str(node.get("node_id") or "unknown")
+        node_type = str(node.get("type") or "node")
+        if node.get("connected"):
+            state_text = "connected, reporting now"
+        else:
+            age = cls._age_text(node.get("last_seen_age_s"))
+            state_text = "disconnected" + (f", last seen {age}" if age else "")
+        line = f"- {node_type} {node_id}: {state_text}"
+        # Earlier installs of the same physical device. Named rather
+        # than hidden so the model can answer "why do I see this id in
+        # my old logs" without the user having to ask twice.
+        others = node.get("also_known_as") or []
+        if others:
+            line += (
+                f"; same physical device as {len(others)} earlier install"
+                f"{'s' if len(others) != 1 else ''} ({', '.join(others)})"
+            )
+        return line
+
+    @classmethod
+    def _hardware_peripheral_line(cls, sub: dict) -> str:
+        capability = str(sub.get("capability") or "unknown")
+        detail = capability
+        label = str(sub.get("name") or "").strip()
+        if label:
+            detail += f" ({label})"
+        if sub.get("live"):
+            state_text = "connected, reporting now"
+        else:
+            age = cls._age_text(sub.get("last_seen_age_s"))
+            state_text = "not reporting (outside its heartbeat window)"
+            if age:
+                state_text += f", last seen {age}"
+        extras = []
+        status = str(sub.get("status") or "").strip()
+        if status:
+            extras.append(f"status={status}")
+        attrs = sub.get("attrs") if isinstance(sub.get("attrs"), dict) else {}
+        battery = attrs.get("battery_pct", attrs.get("battery_level"))
+        if isinstance(battery, (int, float)):
+            extras.append(f"battery={int(battery)}%")
+        line = f"  - {detail}: {state_text}"
+        if extras:
+            line += "; " + ", ".join(extras)
+        return line
 
     def _build_events_section(self) -> str:
         """Render `## Today's Events` + `## Reminders` blocks.

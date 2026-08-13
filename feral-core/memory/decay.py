@@ -138,6 +138,50 @@ def compute_decay(
     return min(max(raw, 0.0), 1.0)
 
 
+_FORGOTTEN_COLUMNS = (
+    "id, event_type, summary, importance, decay_factor, created_at, forgotten_at"
+)
+
+
+def forgotten_query(limit: int = 50, *, query: str = "") -> tuple[str, list]:
+    """SQL + params listing forgotten episodes, newest-forgotten first.
+
+    One definition, two callers: :meth:`MemoryDecayService.list_forgotten`
+    runs it on the brain's async pool, ``feral memory forgotten`` runs it
+    read-only against the database file so an operator can recover an
+    episode without a running brain. Shared rather than duplicated
+    because a recovery path that disagrees with the service about what
+    "forgotten" means is worse than no recovery path.
+
+    Deliberately LIKE and not FTS: ``episodes_fts`` is reached through
+    the same joins that exclude forgotten rows, and a recovery tool must
+    not depend on the index it is recovering from.
+    """
+    sql = (
+        f"SELECT {_FORGOTTEN_COLUMNS} FROM episodes WHERE forgotten_at IS NOT NULL"
+    )
+    params: list = []
+    if query:
+        sql += " AND (summary LIKE ? OR detail LIKE ?)"
+        params += [f"%{query}%", f"%{query}%"]
+    sql += " ORDER BY forgotten_at DESC, created_at DESC LIMIT ?"
+    params.append(limit)
+    return sql, params
+
+
+def forgotten_row_to_dict(row) -> dict:
+    """Shape one row from :func:`forgotten_query` for a caller."""
+    return {
+        "id": row["id"],
+        "event_type": row["event_type"],
+        "summary": row["summary"],
+        "importance": row["importance"],
+        "decay_factor": row["decay_factor"],
+        "created_at": row["created_at"],
+        "forgotten_at": row["forgotten_at"],
+    }
+
+
 class MemoryDecayService:
     """Background sweeper for episode decay + forgetting.
 
@@ -321,6 +365,21 @@ class MemoryDecayService:
 
             await conn.commit()
 
+            # Announce the hard delete so it replicates. Without this, a
+            # peer that still holds the original ``insert`` operation
+            # re-sends it on the next handshake and the episode this
+            # brain spent a year deciding to forget comes straight back:
+            # ``get_changes_since`` selects purely on HLC, and the WAL on
+            # the real store held 14,807 episode inserts and zero deletes
+            # (audit 2026-08-12), so nothing could ever counter them.
+            # Emitted after the commit so a delete that did not land
+            # locally is never announced, and per-id rather than as a
+            # batch because ``SyncOperation`` is keyed on one row_id.
+            for eid in (d["id"] for d in doomed):
+                await self.store._log_sync_async(
+                    "episodes", "delete", eid, {"id": eid},
+                )
+
             # 3) Refresh the active/forgotten gauges. Two cheap counts
             # vs the alternative of computing them in step 1 (which
             # would either need a second pass or row-by-row gauge
@@ -391,6 +450,31 @@ class MemoryDecayService:
         if row is None:
             return {"ok": False, "reason": "not_found", "id": episode_id}
         return {"ok": True, "id": episode_id, "forgotten_at": row["forgotten_at"]}
+
+    async def list_forgotten(self, limit: int = 50, *, query: str = "") -> list[dict]:
+        """Forgotten episodes, newest-forgotten first, with their ids.
+
+        :meth:`recall` takes an episode id, and until this existed there
+        was no way to obtain one. Every read path on ``MemoryStore``
+        filters ``forgotten_at IS NULL`` by default and the CLI exposed
+        no ``include_forgotten`` switch, so on the real store of
+        2026-08-12 the 3,677 forgotten episodes (30% of 12,300, among
+        them 133 ``user_command`` rows the user typed by hand) were
+        excluded from search and unreachable by recall. That is the
+        difference between "forgotten" and "lost", and the promise this
+        tier makes is the former.
+
+        ``query`` is an optional substring filter over summary/detail.
+        See :func:`forgotten_query` for why it is LIKE and not FTS.
+        """
+        sql, params = forgotten_query(limit, query=query)
+        conn = await self.store._conn()
+        try:
+            async with conn.execute(sql, params) as cur:
+                rows = await cur.fetchall()
+        finally:
+            await self.store._release(conn)
+        return [forgotten_row_to_dict(r) for r in rows]
 
     async def recall(self, episode_id: str) -> dict:
         """Reverse a ``forget`` (clears ``forgotten_at`` and bumps

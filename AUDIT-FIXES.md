@@ -2472,3 +2472,1105 @@ not coming.
 - **No user-visible "not configured" message is produced from inside a
   broad handler.** 47 such strings exist; none sit in an `except` body.
   The one that did was F-16, already fixed.
+
+---
+
+## F-27 · "REMEMBERS", tier by tier, audit 2026-08-12
+
+Method: every claim below was produced by a real write followed by a real
+read against a **copy** of the live store (`~/.feral/memory.db` +
+`-wal` + `-shm`, plus `sync_wal.db` and `baselines.db`), taken while the
+brain was running. The live store was never written to.
+
+### The four tiers, as measured
+
+| Tier | Where it lives | Verdict |
+|---|---|---|
+| 1 Working memory | `MemoryStore._working`, in-RAM `dict[str, deque]`, `maxlen=50` per session, 500-session cap | WORKS in a turn; only the primary session survives a restart |
+| 2 Episodes (12,300) | `episodes` + `episodes_fts` + `memory_chunks` | WORKS; 3,677 forgotten rows were unreachable |
+| 3 Notes (400) | `notes` + `notes_fts` | WORKS; 397 of the 400 are duplicate health readings |
+| 4 Knowledge graph (312 entities, 319 relations, 308 aliases) | `entities` / `relations` / `entity_aliases` | Structurally WORKS, semantically DEGRADED on the live store right now |
+
+Tier 1 is consulted per turn: `build_context_for_llm_async` renders it as
+`## Recent Context` (verified on a copy, working memory came back first
+in the assembled prompt). It is not in SQLite. `MemoryStore
+.snapshot_session` / `list_snapshots` / `get_snapshot` and the
+`session_snapshots` table are a **second, dead implementation** with zero
+production callers and 0 rows after four months of use; the live
+mechanism is `memory/session_snapshot.py::SessionSnapshotStore` writing
+`~/.feral/primary_session_thread.json` (50 working-memory entries
+present), wired from `api/state.py:1516` for `primary_session_id` only.
+Every non-primary session's working memory is lost on restart. Left as
+found; both are outside this lane's fixes.
+
+### `knowledge` has 0 rows and `knowledge__deprecated` has 29, NOT a silently empty tier
+
+`memory.kg.unified` defaults to true, so `knowledge_store/query/search/
+about` route to `entities` × `relations`. All 29 deprecated triples were
+verified present as relations (`Alex works_on Feral`, `Alex prefers oat
+milk latte`, …): 29 of 29 matched, 0 missing. `knowledge_fts` at 0 rows
+is consistent, the unified search path reads `entities_fts`.
+
+Latent trap, recorded not fixed: setting `memory.kg.unified=false`
+(documented as kept for chaos/recovery) routes reads back to the empty
+flat table, and all 29 facts vanish.
+
+### The knowledge graph is degraded on the live store *today*
+
+`entities.embedding`: 312 vectors at 1536 dims against a 384-dim
+fastembed provider, plus 4 at 384. `memory_chunks` is fully migrated
+(12,001 at 384, 41 NULL), so the earlier re-embed reached chunks and the
+`entities` table was never migrated on this machine.
+
+Proven on the copy, before and after `reembed_store`:
+
+```
+entity vector widths BEFORE: [(384, 4), (1536, 312)]
+  search_entities('CuteBot') -> ['The CuteBot should follow the line every night at 9 p.m.',
+                                 'Start CuteBot line-following routine', 'CuteBot left line sensor']
+entity vector widths AFTER:  [(384, 316)]
+  search_entities('CuteBot') -> ['CuteBot', 'cutebot.follow_line', 'Start CuteBot line-following routine']
+```
+
+Before the migration the CuteBot entity itself is not in its own result
+set. This is an operational gap, not a code defect: `memory/reembed.py`
+covers `entities` correctly and the runtime now logs the mismatch at
+warning. The remedy is `feral memory reembed` against the live store,
+which this lane did not run because it does not write to `~/.feral`.
+
+**Fixed here:** the operator could not see it. `feral memory status`
+reported the backend module and the encryption flag and nothing else.
+It now runs the same discovery scan `reembed check` uses. Against a copy
+of the real store:
+
+```
+  Embedding provider:    fastembed (384d)
+  Stored vectors:        STALE, 312 at the wrong width
+    entities.embedding: 1536d x312
+  Semantic recall is degraded for the tables above. Fix with:  feral memory reembed
+```
+
+### Decay is not deleting anything a user would expect to keep, but "forgotten" meant "lost"
+
+12,300 episodes, 3,677 forgotten, min `decay_factor` 0.0402 against a
+0.05 threshold. Everything forgotten is 92.9-118.6 days old; the oldest
+still-active row is 92.98 days. The math is exactly the documented curve
+and nothing has been hard-deleted, nor can be: hard delete needs
+`forgotten_at` older than `retention_days` (365) and the oldest episode
+in the store is 118 days old.
+
+The defect was recovery. Every read path filters `forgotten_at IS NULL`,
+`feral memory recall` takes an episode id, and **nothing could produce
+one**. 3,677 episodes (30% of the store, including 133 `user_command`
+rows the user typed by hand) could be neither searched nor recalled.
+
+Fixed: `memory/decay.py::forgotten_query` (one definition),
+`MemoryDecayService.list_forgotten`, and `feral memory forgotten [text]`,
+which reads the DB read-only so recovery does not require a running
+brain. Against a copy of the real store, `feral memory forgotten flight`
+returns 40 of 3,677 with ids, and `feral memory recall <id>` accepts
+them.
+
+### CRDT: update and delete propagation has never worked, and could not have
+
+`sync_wal.db`: 16,184 operations, `op_type` distribution `[('insert',
+16184)]`, `synced_to` distribution `[('[]', 16184)]`. Two independent
+causes, both confirmed by reading every call site:
+
+1. **No writer has ever logged a non-insert.** Every `_log_sync` /
+   `_log_sync_async` call in the tree passes `"insert"`
+   (`store.py:1550,2588,2637,2648`, `notes_legacy.py:51`,
+   `knowledge_graph.py:402,461,477`). The three deleters on synced
+   tables, `notes_legacy.delete_note`, `store.conversation_delete`,
+   and the decay sweep's hard delete, logged nothing at all. The
+   receiving side's `op_type == "delete"` branch in
+   `SyncEngine._apply_to_memory` has been correct and unreachable the
+   whole time. Consequence: a note the user deletes on one brain stays
+   readable on every peer, and a hard-deleted episode is resurrected by
+   any peer still holding its `insert`, because `get_changes_since`
+   selects purely on HLC and there are 14,807 episode inserts with
+   nothing to counter them.
+
+2. **`SyncWAL.mark_synced` had zero callers** anywhere in the tree,
+   production or test. `synced_to` was unwritable by construction, so
+   "which peers have this operation?" was unanswerable and the WAL had
+   no basis on which it could ever be pruned. It grows unbounded; there
+   is no prune path (recorded, not fixed, 12MB today).
+
+Fixed: the three deleters log a `delete` operation after their local
+commit (never before, so a delete that failed locally is not announced);
+`_handshake_and_exchange` marks the operations it shipped once the peer's
+own change set comes back. `mark_synced` opened a connection per call,
+which a first sync of 16,184 operations cannot afford, so
+`mark_synced_many` does it in one commit, chunked at 500 to stay under
+`SQLITE_MAX_VARIABLE_NUMBER`, and tolerates a corrupt `synced_to` cell
+rather than losing the batch.
+
+### Do the senses reach memory? Two of three.
+
+* **Screen, YES.** `perception/screen_loop.py:462` calls `episode_save`.
+  9,509 `screen_*` episodes in the live store; `episode_search
+  ('FlightRadar24')` returns real rows.
+* **Device events, YES.** `hardware/capability_skill.py:517`,
+  `hardware/adapters/cutebot.py:536`, `hardware/mock_roomba.py:203`.
+  280 `device_action` + 267 `robot_event` episodes, retrievable.
+* **Biometrics, ONLY ON THE HTTP BATCH PATH.**
+  `/api/health/ingest` (`api/routes/dashboard.py:586`) writes notes: 397
+  of the 400 notes in the store are HealthKit readings, and they read
+  back. The **live wearable stream does not reach memory at all**.
+  `api/server.py::_handle_biometric_device_event` fans a `device_event`
+  to `state.perception.update_sensors` (volatile),
+  `_record_biometrics_to_baseline`, and `_record_biometrics_to_history`
+ , the last two write `~/.feral/baselines.db`, a different database.
+  That table holds **1,554 real samples** (1,286 heart rate, 149 SpO2,
+  117 steps, sources `jw_health_glasses` / `veepoo_wristband`, spanning
+  2026-06-21 to 2026-08-05) and **not one of them is in memory.db**.
+  `search_all`, `feral memory query` and `build_context_for_llm` cannot
+  reach a single one.
+
+  **Not fixed here**, `_handle_biometric_device_event` is a frame
+  handler owned by another lane. It needs an owner.
+
+Two further observations, recorded not fixed, both outside this lane's
+remit but inside the promise:
+
+* The health-ingest route's comment claims it appends "the raw dict as a
+  JSON tail so nothing is lost". It does not; only `content_line` is
+  written, so `sampled_at_ms` and every unmapped field are dropped
+  (`api/routes/dashboard.py:552-585`). A note's `created_at` is ingest
+  time, not sample time.
+* Health notes are not de-duplicated: 209 notes reading
+  `heart_rate 115bpm (Bluetooth Device)` and 188 reading
+  `spo2 93% (WHOOP)`, identical content, one per poll. Each one also
+  creates two KG entities and a `says` relation via
+  `notes_legacy.py:85`, which is where whole sentences enter `entities`
+  as entity names.
+
+### Tests
+
+`tests/test_memory_remembers_audit.py`, 12 tests. Against unfixed HEAD
+(`b5934eb25`, run in a clean worktree): **10 failed, 2 passed**. The two
+that pass are the negative controls, a delete that changed no local row
+must not be announced, and a sweep with no hard deletes must log no
+delete, and they must hold both before and after. After the fixes:
+**12 passed**.
+
+Whole suite after the fixes: `python3 -m pytest tests/ -q -p
+no:cacheprovider -p no:randomly --no-cov` gives **7,697 passed, 38
+skipped, 0 failed** in 451s. `ruff check --select=E,F,W
+--ignore=E501,E402,F401,W291,W293 .` is clean.
+
+**Files:** `memory/notes_legacy.py`, `memory/store.py`, `memory/decay.py`,
+`memory/sync.py`, `cli/memory_cmd.py`, `cli/main.py` (one entry added to
+the `memory` action list so `forgotten` is reachable).
+
+### Still open, needs an owner
+
+1. `_handle_biometric_device_event` (`api/server.py:4114`) does not write
+   to memory. 1,554 wearable samples are stranded in `baselines.db`.
+2. `api/routes/dashboard.py:552-585` drops `sampled_at_ms` and every
+   unmapped field despite a comment claiming it keeps them, and does not
+   de-duplicate identical readings.
+3. `MemoryStore.snapshot_session` / `list_snapshots` / `get_snapshot` and
+   the `session_snapshots` table: zero production callers, 0 rows. Either
+   wire them or delete them.
+4. Working memory persists for `primary_session_id` only. Every other
+   session loses it on restart.
+5. `sync_wal` has no prune path and grows without bound (16,184 ops,
+   12MB). `synced_to` is now written, so a prune finally has a basis.
+6. `memory.kg.unified=false` routes reads to the empty flat `knowledge`
+   table and hides all 29 migrated facts.
+
+---
+
+## F-27 · HEARS: every `audio_frame` from every device was dropped, and the rest of the audio stack reported readiness it did not have
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+Audit of the product promise "FERAL sees, hears and remembers
+everything connected to it". This is the HEARS half. Everything below
+was established by running it.
+
+### The map: every route audio can take into the brain
+
+| # | Entry point | File:line | Verdict (before) |
+|---|---|---|---|
+| 1 | HUP `audio_frame` on `/v1/node` | `api/server.py:3371` -> `_handle_audio_frame:3730` | **DROPPED** |
+| 2 | HUP `device_event(event_type=audio_frame)` | `api/server.py:3403` -> same handler | **DROPPED** |
+| 3 | HUP `audio_chunk` on `/v1/node` | `api/server.py:3234` -> `voice/router.py:635` | REACHES, if a session is bound |
+| 4 | `audio_chunk` on `/v1/session` | `api/server.py:1785` -> `voice/router.py:745` | REACHES |
+| 5 | Gateway JSON-RPC `voice.audio` | `gateway/protocol.py:357` -> `voice/router.py:745` | REACHES |
+| 6 | REST upload | none exists | N/A |
+| 7 | Local microphone | none exists | N/A |
+
+`api/routes/audio.py` is discovery and config only; it accepts no
+audio. No `sounddevice` / `pyaudio` / capture code exists anywhere in
+`feral-core`, and no ambient path exists: audio is only routable once
+`bind_session_to_daemon` has run (`api/state.py:3164`), which only
+`voice_session_start` and session attachment do. **FERAL never listens
+without a session being started.** That is a design fact, not a defect,
+and it is now the documented answer.
+
+### 1. The `audio_frame` path was dead
+
+`_handle_audio_frame` ended in a `getattr(audio, "ingest_frame", None)`
+probe. `perception/audio_pipeline.AudioPipeline` has never defined
+`ingest_frame`, so the probe was never true: every frame was
+size-checked, counted, and discarded at `debug`, while the daemon's
+send reported success. HUP_SPEC.md §5.4.1 said "Route to
+`state.audio.ingest_frame(node_id, payload)`" - the spec named a method
+nobody wrote, and the spec is prose, so nothing caught it.
+
+It survived because of trap 3. `tests/test_hup_v1_1_brain.py`,
+`tests/test_hup_v1_1_e2e.py` and
+`tests/test_frame_size_cap_decoded_bytes.py` all installed a double
+that *did* define `ingest_frame` (or a MagicMock, which defines
+everything). Three test files proved a call production could not make.
+
+**Fixed.** `audio_frame` now converges on the one consumer whose
+transcript has somewhere to go: `VoiceRouter.handle_audio_from_node`,
+the same sink `audio_chunk` uses, which owns mute, wake-word gating,
+provider selection, the `transcript` frame, working memory, the
+orchestrator turn and the spoken reply. The handler is `async` and
+awaited (fire-and-forget would let two 20ms frames of one utterance
+reach a provider out of order). `codec` maps to `encoding`. An
+unroutable frame is a rate-limited `warning` naming `voice_session_start`,
+not a `debug`. The three test files were corrected to the real contract.
+
+### 2. Wiring it was not enough: the silence-gap VAD could never fire
+
+`AudioPipeline.process_audio_chunk` appended the chunk and *then* asked
+`buf.vad_triggered()`. `append` stamps `_last_chunk_time = time.time()`,
+and `vad_triggered` returns `time.time() - _last_chunk_time > 1.5`, so
+the check always measured a gap of zero. Measured before the fix: 10
+chunks x 3000 bytes in, 30,100 bytes still resident, zero
+transcriptions. Only `is_final=True` ever flushed. A browser sends
+`is_final`; `audio_frame` has no such field, so device audio would have
+accumulated forever even after being wired.
+
+**Fixed.** The boundary is evaluated before the append, which is what a
+silence gap actually means. Teardown of a non-empty buffer now logs at
+`warning` - a stream that ends mid-utterance is still never
+transcribed, and that hole is real, but it is no longer invisible.
+
+### 3. Wake word: works, listens for the wrong phrase, cannot be turned on
+
+openwakeword 0.6.0 and its `hey_jarvis_v0.1.onnx` are both present
+(bundled in the wheel, 1.27MB) and the detector loads and runs. Three
+defects around it:
+
+- `POST /api/ambient/wake_word/toggle` does `state.wake_word.enabled =
+  not ...`. `enabled` was a read-only `@property`: `AttributeError:
+  property 'enabled' of 'WakeWordDetector' object has no setter`. The
+  wake word could not be enabled from the API at all. Its test used a
+  MagicMock, which accepts any assignment.
+- `GET /api/ambient/wake_word/status` read `getattr(ww, "phrase", "hey
+  feral")` against an object with no `phrase` attribute, so the default
+  won unconditionally and `FERAL_WAKE_PHRASE` was never reflected.
+- **The phrase FERAL reports is not the phrase it detects.**
+  `FERAL_WAKE_MODEL` defaults to `hey_jarvis_v0.1`, which fires on "hey
+  jarvis", while the configured phrase defaults to "hey feral". No
+  FERAL-branded wake model is shipped or referenced anywhere in this
+  repo. Out of the box the product told the user to say a phrase that
+  could not work.
+
+Also: with openwakeword absent (it is not in `[all]`, per F-12) the
+detector drops to `_detect_energy`, whose own docstring says "not a
+true wake word detector". Measured: 3200 bytes of uniform random noise,
+no speech, activates it with confidence 1.00. A loudness gate opening a
+microphone to STT.
+
+**Fixed.** `enabled` is settable and loading the model on enable (the
+detector boots disabled for privacy, so without that it would switch on
+into the fallback regardless of what is installed). `phrase`,
+`detector`, `model_phrase` and `effective_phrase` are real properties;
+`effective_phrase` is `""` for the energy fallback because it matches no
+phrase. A phrase/model mismatch and the energy fallback each log a
+`warning` naming the remedy. `stats` and both routes carry
+`detector` / `effective_phrase`. The fallback is kept, labelled, not
+removed. The `except Exception: pass` around the model fetch now logs.
+
+### 4. VAD with missing weights: honest, checked, one gap closed
+
+`~/.feral/models` does not exist on the audit machine, so this is the
+branch every install without `feral setup` takes. `load_endpointer`
+returns `None`, logs at INFO, and the chained pipeline falls back to its
+packet-absence timer. No crash, no pretence. **NOT A DEFECT.** The one
+gap was actionability: the message named the missing file but not the
+command that produces it, and the only symptom is ~2.3s of extra
+latency per turn. `vad_available()` now names
+`python -m voice.local_models fetch-vad`.
+
+### 5. Local STT and TTS: "ready" for engines that could not run
+
+`feral voice providers` reports **7/13 green**. The six that are not:
+Deepgram and Groq (no credential), and whisper.cpp, faster-whisper,
+Piper and Silero VAD (model never fetched). That surface is honest and
+names each missing artefact. `AudioPipeline` was not, and the two
+disagreed on the same machine at the same time:
+
+- `_LocalTTS._ensure_voice` called `PiperVoice.load("en_US-lessac-medium")`.
+  `PiperVoice.load` takes a *path*. It raises `FileNotFoundError: [Errno
+  2] No such file or directory: 'en_US-lessac-medium.json'` on every
+  machine, voice installed or not. **Local TTS through this pipeline has
+  never produced one byte of audio.**
+- `_LocalSTT._ensure_model` called `WhisperModel("base",
+  compute_type="int8")`, which downloads mid-turn. Demonstrated
+  accidentally and conclusively: running the new tests against the
+  unfixed source pulled 141MB into `~/.cache/huggingface` at 22:08.
+  `voice/local_models.py` exists to forbid exactly this.
+- Both failures were caught and rerouted to OpenAI, breaking the rule
+  `voice/local_models.py` states in its own docstring: "an operator who
+  chose local engines for privacy must not be silently rerouted to a
+  cloud provider." Selecting "local, for privacy" silently meant
+  "OpenAI", with an `error` log as the only trace.
+- Boot logged "Audio pipeline ready - STT: local/faster-whisper (base),
+  TTS: local/piper (...)" for both.
+
+**Fixed.** Both backends resolve through `voice/local_models.py` (no
+mid-session download; `ModelUnavailable` carries the fetch command),
+using the same load pattern as `voice/tts_providers/piper.py:210` and
+`voice/stt_providers/faster_whisper_local.py:153` so the call sites
+cannot drift again. Boot probes the same store the CLI reads and says
+`NOT READY: <reason>` with a `warning`. The cloud reroute is preserved
+but no longer silent or default: `FERAL_LOCAL_AUDIO_CLOUD_FALLBACK=1`.
+
+### Tests
+
+New: `tests/test_audio_frame_reaches_transcription.py` (11),
+`tests/test_wake_word_honesty.py` (12),
+`tests/test_local_audio_engines_are_honest.py` (6),
+`tests/test_vad_missing_weights_degrades_loudly.py` (3). 32 total.
+Verified failing against unfixed source: 8/11, 11/12, and 7/9 across
+the last two files. The five that pass either way are deliberate
+non-regression guards (`is_final` still flushes, the cloud fallback
+still works when asked for, no download at VAD load, the energy
+fallback still opens on loud audio).
+
+Updated to the real contract: `tests/test_hup_v1_1_brain.py`,
+`tests/test_hup_v1_1_e2e.py`, `tests/test_frame_size_cap_decoded_bytes.py`.
+
+### Left for the owner to decide
+
+- `AudioPipeline.process_audio_with_wake_word` (`perception/audio_pipeline.py:457`)
+  is called from nowhere. It is also the only wake-word gate on that
+  class, and `api/state.py:367` constructs `AudioPipeline()` with no
+  detector while `state.py:1613` gives the same detector to
+  `VoiceRouter`, which does the gating. Dead, but deleting it removes a
+  documented capability. **Not removed.**
+- A stream that stops mid-utterance and never sends another frame is
+  still never transcribed. It now warns at teardown. A proper fix needs
+  an idle-flush timer, which is a design change, not a defect fix.
+- HUP_SPEC.md §5.4.1 still says "Route to `state.audio.ingest_frame`".
+  The spec is in `feral-nodes/`, owned by another lane. It is now wrong
+  in the opposite direction and should be updated to name
+  `VoiceRouter.handle_audio_from_node`.
+
+**Files:** `api/server.py`, `perception/audio_pipeline.py`,
+`perception/wake_word.py`, `api/routes/ambient.py`, `voice/vad.py`,
+plus the four new and three updated test files.
+
+---
+
+## V-01 · FERAL could not see anything a glasses device sent: the buffer had one writer and no reader
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+`perception/context_attach.py:162` resolved the glasses buffer with
+
+```python
+return getattr(glasses_buffer, "get_glasses_buffer", lambda: None)()
+```
+
+`perception/glasses_buffer.py` never defined `get_glasses_buffer`
+(`__all__` was `GlassesBuffer, GlassesFrame, KNOWN_SOURCES`). The probe
+therefore fell through to `lambda: None` on every turn, and the reader
+concluded "Lane 11's buffer has not merged yet". The orchestrator
+(`agents/orchestrator.py:2232`) never passes `glasses_buffer=` either,
+so nothing else could supply it. `state.glasses_buffer` had exactly one
+writer (`api/server.py _handle_glasses_frame`) and zero readers.
+
+This is the same shape as the audio_frame defect: a getattr probe for a
+method that does not exist, whose absence is indistinguishable from
+"the feature is not installed".
+
+**Reproduced on a running brain**, not by reading. TestClient over the
+real `/v1/node` socket, real `BrainState`, real `GlassesBuffer`: a
+`glasses_frame` landed (`device_ids_with_frames() == ['w610-PROBE']`)
+and the next `orchestrator._attach_vision_context` on a voice turn
+attached no image. After the fix the same script attaches the image.
+
+**Why the test suite did not catch it.** Every one of the 12 tests in
+`tests/test_vision_context_attach.py` injects a fake buffer through the
+`glasses_buffer=` keyword, and `tests/perf/test_lane08_live_traces.py`
+patches `_get_glasses_buffer` itself. The one code path that runs in
+production was the one path no test exercised. CLAUDE.md trap 3.
+
+**Fix.** `perception/glasses_buffer.py` exports `get_glasses_buffer()` /
+`set_glasses_buffer()`; `BrainState.__init__` registers its own
+instance, so the reader resolves the same object the writer writes to,
+never a second empty one. `_get_glasses_buffer` now logs at WARNING,
+once, when the accessor is missing, and says what to do about it. The
+module docstring in `context_attach.py` documented `push()` and
+`device_ids()`, neither of which ever existed, which is how the missing
+symbol stayed unnoticed; it now matches the real API.
+
+## V-02 · Six `device_event` types passed the filter or the dispatcher and were discarded at debug
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+`device_event` with `event_type=uv` was confirmed dead exactly as
+reported: the dispatcher filter admits it (`api/server.py:3420`),
+`_handle_biometric_device_event` has no `uv` branch, `sensors` stays
+empty, and the reading is dropped by the `if not sensors` guard at
+`logger.debug`. Every other type the device side can emit was then
+checked against the extractor by driving the real `/v1/node` socket,
+one `device_event` per type. Result before the fix:
+
+| event_type | before | after |
+|---|---|---|
+| heart_rate, spo2 | survives | survives |
+| skin_temperature | baseline only, never reached the frame | survives |
+| temperature, steps, accelerometer | reached `update_sensors`, no field read it | survives |
+| uv | DROPPED (filter passes, no branch) | survives |
+| gyroscope, ambient_light, battery, gps, button_press | DROPPED (unknown-event branch) | survives |
+| camera_frame | DROPPED (unknown-event branch) | routed to the vision buffer |
+| microphone_chunk | DROPPED | still dropped, audio lane owns it |
+| gesture, glasses_status, robot_telemetry, audio_frame, video_frame | survives | survives |
+
+`camera_frame` is the HUP v1.0 image type, still valid per
+HUP_SPEC.md §5.4 ("camera_frame and microphone_chunk remain valid for
+v1.0.0 daemons"). It had no branch at all, so a v1.0 daemon's every
+frame was discarded. It now shares `_handle_video_frame` with
+`video_frame`.
+
+`ambient_light`, `battery` and `gps` each already had a sink on the
+brain side (`PerceptionFrame.ambient_light_lux`, `.battery_pct`,
+`.location`); only the dispatch was missing. `button_press` is named in
+HUP_SPEC.md §5.4 and was named in this function's own docstring, and
+had neither a filter entry nor a branch.
+
+`perception/fusion.py update_sensors` read only the nested
+`vitals.*` / `environment.*` shapes for skin temperature and ambient
+light, while the extractor emits them flat, so those readings trained
+`baselines.db` and never reached the frame the LLM is shown. Both forms
+are read now. `PerceptionFrame` gained `uv_index`, `steps`,
+`ambient_temperature_c`, `accel_xyz`, `gyro_xyz`, and UV / steps /
+ambient temperature appear in `to_system_context()`, because a value on
+the frame that the context block omits is still invisible to the model.
+
+**Both drop sites are now visible.** The "could not extract a value"
+log is WARNING and names the extractable types; the unknown-event log
+is WARNING, once per (node, event_type) so glasses telemetry rates
+cannot flood it. Forward-compat is unchanged: unknown types are still
+ignored, they are just no longer ignored silently.
+
+## V-03 · The `frame` envelope could not answer "what do you see"
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+`type: "frame"` is what the shipped iOS bridge sends
+(`feral-nodes/ios-app/.../FeralBrainClient.swift:435`,
+`sendCameraFrame`). Its brain branch (`api/server.py:3342`) pushed to
+the vision buffer and updated perception, but was the only image branch
+that never called `orchestrator.resolve_pending_frame` and never ran
+scene analysis. `request_frame` waits on a future that only
+`resolve_pending_frame` completes, so `perception_query` /
+`what_do_i_see` against an iPhone could only ever run its 10 s timeout
+and answer 504, which is the "honest 504" recorded earlier in this
+file. The message was honest; the cause was this. Both calls added, so
+the branch now matches `vision_frame` and `_handle_video_frame`.
+
+## V-04 · Sensing and remembering are not joined (REPORTED, not fixed)
+
+`_handle_biometric_device_event` writes three sinks: the in-RAM
+perception frame, `somatic_engine`, and `baseline_engine`
+(`~/.feral/baselines.db`). It contains no memory write of any kind.
+The memory lane's finding is the same seam one layer up: `baselines.db`
+holds 1,286 real heart-rate samples spanning 2026-06-20 to 2026-08-07
+(verified on a copy: `hr` 1286, `spo2` 149, `steps` 119) and none of
+them are episodes in `memory.db`. `uv` was the same defect one layer
+lower: it never even reached the RAM sink. Joining the two is a
+memory-lane call, not a frame-handler call, so it is recorded here and
+not fixed.
+
+## V-05 · The screen loop is not writing episodes today (MEASURED)
+
+On a copy of the live store: 12,299 episodes total, 9,513 with a
+summary starting `Screen:`. Oldest 2026-04-16 16:18, **most recent
+2026-07-30 17:26**, i.e. 13 days before this audit, and none since.
+The newest episode of any kind is 2026-08-07 15:19. So the prose-salvage
+fix in `perception/scene.py` works when the loop runs (verified: a
+probe boot with `FERAL_VISION_ENABLED=true` produced
+`Scene [general] [screen_loop]: A computer screen displays the Google
+homepage...` and the loop is no longer blind), but no brain with the
+loop enabled has been running since 07-30. Scene provider config is
+sound: `~/.feral/settings.json` has `vision.enabled=true`,
+`provider=ollama`, `model=moondream`; `config/loader.py:1410` exports it
+as `FERAL_VLM_PROVIDER` / `FERAL_VLM_MODEL`; `ollama` is up and
+`moondream:latest` and `llava:latest` are both present locally. With no
+`FERAL_VLM_PROVIDER`, `SceneAnalyzer.available` falls back to the shared
+LLM, which is why the probe's frames went to OpenAI.
+
+**Tests:** `tests/test_vision_entry_points.py`, 25 tests. Against
+unfixed `HEAD` (`b5934eb25`, run in a detached worktree so no other
+lane's uncommitted work was touched): **21 failed, 4 passed**. After:
+**25 passed**. The 4 that passed before are the two paths that already
+worked (`heart_rate`, `spo2`, `gesture`) plus
+`test_glasses_frame_lands_in_the_glasses_buffer`, which is the point of
+V-01: the write always worked, the read never did.
+
+**Files:** `perception/glasses_buffer.py`, `perception/context_attach.py`,
+`perception/fusion.py`, `api/server.py`, `api/state.py`,
+`tests/test_vision_entry_points.py`.
+
+**Leads checked, sound, do not re-investigate.**
+
+- `vision_frame` on both sockets, `video_frame`, and the web client's
+  `vision_frame` all reach `PerceptionFrame.vision_data_url` and the
+  LLM via `to_llm_user_content`. Verified by running.
+- `POST /api/uploads` stores bytes and runs no vision analysis. That is
+  what it is for; it is not a perception entry point.
+- `skills/impl/perception_query.py` `pick_best_camera` consults
+  `state.vision_buffer` only, never `state.glasses_buffer`, so a device
+  that streams `glasses_frame` alone is invisible to its fallback. Real,
+  but `skills/` is owned by another lane. Not fixed here.
+- `feral-nodes/ios-app` `FeralBrainClient` has no `vision_request`
+  handler (`handleMessage` falls through to `default:`), so even with
+  V-03 fixed a brain-initiated capture depends on the host app
+  implementing it. Device-side, out of this lane.
+
+---
+
+# Lane: CONNECTED + ORCHESTRATION
+
+Audited the two halves of "FERAL sees, hears and remembers everything
+connected to it, whether software or hardware": does every connected
+thing get in, and does the brain use it. Every verdict below was
+produced by running the real object against the real data, not by
+reading code. Copies of `~/.feral/memory.db`, `paired_devices.db` and
+`baselines.db` were taken with `sqlite3 .backup` and driven from a
+scratch `FERAL_HOME`; the live directory was not written to.
+
+Suite before this lane: 7674 passed, 38 skipped.
+Suite after: **7774 passed, 2 failed, 44 skipped**. Both failures are
+untracked in-flight test files owned by the perception lanes
+(`tests/test_local_audio_engines_are_honest.py` asserting on
+`perception/audio_pipeline.py` wording, and
+`tests/test_vision_entry_points.py` on the `perception/glasses_buffer.py`
+singleton). Neither touches a file this lane changed; both fail
+identically with this lane's changes reverted.
+`ruff check --select=E,F,W --ignore=E501,E402,F401,W291,W293 .` -> All checks passed.
+
+New tests: 39 across 5 files. 30 of the 32 written against a defect fail
+on unmodified `b5934eb25` (verified in a detached worktree, not a
+stash); the 2 that pass there are deliberate negative controls.
+
+---
+
+## C-01 - The brain was never told what hardware is connected
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+`memory/node_subdevices.py` opens by naming its consumers: "the web
+dashboard, native iOS UI, future MCP clients, **the orchestrator's
+prompt context**". The first three read it. The fourth never did.
+
+Live `memory.db`, `node_subdevices`: 7 rows, all `provenance=ble`,
+across 6 iPhone nodes - `jw_health_glasses` (device_name `W300`,
+battery 69% / 86%) on five nodes and `veepoo_wristband` (`VITRO`) on
+one. `/api/devices/connected` merges them into every node row via
+`_subdevices_for()`, and `GET /api/dashboard` counts them.
+
+Driving the real `IdentityLoader` against a copy of the live database,
+the entire hardware content of the assembled system prompt was:
+
+```
+## Live Perception
+Connected nodes: feral-iphone-6053b3cdc4ed
+
+Connected devices: ['feral-iphone-6053b3cdc4ed']
+```
+
+`W300`, `VITRO`, `glasses`, `wristband` and `subdevice` were all absent
+from the 11,556-character prompt. A bare HUP node id is not an answer to
+"are my glasses connected", and the model had no reason to believe a
+peripheral existed at all, so it would not call a tool to find out.
+
+**Fix.** `IdentityLoader.subdevice_store`, wired by the new
+`Orchestrator.set_subdevice_store` from `BrainState` next to the
+existing `set_calendar` / `set_mcp_client` wiring, renders a
+`## Connected Hardware` block. Same shape as `set_calendar` and for the
+same reason recorded there: a capability the brain owns is useless until
+the prompt carries it.
+
+Three states are stated explicitly because collapsing any two of them
+lies in a different direction each time: live rows say "connected,
+reporting now"; rows past their provenance heartbeat window say "not
+reporting" and are **kept**, since hiding one makes "my glasses just
+dropped" read identically to "you have never owned glasses"; a store
+with zero rows says "No peripherals have reported", because silence
+reads to a model as absence of information rather than information
+about absence. A store that raises logs at warning and the prompt says
+hardware status is unavailable - a silent `except` here would rebuild
+the exact defect, a prompt that looks complete while carrying no
+hardware truth.
+
+Against the real database the block now renders all 7 rows with their
+names, batteries, statuses and owning node, each correctly marked "not
+reporting" (the brain is not running, so every `last_seen` is months
+outside its 30s BLE window).
+
+**Files:** `agents/identity_loader.py`, `agents/orchestrator.py`,
+`api/state.py`, `tests/test_connected_hardware_reaches_prompt.py` (new,
+9 tests, 8 failing before).
+
+---
+
+## C-02 - "What is connected" answered without the peripherals
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+`self_introspection.connected_devices` is the tool an LLM calls for that
+question. It read `state.device_registry` only, which holds HUP nodes -
+the iPhone - and has never held what is paired behind the iPhone. So the
+dashboard and the tool answered the same question with different facts,
+and the tool, the one the model reads, was the one missing the hardware.
+
+Its body also ended in `except Exception: return []`. `[]` is
+simultaneously the honest answer for a machine with nothing attached, so
+a registry that raised produced a confident "no devices are connected"
+with no trace anywhere.
+
+**Fix.** Each device row now carries `subdevices: [...]` from
+`state.node_subdevices`, with `capability`, `name` (from
+`attrs.device_name`, the only human-readable label the device has),
+`status`, `live` and `provenance`. `live` is carried through
+deliberately: "paired" and "currently reporting" are different claims.
+The broad handler logs with a traceback and returns the reason, which
+the endpoint surfaces as `data.error` so a caller can tell empty from
+broken. `_connected_devices_payload` is kept as a wrapper so existing
+callers are unchanged.
+
+**Files:** `skills/impl/self_introspection.py`,
+`tests/test_connected_devices_tool_reports_peripherals.py` (new,
+5 tests, all 5 failing before).
+
+---
+
+## C-03 - Every npx MCP server reported itself installed
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+`_check_installed` was `if cmd == "npx": return shutil.which("npx") is
+not None`. `npx` is one binary that can launch any package on npm, so
+this asks "is npm's runner present" and answers "the GitHub MCP server
+is installed". Measured live on this machine, where exactly two MCP
+packages are cached (`@modelcontextprotocol/server-filesystem` and
+`server-memory`, found under `~/.npm/_npx/*/node_modules`):
+
+```
+before:  stats() -> {'known_servers': 9, 'installed': 9}
+         auto_discover() -> all 9 ids, each {'installed': True}
+after:   stats() -> {'known_servers': 9, 'installed': 2,
+                     'launchable': 9, 'fetch_on_launch': 7, 'unavailable': 0}
+         auto_discover() -> ['filesystem', 'memory']
+```
+
+`ready` was `installed and has_required_env`, so it inherited the lie.
+`auto_discover`'s docstring promised it "checks npx availability and
+node_modules" and only ever checked the former.
+
+**Fix.** `_resolve_install_state` returns one of three states, because
+the remedies differ: `installed` (on disk, starts with no network),
+`fetch_on_launch` (npx present, package not cached - it will start,
+after a download, and only with a network), `unavailable` (the launcher
+itself is missing, so the fix is to install Node, not the package).
+Resolution is filesystem-only, no subprocess, because this runs on every
+render of the Settings page and `npm ls -g` costs hundreds of
+milliseconds; it checks npx's own cache, the global prefix derived from
+the `npm` binary's location, `NODE_PATH`, and the cwd.
+
+`ready` is now `install_state != "unavailable" and has_required_env`.
+Deriving it from the newly honest `installed` would grey out every
+working npx server, which is a regression dressed as a fix.
+`install_detail` carries the actionable sentence, e.g. "npx is available
+but @modelcontextprotocol/server-github is not cached locally. The first
+connect will download it ... Pre-install with: npm install -g ...".
+
+**Note for the owner:** the brief said 12 default MCP servers.
+`KNOWN_SERVERS` holds **9**.
+
+**Files:** `mcp/registry.py`,
+`tests/test_mcp_registry_reports_real_install_state.py` (new, 11 tests,
+10 failing before).
+
+---
+
+## C-04 - A failed MCP connect threw away the only thing that explained it
+
+**Status:** FIXED, uncommitted, in the working tree.
+
+Driven live against a server whose npm package does not exist:
+
+```
+>>> await registry.connect_server("bogus")
+{'error': "Failed to connect to MCP server 'bogus'"}
+stats -> {'bogus': {'reason': 'connection failed after 4 attempts'}}
+```
+
+Thirty seconds of wall clock, four retries, and neither the return value
+nor the degraded record names a cause. Meanwhile `_connect_stdio` opened
+the child with `stderr=asyncio.subprocess.PIPE` and **never read it**,
+so npm's own `404 Not Found` was written into a pipe that was closed and
+discarded. The one artifact that explains the failure was produced and
+thrown away. `reason` describes the retry loop, not the problem.
+
+An unread PIPE is also a hazard on its own: a child that writes past the
+buffer (16KB on macOS, 64KB on Linux) blocks forever on its own stderr,
+so "never read it" is not a safe default even when nobody wants the text.
+
+**Fix.** `MCPServerConnection.last_error`, always present so readers need
+no `hasattr` guard, populated on every failure path - missing command
+(named, with the remedy), rejected `initialize`, and no response to the
+handshake - each with `_drain_stderr()` appended. The drain is bounded by
+both a 4000-byte cap and a 2s timeout, and keeps the last 12 non-empty
+lines because npm prefixes a dozen lines of its own noise before the one
+that matters. `_mark_degraded` gained a `detail` field carrying it, and
+`MCPServerRegistry.connect_server` returns `detail`, `install_state` and
+`attempts`. Both lookups there are best-effort: failing to *read* a
+diagnostic must never replace the diagnostic with an `AttributeError`
+(it did, against the minimal stub in
+`tests/test_mcp_canonical_config_and_connect.py`, which is how that
+regression was caught).
+
+**Files:** `mcp/client.py`, `mcp/registry.py`,
+`tests/test_mcp_connect_failure_is_actionable.py` (new, 7 tests, all 7
+failing before).
+
+---
+
+## C-05 - Biometrics ARE reachable from a turn. NOT REPRODUCIBLE as a defect.
+
+**Status:** NEGATIVE RESULT. Characterization test added, no fix needed.
+
+The memory lane established, correctly, that
+`_handle_biometric_device_event` writes `~/.feral/baselines.db` (1,286
+real `hr` samples spanning 2026-06-21..2026-08-07, plus 149 `spo2` and
+119 `steps`) and that **none** of them are in `memory.db`, which instead
+holds 209 heart-rate notes, 199 of them the same 115bpm value. The
+natural conclusion is that "what was my heart rate on Tuesday" is
+unanswerable. **That conclusion is wrong, and it matters.**
+
+Verified live, end to end, against the real `baselines.db`:
+
+```
+health_data__health_history
+  -> HealthAggregator.get_health_history   (endpoint resolves to get_<id>)
+  -> BaselineEngine.get_samples
+  -> baselines.db
+=> 1286 hr entries, sources ['jw_health_glasses', 'veepoo_wristband'],
+   most recent 2026-08-07 15:20:52 = 82.0 bpm
+```
+
+with real per-day detail available (2026-08-03: 217 samples, 93-119bpm;
+2026-07-24: 293 samples, 75-98bpm). The provider is wired at boot,
+`api/state.py:1252`, `biometric_history_provider=lambda:
+self.baseline_engine`.
+
+Routing reaches it too. `_R_HEALTH` only matches present tense - it
+misses "what was my heart rate on Tuesday", "... yesterday", "how has my
+heart rate been this week" - but that is harmless, because those fall
+through to keyword routing which returns `health_data` as the
+**confident lead** for all three. Only `_R_HEALTH`'s single-skill
+shortcut is skipped.
+
+So the sensing half and the answering half are connected, just not
+through memory. The promise holds by the `health_data` route. This is
+recorded rather than "fixed" because there is nothing broken here, and
+because a future reader who finds the memory.db gap will otherwise draw
+the same wrong conclusion.
+
+Both halves were load-bearing and untested. A guard now pins them so the
+path cannot regress into the 115bpm noise silently.
+
+**Files:** `tests/test_biometrics_reachable_from_a_turn.py` (new, 7
+tests, characterization - they pass before and after by design).
+
+---
+
+## Findings recorded, NOT fixed - owner decisions
+
+### C-06 - `paired_devices.db` only ever sees browsers
+
+61 rows, and every single one is `kind='browser'` with `capabilities`
+`[]` **and `node_id` empty**. 59 `device_credentials`, all
+`bearer_kind='phone_bearer'`. 1 `pending_pair_codes` row, never claimed.
+
+The six iPhone HUP nodes that produce every `node_subdevices` row are
+**not in this table at all**. So "what has paired" and "what is actually
+connected" are two disjoint worlds on this install, and a user reading
+the paired list sees 61 browser sessions and none of their hardware.
+
+The HUP path is not missing - `claim_pending_code` mints
+`pair_device(name, kind="hup", node_id=...)` - it has simply never been
+exercised here. Note also that even that path passes no `capabilities`,
+so the column would stay `[]` for real hardware too, while
+`node_register` carries a capabilities list the brain already reads.
+
+Not fixed because making nodes register as paired changes pairing and
+auth semantics, which is an owner call, not a defect fix.
+
+### C-07 - `agents/context_engine.py` is 227 lines with zero callers
+
+The `ContextEngine` ABC, `DefaultContextEngine` (token estimation,
+LLM summarisation compaction, checkpoint ring), and the
+`register_context_engine` / `get_context_engine` / `set_default_engine`
+registry have **no importer anywhere in production or tests**. The only
+two references outside the file are a prose line in
+`agents/token_estimate.py:21` and a test that reads the file as *text*
+to check it uses the shared estimator. Nothing constructs it.
+
+The orchestrator's real context path is `self.context_manager.compact`
+plus `memory.compact_session`, and the real prompt assembly is
+`IdentityLoader.build_system_prompt`. This is exactly the defect class
+the brief named - a context builder with a branch nobody reaches - but
+it is dead rather than wrong, so it is reported for an owner decision
+(wire it, or delete it) rather than deleted here.
+
+### C-08 - The gateway is live; its legacy bridge is not
+
+`gateway/*` is real and reached: `BrainState` builds `MethodRegistry` +
+`register_core_methods` at `api/state.py:1702-1703`, `api/server.py:1614`
+constructs a `GatewaySession` per socket, and `api/server.py:1677`
+routes `req` / `res` / `event` to it before `parse_message`. **25
+methods** register (chat.send, memory.search, hardware.execute,
+node.invoke, vision.frame, taskflow.*, session.*, ...). That answers the
+brief's question about the envelope that is not in `MESSAGE_TYPES`: it is
+the typed gateway RPC and it is live.
+
+`GatewaySession._handle_legacy` is not. It only runs for a `type` that
+is *not* req/res/event, and `api/server.py` sends only those three to
+the gateway, so it is unreachable from the live server. Two of its eight
+mappings also point at methods that were never registered:
+`device_register -> device.register` and `vision_query -> vision.query`.
+Reported, not fixed: inventing those two handlers is a feature decision.
+
+
+---
+
+## D-01 - Connected devices: a device could never read as disconnected
+
+**Status:** FIXED, in the tree, not committed. Owner report, verbatim:
+devices that were connected and then disconnected still show as
+connected; the same device appears many times; reconnecting is not
+easy; a phone shows up as a browser connection he never made; glasses
+connected to an iPhone should be a sub-device of that iPhone.
+
+Five separate defects, all re-verified against the live install at
+`~/.feral` (copies, never the live files).
+
+### What was measured
+
+```
+$ sqlite3 memory.db "SELECT count(*), count(DISTINCT node_id) FROM node_subdevices;"
+7|6
+$ sqlite3 paired_devices.db "SELECT kind, count(*) FROM paired_devices GROUP BY kind;"
+browser|61
+$ sqlite3 paired_devices.db "SELECT count(*), sum(claimed_at IS NOT NULL), sum(node_id != '') FROM paired_devices;"
+61|18|0
+```
+
+Correction to the brief: the 7 sub-device rows are spread across **six**
+distinct `feral-iphone-*` node ids, not five. Six of the seven rows are
+`jw_health_glasses`.
+
+### D-01a - Disconnect had no representation at all
+
+Not "the dot was wrong": there was no disconnected state to render. The
+`except WebSocketDisconnect` teardown at `api/server.py:3533` pops
+`state.daemons`, calls `hardware_mesh.on_node_disconnected` (which runs
+`DeviceRegistry.unregister_device`), and unregisters from the capability
+registry. A phone that drops does not become disconnected, it stops
+existing. `/api/devices/connected` then returns `{"devices": []}`, the
+`connected_devices` tool reads the emptied `device_registry` and answers
+"nothing is connected", and the topology renders "Awaiting node". Absence
+reads as "you never owned a device", so the last thing the owner ever saw
+for that phone was a green pulsing dot.
+
+`DeviceTopology.jsx:161`'s hardcoded `<StatusDot tone="live" pulse />`
+and `_describe_device`'s hardcoded `"status": "connected"` were true only
+because those lists held open sockets and nothing else. Both are now
+bound to a real flag.
+
+**Fix.** New `api/device_view.py` joins the live daemon set against
+`memory/node_subdevices.py` (the only store that outlives a socket) and
+emits one tree that every surface reads. `/api/devices/connected` keeps
+`devices[]` selection-bound to open sockets (contract unchanged, existing
+tests still pass) and adds `offline[]` plus `heartbeat_window_s`.
+
+### D-01b - The heartbeat window: 30 s, derived not invented
+
+`HUP_SPEC.md` keepalive row: `node_heartbeat` every `heartbeat_ms`
+(default 10000), brain MAY close with `4004 stale_heartbeat` after 3x
+that interval. `models/protocol.py:1028` and `api/server.py:2326` both
+carry the 10000 default. 3 x 10 s = **30 s**, which is also what
+`memory/node_subdevices.LIVENESS_WINDOWS["ble"]` already used, so the
+phone and the BLE peripherals behind it derate on the same clock and no
+surface can show "phone offline, glasses live". Sub-devices keep their
+provenance windows (ble 30 / host 60 / cloud 300) because a cloud-synced
+account genuinely reports on a slower cadence; each row carries its own
+`liveness_window_s` so nothing has to guess. A test asserts the constant
+against `NodeAckPayload.heartbeat_ms` so the two cannot drift.
+
+### D-01c - Why one physical device appears six times
+
+Established, not guessed: the store is keyed `(node_id, capability)` and
+the iOS companion mints an install-scoped node id
+(`feral-nodes/ios-app/Sources/FeralBridge/FeralBrainClient.swift:179`
+shows the SDK's own `feral-iphone-` prefix). Six installs produced six
+node ids for one phone, so the same W300 glasses wrote six rows.
+
+**Not fixed at source, and deliberately so.** Making the node id stable
+across reinstalls changes pairing identity, and the iOS app that mints
+these ids is not in this tree. **Owner decision required:** derive the
+node id from `identifierForVendor` (stable per vendor per device until
+every app of that vendor is deleted) or from a Keychain-persisted UUID
+(survives reinstall). Recommend the Keychain UUID; `identifierForVendor`
+still rotates on full uninstall.
+
+Presentation is fixed instead, non-destructively. `node_family()` strips
+a trailing install nonce (>=6 hex or >=4 digits, never the last segment)
+so `feral-iphone-*` collapse to one entry; offline installs fold into the
+live node of the same family, or into the family's most recent member.
+Two live nodes are never merged. `group_subdevice_rows()` collapses
+repeated observations of one peripheral, splitting on distinct non-empty
+`attrs.device_name` so a W300 and a W610 never merge. Nothing is deleted:
+`also_known_as` and `also_seen_via` name every collapsed id.
+
+Measured on a copy of the live `memory.db`: 7 rows / 6 node ids becomes
+**1 phone with 2 peripherals**, `jw_health_glasses (W300)` carrying
+`observations=6, also_seen_via=5`.
+
+### D-01d - The browser rows are real rows, but they are not browsers
+
+The 61 `kind='browser'` rows are an artefact of two things.
+
+1. `GET /api/devices/pair/url` and `/pair/qr` both called
+   `store.pair_device(name, kind="browser")`. `kind` was stamped at
+   TOKEN-ISSUE time, when the brain cannot know what will scan the QR.
+   Opening the pair screen recorded a browser pairing. **43 of the 61
+   rows were never claimed by anything** - they are pairing codes, not
+   devices.
+2. `mark_claimed` wrote only `claimed_at` and `last_seen`. The /pair page
+   POSTs `kind: "browser_node_v2"`, which is the TRANSPORT the page
+   speaks, not what the device IS; an iPhone in Safari sends exactly that
+   string. So the remaining 18 claimed rows kept saying "browser", and
+   `node_id` stayed empty on all 61, meaning no pairing could ever be
+   joined to a node that connected.
+
+**Fix at source.** Both mint `kind="pending"` now. `Pair.jsx` sends
+`platform` (its user agent) and `node_id` (the stable
+`browserNodeId()` from `BrowserNode.js`, exported for this).
+`mark_claimed(token, kind=, platform=, node_id=)` resolves the real kind
+via `kind_from_platform` and records it, downgrading a known kind never
+(only `""`, `"pending"` and `"browser_node_v2"` are replaceable). A
+claim with no identity behaves exactly as before.
+
+**No history deleted.** `describe_pairing_row` adds derived
+`is_device` / `label` / `explain`. Against the live DB the 61 rows now
+read as **18 devices ("Browser") and 43 "Pairing code (unclaimed)"**.
+The 18 are genuine: the v2 web client IS a node (it streams camera and
+mic). Legacy rows keep `kind='browser'` because they carry no `platform`
+and inventing one would be a guess.
+
+### D-01e - Reconnect: the brain cannot, and now says so
+
+Established rather than assumed. There is no outbound path to a node
+that is not holding a WebSocket: `~/.feral/data/push_tokens.db` does not
+exist, so `channels/push.py` has zero registered APNs/FCM tokens and no
+configured credentials, and the pairing handshake is phone-initiated.
+`reconnect.brain_can_initiate` is a field, always `False`, so no surface
+can render a button that does nothing. The steps the brain emits are the
+two real ones: reopen the app (the iOS client retries 10 times with
+backoff), and if it does not return, re-pair because
+`DEFAULT_TTL_SECONDS` is 24 h.
+
+**Open, needs an owner call:** a 24 h pair-token TTL means a phone left
+off for a day must re-scan a QR. That is most of "reconnecting is not
+easy". The runtime `phone_bearer` already lasts 30 days
+(`DEFAULT_PHONE_BEARER_TTL_SECONDS`), so raising the pair TTL to match,
+or having `verify_device`'s sliding window cover the app's normal
+lifecycle, is a security tradeoff rather than a defect fix.
+
+### Proof
+
+New tests, both written first and run against the unfixed tree:
+
+* `tests/test_disconnected_devices_are_visible.py` - **14 failed / 0
+  passed before, 14 passed after.** Seeded with the owner's exact 7 rows.
+* `tests/test_pair_row_records_the_device_not_the_browser.py` - **7
+  failed / 1 passed before, 8 passed after** (the 1 is the
+  backward-compat claim path, which had to pass both sides).
+* `feral-client-v2/src/__tests__/DeviceTopology.disconnect.test.jsx` -
+  **5 failed / 2 passed before, 7 passed after.**
+
+Two existing tests asserted the old pair-token behaviour and were
+updated with the reason inline, not silently:
+`tests/test_pair_flows.py:127` and
+`tests/test_demo_mobile_ambient_smoke.py:68` (`kind` "browser" ->
+"pending").
+
+Full runs:
+
+```
+cd feral-core && ruff check --select=E,F,W --ignore=E501,E402,F401,W291,W293 .
+  All checks passed!
+cd feral-client-v2 && npx vitest run
+  Test Files  98 passed (98)      Tests  614 passed (614)
+cd feral-core && PYENV_VERSION=3.11.11 python3 -m pytest tests/ -q -p no:cacheprovider -p no:randomly --no-cov
+  6 failed, 7805 passed, 31 skipped in 427.43s
+```
+
+### The 6 remaining failures are another lane's, and the cause is named
+
+`tests/test_phone_bearer_allowlist_route_coherence.py` (3) and
+`tests/test_phone_bearer_http_auth.py` (3), all `401 != 200`. Not mine,
+and proved so rather than asserted:
+
+* They fail with **both** of this lane's new test files removed
+  (`--ignore` on each): still 6 failed.
+* Reproduced by the minimal pair
+  `pytest tests/test_execution_audit_trail.py tests/test_phone_bearer_http_auth.py`
+  -> 3 failed. Neither file, nor `memory/execution_audit.py`, nor the
+  `APIKeyMiddleware`, is touched by this lane.
+* On a pristine `git worktree` at HEAD that pair **passes**. Overlaying
+  every one of this lane's changed source files onto it: still passes.
+  Overlaying the perception lane's uncommitted `tests/conftest.py`
+  (its new `_reset_glasses_buffer_registration` autouse fixture):
+  **fails, 3 failed.**
+
+Mechanism, instrumented: `test_execution_audit_trail.py::
+test_offline_tooling_stays_silent` does
+`monkeypatch.delitem(sys.modules, "api.state")`. With the new autouse
+fixture in play, `api.state` is re-imported while that entry is gone, so
+a second module object is created and bound as the `state` attribute of
+the `api` package. monkeypatch restores `sys.modules["api.state"]` at
+teardown but not the package attribute, leaving them permanently
+desynchronised:
+
+```
+--- clean ---
+PROBE1 file: .../feral-core/api/state.py id: 4501583920
+PROBE1 in sys.modules: True
+--- after test_offline_tooling_stays_silent ---
+PROBE1 file: .../feral-core/api/state.py id: 4530809856
+PROBE1 in sys.modules: False
+```
+
+Every later `monkeypatch.setattr("api.state.state", mock)` then patches
+the wrong module object, so `APIKeyMiddleware`'s per-request
+`from api.state import state` reads the real BrainState, finds no
+matching phone bearer, and 401s. The fix belongs to whoever owns that
+conftest fixture: either restore the `api.state` package attribute in the
+delitem test, or stop importing `api.state` from an autouse fixture.

@@ -310,4 +310,66 @@ class GlassesBuffer:
         return [device_id for device_id, bucket in self._buckets.items() if bucket]
 
 
-__all__ = ["GlassesBuffer", "GlassesFrame", "KNOWN_SOURCES"]
+# ─────────────────────────────────────────────
+# Process-wide accessor (the read path's entry point)
+# ─────────────────────────────────────────────
+#
+# WHY this exists: ``perception/context_attach.py`` is the only production
+# reader of this buffer, and it resolved the buffer with
+#
+#     getattr(glasses_buffer, "get_glasses_buffer", lambda: None)()
+#
+# This module never defined ``get_glasses_buffer``, so the probe fell
+# through to ``lambda: None`` on every turn and the reader concluded
+# "Lane 11's buffer has not merged yet". Measured on a real brain
+# (TestClient + a real ``/v1/node`` socket): a ``glasses_frame`` landed
+# in ``state.glasses_buffer`` (``device_ids_with_frames() ==
+# ['w610-PROBE']``) and the very next ``orchestrator._attach_vision_context``
+# on a voice turn attached no image. Every frame a pair of glasses ever
+# sent was written to a buffer that nothing could read.
+#
+# The instance that matters is the one on ``BrainState`` (api/state.py),
+# because that is what ``_handle_glasses_frame`` writes to. So the
+# accessor returns the registered instance, never a fresh empty one: a
+# second buffer would read as "connected but seeing nothing", which is
+# the failure this replaces.
+_active_buffer: Optional[GlassesBuffer] = None
+
+
+def set_glasses_buffer(buffer: Optional[GlassesBuffer]) -> None:
+    """Register the process-wide buffer. Called by ``BrainState.__init__``."""
+    global _active_buffer
+    _active_buffer = buffer
+
+
+def get_glasses_buffer() -> Optional[GlassesBuffer]:
+    """Return the live glasses buffer, or ``None`` when the brain has none.
+
+    Prefers the explicitly registered instance. Falls back to reading
+    ``api.state.state.glasses_buffer`` so a brain built before
+    :func:`set_glasses_buffer` existed (or a test that constructs
+    ``BrainState`` directly) still resolves the same object the write
+    path uses. Never fabricates an empty buffer.
+    """
+    global _active_buffer
+    if _active_buffer is not None:
+        return _active_buffer
+    try:
+        from api.state import state as _brain_state
+
+        candidate = getattr(_brain_state, "glasses_buffer", None)
+    except Exception:  # pragma: no cover - api.state absent (unit tests)
+        logger.debug("get_glasses_buffer: api.state unavailable", exc_info=True)
+        return None
+    if isinstance(candidate, GlassesBuffer):
+        _active_buffer = candidate
+    return _active_buffer
+
+
+__all__ = [
+    "GlassesBuffer",
+    "GlassesFrame",
+    "KNOWN_SOURCES",
+    "get_glasses_buffer",
+    "set_glasses_buffer",
+]

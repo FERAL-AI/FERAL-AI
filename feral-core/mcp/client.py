@@ -170,6 +170,15 @@ class MCPServerConnection:
         self._request_failure_fuse = max(
             1, int(os.environ.get("FERAL_MCP_REQUEST_FAILURE_FUSE", "3"))
         )
+        # Why a connection carries its own failure text: `_connect_stdio`
+        # opened the child with `stderr=PIPE` and never read it, so the
+        # one artifact that explains a failed launch (npm's own
+        # "404 Not Found - @modelcontextprotocol/server-x") was written
+        # into a pipe that was closed and discarded. Callers got
+        # `{"error": "Failed to connect to MCP server 'x'"}`, which is a
+        # restatement of the question. Readers can assume this attribute
+        # exists without a hasattr guard.
+        self.last_error: str = ""
 
     async def connect(self) -> bool:
         # Reconnect path: tear down old process first to avoid zombie stdio
@@ -185,10 +194,49 @@ class MCPServerConnection:
         logger.warning(f"Unsupported transport: {self.transport}")
         return False
 
+    # Cap on captured child stderr. Enough to hold an npm error block,
+    # small enough that a runaway child cannot put megabytes into a
+    # status payload that gets rendered in a Settings row.
+    _STDERR_CAPTURE_LIMIT = 4000
+
+    async def _drain_stderr(self) -> str:
+        """Read what the child wrote to stderr, bounded and non-blocking.
+
+        Called only on the failure path. Two reasons this has to exist:
+
+        1. It is the only place the real cause is written. npx reports a
+           missing package, a server reports a bad token, and a Node
+           version mismatch reports a syntax error, all on stderr.
+        2. An unread PIPE is a deadlock hazard. A child that writes more
+           than the pipe buffer (64KB on Linux, 16KB on macOS) blocks
+           forever on its own stderr write, so "never read it" is not a
+           safe default even when nobody wants the text.
+
+        Bounded by a timeout as well as a byte cap because a child that
+        is alive and silent would otherwise hang the read forever.
+        """
+        proc = self._process
+        if proc is None or proc.stderr is None:
+            return ""
+        try:
+            data = await asyncio.wait_for(
+                proc.stderr.read(self._STDERR_CAPTURE_LIMIT), timeout=2.0,
+            )
+        except (asyncio.TimeoutError, Exception):
+            return ""
+        text = (data or b"").decode("utf-8", errors="replace").strip()
+        # Collapse to the last few lines: npm prefixes a dozen lines of
+        # its own noise before the line that says what went wrong.
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        return "\n".join(lines[-12:])[: self._STDERR_CAPTURE_LIMIT]
+
     async def _connect_stdio(self) -> bool:
         command = self.config.get("command", "")
         args = self.config.get("args", [])
         env = {**os.environ, **self.config.get("env", {})}
+        # Cleared here rather than on success so a retry never reports
+        # the previous attempt's cause as if it were this attempt's.
+        self.last_error = ""
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -209,15 +257,44 @@ class MCPServerConnection:
                 await self._send_notification("initialized", {})
                 self._connected = True
                 self._request_failures = 0
+                self.last_error = ""
                 await self._discover_tools()
                 await self._discover_resources()
                 logger.info(f"MCP server connected: {self.name} ({len(self._tools)} tools, {len(self._resources)} resources)")
                 return True
 
+            # Handshake did not complete. The child may still be alive
+            # and complaining on stderr; that text is the diagnosis.
+            stderr_text = await self._drain_stderr()
+            if init_result and "error" in init_result:
+                self.last_error = (
+                    f"{command}: server rejected initialize: "
+                    f"{init_result.get('error')!r}"
+                )
+            else:
+                self.last_error = (
+                    f"{command}: no response to the MCP initialize handshake"
+                )
+            if stderr_text:
+                self.last_error += f"; stderr: {stderr_text}"
+
         except FileNotFoundError:
-            logger.error(f"MCP server command not found: {command}")
+            self.last_error = (
+                f"MCP server command not found: {command!r}. Install it, or "
+                f"set an absolute path in ~/.feral/mcp_servers.json."
+            )
+            logger.error(self.last_error)
         except Exception as e:
-            logger.error(f"MCP server connection failed ({self.name}): {e}")
+            stderr_text = await self._drain_stderr()
+            self.last_error = f"{command}: {type(e).__name__}: {e}"
+            if stderr_text:
+                self.last_error += f"; stderr: {stderr_text}"
+            logger.error(
+                "MCP server connection failed (%s): %s", self.name, self.last_error,
+            )
+
+        if self.last_error:
+            logger.error("MCP connect failed for %s: %s", self.name, self.last_error)
 
         if self._process is not None:
             try:
@@ -648,11 +725,19 @@ class MCPClientManager:
             1, int(os.environ.get("FERAL_MCP_RECONNECT_BACKOFF_CAP_SEC", "60"))
         )
 
-    def _mark_degraded(self, name: str, reason: str, attempts: int) -> None:
+    def _mark_degraded(
+        self, name: str, reason: str, attempts: int, detail: str = "",
+    ) -> None:
+        # `reason` is the shape of the failure ("connection failed after
+        # 4 attempts") and was all this record carried, which describes
+        # the retry loop rather than the problem. `detail` is the child's
+        # own account of what went wrong and is the only field an
+        # operator can act on.
         self._degraded_servers[name] = {
             "state": "DEGRADED",
             "reason": reason,
             "attempts": attempts,
+            "detail": detail,
         }
 
     def _clear_degraded(self, name: str) -> None:
@@ -679,16 +764,19 @@ class MCPClientManager:
                 await asyncio.sleep(backoff)
                 delay = min(backoff * 2.0, float(self._connect_backoff_cap_sec))
 
+        detail = getattr(conn, "last_error", "") or ""
         self._mark_degraded(
             conn.name,
             f"connection failed after {attempts} attempts",
             attempts,
+            detail=detail,
         )
         self._reconnect_not_before[conn.name] = time.time() + float(self._connect_backoff_cap_sec)
         logger.error(
-            "MCP server marked DEGRADED: %s (attempts=%d)",
+            "MCP server marked DEGRADED: %s (attempts=%d): %s",
             conn.name,
             attempts,
+            detail or "no cause captured",
         )
         return False
 

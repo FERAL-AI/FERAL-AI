@@ -35,7 +35,7 @@ from __future__ import annotations
 import ast
 import base64
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -110,6 +110,9 @@ def srv_with_mock_state(monkeypatch):
     fake_state.scene = MagicMock(available=False)
     fake_state.change_detector.should_analyze.return_value = None
     fake_state.get_sessions_for_daemon.return_value = []
+    # A plain MagicMock attribute is not awaitable, and audio_frame now
+    # awaits its consumer.
+    fake_state.voice_router.handle_audio_from_node = AsyncMock()
     monkeypatch.setattr(srv, "state", fake_state)
     return srv, fake_state
 
@@ -137,20 +140,28 @@ def test_video_frame_over_the_decoded_cap_returns_a_reason(srv_with_mock_state):
     assert str(CANONICAL_VIDEO_CAP + 1024) in reason
 
 
-def test_audio_frame_of_60_kib_decoded_is_accepted(srv_with_mock_state):
-    """80 KiB of base64, 60 KiB decoded, against the 64 KiB decoded cap."""
+async def test_audio_frame_of_60_kib_decoded_is_accepted(srv_with_mock_state):
+    """80 KiB of base64, 60 KiB decoded, against the 64 KiB decoded cap.
+
+    Asserts against ``voice_router.handle_audio_from_node``: the old
+    ``state.audio.ingest_frame`` sink was a method AudioPipeline has
+    never defined, so on a MagicMock state it recorded a call that could
+    not happen against the real object.
+    """
     srv, st = srv_with_mock_state
-    reason = srv._handle_audio_frame("band-1", {"data_b64": _b64(60 * 1024)})
+    st.get_sessions_for_daemon.return_value = ["sid-1"]
+    reason = await srv._handle_audio_frame("band-1", {"data_b64": _b64(60 * 1024)})
     assert reason is None
-    st.audio.ingest_frame.assert_called_once()
+    st.voice_router.handle_audio_from_node.assert_awaited_once()
 
 
-def test_audio_frame_over_the_decoded_cap_returns_a_reason(srv_with_mock_state):
+async def test_audio_frame_over_the_decoded_cap_returns_a_reason(srv_with_mock_state):
     srv, st = srv_with_mock_state
-    reason = srv._handle_audio_frame(
+    st.get_sessions_for_daemon.return_value = ["sid-1"]
+    reason = await srv._handle_audio_frame(
         "band-1", {"data_b64": _b64(srv.AUDIO_FRAME_MAX_BYTES + 512)}
     )
-    st.audio.ingest_frame.assert_not_called()
+    st.voice_router.handle_audio_from_node.assert_not_awaited()
     assert reason and "audio_frame" in reason
     assert str(srv.AUDIO_FRAME_MAX_BYTES + 512) in reason
 

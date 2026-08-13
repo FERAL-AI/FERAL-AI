@@ -482,6 +482,34 @@ class Orchestrator:
         """
         self.identity_loader.calendar = calendar
 
+    def set_subdevice_store(self, store, live_node_ids=None):
+        """Wire the NodeSubdeviceStore so the prompt names real hardware.
+
+        `frame.connected_nodes` gives the prompt HUP node ids and
+        nothing more. The peripherals behind those nodes -- the W300
+        glasses and VITRO wristband arriving over BLE through the
+        iPhone companion -- live only in `node_subdevices`, which the
+        dashboard, `/api/devices/connected` and the iOS UI all read and
+        the prompt builder did not. On the audited install that table
+        held 7 rows across 6 iPhone nodes while the model's entire view
+        of attached hardware was the string
+        `Connected devices: ['feral-iphone-6053b3cdc4ed']`.
+
+        Same shape as `set_calendar` above and for the same reason: a
+        capability the brain owns is useless until the prompt carries
+        it, because the LLM will not call a tool for a fact it has no
+        reason to believe exists.
+
+        `live_node_ids` is an optional zero-arg callable returning the
+        node ids currently holding a HUP WebSocket. It is a callable and
+        not a snapshot because the set changes between prompt builds,
+        and a stale snapshot would put "connected" in the prompt for a
+        phone that dropped an hour ago -- which is the defect the owner
+        reported.
+        """
+        self.identity_loader.subdevice_store = store
+        self.identity_loader.live_node_ids = live_node_ids
+
     def set_tool_genesis(self, tool_genesis):
         """Wire the ToolGenesisEngine so the orchestrator records tool-call patterns."""
         self._tool_genesis = tool_genesis

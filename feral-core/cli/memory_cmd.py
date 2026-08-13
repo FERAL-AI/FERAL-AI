@@ -118,6 +118,63 @@ def _brain_health_ok(timeout: float = 1.0) -> bool:
         return False
 
 
+def _print_vector_health(db_path) -> None:
+    """Report whether stored vectors still match the active embedder.
+
+    ``feral memory status`` used to describe the backend module and the
+    encryption flag and stop there, which meant the single failure that
+    has actually killed semantic recall on this product was invisible to
+    the one command an operator runs to check on memory. Measured on the
+    real store on 2026-08-12, months after the ``memory_chunks``
+    migration: ``entities.embedding`` still held 312 vectors at 1536
+    dims against a 384-dim provider, so entity linking was silently
+    degraded to exact-name matching and ``status`` said nothing at all.
+    Only ``feral memory reembed check``, which nobody runs unprompted,
+    reported it.
+
+    Best-effort by construction: a status command must never fail
+    because a diagnostic could not be computed, so any error here
+    degrades to one honest line.
+    """
+    import sqlite3
+
+    if not db_path.exists():
+        print(f"  Stored vectors:        no database at {db_path}")
+        return
+    try:
+        from memory.embeddings import EmbeddingProvider
+        from memory.reembed import scan_store
+
+        embedder = EmbeddingProvider()
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            scan = scan_store(conn, embedder.dimension)
+        finally:
+            conn.close()
+    except Exception as exc:
+        print(f"  Stored vectors:        could not be checked ({exc})")
+        return
+
+    print(f"  Embedding provider:    {embedder.provider_name} ({embedder.dimension}d)")
+    if not scan.columns:
+        print("  Stored vectors:        none yet")
+        return
+    if scan.stale_total == 0:
+        print("  Stored vectors:        OK, every column matches the provider")
+        return
+
+    print(f"  Stored vectors:        STALE, {scan.stale_total} at the wrong width")
+    for col in scan.columns:
+        if not col.stale:
+            continue
+        widths = ", ".join(f"{dim}d x{n}" for dim, n in sorted(col.widths.items()))
+        print(f"    {col.table}.{col.column}: {widths}")
+    print(
+        "  Semantic recall is degraded for the tables above. "
+        "Fix with:  feral memory reembed"
+    )
+
+
 def cmd_memory(action: str, backend_id: str | None, *, flags=None) -> None:
     # Lane 07  — `feral memory query <text>` closes THESIS_SCENARIOS
     # S1 from the CLI side. The argparse positional ``backend_id`` is
@@ -181,6 +238,63 @@ def cmd_memory(action: str, backend_id: str | None, *, flags=None) -> None:
             print(f"  Could not forget {backend_id}: {result.get('detail') or result.get('error') or result}")
             sys.exit(1)
         print(f"  Episode {backend_id} forgotten at {result.get('forgotten_at')}.")
+        return
+
+    if action == "forgotten":
+        # Recovery surface for the decay tier. Every read path on
+        # MemoryStore filters ``forgotten_at IS NULL``, and
+        # ``feral memory recall`` needs an episode id, so before this
+        # existed there was no way to obtain one: on the real store of
+        # 2026-08-12 that was 3,677 episodes (30% of 12,300) which the
+        # user could neither see nor recall.
+        #
+        # Reads the database file directly, read-only, the same way
+        # ``reembed`` does. The alternative is an HTTP round-trip, and
+        # the moment an operator most needs to recover an episode is the
+        # moment the brain may not be running.
+        import sqlite3
+
+        from config.loader import feral_data_home
+        from memory.decay import forgotten_query, forgotten_row_to_dict
+
+        db = feral_data_home() / "memory.db"
+        if not db.exists():
+            print(f"  No memory database at {db}")
+            sys.exit(1)
+
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            sql, params = forgotten_query(50, query=(backend_id or "").strip())
+            rows = [forgotten_row_to_dict(r) for r in conn.execute(sql, params)]
+            total = conn.execute(
+                "SELECT COUNT(*) FROM episodes WHERE forgotten_at IS NOT NULL"
+            ).fetchone()[0]
+        except sqlite3.Error as exc:
+            print(f"  Could not read {db}: {exc}")
+            sys.exit(1)
+        finally:
+            conn.close()
+
+        if not rows:
+            print(
+                f"  No forgotten episodes{' matching ' + repr(backend_id) if backend_id else ''}."
+                f"  ({total} forgotten in total.)"
+            )
+            return
+        print(f"  {len(rows)} of {total} forgotten episode(s):")
+        for row in rows:
+            summary = (row["summary"] or "").replace("\n", " ")
+            if len(summary) > 100:
+                summary = summary[:100] + "…"
+            print()
+            print(
+                f"  {row['id']}  [{row['event_type']}]  "
+                f"decay={row['decay_factor']:.3f}"
+            )
+            print(f"     {summary}")
+        print()
+        print("  Restore one with:  feral memory recall <id>")
         return
 
     if action == "recall":
@@ -390,12 +504,15 @@ def cmd_memory(action: str, backend_id: str | None, *, flags=None) -> None:
 
         from memory.at_rest import encryption_status as _enc_status
         from config.loader import feral_data_home
-        enc = _enc_status(feral_data_home() / "memory.db")
+        db_path = feral_data_home() / "memory.db"
+        enc = _enc_status(db_path)
         print(f"  Encrypted at rest:     {'yes' if enc['encrypted_at_rest'] else 'no'}")
         if enc["encrypted_at_rest"]:
             print(f"  Ciphertext:            {enc['ciphertext_path']}")
         if enc.get("backup_path"):
             print(f"  Plaintext backup:      {enc['backup_path']}")
+
+        _print_vector_health(db_path)
         return
 
     if action == "list":

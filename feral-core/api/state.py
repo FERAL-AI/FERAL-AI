@@ -361,8 +361,14 @@ class BrainState:
         # (and glasses-equivalent phone-camera fallback) frames. Lane
         # 11 writes via api.server._handle_glasses_frame; Lane 08
         # reads via perception/context_attach.py.
-        from perception.glasses_buffer import GlassesBuffer
+        from perception.glasses_buffer import GlassesBuffer, set_glasses_buffer
         self.glasses_buffer = GlassesBuffer()
+        # Publish THIS instance as the process-wide buffer. The reader
+        # (perception/context_attach.py) resolves the buffer through
+        # ``perception.glasses_buffer.get_glasses_buffer()``; without
+        # this registration it resolved nothing and every glasses frame
+        # was written to an object no consumer could reach.
+        set_glasses_buffer(self.glasses_buffer)
         self.perception = PerceptionEngine()
         self.audio = AudioPipeline()
         self.scene: Optional[SceneAnalyzer] = None
@@ -1559,6 +1565,20 @@ class BrainState:
                 self.orchestrator.executor.set_wasm_sandbox(self.wasm_sandbox)
             if self.mcp_client:
                 self.orchestrator.set_mcp_client(self.mcp_client)
+            if self.node_subdevices is not None:
+                # Without this the prompt's only hardware fact was a
+                # list of bare HUP node ids, while the sub-device truth
+                # store behind them (glasses, wristband, health
+                # pipelines) fed the dashboard and nothing else. See
+                # Orchestrator.set_subdevice_store.
+                # The live daemon set is passed as a callable, not a
+                # snapshot: `self.daemons` is mutated on every node
+                # connect/disconnect and a snapshot taken at boot would
+                # have the prompt claim a phone is connected forever.
+                self.orchestrator.set_subdevice_store(
+                    self.node_subdevices,
+                    live_node_ids=lambda: list(self.daemons.keys()),
+                )
 
         with boot_subsystem(self._boot_report, "Supervisor"):
             # One seat that sees every input the Brain acts on. Wraps the

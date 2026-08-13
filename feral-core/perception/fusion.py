@@ -174,6 +174,17 @@ class PerceptionFrame:
     head_pose: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     ambient_light_lux: int = 0
     battery_pct: int = 100
+    # Sensors the HUP `device_event` extractor produces that had no slot
+    # here, so `update_sensors` received them and dropped them on the
+    # floor. `steps` and `accel_xyz` were already being extracted by
+    # api/server.py and discarded; `uv_index` and `gyro_xyz` are new
+    # extractions with the same requirement: a reading the brain accepts
+    # must be readable by something afterwards.
+    uv_index: float = 0.0
+    steps: int = 0
+    ambient_temperature_c: float = 0.0
+    accel_xyz: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    gyro_xyz: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     location: Optional[dict] = None  # {"lat": float, "lon": float}
 
     # Gesture
@@ -248,6 +259,16 @@ class PerceptionFrame:
             sensor_parts.append(f"Light={self.ambient_light_lux}lux")
         if self.battery_pct < 100:
             sensor_parts.append(f"Battery={self.battery_pct}%")
+        # UV / steps / ambient temperature reach the frame from the HUP
+        # `device_event` extractor. Without these lines the LLM could
+        # not answer "is the sun strong right now?" from a UV sensor
+        # that was reporting correctly the whole time.
+        if self.uv_index:
+            sensor_parts.append(f"UV={self.uv_index:g}")
+        if self.steps:
+            sensor_parts.append(f"Steps={self.steps}")
+        if self.ambient_temperature_c:
+            sensor_parts.append(f"Ambient={self.ambient_temperature_c:g}°C")
         if sensor_parts:
             sections.append("Sensors: " + " | ".join(sensor_parts))
 
@@ -492,7 +513,12 @@ class PerceptionEngine:
                 frame.spo2_sample_ts = new_spo2_ts
                 if new_spo2_source:
                     frame.spo2_source = new_spo2_source
-        _temp = vitals.get("skin_temperature_c")
+        # Flat form included: the HUP `skin_temperature` device_event
+        # extractor emits `sensors["skin_temperature_c"]` at the top
+        # level, and only the nested `vitals.*` form was read here, so
+        # the reading trained the baseline (baselines.db) and never
+        # reached the frame the LLM is shown. Same seam as `uv`.
+        _temp = _fv(vitals.get("skin_temperature_c"), sensors.get("skin_temperature_c"))
         if _temp is not None:
             frame.skin_temperature_c = _temp
 
@@ -501,10 +527,33 @@ class PerceptionEngine:
         if _pose is not None:
             frame.head_pose = _pose
 
-        # Environment
-        _lux = env.get("ambient_light_lux")
+        # Environment. The flat form is what the HUP `device_event`
+        # extractor emits (api/server.py `_handle_biometric_device_event`);
+        # only the nested `environment.*` form was read here, so an
+        # `ambient_light` event reached this method and changed nothing.
+        _lux = _fv(env.get("ambient_light_lux"), sensors.get("ambient_light_lux"))
         if _lux is not None:
             frame.ambient_light_lux = _lux
+
+        _uv = _fv(env.get("uv_index"), sensors.get("uv_index"))
+        if _uv is not None:
+            frame.uv_index = float(_uv)
+
+        _amb_temp = _fv(env.get("temperature"), sensors.get("temperature"))
+        if _amb_temp is not None:
+            frame.ambient_temperature_c = float(_amb_temp)
+
+        _steps = _fv(sensors.get("steps"), device.get("steps"))
+        if _steps is not None:
+            frame.steps = int(_steps)
+
+        _accel = _fv(imu.get("accel_xyz"), sensors.get("accel_xyz"))
+        if _accel is not None:
+            frame.accel_xyz = list(_accel)
+
+        _gyro = _fv(imu.get("gyro_xyz"), sensors.get("gyro_xyz"))
+        if _gyro is not None:
+            frame.gyro_xyz = list(_gyro)
 
         # Device
         _batt = _fv(device.get("battery_pct"), sensors.get("battery_pct"))

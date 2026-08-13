@@ -314,7 +314,16 @@ def vad_available() -> tuple[bool, str]:
     from voice import local_models
 
     if not local_models.silero_vad_present():
-        return False, f"weights not downloaded ({local_models.silero_vad_path()})"
+        # Name the remedy, not just the missing path. Verified on the
+        # audit machine: ~/.feral/models does not exist at all, so this
+        # is the branch every install without `feral setup` takes, and
+        # the only symptom is roughly 2.3s of extra latency per voice
+        # turn with nothing anywhere saying why.
+        return False, (
+            f"weights not downloaded ({local_models.silero_vad_path()}); "
+            f"fetch them with `python -m voice.local_models fetch-vad` "
+            f"or run `feral setup`"
+        )
     return True, "ready"
 
 

@@ -3557,7 +3557,7 @@ def _main():
         "action",
         choices=[
             "status", "switch", "list", "decay",
-            "forget", "recall", "compact", "query", "encrypt",
+            "forget", "forgotten", "recall", "compact", "query", "encrypt",
             "reembed",
         ],
         help=(
@@ -3565,6 +3565,8 @@ def _main():
             "switch <id>: select backend | "
             "decay now: run a one-shot Ebbinghaus sweep | "
             "forget <episode_id>: mark an episode forgotten | "
+            "forgotten [<text>]: list forgotten episodes with their ids "
+            "(the only way to obtain an id for `recall`) | "
             "recall <episode_id>: reverse a forget | "
             "compact [<session_id>]: promote conversation turns to episodes | "
             "query <text>: search memory (THESIS S1) | "

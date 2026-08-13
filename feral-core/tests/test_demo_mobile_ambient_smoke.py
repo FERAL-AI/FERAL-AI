@@ -62,10 +62,13 @@ def test_demo_step_1_issue_pair_url(brain):
     assert body["url"].startswith("http")
     assert "/pair?t=" in body["url"]
     assert len(body["token"]) >= 32
-    # Record landed in the pairing store with kind="browser".
+    # Record landed in the pairing store with kind="pending". It was
+    # "browser" until the devices-lane fix: at mint time nothing has
+    # scanned the QR yet, so the row cannot honestly name a device kind.
+    # The claimant sets it at /api/devices/pair/complete.
     rows = store.list_devices()
     assert len(rows) == 1
-    assert rows[0]["kind"] == "browser"
+    assert rows[0]["kind"] == "pending"
     assert rows[0]["name"] == "demo-phone"
 
 

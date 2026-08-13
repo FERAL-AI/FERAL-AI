@@ -64,17 +64,140 @@ class WakeWordDetector:
         self._last_audio_at: dict[str, float] = {}
         self._pre_roll_buffer: dict[str, list[bytes]] = {}
         self._oww_model = None
+        self._model_name: str = ""
 
         self._on_wake: Optional[Callable[[str, WakeWordEvent], Awaitable[None]]] = None
 
         if self._config.enabled:
             self._try_load_oww()
 
-        logger.info(f"WakeWordDetector: enabled={self._config.enabled}, phrase='{self._config.phrase}'")
+        logger.info(
+            "WakeWordDetector: enabled=%s, detector=%s, configured phrase='%s', "
+            "phrase actually detected='%s'",
+            self._config.enabled,
+            self.detector,
+            self._config.phrase,
+            self.effective_phrase,
+        )
+        self._report_phrase_mismatch()
 
     @property
     def enabled(self) -> bool:
         return self._config.enabled
+
+    @enabled.setter
+    def enabled(self, value: bool) -> None:
+        """Turn the detector on or off at runtime.
+
+        ``enabled`` used to be read-only, and
+        ``POST /api/ambient/wake_word/toggle`` assigns to it::
+
+            state.wake_word.enabled = not state.wake_word.enabled
+
+        against the real object that raises ``AttributeError: property
+        'enabled' of 'WakeWordDetector' object has no setter``, so the
+        route 500'd and the wake word could not be switched on from the
+        API at all. (The route's test passed because its detector was a
+        MagicMock, which accepts any assignment.)
+
+        Enabling also loads the model. The detector is constructed
+        disabled by default for privacy, and ``_try_load_oww`` only ran
+        in ``__init__``, so a detector switched on later would have run
+        the loudness fallback forever no matter what was installed.
+        """
+        value = bool(value)
+        was = self._config.enabled
+        self._config.enabled = value
+        if value and not was and self._oww_model is None:
+            self._try_load_oww()
+            logger.info(
+                "Wake word enabled at runtime: detector=%s, phrase actually "
+                "detected='%s'", self.detector, self.effective_phrase,
+            )
+            self._report_phrase_mismatch()
+
+    @property
+    def phrase(self) -> str:
+        """The configured wake phrase.
+
+        Exposed because ``GET /api/ambient/wake_word/status`` reads
+        ``getattr(state.wake_word, "phrase", "hey feral")``. There was no
+        such attribute, so the getattr default won every time and the
+        route reported "hey feral" whatever ``FERAL_WAKE_PHRASE`` said.
+        """
+        return self._config.phrase
+
+    @property
+    def detector(self) -> str:
+        """Which detector is actually running: the honest name of it."""
+        if not self._config.enabled:
+            return "disabled"
+        return "openwakeword" if self._oww_model is not None else "energy-fallback"
+
+    @property
+    def model_phrase(self) -> str:
+        """The phrase the loaded openwakeword model was trained on.
+
+        Derived from the model name, which is where the truth lives:
+        ``hey_jarvis_v0.1`` detects "hey jarvis". Empty when no ML model
+        is loaded.
+        """
+        if not self._model_name:
+            return ""
+        name = self._model_name
+        # Strip a trailing ``_v<version>`` tag, then read the words.
+        parts = name.split("_")
+        while parts and parts[-1].startswith("v") and parts[-1][1:2].isdigit():
+            parts.pop()
+        return " ".join(parts).replace("-", " ").strip().lower()
+
+    @property
+    def effective_phrase(self) -> str:
+        """What saying the phrase out loud will actually trigger.
+
+        The energy fallback detects no phrase at all, so it reports the
+        empty string rather than the configured one. Claiming a phrase
+        that nothing is matching against is the defect this property
+        exists to prevent.
+        """
+        if self.detector == "openwakeword":
+            return self.model_phrase or self._config.phrase
+        if self.detector == "energy-fallback":
+            return ""
+        return self._config.phrase
+
+    def _report_phrase_mismatch(self) -> None:
+        """Say so when the configured phrase is not what fires.
+
+        ``FERAL_WAKE_MODEL`` defaults to openwakeword's pre-trained
+        ``hey_jarvis_v0.1``, while the configured phrase defaults to "hey
+        feral". No FERAL-branded wake model is shipped or referenced
+        anywhere in this repo, so out of the box the product told the
+        user to say a phrase that could never trigger, and a user who
+        said it and got nothing had no way to find out why.
+        """
+        if not self._config.enabled:
+            return
+        if self.detector == "energy-fallback":
+            logger.warning(
+                "Wake word is ENABLED but openwakeword is not loaded, so "
+                "detection is the energy fallback: it opens the microphone "
+                "on any sufficiently LOUD audio, speech or not, and the "
+                "phrase '%s' is not matched against anything. Install the "
+                "detector with: pip install 'feral-ai[wake]'",
+                self._config.phrase,
+            )
+            return
+        detected = self.model_phrase
+        if detected and detected != self._config.phrase.strip().lower():
+            logger.warning(
+                "Wake word phrase mismatch: FERAL reports '%s' but the loaded "
+                "model %r detects '%s'. Saying '%s' will NOT wake FERAL. Set "
+                "FERAL_WAKE_PHRASE='%s', or point FERAL_WAKE_MODEL at a model "
+                "trained on '%s'.",
+                self._config.phrase, self._model_name, detected,
+                self._config.phrase, detected, self._config.phrase,
+            )
 
     def _try_load_oww(self):
         """Attempt to load openwakeword; graceful fallback to energy-based."""
@@ -86,13 +209,23 @@ class WakeWordDetector:
 
             try:
                 openwakeword.utils.download_models([model_name])
-            except Exception:
-                pass
+            except Exception as exc:
+                # Was ``except Exception: pass``. openwakeword ships its
+                # pre-trained models inside the wheel, so this normally
+                # fails only on a network or checksum problem for a model
+                # that is not bundled - in which case the constructor
+                # below raises and we drop to the loudness gate. Silently
+                # was the wrong way to do that.
+                logger.warning(
+                    "openwakeword model fetch for %r failed: %s. Continuing "
+                    "with whatever is already on disk.", model_name, exc,
+                )
 
             self._oww_model = OWWModel(
                 wakeword_models=[model_name],
                 inference_framework="onnx",
             )
+            self._model_name = model_name
             logger.info(f"openwakeword loaded (model={model_name}) — ML-based wake word detection active")
         except ImportError:
             logger.info(
@@ -224,9 +357,20 @@ class WakeWordDetector:
 
     @property
     def stats(self) -> dict:
+        detected = self.effective_phrase
         return {
             "enabled": self._config.enabled,
             "phrase": self._config.phrase,
             "active_sessions": sum(1 for s in self._states.values() if s == WakeState.ACTIVATED),
             "using_ml": self._oww_model is not None,
+            # ``phrase`` alone was a claim FERAL could not keep: the
+            # default model detects "hey jarvis" while the default phrase
+            # says "hey feral", and the energy fallback matches no phrase
+            # at all. These three report what is really happening.
+            "detector": self.detector,
+            "model": self._model_name,
+            "effective_phrase": detected,
+            "phrase_matches_model": (
+                detected == self._config.phrase.strip().lower()
+            ),
         }

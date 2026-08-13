@@ -427,6 +427,45 @@ def _reset_bound_host():
     _reset()
 
 
+def _reset_glasses_buffer_registration():
+    """The process-wide glasses buffer the vision read path resolves.
+
+    ``BrainState.__init__`` builds a ``GlassesBuffer`` and registers it
+    via ``set_glasses_buffer``, so the reader resolves the same object
+    the ``glasses_frame`` write path fills. Correct for production,
+    which builds exactly one ``BrainState``. But a test that constructs
+    a throwaway one (``test_glasses_buffer``, ``test_primary_session_id``,
+    ``test_e2e``) silently hands the registration to a buffer that is
+    discarded when the test ends, while ``api.state.state`` keeps the
+    real one. Every later reader then resolves the dead buffer.
+
+    Re-point the registration at ``api.state.state``'s buffer rather
+    than clearing it: cleared, the reader falls back to reading
+    ``api.state`` anyway, so clearing would hide a genuine failure to
+    register instead of restoring the canonical answer.
+
+    Look both modules up in ``sys.modules`` instead of importing them.
+    ``test_execution_audit_trail`` and ``test_external_agent_skill``
+    ``monkeypatch.delitem(sys.modules, "api.state")`` on purpose. A plain
+    ``from api.state import state`` here would re-import it, build a
+    second ``BrainState``, and leave ``sys.modules["api.state"]`` and the
+    ``api`` package attribute pointing at different modules for the rest
+    of the session, which reads downstream as phone-bearer requests
+    getting 401 from a session store nothing ever wrote to. Restoring one
+    global is never worth importing a module a test just unloaded.
+    """
+    import sys
+
+    api_state = sys.modules.get("api.state")
+    glasses = sys.modules.get("perception.glasses_buffer")
+    if api_state is None or glasses is None:
+        return
+
+    buf = getattr(getattr(api_state, "state", None), "glasses_buffer", None)
+    if buf is not None:
+        glasses.set_glasses_buffer(buf)
+
+
 def _reset_rate_limit_store():
     """Per-client-IP request windows in the API rate limiter.
 
@@ -460,6 +499,7 @@ _SHARED_STATE_RESETTERS = (
     _reset_shared_catalog,
     _reset_device_pairing_store,
     _reset_bound_host,
+    _reset_glasses_buffer_registration,
 )
 
 # Deliberately NOT reset here, so nobody adds them back "for symmetry":

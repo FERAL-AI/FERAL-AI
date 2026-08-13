@@ -195,7 +195,8 @@ class MCPServerRegistry:
         """List all known MCP servers with installation and connection status."""
         result = []
         for sid, server in self._known.items():
-            installed = self._check_installed(server)
+            install_state, install_detail = self._resolve_install_state(server)
+            installed = install_state == "installed"
             # AUDIT-r14 finding 16 fix #5: ``MCPClientManager`` exposes
             # ``_servers`` (the canonical name); the pre-fix code looked
             # up ``_connections`` which doesn't exist, so every row in
@@ -211,9 +212,15 @@ class MCPServerRegistry:
             result.append({
                 **server,
                 "installed": installed,
+                "install_state": install_state,
+                "install_detail": install_detail,
                 "connected": connected,
                 "configured": configured,
-                "ready": installed and has_required_env,
+                # `ready` means "we can attempt a launch", which npx can
+                # do for an uncached package. Deriving it from the now
+                # truthful `installed` would grey out every working
+                # npx server, turning a fix into a regression.
+                "ready": install_state != "unavailable" and has_required_env,
             })
         return result
 
@@ -274,10 +281,40 @@ class MCPServerRegistry:
             )
             ok = await self._mcp_client.connect_server(model)
             if not ok:
-                return {"error": f"Failed to connect to MCP server '{server_id}'"}
+                # "Failed to connect to X" restates the request. The
+                # cause lives on the connection (child stderr, missing
+                # command) and in the manager's degraded record; both
+                # existed and neither reached the caller.
+                # Both lookups are best-effort: a caller may hand us a
+                # manager stub without `stats` / `get_server`, and
+                # failing to READ a diagnostic must never replace the
+                # diagnostic with an AttributeError.
+                degraded = {}
+                try:
+                    degraded = ((getattr(self._mcp_client, "stats", None) or {})
+                                .get("degraded_servers", {})
+                                .get(server_id, {})) or {}
+                except Exception:
+                    degraded = {}
+                detail = degraded.get("detail") or ""
+                if not detail:
+                    try:
+                        conn = self._mcp_client.get_server(server_id)
+                    except Exception:
+                        conn = None
+                    detail = getattr(conn, "last_error", "") or ""
+                install_state, install_detail = self._resolve_install_state(config)
+                if not detail and install_state == "unavailable":
+                    detail = install_detail
+                return {
+                    "error": f"Failed to connect to MCP server '{server_id}'",
+                    "detail": detail or "No cause was captured by the client.",
+                    "install_state": install_state,
+                    "attempts": degraded.get("attempts"),
+                }
             return {"ok": True, "server": server_id}
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": str(e), "detail": f"{type(e).__name__}: {e}"}
 
     async def disconnect_server(self, server_id: str) -> dict:
         if not self._mcp_client:
@@ -291,27 +328,125 @@ class MCPServerRegistry:
             return {"error": str(e)}
 
     def auto_discover(self) -> list[dict]:
-        """
-        Discover locally installed MCP servers by checking common locations.
-        Checks npx availability and node_modules.
+        """Discover MCP servers whose package is genuinely on this machine.
+
+        The docstring used to promise it "checks npx availability and
+        node_modules" and only ever checked the former, so it returned
+        every known server the moment npx existed. It now checks
+        node_modules for real (see `_npx_package_roots`) and returns
+        only servers that would start without a download.
         """
         discovered = []
-        npx = shutil.which("npx")
-        if not npx:
-            return discovered
-
         for sid, server in self._known.items():
             if self._check_installed(server):
                 discovered.append({"id": sid, "name": server["name"], "installed": True})
-
         return discovered
 
+    # ------------------------------------------------------------------
+    # Install-state resolution
+    # ------------------------------------------------------------------
+    #
+    # `npx` is a single binary that can launch ANY package on npm, so
+    # `shutil.which("npx") is not None` answers "is npm's runner
+    # present", not "is this server installed". The pre-fix
+    # `_check_installed` returned the former as the latter, which on the
+    # audit machine reported all 9 known servers installed while exactly
+    # 2 packages existed on disk. `ready` is derived from `installed`,
+    # so it inherited the lie and the Settings UI showed seven servers
+    # as ready that were not present in any form.
+
+    @staticmethod
+    def _npx_package_name(args: list) -> str:
+        """The package `npx` would run, skipping its own flags.
+
+        `args` is shaped `["-y", "@scope/pkg", "/some/path"]`; taking
+        `args[0]` yields `-y`. Flags that consume a value (`-p`,
+        `--package`) name the package in the NEXT token, which is also
+        the one we want, so they need no special case beyond being
+        skipped themselves.
+        """
+        for arg in args or []:
+            token = str(arg)
+            if token.startswith("-"):
+                continue
+            return token
+        return ""
+
+    @staticmethod
+    def _npx_package_roots() -> list[Path]:
+        """Directories where an already-fetched npm package can live.
+
+        Deliberately filesystem-only, no subprocess: this runs on every
+        render of the Settings page and `npm ls -g` costs hundreds of
+        milliseconds. Covers npx's own cache, the global prefix derived
+        from the `npm` binary's location, `NODE_PATH`, and the cwd.
+        """
+        roots: list[Path] = []
+        npx_cache = Path.home() / ".npm" / "_npx"
+        if npx_cache.is_dir():
+            try:
+                for entry in npx_cache.iterdir():
+                    node_modules = entry / "node_modules"
+                    if node_modules.is_dir():
+                        roots.append(node_modules)
+            except OSError:
+                pass
+        npm_bin = shutil.which("npm")
+        if npm_bin:
+            # /opt/homebrew/bin/npm -> /opt/homebrew/lib/node_modules
+            roots.append(Path(npm_bin).resolve().parent.parent / "lib" / "node_modules")
+        for entry in (os.environ.get("NODE_PATH") or "").split(os.pathsep):
+            if entry.strip():
+                roots.append(Path(entry.strip()))
+        roots.append(Path.cwd() / "node_modules")
+        return [r for r in roots if r.is_dir()]
+
+    def _resolve_install_state(self, server: dict) -> tuple[str, str]:
+        """Return ``(install_state, detail)``.
+
+        Three states, because the remedies differ:
+
+        * ``installed`` - the package (or the server's own binary) is on
+          this machine and starts without a network.
+        * ``fetch_on_launch`` - `npx` is present but the package is not
+          cached. It WILL start, after downloading, and only with a
+          working network. Reporting this as installed is what made a
+          30-second first connect look like a hang.
+        * ``unavailable`` - the launcher itself is missing. Nothing can
+          start and the fix is to install Node, not the package.
+        """
+        cmd = str(server.get("command", "") or "")
+        if not cmd:
+            return "unavailable", "No launch command configured for this server."
+        if cmd != "npx":
+            if shutil.which(cmd):
+                return "installed", f"{cmd} found on PATH."
+            return "unavailable", (
+                f"Launch command {cmd!r} is not on PATH. Install it, or set an "
+                f"absolute path in ~/.feral/mcp_servers.json."
+            )
+        if not shutil.which("npx"):
+            return "unavailable", (
+                "npx is not on PATH. Install Node.js (which provides npm and "
+                "npx) and restart the brain."
+            )
+        package = self._npx_package_name(server.get("args", []) or [])
+        if not package:
+            return "fetch_on_launch", (
+                "npx is available but this server declares no package to run."
+            )
+        for root in self._npx_package_roots():
+            if (root / package).is_dir():
+                return "installed", f"{package} found in {root}."
+        return "fetch_on_launch", (
+            f"npx is available but {package} is not cached locally. The first "
+            f"connect will download it, which needs a network and can take "
+            f"tens of seconds. Pre-install with: npm install -g {package}"
+        )
+
     def _check_installed(self, server: dict) -> bool:
-        """Check if the MCP server's command is available."""
-        cmd = server.get("command", "")
-        if cmd == "npx":
-            return shutil.which("npx") is not None
-        return shutil.which(cmd) is not None
+        """True only when the server can start WITHOUT a download."""
+        return self._resolve_install_state(server)[0] == "installed"
 
     def _check_env(self, server: dict) -> bool:
         """Check if all required env vars are set."""
@@ -330,9 +465,16 @@ class MCPServerRegistry:
         self._save_user_configs()
 
     def stats(self) -> dict:
-        installed = sum(1 for s in self._known.values() if self._check_installed(s))
+        states = [self._resolve_install_state(s)[0] for s in self._known.values()]
         return {
             "known_servers": len(self._known),
-            "installed": installed,
+            # On disk now, starts with no network.
+            "installed": sum(1 for s in states if s == "installed"),
+            # Can be started at all, counting the ones npx would fetch.
+            # Kept separate from `installed` because the old single
+            # number meant both and was therefore true of neither.
+            "launchable": sum(1 for s in states if s != "unavailable"),
+            "fetch_on_launch": sum(1 for s in states if s == "fetch_on_launch"),
+            "unavailable": sum(1 for s in states if s == "unavailable"),
             "configured": len(self._user_configs),
         }

@@ -136,7 +136,24 @@ class SelfIntrospectionSkill(BaseSkill):
         return {"success": True, "status_code": 200, "data": {"channels": self._active_channels_payload(state)}, "error": None}
 
     def _connected_devices(self, state) -> Dict[str, Any]:
-        return {"success": True, "status_code": 200, "data": {"devices": self._connected_devices_payload(state)}, "error": None}
+        devices, error = self._connected_devices_result(state)
+        data: Dict[str, Any] = {"devices": devices}
+        # Disconnected nodes. `state.device_registry` is emptied by the
+        # WebSocketDisconnect teardown in api/server.py, so a phone that
+        # dropped ten seconds ago was invisible here and the model
+        # answered "you have no devices connected" for hardware the user
+        # was still wearing. The sub-device store is the only record
+        # that outlives the socket, so the offline half comes from
+        # there via the same assembler /api/devices/connected uses.
+        data.update(self._offline_devices_payload(state, devices))
+        if error:
+            # An empty list is a legitimate answer meaning "nothing is
+            # attached". Returning it on a crash made a broken registry
+            # read identically to a bare machine, and the model then
+            # told the user they had no devices connected. Carry the
+            # reason so the answer can distinguish the two.
+            data["error"] = error
+        return {"success": True, "status_code": 200, "data": data, "error": None}
 
     def _current_session(self, state) -> Dict[str, Any]:
         model = "unknown"
@@ -215,12 +232,103 @@ class SelfIntrospectionSkill(BaseSkill):
 
     @staticmethod
     def _connected_devices_payload(state) -> list[dict]:
-        """Return a compact view of devices known to ``state.device_registry``.
+        """Back-compat wrapper: devices only, error dropped."""
+        devices, _error = SelfIntrospectionSkill._connected_devices_result(state)
+        return devices
+
+    @staticmethod
+    def _offline_devices_payload(state, live_devices: list[dict]) -> dict:
+        """Nodes the brain knows about that are NOT reporting right now.
+
+        Returns ``{"offline": [...], "heartbeat_window_s": N}``, or an
+        empty dict when there is no sub-device store to read (older
+        snapshots and every test double that predates it), so this can
+        never fabricate an offline device out of nothing.
+        """
+        store = getattr(state, "node_subdevices", None)
+        if store is None:
+            return {}
+        try:
+            rows = store.list_all()
+        except Exception as exc:
+            logger.warning(
+                "node_subdevices.list_all failed; the tool cannot report "
+                "disconnected devices this turn: %s", exc, exc_info=True,
+            )
+            return {"offline_error": f"sub-device store unavailable: {exc}"}
+        from api.device_view import build_device_view
+
+        view = build_device_view(
+            live_nodes=[
+                {"node_id": d.get("node_id") or "", "type": d.get("type"),
+                 "name": d.get("name")}
+                for d in live_devices
+                if d.get("node_id")
+            ],
+            subdevice_rows=rows,
+        )
+        return {
+            "offline": view["offline"],
+            "heartbeat_window_s": view["heartbeat_window_s"],
+        }
+
+    @staticmethod
+    def _subdevices_payload(state, node_id: str) -> list[dict]:
+        """Peripherals paired BEHIND ``node_id``, from the truth store.
+
+        ``device_registry`` knows about HUP nodes -- the iPhone. It has
+        never known about what is paired to the iPhone. The BLE
+        peripherals (W300 glasses, VITRO wristband) live only in
+        ``state.node_subdevices``, which ``/api/devices/connected``
+        already merges in via ``_subdevices_for()``. Without this the
+        dashboard and this tool answered "what is connected" with
+        different facts, and the tool -- the one the model reads -- was
+        the one missing the hardware.
+
+        ``live`` is carried through deliberately: "paired" and
+        "currently reporting" are different claims and the model must
+        be able to tell the user which one it has.
+        """
+        store = getattr(state, "node_subdevices", None)
+        if store is None or not node_id:
+            return []
+        try:
+            rows = store.list_for_node(node_id)
+        except Exception as exc:
+            logger.warning(
+                "node_subdevices.list_for_node(%s) failed; reporting the node "
+                "with no peripherals: %s", node_id, exc, exc_info=True,
+            )
+            return []
+        out = []
+        for row in rows or []:
+            attrs = row.get("attrs") if isinstance(row.get("attrs"), dict) else {}
+            out.append({
+                "capability": row.get("capability"),
+                "name": attrs.get("device_name") or "",
+                "status": row.get("status"),
+                "live": bool(row.get("live")),
+                "provenance": row.get("provenance"),
+                "last_seen": row.get("last_seen"),
+                "attrs": attrs,
+            })
+        return out
+
+    @staticmethod
+    def _connected_devices_result(state) -> tuple[list[dict], str]:
+        """Return ``(devices, error_text)`` for devices known to
+        ``state.device_registry``, each with its sub-device tree.
 
         Falls back to legacy ``node_registry`` / ``nodes`` attributes for
         any caller that still exposes them. The canonical path uses
         ``DeviceRegistry.list_devices()`` (see ``hardware/protocol.py``);
         anything else is best-effort.
+
+        The old body ended in ``except Exception: return []``. Because
+        ``[]`` is also the honest answer for a machine with nothing
+        attached, a registry that raised produced a confident "no
+        devices are connected" with no trace anywhere. The error text is
+        now returned to the caller and logged.
         """
         try:
             registry = (
@@ -229,7 +337,7 @@ class SelfIntrospectionSkill(BaseSkill):
                 or getattr(state, "nodes", None)
             )
             if not registry:
-                return []
+                return [], ""
             if hasattr(registry, "list_devices"):
                 raw = registry.list_devices()
             elif hasattr(registry, "list_nodes"):
@@ -241,7 +349,11 @@ class SelfIntrospectionSkill(BaseSkill):
             elif hasattr(registry, "_devices"):
                 raw = list(registry._devices.values())
             else:
-                return []
+                return [], (
+                    f"device registry {type(registry).__name__!r} exposes no "
+                    "known listing method (list_devices / list_nodes / all / "
+                    "nodes / _devices); devices cannot be enumerated"
+                )
             devices = []
             for node in raw:
                 if isinstance(node, dict):
@@ -253,6 +365,9 @@ class SelfIntrospectionSkill(BaseSkill):
                         "capabilities": [getattr(c, "category", c) if not isinstance(c, str) else c for c in caps],
                         "last_seen": node.get("last_seen"),
                     })
+                    devices[-1]["subdevices"] = SelfIntrospectionSkill._subdevices_payload(
+                        state, devices[-1]["node_id"] or "",
+                    )
                 else:
                     caps_raw = list(getattr(node, "capabilities", []) or [])
                     caps = [getattr(c, "category", None) or getattr(c, "name", None) or str(c) for c in caps_raw]
@@ -263,9 +378,15 @@ class SelfIntrospectionSkill(BaseSkill):
                         "capabilities": caps,
                         "last_seen": getattr(node, "last_seen", None),
                     })
-            return devices
-        except Exception:
-            return []
+                    devices[-1]["subdevices"] = SelfIntrospectionSkill._subdevices_payload(
+                        state, devices[-1]["node_id"] or "",
+                    )
+            return devices, ""
+        except Exception as exc:
+            logger.warning(
+                "connected_devices enumeration failed: %s", exc, exc_info=True,
+            )
+            return [], f"device registry unavailable: {exc}"
 
     @staticmethod
     def _autonomy_mode(state) -> str:

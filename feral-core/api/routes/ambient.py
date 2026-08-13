@@ -354,20 +354,48 @@ async def get_wind_down():
 
 @router.get("/wake_word/status")
 async def wake_word_status():
-    """Returns current wake-word detector status."""
+    """Returns current wake-word detector status.
+
+    ``phrase`` is what the operator configured. ``effective_phrase`` is
+    what saying it out loud will actually trigger, and the two are not
+    the same by default: ``FERAL_WAKE_MODEL`` defaults to openwakeword's
+    ``hey_jarvis_v0.1``, which detects "hey jarvis", while the configured
+    phrase defaults to "hey feral". A client that renders only ``phrase``
+    is telling the user to say something that will never work.
+
+    This route also used to read ``getattr(state.wake_word, "phrase",
+    "hey feral")`` against a detector with no ``phrase`` attribute, so
+    the default won unconditionally and ``FERAL_WAKE_PHRASE`` was never
+    reflected here at all.
+    """
     if not hasattr(state, "wake_word") or not state.wake_word:
         return {"enabled": False, "supported": False}
+    ww = state.wake_word
     return {
-        "enabled": getattr(state.wake_word, "enabled", False),
-        "phrase": getattr(state.wake_word, "phrase", "hey feral"),
+        "enabled": getattr(ww, "enabled", False),
+        "phrase": getattr(ww, "phrase", ""),
+        "effective_phrase": getattr(ww, "effective_phrase", ""),
+        "detector": getattr(ww, "detector", "unknown"),
         "supported": True,
     }
 
 
 @router.post("/wake_word/toggle")
 async def toggle_wake_word():
-    """Toggle the wake-word detector on/off."""
+    """Toggle the wake-word detector on/off.
+
+    ``WakeWordDetector.enabled`` was a read-only property, so this
+    assignment raised ``AttributeError`` and the route 500'd on the real
+    object. It is a settable property now, and enabling also loads the
+    ML model (the detector boots disabled by default for privacy, so
+    without that it would have been switched on into the loudness
+    fallback regardless of what is installed).
+    """
     if not hasattr(state, "wake_word") or not state.wake_word:
         raise HTTPException(503, "Wake word detector not initialized")
     state.wake_word.enabled = not state.wake_word.enabled
-    return {"enabled": state.wake_word.enabled}
+    return {
+        "enabled": state.wake_word.enabled,
+        "detector": getattr(state.wake_word, "detector", "unknown"),
+        "effective_phrase": getattr(state.wake_word, "effective_phrase", ""),
+    }

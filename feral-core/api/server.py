@@ -2083,6 +2083,12 @@ def _verify_credential(store: DevicePairingStore, credential: str):
     return None, None
 
 
+# (node_id, event_type) pairs already reported as unhandled. Bounds the
+# warning below to one line per pair instead of one per frame, which at
+# glasses telemetry rates would be a flood.
+_UNKNOWN_EVENT_TYPES_SEEN: set[tuple[str, str]] = set()
+
+
 @app.websocket("/v1/node")
 async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
     credential_source = ""
@@ -3357,6 +3363,43 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         for sid in state.get_sessions_for_daemon(effective_node):
                             state.perception.update_vision(sid, state.vision_buffer, effective_node)
 
+                        # `frame` is what the shipped iOS bridge sends
+                        # (feral-nodes/ios-app FeralBrainClient.sendCameraFrame
+                        # emits type="frame" with image_b64). It was the only
+                        # image branch that neither resolved a pending
+                        # `vision_request` nor ran scene analysis, so:
+                        #   * `perception_query` / "what do you see" against an
+                        #     iPhone always ran its 10 s timeout and answered
+                        #     504, because `request_frame` waits on a future
+                        #     that only `resolve_pending_frame` completes; and
+                        #   * the pixels reached the LLM as an image but never
+                        #     produced a scene description, so nothing about
+                        #     what the phone saw was ever written to memory.
+                        # Same two calls as `vision_frame` and `_handle_video_frame`.
+                        change_event = state.change_detector.should_analyze(
+                            effective_node, data_b64,
+                            frame_payload.get("encoding", "jpeg"),
+                        )
+                        if change_event and state.scene and state.scene.available:
+                            mode = (
+                                "tracking"
+                                if change_event.trigger_reason == "scene_change"
+                                else "general"
+                            )
+                            # AUDIT-FIXES F-06, see the vision_query branch.
+                            state.register_background_task(
+                                asyncio.ensure_future(
+                                    _analyze_scene_background(
+                                        effective_node, frame_payload, mode=mode,
+                                    )
+                                )
+                            )
+
+                        if msg.msg_id and state.orchestrator:
+                            state.orchestrator.resolve_pending_frame(
+                                msg.msg_id, frame_payload,
+                            )
+
             elif msg.type == "video_frame":
                 # HUP v1.1 §5.4.2 — route video frames into the vision buffer,
                 # same sink as the legacy vision_frame branch above.
@@ -3369,9 +3412,11 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     await _send_frame_too_large(ws, reason)
 
             elif msg.type == "audio_frame":
-                # HUP v1.1 §5.4.1 — route audio frames into the audio pipeline
-                # when available; otherwise log and move on.
-                reason = _handle_audio_frame(node_id, raw.get("payload", {}))
+                # HUP v1.1 §5.4.1 — route audio frames into the voice
+                # router, the same sink the `audio_chunk` branch above
+                # uses. Awaited rather than fire-and-forget so frames of
+                # one utterance cannot reach a provider out of order.
+                reason = await _handle_audio_frame(node_id, raw.get("payload", {}))
                 if reason:
                     await _send_frame_too_large(ws, reason)
 
@@ -3401,10 +3446,19 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 de_payload = raw.get("payload", {}) or {}
                 ev_type = de_payload.get("event_type", "")
                 if ev_type == "audio_frame":
-                    reason = _handle_audio_frame(node_id, de_payload)
+                    reason = await _handle_audio_frame(node_id, de_payload)
                     if reason:
                         await _send_frame_too_large(ws, reason)
-                elif ev_type == "video_frame":
+                elif ev_type in ("video_frame", "camera_frame"):
+                    # ``camera_frame`` is the HUP v1.0 name for the same
+                    # thing (HUP_SPEC.md §5.4: "camera_frame and
+                    # microphone_chunk remain valid for v1.0.0 daemons")
+                    # and it had no branch at all, so a v1.0 daemon
+                    # streaming camera_frame hit the unknown-event
+                    # branch: every image it ever sent was discarded at
+                    # debug level. Its payload is
+                    # {encoding, resolution, data_b64}, which
+                    # ``_handle_video_frame`` already accepts.
                     reason = _handle_video_frame(node_id, de_payload, msg.msg_id)
                     if reason:
                         await _send_frame_too_large(ws, reason)
@@ -3416,6 +3470,17 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     # every UV reading hit the unknown-event branch and
                     # was dropped at debug level with nothing surfaced.
                     "uv",
+                    # Each of these is in the HUP v1 capability
+                    # vocabulary (feral-nodes/python-node-sdk
+                    # capability.py) or the §5.4 conventions table, and
+                    # each already has a sink on the brain side
+                    # (PerceptionFrame.ambient_light_lux, .battery_pct,
+                    # .location, .gesture). They were reaching the
+                    # unknown-event branch instead, so a glasses node
+                    # that reported ambient light, battery, position or
+                    # a button press was reporting into nothing.
+                    "gyroscope", "ambient_light", "battery",
+                    "button_press", "gps",
                 }:
                     _handle_biometric_device_event(node_id, ev_type, de_payload)
                 elif ev_type in {"robot_telemetry", "robot_event"}:
@@ -3441,10 +3506,22 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     # MCP consumer share one binding for "Active".
                     await _handle_subdevice_status(ws, node_id, ev_type, de_payload)
                 else:
-                    logger.debug(
-                        "Ignoring unknown device_event event_type=%r from %s",
-                        ev_type, node_id,
-                    )
+                    # Forward-compat (HUP_SPEC.md §1) says ignore, but
+                    # "ignore" at debug is how `camera_frame`, `gps`,
+                    # `battery`, `ambient_light` and `button_press` were
+                    # all discarded without a single visible line. The
+                    # rule is kept (we still do not error) and the fact
+                    # is now stated once per node+type, at warning, so
+                    # the next dead sensor is one grep away.
+                    _seen_key = (str(node_id), ev_type)
+                    if _seen_key not in _UNKNOWN_EVENT_TYPES_SEEN:
+                        _UNKNOWN_EVENT_TYPES_SEEN.add(_seen_key)
+                        logger.warning(
+                            "Ignoring device_event event_type=%r from %s: no "
+                            "handler. Nothing from this sensor reaches memory, "
+                            "perception or the LLM. Logged once per node+type.",
+                            ev_type, node_id,
+                        )
 
             else:
                 logger.debug("Unknown HUP msg type=%r from %s", msg.type, node_id)
@@ -3727,8 +3804,21 @@ def _handle_video_frame(node_id, frame_payload: dict, msg_id=None) -> str | None
     return None
 
 
-def _handle_audio_frame(node_id, frame_payload: dict) -> str | None:
-    """Dispatch a HUP v1.1 ``audio_frame`` payload into the audio pipeline.
+def _audio_frame_should_log(sequence: int) -> bool:
+    """Rate limit an audio_frame drop warning to one in fifty frames.
+
+    HUP_SPEC.md §5.4.1 frames default to 20ms, so an unroutable stream
+    produces 50 drop events a second. Logging each one turns the message
+    into the noise that hides it. The first frame always logs (a stream
+    that is broken from the start must be visible immediately) and every
+    50th after that keeps a long-running failure on the record. Mirrors
+    the ``audio_chunk`` branch in :func:`daemon_session`.
+    """
+    return sequence == 0 or sequence % 50 == 0
+
+
+async def _handle_audio_frame(node_id, frame_payload: dict) -> str | None:
+    """Dispatch a HUP v1.1 ``audio_frame`` payload into the voice pipeline.
 
     Returns ``None`` when the frame was handled, or a rejection reason the
     caller emits as an HUP §8 error frame with code 4020. See
@@ -3736,9 +3826,40 @@ def _handle_audio_frame(node_id, frame_payload: dict) -> str | None:
     sent from here.
 
     Accepts both SDK-nested and flat payload shapes via
-    :func:`_unwrap_hup_frame`. Falls back to a debug log when
-    ``state.audio`` does not expose an ``ingest_frame`` hook: the
-    Brain boot tolerates the pipeline being absent, so we must too.
+    :func:`_unwrap_hup_frame`.
+
+    Why this awaits the voice router rather than calling
+    ``state.audio.ingest_frame``
+    ----------------------------------------------------
+    HUP_SPEC.md §5.4.1 used to instruct "Route to
+    ``state.audio.ingest_frame(node_id, payload)``" and this function
+    duly probed for that hook::
+
+        ingest = getattr(audio, "ingest_frame", None)
+        if callable(ingest): ...
+
+    ``state.audio`` is a ``perception.audio_pipeline.AudioPipeline`` and
+    that class has never defined ``ingest_frame``. The probe was never
+    true, so every audio_frame from every hardware daemon was
+    size-checked, counted, and then discarded at ``debug`` level while the
+    daemon's send reported success. The spec named a method nobody wrote.
+
+    ``audio_chunk`` (the branch a few hundred lines up in
+    :func:`daemon_session`) already had the working answer:
+    ``VoiceRouter.handle_audio_from_node``. That is the only audio entry
+    point in this repo whose transcript has a consumer - it emits the
+    ``transcript`` frame, pushes working memory, runs the orchestrator
+    turn and synthesises the reply. Sending audio anywhere else produces
+    a transcript that goes nowhere, which is the same defect in a
+    different costume. So both HUP audio shapes now converge on one
+    consumer, and the router owns mute, wake-word gating and provider
+    selection for both.
+
+    This is ``async`` for ordering. Scheduling the router call as a
+    background task per frame would let two 20ms frames of the same
+    utterance interleave after their first ``await`` and reach the
+    realtime socket out of order. The sibling ``audio_chunk`` branch
+    awaits inline for the same reason.
     """
     frame_payload = _unwrap_hup_frame(frame_payload)
     data_b64 = frame_payload.get("data_b64", "") or ""
@@ -3756,18 +3877,65 @@ def _handle_audio_frame(node_id, frame_payload: dict) -> str | None:
         )
 
     effective_node = node_id or frame_payload.get("node_id", "unknown")
-    audio = getattr(state, "audio", None)
-    ingest = getattr(audio, "ingest_frame", None)
-    if callable(ingest):
-        try:
-            ingest(effective_node, frame_payload)
-        except Exception as exc:
-            logger.warning("audio.ingest_frame raised for %s: %s", effective_node, exc)
-    else:
-        logger.debug(
-            "Received audio_frame from %s but state.audio has no ingest_frame hook; dropping.",
-            effective_node,
-        )
+
+    # HUP_SPEC.md §5.4.1 calls the field ``codec``; the voice router (and
+    # every provider under it) calls the same thing ``encoding``. Both
+    # vocabularies carry the same two values, "opus" and "pcm16".
+    encoding = frame_payload.get("codec") or "pcm16"
+    try:
+        sample_rate = int(frame_payload.get("sample_rate") or 24000)
+    except (TypeError, ValueError):
+        sample_rate = 24000
+    try:
+        sequence = int(frame_payload.get("sequence") or 0)
+    except (TypeError, ValueError):
+        sequence = 0
+
+    router = getattr(state, "voice_router", None)
+    if router is None:
+        # Boot ordering, not a protocol violation, so no 4020. Rate
+        # limited: a daemon at 20ms frames would otherwise emit 50 of
+        # these a second and bury the one that matters.
+        if _audio_frame_should_log(sequence):
+            logger.warning(
+                "audio_frame from node=%s dropped - voice_router not "
+                "initialised. The brain is still booting or VoiceRouter "
+                "failed its boot_subsystem step; check `feral doctor`.",
+                effective_node,
+            )
+        return None
+
+    sessions = state.get_sessions_for_daemon(effective_node)
+    target_sid = next(iter(sessions), None)
+    if not target_sid:
+        # The failure a device actually hits. Same precondition the
+        # audio_chunk branch documents: audio is only routable once a
+        # session is bound to this daemon. Before this it was a debug
+        # log, so a wristband could stream a microphone into a brain
+        # that discarded every frame with nothing visible anywhere.
+        if _audio_frame_should_log(sequence):
+            logger.warning(
+                "audio_frame from node=%s dropped - no voice session is "
+                "bound to this daemon, so there is nothing to transcribe "
+                "into. Send voice_session_start (HUP v1.3.0 §5.9) before "
+                "streaming audio.",
+                effective_node,
+            )
+        return None
+
+    await router.handle_audio_from_node(
+        node_id=effective_node,
+        session_id=target_sid,
+        audio_b64=data_b64,
+        chunk_index=sequence,
+        # ``audio_frame`` has no is_final field (HUP_SPEC.md §5.4.1): a
+        # media frame is one 20ms slice, not an utterance boundary. The
+        # utterance ends the way a live stream ends, on the router's
+        # silence gate.
+        is_final=False,
+        encoding=encoding,
+        sample_rate=sample_rate,
+    )
 
     return None
 
@@ -4111,14 +4279,45 @@ def _resolve_sample_ts(
     return time.time()
 
 
+def _first_present(payload: dict, *keys: str):
+    """Return the first key present in ``payload`` with a non-None value.
+
+    Sensor payloads carry the same reading under different key names
+    across the four SDKs (`{"index": 6}` from the iOS bridge,
+    `{"value": 6}` from the generic emit_event helper), and each
+    extractor branch below was re-implementing that with chained
+    ``or``, which also silently discards a legitimate ``0`` reading
+    (0 lux, 0 UV, 0% battery are all real values). This preserves them.
+    """
+    for key in keys:
+        val = payload.get(key)
+        if val is not None:
+            return val
+    return None
+
+
+# Every ``event_type`` this function can turn into a value, kept next
+# to the branches so the "dropped" log below can tell a daemon author
+# what the brain actually understands instead of just saying no.
+_EXTRACTABLE_EVENT_TYPES = (
+    "heart_rate", "spo2", "skin_temperature", "temperature", "steps",
+    "uv", "accelerometer", "gyroscope", "ambient_light", "battery",
+    "gps", "gesture", "button_press",
+)
+
+
 def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict) -> None:
     """Dispatch ``device_event`` payloads with biometric / sensor event types.
 
     Accepts both SDK-nested and flat shapes. Lands in the same sinks
     as the legacy ``telemetry`` branch: ``state.perception.update_sensors``
     per session and ``_record_biometrics_to_baseline`` for rolling stats.
-    Handles ``heart_rate``, ``spo2``, ``skin_temperature``, ``steps``,
-    ``temperature``, ``accelerometer``, ``button_press``.
+
+    The authoritative list of what this handles is
+    ``_EXTRACTABLE_EVENT_TYPES`` above, which the caller's filter and
+    the "dropped" log both read. This docstring used to carry its own
+    hand-maintained list that claimed ``button_press`` and omitted
+    ``uv`` and ``gesture``; the code did the opposite in both cases.
     """
     frame_payload = _unwrap_hup_frame(frame_payload)
     effective_node = node_id or frame_payload.get("node_id", "unknown")
@@ -4215,6 +4414,59 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
             frame_payload.get("z", 0.0),
         ]
         sensors["accel_xyz"] = accel
+    elif event_type == "uv":
+        # `uv` passed the dispatcher's type filter and then fell off the
+        # end of this chain, leaving `sensors` empty, so every reading
+        # from a pair of Theora glasses was dropped by the "could not
+        # extract a value" branch below at debug level. Accepts the
+        # three shapes the SDKs send: {"index": n}, {"uv_index": n} and
+        # the bare {"value": n}.
+        val = _first_present(frame_payload, "index", "uv_index", "value", "uv")
+        if val is not None:
+            sensors["uv_index"] = val
+    elif event_type == "gyroscope":
+        sensors["gyro_xyz"] = [
+            frame_payload.get("x", 0.0),
+            frame_payload.get("y", 0.0),
+            frame_payload.get("z", 0.0),
+        ]
+    elif event_type == "ambient_light":
+        val = _first_present(frame_payload, "lux", "ambient_light_lux", "value")
+        if val is not None:
+            sensors["ambient_light_lux"] = val
+    elif event_type == "battery":
+        val = _first_present(
+            frame_payload, "percent", "pct", "battery_pct", "level", "value",
+        )
+        if val is not None:
+            sensors["battery_pct"] = val
+    elif event_type == "gps":
+        # PerceptionFrame.location is populated from sensors["gps"]
+        # (perception/fusion.py update_sensors), so the sink already
+        # existed; only the dispatch was missing.
+        lat = _first_present(frame_payload, "lat", "latitude")
+        lon = _first_present(frame_payload, "lon", "lng", "longitude")
+        if lat is not None and lon is not None:
+            gps_reading: dict = {"lat": lat, "lon": lon}
+            accuracy = _first_present(frame_payload, "accuracy", "accuracy_m")
+            if accuracy is not None:
+                gps_reading["accuracy_m"] = accuracy
+            sensors["gps"] = gps_reading
+    elif event_type == "button_press":
+        # HUP_SPEC.md §5.4 lists button_press, and this function's
+        # docstring has always claimed to handle it, but there was no
+        # branch and it was not even in the dispatcher's filter set. A
+        # button press is a physical interaction, so it lands in the
+        # gesture pipeline (the only sink for "the user did something
+        # to the device") named `button_<name>`.
+        button = str(
+            frame_payload.get("button") or frame_payload.get("name") or "button"
+        )
+        pressed = frame_payload.get("pressed", True)
+        if pressed and effective_node:
+            for sid in state.get_sessions_for_daemon(effective_node):
+                state.perception.update_gesture(sid, f"button_{button}")
+        return
     elif event_type == "gesture":
         # Route straight to the gesture pipeline. No baseline recording.
         gesture = frame_payload.get("gesture") or frame_payload.get("name") or ""
@@ -4224,9 +4476,19 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
         return
 
     if not sensors:
-        logger.debug(
-            "Dropping device_event %r from %s — could not extract a value from %r",
+        # WARNING, not debug. `uv` reached this line on every reading
+        # for the life of the feature: it passed the caller's type
+        # filter, matched no branch, and was discarded here at a level
+        # that is off in every normal deployment. A sensor the brain
+        # accepted and then threw away is a defect, and it has to be
+        # visible in the operator's log the first time it happens.
+        logger.warning(
+            "Dropping device_event %r from %s: no value could be extracted "
+            "from %r. Extractable types: %s. Either the payload keys differ "
+            "from the HUP_SPEC.md §5.4 conventions or this event_type needs a "
+            "branch in _handle_biometric_device_event.",
             event_type, effective_node, frame_payload,
+            ", ".join(_EXTRACTABLE_EVENT_TYPES),
         )
         return
 

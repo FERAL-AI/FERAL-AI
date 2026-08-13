@@ -5,7 +5,12 @@ Asserts the branches in the ``/v1/node`` WebSocket handler exist and
 route correctly:
 
 * ``video_frame`` (flat + nested-``data``) → ``state.vision_buffer``.
-* ``audio_frame`` (flat + nested-``data``) → ``state.audio.ingest_frame``.
+* ``audio_frame`` (flat + nested-``data``) →
+  ``state.voice_router.handle_audio_from_node``. It used to assert
+  ``state.audio.ingest_frame``, a method ``AudioPipeline`` has never
+  defined; the ``FakeAudio`` double below defined it, so this file
+  proved a call that could not happen in production. See
+  ``tests/test_audio_frame_reaches_transcription.py``.
 * ``device_event(event_type=heart_rate|spo2|skin_temperature|steps|
   accelerometer|gesture)`` → ``state.perception.update_sensors`` +
   baseline recording.
@@ -71,9 +76,10 @@ def server_module(monkeypatch):
         def should_analyze(self, *_a, **_k):
             return None
 
-    class FakeAudio:
-        def ingest_frame(self, node_id, payload):
-            ingested.append((node_id, payload))
+    class FakeVoiceRouter:
+        # Mirrors VoiceRouter.handle_audio_from_node, the real consumer.
+        async def handle_audio_from_node(self, **kwargs):
+            ingested.append((kwargs["node_id"], kwargs))
 
     class FakeBaseline:
         def record(self, metric_id, value, category=None):
@@ -83,7 +89,8 @@ def server_module(monkeypatch):
         vision_buffer = FakeVisionBuffer()
         perception = FakePerception()
         change_detector = FakeChangeDetector()
-        audio = FakeAudio()
+        audio = object()
+        voice_router = FakeVoiceRouter()
         scene = None
         orchestrator = None
         somatic_engine = None
@@ -159,7 +166,7 @@ def test_video_frame_over_cap_is_dropped(server_module):
     assert reason and "video_frame" in reason
 
 
-def test_audio_frame_lands_in_audio_pipeline(server_module):
+async def test_audio_frame_lands_in_the_voice_router(server_module):
     server, _pushed, ingested, *_ = server_module
     payload = {
         "event_type": "audio_frame",
@@ -169,14 +176,15 @@ def test_audio_frame_lands_in_audio_pipeline(server_module):
         "sequence": 5,
         "data_b64": _b64(512),
     }
-    server._handle_audio_frame("feral-band-test", payload)
+    await server._handle_audio_frame("feral-band-test", payload)
     assert len(ingested) == 1
-    node_id, frame = ingested[0]
+    node_id, call = ingested[0]
     assert node_id == "feral-band-test"
-    assert frame["codec"] == "opus"
+    assert call["encoding"] == "opus"
+    assert call["audio_b64"] == payload["data_b64"]
 
 
-def test_audio_frame_nested_payload_unwraps(server_module):
+async def test_audio_frame_nested_payload_unwraps(server_module):
     server, _pushed, ingested, *_ = server_module
     payload = {
         "node_id": "feral-band-test",
@@ -189,14 +197,14 @@ def test_audio_frame_nested_payload_unwraps(server_module):
             "data_b64": _b64(512),
         },
     }
-    server._handle_audio_frame(None, payload)
+    await server._handle_audio_frame(None, payload)
     assert len(ingested) == 1
-    node_id, frame = ingested[0]
+    node_id, call = ingested[0]
     assert node_id == "feral-band-test"
-    assert frame["codec"] == "opus"
+    assert call["encoding"] == "opus"
 
 
-def test_audio_frame_over_cap_is_dropped(server_module):
+async def test_audio_frame_over_cap_is_dropped(server_module):
     # F-03: decoded bytes, see the video_frame case above.
     server, _pushed, ingested, *_ = server_module
     payload = {
@@ -207,15 +215,15 @@ def test_audio_frame_over_cap_is_dropped(server_module):
         "sequence": 6,
         "data_b64": _b64(server.AUDIO_FRAME_MAX_BYTES + 4),
     }
-    reason = server._handle_audio_frame("feral-band-test", payload)
+    reason = await server._handle_audio_frame("feral-band-test", payload)
     assert ingested == []
     assert reason and "audio_frame" in reason
 
 
-def test_audio_frame_no_pipeline_does_not_raise(server_module, monkeypatch):
+async def test_audio_frame_no_voice_router_does_not_raise(server_module, monkeypatch):
     server, _pushed, _ingested, *_ = server_module
-    # Strip the audio.ingest_frame method to mimic an early-boot brain.
-    server.state.audio = object()
+    # Mimic an early-boot brain: the socket is up, the router is not.
+    server.state.voice_router = None
     payload = {
         "event_type": "audio_frame",
         "codec": "opus",
@@ -226,7 +234,7 @@ def test_audio_frame_no_pipeline_does_not_raise(server_module, monkeypatch):
     }
     # Must NOT raise — daemon should not be punished for the brain
     # not being ready.
-    server._handle_audio_frame("any", payload)
+    await server._handle_audio_frame("any", payload)
 
 
 # ---------------------------------------------------------------------------

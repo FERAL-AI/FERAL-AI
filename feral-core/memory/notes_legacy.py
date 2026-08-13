@@ -394,6 +394,18 @@ async def delete_note(store, note_id: str) -> bool:
         deleted = cursor.rowcount > 0
     finally:
         await conn.close()
+    # Log the removal so it replicates. Measured on the real store
+    # 2026-08-12: sync_wal held 16,184 operations and every single one
+    # was an ``insert``. ``notes`` contributed 386 inserts and zero
+    # deletes, because this function was the only note deleter and it
+    # never called ``_log_sync``. The receiving side has had a working
+    # ``op_type == "delete"`` branch in ``SyncEngine._apply_to_memory``
+    # the whole time; no writer could ever reach it, so a note the user
+    # deleted on one brain stayed readable on every peer forever.
+    # Logged AFTER the local commit so a delete that failed locally is
+    # never announced to peers.
+    if deleted:
+        await store._log_sync_async("notes", "delete", note_id, {"id": note_id})
     return deleted
 
 
