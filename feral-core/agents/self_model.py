@@ -186,6 +186,26 @@ def _skill_line(skill, prefix: str = "") -> str:
     return "\n".join([header, *ep_lines])
 
 
+def _inactive_skill_line(skill) -> str:
+    """Render discovery metadata without advertising unavailable endpoints.
+
+    Inactive skills are registered on the Brain but do not have callable tool
+    schemas on the current turn.  Keeping their identity and description lets
+    the model acknowledge the installed capability, while omitting endpoint
+    prose avoids spending context on instructions it cannot act on yet.
+    """
+    skill_id = getattr(skill, "skill_id", None) or getattr(
+        getattr(skill, "brand", None), "name", ""
+    )
+    name = getattr(getattr(skill, "brand", None), "name", skill_id) or skill_id
+    description = getattr(skill, "description", "") or ""
+    description = (description.splitlines()[0] if description else "").strip()
+    return (
+        f"- **{name}** (`{skill_id}`) — {description or 'FERAL skill.'} "
+        "Registered, but not callable this turn."
+    )
+
+
 def build_tooling_catalog(
     active: Iterable,
     full: Iterable,
@@ -226,9 +246,16 @@ def build_tooling_catalog(
             "here isn't active right now, say so explicitly — never claim "
             "the skill does not exist."
         )
-        dimmed = [s for s in full_list if getattr(s, "skill_id", None) not in active_ids]
+        dimmed = []
+        seen_ids = set(active_ids)
+        for skill in full_list:
+            skill_id = getattr(skill, "skill_id", None)
+            if skill_id in seen_ids:
+                continue
+            seen_ids.add(skill_id)
+            dimmed.append(skill)
         for s in dimmed[:max_full]:
-            parts.append(_skill_line(s, prefix=""))
+            parts.append(_inactive_skill_line(s))
         if len(dimmed) > max_full:
             parts.append(f"- …and {len(dimmed) - max_full} more skills. Ask the user to be specific.")
 
