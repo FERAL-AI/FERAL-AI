@@ -100,8 +100,17 @@ The adapter talks to `codex app-server --stdio`, discovers the models available
 to the signed-in account, and supports normal and streaming text turns. The
 app-server interface is experimental, and FERAL tool schemas are not yet bridged
 to Codex dynamic tools. Codex starts in `read-only` mode by default; set
-`FERAL_CODEX_SANDBOX=workspace-write` or `danger-full-access` only when that is
-the intended execution boundary. `FERAL_CODEX_PATH`, `FERAL_CODEX_CWD`, and
+`FERAL_CODEX_SANDBOX=workspace-write` only when that is the intended execution
+boundary.
+
+`danger-full-access` additionally requires `FERAL_CODEX_ALLOW_DANGEROUS_SANDBOX=1`.
+Codex runs with `approvalPolicy: "never"`, so that mode lets it execute commands
+that never pass FERAL's dangerous-tool gate. Two settings rather than one, so a
+copied `.env` cannot hand out unrestricted execution on its own. Any value that
+is unset, misspelled, or not opted in falls back to `read-only` with an error in
+the log; it never stops the brain from starting.
+
+`FERAL_CODEX_PATH`, `FERAL_CODEX_CWD`, and
 `FERAL_CODEX_TIMEOUT_SECONDS` override the executable, working directory, and
 turn timeout.
 

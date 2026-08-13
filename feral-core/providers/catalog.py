@@ -951,6 +951,23 @@ class ProviderCatalog:
         except ImportError as exc:
             logger.debug("adapter import for %s failed: %s", pid, exc)
             return None
+        except Exception as exc:
+            # One adapter's constructor must never be able to take down
+            # the catalog. _bind_builtin_adapters walks every descriptor
+            # from ProviderCatalog.__init__, so an exception raised here
+            # aborts construction for ALL providers and the brain does
+            # not boot. That was reachable: CodexProvider.__init__ raised
+            # ValueError on an unrecognised FERAL_CODEX_SANDBOX, an env
+            # var documented in .env.example, so one typo cost sixteen
+            # providers. Fixed at the source too; kept here because the
+            # next adapter to validate in its constructor should cost one
+            # provider, not the process.
+            logger.error(
+                "adapter for %s failed to construct: %s. This provider is "
+                "unavailable; the rest of the catalog is unaffected.",
+                pid, exc, exc_info=True,
+            )
+            return None
         logger.debug("no known adapter class for provider_id=%s", pid)
         return None
 

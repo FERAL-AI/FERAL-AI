@@ -27,6 +27,74 @@ logger = logging.getLogger("feral.providers.codex")
 
 _SANDBOX_MODES = {"read-only", "workspace-write", "danger-full-access"}
 
+# The safe mode to land on whenever the request cannot be honoured. Codex
+# runs with ``approvalPolicy: "never"``, so the sandbox is the only thing
+# standing between a model-chosen command and the machine.
+_SANDBOX_FALLBACK = "read-only"
+
+# ``danger-full-access`` lets Codex run commands that never pass
+# ``security/dangerous_tools.py``. Reaching it needs a second, explicit
+# opt-in rather than one env var, so a copied .env or a tutorial cannot
+# hand out unrestricted execution by itself.
+_DANGER_OPT_IN = "FERAL_CODEX_ALLOW_DANGEROUS_SANDBOX"
+
+# Dropped from the Codex subprocess environment. Codex authenticates
+# itself, so it needs none of FERAL's credentials, and the subprocess is
+# the one place in this provider where they would leave the process.
+_SECRET_ENV_MARKERS = ("API_KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "PASSPHRASE")
+
+
+def _resolve_sandbox(requested: str | None) -> str:
+    """Return the sandbox mode to run under. Never raises.
+
+    This used to raise ``ValueError`` on an unrecognised value. That runs
+    inside ``CodexProvider.__init__``, which ``ProviderCatalog`` calls from
+    its own ``__init__`` via ``_bind_builtin_adapters``, and that catch
+    only handles ``ImportError``. So a typo in ``FERAL_CODEX_SANDBOX`` (an
+    env var documented in .env.example) did not disable one provider, it
+    aborted catalog construction for all sixteen and the brain did not
+    boot. A misspelled setting must never be able to do that.
+
+    Falling back is safe in the direction that matters: every unusable
+    value lands on ``read-only``, so the failure mode is Codex being less
+    capable than asked, never more.
+    """
+    value = (requested or os.getenv("FERAL_CODEX_SANDBOX") or _SANDBOX_FALLBACK).strip()
+
+    if value not in _SANDBOX_MODES:
+        logger.error(
+            "Unsupported FERAL_CODEX_SANDBOX=%r; falling back to %r. Choose one of %s.",
+            value, _SANDBOX_FALLBACK, sorted(_SANDBOX_MODES),
+        )
+        return _SANDBOX_FALLBACK
+
+    if value == "danger-full-access" and os.getenv(_DANGER_OPT_IN, "").strip().lower() not in {"1", "true", "yes"}:
+        logger.error(
+            "FERAL_CODEX_SANDBOX=danger-full-access ignored; falling back to %r. "
+            "Codex runs with approvalPolicy=never, so this grants command execution "
+            "that bypasses FERAL's dangerous-tool gate entirely. Set %s=1 as well if "
+            "that is genuinely what you want.",
+            _SANDBOX_FALLBACK, _DANGER_OPT_IN,
+        )
+        return _SANDBOX_FALLBACK
+
+    return value
+
+
+def _child_env() -> dict[str, str]:
+    """The environment for the Codex subprocess, minus FERAL's secrets.
+
+    ``os.environ.copy()`` handed a child process every provider key the
+    brain had loaded. Codex manages its own auth, so none of them are
+    needed for it to work.
+    """
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key.startswith("CODEX_")
+        or not any(marker in key.upper() for marker in _SECRET_ENV_MARKERS)
+    }
+
 
 class CodexAppServerError(RuntimeError):
     """Raised when the Codex app-server protocol cannot complete a request."""
@@ -72,7 +140,7 @@ class CodexAppServerClient:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=os.environ.copy(),
+                env=_child_env(),
             )
         except FileNotFoundError as exc:
             raise CodexAppServerError(
@@ -471,13 +539,7 @@ class CodexProvider(BaseProvider):
             or os.getenv("FERAL_CODEX_CWD", "")
             or Path.home() / ".feral" / "codex-workspace"
         ).expanduser()
-        requested_sandbox = sandbox or os.getenv("FERAL_CODEX_SANDBOX", "read-only")
-        if requested_sandbox not in _SANDBOX_MODES:
-            raise ValueError(
-                f"Unsupported FERAL_CODEX_SANDBOX={requested_sandbox!r}; "
-                f"choose one of {sorted(_SANDBOX_MODES)}"
-            )
-        self.sandbox = requested_sandbox
+        self.sandbox = _resolve_sandbox(sandbox)
         self.timeout_seconds = timeout_seconds or float(
             os.getenv("FERAL_CODEX_TIMEOUT_SECONDS") or "300"
         )
