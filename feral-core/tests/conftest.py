@@ -467,6 +467,51 @@ def _reset_glasses_buffer_registration():
 
 
 @pytest.fixture(autouse=True)
+def _api_server_state_is_not_left_mocked(request):
+    """Fail the test that leaves ``api.server.state`` as a mock.
+
+    ``/v1/session`` resolves its session id with
+    ``getattr(state, "primary_session_id", "")``. Against a mock that
+    returns a ``MagicMock``, which then fails ``FeralMessage``'s string
+    validation deep inside the request, so the test that reports the
+    error is never the test that caused it. Observed exactly once, in a
+    release run, on a test that passes alone.
+
+    Most tests swap state with ``monkeypatch.setattr``, which restores
+    itself. This catches the paths that do not: a mock installed through
+    a context manager that was skipped when the body raised, or a
+    teardown that never completed (an "Event loop is closed" during
+    async cleanup will do it).
+
+    Autouse and declared first, so it finalises last, after monkeypatch
+    has already put the real object back. Anything still mocked here
+    genuinely leaked.
+    """
+    yield
+
+    import sys
+    from unittest.mock import Mock
+
+    module = sys.modules.get("api.server")
+    if module is None:
+        return
+
+    current = getattr(module, "state", None)
+    if isinstance(current, Mock):
+        # Put the real one back so the whole rest of the session is not
+        # collateral damage from one test's leak.
+        real = getattr(sys.modules.get("api.state"), "state", None)
+        if real is not None:
+            module.state = real
+        raise AssertionError(
+            f"{request.node.nodeid} left api.server.state as a mock. Later "
+            "tests resolve session_id from it and fail Pydantic validation "
+            "far from here. Use monkeypatch.setattr(server, 'state', ...) so "
+            "it is restored even when the test body raises."
+        )
+
+
+@pytest.fixture(autouse=True)
 def _llm_provider_class_identity_is_stable():
     """Fail loudly if something rebuilt the ``LLMProvider`` class.
 

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import sys
 from contextlib import ExitStack, contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -191,8 +190,9 @@ def _brain_patchers(mock: MagicMock):
 def _node_client(mock: MagicMock):
     pairing_store = MagicMock()
     pairing_store.verify_device = MagicMock(return_value=None)
-    if "api.server" in sys.modules:
-        del sys.modules["api.server"]
+    from tests.test_server_websocket import _reimport_api_server_before_patching
+
+    _reimport_api_server_before_patching()
     mock.device_pairing_store = pairing_store
     with ExitStack() as stack:
         for p in _brain_patchers(mock):
@@ -252,8 +252,9 @@ class TestNodeHeartbeat:
 
     def test_old_heartbeat_literal_not_matched(self):
         """Brain handler must NOT have a branch for the bare 'heartbeat' type."""
-        if "api.server" in sys.modules:
-            del sys.modules["api.server"]
+        from tests.test_server_websocket import _reimport_api_server_before_patching
+
+        _reimport_api_server_before_patching()
         with ExitStack() as stack:
             mock = _make_mock_state()
             for p in _brain_patchers(mock):

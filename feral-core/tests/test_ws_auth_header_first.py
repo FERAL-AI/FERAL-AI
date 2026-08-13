@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from contextlib import ExitStack
 from unittest.mock import patch
 
@@ -24,8 +23,7 @@ def node_client(tmp_path, monkeypatch):
     mock = ws_harness._make_ws_mock_state()
     mock.device_pairing_store = store
 
-    if "api.server" in sys.modules:
-        del sys.modules["api.server"]
+    ws_harness._reimport_api_server_before_patching()
     with ExitStack() as stack:
         for patcher in ws_harness._brain_patchers(mock):
             stack.enter_context(patcher)

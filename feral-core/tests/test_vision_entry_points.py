@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import base64
 import logging
-import sys
 from contextlib import ExitStack, contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -275,8 +274,9 @@ def _node_client(mock: MagicMock):
     pairing_store = MagicMock()
     pairing_store.verify_device = MagicMock(return_value=None)
     mock.device_pairing_store = pairing_store
-    if "api.server" in sys.modules:
-        del sys.modules["api.server"]
+    from tests.test_server_websocket import _reimport_api_server_before_patching
+
+    _reimport_api_server_before_patching()
     with ExitStack() as stack:
         stack.enter_context(patch("api.state.state", mock))
         from api.server import app

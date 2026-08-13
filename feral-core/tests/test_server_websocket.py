@@ -8,6 +8,7 @@ Does not start the full brain or real I/O.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import sys
 from contextlib import ExitStack, contextmanager
@@ -220,6 +221,42 @@ def _make_ws_mock_state() -> MagicMock:
 _TEST_API_KEY = "test-feral-key-for-tests"
 
 
+def _reimport_api_server_before_patching() -> None:
+    """Drop and re-import ``api.server`` BEFORE any patcher is applied.
+
+    The harness wants a freshly imported ``api.server``, and it wants
+    ``api.state.state`` mocked. Doing the first lazily and the second
+    first is what made these fixtures leak.
+
+    ``api.server`` binds ``state`` at import (``from api.state import
+    state``). Deleting the module and letting ``patch("api.server.state",
+    ...)`` trigger the re-import means the import runs *after*
+    ``patch("api.state.state", mock)`` has already landed, so the fresh
+    module binds the mock. ``patch`` then records that mock as the
+    "original" and faithfully restores it on exit. The teardown put a
+    MagicMock back into a module every later test reads.
+
+    It surfaced far away and only sometimes: ``/v1/session`` resolves its
+    id via ``getattr(state, "primary_session_id", "")``, so an unrelated
+    test failed Pydantic validation with a MagicMock, and only when file
+    ordering put it after one of these. It aborted a release run while
+    passing alone.
+
+    Importing here, before the ExitStack, means the module binds the real
+    state and that is what gets restored.
+    """
+    sys.modules.pop("api.server", None)
+    importlib.import_module("api.server")
+
+
+def _restore_api_server_state() -> None:
+    """Rebind ``api.server.state`` to the real singleton, if it is loaded."""
+    server = sys.modules.get("api.server")
+    real = getattr(sys.modules.get("api.state"), "state", None)
+    if server is not None and real is not None:
+        server.state = real
+
+
 def _brain_patchers(mock: MagicMock):
     """Patches for api.state.state, api.server.state, route modules, greeting, and heartbeat task."""
     greet = MagicMock(return_value="Test greeting")
@@ -255,23 +292,29 @@ def ws_mock_state():
 def ws_client(ws_mock_state):
     """TestClient with BrainState mocked; skips the dashboard broadcast background task."""
     mock = ws_mock_state
-    if "api.server" in sys.modules:
-        del sys.modules["api.server"]
-    with ExitStack() as stack:
-        for p in _brain_patchers(mock):
-            stack.enter_context(p)
-        from api.server import app
+    _reimport_api_server_before_patching()
+    try:
+        with ExitStack() as stack:
+            for p in _brain_patchers(mock):
+                stack.enter_context(p)
+            from api.server import app
 
-        client = TestClient(app, raise_server_exceptions=False)
-        client.headers["Authorization"] = f"Bearer {_TEST_API_KEY}"
-        yield client
+            client = TestClient(app, raise_server_exceptions=False)
+            client.headers["Authorization"] = f"Bearer {_TEST_API_KEY}"
+            yield client
+    finally:
+        # ``patch`` restores the module object it patched. If anything
+        # re-imported ``api.server`` during the test, sys.modules now
+        # holds a different object, and that one is left bound to the
+        # mock -- which later tests read as their session state. Belt as
+        # well as braces: rebind whatever is in sys.modules now.
+        _restore_api_server_state()
 
 
 @contextmanager
 def _node_client(mock: MagicMock, pairing_store: MagicMock, node_api_key: str = "expected-node-key"):
     """TestClient for /v1/node with pairing store and NODE_API_KEY mocked."""
-    if "api.server" in sys.modules:
-        del sys.modules["api.server"]
+    _reimport_api_server_before_patching()
     mock.device_pairing_store = pairing_store
     with ExitStack() as stack:
         for p in _brain_patchers(mock):
