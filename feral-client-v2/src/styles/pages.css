@@ -42,6 +42,84 @@
   font-size: var(--v2-size-sm);
 }
 
+/* ── ErrorState ─────────────────────────────────────────────────
+ * Sibling of .v2-empty-state (ui.css). Same centred column so it
+ * drops into any pane an empty state used to occupy, but it must
+ * never be mistaken for one: a state-coloured icon and title, a
+ * hairline-boxed body, and a permanent note line. An empty state is
+ * tertiary grey and silent; this one is not.
+ */
+.v2-error-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px 20px;
+  text-align: center;
+  color: var(--v2-text-secondary);
+  border: 1px solid var(--v2-hairline);
+  border-radius: var(--v2-radius-md);
+  background: var(--v2-fill-subtle);
+}
+.v2-error-state[data-tone="error"] {
+  border-color: rgb(var(--v2-state-error-rgb) / 0.35);
+  background: rgb(var(--v2-state-error-rgb) / 0.05);
+}
+.v2-error-state[data-tone="warn"] {
+  border-color: rgb(var(--v2-state-warn-rgb) / 0.35);
+  background: rgb(var(--v2-state-warn-rgb) / 0.05);
+}
+.v2-error-state-icon { display: flex; margin-bottom: 2px; }
+.v2-error-state[data-tone="error"] .v2-error-state-icon { color: var(--v2-state-error); }
+.v2-error-state[data-tone="warn"] .v2-error-state-icon { color: var(--v2-state-warn); }
+.v2-error-state-title {
+  font-size: var(--v2-size-md);
+  font-weight: 600;
+  color: var(--v2-text-primary);
+}
+.v2-error-state-hint {
+  font-size: var(--v2-size-sm);
+  max-width: 460px;
+  line-height: 1.5;
+  color: var(--v2-text-secondary);
+}
+/* The derived diagnosis (status-specific, always present) sits a step
+ * quieter than a caller-supplied context line. */
+.v2-error-state-diagnosis { color: var(--v2-text-tertiary); }
+.v2-error-state-note {
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+  font-style: italic;
+}
+.v2-error-state-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px;
+}
+/* .v2-chip carries a left margin for inline runs; inside the centred
+ * meta row the gap does the spacing. */
+.v2-error-state-meta .v2-chip { margin-left: 0; }
+.v2-error-state-action {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.v2-error-state--compact {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  text-align: left;
+  gap: 8px;
+  padding: 10px 12px;
+}
+.v2-error-state--compact .v2-error-state-title { font-size: var(--v2-size-base); }
+.v2-error-state--compact .v2-error-state-hint,
+.v2-error-state--compact .v2-error-state-note { font-size: var(--v2-size-xs); }
+.v2-error-state--compact .v2-error-state-action { margin-top: 0; }
+
 .v2-kbd {
   display: inline-block;
   min-width: 20px;

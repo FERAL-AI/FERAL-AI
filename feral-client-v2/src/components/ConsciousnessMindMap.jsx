@@ -17,9 +17,10 @@
  * nodes typically) and the existing Glass Brain iframe already
  * handles the 3D scene.
  */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { apiJson } from '../lib/api';
+import ErrorState from '../ui/ErrorState';
+import { useResource } from '../hooks/useResource';
 import { useBrainEvents } from '../hooks/useBrainEvents';
 
 const KIND_COLOR = {
@@ -79,20 +80,20 @@ function shortLabel(entity) {
 }
 
 export default function ConsciousnessMindMap() {
-  const [entities, setEntities] = useState([]);
   const [hovered, setHovered] = useState(null);
   const navigate = useNavigate();
   const containerRef = useRef(null);
   const [size, setSize] = useState({ width: 640, height: 360 });
 
-  const refresh = useCallback(async () => {
-    try {
-      const d = await apiJson('/api/consciousness/state?include_abandoned=false');
-      setEntities(d?.entities || []);
-    } catch { setEntities([]); }
-  }, []);
-
-  useEffect(() => { refresh(); }, [refresh]);
+  // Was: `catch { setEntities([]) }`, which rendered "No in-flight
+  // consciousness entities.", the graph claiming the agent is idle
+  // when in truth the client never heard back. `data` stays null on
+  // failure so the two cases below cannot collapse into one.
+  const { data, error, loading, refresh } = useResource(
+    '/api/consciousness/state?include_abandoned=false',
+    { select: (d) => (Array.isArray(d?.entities) ? d.entities : []) },
+  );
+  const entities = useMemo(() => data || [], [data]);
 
   // Real-time WebSocket push via the existing event bus.
   const pushes = useBrainEvents({
@@ -145,6 +146,40 @@ export default function ConsciousnessMindMap() {
   }, [entities, pos, cx, cy]);
 
   const hoveredEntity = hovered ? entities.find((e) => e.id === hovered) : null;
+
+  // "We could not ask", never the empty state below. Same container
+  // geometry so the pane does not jump, but the message is an error,
+  // not a statement about how busy the agent is.
+  if (error && !data) {
+    return (
+      <div
+        ref={containerRef}
+        className="v2-mindmap v2-mindmap--empty"
+        data-testid="consciousness-mindmap"
+      >
+        <ErrorState
+          error={error}
+          what="the consciousness graph"
+          hint="The consciousness store did not answer. FERAL may well be mid-flow right now; this pane simply cannot see it."
+          onRetry={refresh}
+        />
+      </div>
+    );
+  }
+
+  if (loading && !data) {
+    return (
+      <div
+        ref={containerRef}
+        className="v2-mindmap v2-mindmap--empty"
+        data-testid="consciousness-mindmap"
+      >
+        <div className="v2-mindmap-empty v2-p v2-p--muted">
+          Reading the consciousness store…
+        </div>
+      </div>
+    );
+  }
 
   // Empty state renders ONLY the centred message — no SVG centre dot,
   // no ambient orbs, no kind-ring guides. Painting the FERAL anchor

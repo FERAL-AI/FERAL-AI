@@ -5,11 +5,13 @@ import Glass from '../ui/Glass';
 import Modal from '../ui/Modal';
 import StatusDot from '../ui/StatusDot';
 import EmptyState from '../ui/EmptyState';
+import ErrorState from '../ui/ErrorState';
 import PairDeviceModal from '../components/PairDeviceModal';
 import PerceptionShare from '../components/PerceptionShare';
 import DeviceTopology, { ageText } from '../components/DeviceTopology';
 import { apiJson, apiFetch } from '../lib/api';
 import { useFeralSocket } from '../hooks/useFeralSocket';
+import { firstRejection } from '../hooks/useResource';
 
 // Labels we refuse to render verbatim — they are placeholders from
 // before commit 5 renamed the pair-QR default. Replaced by a
@@ -91,7 +93,11 @@ export default function Devices() {
   const [loading, setLoading] = useState(true);
   const [showPair, setShowPair] = useState(false);
   const [selected, setSelected] = useState(null);
+  // `error` = a mutation the user asked for failed (revoke, prune).
+  // `loadError` = we could not read the device lists at all, which is
+  // the difference between "you have no devices" and "we do not know".
   const [error, setError] = useState(null);
+  const [loadError, setLoadError] = useState(null);
   // Device IDs that the currently-open PairDeviceModal session has
   // requested via /api/devices/pair{,/url}. The Brain creates the row
   // immediately so the next /api/devices/paired poll picks it up,
@@ -109,28 +115,37 @@ export default function Devices() {
   const socket = useFeralSocket();
 
   const refresh = useCallback(async () => {
-    try {
-      const [c, p, m, d] = await Promise.allSettled([
-        apiJson('/api/devices/connected'),
-        apiJson('/api/devices/paired'),
-        apiJson('/api/hardware/mesh'),
-        apiJson('/api/dashboard'),
-      ]);
-      if (c.status === 'fulfilled') {
-        setConnected(c.value?.devices || []);
-        setOffline(c.value?.offline || []);
-      }
-      if (p.status === 'fulfilled') setPaired(p.value?.devices || []);
-      if (m.status === 'fulfilled') setMesh(m.value?.nodes || []);
-      if (d.status === 'fulfilled') {
-        setLatestHealth(d.value?.latest_health || null);
-      }
-      setError(null);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
+    // `Promise.allSettled` never rejects. The old body wrapped it in a
+    // try/catch, so the `catch` was dead code and `setError(null)` ran
+    // unconditionally on every tick, including the tick where all four
+    // calls had just failed. With the brain down the page therefore
+    // rendered "No devices paired yet" plus a "Pair your first device"
+    // CTA, which is an assertion about hardware the client never got to
+    // ask about. Inspect each settled result instead.
+    const [c, p, m, d] = await Promise.allSettled([
+      apiJson('/api/devices/connected'),
+      apiJson('/api/devices/paired'),
+      apiJson('/api/hardware/mesh'),
+      apiJson('/api/dashboard'),
+    ]);
+    if (c.status === 'fulfilled') {
+      setConnected(c.value?.devices || []);
+      setOffline(c.value?.offline || []);
     }
+    if (p.status === 'fulfilled') setPaired(p.value?.devices || []);
+    if (m.status === 'fulfilled') setMesh(m.value?.nodes || []);
+    if (d.status === 'fulfilled') {
+      setLatestHealth(d.value?.latest_health || null);
+    }
+    // The three device-list endpoints are what the "no devices" empty
+    // state speaks for. If ANY of them failed we do not know the list
+    // is empty, so the page must not say it is.
+    setLoadError(firstRejection([c, p, m]));
+    // `error` is now only ever a mutation failure (revoke / prune). It
+    // used to be cleared here on every 10s tick, which also silently
+    // wiped the message `forget` had just set, because `forget` ends by
+    // awaiting this refresh. Each mutation clears it on entry instead.
+    setLoading(false);
   }, []);
 
   // Phase-1 real-time sub-device deltas. The brain emits
@@ -202,6 +217,11 @@ export default function Devices() {
     }),
     [paired, pendingPairIds],
   );
+
+  const nothingVisible = connected.length === 0
+    && offline.length === 0
+    && visiblePaired.length === 0
+    && mesh.length === 0;
 
   const handleTokenIssued = useCallback((deviceId) => {
     if (!deviceId) return;
@@ -277,7 +297,16 @@ export default function Devices() {
         {error && <div className="v2-chip v2-chip--error">{error}</div>}
         {loading && <EmptyState title="Scanning…" />}
 
-        {!loading && connected.length === 0 && offline.length === 0 && visiblePaired.length === 0 && mesh.length === 0 && (
+        {!loading && nothingVisible && loadError && (
+          <ErrorState
+            error={loadError}
+            what="your devices"
+            hint="The device lists did not load, so we cannot tell you what is paired. Nothing has been unpaired. Retry once the brain is reachable."
+            onRetry={refresh}
+          />
+        )}
+
+        {!loading && nothingVisible && !loadError && (
           <EmptyState
             title="No devices paired yet"
             hint="Pair an iPhone, wristband, smart glasses, or any HUP daemon. FERAL sees their sensors + fires their actuators."
@@ -288,7 +317,11 @@ export default function Devices() {
 
       <PerceptionShare />
 
-      {!loading && (
+      {/* Topology draws "Awaiting node, pair an iPhone or browser
+          daemon to populate the mesh" over an empty orbit. That is the
+          same affirmative negative as the empty state, so it is
+          suppressed while the device lists are unreadable. */}
+      {!loading && !(nothingVisible && loadError) && (
         <DeviceTopology connected={connected} offline={offline} latestHealth={latestHealth} />
       )}
 
@@ -485,15 +518,19 @@ function PairedPane({ paired, onSelect, onForget, onRefresh }) {
     setBusy(true);
     setErr(null);
     try {
-      const r = await apiFetch('/api/devices/pair/prune', {
+      // apiFetch throws on any non-2xx, so the old `if (!r.ok)` branch
+      // here was unreachable and a failed prune rejected out of this
+      // function unhandled: the pane said nothing and `onRefresh` never
+      // ran, so the rows the user just tried to clear stayed put with
+      // no explanation once the 6s toast expired.
+      await apiFetch('/api/devices/pair/prune', {
         method: 'POST',
         body: JSON.stringify({ older_than_seconds: 0 }),
       });
-      if (!r.ok) {
-        setErr(`${r.status}`);
-      }
-      onRefresh();
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'prune failed');
     } finally {
+      onRefresh();
       setBusy(false);
     }
   };

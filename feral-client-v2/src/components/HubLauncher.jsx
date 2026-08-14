@@ -5,7 +5,7 @@ import {
   HeartPulse, Crosshair, Clock, BrainCircuit, Globe, MapPin, Store,
   Search, X, Plug,
 } from 'lucide-react';
-import { apiJson } from '../lib/api';
+import { useResource } from '../hooks/useResource';
 
 /**
  * HubLauncher — translucent stack popup anchored above the Dock. Holds the
@@ -42,26 +42,32 @@ export default function HubLauncher({ open, onClose }) {
   // nodes, so a paired phone that backgrounded itself made the CTA
   // re-appear and lied to the user that they had nothing paired.
   // See audit-r6/08-status-truthfulness-audit.md row 21.
-  const [pairedCount, setPairedCount] = useState(null);
-  const [onlineCount, setOnlineCount] = useState(null);
+  //
+  // The failure path reintroduced exactly the lie the comment above
+  // describes. It was `.catch(() => { setOnlineCount(0);
+  // setPairedCount(0); })`, which trips the `pairedCount === 0` branch
+  // below and renders "Pair a device / No devices paired yet" at a
+  // user who may have five devices paired and a brain that is merely
+  // unreachable. Both counts stay null on failure, so neither CTA
+  // renders and the Hub simply says nothing about devices.
+  const { data: counts } = useResource('/api/dashboard', {
+    enabled: open,
+    silent: true,
+    select: (d) => ({
+      onlineCount: d?.online_count ?? d?.device_count ?? 0,
+      // Falls back gracefully when the brain is older than the
+      // `paired_count` field by treating `online_count`/`device_count`
+      // as the lower bound.
+      pairedCount: d?.paired_count ?? d?.online_count ?? d?.device_count ?? 0,
+    }),
+  });
+  const pairedCount = counts ? counts.pairedCount : null;
+  const onlineCount = counts ? counts.onlineCount : null;
 
   useEffect(() => {
     if (!open) { setQuery(''); return; }
     // Focus the search field once the popup is visible.
     setTimeout(() => inputRef.current?.focus(), 30);
-    // Probe device counts so we surface the Pair CTA only when the
-    // user really has nothing paired. Falls back gracefully when the
-    // brain is older than the `paired_count` field by treating
-    // `online_count`/`device_count` as the lower bound.
-    apiJson('/api/dashboard')
-      .then((d) => {
-        setOnlineCount(d?.online_count ?? d?.device_count ?? 0);
-        setPairedCount(d?.paired_count ?? d?.online_count ?? d?.device_count ?? 0);
-      })
-      .catch(() => {
-        setOnlineCount(0);
-        setPairedCount(0);
-      });
   }, [open]);
 
   useEffect(() => {

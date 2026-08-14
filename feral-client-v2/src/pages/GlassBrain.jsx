@@ -4,8 +4,9 @@ import { Activity, Cpu, Layers, RefreshCw, Radio, Zap, Brain, Shield } from 'luc
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import ConsciousnessMindMap from '../components/ConsciousnessMindMap';
+import ErrorState from '../ui/ErrorState';
 import { useFeralSocket } from '../hooks/useFeralSocket';
-import { apiJson } from '../lib/api';
+import { useResource } from '../hooks/useResource';
 import { useSystemHealth, refreshSystemHealth } from '../hooks/useSystemHealth';
 
 /**
@@ -36,15 +37,12 @@ const KIND_DOT = {
 export default function GlassBrain() {
   const socket = useFeralSocket();
   const [events, setEvents] = useState([]);
-  const [summary, setSummary] = useState({ total: 0, byKind: {}, byStatus: {} });
   // AUDIT-r14 finding 03 dedup: the page used to mount its own 8s
   // /api/dashboard poll on top of Home's 15s + Shell's 10s. Now it
   // subscribes to the single shared store via useSystemHealth; only
   // consciousness/state stays page-local because no other surface
   // consumes it.
   const { data: dashboard, error: dashboardError } = useSystemHealth();
-  const [refreshKey, setRefreshKey] = useState(0);
-  const [consErr, setConsErr] = useState('');
 
   useEffect(() => {
     const unsub = socket.subscribe((msg) => {
@@ -54,29 +52,28 @@ export default function GlassBrain() {
     return unsub;
   }, [socket]);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const cons = await apiJson('/api/consciousness/state?include_abandoned=false', { silent: true });
-        if (cancelled) return;
-        if (cons && Array.isArray(cons.entities)) {
-          const byKind = {};
-          const byStatus = {};
-          for (const e of cons.entities) {
-            byKind[e.kind] = (byKind[e.kind] || 0) + 1;
-            byStatus[e.status] = (byStatus[e.status] || 0) + 1;
-          }
-          setSummary({ total: cons.entities.length, byKind, byStatus });
-        }
-      } catch (e) {
-        setConsErr(e?.message || 'consciousness fetch failed');
+  // `consErr` used to be declared, set, and never rendered anywhere:
+  // a dead state field, so a failing consciousness poll was invisible
+  // and the "In-flight" tile just kept showing the last count (0 on a
+  // cold page). It is now surfaced both in the tile and as a banner.
+  const {
+    data: summary, error: consError, refresh: refreshCons,
+  } = useResource('/api/consciousness/state?include_abandoned=false', {
+    pollMs: 8000,
+    // The inline ErrorState below is permanent; an 8s toast loop is not
+    // additional information.
+    silent: true,
+    select: (cons) => {
+      const list = Array.isArray(cons?.entities) ? cons.entities : [];
+      const byKind = {};
+      const byStatus = {};
+      for (const e of list) {
+        byKind[e.kind] = (byKind[e.kind] || 0) + 1;
+        byStatus[e.status] = (byStatus[e.status] || 0) + 1;
       }
-    }
-    load();
-    const id = setInterval(load, 8000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [refreshKey]);
+      return { total: list.length, byKind, byStatus };
+    },
+  });
 
   const vitals = useMemo(() => {
     const d = dashboard || {};
@@ -89,14 +86,21 @@ export default function GlassBrain() {
     const brainOnline = !dashboardError && !!dashboard;
     return [
       { icon: Cpu, label: 'Brain', value: brainOnline ? 'online' : (dashboardError?.detail || 'offline'), tone: brainOnline ? 'live' : 'warn' },
-      { icon: Activity, label: 'In-flight', value: summary.total, tone: summary.total > 0 ? 'live' : 'muted' },
+      // "0" here would be a count. Without a successful read there is
+      // no count, so the tile says so rather than picking a number.
+      {
+        icon: Activity,
+        label: 'In-flight',
+        value: summary ? summary.total : 'unknown',
+        tone: summary ? (summary.total > 0 ? 'live' : 'muted') : 'warn',
+      },
       { icon: Layers, label: 'Sessions', value: d.session_count ?? '—' },
       { icon: Radio, label: 'Devices', value: d.device_count ?? '—' },
       { icon: Zap, label: 'Skills', value: d.skill_count ?? d.skills_count ?? (Array.isArray(d.skills) ? d.skills.length : '—') },
     ];
   }, [dashboard, dashboardError, summary]);
 
-  const hasNodes = summary.total > 0;
+  const hasNodes = !!summary && summary.total > 0;
   // Legend rows: when at least one entity is in flight we anchor the
   // baseline kinds (intent/flow) so the colour key stays stable while
   // the graph fills in. With zero entities there is nothing to legend,
@@ -106,7 +110,7 @@ export default function GlassBrain() {
   const kindRows = useMemo(
     () => (hasNodes
       ? Object.keys(KIND_LABELS)
-        .map((k) => ({ kind: k, label: KIND_LABELS[k], count: summary.byKind[k] || 0 }))
+        .map((k) => ({ kind: k, label: KIND_LABELS[k], count: summary.byKind?.[k] || 0 }))
         .filter((r) => r.count > 0 || r.kind === 'intent' || r.kind === 'flow')
       : []),
     [summary, hasNodes],
@@ -127,7 +131,7 @@ export default function GlassBrain() {
             <button
               type="button"
               className="v2-btn"
-              onClick={() => { setRefreshKey((k) => k + 1); refreshSystemHealth(); }}
+              onClick={() => { refreshCons(); refreshSystemHealth(); }}
               title="Refresh"
             >
               <RefreshCw size={13} /> Refresh
@@ -142,6 +146,16 @@ export default function GlassBrain() {
           that owns them. Nothing here is mocked; it all comes from the consciousness store
           and WebSocket event bus in real time.
         </p>
+
+        {consError && !summary && (
+          <ErrorState
+            error={consError}
+            what="the consciousness store"
+            hint="The in-flight counts below could not be read. Treat them as unknown, not as zero."
+            compact
+            onRetry={refreshCons}
+          />
+        )}
 
         <div className="v2-glass-brain-vitals">
           {vitals.map(({ icon: Icon, label, value, tone }) => (

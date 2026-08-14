@@ -1,42 +1,62 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { RefreshCw, Play, Wrench } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import EmptyState from '../ui/EmptyState';
-import { apiJson, apiFetch } from '../lib/api';
+import ErrorState from '../ui/ErrorState';
+import { apiFetch } from '../lib/api';
+import { useResource, toApiError } from '../hooks/useResource';
+
+function asList(value, key) {
+  if (Array.isArray(value?.[key])) return value[key];
+  if (Array.isArray(value)) return value;
+  return [];
+}
 
 /**
  * Skills — shows every loaded skill. Reload button per skill.
  * Pending drafts banner links to Forge.
  */
 export default function Skills() {
-  const [skills, setSkills] = useState([]);
-  const [pending, setPending] = useState([]);
-  const [loading, setLoading] = useState(true);
+  // Was: one `Promise.allSettled` with no else branch and no error
+  // state anywhere in the file, so a failed `/skills` left the list at
+  // `[]` and the page told the user "No skills loaded / Check the Brain
+  // boot log", sending them to debug a boot that was fine.
+  const {
+    data: skillRows, error: skillsError, loading, refresh: refreshSkills,
+  } = useResource('/skills', { select: (d) => asList(d, 'skills') });
+  // The drafts banner is additive: if only this call fails we simply do
+  // not claim there are drafts, and we do not shout about it.
+  const { data: pendingRows, refresh: refreshPending } = useResource(
+    '/api/skills/pending', { select: (d) => asList(d, 'pending'), silent: true },
+  );
   const [reloading, setReloading] = useState(null);
+  const [reloadError, setReloadError] = useState(null);
+  const [reloaded, setReloaded] = useState(null);
   const [filter, setFilter] = useState('');
 
-  const refresh = useCallback(async () => {
-    try {
-      const [s, p] = await Promise.allSettled([
-        apiJson('/skills'),
-        apiJson('/api/skills/pending'),
-      ]);
-      if (s.status === 'fulfilled') setSkills(s.value?.skills || s.value || []);
-      if (p.status === 'fulfilled') setPending(p.value?.pending || p.value || []);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const skills = skillRows || [];
+  const pending = pendingRows || [];
 
-  useEffect(() => { refresh(); }, [refresh]);
+  const refresh = useCallback(() => {
+    setReloadError(null);
+    setReloaded(null);
+    return Promise.all([refreshSkills(), refreshPending()]);
+  }, [refreshSkills, refreshPending]);
 
+  // A hot-reload used to look identical whether it worked or not: no
+  // catch, no confirmation. Now both outcomes say so.
   const reload = async (id) => {
     setReloading(id);
+    setReloadError(null);
+    setReloaded(null);
     try {
       await apiFetch(`/api/skills/reload?skill_id=${encodeURIComponent(id)}`, { method: 'POST' });
-      await refresh();
+      await refreshSkills();
+      setReloaded(id);
+    } catch (err) {
+      setReloadError({ id, error: toApiError(err) });
     } finally {
       setReloading(null);
     }
@@ -55,7 +75,7 @@ export default function Skills() {
   return (
     <div className="v2-page v2-page--stack" data-testid="v2-marker">
       <Pane
-        title={`Skills (${skills.length})`}
+        title={skillRows ? `Skills (${skills.length})` : 'Skills'}
         actions={(
           <>
             <input
@@ -81,8 +101,30 @@ export default function Skills() {
           </Glass>
         )}
 
-        {loading && <EmptyState title="Loading skills…" />}
-        {!loading && skills.length === 0 && <EmptyState title="No skills loaded" hint="Check the Brain boot log." />}
+        {reloadError && (
+          <ErrorState
+            error={reloadError.error}
+            what={`the hot-reload of ${reloadError.id}`}
+            hint="The skill was not reloaded. Whatever code the brain had loaded before is still what is running."
+            compact
+            onRetry={() => reload(reloadError.id)}
+          />
+        )}
+        {reloaded && !reloadError && (
+          <div className="v2-chip v2-chip--live" role="status">
+            Hot-reloaded {reloaded}
+          </div>
+        )}
+
+        {loading && !skillRows && <EmptyState title="Loading skills…" />}
+        {skillsError && !skillRows && (
+          <ErrorState
+            error={skillsError}
+            what="the skill list"
+            onRetry={refresh}
+          />
+        )}
+        {!loading && !skillsError && skillRows && skills.length === 0 && <EmptyState title="No skills loaded" hint="Check the Brain boot log." />}
 
         <div className="v2-skills-grid">
           {visible.map((s) => {

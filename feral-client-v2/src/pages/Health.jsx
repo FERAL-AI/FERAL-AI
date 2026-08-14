@@ -1,11 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { Heart, AlertTriangle, TrendingUp, Activity } from 'lucide-react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import Tabs from '../ui/Tabs';
 import EmptyState from '../ui/EmptyState';
+import ErrorState from '../ui/ErrorState';
 import StatusDot from '../ui/StatusDot';
-import { apiJson } from '../lib/api';
+import { useResource } from '../hooks/useResource';
 
 export default function Health() {
   const [tab, setTab] = useState('summary');
@@ -40,8 +41,18 @@ export default function Health() {
 }
 
 function SummaryTab() {
-  const [s, setS] = useState(null);
-  useEffect(() => { apiJson('/api/baseline/summary').then(setS).catch(() => setS({})); }, []);
+  // Was: `.catch(() => setS({}))`, which rendered "Metrics tracked 0 /
+  // Recent alerts 0 / Categories 0" whenever the request failed. Three
+  // zeros are a claim about the user's health baseline; a failed fetch
+  // is not entitled to make it.
+  const { data: s, error, refresh } = useResource('/api/baseline/summary');
+  if (error && !s) {
+    return (
+      <Pane title="Summary">
+        <ErrorState error={error} what="the baseline summary" onRetry={refresh} />
+      </Pane>
+    );
+  }
   if (!s) return <Pane title="Summary"><EmptyState title="Loading…" /></Pane>;
   return (
     <Pane title="Summary">
@@ -69,17 +80,22 @@ function SummaryTab() {
 }
 
 function MetricsTab() {
-  const [metrics, setMetrics] = useState([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    apiJson('/api/baseline/metrics')
-      .then((d) => setMetrics(d.metrics || d || []))
-      .finally(() => setLoading(false));
-  }, []);
+  // Was: `.then(...).finally(...)` with no catch at all, so a rejected
+  // promise left `metrics` at its initial `[]` and the pane asserted
+  // "No metrics yet".
+  const { data, error, loading, refresh } = useResource('/api/baseline/metrics', {
+    select: (d) => (Array.isArray(d?.metrics) ? d.metrics : (Array.isArray(d) ? d : [])),
+  });
+  const metrics = data || [];
   return (
-    <Pane title={`Metrics (${metrics.length})`}>
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && metrics.length === 0 && <EmptyState title="No metrics yet" hint="Pair a wristband or phone to start populating baselines." />}
+    // No count in the title until we actually have a list. "(0)" next
+    // to a failed fetch reads as a measurement.
+    <Pane title={data ? `Metrics (${metrics.length})` : 'Metrics'}>
+      {loading && !data && <EmptyState title="Loading…" />}
+      {error && !data && (
+        <ErrorState error={error} what="baseline metrics" onRetry={refresh} />
+      )}
+      {!loading && !error && data && metrics.length === 0 && <EmptyState title="No metrics yet" hint="Pair a wristband or phone to start populating baselines." />}
       <div className="v2-skills-grid">
         {metrics.map((m, i) => {
           // Backend (`/api/baseline/metrics`) returns BaselineMetric rows:
@@ -116,20 +132,36 @@ function MetricsTab() {
 }
 
 function AlertsTab() {
-  const [alerts, setAlerts] = useState([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    apiJson('/api/baseline/alerts')
-      .then((d) => setAlerts(d.alerts || d || []))
-      .finally(() => setLoading(false));
-  }, []);
+  // The worst instance of the bug class: no catch at all, so any
+  // failure left `alerts` at `[]` and this pane rendered "No anomalies
+  // detected" over a health surface. Silence is now silence, not an
+  // all-clear.
+  const { data, error, loading, refresh } = useResource('/api/baseline/alerts', {
+    select: (d) => (Array.isArray(d?.alerts) ? d.alerts : (Array.isArray(d) ? d : [])),
+  });
+  const alerts = data || [];
 
-  const tone = (sev) => sev === 'high' || sev === 'critical' ? 'error' : sev === 'medium' ? 'warn' : 'live';
+  // Two bugs here before this change. The expression was
+  //   sev === 'high'||'critical' ? 'error' : 'medium' ? 'warn' : 'live'
+  // which by JS precedence is `(sev === 'high') || 'critical'`, always
+  // truthy, so every alert painted as 'error'; and the unreachable
+  // fallback was 'live', the same green that means "healthy" on every
+  // other surface. A low-severity anomaly is neither an emergency nor
+  // an all-clear, so it gets the neutral dot.
+  const tone = (sev) => {
+    const s = String(sev || '').toLowerCase();
+    if (s === 'high' || s === 'critical') return 'error';
+    if (s === 'medium') return 'warn';
+    return 'neutral';
+  };
 
   return (
-    <Pane title={`Alerts (${alerts.length})`}>
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && alerts.length === 0 && <EmptyState title="No anomalies detected" />}
+    <Pane title={data ? `Alerts (${alerts.length})` : 'Alerts'}>
+      {loading && !data && <EmptyState title="Loading…" />}
+      {error && !data && (
+        <ErrorState error={error} what="health alerts" onRetry={refresh} />
+      )}
+      {!loading && !error && data && alerts.length === 0 && <EmptyState title="No anomalies detected" />}
       <ul className="v2-mem-list">
         {alerts.map((a, i) => (
           <li key={a.id || i}>
@@ -172,61 +204,63 @@ function pipelineLabelForCapability(cap) {
   }
 }
 
+// AUDIT-r14 finding 06 fix for Health/Today: backend at
+// api/routes/timeline.py:154-163 returns `{data: {...vitals}, error?}`.
+// The page used to set `today` to the whole response, so the metric
+// tiles rendered "data" / "error" as keys instead of the actual vital
+// names. Unpack `.data` (with a back-compat fall-through if a future
+// build flattens the shape).
+//
+// The old `resp.error` branch is gone: apiFetch (lib/api.js:88-93,
+// 144-150) already converts a 200 whose body carries a truthy `error`
+// into a thrown ApiError, so that branch could never run and the
+// failure landed in the `.catch` that set `{}` and rendered "No vitals
+// yet". It is an ErrorState now.
+function unpackVitals(resp) {
+  if (!resp || typeof resp !== 'object') return {};
+  if (resp.data && typeof resp.data === 'object') return resp.data;
+  return resp;
+}
+
 function TodayTab() {
-  const [today, setToday] = useState(null);
-  const [sources, setSources] = useState([]);
-  useEffect(() => {
-    // AUDIT-r14 finding 06 fix for Health/Today: backend at
-    // api/routes/timeline.py:154-163 returns `{data: {...vitals},
-    // error?}`. The page used to set `today` to the whole response,
-    // so the metric tiles rendered "data" / "error" as keys instead
-    // of the actual vital names. Unpack `.data` (with a back-compat
-    // fall-through if a future build flattens the shape).
-    apiJson('/api/health-summary')
-      .then((resp) => {
-        if (resp && typeof resp === 'object') {
-          if (resp.error) {
-            setToday({ _error: resp.error });
-          } else if (resp.data && typeof resp.data === 'object') {
-            setToday(resp.data);
-          } else {
-            setToday(resp);
-          }
-        } else {
-          setToday({});
+  const {
+    data: today, error: todayError, loading: todayLoading, refresh: refreshToday,
+  } = useResource('/api/health-summary', { select: unpackVitals });
+  // Pull the dashboard so we can render a real pipeline+source line
+  // alongside the metric tiles. The vital values themselves come from
+  // the aggregator above; the sources list comes from the brain's
+  // sub-device truth store on /api/dashboard so each chip is bound
+  // to the same `live` flag the rest of the dashboard uses.
+  const {
+    data: sourceRows, error: sourcesError, refresh: refreshSources,
+  } = useResource('/api/dashboard', {
+    select: (d) => {
+      const out = [];
+      for (const dev of (d?.devices || [])) {
+        for (const s of (dev?.subdevices || [])) {
+          out.push({
+            ...s,
+            node_id: s.node_id || dev.node_id,
+            pipeline: pipelineLabelForCapability(s.capability),
+            sample_source: s?.attrs?.device_name || s?.attrs?.sample_source || '',
+          });
         }
-      })
-      .catch(() => setToday({}));
-    // Pull the dashboard so we can render a real pipeline+source line
-    // alongside the metric tiles. The vital values themselves come from
-    // the aggregator above; the sources list comes from the brain's
-    // sub-device truth store on /api/dashboard so each chip is bound
-    // to the same `live` flag the rest of the dashboard uses.
-    apiJson('/api/dashboard')
-      .then((d) => {
-        const out = [];
-        for (const dev of (d?.devices || [])) {
-          for (const s of (dev?.subdevices || [])) {
-            out.push({
-              ...s,
-              node_id: s.node_id || dev.node_id,
-              pipeline: pipelineLabelForCapability(s.capability),
-              sample_source: s?.attrs?.device_name || s?.attrs?.sample_source || '',
-            });
-          }
-        }
-        setSources(out);
-      })
-      .catch(() => setSources([]));
-  }, []);
-  if (!today) return <Pane title="Today"><EmptyState title="Loading…" /></Pane>;
-  const errOnly = today._error;
-  const visibleEntries = Object.entries(today).filter(([k]) => !k.startsWith('_'));
+      }
+      return out;
+    },
+  });
+  const sources = sourceRows || [];
+  if (todayLoading && !today) return <Pane title="Today"><EmptyState title="Loading…" /></Pane>;
+  const visibleEntries = today
+    ? Object.entries(today).filter(([k]) => !k.startsWith('_'))
+    : [];
   return (
     <>
       <Pane title="Today's vitals">
-        {errOnly && <div className="v2-chip v2-chip--error" role="alert">{errOnly}</div>}
-        {!errOnly && visibleEntries.length === 0 && (
+        {todayError && !today && (
+          <ErrorState error={todayError} what="today's vitals" onRetry={refreshToday} />
+        )}
+        {!todayError && today && visibleEntries.length === 0 && (
           <EmptyState title="No vitals yet" hint="Pair a wearable or HealthKit-enabled iPhone to populate today's snapshot." />
         )}
         <div className="v2-grid v2-grid--stats">
@@ -239,7 +273,14 @@ function TodayTab() {
         </div>
       </Pane>
       <Pane title={`Active sources${sources.length ? ` · ${sources.length}` : ''}`}>
-        {sources.length === 0 ? (
+        {sourcesError && !sourceRows ? (
+          <ErrorState
+            error={sourcesError}
+            what="the active source list"
+            hint="The brain's sub-device truth store did not answer, so we cannot tell you which pipelines are feeding vitals right now."
+            onRetry={refreshSources}
+          />
+        ) : sourceRows && sources.length === 0 ? (
           <EmptyState
             title="No active sources"
             hint="Pair a device or connect a cloud integration. The pipeline label here matches the iOS Vitals tab so you can verify which transport a number came from."
