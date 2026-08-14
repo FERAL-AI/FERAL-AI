@@ -697,6 +697,44 @@
   50% { opacity: 0.5; transform: scale(1.4); }
 }
 
+/* ── PerceptionShare privacy chip ────────────────────────────── */
+/* The recording dot on the floating "you are being recorded" chip.
+ * It used to carry an inline `animation: pulse 1s ...` naming a keyframe
+ * that does not exist anywhere in this client, so the dot was static and
+ * the chip read as a passive label instead of a live indicator.
+ *
+ * Kept here rather than inline because an inline animation outranks the
+ * stylesheet and could not then be switched off for reduced motion. */
+.v2-perception-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--v2-on-accent);
+  flex-shrink: 0;
+  animation: v2PerceptionPulse 1.2s ease-in-out infinite;
+}
+@keyframes v2PerceptionPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.35; transform: scale(1.35); }
+}
+/* Paused still holds the camera, so the dot stays lit; it just stops
+ * claiming that frames are moving. */
+.v2-perception-chip--paused .v2-perception-chip-dot {
+  animation: none;
+  opacity: 0.75;
+}
+/* The --v2-dur-* tokens are zeroed under reduced motion but keyframe
+ * durations are declared per-animation, so the token alone would not
+ * stop this one. Drop the animation outright and keep the dot at full
+ * opacity: the indicator must never become less visible than it is
+ * while animating. */
+@media (prefers-reduced-motion: reduce) {
+  .v2-perception-chip-dot {
+    animation: none;
+    opacity: 1;
+  }
+}
+
 /* ── DeviceQRCode ────────────────────────────────────────────── */
 .v2-qr {
   display: inline-flex;

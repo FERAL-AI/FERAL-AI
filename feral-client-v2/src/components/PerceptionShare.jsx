@@ -149,12 +149,29 @@ export default function PerceptionShare() {
 }
 
 
+/**
+ * The privacy indicator.
+ *
+ * Mounted once by the shell (`Shell.jsx`) and driven by the same
+ * module-level store as the pane, so it is visible the entire time this
+ * browser holds the camera, including while paused, where the tracks
+ * are still open even though nothing is being sent. Anything that hides
+ * this chip while the stream is alive is a privacy defect, not a styling
+ * choice.
+ *
+ * The dot's colours and pulse live in `styles/ui.css`
+ * (`.v2-perception-chip-dot`). They are deliberately NOT inline: an
+ * inline `animation` outranks the stylesheet, so a
+ * `prefers-reduced-motion` override could never turn it off.
+ */
 function FloatingChip() {
   const share = useLiveShare();
-  if (share.status !== 'running') return null;
+  const isLive = share.status === 'running';
+  const isHeld = share.status === 'paused';
+  if (!isLive && !isHeld) return null;
   return (
     <div
-      className="v2-perception-chip"
+      className={`v2-perception-chip${isHeld ? ' v2-perception-chip--paused' : ''}`}
       role="status"
       aria-live="polite"
       data-testid="perception-floating-chip"
@@ -168,24 +185,23 @@ function FloatingChip() {
         gap: 8,
         padding: '8px 12px',
         borderRadius: 999,
-        // Recording-red. Semantically this is the alert state (the camera is
-        // live and the user needs to see that at a glance), so it reads from
-        // --v2-state-error rather than a stray Tailwind red-600.
-        background: 'rgb(var(--v2-state-error-rgb) / 0.9)',
+        // Recording-red while live. Semantically this is the alert state (the
+        // camera is live and the user needs to see that at a glance), so it
+        // reads from --v2-state-error rather than a stray Tailwind red-600.
+        // Paused still holds the camera, so it stays visible in the warn tone.
+        background: isHeld
+          ? 'rgb(var(--v2-state-warn-rgb) / 0.9)'
+          : 'rgb(var(--v2-state-error-rgb) / 0.9)',
         color: 'var(--v2-on-accent)',
         fontSize: 12,
         fontWeight: 600,
         boxShadow: 'var(--v2-shadow-glass-soft)',
       }}
     >
-      <span className="v2-perception-chip-dot" style={{
-        width: 8,
-        height: 8,
-        borderRadius: '50%',
-        background: 'var(--v2-on-accent)',
-        animation: 'pulse 1s ease-in-out infinite',
-      }} />
-      Sharing camera · {share.controls.fps}fps
+      <span className="v2-perception-chip-dot" data-testid="perception-chip-dot" />
+      {isLive
+        ? `Sharing camera · ${share.controls.fps}fps`
+        : 'Camera paused · nothing sent'}
       <button
         type="button"
         className="v2-perception-chip-stop"
