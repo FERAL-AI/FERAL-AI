@@ -80,6 +80,19 @@ Everything is resolved when the app runs, never at compile time. The previous im
 
 The `brain_runtime_info` Tauri command returns the resolved paths, for a troubleshooting panel.
 
+## Theming
+
+Colours come from the canonical FERAL design system. The source of truth is `feral-client-v2/src/styles/tokens.css` and nothing in this app is allowed to restate a colour it defines.
+
+The desktop app is a separate Vite package and cannot import across the package boundary, so `scripts/sync_tokens.sh` copies the token file to `src/tokens.css` with a generated header. `npm run build` runs it via a `prebuild` hook, and `npm run dev` via `predev`, so `tauri:build` and `tauri:dev` both pick up a token change without anyone remembering to. The copy is committed, which keeps `vite build` working in a tree without `feral-client-v2` and makes drift show up as a diff in review. If the source file is missing the script fails rather than skipping, because a skipped sync is the drift it exists to prevent.
+
+- `npm run sync:tokens` refreshes the copy by hand.
+- `npm run check:tokens` fails if the committed copy is stale, for CI.
+
+`src/tokens.css` is generated. Edit `feral-client-v2/src/styles/tokens.css` instead.
+
+The desktop shell's own role names (`--bg`, `--surface`, `--border`, `--text`, `--muted`, `--accent`, `--accent2`, `--glow`, `--danger`) are defined once, in the `:root` block in `index.html`, and every one of them is an alias onto a `--v2-*` token. `src/main.js` and `src/floating-window.html` read those variables and contain no colour literals. `<html>` carries `class="v2-dark"`, which pins the token file to its dark ramp: this chrome is only the loading, setup and error screens, so there is no light variant to switch to.
+
 ## Architecture
 
 The app loads the brain's web UI in a native window and manages the brain process itself (`start_brain` / `stop_brain`), so you do not need a separate `feral serve`.

@@ -1,22 +1,41 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="v2-dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FERAL</title>
+  <!-- Canonical FERAL design tokens. Generated from
+       feral-client-v2/src/styles/tokens.css by desktop/scripts/sync_tokens.sh,
+       which npm run build runs before vite. Do not edit src/tokens.css. -->
+  <link rel="stylesheet" href="/src/tokens.css" />
   <style>
+    /* This app's roles, mapped onto the tokens above. Every colour in the
+       desktop shell resolves through one of these, or through a --v2-* token
+       directly. No hex literals below this block. */
+    /* The shell is dark-only: this chrome is only the loading, setup and error
+       screens, and the brain UI it hands off to carries its own theme.
+       .v2-dark on <html> pins tokens.css to its dark ramp. The selector is
+       :root.v2-dark rather than :root so it outranks the color-scheme in
+       tokens.css, which Vite emits after this block. */
+    :root.v2-dark { color-scheme: dark; }
+
     :root {
-      --bg:       #07070d;
-      --surface:  #111119;
-      --border:   #1e1e2e;
-      --text:     #e8e8f0;
-      --muted:    #6b6b82;
-      --accent:   #6366f1;
-      --accent2:  #a78bfa;
-      --glow:     rgba(99,102,241,.35);
+      --bg:       var(--v2-bg-deep);
+      --surface:  var(--v2-bg-base);
+      --border:   var(--v2-hairline);
+      --text:     var(--v2-text-primary);
+      --muted:    var(--v2-text-secondary);
+      --accent:   var(--v2-accent);
+      /* Second stop of the wordmark gradient, which runs --text -> --accent2.
+         The v2 system is deliberately one accent plus neutrals, so the
+         gradient runs neutral-to-accent rather than reaching for a second
+         hue the way the old violet pair did. */
+      --accent2:  var(--v2-accent);
+      --glow:     var(--v2-accent-ring);
+      --danger:   var(--v2-state-error);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--v2-font-system); overflow: hidden; }
     #app { height: 100%; }
 
     /* ----- Splash / loading screen ----- */
@@ -30,14 +49,19 @@
       text-align: center;
       position: relative;
       overflow: hidden;
+      /* The ambient light the two indigo/violet radial washes were imitating
+         is already a token, and it is grayscale. It goes on the element's own
+         background, not on ::before, because ::before is positioned and would
+         paint over the splash text, which is not. */
+      background: var(--v2-shell-ambient);
     }
     .splash::before {
       content: "";
       position: absolute;
       inset: 0;
-      background:
-        radial-gradient(ellipse 60% 50% at 50% 45%, rgba(99,102,241,.10) 0%, transparent 70%),
-        radial-gradient(ellipse 40% 35% at 60% 55%, rgba(167,139,250,.06) 0%, transparent 70%);
+      /* Translucent neutral highlight. Must stay translucent: this layer sits
+         above the splash text in paint order. */
+      background: var(--v2-glass-tint);
       pointer-events: none;
     }
 
@@ -117,7 +141,7 @@
     .error-icon {
       width: 52px; height: 52px;
       margin-bottom: 1rem;
-      color: #ef4444;
+      color: var(--danger);
     }
     .error-title {
       font-size: 1.05rem;
@@ -140,15 +164,18 @@
     .btn {
       padding: 0.55rem 1.5rem;
       background: var(--accent);
-      color: #fff;
+      color: var(--v2-text-primary);
       border: none;
       border-radius: 8px;
       cursor: pointer;
       font-size: 0.88rem;
       font-weight: 500;
-      transition: background .15s, transform .1s;
+      transition: filter .15s, transform .1s;
     }
-    .btn:hover { background: #5457e5; }
+    /* Was a hand-picked darker indigo. The v2 set has one accent and no
+       hover shade for it, so the hover state is derived from the accent
+       instead of introducing a second blue that nothing else defines. */
+    .btn:hover { filter: brightness(1.14); }
     .btn:active { transform: scale(.97); }
 
     /* ----- Iframe (brain loaded) ----- */

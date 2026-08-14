@@ -1,21 +1,36 @@
 <!DOCTYPE html>
-<html>
+<html class="v2-dark">
 <head>
+  <!-- Canonical FERAL design tokens, generated from
+       feral-client-v2/src/styles/tokens.css by desktop/scripts/sync_tokens.sh.
+       Do not edit src/tokens.css. -->
+  <link rel="stylesheet" href="./src/tokens.css" />
   <style>
+    :root.v2-dark { color-scheme: dark; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: rgba(10, 10, 11, 0.95); font-family: -apple-system, BlinkMacSystemFont, sans-serif; color: #fff; }
+    /* The Tauri window is transparent:true, so this panel is meant to read as
+       glass. --v2-surface-elev is the elevated-surface alpha and its value is
+       chosen to be blurred, so it carries the matching blur token. */
+    body {
+      background: var(--v2-surface-elev);
+      backdrop-filter: var(--v2-blur-md);
+      -webkit-backdrop-filter: var(--v2-blur-md);
+      font-family: var(--v2-font-system);
+      color: var(--v2-text-primary);
+    }
     .container { padding: 12px; }
     .input-row { display: flex; gap: 8px; align-items: center; }
     #command-input {
-      flex: 1; background: #1a1a2e; border: 1px solid #333; color: #fff;
+      flex: 1; background: var(--v2-surface-1);
+      border: 1px solid var(--v2-hairline); color: var(--v2-text-primary);
       padding: 12px 16px; border-radius: 12px; font-size: 15px; outline: none;
     }
-    #command-input:focus { border-color: #06b6d4; }
-    #command-input::placeholder { color: #555; }
-    .response { padding: 12px; margin-top: 8px; background: #1a1a2e; border-radius: 8px; font-size: 13px; color: #d4d4d8; max-height: 400px; overflow-y: auto; display: none; white-space: pre-wrap; word-break: break-word; }
-    .status { font-size: 11px; color: #555; padding: 4px 12px; display: flex; justify-content: space-between; }
-    .connected { color: #10b981; }
-    .disconnected { color: #ef4444; }
+    #command-input:focus { border-color: var(--v2-accent); }
+    #command-input::placeholder { color: var(--v2-text-tertiary); }
+    .response { padding: 12px; margin-top: 8px; background: var(--v2-surface-1); border-radius: 8px; font-size: 13px; color: var(--v2-text-secondary); max-height: 400px; overflow-y: auto; display: none; white-space: pre-wrap; word-break: break-word; }
+    .status { font-size: 11px; color: var(--v2-text-tertiary); padding: 4px 12px; display: flex; justify-content: space-between; }
+    .connected { color: var(--v2-state-live); }
+    .disconnected { color: var(--v2-state-error); }
   </style>
 </head>
 <body>
@@ -29,7 +44,14 @@
       <span>Cmd+Shift+F to toggle</span>
     </div>
   </div>
-  <script>
+  <script type="module">
+    // Tauri v2 module import, not window.__TAURI__. This app is on
+    // @tauri-apps/api v2 and does not set withGlobalTauri, so the global
+    // was undefined and the Escape handler below silently did nothing.
+    // Importing the API directly also avoids exposing the whole Tauri
+    // surface to the page just to hide a window.
+    import { getCurrentWindow } from '@tauri-apps/api/window';
+
     let ws = null;
     const input = document.getElementById('command-input');
     const response = document.getElementById('response');
@@ -71,9 +93,7 @@
         input.value = '';
       }
       if (e.key === 'Escape') {
-        if (window.__TAURI__) {
-          window.__TAURI__.window?.getCurrent()?.hide();
-        }
+        getCurrentWindow().hide();
       }
     });
 

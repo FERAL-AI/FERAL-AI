@@ -4,7 +4,11 @@
 "version": "2026.8.9",
   "type": "module",
   "scripts": {
+    "sync:tokens": "bash scripts/sync_tokens.sh",
+    "check:tokens": "bash scripts/sync_tokens.sh --check",
+    "predev": "bash scripts/sync_tokens.sh",
     "dev": "vite",
+    "prebuild": "bash scripts/sync_tokens.sh",
     "build": "vite build",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
