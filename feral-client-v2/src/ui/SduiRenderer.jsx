@@ -334,7 +334,7 @@ export function SduiNode({ node, onAction, depth = 0 }) {
     return (
       <div className="v2-sdui-progress" style={{ width: '100%' }}>
         {node.label ? <div className="v2-stat-label">{node.label}</div> : null}
-        <div style={{ width: '100%', height: 6, borderRadius: 999, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+        <div style={{ width: '100%', height: 6, borderRadius: 999, background: 'var(--v2-fill-strong)', overflow: 'hidden' }}>
           <div style={{ width: `${pct * 100}%`, height: '100%', background: node.color || 'currentColor', transition: 'width 300ms ease' }} />
         </div>
       </div>
@@ -351,7 +351,7 @@ export function SduiNode({ node, onAction, depth = 0 }) {
               width: `${70 + (i % 3) * 10}%`,
               height: 10,
               borderRadius: 4,
-              background: 'rgba(255,255,255,0.06)',
+              background: 'var(--v2-fill)',
             }}
           />
         ))}
@@ -366,7 +366,7 @@ export function SduiNode({ node, onAction, depth = 0 }) {
         className="v2-sdui-placeholder"
         style={{
           padding: 10, borderRadius: 8, opacity: 0.75, fontSize: 12,
-          border: '1px dashed rgba(255,255,255,0.2)',
+          border: '1px dashed var(--v2-hairline-strong)',
         }}
       >
         {String(type)}{node.label ? ` · ${node.label}` : ''}
@@ -383,7 +383,7 @@ export function SduiNode({ node, onAction, depth = 0 }) {
   }
 
   return (
-    <div className="v2-sdui-unknown" style={{ padding: 6, fontSize: 11, opacity: 0.7, border: '1px dashed #c1a75a', borderRadius: 4 }}>
+    <div className="v2-sdui-unknown" style={{ padding: 6, fontSize: 11, opacity: 0.7, border: '1px dashed var(--v2-state-warn)', borderRadius: 4 }}>
       Unknown SDUI component: {type}
     </div>
   );
@@ -425,12 +425,13 @@ function PermissionOrTccCardNode({ node, kind }) {
     }
   }, [deeplink]);
 
-  const accent = isMac
-    ? 'rgba(58, 134, 255, 0.45)'
-    : 'rgba(255, 159, 67, 0.45)';
-  const accentBg = isMac
-    ? 'rgba(58, 134, 255, 0.10)'
-    : 'rgba(255, 159, 67, 0.10)';
+  // A permission card is a call to action, not a taxonomy. The old code
+  // hued it blue on macOS and orange elsewhere, which put an off-palette
+  // amber on every non-mac client for no semantic reason. Both platforms
+  // now use the accent; the platform is already signalled by the icon and
+  // the deeplink label.
+  const accent = 'var(--v2-accent-ring)';
+  const accentBg = 'var(--v2-accent-soft)';
 
   return (
     <Glass
@@ -531,7 +532,7 @@ function ModalNode({ node, onAction, depth }) {
       role="dialog"
       aria-modal="true"
       style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
+        position: 'fixed', inset: 0, background: 'var(--v2-scrim)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         zIndex: 100,
       }}
@@ -543,8 +544,10 @@ function ModalNode({ node, onAction, depth }) {
         style={{
           maxWidth: 480, width: '90%',
           borderRadius: 14, padding: 16,
-          background: 'var(--v2-bg-elev, #181818)',
-          border: '1px solid rgba(255,255,255,0.08)',
+          // --v2-bg-elev never existed, so only the #181818 fallback ever
+          // rendered. The real token is --v2-surface-elev.
+          background: 'var(--v2-surface-elev)',
+          border: '1px solid var(--v2-hairline)',
         }}
       >
         {node.title ? <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>{node.title}</div> : null}
@@ -562,7 +565,7 @@ function AccordionNode({ node, onAction, depth }) {
       {sections.map((s, i) => {
         const isOpen = i === openIdx;
         return (
-          <div key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+          <div key={i} style={{ borderBottom: '1px solid var(--v2-hairline)' }}>
             <button
               type="button"
               onClick={() => setOpenIdx(isOpen ? -1 : i)}

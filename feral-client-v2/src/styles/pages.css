@@ -845,7 +845,7 @@
   border-radius: var(--v2-radius-sm);
   padding: 10px 12px;
   max-width: 280px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--v2-shadow-glass-soft);
 }
 .v2-mindmap-empty {
   position: absolute; top: 50%; left: 50%;
@@ -1477,7 +1477,7 @@
   align-items: flex-end;
   justify-content: center;
   padding: calc(var(--v2-menubar-height) + 16px) 16px calc(var(--v2-dock-height) + 20px);
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--v2-scrim);
   -webkit-backdrop-filter: var(--v2-blur-sm);
   backdrop-filter: var(--v2-blur-sm);
   animation: v2ModalBackdropIn var(--v2-dur-base) var(--v2-ease-out);
@@ -1585,7 +1585,7 @@
   align-items: center;
   justify-content: center;
   padding: calc(var(--v2-menubar-height) + 24px) 24px calc(var(--v2-dock-height) + 24px);
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--v2-scrim);
   -webkit-backdrop-filter: var(--v2-blur-sm);
   backdrop-filter: var(--v2-blur-sm);
   animation: v2ModalBackdropIn var(--v2-dur-base) var(--v2-ease-out);
@@ -1846,19 +1846,19 @@
   border-radius: 18px;
   line-height: 1.4;
   font-size: 15px;
-  background: rgba(255,255,255,0.06);
+  background: var(--v2-fill);
   color: var(--v2-text-primary);
   word-wrap: break-word;
   overflow-wrap: anywhere;
 }
 
 .phone-chat-row--user .phone-chat-bubble {
-  background: rgba(10,132,255,0.30);
+  background: rgb(var(--v2-accent-rgb) / 0.30);
   border-bottom-right-radius: 6px;
 }
 
 .phone-chat-row--assistant .phone-chat-bubble {
-  background: rgba(255,255,255,0.08);
+  background: var(--v2-fill-strong);
   border-bottom-left-radius: 6px;
 }
 
@@ -1868,7 +1868,7 @@
   gap: 8px;
   /* Stick to bottom inside the panel so typing always has space. */
   padding: 8px 4px;
-  border-top: 1px solid rgba(255,255,255,0.06);
+  border-top: 1px solid var(--v2-hairline);
 }
 
 .phone-chat-input-wrap {
@@ -1884,8 +1884,8 @@
   padding: 10px 14px;
   font-size: 16px;            /* prevents iOS zoom on focus */
   border-radius: 22px;
-  background: rgba(255,255,255,0.08);
-  border: 1px solid rgba(255,255,255,0.10);
+  background: var(--v2-fill-strong);
+  border: 1px solid var(--v2-hairline);
   color: var(--v2-text-primary);
   outline: none;
   -webkit-appearance: none;
@@ -1893,7 +1893,7 @@
 
 .phone-chat-input:focus {
   border-color: var(--v2-accent);
-  box-shadow: 0 0 0 3px rgba(10,132,255,0.18);
+  box-shadow: 0 0 0 3px var(--v2-accent-soft);
 }
 
 .phone-chat-recording-dot {
@@ -1902,7 +1902,7 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #ff3b30;
+  background: var(--v2-state-error);
   animation: pulse-record 1.2s ease-in-out infinite;
   pointer-events: none;
 }
@@ -1921,8 +1921,8 @@
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  border: 1px solid rgba(255,255,255,0.10);
-  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--v2-hairline);
+  background: var(--v2-fill);
   color: var(--v2-text-primary);
   cursor: pointer;
   transition: background 0.12s, transform 0.08s;
@@ -1930,7 +1930,7 @@
 
 .phone-chat-mic:hover:not(:disabled),
 .phone-chat-send:hover:not(:disabled) {
-  background: rgba(255,255,255,0.12);
+  background: var(--v2-fill-strong);
 }
 
 .phone-chat-mic:active:not(:disabled),
@@ -1939,9 +1939,9 @@
 }
 
 .phone-chat-mic.is-listening {
-  background: rgba(255,59,48,0.24);
-  border-color: rgba(255,59,48,0.5);
-  color: #ff3b30;
+  background: rgb(var(--v2-state-error-rgb) / 0.24);
+  border-color: rgb(var(--v2-state-error-rgb) / 0.5);
+  color: var(--v2-state-error);
 }
 
 .phone-chat-mic.is-disabled,
@@ -1953,7 +1953,7 @@
 .phone-chat-send {
   background: var(--v2-accent);
   border-color: transparent;
-  color: white;
+  color: var(--v2-on-accent);
 }
 
 .phone-chat-send:disabled {
@@ -1968,16 +1968,16 @@
   gap: 8px;
   padding: 10px 14px;
   border-radius: 10px;
-  background: rgba(255,59,48,0.12);
-  border: 1px solid rgba(255,59,48,0.35);
-  color: #ff9c96;
+  background: rgb(var(--v2-state-error-rgb) / 0.12);
+  border: 1px solid rgb(var(--v2-state-error-rgb) / 0.35);
+  color: var(--v2-state-error);
   font-size: 14px;
 }
 
 .phone-chat-error button {
   background: transparent;
   border: none;
-  color: #ff3b30;
+  color: var(--v2-state-error);
   font-weight: 600;
   cursor: pointer;
   padding: 4px 8px;
@@ -2006,17 +2006,17 @@
   font-size: 17px;
   font-weight: 600;
   border-radius: 20px;
-  background: linear-gradient(135deg, rgba(10,132,255,0.95) 0%, rgba(94,92,230,0.95) 100%);
-  color: white;
-  border: 1px solid rgba(255,255,255,0.16);
+  background: var(--v2-accent-gradient);
+  color: var(--v2-on-accent);
+  border: 1px solid var(--v2-hairline-strong);
   cursor: pointer;
-  box-shadow: 0 4px 20px rgba(10,132,255,0.28);
+  box-shadow: 0 4px 20px rgb(var(--v2-accent-rgb) / 0.28);
   transition: transform 0.12s, box-shadow 0.18s;
 }
 
 .phone-voice-cta:active {
   transform: scale(0.98);
-  box-shadow: 0 2px 10px rgba(10,132,255,0.28);
+  box-shadow: 0 2px 10px rgb(var(--v2-accent-rgb) / 0.28);
 }
 
 .phone-voice-history {
@@ -2024,9 +2024,9 @@
   flex-direction: column;
   gap: 8px;
   padding: 10px;
-  background: rgba(255,255,255,0.03);
+  background: var(--v2-fill-subtle);
   border-radius: 12px;
-  border: 1px solid rgba(255,255,255,0.06);
+  border: 1px solid var(--v2-hairline);
 }
 
 .phone-voice-history-empty {
@@ -2042,8 +2042,8 @@
   position: fixed;
   inset: 0;
   z-index: 9999;
-  background: radial-gradient(circle at 50% 30%, #0a0e1a 0%, #02040a 100%);
-  color: white;
+  background: var(--v2-bg-immersive);
+  color: var(--v2-on-immersive);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2060,12 +2060,14 @@
   top: calc(16px + env(safe-area-inset-top));
   left: 16px;
   font-size: 12px;
+  /* Deliberate neutral alpha of --v2-on-immersive. The immersive surface
+     is locked dark, so its text ramp is opacity, not the themed ramp. */
   color: rgba(255,255,255,0.6);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   padding: 4px 10px;
   border-radius: 10px;
-  background: rgba(255,255,255,0.06);
+  background: var(--v2-fill);
 }
 
 .voice-fullscreen-orb-wrap {
@@ -2090,6 +2092,8 @@
   font-size: 18px;
   line-height: 1.4;
   padding: 12px 18px;
+  /* Same: neutral alpha of --v2-on-immersive, plus a pure-black
+     legibility shadow. Neither is a palette choice. */
   color: rgba(255,255,255,0.9);
   min-height: 2em;
   text-shadow: 0 2px 20px rgba(0,0,0,0.6);
@@ -2107,9 +2111,9 @@
   width: 56px;
   height: 56px;
   border-radius: 50%;
-  background: rgba(255,255,255,0.08);
-  border: 1px solid rgba(255,255,255,0.14);
-  color: white;
+  background: var(--v2-fill-strong);
+  border: 1px solid var(--v2-hairline-strong);
+  color: var(--v2-on-immersive);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2118,7 +2122,7 @@
 }
 
 .voice-fullscreen-btn:hover:not(:disabled) {
-  background: rgba(255,255,255,0.14);
+  background: var(--v2-fill-heavy);
 }
 
 .voice-fullscreen-btn:active:not(:disabled) {
@@ -2126,8 +2130,8 @@
 }
 
 .voice-fullscreen-btn--close {
-  background: rgba(255,59,48,0.18);
-  border-color: rgba(255,59,48,0.35);
+  background: var(--v2-state-error-soft);
+  border-color: rgb(var(--v2-state-error-rgb) / 0.35);
 }
 
 .voice-fullscreen-error {
@@ -2138,9 +2142,9 @@
   max-width: 82vw;
   padding: 16px 20px;
   border-radius: 16px;
-  background: rgba(255,59,48,0.16);
-  border: 1px solid rgba(255,59,48,0.45);
-  color: white;
+  background: rgb(var(--v2-state-error-rgb) / 0.16);
+  border: 1px solid rgb(var(--v2-state-error-rgb) / 0.45);
+  color: var(--v2-on-immersive);
   text-align: center;
   font-size: 15px;
 }
@@ -2149,8 +2153,8 @@
   margin-top: 12px;
   padding: 10px 20px;
   border-radius: 22px;
-  background: white;
-  color: #ff3b30;
+  background: var(--v2-on-immersive);
+  color: var(--v2-state-error);
   border: none;
   font-weight: 600;
   font-size: 14px;
@@ -2173,8 +2177,8 @@
   gap: 10px;
   padding: 14px 12px;
   border-radius: 14px;
-  background: rgba(255,255,255,0.03);
-  border: 1px solid rgba(255,255,255,0.06);
+  background: var(--v2-fill-subtle);
+  border: 1px solid var(--v2-hairline);
 }
 
 .phone-settings-section h3 {
@@ -2204,7 +2208,7 @@
   gap: 4px;
   padding: 4px;
   border-radius: 12px;
-  background: rgba(0,0,0,0.28);
+  background: var(--v2-well);
 }
 
 .phone-settings-seg-btn {
@@ -2225,7 +2229,7 @@
 
 .phone-settings-seg-btn.is-active {
   background: var(--v2-accent);
-  color: white;
+  color: var(--v2-on-accent);
 }
 
 .phone-settings-sub {
@@ -2234,7 +2238,7 @@
   gap: 10px;
   padding-top: 10px;
   margin-top: 4px;
-  border-top: 1px solid rgba(255,255,255,0.06);
+  border-top: 1px solid var(--v2-hairline);
 }
 
 .phone-settings-row select,
@@ -2244,8 +2248,8 @@
   padding: 10px 14px;
   font-size: 16px;           /* iOS no-zoom-on-focus */
   border-radius: 10px;
-  background: rgba(255,255,255,0.08);
-  border: 1px solid rgba(255,255,255,0.10);
+  background: var(--v2-fill-strong);
+  border: 1px solid var(--v2-hairline);
   color: var(--v2-text-primary);
   -webkit-appearance: none;
   appearance: none;
@@ -2274,6 +2278,8 @@
   width: 100%;
   border-radius: 14px;
   overflow: hidden;
+  /* True black, deliberately not a token: this is the letterbox behind a
+     live camera feed. It must not lighten with the theme. */
   background: #000;
   min-height: 50vh;
   display: flex;
@@ -2286,6 +2292,7 @@
   height: 100%;
   min-height: 50vh;
   object-fit: cover;
+  /* Same letterbox as .phone-vision-preview. */
   background: #000;
 }
 
@@ -2295,10 +2302,10 @@
   align-items: center;
   gap: 10px;
   padding: 20px;
-  background: rgba(255,59,48,0.10);
-  border: 1px solid rgba(255,59,48,0.32);
+  background: rgb(var(--v2-state-error-rgb) / 0.10);
+  border: 1px solid rgb(var(--v2-state-error-rgb) / 0.32);
   border-radius: 12px;
-  color: #ff9c96;
+  color: var(--v2-state-error);
   text-align: center;
   font-size: 14px;
 }
@@ -2308,7 +2315,7 @@
   padding: 10px 18px;
   border-radius: 10px;
   background: var(--v2-accent);
-  color: white;
+  color: var(--v2-on-accent);
   border: none;
   font-size: 14px;
   font-weight: 500;
@@ -2326,7 +2333,7 @@
   width: 100%;
   max-width: 280px;
   border-radius: 12px;
-  border: 1px solid rgba(255,255,255,0.10);
+  border: 1px solid var(--v2-hairline);
 }
 
 .phone-vision-capture-btn {
@@ -2335,11 +2342,11 @@
   font-size: 16px;
   font-weight: 600;
   border-radius: 16px;
-  background: linear-gradient(135deg, rgba(10,132,255,0.95), rgba(94,92,230,0.95));
-  color: white;
+  background: var(--v2-accent-gradient);
+  color: var(--v2-on-accent);
   border: none;
   cursor: pointer;
-  box-shadow: 0 4px 20px rgba(10,132,255,0.22);
+  box-shadow: 0 4px 20px rgb(var(--v2-accent-rgb) / 0.22);
 }
 
 .phone-vision-capture-btn:active { transform: scale(0.98); }
@@ -2362,15 +2369,15 @@
   padding: 10px 14px;
   font-size: 16px;
   border-radius: 22px;
-  background: rgba(255,255,255,0.08);
-  border: 1px solid rgba(255,255,255,0.10);
+  background: var(--v2-fill-strong);
+  border: 1px solid var(--v2-hairline);
   color: var(--v2-text-primary);
   outline: none;
 }
 
 .phone-vision-question-input:focus {
   border-color: var(--v2-accent);
-  box-shadow: 0 0 0 3px rgba(10,132,255,0.18);
+  box-shadow: 0 0 0 3px var(--v2-accent-soft);
 }
 
 .phone-vision-send-btn,
@@ -2390,7 +2397,7 @@
 
 .phone-vision-send-btn {
   background: var(--v2-accent);
-  color: white;
+  color: var(--v2-on-accent);
 }
 
 .phone-vision-send-btn:disabled {
@@ -2399,9 +2406,9 @@
 }
 
 .phone-vision-retake-btn {
-  background: rgba(255,255,255,0.08);
+  background: var(--v2-fill-strong);
   color: var(--v2-text-primary);
-  border: 1px solid rgba(255,255,255,0.14);
+  border: 1px solid var(--v2-hairline-strong);
   padding: 0 20px;
 }
 
@@ -2415,8 +2422,8 @@
 .phone-vision-response {
   padding: 12px;
   border-radius: 12px;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.06);
+  background: var(--v2-fill-subtle);
+  border: 1px solid var(--v2-hairline);
 }
 
 .phone-vision-response-question {

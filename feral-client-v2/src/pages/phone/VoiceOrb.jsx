@@ -1,11 +1,18 @@
 import { useRef, useEffect, useCallback } from 'react';
 
+/*
+ * Canvas cannot read CSS custom properties, so these have to be literal
+ * channels. They are the dark-theme values from src/styles/tokens.css and
+ * must be kept in step with it. The previous set was Tailwind (slate-500,
+ * blue-500, green-500, red-500) and drifted off the palette on every
+ * state.
+ */
 const STATE_COLORS = {
-  idle:       { r: 100, g: 116, b: 139 },
-  listening:  { r:  59, g: 130, b: 246 },
-  processing: { r: 255, g: 255, b: 255 },
-  speaking:   { r:  34, g: 197, b:  94 },
-  error:      { r: 239, g:  68, b:  68 },
+  idle:       { r: 110, g: 110, b: 118 },  // --v2-text-tertiary  #6E6E76
+  listening:  { r:  10, g: 132, b: 255 },  // --v2-accent         #0A84FF
+  processing: { r: 255, g: 255, b: 255 },  // neutral: no state hue yet
+  speaking:   { r:  48, g: 209, b:  88 },  // --v2-state-live     #30D158
+  error:      { r: 255, g:  69, b:  58 },  // --v2-state-error    #FF453A
 };
 
 const BASE_RADIUS_RATIO = 0.3;
@@ -94,6 +101,7 @@ export default function VoiceOrb({ state = 'idle', audioLevel = 0 }) {
       ctx.beginPath();
       const arcStart = phase % (Math.PI * 2);
       ctx.arc(cx, cy, radius * 0.85, arcStart, arcStart + Math.PI * 0.6);
+      // Neutral spinner arc: white at alpha, no palette hue involved.
       ctx.strokeStyle = `rgba(255, 255, 255, 0.4)`;
       ctx.lineWidth = 3;
       ctx.lineCap = 'round';

@@ -81,8 +81,8 @@ export default function PeripheralsPanel({ shell: shellProp }) {
       <div
         style={{
           borderRadius: 10,
-          border: "1px solid rgba(255,255,255,0.08)",
-          background: "rgba(255,255,255,0.02)",
+          border: "1px solid var(--v2-hairline)",
+          background: "var(--v2-fill-subtle)",
           padding: 10,
           minHeight: 120,
         }}

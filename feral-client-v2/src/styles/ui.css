@@ -268,9 +268,9 @@
   position: absolute;
   inset: -10%;
   background:
-    radial-gradient(60% 50% at 25% 22%, var(--v2-ambient-spot-a, rgba(255, 255, 255, 0.10)), transparent 70%),
-    radial-gradient(55% 45% at 78% 78%, var(--v2-ambient-spot-b, rgba(255, 255, 255, 0.06)), transparent 72%),
-    radial-gradient(90% 70% at 50% 50%, transparent 0%, var(--v2-ambient-base, rgba(0, 0, 0, 0.18)) 100%);
+    radial-gradient(60% 50% at 25% 22%, var(--v2-ambient-spot-a), transparent 70%),
+    radial-gradient(55% 45% at 78% 78%, var(--v2-ambient-spot-b), transparent 72%),
+    radial-gradient(90% 70% at 50% 50%, transparent 0%, var(--v2-ambient-base) 100%);
   filter: blur(32px);
   opacity: 0.85;
   transition:
@@ -283,6 +283,9 @@
   pointer-events: none;
   opacity: 0.035;
   mix-blend-mode: overlay;
+  /* Texture generator, not a palette entry: a near-white dot stamped at
+   * 0.035 opacity through an overlay blend is film grain. Tokenising it
+   * would tint the grain. */
   background-image: radial-gradient(rgba(255, 255, 255, 0.9) 1px, transparent 1px);
   background-size: 3px 3px;
 }
@@ -348,12 +351,14 @@
   position: absolute;
   inset: 18%;
   border-radius: 50%;
+  /* The first stop is a specular highlight (where light hits the sphere),
+     not a colour choice. It stays neutral white at every accent. */
   background: radial-gradient(
     circle at 35% 30%,
     rgba(255, 255, 255, 0.22),
     var(--v2-accent) 45%,
-    rgba(10, 132, 255, 0.4) 72%,
-    rgba(10, 132, 255, 0.0) 100%
+    rgb(var(--v2-accent-rgb) / 0.4) 72%,
+    rgb(var(--v2-accent-rgb) / 0) 100%
   );
   filter: saturate(1.1);
 }
@@ -364,7 +369,7 @@
   border: 1px solid var(--v2-hairline-strong);
   box-shadow:
     0 0 40px var(--v2-accent-ring),
-    inset 0 0 24px rgba(10, 132, 255, 0.18);
+    inset 0 0 24px var(--v2-accent-soft);
 }
 .v2-orb-halo {
   position: absolute;
@@ -385,8 +390,8 @@
 .v2-orb--thinking { animation: v2OrbBreathe 2.6s ease-in-out infinite; }
 .v2-orb--thinking .v2-orb-ring { animation: v2OrbThink 6s linear infinite; border-style: dashed; }
 .v2-orb--speaking .v2-orb-core { animation: v2OrbSpeak 0.9s ease-in-out infinite; }
-.v2-orb--alerting .v2-orb-ring { border-color: var(--v2-state-error); box-shadow: 0 0 60px rgba(255, 69, 58, 0.35); }
-.v2-orb--alerting .v2-orb-halo { background: radial-gradient(circle, rgba(255, 69, 58, 0.4) 0%, transparent 60%); }
+.v2-orb--alerting .v2-orb-ring { border-color: var(--v2-state-error); box-shadow: 0 0 60px rgb(var(--v2-state-error-rgb) / 0.35); }
+.v2-orb--alerting .v2-orb-halo { background: radial-gradient(circle, rgb(var(--v2-state-error-rgb) / 0.4) 0%, transparent 60%); }
 .v2-orb--observing .v2-orb-ring { border-color: var(--v2-state-live); }
 .v2-orb--offline { filter: grayscale(1) opacity(0.5); }
 .v2-orb--offline .v2-orb-ring { box-shadow: none; }
@@ -472,10 +477,10 @@
   gap: 12px;
   padding: 10px 14px;
   border-radius: 18px;
-  background: var(--v2-surface-1, rgba(20, 20, 28, 0.85));
+  background: var(--v2-surface-1);
   -webkit-backdrop-filter: var(--v2-blur-sm);
   backdrop-filter: var(--v2-blur-sm);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--v2-shadow-glass);
   transform: translateY(8px) scale(0.98);
   max-width: min(560px, calc(100vw - 40px));
 }
@@ -512,6 +517,8 @@
 }
 .v2-voice-overlay--fullscreen.is-visible {
   transform: scale(1);
+  /* Vignette, not a fill: two stops of pure black darkening toward the
+     edges. --v2-scrim is a single flat value and cannot express a ramp. */
   background:
     radial-gradient(ellipse at center, rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.6) 80%);
   -webkit-backdrop-filter: var(--v2-blur-sm);
@@ -551,7 +558,7 @@
   align-items: center;
   justify-content: center;
   padding: calc(var(--v2-menubar-height) + 16px) 32px calc(var(--v2-dock-height) + 16px);
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--v2-scrim);
   -webkit-backdrop-filter: var(--v2-blur-sm);
   backdrop-filter: var(--v2-blur-sm);
   animation: v2ModalBackdropIn var(--v2-dur-base) var(--v2-ease-out);
@@ -696,6 +703,8 @@
   align-items: center;
   justify-content: center;
   padding: 8px;
+  /* Literal white, deliberately not a token: a QR code needs a true-white
+   * quiet zone to stay scannable. It must not follow the theme. */
   background: #FFFFFF;
   border-radius: var(--v2-radius-md);
   border: 1px solid var(--v2-hairline);

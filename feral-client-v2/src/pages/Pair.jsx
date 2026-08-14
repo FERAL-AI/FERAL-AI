@@ -539,7 +539,7 @@ function LiveRow({ label, active, color, onToggle }) {
         <span
           style={{
             width: 8, height: 8, borderRadius: "50%",
-            background: active ? color : "rgba(255,255,255,0.3)",
+            background: active ? color : "var(--v2-text-tertiary)",
             boxShadow: active ? `0 0 8px ${color}` : "none",
             animation: active ? "v2-pulse 1.4s ease-in-out infinite" : "none",
           }}
@@ -554,7 +554,7 @@ function LiveRow({ label, active, color, onToggle }) {
             ...btnSecondary,
             marginTop: 0,
             padding: "6px 12px",
-            background: active ? "rgba(255,69,58,0.2)" : "rgba(255,255,255,0.06)",
+            background: active ? "var(--v2-state-error-soft)" : "var(--v2-fill)",
           }}
         >
           {active ? "Stop" : "Start"}
@@ -572,7 +572,7 @@ const frameStyle = {
   alignItems: "center",
   justifyContent: "center",
   padding: 24,
-  background: "var(--v2-shell-ambient, linear-gradient(180deg, #1F1F27 0%, #0F0F15 100%))",
+  background: "var(--v2-shell-ambient)",
   color: "var(--v2-text-primary)",
   fontFamily: "var(--v2-font-system)",
 };
@@ -583,14 +583,14 @@ const cardStyle = {
   background: "var(--v2-surface-1)",
   backdropFilter: "var(--v2-blur-md)",
   border: "1px solid var(--v2-hairline)",
-  boxShadow: "0 12px 36px rgba(0,0,0,0.45)",
+  boxShadow: "var(--v2-shadow-glass)",
 };
 
 const iconStyle = {
   width: 32,
   height: 32,
   borderRadius: 10,
-  background: "rgba(255,255,255,0.06)",
+  background: "var(--v2-fill)",
   display: "grid",
   placeItems: "center",
 };
@@ -647,9 +647,9 @@ const pinInputStyle = {
   width: "8.5em",
   textAlign: "center",
   borderRadius: 10,
-  border: "1px solid rgba(255,255,255,0.16)",
-  background: "rgba(0,0,0,0.3)",
-  color: "white",
+  border: "1px solid var(--v2-hairline-strong)",
+  background: "var(--v2-well)",
+  color: "var(--v2-text-primary)",
   fontFamily: "ui-monospace, SFMono-Regular, monospace",
   outline: "none",
 };
@@ -659,7 +659,7 @@ const bulletList = {
   paddingLeft: 18,
   fontSize: 13,
   lineHeight: 1.6,
-  color: "rgba(255,255,255,0.75)",
+  color: "var(--v2-text-secondary)",
 };
 
 const errorBox = {

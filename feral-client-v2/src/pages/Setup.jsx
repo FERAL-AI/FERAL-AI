@@ -887,8 +887,8 @@ function PairStep({ choice, onPick, payload, error, fix, onApplyFix, busy }) {
                 style={{
                   display: 'block',
                   padding: '10px 12px',
-                  background: '#0a0a0a',
-                  border: '1px solid #1a1a1a',
+                  background: 'var(--v2-well)',
+                  border: '1px solid var(--v2-hairline)',
                   borderRadius: 8,
                   wordBreak: 'break-all',
                   fontSize: 13,
@@ -967,7 +967,7 @@ function DoneStep({ saved, error, pairChoice }) {
   return (
     <Pane title="Ready">
       <div style={{ textAlign: 'center', padding: 20 }}>
-        <CheckCircle2 size={48} style={{ color: saved ? '#22c55e' : '#64748b' }} />
+        <CheckCircle2 size={48} style={{ color: saved ? 'var(--v2-state-live)' : 'var(--v2-text-tertiary)' }} />
         <h2 style={{ marginTop: 12 }}>
           {saved ? 'Setup complete.' : 'Click Finish to write settings to disk.'}
         </h2>

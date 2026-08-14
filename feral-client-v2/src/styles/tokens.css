@@ -31,6 +31,30 @@
   --v2-hairline-strong: rgba(255, 255, 255, 0.18);
   --v2-hairline-focus: rgba(255, 255, 255, 0.28);
 
+  /* Wash fills. Distinct from --v2-surface-*: a surface is a panel body
+   * with its own base tint, a fill is a thin tint laid over whatever is
+   * already behind it (chips, bubbles, inputs, icon buttons, list rows).
+   * These flip to black alphas in light mode; the raw white alphas that
+   * used to be typed inline vanished on a light background. */
+  --v2-fill-subtle: rgba(255, 255, 255, 0.03);
+  --v2-fill: rgba(255, 255, 255, 0.06);
+  --v2-fill-strong: rgba(255, 255, 255, 0.10);
+  --v2-fill-heavy: rgba(255, 255, 255, 0.14);
+
+  /* Scrim sits behind a modal and dims the whole app. Well is the
+   * opposite direction: a recessed inset (segmented-control track, code
+   * block, PIN field) that reads as carved into the surface. */
+  --v2-scrim: rgba(0, 0, 0, 0.45);
+  --v2-well: rgba(0, 0, 0, 0.28);
+
+  /* Ambient field spots. ui.css has always referenced these three; they
+   * were never defined, so only the inline fallbacks ever rendered and
+   * light mode got white-on-white spots. Defined here so the field is
+   * theme-aware like everything else. */
+  --v2-ambient-spot-a: rgba(255, 255, 255, 0.10);
+  --v2-ambient-spot-b: rgba(255, 255, 255, 0.06);
+  --v2-ambient-base: rgba(0, 0, 0, 0.18);
+
   /* Neutral glass highlight — mimics how real glass catches light without
    * introducing any color hue. Zero tint, just a top-down fade. */
   --v2-glass-tint:
@@ -51,10 +75,24 @@
   --v2-text-tertiary: #6E6E76;
   --v2-text-inverse: #0B0B0D;
 
+  /* Foreground for anything sitting ON a filled accent or filled state
+   * colour: primary buttons, badges, the send button, an app tile's
+   * initial. NOT --v2-text-inverse, which is near-black in dark mode and
+   * would put black text on a blue button. Both accent values are
+   * saturated enough that white is the correct foreground in either
+   * theme, so this one does not flip. */
+  --v2-on-accent: #FFFFFF;
+
   /* ── Accent (interactive only) ───────────────────────────────── */
   --v2-accent: #0A84FF;
   --v2-accent-soft: rgba(10, 132, 255, 0.18);
   --v2-accent-ring: rgba(10, 132, 255, 0.35);
+
+  /* Primary-CTA fill. A single-hue ramp: the accent falling to a deeper
+   * shade of itself. Replaces an accent-to-indigo (#5E5CE6) gradient that
+   * put a purple cast on the phone CTAs, which the neutral + one-accent
+   * thesis at the top of this file rules out. */
+  --v2-accent-gradient: linear-gradient(135deg, #0A84FF 0%, #0060DF 100%);
 
   /* ── Semantic state (never decorative) ───────────────────────── */
   --v2-state-live: #30D158;
@@ -63,6 +101,27 @@
   --v2-state-warn-soft: rgba(255, 214, 10, 0.18);
   --v2-state-error: #FF453A;
   --v2-state-error-soft: rgba(255, 69, 58, 0.18);
+
+  /* Channel triplets for the palette. CSS cannot take an arbitrary alpha
+   * of an existing hex token, which is the single reason raw rgba()
+   * literals kept reappearing for glows, tints, rings and pill fills.
+   * Compose those as rgb(var(--v2-accent-rgb) / 0.4) instead of retyping
+   * the channels and drifting off-hue. Keep each triplet in sync with the
+   * hex above it, including in the light-theme block. */
+  --v2-accent-rgb: 10 132 255;
+  --v2-state-live-rgb: 48 209 88;
+  --v2-state-warn-rgb: 255 214 10;
+  --v2-state-error-rgb: 255 69 58;
+
+  /* ── Immersive (locked dark, ignores theme) ──────────────────── */
+  /* The phone voice fullscreen is a blackout surface in every theme: it
+   * is meant to feel like the room lights went down. It therefore cannot
+   * use --v2-bg-base / --v2-text-primary, which flip to light. Neutral
+   * charcoal core falling to near-black at the edges; the previous
+   * literal carried a blue tint the thesis does not allow. */
+  --v2-bg-immersive: radial-gradient(circle at 50% 30%, #14141A 0%, #06060A 100%);
+  --v2-surface-immersive: rgba(16, 16, 20, 0.94);
+  --v2-on-immersive: #FFFFFF;
 
   /* ── Vibrancy / blur ─────────────────────────────────────────── */
   --v2-blur-sm: saturate(1.6) blur(24px);
@@ -126,6 +185,18 @@
   --v2-hairline-strong: rgba(0, 0, 0, 0.14);
   --v2-hairline-focus: rgba(0, 0, 0, 0.24);
 
+  --v2-fill-subtle: rgba(0, 0, 0, 0.03);
+  --v2-fill: rgba(0, 0, 0, 0.05);
+  --v2-fill-strong: rgba(0, 0, 0, 0.08);
+  --v2-fill-heavy: rgba(0, 0, 0, 0.12);
+
+  --v2-scrim: rgba(0, 0, 0, 0.32);
+  --v2-well: rgba(0, 0, 0, 0.06);
+
+  --v2-ambient-spot-a: rgba(255, 255, 255, 0.55);
+  --v2-ambient-spot-b: rgba(255, 255, 255, 0.30);
+  --v2-ambient-base: rgba(0, 0, 0, 0.05);
+
   --v2-shell-ambient:
     radial-gradient(ellipse 90% 60% at 50% -10%, rgba(255, 255, 255, 0.6), transparent 60%),
     radial-gradient(ellipse 70% 60% at 80% 110%, rgba(0, 0, 0, 0.04), transparent 60%),
@@ -140,6 +211,7 @@
   --v2-accent: #0066CC;
   --v2-accent-soft: rgba(0, 102, 204, 0.12);
   --v2-accent-ring: rgba(0, 102, 204, 0.28);
+  --v2-accent-gradient: linear-gradient(135deg, #0066CC 0%, #004C99 100%);
 
   --v2-state-live: #1F9D48;
   --v2-state-live-soft: rgba(31, 157, 72, 0.14);
@@ -147,6 +219,16 @@
   --v2-state-warn-soft: rgba(185, 137, 0, 0.14);
   --v2-state-error: #D70015;
   --v2-state-error-soft: rgba(215, 0, 21, 0.14);
+
+  --v2-accent-rgb: 0 102 204;
+  --v2-state-live-rgb: 31 157 72;
+  --v2-state-warn-rgb: 185 137 0;
+  --v2-state-error-rgb: 215 0 21;
+
+  /* --v2-on-accent, --v2-bg-immersive, --v2-surface-immersive and
+   * --v2-on-immersive are deliberately not overridden here: white on a
+   * saturated blue fill is correct in both themes, and the immersive
+   * surface is a blackout by definition. */
 
   --v2-shadow-glass:
     0 0 0 1px var(--v2-hairline),
@@ -168,6 +250,15 @@
     --v2-hairline: rgba(0, 0, 0, 0.08);
     --v2-hairline-strong: rgba(0, 0, 0, 0.14);
     --v2-hairline-focus: rgba(0, 0, 0, 0.24);
+    --v2-fill-subtle: rgba(0, 0, 0, 0.03);
+    --v2-fill: rgba(0, 0, 0, 0.05);
+    --v2-fill-strong: rgba(0, 0, 0, 0.08);
+    --v2-fill-heavy: rgba(0, 0, 0, 0.12);
+    --v2-scrim: rgba(0, 0, 0, 0.32);
+    --v2-well: rgba(0, 0, 0, 0.06);
+    --v2-ambient-spot-a: rgba(255, 255, 255, 0.55);
+    --v2-ambient-spot-b: rgba(255, 255, 255, 0.30);
+    --v2-ambient-base: rgba(0, 0, 0, 0.05);
     --v2-shell-ambient:
       radial-gradient(ellipse 90% 60% at 50% -10%, rgba(255, 255, 255, 0.6), transparent 60%),
       radial-gradient(ellipse 70% 60% at 80% 110%, rgba(0, 0, 0, 0.04), transparent 60%),
@@ -180,12 +271,17 @@
     --v2-accent: #0066CC;
     --v2-accent-soft: rgba(0, 102, 204, 0.12);
     --v2-accent-ring: rgba(0, 102, 204, 0.28);
+    --v2-accent-gradient: linear-gradient(135deg, #0066CC 0%, #004C99 100%);
     --v2-state-live: #1F9D48;
     --v2-state-live-soft: rgba(31, 157, 72, 0.14);
     --v2-state-warn: #B98900;
     --v2-state-warn-soft: rgba(185, 137, 0, 0.14);
     --v2-state-error: #D70015;
     --v2-state-error-soft: rgba(215, 0, 21, 0.14);
+    --v2-accent-rgb: 0 102 204;
+    --v2-state-live-rgb: 31 157 72;
+    --v2-state-warn-rgb: 185 137 0;
+    --v2-state-error-rgb: 215 0 21;
     --v2-shadow-glass:
       0 0 0 1px var(--v2-hairline),
       0 10px 28px rgba(0, 0, 0, 0.12),

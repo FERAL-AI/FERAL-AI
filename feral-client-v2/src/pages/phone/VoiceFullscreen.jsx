@@ -57,9 +57,9 @@ function VoiceStatusBanner({ status, layout = 'overlay' }) {
   };
   const subline = reasonCopy[status.reason] || status.detail || '';
   const baseStyle = {
-    background: 'rgba(239,68,68,0.18)',
-    border: '1px solid rgba(239,68,68,0.5)',
-    color: '#fff',
+    background: 'var(--v2-state-error-soft)',
+    border: '1px solid rgb(var(--v2-state-error-rgb) / 0.5)',
+    color: 'var(--v2-on-immersive)',
     borderRadius: 12,
     padding: '8px 12px',
     fontSize: 12,
@@ -557,10 +557,10 @@ export function VoiceFullscreen({
           right: 12,
           bottom: 12,
           zIndex: 1000,
-          background: 'rgba(10,10,15,0.94)',
-          color: '#fff',
+          background: 'var(--v2-surface-immersive)',
+          color: 'var(--v2-on-immersive)',
           borderRadius: 18,
-          boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
+          boxShadow: 'var(--v2-shadow-glass)',
           backdropFilter: 'blur(12px)',
           WebkitBackdropFilter: 'blur(12px)',
           display: 'flex',
@@ -616,8 +616,8 @@ export function VoiceFullscreen({
           aria-label={isMuted ? 'Unmute microphone' : 'Mute microphone'}
           aria-pressed={isMuted}
           style={{
-            background: isMuted ? 'rgba(239,68,68,0.3)' : 'rgba(255,255,255,0.1)',
-            color: '#fff', border: 'none', borderRadius: '50%',
+            background: isMuted ? 'rgb(var(--v2-state-error-rgb) / 0.3)' : 'var(--v2-fill-strong)',
+            color: 'var(--v2-on-immersive)', border: 'none', borderRadius: '50%',
             width: 40, height: 40, fontSize: 16, cursor: 'pointer', flex: '0 0 auto',
           }}
         >
@@ -628,8 +628,8 @@ export function VoiceFullscreen({
           onClick={() => setVariant('fullscreen')}
           aria-label="Expand voice session"
           style={{
-            background: 'rgba(255,255,255,0.1)',
-            color: '#fff', border: 'none', borderRadius: '50%',
+            background: 'var(--v2-fill-strong)',
+            color: 'var(--v2-on-immersive)', border: 'none', borderRadius: '50%',
             width: 40, height: 40, fontSize: 16, cursor: 'pointer', flex: '0 0 auto',
           }}
         >
@@ -640,8 +640,8 @@ export function VoiceFullscreen({
           onClick={handleClose}
           aria-label="End voice session"
           style={{
-            background: 'rgba(239,68,68,0.25)',
-            color: '#fff', border: 'none', borderRadius: '50%',
+            background: 'rgb(var(--v2-state-error-rgb) / 0.25)',
+            color: 'var(--v2-on-immersive)', border: 'none', borderRadius: '50%',
             width: 40, height: 40, fontSize: 16, cursor: 'pointer', flex: '0 0 auto',
           }}
         >
@@ -667,12 +667,12 @@ export function VoiceFullscreen({
         position: 'fixed',
         inset: 0,
         zIndex: 1000,
-        background: '#0a0a0f',
+        background: 'var(--v2-bg-immersive)',
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'space-between',
-        color: '#fff',
+        color: 'var(--v2-on-immersive)',
         fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
         overflow: 'hidden',
       }}
@@ -687,7 +687,7 @@ export function VoiceFullscreen({
             left: 16,
             fontSize: 12,
             opacity: 0.6,
-            background: 'rgba(255,255,255,0.08)',
+            background: 'var(--v2-fill-strong)',
             padding: '4px 10px',
             borderRadius: 12,
           }}
@@ -705,8 +705,8 @@ export function VoiceFullscreen({
           position: 'absolute',
           top: 12,
           right: 12,
-          background: 'rgba(255,255,255,0.1)',
-          color: '#fff',
+          background: 'var(--v2-fill-strong)',
+          color: 'var(--v2-on-immersive)',
           border: 'none',
           borderRadius: 14,
           width: 36,
@@ -785,15 +785,15 @@ export function VoiceFullscreen({
       {/* Error surface */}
       {voiceState === 'error' && (
         <div data-testid="error-surface" style={{ textAlign: 'center', padding: '0 24px 16px' }}>
-          <p style={{ color: '#ef4444', fontSize: 15, margin: '0 0 12px' }}>
+          <p style={{ color: 'var(--v2-state-error)', fontSize: 15, margin: '0 0 12px' }}>
             {errorMessage || 'An error occurred'}
           </p>
           <button
             data-testid="retry-button"
             onClick={handleRetry}
             style={{
-              background: 'rgba(255,255,255,0.12)',
-              color: '#fff',
+              background: 'var(--v2-fill-strong)',
+              color: 'var(--v2-on-immersive)',
               border: 'none',
               borderRadius: 8,
               padding: '10px 28px',
@@ -839,8 +839,8 @@ export function VoiceFullscreen({
           aria-label={isMuted ? 'Unmute microphone' : 'Mute microphone'}
           aria-pressed={isMuted}
           style={{
-            background: isMuted ? 'rgba(239,68,68,0.3)' : 'rgba(255,255,255,0.1)',
-            color: '#fff',
+            background: isMuted ? 'rgb(var(--v2-state-error-rgb) / 0.3)' : 'var(--v2-fill-strong)',
+            color: 'var(--v2-on-immersive)',
             border: 'none',
             borderRadius: '50%',
             width: 52,
@@ -860,8 +860,8 @@ export function VoiceFullscreen({
           onClick={handleKeyboard}
           aria-label="Switch to keyboard"
           style={{
-            background: 'rgba(255,255,255,0.1)',
-            color: '#fff',
+            background: 'var(--v2-fill-strong)',
+            color: 'var(--v2-on-immersive)',
             border: 'none',
             borderRadius: '50%',
             width: 52,
@@ -881,8 +881,8 @@ export function VoiceFullscreen({
           onClick={handleClose}
           aria-label="Close voice session"
           style={{
-            background: 'rgba(239,68,68,0.25)',
-            color: '#fff',
+            background: 'rgb(var(--v2-state-error-rgb) / 0.25)',
+            color: 'var(--v2-on-immersive)',
             border: 'none',
             borderRadius: '50%',
             width: 52,

@@ -109,6 +109,10 @@ const BOOTSTRAP_SCRIPT = `
 })();
 `;
 
+// These styles are injected into a sandboxed iframe srcdoc under a strict
+// CSP. That document does not load tokens.css, so var(--v2-*) cannot
+// resolve here and every colour has to be a literal. Keep the values in
+// sync with src/styles/tokens.css by hand.
 const BASE_STYLES = `
   :root { color-scheme: dark light; font-family: -apple-system, system-ui, Segoe UI, sans-serif; }
   body { margin: 0; padding: 12px; background: transparent; color: inherit; }
@@ -116,7 +120,7 @@ const BASE_STYLES = `
   [data-layout="column"] { display: flex; flex-direction: column; gap: 8px; }
   [data-card="true"] { padding: 12px; border-radius: 12px; background: rgba(255,255,255,0.04); }
   button { cursor: pointer; padding: 6px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.06); color: inherit; }
-  button[data-style="primary"] { background: #5B21B6; border-color: #5B21B6; color: #fff; }
+  button[data-style="primary"] { background: #0A84FF; border-color: #0A84FF; color: #FFFFFF; }  /* --v2-accent / --v2-on-accent */
   hr { border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 8px 0; }
   ul { padding-left: 20px; margin: 0; }
   img { max-width: 100%; }

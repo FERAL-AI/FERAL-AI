@@ -86,7 +86,10 @@ export default function Apps() {
         <div className="v2-skills-grid" data-testid="v2-apps-grid">
           {apps.map((app) => {
             const brand = app.brand || {};
-            const accent = brand.primary_color || '#5B21B6';
+            // An app's own primary_color is third-party brand data and is used
+            // verbatim. The fallback, when an app declares no brand, is FERAL
+            // chrome and so must be the FERAL accent, not a stray violet.
+            const accent = brand.primary_color || 'var(--v2-accent)';
             return (
               <Glass key={app.app_id} level={1} radius="md" padding="md">
                 <header
@@ -98,7 +101,7 @@ export default function Apps() {
                       width: 28, height: 28, borderRadius: 8, flexShrink: 0,
                       background: accent,
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: 13, fontWeight: 700, color: '#fff',
+                      fontSize: 13, fontWeight: 700, color: 'var(--v2-on-accent)',
                     }}
                   >
                     {(brand.name || app.app_id).charAt(0).toUpperCase()}

@@ -26,6 +26,10 @@ import Glass from '../ui/Glass';
 import CodeEditor from '../ui/CodeEditor';
 import { apiFetch, apiJson } from '../lib/api';
 
+// Example manifest content, not FERAL chrome. The #6F4E37 below is the
+// fictional Coffee Log app's own brand mark and is meant to show that a
+// third-party app picks its own primary_color. It is deliberately not a
+// design token.
 const SAMPLE_MANIFEST = `app_id: coffee-log
 version: 0.1.0
 author: Jane Dev

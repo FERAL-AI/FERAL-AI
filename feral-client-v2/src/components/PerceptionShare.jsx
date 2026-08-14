@@ -168,18 +168,21 @@ function FloatingChip() {
         gap: 8,
         padding: '8px 12px',
         borderRadius: 999,
-        background: 'rgba(220, 38, 38, 0.9)',
-        color: 'white',
+        // Recording-red. Semantically this is the alert state (the camera is
+        // live and the user needs to see that at a glance), so it reads from
+        // --v2-state-error rather than a stray Tailwind red-600.
+        background: 'rgb(var(--v2-state-error-rgb) / 0.9)',
+        color: 'var(--v2-on-accent)',
         fontSize: 12,
         fontWeight: 600,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+        boxShadow: 'var(--v2-shadow-glass-soft)',
       }}
     >
       <span className="v2-perception-chip-dot" style={{
         width: 8,
         height: 8,
         borderRadius: '50%',
-        background: 'rgba(255,255,255,0.95)',
+        background: 'var(--v2-on-accent)',
         animation: 'pulse 1s ease-in-out infinite',
       }} />
       Sharing camera · {share.controls.fps}fps
@@ -191,8 +194,8 @@ function FloatingChip() {
         style={{
           marginLeft: 4,
           border: 'none',
-          background: 'rgba(0,0,0,0.25)',
-          color: 'white',
+          background: 'var(--v2-well)',
+          color: 'var(--v2-on-accent)',
           cursor: 'pointer',
           padding: '2px 8px',
           borderRadius: 999,
