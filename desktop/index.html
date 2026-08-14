@@ -148,18 +148,44 @@
       font-weight: 600;
       margin-bottom: 0.4rem;
     }
-    .error-hint {
+    /* .hint is the same block used by the first-run screen, which is not an
+       error. .error-hint is kept as the alias so the error screen's markup
+       does not have to change. */
+    .hint, .error-hint {
       font-size: 0.82rem;
       color: var(--muted);
       margin-bottom: 1.25rem;
       max-width: 400px;
       line-height: 1.5;
     }
-    .error-hint code {
+    .hint code, .error-hint code, .splash-subtitle code {
       background: var(--surface);
       padding: 0.15em 0.4em;
       border-radius: 4px;
       font-size: 0.85em;
+    }
+    /* What the app actually resolved: the feral-core directory, the
+       interpreter (or why every candidate was rejected) and the brain URL,
+       from the brain_runtime_info command. Monospace and left aligned
+       because these are paths the operator has to read character by
+       character, and scrollable because they are long. */
+    .detail-block {
+      font-family: var(--v2-font-mono);
+      font-size: 0.74rem;
+      line-height: 1.55;
+      color: var(--muted);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.6rem 0.8rem;
+      margin-bottom: 1.1rem;
+      width: 100%;
+      max-width: 460px;
+      max-height: 190px;
+      overflow: auto;
+      text-align: left;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }
     .btn {
       padding: 0.55rem 1.5rem;

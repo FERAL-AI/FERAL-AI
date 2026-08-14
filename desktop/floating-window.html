@@ -28,6 +28,27 @@
     #command-input:focus { border-color: var(--v2-accent); }
     #command-input::placeholder { color: var(--v2-text-tertiary); }
     .response { padding: 12px; margin-top: 8px; background: var(--v2-surface-1); border-radius: 8px; font-size: 13px; color: var(--v2-text-secondary); max-height: 400px; overflow-y: auto; display: none; white-space: pre-wrap; word-break: break-word; }
+    /* Waiting and failed used to be the same empty panel. They are now two
+       distinct, labelled states, and #response carries aria-live so a screen
+       reader is told about either one. */
+    .response.pending { color: var(--v2-text-tertiary); }
+    .response.pending::before {
+      content: "";
+      display: inline-block;
+      width: 7px; height: 7px;
+      margin-right: 7px;
+      border-radius: 50%;
+      background: var(--v2-state-warn);
+      animation: pending-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes pending-pulse {
+      0%, 100% { opacity: .35; }
+      50%      { opacity: 1; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .response.pending::before { animation: none; opacity: 1; }
+    }
+    .response.failed { color: var(--v2-state-error); }
     .status { font-size: 11px; color: var(--v2-text-tertiary); padding: 4px 12px; display: flex; justify-content: space-between; }
     .connected { color: var(--v2-state-live); }
     .disconnected { color: var(--v2-state-error); }
@@ -38,7 +59,7 @@
     <div class="input-row">
       <input id="command-input" type="text" placeholder="Ask FERAL anything..." autofocus />
     </div>
-    <div id="response" class="response"></div>
+    <div id="response" class="response" aria-live="polite"></div>
     <div class="status">
       <span id="status-text" class="disconnected">Connecting...</span>
       <span>Cmd+Shift+F to toggle</span>
@@ -53,20 +74,47 @@
     import { getCurrentWindow } from '@tauri-apps/api/window';
 
     let ws = null;
+    // True between a successful send and the first byte of the reply, so the
+    // pending placeholder can be replaced rather than appended to.
+    let awaitingReply = false;
     const input = document.getElementById('command-input');
     const response = document.getElementById('response');
     const status = document.getElementById('status-text');
 
+    // One place that decides what the response panel says and how it looks.
+    // `kind` is 'pending', 'failed' or 'reply'.
+    function setResponse(text, kind) {
+      response.className = kind === 'reply' ? 'response' : `response ${kind}`;
+      response.textContent = text;
+      response.style.display = 'block';
+      awaitingReply = kind === 'pending';
+    }
+
     function connect() {
       ws = new WebSocket('ws://localhost:9090/v1/session');
       ws.onopen = () => { status.textContent = 'Connected'; status.className = 'connected'; };
-      ws.onclose = () => { status.textContent = 'Disconnected'; status.className = 'disconnected'; setTimeout(connect, 3000); };
+      ws.onerror = () => { status.textContent = 'Disconnected'; status.className = 'disconnected'; };
+      ws.onclose = () => {
+        status.textContent = 'Disconnected';
+        status.className = 'disconnected';
+        // A request that was in flight when the socket closed has no reply
+        // coming. Saying so beats leaving the pending dot pulsing forever.
+        if (awaitingReply) {
+          setResponse('The connection closed before the brain replied. Ask again once the status reads Connected.', 'failed');
+        }
+        setTimeout(connect, 3000);
+      };
       ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'text_response' || msg.type === 'stream_delta') {
             const text = msg.payload?.text || '';
             if (text) {
+              if (awaitingReply) {
+                // Clear the pending placeholder before the first chunk, so a
+                // stream is not appended to the word "Waiting".
+                setResponse('', 'reply');
+              }
               response.style.display = 'block';
               if (msg.type === 'stream_delta' && msg.payload?.final) {
                 // Stream complete
@@ -82,15 +130,30 @@
     }
 
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && input.value.trim()) {
-        response.textContent = '';
-        response.style.display = 'block';
-        ws?.send(JSON.stringify({
-          hop: 'client',
-          type: 'text_command',
-          payload: { text: input.value, context: { source: 'desktop_tray' } }
-        }));
+      if (e.key === 'Enter') {
+        const text = input.value.trim();
+        if (!text) return;
+        // The input used to be cleared unconditionally, before anything was
+        // known about the socket: `ws?.send(...)` is skipped entirely while ws
+        // is null and throws while it is CONNECTING or CLOSED, and either way
+        // the user's text was already gone and an empty panel was already
+        // showing. Nothing leaves the input until a send has succeeded.
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          setResponse('Not connected to the brain, so nothing was sent. Your text is still in the box; press Enter again once the status below reads Connected.', 'failed');
+          return;
+        }
+        try {
+          ws.send(JSON.stringify({
+            hop: 'client',
+            type: 'text_command',
+            payload: { text, context: { source: 'desktop_tray' } }
+          }));
+        } catch (err) {
+          setResponse(`Could not send: ${err}. Your text is still in the box.`, 'failed');
+          return;
+        }
         input.value = '';
+        setResponse('Waiting for the brain …', 'pending');
       }
       if (e.key === 'Escape') {
         getCurrentWindow().hide();
