@@ -9,7 +9,7 @@
  * These tests exercise all three with honest fetch mocks — no shortcuts.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { fireEvent, render, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { installFetchMock, StubWebSocket } from '../_helpers/renderV2';
 import { renderV2 } from '../_helpers/renderV2';
@@ -99,6 +99,58 @@ function makeResponder({ events = baseEvents, stats = baseStats } = {}) {
   };
 }
 
+/**
+ * The shared installFetchMock always answers 200, which cannot express the
+ * cases that matter for a safety control: the Supervisor route raises 503
+ * ("Supervisor not initialised") and the POST answers with the real paused
+ * flag rather than the one that was requested. This mock takes
+ * `{status, body}` per URL so both are reachable.
+ */
+function installStatusFetchMock(responder) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input, init) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      const { status = 200, body = {} } = responder(url, init) || {};
+      const text = () => Promise.resolve(JSON.stringify(body));
+      return Promise.resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        statusText: String(status),
+        json: () => Promise.resolve(body),
+        text,
+        clone: () => ({ text }),
+        headers: new Map(),
+      });
+    }),
+  );
+}
+
+function renderWithStatuses(responder) {
+  installStatusFetchMock(responder);
+  StubWebSocket.instances = [];
+  vi.stubGlobal('WebSocket', StubWebSocket);
+  if (!window.matchMedia) {
+    window.matchMedia = vi.fn().mockImplementation((q) => ({
+      matches: false, media: q, onchange: null,
+      addEventListener: vi.fn(), removeEventListener: vi.fn(),
+      addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn(),
+    }));
+  }
+  return render(
+    <MemoryRouter initialEntries={['/oversight']}>
+      <Oversight />
+    </MemoryRouter>,
+  );
+}
+
+const SUPERVISOR_503 = { status: 503, body: { detail: 'Supervisor not initialised' } };
+
+/** Text of the "Paused" stat pill, label included: "Pausedyes" / "Pausedno". */
+function pausedPillText(getByText) {
+  return getByText('Paused').closest('.v2-oversight-stat').textContent;
+}
+
 describe('Oversight page', () => {
   it('renders header + event rows', async () => {
     const { findByText, getByText } = renderV2(<Oversight />, {
@@ -163,5 +215,104 @@ describe('Oversight page', () => {
     });
     fireEvent.click(getByRole('button', { name: /Back/i }));
     expect(navigateMock).toHaveBeenCalledWith('/glass-brain');
+  });
+});
+
+describe('Oversight kill switch honesty', () => {
+  it('does not claim the Brain is paused when the pause request 503s', async () => {
+    const { findByRole, getByRole, getByText, queryByRole, findByTestId } = renderWithStatuses((url) => {
+      if (url.includes('/api/supervisor/pause')) return SUPERVISOR_503;
+      if (url.includes('/api/supervisor/events')) {
+        return { status: 200, body: { count: baseEvents.length, events: baseEvents } };
+      }
+      if (url.includes('/api/supervisor/stats')) return { status: 200, body: baseStats };
+      return { status: 200, body: {} };
+    });
+
+    const btn = await findByRole('button', { name: /Pause actions/i });
+    await act(async () => { fireEvent.click(btn); });
+
+    // The control rolls back: nothing paused, so nothing says paused.
+    expect(getByRole('button', { name: /Pause actions/i })).toBeInTheDocument();
+    expect(queryByRole('button', { name: /Resume/i })).toBeNull();
+    expect(pausedPillText(getByText)).toContain('no');
+
+    const alert = await findByTestId('oversight-control-error');
+    expect(alert.textContent).toMatch(/was not applied/i);
+    expect(alert.textContent).toMatch(/Supervisor is unreachable/i);
+  });
+
+  it('follows the paused value the server returns, not the optimistic guess', async () => {
+    // /stats is down, so the 4 s poll cannot quietly correct the control:
+    // the POST response body is the only truth in this test. The server
+    // answers `paused: false` to a request that asked for `true`.
+    const { findByRole, getByRole, getByText, queryByRole } = renderWithStatuses((url) => {
+      if (url.includes('/api/supervisor/pause')) return { status: 200, body: { paused: false } };
+      if (url.includes('/api/supervisor/events')) return { status: 200, body: { count: 0, events: [] } };
+      if (url.includes('/api/supervisor/stats')) return SUPERVISOR_503;
+      return { status: 200, body: {} };
+    });
+
+    const btn = await findByRole('button', { name: /Pause actions/i });
+    await act(async () => { fireEvent.click(btn); });
+
+    expect(getByRole('button', { name: /Pause actions/i })).toBeInTheDocument();
+    expect(queryByRole('button', { name: /Resume/i })).toBeNull();
+    expect(pausedPillText(getByText)).toContain('no');
+  });
+
+  it('applies the pause the server confirms', async () => {
+    const { findByRole, getByText } = renderWithStatuses((url) => {
+      if (url.includes('/api/supervisor/pause')) return { status: 200, body: { paused: true } };
+      if (url.includes('/api/supervisor/events')) return { status: 200, body: { count: 0, events: [] } };
+      if (url.includes('/api/supervisor/stats')) return SUPERVISOR_503;
+      return { status: 200, body: {} };
+    });
+
+    const btn = await findByRole('button', { name: /Pause actions/i });
+    await act(async () => { fireEvent.click(btn); });
+
+    expect(await findByRole('button', { name: /Resume/i })).toBeInTheDocument();
+    expect(pausedPillText(getByText)).toContain('yes');
+  });
+
+  it('flags the paused pill as unconfirmed when the stats fetch fails', async () => {
+    const { findByTestId } = renderWithStatuses((url) => {
+      if (url.includes('/api/supervisor/events')) {
+        return { status: 200, body: { count: baseEvents.length, events: baseEvents } };
+      }
+      if (url.includes('/api/supervisor/stats')) return SUPERVISOR_503;
+      return { status: 200, body: {} };
+    });
+
+    const alert = await findByTestId('oversight-control-error');
+    expect(alert.textContent).toMatch(/not confirmed/i);
+    expect(alert.textContent).toMatch(/Supervisor is unreachable/i);
+  });
+});
+
+describe('Oversight audit log honesty', () => {
+  it('shows an unreachable-Supervisor error, not "no events", when the fetch fails', async () => {
+    const { findByTestId, queryByText } = renderWithStatuses((url) => {
+      if (url.includes('/api/supervisor/events')) return SUPERVISOR_503;
+      if (url.includes('/api/supervisor/stats')) return { status: 200, body: baseStats };
+      return { status: 200, body: {} };
+    });
+
+    const box = await findByTestId('oversight-events-error');
+    expect(box.textContent).toMatch(/Audit log unavailable/i);
+    expect(box.textContent).toMatch(/Supervisor is unreachable/i);
+    expect(queryByText(/No events match this filter/i)).toBeNull();
+  });
+
+  it('still renders the plain empty state when the fetch succeeds with no rows', async () => {
+    const { findByText, queryByTestId } = renderWithStatuses((url) => {
+      if (url.includes('/api/supervisor/events')) return { status: 200, body: { count: 0, events: [] } };
+      if (url.includes('/api/supervisor/stats')) return { status: 200, body: baseStats };
+      return { status: 200, body: {} };
+    });
+
+    expect(await findByText(/No events match this filter/i)).toBeInTheDocument();
+    await waitFor(() => expect(queryByTestId('oversight-events-error')).toBeNull());
   });
 });

@@ -10,7 +10,7 @@
  * queued / error).
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, Pause, Play, Shield, Clock, Filter } from 'lucide-react';
+import { RefreshCw, Pause, Play, Shield, Clock, Filter, AlertTriangle } from 'lucide-react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import EmptyState from '../ui/EmptyState';
@@ -29,6 +29,45 @@ const DECISION_TONE = {
   error: 'error',
 };
 
+/**
+ * Local error surface. `src/ui/` has no shared error component yet and
+ * another agent may be adding one, so this stays inside the page. Colours
+ * come from tokens.css; nothing here hard-codes a hex.
+ */
+const ERROR_BOX_STYLE = {
+  display: 'flex',
+  alignItems: 'flex-start',
+  gap: 8,
+  marginTop: 10,
+  padding: '8px 12px',
+  border: '1px solid var(--v2-state-error-soft)',
+  borderRadius: 'var(--v2-radius-sm)',
+  background: 'var(--v2-state-error-soft)',
+  color: 'var(--v2-state-error)',
+  fontSize: 'var(--v2-size-sm)',
+  lineHeight: 1.45,
+};
+
+const ERROR_TITLE_STYLE = { fontWeight: 600 };
+
+/**
+ * Turn an ApiError into a sentence that names the cause. `ApiError` carries
+ * `status`, `code`, `reason` and `detail` (see lib/api.js); a 503 from
+ * api/routes/supervisor.py means the Supervisor never initialised, so say so
+ * rather than showing a bare status number.
+ */
+function describeCause(err) {
+  const status = Number(err?.status) || 0;
+  const detail = String(err?.detail || err?.reason || err?.message || '').trim();
+  if (status === 503) {
+    return `The Supervisor is unreachable (HTTP 503${detail ? `, ${detail}` : ''}).`;
+  }
+  if (status) {
+    return `The request failed (HTTP ${status}${detail ? `, ${detail}` : ''}).`;
+  }
+  return detail ? `${detail}.` : 'The request failed.';
+}
+
 function relativeTime(ts) {
   if (!ts) return '—';
   const diff = Date.now() / 1000 - ts;
@@ -44,6 +83,14 @@ export default function Oversight() {
   const [filters, setFilters] = useState({ source: '', decision: '', actor: '' });
   const [paused, setPaused] = useState(false);
   const [loading, setLoading] = useState(true);
+  // "We asked and there is nothing" and "we could not ask" are different
+  // states. eventsError holds the second one so the river never renders an
+  // empty audit log it never actually read.
+  const [eventsError, setEventsError] = useState(null);
+  // statsError means the paused pill below is last-known, not confirmed.
+  const [statsError, setStatsError] = useState(null);
+  // pauseError is the kill switch itself failing to apply.
+  const [pauseError, setPauseError] = useState(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -53,12 +100,23 @@ export default function Oversight() {
       if (filters.source) params.set('source', filters.source);
       if (filters.decision) params.set('decision', filters.decision);
       if (filters.actor) params.set('actor', filters.actor);
-      const d = await apiJson(`/api/supervisor/events?${params.toString()}`);
-      setEvents(d?.events || []);
-      const s = await apiJson('/api/supervisor/stats').catch(() => null);
-      if (s) {
+      try {
+        const d = await apiJson(`/api/supervisor/events?${params.toString()}`);
+        setEvents(d?.events || []);
+        setEventsError(null);
+      } catch (err) {
+        setEventsError(describeCause(err));
+      }
+      try {
+        const s = await apiJson('/api/supervisor/stats');
         setStats(s);
         setPaused(!!s.paused);
+        // A successful stats read is fresh truth about the kill switch, so
+        // any earlier "could not confirm" / "did not apply" notice is stale.
+        setStatsError(null);
+        setPauseError(null);
+      } catch (err) {
+        setStatsError(describeCause(err));
       }
     } finally {
       setLoading(false);
@@ -80,15 +138,37 @@ export default function Oversight() {
     return unsub;
   }, [socket]);
 
+  /**
+   * The kill switch. Never claim a halt we have not been told happened:
+   * the pill and the button follow the `paused` value in the response body
+   * (api/routes/supervisor.py returns `{"paused": sup.paused}`), and a failed
+   * request rolls the control back to the value it had before the click.
+   */
   const togglePause = async () => {
+    const previous = paused;
     const next = !paused;
-    setPaused(next);
-    await apiFetch('/api/supervisor/pause', {
-      method: 'POST',
-      body: JSON.stringify({ paused: next }),
-    });
-    refresh();
+    setPauseError(null);
+    try {
+      const res = await apiFetch('/api/supervisor/pause', {
+        method: 'POST',
+        body: JSON.stringify({ paused: next }),
+      });
+      const body = await res.json().catch(() => null);
+      // Server truth wins. Only fall back to the requested value if the body
+      // carried no `paused` field at all.
+      setPaused(typeof body?.paused === 'boolean' ? body.paused : next);
+      refresh();
+    } catch (err) {
+      setPaused(previous);
+      setPauseError(
+        `${next ? 'Pause' : 'Resume'} was not applied, the Brain is still ${previous ? 'paused' : 'running'}. ${describeCause(err)}`,
+      );
+    }
   };
+
+  // A kill switch that did not apply is more urgent than an unconfirmed pill.
+  const controlError = pauseError
+    || (statsError ? `Paused state not confirmed. ${statsError}` : null);
 
   const filtered = useMemo(() => {
     if (!filters.source && !filters.decision && !filters.actor) return events;
@@ -127,9 +207,23 @@ export default function Oversight() {
           halt every outgoing action immediately.
         </p>
 
+        {controlError && (
+          <div style={ERROR_BOX_STYLE} role="alert" data-testid="oversight-control-error">
+            <AlertTriangle size={14} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2 }} />
+            <span>{controlError}</span>
+          </div>
+        )}
+
         <div className="v2-oversight-stats">
           <StatPill label="Total" value={stats?.total ?? '—'} />
-          <StatPill label="Paused" value={paused ? 'yes' : 'no'} tone={paused ? 'warn' : 'live'} />
+          <StatPill
+            label="Paused"
+            value={paused ? 'yes' : 'no'}
+            tone={paused ? 'warn' : 'live'}
+            title={statsError
+              ? 'Last known value. The Supervisor could not be reached to confirm it.'
+              : undefined}
+          />
           {stats?.by_source && Object.entries(stats.by_source).slice(0, 6).map(([src, n]) => (
             <StatPill key={src} label={src} value={n} />
           ))}
@@ -160,8 +254,18 @@ export default function Oversight() {
       </Pane>
 
       <Pane title={`Events · ${filtered.length}`}>
-        {loading && filtered.length === 0 && <EmptyState title="Loading…" />}
-        {!loading && filtered.length === 0 && (
+        {eventsError && (
+          <div style={ERROR_BOX_STYLE} role="alert" data-testid="oversight-events-error">
+            <AlertTriangle size={14} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2 }} />
+            <div>
+              <div style={ERROR_TITLE_STYLE}>Audit log unavailable</div>
+              <div>{eventsError}</div>
+              <div>This is not an empty log. The events below, if any, may be stale.</div>
+            </div>
+          </div>
+        )}
+        {loading && !eventsError && filtered.length === 0 && <EmptyState title="Loading…" />}
+        {!loading && !eventsError && filtered.length === 0 && (
           <EmptyState title="No events match this filter" />
         )}
         <ul className="v2-oversight-list">
@@ -211,9 +315,9 @@ function Select({ label, value, onChange, options }) {
   );
 }
 
-function StatPill({ label, value, tone }) {
+function StatPill({ label, value, tone, title }) {
   return (
-    <Glass level={0} radius="md" padding="sm" className="v2-oversight-stat">
+    <Glass level={0} radius="md" padding="sm" className="v2-oversight-stat" title={title}>
       <div className="v2-stat-label">{label}</div>
       <div className={`v2-stat-value${tone ? ` is-${tone}` : ''}`}>{value}</div>
     </Glass>
