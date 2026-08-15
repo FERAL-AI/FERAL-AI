@@ -12,6 +12,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { CheckCircle2, Smartphone, ShieldCheck, Zap, AlertTriangle } from "lucide-react";
 import { Navigate } from "react-router-dom";
 import BrowserNode, { browserNodeId } from "../node/BrowserNode";
+import StatusDot from "../ui/StatusDot";
 import {
   clearPhoneBearer,
   getLatestPhoneBearer,
@@ -358,18 +359,15 @@ export default function Pair() {
             <LiveRow
               label="Location"
               active={permissions.location}
-              color="var(--v2-state-live)"
             />
             <LiveRow
               label="Microphone"
               active={permissions.mic}
-              color="var(--v2-state-warn)"
               onToggle={toggleMic}
             />
             <LiveRow
               label="Camera"
               active={permissions.camera}
-              color="var(--v2-state-error)"
               onToggle={toggleCamera}
             />
           </div>
@@ -532,17 +530,34 @@ function PermissionToggle({ label, on, onChange }) {
   );
 }
 
-function LiveRow({ label, active, color, onToggle }) {
+// The dot here was hand-rolled, and wrong in three ways that StatusDot
+// already solves.
+//
+// It animated `v2-pulse`, a keyframe that is defined nowhere in the client,
+// so the indicator was silently static. Being an inline style it also sat
+// above the stylesheet, so the reduced-motion overrides could never have
+// switched it off even once the keyframe existed.
+//
+// It had no accessible name, so whether a permission was granted was
+// carried to a screen reader by nothing at all.
+//
+// And its colour was passed in per row: Location green, Microphone amber,
+// Camera red, fixed, regardless of whether the permission was actually
+// granted. That is hue used to tell three rows apart, next to labels that
+// already tell them apart, on a component whose own token file says colour
+// appears only on real system state. Green for a granted mic and red for a
+// granted camera says something untrue about both.
+//
+// Tone now derives from `active`, which is the real state, and the label
+// says which state it is rather than leaving it to the colour.
+function LiveRow({ label, active, onToggle }) {
   return (
     <div style={toggleRow}>
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-        <span
-          style={{
-            width: 8, height: 8, borderRadius: "50%",
-            background: active ? color : "var(--v2-text-tertiary)",
-            boxShadow: active ? `0 0 8px ${color}` : "none",
-            animation: active ? "v2-pulse 1.4s ease-in-out infinite" : "none",
-          }}
+        <StatusDot
+          tone={active ? "live" : "off"}
+          pulse={active}
+          label={`${label}: ${active ? "granted" : "not granted"}`}
         />
         <span>{label}</span>
       </span>

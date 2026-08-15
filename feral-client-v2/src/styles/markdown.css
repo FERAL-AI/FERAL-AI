@@ -28,7 +28,7 @@
 .v2-md li { margin: 2px 0; }
 .v2-md li > p { margin: 0; }
 .v2-md a {
-  color: var(--v2-accent);
+  color: var(--v2-accent-text);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -206,7 +206,7 @@
 .v2-budget-banner__spend { font-weight: 400; color: var(--v2-text-secondary); }
 .v2-budget-banner__sub { color: var(--v2-text-secondary); font-size: 12px; margin-top: 2px; }
 .v2-budget-banner__link {
-  color: var(--v2-accent);
+  color: var(--v2-accent-text);
   text-decoration: underline;
   font-weight: 600;
 }
@@ -622,7 +622,7 @@
 .v2-timeline-card__rowtitle { font-weight: 600; }
 .v2-timeline-card__ref {
   font-size: 11px;
-  color: var(--v2-accent);
+  color: var(--v2-accent-text);
   text-decoration: underline;
 }
 

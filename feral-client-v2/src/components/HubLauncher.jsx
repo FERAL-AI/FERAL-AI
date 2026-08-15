@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import useFocusTrap from '../ui/useFocusTrap';
 import { useNavigate } from 'react-router-dom';
 import {
   Hammer, Wrench, Database, BookOpen, Users, UserCircle2,
@@ -42,6 +43,7 @@ const HUB_ITEMS = [
 export default function HubLauncher({ open, onClose }) {
   const navigate = useNavigate();
   const inputRef = useRef(null);
+  const dialogRef = useRef(null);
   const [query, setQuery] = useState('');
   // Phase-1 truthfulness: show the Pair CTA when the operator has
   // never paired anything (`paired_count == 0`), not when the brain
@@ -77,6 +79,16 @@ export default function HubLauncher({ open, onClose }) {
     setTimeout(() => inputRef.current?.focus(), 30);
   }, [open]);
 
+  // This dialog declared aria-modal="true" while doing nothing to contain
+  // focus, so Tab walked straight out into the page behind it. Same hook
+  // Modal uses; `focusOnOpen: 'none'` because the effect above deliberately
+  // puts initial focus in the search field, and no scroll lock because this
+  // popup does not cover the whole viewport.
+  useFocusTrap(open, () => dialogRef.current, {
+    lockScroll: false,
+    focusOnOpen: 'none',
+  });
+
   useEffect(() => {
     if (!open) return undefined;
     const onKey = (e) => {
@@ -109,7 +121,7 @@ export default function HubLauncher({ open, onClose }) {
       role="presentation"
       onClick={(e) => { if (e.target === e.currentTarget) onClose?.(); }}
     >
-      <div className="v2-hub" role="dialog" aria-label="Hub launcher" aria-modal="true">
+      <div ref={dialogRef} className="v2-hub" role="dialog" aria-label="Hub launcher" aria-modal="true" tabIndex={-1}>
         <header className="v2-hub-head">
           <Search size={14} aria-hidden="true" />
           <input

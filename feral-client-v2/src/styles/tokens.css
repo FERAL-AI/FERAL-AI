@@ -109,6 +109,25 @@
   --v2-accent-soft: rgba(10, 132, 255, 0.18);
   --v2-accent-ring: rgba(10, 132, 255, 0.35);
 
+  /* The accent as TEXT, which is a different problem from the accent as a
+   * fill. #0A84FF measures 4.49:1 on the shell base, one hundredth under
+   * AA, and only 3.68:1 on --v2-surface-elev, which is where most of these
+   * labels actually sit. A chip on a raised card was the worst case and
+   * the easiest to miss, because checking the accent against the page
+   * background alone says "borderline" rather than "failing".
+   *
+   * Lightened to clear AA on the worst dark surface: 5.71 on the base,
+   * 4.69 on elevated. Deliberately a separate token rather than moving
+   * --v2-accent, because the accent is overwhelmingly used as a FILL
+   * behind white text, where 4.49 against the page is irrelevant and
+   * lightening it would wash out every primary button in the client.
+   * Same hue, same family, one step brighter.
+   *
+   * Light mode needs no split: #0066CC on the light base is 6.55:1, so
+   * --v2-accent-text is simply the accent there.
+   */
+  --v2-accent-text: #3D9BFF;
+
   /* Primary-CTA fill. A single-hue ramp: the accent falling to a deeper
    * shade of itself. Replaces an accent-to-indigo (#5E5CE6) gradient that
    * put a purple cast on the phone CTAs, which the neutral + one-accent
@@ -237,6 +256,8 @@
   --v2-accent: #0066CC;
   --v2-accent-soft: rgba(0, 102, 204, 0.12);
   --v2-accent-ring: rgba(0, 102, 204, 0.28);
+  /* 6.55:1 on the light base, so no split is needed here. */
+  --v2-accent-text: #0066CC;
   --v2-accent-gradient: linear-gradient(135deg, #0066CC 0%, #004C99 100%);
 
   /* The light-mode state colours are used as *text* by .v2-chip--live,
@@ -306,6 +327,8 @@
     --v2-accent: #0066CC;
     --v2-accent-soft: rgba(0, 102, 204, 0.12);
     --v2-accent-ring: rgba(0, 102, 204, 0.28);
+  /* 6.55:1 on the light base, so no split is needed here. */
+  --v2-accent-text: #0066CC;
     --v2-accent-gradient: linear-gradient(135deg, #0066CC 0%, #004C99 100%);
     --v2-state-live: #177636;
     --v2-state-live-soft: rgba(23, 118, 54, 0.14);

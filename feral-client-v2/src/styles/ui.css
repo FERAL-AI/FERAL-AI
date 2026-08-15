@@ -191,7 +191,7 @@
 }
 .v2-dock-btn.is-active,
 .v2-dock-btn[aria-pressed="true"] {
-  color: var(--v2-accent);
+  color: var(--v2-accent-text);
   background: var(--v2-accent-soft);
 }
 .v2-dock-btn.is-active::after {
@@ -239,7 +239,7 @@
   border-left: 1px solid var(--v2-hairline);
 }
 .v2-dock-btn--cta {
-  color: var(--v2-accent);
+  color: var(--v2-accent-text);
   background: var(--v2-accent-soft);
 }
 .v2-dock-btn--cta:hover { background: var(--v2-accent); color: var(--v2-text-inverse); }
@@ -331,12 +331,12 @@
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
-.v2-liveops-tag--skill { color: var(--v2-accent); border-color: var(--v2-accent-soft); }
+.v2-liveops-tag--skill { color: var(--v2-accent-text); border-color: var(--v2-accent-soft); }
 .v2-liveops-tag--tool { color: var(--v2-text-primary); }
 .v2-liveops-tag--mem { color: var(--v2-state-live); border-color: var(--v2-state-live-soft); }
 .v2-liveops-tag--node { color: var(--v2-state-warn); border-color: var(--v2-state-warn-soft); }
 .v2-liveops-tag--chan { color: var(--v2-text-secondary); }
-.v2-liveops-tag--forge { color: var(--v2-accent); }
+.v2-liveops-tag--forge { color: var(--v2-accent-text); }
 .v2-liveops-tag--alert { color: var(--v2-state-error); border-color: var(--v2-state-error-soft); }
 
 /* ── Orb ─────────────────────────────────────────────────────── */
@@ -432,7 +432,7 @@
 .v2-menubar-voice:hover:not(:disabled) { color: var(--v2-text-primary); background: var(--v2-surface-1); }
 .v2-menubar-voice:disabled { opacity: 0.45; cursor: not-allowed; }
 .v2-menubar-voice.is-active {
-  color: var(--v2-accent);
+  color: var(--v2-accent-text);
   background: var(--v2-accent-soft);
   border-color: var(--v2-accent-soft);
 }
@@ -669,7 +669,7 @@
   padding: 0 6px;
   border-radius: var(--v2-radius-pill);
   background: var(--v2-accent-soft);
-  color: var(--v2-accent);
+  color: var(--v2-accent-text);
   font-size: 10px;
   line-height: 1.5;
   font-variant-numeric: tabular-nums;
