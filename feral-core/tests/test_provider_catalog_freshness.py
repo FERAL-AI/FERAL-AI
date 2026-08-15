@@ -12,10 +12,39 @@ exited 0; and ``peter-evans/create-pull-request`` correctly opened no PR
 because nothing had changed. Every layer behaved "correctly" and the
 net effect was three months of invisible drift.
 
-That is expensive, not cosmetic. ``cost/pricing.py`` reads ALL pricing
-from ``model_catalog.json`` and is documented as the single source of
-truth, so every cost calculation and every budget cap in the system was
-running on April rates while frontier models shipped and prices moved.
+``cost/pricing.py`` reads ALL pricing from ``model_catalog.json`` and is
+documented as the single source of truth, so a stale catalog means the
+system is quoting old rates while frontier models ship and prices move.
+
+How much that costs, precisely
+------------------------------
+This docstring used to say "every cost calculation and every budget cap
+in the system was running on April rates", and the failure message said
+the same. That overstates it, and the overstatement is why this test read
+as an emergency for something that is usually cosmetic.
+
+``cost/budget.py:44`` ships the budget UNLIMITED by default, deliberately,
+since v2026.5.47. Until an operator types a number into Settings, or sets
+``cost.global_per_hour_usd``, ``_cap_for`` returns ``None`` for every
+call site and window and ``BudgetLoopGuard.allow()`` always passes. And
+the cost-ordered provider routing in ``agents/llm_provider.py`` only
+reorders candidates when budget headroom is tight, which cannot happen
+without a cap.
+
+So on a default install, prices drive one thing: the "you used N tokens,
+that cost about $X" figure. Stale rates make that figure slightly wrong.
+Nothing is gated, throttled or refused.
+
+The moment an operator sets a cap, the same numbers start deciding what
+runs, and being wrong in the cheap direction means sailing past a limit
+they asked for. That is the real risk, and it is real, but it belongs to
+installs that opted in rather than to every build.
+
+Hence two thresholds instead of one. Past ``WARN_AFTER_DAYS`` the catalog
+is stale and this file says so loudly. Past ``MAX_AGE_DAYS`` it is stale
+enough that the displayed figure is likely wrong for models that did not
+exist when it was written, and the build fails. A permanently red build
+that everyone learns to ignore protects nothing.
 
 ``--require-keys`` (which CI now passes) closes the hole from the
 workflow side. This test closes it from the repository side: even if
@@ -37,16 +66,27 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import warnings
 
 import pytest
 
 from providers.catalog_data import catalog_path
 
 # Two weeks. The refresher runs daily, so this tolerates ~13 consecutive
-# failed or skipped runs before going red — long enough to absorb a
-# holiday weekend plus a provider outage, short enough that a quarter of
-# silent drift is impossible.
-MAX_AGE_DAYS = 14
+# failed or skipped runs before it is worth saying something: long enough
+# to absorb a holiday weekend plus a provider outage.
+WARN_AFTER_DAYS = 14
+
+# Six weeks. Past this the catalog predates whole model generations and
+# the cost figure shown to the operator is wrong for anything launched
+# since, so the build fails.
+#
+# Not 14, because at 14 days the only consequence on a default install is
+# a slightly wrong number on a usage screen (see the module docstring),
+# and a build that is red for six weeks over a display value is a build
+# nobody reads. The guard the repo actually needed was against a quarter
+# of silent drift, which this still catches with five weeks to spare.
+MAX_AGE_DAYS = 42
 
 
 def _load_catalog() -> dict:
@@ -72,23 +112,58 @@ def test_catalog_declares_last_fetched() -> None:
     )
 
 
-def test_catalog_is_not_stale() -> None:
-    """Fail when the catalog has not been refreshed in ~two weeks."""
+def _catalog_age() -> dt.timedelta:
     catalog = _load_catalog()
     fetched = dt.datetime.fromisoformat(str(catalog["last_fetched"]))
-    age = dt.datetime.now(dt.timezone.utc) - fetched
+    return dt.datetime.now(dt.timezone.utc) - fetched
+
+
+_REFRESH_INSTRUCTIONS = (
+    "Fix: run `python scripts/research_providers.py --require-keys` and "
+    "commit the result. Do NOT hand-edit `last_fetched`, that silences the "
+    "guard without refreshing anything. If the script fails on missing API "
+    "keys, the PROVIDER_RESEARCH_* repository secrets do not exist; that is "
+    "the bug to fix."
+)
+
+
+def test_catalog_staleness_is_reported() -> None:
+    # No `recwarn` fixture here on purpose. Requesting it captures warnings
+    # raised in the test instead of letting them propagate, so the warning
+    # would never reach the run summary and this guard would report
+    # staleness to nobody. That is the exact failure it exists to prevent.
+    """Warn, without failing, once the catalog passes WARN_AFTER_DAYS.
+
+    Visible on every run rather than only when someone opens CI, and it
+    does not turn the build red for a figure that is display-only until an
+    operator sets a spending cap.
+    """
+    age = _catalog_age()
+    if age <= dt.timedelta(days=WARN_AFTER_DAYS):
+        return
+
+    warnings.warn(
+        f"providers/model_catalog.json is {age.days} days old, past the "
+        f"{WARN_AFTER_DAYS}-day refresh window. On a default install this "
+        "only skews the reported token cost, since cost/budget.py ships "
+        "unlimited and nothing is gated until an operator sets a cap. If a "
+        f"cap IS set, stale rates can let spend past it. Build fails at "
+        f"{MAX_AGE_DAYS} days.\n\n" + _REFRESH_INSTRUCTIONS,
+        stacklevel=1,
+    )
+
+
+def test_catalog_is_not_hopelessly_stale() -> None:
+    """Fail once the catalog predates whole model generations."""
+    age = _catalog_age()
     assert age <= dt.timedelta(days=MAX_AGE_DAYS), (
         f"providers/model_catalog.json was last refreshed {age.days} days "
-        f"ago ({catalog['last_fetched']}), over the {MAX_AGE_DAYS}-day "
-        "limit.\n\n"
-        "cost/pricing.py reads ALL pricing from this file, so a stale "
-        "catalog means every cost calculation and budget cap in the "
-        "system is running on stale rates.\n\n"
-        "Fix: run `python scripts/research_providers.py --require-keys` "
-        "and commit the result. Do NOT hand-edit `last_fetched` — that "
-        "silences the guard without refreshing anything. If the script "
-        "fails on missing API keys, the PROVIDER_RESEARCH_* repository "
-        "secrets do not exist; that is the bug to fix."
+        f"ago, over the {MAX_AGE_DAYS}-day hard limit.\n\n"
+        "cost/pricing.py reads ALL pricing from this file. At this age it "
+        "predates model generations, so the cost reported for anything "
+        "launched since is wrong, and any spending cap an operator has set "
+        "is being enforced against rates that no longer exist.\n\n"
+        + _REFRESH_INSTRUCTIONS
     )
 
 
