@@ -15,16 +15,19 @@
  * app. No fake fields; every input/CLI example corresponds to a real route
  * on the brain or a real `feral app …` command.
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowLeft, CheckCircle2, XCircle, Terminal, Package, GitBranch, Folder,
-  FileCheck2, Rocket, BookOpen, Copy, Check,
+  FileCheck2, Rocket, BookOpen,
 } from 'lucide-react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import CodeEditor from '../ui/CodeEditor';
-import { apiFetch, apiJson } from '../lib/api';
+import CopyButton from '../ui/CopyButton';
+import ErrorState from '../ui/ErrorState';
+import { apiFetch } from '../lib/api';
+import { useResource } from '../hooks/useResource';
 
 // Example manifest content, not FERAL chrome. The #6F4E37 below is the
 // fictional Coffee Log app's own brand mark and is meant to show that a
@@ -76,34 +79,21 @@ data_schemas:
     schema: { type: object }
 `;
 
-function useCopy() {
-  const [copied, setCopied] = useState(null);
-  const copy = useCallback((id, text) => {
-    try {
-      navigator.clipboard.writeText(text);
-      setCopied(id);
-      setTimeout(() => setCopied((c) => (c === id ? null : c)), 1400);
-    } catch { /* ignore */ }
-  }, []);
-  return [copied, copy];
-}
-
+// The local `useCopy` this file used to carry called
+// `navigator.clipboard.writeText(text)` inside a synchronous `try` and
+// then set the copied flag unconditionally. `writeText` returns a
+// promise; on an insecure origin or a denied permission it rejects
+// after the try block has already exited, so the checkmark appeared for
+// a clipboard that was never written. ui/CopyButton awaits the write
+// and confirms only what actually happened.
 function CliBlock({ id, label, cmd }) {
-  const [copied, copy] = useCopy();
   return (
     <div className="v2-publish-cli">
       {label && <div className="v2-publish-cli-label">{label}</div>}
       <div className="v2-publish-cli-row">
         <Terminal size={13} aria-hidden="true" />
         <code>{cmd}</code>
-        <button
-          type="button"
-          className="v2-btn v2-btn--ghost"
-          onClick={() => copy(id, cmd)}
-          aria-label={`Copy command: ${cmd}`}
-        >
-          {copied === id ? <Check size={13} /> : <Copy size={13} />}
-        </button>
+        <CopyButton value={cmd} label={`Copy command: ${cmd}`} testId={`cli-copy-${id}`} />
       </div>
     </div>
   );
@@ -433,14 +423,36 @@ function PublishStep() {
 }
 
 function DocsStep() {
-  const [health, setHealth] = useState(null);
-  useEffect(() => {
-    apiJson('/api/apps').then((d) => setHealth({ count: d?.count ?? (d?.apps?.length || 0) })).catch(() => setHealth(null));
-  }, []);
+  // Was: `.catch(() => setHealth(null))` feeding `{health ? count : '…'}`,
+  // so a failed /api/apps left an ellipsis on screen forever. That is
+  // the same lie as a false empty state wearing a spinner: it says the
+  // answer is still coming when the request already failed.
+  const {
+    data: health, error, loading, refresh,
+  } = useResource('/api/apps', {
+    select: (d) => ({ count: d?.count ?? (d?.apps?.length || 0) }),
+  });
+
   return (
     <Pane title="Live state">
+      {loading && !health && (
+        <p className="v2-p v2-p--muted">Counting the apps installed on this brain…</p>
+      )}
+      {error && !health && (
+        <ErrorState
+          error={error}
+          what="the installed app count"
+          hint="Your apps are unaffected; the client just could not read the count."
+          compact
+          onRetry={refresh}
+        />
+      )}
+      {health && (
+        <p className="v2-p v2-p--muted">
+          Apps currently installed on this brain: <strong>{health.count}</strong>.
+        </p>
+      )}
       <p className="v2-p v2-p--muted">
-        Apps currently installed on this brain: <strong>{health ? health.count : '…'}</strong>.
         Open <Link to="/apps">/apps</Link> for the user-facing launcher.
       </p>
       <p className="v2-p v2-p--muted v2-p--tiny" style={{ marginTop: 6 }}>

@@ -1,11 +1,40 @@
-import React, { useCallback, useEffect, useState } from 'react';
+/**
+ * Memory: the four-tier store, one tab per tier.
+ *
+ * Every tab in this file used to turn a failed fetch into an empty
+ * result: `.then(setItems).finally(() => setLoading(false))` with no
+ * catch, or a `Promise.allSettled` whose rejected leg was simply not
+ * read. The list state stayed `[]`, `loading` went false, and the page
+ * asserted "No notes saved yet" / "No episodes yet" / "No tool calls
+ * yet" / "Knowledge graph is empty" about a brain it had never
+ * successfully reached, with a fabricated `(0)` in the pane title next
+ * to it. All five tabs now go through useResource, which never
+ * substitutes an empty value for an answer it does not have, and each
+ * renders ErrorState instead of EmptyState when the ask itself failed.
+ */
+import React, { useCallback, useState } from 'react';
 import { Search, Plus, Network, Database, Clock, ScrollText } from 'lucide-react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import Tabs from '../ui/Tabs';
 import EmptyState from '../ui/EmptyState';
+import ErrorState from '../ui/ErrorState';
 import Modal from '../ui/Modal';
-import { apiJson, apiFetch } from '../lib/api';
+import { apiFetch } from '../lib/api';
+import { useResource } from '../hooks/useResource';
+
+/**
+ * Pull the first array-valued key out of a response, else the response
+ * itself when it is already an array. Returns `[]` only for a shape we
+ * genuinely cannot read, never for a failed request: useResource keeps
+ * `data` null in that case and `select` does not run at all.
+ */
+function asList(value, ...keys) {
+  for (const key of keys) {
+    if (Array.isArray(value?.[key])) return value[key];
+  }
+  return Array.isArray(value) ? value : [];
+}
 
 export default function Memory() {
   const [tab, setTab] = useState('recent');
@@ -41,71 +70,71 @@ export default function Memory() {
 }
 
 function RecentTab() {
-  const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [showNew, setShowNew] = useState(false);
   // AUDIT-r14 D-L fix: surface real per-tier totals from /api/memory/stats
   // so the tab title shows e.g. "Recent (4361 episodes · 12 notes)"
   // instead of always claiming 0. The recent-notes list still renders
-  // the bounded `/internal/memory/recent` slice — the count above is
+  // the bounded `/internal/memory/recent` slice; the count above is
   // the truthful number.
   // RC polish: backend canonical key is ``knowledge_triples``; the
   // legacy ``knowledge`` alias is still accepted for back-compat with
-  // older brains. ``statsState.ok === false`` surfaces the degraded
-  // chip instead of a misleading row of zeros.
-  const [totals, setTotals] = useState({ notes: 0, episodes: 0, knowledge: 0 });
-  const [statsState, setStatsState] = useState({ ok: true, reason: '' });
+  // older brains. A degraded (``ok: false``) or unreachable stats call
+  // surfaces the chip instead of a misleading row of zeros, and the
+  // title drops the counts entirely rather than printing zeros.
+  const {
+    data: notes, error: notesError, loading, refresh: refreshNotes,
+  } = useResource('/internal/memory/recent', {
+    select: (d) => asList(d, 'memories', 'notes'),
+  });
+  const {
+    data: stats, error: statsError, refresh: refreshStats,
+  } = useResource('/api/memory/stats', { silent: true });
 
-  const refresh = useCallback(async () => {
-    try {
-      const [recent, stats] = await Promise.allSettled([
-        apiJson('/internal/memory/recent'),
-        apiJson('/api/memory/stats', { silent: true }),
-      ]);
-      if (recent.status === 'fulfilled') {
-        const d = recent.value;
-        setItems(d.memories || d.notes || d || []);
-      }
-      if (stats.status === 'fulfilled') {
-        const t = stats.value?.totals || {};
-        const knowledge = t.knowledge_triples ?? t.knowledge ?? 0;
-        setTotals({
-          notes: Number(t.notes ?? 0),
-          episodes: Number(t.episodes ?? 0),
-          knowledge: Number(knowledge),
-        });
-        setStatsState({
-          ok: stats.value?.ok !== false,
-          reason: stats.value?.reason || '',
-        });
-      } else {
-        setStatsState({ ok: false, reason: 'stats_unreachable' });
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const items = notes || [];
+  const refresh = useCallback(
+    () => Promise.all([refreshNotes(), refreshStats()]),
+    [refreshNotes, refreshStats],
+  );
 
-  useEffect(() => { refresh(); }, [refresh]);
+  const tiers = stats?.totals || {};
+  const totals = {
+    notes: Number(tiers.notes ?? 0),
+    episodes: Number(tiers.episodes ?? 0),
+    knowledge: Number(tiers.knowledge_triples ?? tiers.knowledge ?? 0),
+  };
+  // Two different failures, one chip: the brain answered "my stats are
+  // degraded", or we never got an answer at all. Both mean the numbers
+  // are unknown, and the reason distinguishes them.
+  const statsOk = !statsError && !!stats && stats.ok !== false;
+  const statsReason = statsError ? 'stats_unreachable' : (stats?.reason || '');
 
-  const title = `Recent (${totals.episodes} episodes · ${totals.notes} notes · ${totals.knowledge} knowledge)`;
+  const title = statsOk
+    ? `Recent (${totals.episodes} episodes · ${totals.notes} notes · ${totals.knowledge} knowledge)`
+    : 'Recent';
 
   return (
     <Pane
       title={title}
       actions={<button type="button" className="v2-btn v2-btn--primary" onClick={() => setShowNew(true)}><Plus size={13} /> Save memory</button>}
     >
-      {!statsState.ok && (
+      {!statsOk && (stats || statsError) && (
         <span
           className="v2-chip v2-chip--warn"
           role="status"
           data-testid="memory-stats-degraded"
         >
-          Memory stats unavailable ({statsState.reason || 'unknown'})
+          Memory stats unavailable ({statsReason || 'unknown'})
         </span>
       )}
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && items.length === 0 && <EmptyState title="No notes saved yet" hint="Episodes are written automatically per chat turn; notes are explicit Save Memory items." />}
+      {loading && !notes && <EmptyState title="Loading…" />}
+      {notesError && !notes && (
+        <ErrorState
+          error={notesError}
+          what="your recent memories"
+          onRetry={refresh}
+        />
+      )}
+      {notes && items.length === 0 && <EmptyState title="No notes saved yet" hint="Episodes are written automatically per chat turn; notes are explicit Save Memory items." />}
       <ul className="v2-mem-list">
         {items.slice(0, 30).map((m, i) => (
           <li key={m.id || i}>
@@ -184,19 +213,27 @@ function SaveMemoryModal({ onClose, onSaved }) {
 
 function SearchTab() {
   const [q, setQ] = useState('');
-  const [results, setResults] = useState([]);
-  const [busy, setBusy] = useState(false);
+  // The submitted query, not the input. A search that failed used to
+  // land in the same `results = []` as a search that genuinely matched
+  // nothing, and the page said "No results" for both.
+  const [query, setQuery] = useState('');
+  const {
+    data: hits, error, loading, refresh,
+  } = useResource(
+    query ? `/internal/memory/search?q=${encodeURIComponent(query)}` : null,
+    { select: (d) => asList(d, 'results', 'memories') },
+  );
 
-  const go = async (e) => {
+  const results = hits || [];
+  const busy = !!query && loading && !hits;
+
+  const go = (e) => {
     e.preventDefault();
-    if (!q.trim()) return;
-    setBusy(true);
-    try {
-      const d = await apiJson(`/internal/memory/search?q=${encodeURIComponent(q)}`);
-      setResults(d.results || d.memories || d || []);
-    } finally {
-      setBusy(false);
-    }
+    const next = q.trim();
+    if (!next) return;
+    // Re-submitting the same text has to re-ask, not no-op.
+    if (next === query) refresh();
+    else setQuery(next);
   };
 
   return (
@@ -207,33 +244,48 @@ function SearchTab() {
           <Search size={13} /> {busy ? 'Searching…' : 'Search'}
         </button>
       </form>
-      <ul className="v2-mem-list" style={{ marginTop: 12 }}>
-        {results.map((r, i) => (
-          <li key={r.id || i}>
-            <Glass level={0} radius="md" padding="md">
-              <div className="v2-mem-content">{r.content || r.text || JSON.stringify(r).slice(0, 200)}</div>
-              {r.score != null && <div className="v2-mem-meta"><span className="v2-chip">score {(r.score).toFixed(3)}</span></div>}
-            </Glass>
-          </li>
-        ))}
-        {!busy && q && results.length === 0 && <EmptyState title="No results" />}
-      </ul>
+      {/* Unlike a polling surface, stale rows here answer a DIFFERENT
+          question than the one on screen, so a failed search hides the
+          previous search's hits instead of leaving them to be misread
+          as results for this query. */}
+      {error && (
+        <ErrorState
+          error={error}
+          what={`search results for "${query}"`}
+          onRetry={refresh}
+        />
+      )}
+      {!error && (
+        <ul className="v2-mem-list" style={{ marginTop: 12 }}>
+          {results.map((r, i) => (
+            <li key={r.id || i}>
+              <Glass level={0} radius="md" padding="md">
+                <div className="v2-mem-content">{r.content || r.text || JSON.stringify(r).slice(0, 200)}</div>
+                {r.score != null && <div className="v2-mem-meta"><span className="v2-chip">score {(r.score).toFixed(3)}</span></div>}
+              </Glass>
+            </li>
+          ))}
+          {!busy && hits && results.length === 0 && <EmptyState title="No results" />}
+        </ul>
+      )}
     </Pane>
   );
 }
 
 function EpisodesTab() {
-  const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    apiJson('/internal/episodes/recent')
-      .then((d) => setItems(d.episodes || d || []))
-      .finally(() => setLoading(false));
-  }, []);
+  const {
+    data: episodes, error, loading, refresh,
+  } = useResource('/internal/episodes/recent', {
+    select: (d) => asList(d, 'episodes'),
+  });
+  const items = episodes || [];
   return (
-    <Pane title={`Episodes (${items.length})`}>
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && items.length === 0 && <EmptyState title="No episodes yet" />}
+    <Pane title={episodes ? `Episodes (${items.length})` : 'Episodes'}>
+      {loading && !episodes && <EmptyState title="Loading…" />}
+      {error && !episodes && (
+        <ErrorState error={error} what="your episodes" onRetry={refresh} />
+      )}
+      {episodes && items.length === 0 && <EmptyState title="No episodes yet" />}
       <ul className="v2-mem-list">
         {items.slice(0, 50).map((e, i) => (
           <li key={e.id || i}>
@@ -251,17 +303,19 @@ function EpisodesTab() {
 }
 
 function ExecLogTab() {
-  const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    apiJson('/internal/execution-log')
-      .then((d) => setItems(d.entries || d.log || d || []))
-      .finally(() => setLoading(false));
-  }, []);
+  const {
+    data: entries, error, loading, refresh,
+  } = useResource('/internal/execution-log', {
+    select: (d) => asList(d, 'entries', 'log'),
+  });
+  const items = entries || [];
   return (
-    <Pane title={`Execution log (${items.length})`}>
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && items.length === 0 && <EmptyState title="No tool calls yet" />}
+    <Pane title={entries ? `Execution log (${items.length})` : 'Execution log'}>
+      {loading && !entries && <EmptyState title="Loading…" />}
+      {error && !entries && (
+        <ErrorState error={error} what="the execution log" onRetry={refresh} />
+      )}
+      {entries && items.length === 0 && <EmptyState title="No tool calls yet" />}
       <ul className="v2-mem-list">
         {items.slice(0, 60).map((e, i) => (
           <li key={e.id || i}>
@@ -277,26 +331,30 @@ function ExecLogTab() {
 }
 
 function KnowledgeTab() {
-  const [entities, setEntities] = useState([]);
   const [selected, setSelected] = useState(null);
-  const [about, setAbout] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const {
+    data: rows, error, loading, refresh,
+  } = useResource('/api/knowledge/entities', {
+    select: (d) => asList(d, 'entities'),
+  });
+  // The detail pane's `.catch(() => setAbout(null))` rendered exactly
+  // the same blank space as "nothing selected", so a failed lookup was
+  // indistinguishable from an entity the brain knows nothing about.
+  const {
+    data: about, error: aboutError, loading: aboutLoading, refresh: refreshAbout,
+  } = useResource(
+    selected ? `/internal/knowledge/about/${encodeURIComponent(selected)}` : null,
+  );
 
-  useEffect(() => {
-    apiJson('/api/knowledge/entities')
-      .then((d) => setEntities(d.entities || d || []))
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    if (!selected) { setAbout(null); return; }
-    apiJson(`/internal/knowledge/about/${encodeURIComponent(selected)}`).then(setAbout).catch(() => setAbout(null));
-  }, [selected]);
+  const entities = rows || [];
 
   return (
-    <Pane title={`Knowledge graph (${entities.length})`}>
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && entities.length === 0 && <EmptyState title="Knowledge graph is empty" hint="Entities get extracted as FERAL learns about you." />}
+    <Pane title={rows ? `Knowledge graph (${entities.length})` : 'Knowledge graph'}>
+      {loading && !rows && <EmptyState title="Loading…" />}
+      {error && !rows && (
+        <ErrorState error={error} what="the knowledge graph" onRetry={refresh} />
+      )}
+      {rows && entities.length === 0 && <EmptyState title="Knowledge graph is empty" hint="Entities get extracted as FERAL learns about you." />}
       <div className="v2-knowledge-layout">
         <div className="v2-knowledge-entities">
           {entities.map((e, i) => {
@@ -315,6 +373,15 @@ function KnowledgeTab() {
         </div>
         <div className="v2-knowledge-detail">
           {!selected && <EmptyState title="Pick an entity" />}
+          {selected && aboutLoading && !about && <EmptyState title="Loading…" />}
+          {selected && aboutError && !about && (
+            <ErrorState
+              error={aboutError}
+              what={`what the brain knows about ${selected}`}
+              compact
+              onRetry={refreshAbout}
+            />
+          )}
           {selected && about && (
             <Glass level={0} radius="md" padding="md">
               <h3>{selected}</h3>

@@ -1,10 +1,12 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { BookOpen, Upload, Link as LinkIcon, RefreshCw } from 'lucide-react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import Tabs from '../ui/Tabs';
 import EmptyState from '../ui/EmptyState';
-import { apiJson, apiFetch } from '../lib/api';
+import ErrorState from '../ui/ErrorState';
+import { apiFetch } from '../lib/api';
+import { useResource } from '../hooks/useResource';
 import { API_BASE } from '../lib/config';
 
 export default function Wiki() {
@@ -37,45 +39,55 @@ export default function Wiki() {
   );
 }
 
+/**
+ * PagesTab: the false-empty-state conversion.
+ *
+ * Was: one `Promise.allSettled` whose rejected legs were never read,
+ * with `loading` flipped false in a `finally`. A dropped
+ * `/api/wiki/pages` therefore left `pages` at its initial `[]` and the
+ * pane rendered "Pages (0)" over "No pages yet / Compile or ingest
+ * content to populate the wiki", sending the user to re-ingest a wiki
+ * that may well be full. The open-page fetch had the mirrored problem:
+ * `.catch(() => setContent(null))` renders exactly what "no page
+ * selected" renders.
+ */
 function PagesTab() {
-  const [pages, setPages] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(null);
-  const [content, setContent] = useState(null);
-  const [stats, setStats] = useState(null);
 
-  const refresh = useCallback(async () => {
-    try {
-      const [p, s] = await Promise.allSettled([
-        apiJson('/api/wiki/pages'),
-        apiJson('/api/wiki/stats'),
-      ]);
-      if (p.status === 'fulfilled') setPages(p.value?.pages || p.value || []);
-      if (s.status === 'fulfilled') setStats(s.value);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const {
+    data: pageRows, error: pagesError, loading, refresh: refreshPages,
+  } = useResource('/api/wiki/pages', {
+    select: (d) => (Array.isArray(d?.pages) ? d.pages : (Array.isArray(d) ? d : [])),
+  });
+  // Additive: the total chip is a nice-to-have next to a list that
+  // already rendered, so its failure stays quiet rather than stacking a
+  // second ErrorState on the same pane.
+  const { data: stats, refresh: refreshStats } = useResource('/api/wiki/stats', { silent: true });
+  const {
+    data: content, error: contentError, loading: contentLoading, refresh: refreshContent,
+  } = useResource(open ? `/api/wiki/pages/${encodeURIComponent(open)}` : null);
 
-  useEffect(() => { refresh(); }, [refresh]);
-
-  useEffect(() => {
-    if (!open) { setContent(null); return; }
-    apiJson(`/api/wiki/pages/${encodeURIComponent(open)}`).then(setContent).catch(() => setContent(null));
-  }, [open]);
+  const pages = pageRows || [];
+  const refresh = useCallback(
+    () => Promise.all([refreshPages(), refreshStats()]),
+    [refreshPages, refreshStats],
+  );
 
   return (
     <Pane
-      title={`Pages (${pages.length})`}
+      title={pageRows ? `Pages (${pages.length})` : 'Pages'}
       actions={(
         <>
           {stats?.pages != null && <span className="v2-chip">{stats.pages} total</span>}
-          <button type="button" className="v2-btn v2-btn--ghost" onClick={refresh}><RefreshCw size={13} /></button>
+          <button type="button" className="v2-btn v2-btn--ghost" onClick={refresh} aria-label="Refresh pages"><RefreshCw size={13} /></button>
         </>
       )}
     >
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && pages.length === 0 && <EmptyState title="No pages yet" hint="Compile or ingest content to populate the wiki." />}
+      {loading && !pageRows && <EmptyState title="Loading…" />}
+      {pagesError && !pageRows && (
+        <ErrorState error={pagesError} what="the wiki page list" onRetry={refresh} />
+      )}
+      {pageRows && pages.length === 0 && <EmptyState title="No pages yet" hint="Compile or ingest content to populate the wiki." />}
       <div className="v2-knowledge-layout">
         <div className="v2-knowledge-entities">
           {pages.map((p, i) => {
@@ -94,6 +106,15 @@ function PagesTab() {
         </div>
         <div className="v2-knowledge-detail">
           {!open && <EmptyState title="Pick a page" />}
+          {open && contentLoading && !content && <EmptyState title="Loading…" />}
+          {open && contentError && !content && (
+            <ErrorState
+              error={contentError}
+              what={`the page "${open}"`}
+              compact
+              onRetry={refreshContent}
+            />
+          )}
           {open && content && (
             <Glass level={0} radius="md" padding="md">
               <h3>{content.title || open}</h3>
@@ -161,6 +182,11 @@ function IngestTab() {
       const data = await r.json().catch(() => ({}));
       if (!r.ok) setError(data?.error || `${r.status}`);
       else setResult(data);
+    } catch (err) {
+      // Same shape as the other two ingest paths. Without this the
+      // upload rejected, the spinner cleared, and nothing on screen
+      // distinguished a dropped upload from one that never started.
+      setError(err?.message || 'upload failed');
     } finally {
       setBusy(null);
     }

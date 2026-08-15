@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Bluetooth, QrCode, KeyRound, Smartphone, Terminal, Copy, Check, RefreshCw } from 'lucide-react';
+import { Bluetooth, QrCode, KeyRound, Smartphone, Terminal, RefreshCw } from 'lucide-react';
 import QRCode from 'qrcode';
 import Modal from '../ui/Modal';
 import Tabs from '../ui/Tabs';
 import DeviceQRCode from '../ui/DeviceQRCode';
+import CopyButton from '../ui/CopyButton';
 import { apiFetch, apiJson } from '../lib/api';
 
 /**
- * PairDeviceModal — four first-class pairing flows. No dead branches.
+ * PairDeviceModal: three pairing flows and one radio check.
  *
  *   1) Web phone — generates a /pair?t=<TOKEN> URL + QR. Any phone
  *      camera scans it, lands on Pair.jsx, one tap = live browser_node.
@@ -17,14 +18,24 @@ import { apiFetch, apiJson } from '../lib/api';
  *      Vendors use this.
  *   3) QR (native app) — legacy host+port+token JSON for the iOS /
  *      Android app.
- *   4) Bluetooth — Web BLE for browser-level scanning (kept).
+ *   4) Bluetooth: a Web BLE radio + range check for THIS browser tab.
+ *      Explicitly not a pairing flow; see BLETab for why the brain
+ *      cannot be handed a browser-held BLE device.
+ *
+ * All three real flows share one shape, and it is the definition of
+ * "paired" everywhere in FERAL: POST /api/devices/pair mints a token
+ * row, the device then attaches to /v1/node over HUP and claims that
+ * token (POST /api/devices/pair/complete -> mark_claimed). Nothing is
+ * paired until a device holds a socket. Consequently this modal never
+ * reports a completed pair itself: completion arrives over the
+ * WebSocket, and the parent refreshes its list when the modal closes.
  *
  * Token hygiene contract: every token issued by this modal is tracked.
  * On close, any token that was NOT claimed (no `claimed_at` on its
  * paired row) is revoked via DELETE /api/devices/{id}. That kills the
  * "open the modal, never scan, leave a phantom row in Paired" bug.
  */
-export default function PairDeviceModal({ open, onClose, onPaired, onTokenIssued }) {
+export default function PairDeviceModal({ open, onClose, onTokenIssued }) {
   const [tab, setTab] = useState('web_phone');
   const [closing, setClosing] = useState(false);
   // Tokens issued during this modal session, plus any in-flight
@@ -103,7 +114,7 @@ export default function PairDeviceModal({ open, onClose, onPaired, onTokenIssued
           { id: 'web_phone', label: 'Web phone' },
           { id: 'daemon', label: 'Daemon token' },
           { id: 'app_qr', label: 'Native app QR' },
-          { id: 'ble', label: 'Bluetooth' },
+          { id: 'ble', label: 'Bluetooth check' },
         ]}
       />
       <div className="v2-pair-body">
@@ -117,31 +128,19 @@ export default function PairDeviceModal({ open, onClose, onPaired, onTokenIssued
           <AppQRTab active={tab === 'app_qr'} onIssue={trackIssue} />
         </div>
         <div style={{ display: tab === 'ble' ? 'block' : 'none' }}>
-          <BLETab onPaired={onPaired} />
+          <BLETab onUseDaemonTab={() => setTab('daemon')} />
         </div>
       </div>
     </Modal>
   );
 }
 
-function useCopy() {
-  const [copied, setCopied] = useState(null);
-  const copy = useCallback((id, text) => {
-    try {
-      navigator.clipboard.writeText(text);
-      setCopied(id);
-      setTimeout(() => setCopied((c) => (c === id ? null : c)), 1400);
-    } catch { /* ignore */ }
-  }, []);
-  return [copied, copy];
-}
-
 function WebPhoneTab({ active, onIssue }) {
   // Token issuance happens INSIDE the active tab so a user who only
   // wanted to peek at the modal (e.g. opened it from the dock) doesn't
   // leave behind a stray pairing row. The handshake-completion event
-  // arrives over the WebSocket — `onPaired` is fired by the parent on
-  // modal close so the Paired list refreshes either way.
+  // arrives over the WebSocket, and the parent refreshes its
+  // list on modal close, so the pair lands either way.
   //
   // Every issued token is reported to the parent via `onIssue`. The
   // parent prunes any unclaimed tokens on close so a peek-and-leave
@@ -151,7 +150,6 @@ function WebPhoneTab({ active, onIssue }) {
   const [busy, setBusy] = useState(false);
   const [requirePin, setRequirePin] = useState(true);
   const [qrSrc, setQrSrc] = useState(null);
-  const [copied, copy] = useCopy();
 
   const generate = useCallback(async () => {
     if (!active) return;
@@ -251,14 +249,7 @@ function WebPhoneTab({ active, onIssue }) {
             <code className="v2-p v2-p--tiny" style={{ flex: 1, wordBreak: 'break-all' }} data-testid="pair-web-phone-url">
               {url}
             </code>
-            <button
-              type="button"
-              className="v2-btn v2-btn--ghost"
-              onClick={() => copy('url', url)}
-              aria-label="Copy URL"
-            >
-              {copied === 'url' ? <Check size={13} /> : <Copy size={13} />}
-            </button>
+            <CopyButton value={url} label="Copy URL" testId="pair-web-phone-copy" />
             <button type="button" className="v2-btn v2-btn--ghost" onClick={generate} aria-label="New token" disabled={busy}>
               <RefreshCw size={13} />
             </button>
@@ -282,7 +273,6 @@ function DaemonTokenTab({ onIssue }) {
   const [nodeId, setNodeId] = useState('');
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [copied, copy] = useCopy();
 
   const generate = useCallback(async () => {
     if (!nodeId.trim()) return;
@@ -366,19 +356,18 @@ function DaemonTokenTab({ onIssue }) {
             id="py"
             label="Python SDK (any OS)"
             cmd={pythonOneLiner}
-            copied={copied === 'py'}
-            onCopy={() => copy('py', pythonOneLiner)}
           />
           <OneLiner
             id="bridge"
             label="Phone-bridge daemon (Mac / Linux)"
             cmd={bridgeOneLiner}
-            copied={copied === 'bridge'}
-            onCopy={() => copy('bridge', bridgeOneLiner)}
           />
 
           <p className="v2-p v2-p--tiny v2-p--muted" style={{ marginTop: 4 }}>
             The token is only shown once. If you lose it, revoke + reissue.
+            The copy button confirms only after the clipboard write
+            actually succeeded, so a checkmark here means the token is
+            really on your clipboard.
           </p>
         </div>
       )}
@@ -386,16 +375,14 @@ function DaemonTokenTab({ onIssue }) {
   );
 }
 
-function OneLiner({ id, label, cmd, copied, onCopy }) {
+function OneLiner({ id, label, cmd }) {
   return (
     <div className="v2-publish-cli" id={`one-${id}`}>
       <div className="v2-publish-cli-label">{label}</div>
       <div className="v2-publish-cli-row">
         <Terminal size={13} aria-hidden="true" />
         <code>{cmd}</code>
-        <button type="button" className="v2-btn v2-btn--ghost" onClick={onCopy} aria-label="Copy command">
-          {copied ? <Check size={13} /> : <Copy size={13} />}
-        </button>
+        <CopyButton value={cmd} label="Copy command" testId={`one-${id}-copy`} />
       </div>
     </div>
   );
@@ -441,7 +428,53 @@ function AppQRTab({ active, onIssue }) {
   );
 }
 
-function BLETab({ onPaired }) {
+/**
+ * BLETab: a radio + range check. NOT a pairing flow, and it no longer
+ * says it is.
+ *
+ * What it used to do: call `navigator.bluetooth.requestDevice()`,
+ * which only opens the browser's device chooser, and then immediately
+ * fire `onPaired({source:'ble', ...})`. The parent
+ * (Devices.jsx:245 handlePaired) closed the modal and refreshed the
+ * paired list. So the user saw the "device paired" gesture complete
+ * and the list come back without their device in it, because nothing
+ * was ever paired: no `gatt.connect()`, no call to the brain, nothing
+ * persisted. The caveat line explaining the limitation was unmounted
+ * by the very callback that rendered the claim.
+ *
+ * Why it is not fixed by "just calling the brain" (investigated
+ * before relabelling):
+ *
+ *   - The brain's pairing model is token-then-attach.
+ *     `POST /api/devices/pair` (api/routes/devices.py:780) accepts
+ *     kind in {name, hup, browser, browser_node_v2, pending} and 400s
+ *     on anything else. It mints a row; the row is only paired once
+ *     something attaches to /v1/node and claims the token via
+ *     `POST /api/devices/pair/complete` -> `mark_claimed`. A
+ *     `BluetoothDevice` handle cannot open a WebSocket, so it cannot
+ *     claim anything.
+ *   - The one path a BLE peripheral does take into the brain is the
+ *     `peripheral_bridge_register` HUP frame (api/server.py:3099),
+ *     sent over an already-authenticated node socket. See
+ *     pages/phone/PeripheralsPanel.jsx:33 for the real call site: the
+ *     phone is itself a paired node and bridges its peripherals. The
+ *     brain registers a `BridgedPeripheralAdapter(node_id=...)` and
+ *     relays every later read/write back through that node's socket.
+ *     There is no equivalent for this modal, which runs in the
+ *     operator console, not in a node.
+ *   - Adding an HTTP endpoint would not help. Whatever the brain
+ *     recorded, it could not read a characteristic without this tab
+ *     relaying it, and the handle dies on refresh, navigation, or the
+ *     modal simply closing. A row that survives its own transport is
+ *     the ghost-row bug this file's token hygiene contract exists to
+ *     prevent.
+ *
+ * So the honest outcome is: keep the scan, which genuinely answers
+ * "does this machine have a working BLE radio and is the peripheral in
+ * range", drop the pairing claim, and point at the two flows that do
+ * pair a bridge.
+ */
+function BLETab({ onUseDaemonTab }) {
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState(null);
   const [device, setDevice] = useState(null);
@@ -456,10 +489,12 @@ function BLETab({ onPaired }) {
         acceptAllDevices: true,
         optionalServices: ['battery_service', 'heart_rate', 'device_information'],
       });
+      // Deliberately terminal. The result of this scan is a fact about
+      // this browser tab, and it is reported here rather than handed
+      // to the parent as a pairing event.
       setDevice(dev);
-      if (onPaired) onPaired({ source: 'ble', id: dev.id, name: dev.name });
     } catch (err) {
-      if (err.name !== 'NotFoundError') setError(err.message);
+      if (err?.name !== 'NotFoundError') setError(err?.message || 'BLE scan failed');
     } finally {
       setScanning(false);
     }
@@ -467,7 +502,7 @@ function BLETab({ onPaired }) {
 
   if (!supported) {
     return (
-      <div className="v2-p v2-p--muted">
+      <div className="v2-p v2-p--muted" data-testid="pair-ble-unsupported">
         <Bluetooth size={13} style={{ verticalAlign: 'text-bottom', marginRight: 4 }} />
         Web Bluetooth isn't available in this browser. Use Chrome / Edge
         on a machine with a BLE radio, or use the desktop app for
@@ -477,16 +512,50 @@ function BLETab({ onPaired }) {
   }
 
   return (
-    <div className="v2-pair-ble">
+    <div className="v2-pair-ble" data-testid="pair-ble">
+      <div className="v2-p v2-p--muted" style={{ marginBottom: 10 }}>
+        <Bluetooth size={13} style={{ verticalAlign: 'text-bottom', marginRight: 4 }} />
+        Checks that this machine has a working BLE radio and that a
+        peripheral is in range. It does not add the peripheral to FERAL:
+        the handle the browser returns lives in this tab only and is
+        gone on refresh, and the brain has no way to talk to it.
+      </div>
       <button type="button" className="v2-btn v2-btn--primary" onClick={scan} disabled={scanning}>
-        {scanning ? 'Scanning…' : 'Start BLE scan'}
+        {scanning ? 'Scanning…' : 'Check for BLE devices'}
       </button>
       {device && (
-        <div className="v2-pair-picked">
+        <div
+          className="v2-pair-picked"
+          data-testid="pair-ble-result"
+          style={{
+            marginTop: 10,
+            padding: 10,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
+            border: '1px solid var(--v2-hairline)',
+            borderRadius: 'var(--v2-radius-sm)',
+            background: 'var(--v2-surface-0)',
+          }}
+        >
           <strong>{device.name || device.id}</strong>
-          <span className="v2-p v2-p--muted">
-            Browser-level BLE pairs to this page only. For ongoing device control, run a HUP daemon and enter its token.
+          <span className="v2-p v2-p--muted v2-p--tiny">
+            In range and reachable from this browser. Not registered with
+            the brain, and not in your device list.
           </span>
+          <span className="v2-p v2-p--muted v2-p--tiny">
+            To let FERAL use it, run something that bridges it: pair a
+            phone from the Web phone tab and add the peripheral there, or
+            issue a daemon token and run the phone-bridge daemon on a
+            machine near the peripheral.
+          </span>
+          {onUseDaemonTab && (
+            <div>
+              <button type="button" className="v2-btn" onClick={onUseDaemonTab}>
+                Issue a daemon token
+              </button>
+            </div>
+          )}
         </div>
       )}
       {error && <div className="v2-chip v2-chip--error">{error}</div>}
