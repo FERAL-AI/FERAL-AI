@@ -13,6 +13,7 @@ import SkillsLauncher, { readPinned, MAX_PINNED } from '../components/SkillsLaun
 import ResumeCockpit from '../components/ResumeCockpit';
 import ForYouToday from '../components/ForYouToday';
 import ConnectedHardware from '../components/ConnectedHardware';
+import { deviceCounts } from '../components/DeviceTopology';
 import { apiJson, apiFetch } from '../lib/api';
 import { useSomatic } from '../hooks/useSomatic';
 import { useSystemHealth, refreshSystemHealth } from '../hooks/useSystemHealth';
@@ -155,10 +156,16 @@ export default function Home() {
   // from the /api/dashboard response and is then maintained by the
   // WS events. Keeping a separate state from `dashboard` avoids
   // racing the polled snapshot back over a fresher delta.
+  // `fromSocket` records whether the current counts came from a live
+  // WS delta rather than from the polled payload. It is what lets the
+  // Subdevices tile keep its live dot when the /api/dashboard poll is
+  // failing but the socket is still delivering frames, and drop it
+  // when both are frozen.
   const [subdevices, setSubdevices] = useState({
     total: 0,
     live: 0,
     rows: new Map(),
+    fromSocket: false,
   });
 
   const refresh = useCallback(async () => {
@@ -230,10 +237,38 @@ export default function Home() {
   // `refresh` callback above can stay free of sysHealth.* deps (which
   // would otherwise create a useCallback identity loop with the
   // useEffect that schedules `refresh`).
+  //
+  // Read the ERROR FIRST. `useSystemHealth` deliberately retains the
+  // last good payload on a failed poll (hooks/useSystemHealth.js,
+  // the catch in `tick`: `snapshot = { data: snapshot.data, ...,
+  // error: err }`). That is the right call: a 15s blip should not
+  // blank the page. But it means `sysHealth.data` is truthy forever
+  // after the first success, so the previous
+  // `if (data) { clear error } else if (error) { set error }` ladder
+  // could never reach its error branch again. `dashboardError` was
+  // pinned to null, `dashboardOk` was pinned to true, and the
+  // three-signal offline contract below could not evaluate to
+  // `offline` no matter what the brain did. A stopped brain read as
+  // "reconnecting…" forever.
+  //
+  // Retaining stale data is reasonable. Presenting it as live is not,
+  // so we keep the payload, mark it stale, and let every derived
+  // renderer downgrade off `dashboardStale`.
   useEffect(() => {
+    if (sysHealth.error) {
+      setDashboardError(
+        sysHealth.error?.message
+        || sysHealth.error?.detail
+        || 'dashboard fetch failed',
+      );
+      // Deliberately do NOT re-seed `subdevices` here. The payload is
+      // unchanged (same object, same `lastFetched`) so re-seeding
+      // would only clobber fresher WS deltas with the frozen snapshot.
+      return;
+    }
+    setDashboardError(null);
     if (sysHealth.data) {
       setDashboard(sysHealth.data);
-      setDashboardError(null);
       setLastDashboardAt(sysHealth.lastFetched || Date.now());
       const seedRows = new Map();
       let seedLive = 0;
@@ -248,13 +283,10 @@ export default function Home() {
         total: sysHealth.data?.subdevices_total ?? seedRows.size,
         live: sysHealth.data?.subdevices_live ?? seedLive,
         rows: seedRows,
+        // Reset on every fresh poll: these rows came from the polled
+        // payload, not from a live WS frame.
+        fromSocket: false,
       });
-    } else if (sysHealth.error) {
-      setDashboardError(
-        sysHealth.error?.message
-        || sysHealth.error?.detail
-        || 'dashboard fetch failed',
-      );
     }
   }, [sysHealth.data, sysHealth.error, sysHealth.lastFetched]);
 
@@ -281,7 +313,7 @@ export default function Home() {
         for (const r of rows.values()) {
           if (r.live) live += 1;
         }
-        return { total: rows.size, live, rows };
+        return { total: rows.size, live, rows, fromSocket: true };
       });
     });
     return unsub;
@@ -342,15 +374,16 @@ export default function Home() {
     }
   };
 
-  // `device_count` (legacy) counts only currently-online HUP nodes.
-  // `online_count` and `paired_count` were added in 2026.5.13 so the
-  // home empty-state can distinguish "no pairings ever" from "you
-  // have devices, none of them are talking right now". Fall back
-  // gracefully if the brain is older than the dashboard payload.
-  const onlineCount = dashboard?.online_count ?? dashboard?.device_count ?? 0;
-  const pairedCount = dashboard?.paired_count ?? onlineCount;
-  const pairedOfflineCount = dashboard?.paired_offline_count ?? Math.max(pairedCount - onlineCount, 0);
-  const deviceCount = onlineCount;
+  // One derivation, shared with GlassBrain and HubLauncher. See the
+  // doc comment on `deviceCounts` in components/DeviceTopology.jsx for
+  // why `device_count`/`online_count` are the same live-only number
+  // and why the honest total is `online + paired_offline`. The three
+  // surfaces used to each carry their own fallback chain and
+  // disagreed on screen.
+  const counts = deviceCounts(dashboard);
+  const onlineCount = counts.online ?? 0;
+  const pairedCount = counts.total ?? 0;
+  const pairedOfflineCount = counts.offline ?? 0;
   const skillCount = dashboard?.skills_count ?? skills.length;
   const hr = Math.round(dashboard?.health?.heart_rate || somatic.heartRate || 0);
   // Surface the wearable source under the bpm so the demo viewer can
@@ -375,6 +408,28 @@ export default function Home() {
     : (dashboard?.subdevices_total ?? 0);
   const subdevicesUnavailable = dashboard?.subdevices_unavailable ?? null;
   const alert = proactive?.[0]?.msg?.data || proactive?.[0]?.msg?.payload;
+
+  // Every number on this page below the hero is derived from
+  // `dashboard`, and `dashboard` survives a failed poll. When it is
+  // stale, the numbers stay (they are the last thing we actually
+  // knew) but nothing may claim liveness from them: no green dot, no
+  // pulse. The user gets the last-known counts plus a timestamp, and
+  // decides for themselves whether a 40-minute-old reading is useful.
+  const dashboardStale = dashboard != null && dashboardError != null;
+  // A live dot on the Devices tile requires BOTH a device that is
+  // online and a reading recent enough to back the claim.
+  const devicesLiveNow = onlineCount > 0 && !dashboardStale;
+  // Sub-devices are maintained by WS deltas independently of the
+  // /api/dashboard poll, so a failing poll does not automatically
+  // make them stale. Only a poll failure with no socket frame since
+  // does.
+  const subdevicesStale = dashboardStale && !subdevices.fromSocket;
+  const subdevicesLiveNow = subdevicesLive > 0 && !subdevicesStale;
+  const asOfText = lastDashboardAt
+    ? new Date(lastDashboardAt).toLocaleTimeString('en-US', {
+      hour: 'numeric', minute: '2-digit', second: '2-digit',
+    })
+    : '';
 
   // Phase-1 brain liveness: the hero stat is a real binding now, not
   // a hardcoded `live + pulse` literal. Three states map to three
@@ -492,7 +547,7 @@ export default function Home() {
             <Glass level={0} radius="md" padding="sm">
               <div className="v2-stat-label">Devices</div>
               {pairedCount === 0 ? (
-                <div className="v2-stat-value">0</div>
+                <div className="v2-stat-value" data-testid="v2-home-devices-stat">0</div>
               ) : onlineCount === pairedCount ? (
                 // Phase-1 truthfulness contract (operator follow-up
                 // on PR #80): bind tone + pulse to a measurable
@@ -502,10 +557,21 @@ export default function Home() {
                 // refactor that loosens the invariant would re-
                 // introduce the same dot-lie pattern as the Brain
                 // hero stat fix. Same defence-in-depth.
-                <div className="v2-stat-value">
+                //
+                // `devicesLiveNow` adds the second half of that
+                // contract: the count must also be CURRENT. With a
+                // failing /api/dashboard poll the retained payload
+                // still says N devices are online, and painting a
+                // pulsing green dot from a frozen cache is a
+                // pulsing green dot on a dead brain.
+                <div
+                  className="v2-stat-value"
+                  data-testid="v2-home-devices-stat"
+                  title={dashboardStale ? `Last known count, as of ${asOfText}` : undefined}
+                >
                   <StatusDot
-                    tone={onlineCount > 0 ? 'live' : 'off'}
-                    pulse={onlineCount > 0}
+                    tone={devicesLiveNow ? 'live' : dashboardStale ? 'warn' : 'off'}
+                    pulse={devicesLiveNow}
                   /> {onlineCount}
                 </div>
               ) : (
@@ -515,8 +581,17 @@ export default function Home() {
                 // Previously the card just showed the online count
                 // (often 0) and the user saw "0" up top while the
                 // banner said "1 paired" — confusing inconsistency.
-                <div className="v2-stat-value" title={`${pairedOfflineCount} paired but offline`}>
-                  <StatusDot tone={onlineCount > 0 ? 'live' : 'neutral'} /> {onlineCount}/{pairedCount}
+                <div
+                  className="v2-stat-value"
+                  data-testid="v2-home-devices-stat"
+                  title={dashboardStale
+                    ? `Last known count, as of ${asOfText}`
+                    : `${pairedOfflineCount} paired but offline`}
+                >
+                  <StatusDot
+                    tone={devicesLiveNow ? 'live' : dashboardStale ? 'warn' : 'neutral'}
+                    pulse={devicesLiveNow}
+                  /> {onlineCount}/{pairedCount}
                 </div>
               )}
             </Glass>
@@ -546,9 +621,11 @@ export default function Home() {
                   ) : (
                     <>
                       <StatusDot
-                        tone={subdevicesLive > 0 ? 'live' : 'off'}
-                        pulse={subdevicesLive > 0}
-                        label={`${subdevicesLive} of ${subdevicesTotal} sub-devices live`}
+                        tone={subdevicesLiveNow ? 'live' : subdevicesStale ? 'warn' : 'off'}
+                        pulse={subdevicesLiveNow}
+                        label={subdevicesStale
+                          ? `${subdevicesLive} of ${subdevicesTotal} sub-devices live as of ${asOfText}, not current`
+                          : `${subdevicesLive} of ${subdevicesTotal} sub-devices live`}
                       /> {subdevicesLive}/{subdevicesTotal}
                     </>
                   )}
@@ -571,6 +648,27 @@ export default function Home() {
             </Glass>
           </div>
         </div>
+
+        {/* Staleness stamp. `lastDashboardAt` was computed and then
+            never rendered, so a page frozen on a cached payload gave
+            the user no way to tell how old it was. Same "As of
+            HH:MM:SS" shape as components/ConnectedHardware.jsx, plus
+            the reason when the poll is currently failing. */}
+        {asOfText && (
+          <div
+            className="v2-p v2-p--tiny v2-p--muted"
+            style={{
+              marginTop: 8,
+              color: dashboardStale ? 'var(--v2-state-warn)' : 'var(--v2-text-tertiary)',
+            }}
+            data-testid="v2-home-dashboard-stamp"
+            title={dashboardStale ? dashboardError : undefined}
+          >
+            {dashboardStale
+              ? `Stale. Last read from the brain at ${asOfText}. ${dashboardError}`
+              : `As of ${asOfText}`}
+          </div>
+        )}
       </Pane>
 
       {alert && (alert.title || alert.message) && (

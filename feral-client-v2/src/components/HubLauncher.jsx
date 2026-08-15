@@ -3,13 +3,14 @@ import { useNavigate } from 'react-router-dom';
 import {
   Hammer, Wrench, Database, BookOpen, Users, UserCircle2,
   HeartPulse, Crosshair, Clock, BrainCircuit, Globe, MapPin, Store,
-  Search, X, Plug,
+  Search, X, Plug, Shield, BrainCog,
 } from 'lucide-react';
 import { useResource } from '../hooks/useResource';
+import { deviceCounts } from './DeviceTopology';
 
 /**
  * HubLauncher — translucent stack popup anchored above the Dock. Holds the
- * 13 secondary navigation destinations that used to clutter the Dock.
+ * 15 secondary navigation destinations that used to clutter the Dock.
  *
  * Triggered by the Hub button on the Dock or the ⌘K shortcut. Search
  * filters by name / description. Click an entry → navigate + close.
@@ -29,6 +30,13 @@ const HUB_ITEMS = [
   { to: '/marketplace', label: 'Market', Icon: Store, desc: 'Browse + install registry items' },
   { to: '/webhooks', label: 'Webhooks', Icon: Globe, desc: 'Inbound integrations' },
   { to: '/geofences', label: 'Places', Icon: MapPin, desc: 'Geofences + location' },
+  // Both of these were reachable ONLY from two buttons inside the
+  // Glass Brain page header. /oversight is the kill switch; a safety
+  // control three clicks deep inside an unrelated page is not
+  // reachable when it matters. It is now also a primary Dock item
+  // (shell/Dock.jsx); it is listed here as well so ⌘K search finds it.
+  { to: '/oversight', label: 'Oversight', Icon: Shield, desc: 'Supervisor audit + kill switch' },
+  { to: '/memory/context', label: 'Memory context', Icon: BrainCog, desc: 'What multi-memory surfaced per LLM turn' },
 ];
 
 export default function HubLauncher({ open, onClose }) {
@@ -50,19 +58,18 @@ export default function HubLauncher({ open, onClose }) {
   // user who may have five devices paired and a brain that is merely
   // unreachable. Both counts stay null on failure, so neither CTA
   // renders and the Hub simply says nothing about devices.
+  //
+  // The third fallback chain that used to live here is gone. Home,
+  // GlassBrain and this popup now share one derivation (`deviceCounts`
+  // in components/DeviceTopology.jsx) so the same payload can no
+  // longer produce three different device numbers on three surfaces.
   const { data: counts } = useResource('/api/dashboard', {
     enabled: open,
     silent: true,
-    select: (d) => ({
-      onlineCount: d?.online_count ?? d?.device_count ?? 0,
-      // Falls back gracefully when the brain is older than the
-      // `paired_count` field by treating `online_count`/`device_count`
-      // as the lower bound.
-      pairedCount: d?.paired_count ?? d?.online_count ?? d?.device_count ?? 0,
-    }),
+    select: (d) => deviceCounts(d),
   });
-  const pairedCount = counts ? counts.pairedCount : null;
-  const onlineCount = counts ? counts.onlineCount : null;
+  const pairedCount = counts ? counts.total : null;
+  const onlineCount = counts ? counts.online : null;
 
   useEffect(() => {
     if (!open) { setQuery(''); return; }

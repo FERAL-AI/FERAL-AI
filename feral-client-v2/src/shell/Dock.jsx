@@ -2,13 +2,13 @@ import React, { useEffect, useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import {
   MessageSquare, ListChecks, Cpu, LayoutDashboard, SquareStack,
-  Settings as SettingsIcon, LayoutGrid, AppWindow,
+  Settings as SettingsIcon, LayoutGrid, AppWindow, Shield,
 } from 'lucide-react';
 import HubLauncher from '../components/HubLauncher';
 
 /**
  * Bottom dock — seven primary items + a Hub button that opens a popup with
- * the thirteen secondary destinations. One clean row, always.
+ * the fifteen secondary destinations. One clean row, always.
  */
 const PRIMARY_ITEMS = [
   { to: '/', label: 'Home', Icon: LayoutDashboard },
@@ -17,12 +17,24 @@ const PRIMARY_ITEMS = [
   { to: '/devices', label: 'Devices', Icon: Cpu },
   { to: '/apps', label: 'Apps', Icon: AppWindow },
   { to: '/canvas', label: 'Canvas', Icon: SquareStack },
+  // /oversight holds the supervisor audit trail and the kill switch.
+  // It used to be reachable from exactly one place: a button in the
+  // Glass Brain page header, itself a Hub entry. A safety control the
+  // operator has to remember a path to is a safety control they will
+  // not find while something is going wrong, so it is primary now.
+  { to: '/oversight', label: 'Oversight', Icon: Shield },
 ];
 
+// Routes that live behind the Hub popup. Membership drives the Hub
+// button's active highlight, so anything the Hub can navigate to
+// belongs here or the Dock goes blank on arrival. `/oversight` is
+// deliberately absent: it has its own primary NavLink above, which
+// highlights itself. `/memory/context` needs its own entry because
+// the check is exact-pathname, not prefix.
 const HUB_ROUTES = new Set([
-  '/forge', '/skills', '/memory', '/wiki', '/agents', '/identity',
-  '/health', '/intents', '/timeline', '/glass-brain', '/marketplace',
-  '/webhooks', '/geofences',
+  '/forge', '/skills', '/memory', '/memory/context', '/wiki', '/agents',
+  '/identity', '/health', '/intents', '/timeline', '/glass-brain',
+  '/marketplace', '/webhooks', '/geofences',
 ]);
 
 export default function Dock() {

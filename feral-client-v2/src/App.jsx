@@ -83,7 +83,13 @@ export default function App() {
         <Route path="/apps/publish" element={<AppsPublish />} />
         <Route path="/apps/:app_id" element={<AppSurface />} />
         <Route path="/settings" element={<Settings />} />
-        <Route path="/ambient" element={<Home />} />
+        {/* /ambient was a second mount of <Home /> that nothing linked
+            to, so it could render a duplicate Home under a URL no
+            navigation produced. Redirected rather than deleted: the
+            path shipped, so a pinned tab or bookmark may still point
+            at it, and a redirect lands them on the surface Ambient was
+            folded into instead of bouncing off the catch-all. */}
+        <Route path="/ambient" element={<Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

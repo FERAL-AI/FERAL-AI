@@ -98,6 +98,73 @@ function subTooltip(sub) {
 }
 
 /**
+ * Render whatever the caller handed us as `unreadable` into one line
+ * of operator-readable text. Accepts an ApiError (`detail`), a plain
+ * Error (`message`), a string, or `true` for "it failed and I have
+ * nothing more to tell you".
+ */
+function unreadableText(err) {
+  if (typeof err === 'string' && err.trim()) return err.trim();
+  const detail = err?.detail || err?.message;
+  if (typeof detail === 'string' && detail.trim()) return detail.trim();
+  return 'The device list could not be fetched from the brain.';
+}
+
+function finiteNumber(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * The single device-count derivation for every surface that reads
+ * `/api/dashboard`. Home, GlassBrain and HubLauncher each grew their
+ * own fallback chain and disagreed: Home read
+ * `online_count`/`paired_count`, GlassBrain read the legacy
+ * `device_count` under a bare "Devices" label (so it showed `0` while
+ * Home showed `0/3`), and HubLauncher had a third chain again.
+ *
+ * What the brain actually returns (`feral-core/api/routes/dashboard.py`
+ * `_get_dashboard_data`, the `return {...}` at the end):
+ *
+ *   device_count         = len(state.daemons)   (legacy, live-only)
+ *   online_count         = len(state.daemons)   (same number, new name)
+ *   paired_count         = len(pairing_store.list_devices())
+ *   paired_offline_count = paired rows with no open socket
+ *   paired_unavailable   = str | null, set when the pairing store threw
+ *   devices[]            = the live rows PLUS the paired-but-offline rows
+ *
+ * So `device_count` and `online_count` are the same value and neither
+ * one is a device total: a paired phone that backgrounded itself is in
+ * neither. The honest total is the length of `devices[]`, which is
+ * `online_count + paired_offline_count`. We take the max of that and
+ * `paired_count` because the two are counted from different stores: a
+ * daemon can hold a socket without a pairing row (legacy / unclaimed
+ * node), in which case `paired_count` alone under-reports.
+ *
+ * Returns `null` counts when there is no payload at all. That is not
+ * the same as zero, and callers must render it as unknown rather than
+ * picking a number the brain never gave them.
+ */
+export function deviceCounts(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return { online: null, offline: null, total: null, unavailable: null, known: false };
+  }
+  const online = finiteNumber(payload.online_count)
+    ?? finiteNumber(payload.device_count)
+    ?? 0;
+  const paired = finiteNumber(payload.paired_count);
+  const offline = finiteNumber(payload.paired_offline_count)
+    ?? Math.max((paired ?? online) - online, 0);
+  const total = Math.max(paired ?? 0, online + offline);
+  return {
+    online,
+    offline,
+    total,
+    unavailable: payload.paired_unavailable ?? null,
+    known: true,
+  };
+}
+
+/**
  * Pull the live HR/SpO2 reading off `/api/dashboard.latest_health`.
  * The brain only sets `heart_rate` / `spo2` (without `_stale`) when
  * the sample is fresh enough to count as "current" — see the
@@ -129,8 +196,21 @@ function liveBadges(latestHealth) {
  * Top-level component. `connected` is the array returned by
  * `/api/devices/connected`; `latestHealth` is `/api/dashboard
  * .latest_health` (HR + SpO2 with fresh/stale flags).
+ *
+ * `unreadable` is how a caller says "I could not read the device
+ * lists". Pass the error (an Error, an ApiError, or a plain string);
+ * anything falsy means the empty arrays are a real answer. It exists
+ * because an empty `connected` used to render "Awaiting node, pair an
+ * iPhone or browser daemon to populate the mesh" for BOTH "the brain
+ * says you have no devices" and "the fetch failed", which is an
+ * affirmative negative the component had no evidence for. Devices.jsx
+ * worked around it by suppressing the whole component on a failed
+ * load; that fixed one caller and left the component itself lying to
+ * every other mount.
  */
-export default function DeviceTopology({ connected = [], offline = [], latestHealth = null }) {
+export default function DeviceTopology({
+  connected = [], offline = [], latestHealth = null, unreadable = null,
+}) {
   // Live nodes first, then the ones that dropped. `offline` comes from
   // the brain's new `/api/devices/connected.offline[]`: before it
   // existed, a node that disconnected was popped from `state.daemons`
@@ -179,7 +259,31 @@ export default function DeviceTopology({ connected = [], offline = [], latestHea
         </div>
 
         <div className="v2-topology-orbit">
-          {nodes.length === 0 && (
+          {/* Unreadable wins over empty. "No devices" is a claim about
+              the world; "we could not read the device list" is a claim
+              about the fetch, and only the second one is true when the
+              request failed. The warning renders even with nodes
+              present (a partial read is still a partial read). */}
+          {unreadable ? (
+            <div
+              className="v2-topology-empty"
+              data-testid="v2-topology-unreadable"
+              title={unreadableText(unreadable)}
+            >
+              <span className="v2-chip v2-chip--warn">
+                <StatusDot tone="warn" label="Device list unreadable" />
+                <span style={{ marginLeft: 4 }}>
+                  Device list unreadable. The mesh below may be incomplete or out of date.
+                </span>
+              </span>
+              <div
+                className="v2-p v2-p--tiny v2-p--muted"
+                style={{ marginTop: 6, color: 'var(--v2-text-tertiary)' }}
+              >
+                {unreadableText(unreadable)}
+              </div>
+            </div>
+          ) : nodes.length === 0 && (
             <div className="v2-topology-empty" data-testid="v2-topology-empty">
               <span className="v2-chip v2-chip--muted">
                 Awaiting node — pair an iPhone or browser daemon to populate the mesh.

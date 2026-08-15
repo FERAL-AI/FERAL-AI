@@ -4,6 +4,7 @@ import { Activity, Cpu, Layers, RefreshCw, Radio, Zap, Brain, Shield } from 'luc
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import ConsciousnessMindMap from '../components/ConsciousnessMindMap';
+import { deviceCounts } from '../components/DeviceTopology';
 import ErrorState from '../ui/ErrorState';
 import { useFeralSocket } from '../hooks/useFeralSocket';
 import { useResource } from '../hooks/useResource';
@@ -77,6 +78,7 @@ export default function GlassBrain() {
 
   const vitals = useMemo(() => {
     const d = dashboard || {};
+    const devices = deviceCounts(dashboard);
     // AUDIT-r14 finding 03 fix #4: the prior Brain tile checked
     // `d.health?.status === 'ok'` but `/api/dashboard` returns
     // `health` as a vitals map (heart_rate, hrv, …) with no `status`
@@ -95,7 +97,22 @@ export default function GlassBrain() {
         tone: summary ? (summary.total > 0 ? 'live' : 'muted') : 'warn',
       },
       { icon: Layers, label: 'Sessions', value: d.session_count ?? '—' },
-      { icon: Radio, label: 'Devices', value: d.device_count ?? '—' },
+      // Was `d.device_count` under a bare "Devices" label. That field
+      // is `len(state.daemons)`, currently-online nodes only, so
+      // this tile read "Devices 0" while Home, two clicks away, read
+      // "0/3" off the same payload. One derivation now, shared with
+      // Home and HubLauncher; see `deviceCounts` in
+      // components/DeviceTopology.jsx.
+      {
+        icon: Radio,
+        label: 'Devices',
+        value: devices.total == null
+          ? '—'
+          : (devices.total === 0 ? '0' : `${devices.online}/${devices.total}`),
+        tone: devices.total == null
+          ? 'warn'
+          : (devices.online > 0 && !dashboardError ? 'live' : 'muted'),
+      },
       { icon: Zap, label: 'Skills', value: d.skill_count ?? d.skills_count ?? (Array.isArray(d.skills) ? d.skills.length : '—') },
     ];
   }, [dashboard, dashboardError, summary]);
