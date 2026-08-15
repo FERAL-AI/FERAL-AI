@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -11,6 +13,112 @@ use tauri::{Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{Builder as GsBuilder, ShortcutState};
 
 struct BrainProcess(pub Mutex<Option<Child>>);
+
+// ---------------------------------------------------------------------------
+// What the brain actually said
+//
+// `start_brain` gives the child piped stdout and stderr. Nothing used to
+// read them, which cost two separate things:
+//
+//   * The brain's own startup failure was invisible. The shell could
+//     report what it RESOLVED (`brain_runtime_info`: which feral-core,
+//     which interpreter, which URL) but never what the process SAID, so
+//     a traceback, an `OperationalError: no such module: fts5`, or
+//     "address already in use" all looked identical from the outside:
+//     a health probe that never went green.
+//   * A pipe nobody drains has a fixed OS buffer (64KiB on macOS). A
+//     chatty brain fills it and then blocks on its next write, forever.
+//     Piping output and not reading it is strictly worse than inheriting
+//     the parent's stdio.
+//
+// So both streams are drained on their own threads into this ring, which
+// keeps the last BRAIN_LOG_LINES lines and drops the oldest. Bounded on
+// both axes (line count and line length) because the input is a process
+// that may be printing in a loop, and a diagnostic buffer must not be a
+// way to exhaust memory.
+// ---------------------------------------------------------------------------
+
+/// Lines of brain output retained. Enough for a Python traceback plus the
+/// uvicorn banner around it, which is what a failure actually looks like.
+const BRAIN_LOG_LINES: usize = 300;
+
+/// Longest single retained line, in bytes. A brain that prints a 10MB
+/// blob on one line still costs one line of the ring.
+const BRAIN_LOG_MAX_LINE: usize = 2_000;
+
+/// Truncate on a char boundary, so a clipped multi-byte character cannot
+/// produce a panic or invalid UTF-8.
+fn clip_line(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}... <line truncated>", &s[..end])
+}
+
+/// Bounded, shared, last-N-lines view of the brain's stdout and stderr.
+#[derive(Clone)]
+struct BrainLog(Arc<Mutex<VecDeque<String>>>);
+
+impl BrainLog {
+    fn new() -> Self {
+        BrainLog(Arc::new(Mutex::new(VecDeque::with_capacity(BRAIN_LOG_LINES))))
+    }
+
+    /// Drop everything. Called when a new brain is spawned, so the screen
+    /// never shows the previous process's traceback next to this one's
+    /// pid.
+    fn clear(&self) {
+        if let Ok(mut buf) = self.0.lock() {
+            buf.clear();
+        }
+    }
+
+    fn push(&self, stream: &str, line: &str) {
+        let text = clip_line(line.trim_end_matches(['\n', '\r']), BRAIN_LOG_MAX_LINE);
+        if let Ok(mut buf) = self.0.lock() {
+            buf.push_back(format!("[{stream}] {text}"));
+            while buf.len() > BRAIN_LOG_LINES {
+                buf.pop_front();
+            }
+        }
+    }
+
+    fn tail(&self) -> String {
+        match self.0.lock() {
+            Ok(buf) => buf.iter().cloned().collect::<Vec<_>>().join("\n"),
+            Err(_) => "<brain output unavailable: the log lock is poisoned>".to_string(),
+        }
+    }
+}
+
+/// Read one pipe to EOF on its own thread, appending to the ring.
+///
+/// Reads bytes rather than `BufRead::lines()`: the brain's output is not
+/// guaranteed to be valid UTF-8 (a library printing raw bytes is enough),
+/// and a decode error must not silently kill the drain thread and
+/// re-create the blocked-pipe problem this exists to remove.
+fn drain_stream<R: Read + Send + 'static>(reader: R, stream: &'static str, log: BrainLog) {
+    std::thread::spawn(move || {
+        let mut buffered = BufReader::new(reader);
+        let mut raw = Vec::new();
+        loop {
+            raw.clear();
+            match buffered.read_until(b'\n', &mut raw) {
+                Ok(0) => break,
+                Ok(_) => log.push(stream, &String::from_utf8_lossy(&raw)),
+                Err(e) => {
+                    log.push(stream, &format!("<could not read this stream: {e}>"));
+                    break;
+                }
+            }
+        }
+        log.push(stream, "<end of stream: the brain closed it or exited>");
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Brain process helpers
@@ -242,7 +350,11 @@ fn brain_base_url() -> String {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-fn start_brain(app: tauri::AppHandle, state: State<'_, BrainProcess>) -> Result<u32, String> {
+fn start_brain(
+    app: tauri::AppHandle,
+    state: State<'_, BrainProcess>,
+    log: State<'_, BrainLog>,
+) -> Result<u32, String> {
     let mut guard = state.0.lock().map_err(|e| format!("lock: {e}"))?;
     if let Some(mut existing) = guard.take() {
         let _ = existing.kill();
@@ -256,7 +368,7 @@ fn start_brain(app: tauri::AppHandle, state: State<'_, BrainProcess>) -> Result<
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = cmd.spawn().map_err(|e| {
+    let mut child = cmd.spawn().map_err(|e| {
         format!(
             "failed to spawn {} -m api.server in {}: {e}",
             python.display(),
@@ -264,6 +376,22 @@ fn start_brain(app: tauri::AppHandle, state: State<'_, BrainProcess>) -> Result<
         )
     })?;
     let pid = child.id();
+
+    // This process's output only. Whatever the previous brain printed
+    // describes a pid that no longer exists.
+    let log = log.inner().clone();
+    log.clear();
+    log.push(
+        "shell",
+        &format!("started {} -m api.server (pid {pid})", python.display()),
+    );
+    if let Some(out) = child.stdout.take() {
+        drain_stream(out, "stdout", log.clone());
+    }
+    if let Some(err) = child.stderr.take() {
+        drain_stream(err, "stderr", log);
+    }
+
     *guard = Some(child);
     Ok(pid)
 }
@@ -284,6 +412,23 @@ fn brain_runtime_info(app: tauri::AppHandle) -> String {
         Err(e) => format!("feral-core: UNRESOLVED: {e}"),
     };
     format!("{core}\nbrain url: {}", brain_base_url())
+}
+
+/// The tail of what the brain itself printed, as text.
+///
+/// Companion to `brain_runtime_info`: that one reports what the shell
+/// RESOLVED, this one reports what the process SAID. The difference is
+/// "the interpreter was wrong" versus the traceback that proves it.
+/// Bounded to the last `BRAIN_LOG_LINES` lines by the ring buffer, so
+/// this is safe to call from a UI on a timer.
+#[tauri::command]
+fn brain_output_tail(log: State<'_, BrainLog>) -> String {
+    let tail = log.inner().tail();
+    if tail.is_empty() {
+        "<no output captured: the brain has not been started, or it printed nothing>".to_string()
+    } else {
+        tail
+    }
 }
 
 #[tauri::command]
@@ -409,12 +554,14 @@ fn main() {
             Some(vec!["--minimized"]),
         ))
         .manage(BrainProcess(Mutex::new(None)))
+        .manage(BrainLog::new())
         .invoke_handler(tauri::generate_handler![
             start_brain,
             stop_brain,
             check_brain_health,
             get_brain_url,
             brain_runtime_info,
+            brain_output_tail,
         ])
         .setup(|app| {
             // ---- System tray menu ----------------------------------------
@@ -686,6 +833,72 @@ mod tests {
                 assert!(why.contains("FTS5"), "unexpected rejection: {why}");
             }
         }
+    }
+
+    #[test]
+    fn the_brain_log_keeps_only_the_last_n_lines() {
+        // The buffer exists to survive a brain that prints in a loop, so
+        // the bound is the property under test, not the content.
+        let log = BrainLog::new();
+        for i in 0..(BRAIN_LOG_LINES * 3) {
+            log.push("stdout", &format!("line {i}"));
+        }
+        let tail = log.tail();
+        let lines: Vec<&str> = tail.lines().collect();
+        assert_eq!(lines.len(), BRAIN_LOG_LINES);
+        // Oldest dropped, newest kept: a traceback printed just before the
+        // process died must be the part that survives.
+        assert!(!tail.contains("line 0\n"));
+        assert!(lines.last().unwrap().contains(&format!("line {}", BRAIN_LOG_LINES * 3 - 1)));
+    }
+
+    #[test]
+    fn a_single_enormous_line_is_clipped_not_kept_whole() {
+        let log = BrainLog::new();
+        log.push("stderr", &"x".repeat(BRAIN_LOG_MAX_LINE * 4));
+        let tail = log.tail();
+        assert!(tail.len() < BRAIN_LOG_MAX_LINE * 2, "clip did not apply");
+        assert!(tail.contains("line truncated"), "{tail}");
+    }
+
+    #[test]
+    fn clipping_does_not_split_a_multibyte_character() {
+        // Truncating at a byte offset inside a UTF-8 sequence would panic
+        // on the slice. Every char here is 2 bytes, so max lands mid-char.
+        let s = "é".repeat(BRAIN_LOG_MAX_LINE);
+        let clipped = clip_line(&s, BRAIN_LOG_MAX_LINE + 1);
+        assert!(clipped.starts_with('é'));
+        assert!(clipped.ends_with("<line truncated>"));
+    }
+
+    #[test]
+    fn starting_a_new_brain_drops_the_previous_ones_output() {
+        let log = BrainLog::new();
+        log.push("stderr", "traceback from the process that already died");
+        log.clear();
+        assert_eq!(log.tail(), "");
+    }
+
+    #[test]
+    fn a_drained_stream_reaches_the_ring() {
+        // The whole point of the piped stdio: what the process wrote is
+        // readable afterwards. A Cursor stands in for the child's pipe.
+        let log = BrainLog::new();
+        let payload = b"Traceback (most recent call last):\nsqlite3.OperationalError: no such module: fts5\n";
+        drain_stream(std::io::Cursor::new(payload.to_vec()), "stderr", log.clone());
+
+        // The drain runs on its own thread; poll rather than sleep a fixed
+        // amount, so this is not a timing bet.
+        for _ in 0..200 {
+            if log.tail().contains("fts5") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let tail = log.tail();
+        assert!(tail.contains("no such module: fts5"), "{tail}");
+        assert!(tail.contains("[stderr]"), "{tail}");
+        assert!(tail.contains("end of stream"), "{tail}");
     }
 
     fn which_python() -> Result<PathBuf, ()> {

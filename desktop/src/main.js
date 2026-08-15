@@ -221,10 +221,22 @@ function showError(title, detail) {
   document.getElementById('retry').onclick = () => { void boot(); };
 }
 
-// What the app resolved, for the error screen. `brain_runtime_info` reports
-// three lines: the feral-core directory, the interpreter (or "UNRESOLVED:"
-// with the reason every candidate was rejected, e.g. missing FTS5), and the
-// brain URL. See src-tauri/src/main.rs.
+// What the app resolved AND what the brain said, for the error screen.
+//
+// Two commands, because they answer two different questions and only one of
+// them used to be askable:
+//
+//   brain_runtime_info: what the shell RESOLVED. The feral-core directory,
+//     the interpreter (or "UNRESOLVED:" with the reason every candidate was
+//     rejected, e.g. missing FTS5), and the brain URL.
+//   brain_output_tail: what the brain PROCESS actually printed. Its stdout
+//     and stderr were piped and then never read, so the traceback that
+//     explains the failure went nowhere. The Rust side now drains both into
+//     a bounded ring buffer and this returns its tail.
+//
+// The distinction is the whole point: "the interpreter was wrong" is a guess
+// until the process's own last words are on the screen next to it.
+// See src-tauri/src/main.rs.
 async function collectDiagnostics(firstLine) {
   const lines = [];
   if (firstLine) lines.push(firstLine);
@@ -232,6 +244,13 @@ async function collectDiagnostics(firstLine) {
     lines.push(String(await invoke('brain_runtime_info')).trim());
   } catch (e) {
     lines.push(`brain_runtime_info failed: ${e}`);
+  }
+  lines.push('');
+  lines.push('--- what the brain printed (most recent last) ---');
+  try {
+    lines.push(String(await invoke('brain_output_tail')).trim());
+  } catch (e) {
+    lines.push(`brain_output_tail failed: ${e}`);
   }
   return lines.join('\n');
 }

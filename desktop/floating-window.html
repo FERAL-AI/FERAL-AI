@@ -72,8 +72,16 @@
     // Importing the API directly also avoids exposing the whole Tauri
     // surface to the page just to hide a window.
     import { getCurrentWindow } from '@tauri-apps/api/window';
+    // Same bridge the main window uses. This panel used to open a
+    // hardcoded ws://localhost:9090/v1/session, which is only ever right
+    // by coincidence: FERAL_PUBLIC_BASE_URL / FERAL_BRAIN_URL are read in
+    // the Rust process and can point anywhere, so with either set this
+    // window read "Disconnected" forever while the main window worked.
+    import { invoke } from '@tauri-apps/api/core';
 
     let ws = null;
+    // Resolved once from get_brain_url and reused across reconnects.
+    let sessionUrl = null;
     // True between a successful send and the first byte of the reply, so the
     // pending placeholder can be replaced rather than appended to.
     let awaitingReply = false;
@@ -90,8 +98,52 @@
       awaitingReply = kind === 'pending';
     }
 
-    function connect() {
-      ws = new WebSocket('ws://localhost:9090/v1/session');
+    // Derive the session WebSocket URL from the brain's HTTP base URL:
+    // http -> ws, https -> wss, and any path prefix the base carries is
+    // preserved so a brain behind a reverse proxy at /feral still works.
+    function sessionUrlFrom(base) {
+      const u = new URL(base);
+      u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+      u.pathname = `${u.pathname.replace(/\/+$/, '')}/v1/session`;
+      u.search = '';
+      u.hash = '';
+      return u.toString();
+    }
+
+    // get_brain_url is infallible on the Rust side, so an empty or
+    // unparseable answer is reported rather than papered over with a
+    // localhost guess, which is the bug this replaces.
+    async function resolveSessionUrl() {
+      let base;
+      try {
+        base = String(await invoke('get_brain_url') || '').trim();
+      } catch (err) {
+        setResponse(`Could not ask the app which brain to use: ${err}`, 'failed');
+        return null;
+      }
+      if (!base) {
+        setResponse('The app could not resolve a brain URL, so there is nothing to connect to. Set FERAL_BRAIN_URL before launching.', 'failed');
+        return null;
+      }
+      try {
+        return sessionUrlFrom(base);
+      } catch (err) {
+        setResponse(`The resolved brain URL is not usable: ${base} (${err})`, 'failed');
+        return null;
+      }
+    }
+
+    async function connect() {
+      if (!sessionUrl) {
+        sessionUrl = await resolveSessionUrl();
+        if (!sessionUrl) {
+          status.textContent = 'No brain URL';
+          status.className = 'disconnected';
+          setTimeout(() => { void connect(); }, 3000);
+          return;
+        }
+      }
+      ws = new WebSocket(sessionUrl);
       ws.onopen = () => { status.textContent = 'Connected'; status.className = 'connected'; };
       ws.onerror = () => { status.textContent = 'Disconnected'; status.className = 'disconnected'; };
       ws.onclose = () => {
@@ -102,7 +154,7 @@
         if (awaitingReply) {
           setResponse('The connection closed before the brain replied. Ask again once the status reads Connected.', 'failed');
         }
-        setTimeout(connect, 3000);
+        setTimeout(() => { void connect(); }, 3000);
       };
       ws.onmessage = (e) => {
         try {
@@ -160,7 +212,7 @@
       }
     });
 
-    connect();
+    void connect();
   </script>
 </body>
 </html>

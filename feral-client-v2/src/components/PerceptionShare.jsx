@@ -95,7 +95,9 @@ export default function PerceptionShare() {
             className={`v2-btn v2-btn--ghost${controls.videoMuted ? ' is-active' : ''}`}
             onClick={toggleVideo}
             aria-pressed={controls.videoMuted}
-            title="Toggle video"
+            // Muting now disables the camera track, not just the send, so
+            // the label can promise the device goes off and be right.
+            title={controls.videoMuted ? 'Turn the camera back on' : 'Turn the camera off'}
           >
             {controls.videoMuted ? <CameraOff size={12} /> : <Camera size={12} />}
           </button>
@@ -104,7 +106,7 @@ export default function PerceptionShare() {
             className={`v2-btn v2-btn--ghost${controls.audioMuted ? ' is-active' : ''}`}
             onClick={toggleAudio}
             aria-pressed={controls.audioMuted}
-            title="Toggle audio"
+            title={controls.audioMuted ? 'Turn the microphone back on' : 'Turn the microphone off'}
           >
             {controls.audioMuted ? <MicOff size={12} /> : <Mic size={12} />}
           </button>
@@ -140,8 +142,9 @@ export default function PerceptionShare() {
 
       <p className="v2-p v2-p--tiny v2-p--muted" style={{ marginTop: 8 }}>
         Privacy: sharing only starts after you click. The indicator is always visible while streaming.
-        Frames are capped at 512 KiB and dropped by the Brain above that. We auto-pause if this tab is
-        hidden longer than 60 seconds.
+        Muting the camera or the microphone switches the track itself off, so your device&apos;s camera
+        and mic lights go out, and pausing does the same. Frames are capped at 512 KiB and dropped by
+        the Brain above that. We auto-pause if this tab is hidden longer than 60 seconds.
       </p>
     </Pane>
     </div>

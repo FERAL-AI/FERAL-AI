@@ -42,8 +42,11 @@
  *     and stopping all stop bytes leaving the browser, and the emit
  *     paths re-check the live flags on every frame/chunk rather than
  *     trusting a value captured when the share started.
- *   • Muting the mic also disables the audio tracks, so capture stops at
- *     the source and not just at the send call.
+ *   • Muting the mic or the camera also disables the corresponding
+ *     MediaStreamTracks, so capture stops at the source and not just at
+ *     the send call. That is what puts the camera light out; a lit
+ *     camera light next to a CameraOff icon teaches the user that the
+ *     indicator cannot be trusted.
  *   • Visibility change (tab backgrounded > 60s) auto-pauses.
  *   • stop() tears the MediaStream down AND revokes the daemon.
  *   • The dock indicator is visible the whole time the camera is held
@@ -330,6 +333,40 @@ function applyAudioGate() {
   } catch { /* fake/di stream without track control */ }
 }
 
+/**
+ * Gate the camera at the source.
+ *
+ * `videoMuted` used to gate only `captureFrame()`, so muting stopped
+ * frames being SENT while the track stayed enabled and the camera stayed
+ * open. Nothing was transmitted, but the hardware light stayed lit next
+ * to a CameraOff icon, which is the same honesty problem as the mic bug
+ * with the sign flipped: the bytes were right and the indicator was
+ * unbelievable. Disabling the track is what actually puts the light out.
+ *
+ * Setting `enabled = false` is deliberately not `track.stop()`. Stopping
+ * releases the device, and re-acquiring it means a fresh getUserMedia and
+ * possibly a fresh permission prompt, so unmute would no longer be the
+ * cheap, silent resume the UI implies.
+ */
+function applyVideoGate() {
+  const enabled = !controlsRef.current.videoMuted && snapshot.status === 'running';
+  try {
+    (mediaStream?.getVideoTracks?.() || []).forEach((t) => { t.enabled = enabled; });
+  } catch { /* fake/di stream without track control */ }
+}
+
+/**
+ * Both source gates, applied together.
+ *
+ * Every status transition has to move both, so they are moved from one
+ * place. Calling only one of them is how the two paths drifted apart in
+ * the first place.
+ */
+function applyCaptureGates() {
+  applyAudioGate();
+  applyVideoGate();
+}
+
 async function attachAudioWorklet(stream) {
   if (!config.audio || typeof AudioContext === 'undefined') return;
   try {
@@ -419,7 +456,7 @@ function openSocket(pairToken) {
       ws.onclose = () => {
         if (snapshot.status !== 'idle') {
           setState({ status: 'paused' });
-          applyAudioGate();
+          applyCaptureGates();
         }
       };
     } catch (err) {
@@ -493,7 +530,7 @@ export async function startShare() {
     await openSocket(pairToken);
     await attachAudioWorklet(stream);
     setState({ status: 'running' });
-    applyAudioGate();
+    applyCaptureGates();
     startFrameLoop();
   } catch (e) {
     // Tear down side effects first (mic / camera tracks, partial
@@ -508,9 +545,10 @@ export async function startShare() {
 export function pauseShare() {
   stopFrameLoop();
   setState({ status: 'paused' });
-  // Paused means nothing is sent, audio included. mayEmit() already
-  // blocks the audio path; disabling the tracks stops capture too.
-  applyAudioGate();
+  // Paused means nothing is sent, audio and video included. mayEmit()
+  // already blocks both emit paths; disabling the tracks stops capture
+  // too, so the mic and camera indicators match what the chip claims.
+  applyCaptureGates();
 }
 
 export function resumeShare() {
@@ -519,7 +557,7 @@ export function resumeShare() {
     return;
   }
   setState({ status: 'running' });
-  applyAudioGate();
+  applyCaptureGates();
   startFrameLoop();
 }
 
@@ -537,6 +575,8 @@ export function toggleAudio() {
 
 export function toggleVideo() {
   setState({ controls: { ...snapshot.controls, videoMuted: !snapshot.controls.videoMuted } });
+  // Not just a send-side flag: this is what turns the camera light off.
+  applyVideoGate();
 }
 
 function onVisibilityChange() {
