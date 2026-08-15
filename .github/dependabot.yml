@@ -1,7 +1,7 @@
 # Dependabot configuration for FERAL-AI/FERAL-AI.
 #
-# Why weekly (not daily): with four npm packages (feral-client,
-# feral-client-v2, feral-extension, ts-node-sdk) + pip + github-actions,
+# Why weekly (not daily): with four npm packages (feral-client-v2,
+# feral-extension, ts-node-sdk, desktop) + pip + github-actions,
 # a daily schedule fires CI seven times a week on small version bumps.
 # Weekly batches reduce runner-minute burn to roughly 1/7 without losing
 # security-critical alerts — GitHub still opens a SEPARATE PR for any
@@ -13,15 +13,23 @@
 # dedicated PR (per Dependabot's default group behaviour).
 version: 2
 updates:
-  - package-ecosystem: npm
-    directory: /feral-client
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    groups:
-      feral-client-minor:
-        update-types: ["minor", "patch"]
+# /feral-client (the superseded v1 client) is deliberately NOT listed.
+#
+# It is not being developed: v2 is the default UI, and since the
+# fail-closed change in api/server.py the brain only serves v1 when
+# someone sets FERAL_SERVE_LEGACY_WEBUI=1. Weekly minor/patch PRs against
+# a client nobody is changing are pure review load.
+#
+# This does NOT stop security coverage, and the distinction matters.
+# Dependabot ALERTS are driven by the repository dependency graph, not by
+# this file, so a new advisory against anything in feral-client's
+# lockfile still raises an alert exactly as before. What stops is the
+# routine version-bump PR. Security stays, noise goes.
+#
+# The consequence to accept: v1's dependencies now drift until an
+# advisory forces a manual bump. That is the intended trade for a
+# component in maintenance, and it is revisited if v1 is ever revived or
+# removed outright.
 
   - package-ecosystem: npm
     directory: /feral-client-v2
