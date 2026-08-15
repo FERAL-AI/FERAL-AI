@@ -13,11 +13,32 @@ the third, and the digital-twin engine (Commit 7) uses the fourth.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, StrictBool, ValidationError
 
 from api.state import state
 
 router = APIRouter(tags=["supervisor"])
+
+
+class PauseRequest(BaseModel):
+    """Body for ``POST /api/supervisor/pause``.
+
+    ``paused`` is a ``StrictBool`` on purpose. The pre-fix handler took a
+    bare ``dict`` and ran ``bool((body or {}).get("paused", False))``,
+    which is Python truthiness, not JSON booleans: ``{"paused": "no"}``,
+    ``{"paused": "false"}`` and ``{"paused": 0.1}`` all coerced to
+    ``True`` and paused the brain. This is the kill switch, so the wire
+    type has to be exactly ``true`` or ``false``.
+
+    ``models/protocol.py`` is canonical for HUP frames only; this is a
+    REST request body, so it follows the ``api/routes/*.py`` convention
+    of a local ``BaseModel`` (see ``apps.ValidateRequest``,
+    ``audio.AudioConfigRequest``). Nothing here duplicates a wire
+    constant that lives in the protocol module.
+    """
+
+    paused: StrictBool
 
 
 def _require_supervisor():
@@ -46,10 +67,61 @@ async def get_stats():
 
 
 @router.post("/api/supervisor/pause")
-async def set_paused(body: dict):
+async def set_paused(request: Request):
+    """Toggle the supervisor kill switch.
+
+    The body is read raw and validated through :class:`PauseRequest`
+    rather than declared as a handler parameter so a malformed body
+    answers 400 with a sentence naming the field and the type we got.
+    Declaring the model directly would hand the caller FastAPI's default
+    422 with a nested ``loc``/``msg``/``input`` array, which is not a
+    useful message for the one control that stops the brain.
+    """
     sup = _require_supervisor()
-    paused = bool((body or {}).get("paused", False))
-    sup.set_paused(paused)
+
+    try:
+        raw = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_json",
+                "field": "body",
+                "message": "Body must be JSON shaped {\"paused\": true|false}.",
+            },
+        )
+
+    if not isinstance(raw, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_body",
+                "field": "body",
+                "message": (
+                    f"Body must be a JSON object shaped "
+                    f"{{\"paused\": true|false}}, got {type(raw).__name__}."
+                ),
+            },
+        )
+
+    try:
+        req = PauseRequest.model_validate(raw)
+    except ValidationError:
+        got = raw.get("paused", None)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_paused",
+                "field": "paused",
+                "message": (
+                    f"paused must be the JSON boolean true or false, got "
+                    f"{got!r}. It is NOT coerced: a truthy string would "
+                    f"otherwise pause the brain."
+                ),
+            },
+        )
+
+    sup.set_paused(req.paused)
     return {"paused": sup.paused}
 
 

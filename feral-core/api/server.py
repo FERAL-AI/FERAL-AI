@@ -4722,13 +4722,42 @@ async def _analyze_scene_background(
 #
 # v2 (feral-client-v2) is the default UI. When ``webui_v2/index.html`` is on
 # disk the Brain serves it at / directly, and v1 (``webui/``) is never
-# reached. If webui_v2/ isn't built (fresh clone), fall back to v1 so users
-# still see something. v1 source is kept in the tree for history only.
+# reached. v1 source is kept in the tree for history only.
 #
 # The directory is named ``webui_v2`` (underscore) so setuptools treats it
 # as a real Python package — without that, ``pip install feral-ai`` ships a
-# wheel missing the v2 bundle and the fallback kicks in on end-user machines.
-# See feral-core/pyproject.toml [tool.setuptools.package-data] for the mirror.
+# wheel missing the v2 bundle. See feral-core/pyproject.toml
+# [tool.setuptools.package-data] for the mirror. That has already happened
+# once, which is what makes the missing-v2 branch below a live path and not
+# a hypothetical.
+#
+# What that branch used to do: ``_webui_dir = ... else _webui_legacy_dir``,
+# serve the superseded v1 client at / and log a warning. Nothing on the
+# served page said which client it was. A user on a broken wheel got a UI
+# that looks plausible, is two generations old, calls routes that have since
+# been renamed, and files bugs against code nobody maintains. The log line
+# is read by whoever restarts the brain; the page is read by everybody.
+#
+# So the missing-v2 branch now FAILS CLOSED. ``/`` serves
+# ``_PACKAGING_FAULT_HTML``, which names the fault (the install shipped
+# without webui_v2/), says v1 is present but deliberately not served, and
+# gives the fix. Reasoning:
+#
+#   * The fault is a packaging fault. A page that says "this install is
+#     broken, here is the command" routes the report to the right place.
+#     A silently-downgraded UI routes it to the wrong one, and the cost of
+#     a misattributed bug report is paid by the maintainer AND the user.
+#   * v1 is not a degraded v2, it is a different client against an API that
+#     has moved. "Something" is not better than "nothing" when the something
+#     is wrong in ways the user cannot see.
+#   * The fallback page is not a dead end: /docs, /api/config, /health and
+#     the CLI all still work, and they are linked from it.
+#
+# The escape hatch stays, because someone deliberately running v1 (bisecting
+# a regression, comparing behaviour) is a real case and should not have to
+# patch the brain: ``FERAL_SERVE_LEGACY_WEBUI=1`` serves v1 again, with a
+# fixed, non-dismissible banner injected into its index.html naming the
+# variant and the cause. Opt-in plus banner, never silent.
 #
 # The ``/v2/`` alias is retained so existing bookmarks keep working even
 # when v2 is already the default at /.
@@ -4738,9 +4767,19 @@ _webui_legacy_dir = Path(__file__).parent.parent / "webui"
 _webui_v2_ready = _webui_v2_dir.is_dir() and (_webui_v2_dir / "index.html").exists()
 _webui_legacy_ready = _webui_legacy_dir.is_dir() and (_webui_legacy_dir / "index.html").exists()
 
+#: Opt-in override that re-enables serving the superseded v1 client when the
+#: v2 bundle is missing. Never on by default.
+_SERVE_LEGACY_WEBUI_ENV = "FERAL_SERVE_LEGACY_WEBUI"
+_webui_legacy_opt_in = os.getenv(_SERVE_LEGACY_WEBUI_ENV, "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+_webui_legacy_serving = (
+    not _webui_v2_ready and _webui_legacy_ready and _webui_legacy_opt_in
+)
+
 _webui_dir = _webui_v2_dir if _webui_v2_ready else _webui_legacy_dir
-_webui_ready = _webui_v2_ready or _webui_legacy_ready
-_webui_variant = "v2" if _webui_v2_ready else ("v1-legacy" if _webui_legacy_ready else "missing")
+_webui_ready = _webui_v2_ready or _webui_legacy_serving
+_webui_variant = "v2" if _webui_v2_ready else ("v1-legacy" if _webui_legacy_serving else "missing")
 _webui_route_mode = "spa" if _webui_ready else "fallback"
 logger.info("Web UI routing mode=%s variant=%s path=%s", _webui_route_mode, _webui_variant, _webui_dir)
 
@@ -4748,6 +4787,15 @@ if _webui_ready and (_webui_dir / "assets").is_dir():
     from starlette.staticfiles import StaticFiles
     app.mount("/assets", StaticFiles(directory=str(_webui_dir / "assets")), name="webui-assets")
     logger.info(f"Web UI ({_webui_variant}) bundled from {_webui_dir} — open {brain_public_base_url()}")
+elif _webui_legacy_ready and not _webui_v2_ready:
+    logger.error(
+        "Web UI v2 bundle is MISSING at %s while the superseded v1 client is "
+        "present at %s. This install was packaged without webui_v2/. Serving "
+        "the packaging-fault page at / rather than silently downgrading to v1; "
+        "run 'make bundle-webui' to fix, or set %s=1 to serve v1 with a "
+        "warning banner.",
+        _webui_v2_dir, _webui_legacy_dir, _SERVE_LEGACY_WEBUI_ENV,
+    )
 else:
     logger.warning(
         f"Web UI not found at {_webui_dir}. Dashboard will show setup instructions. "
@@ -4827,6 +4875,107 @@ a{color:#06b6d4}p{line-height:1.6}</style></head>
 </div></body></html>"""
 
 
+# Shown when webui_v2/ is missing but the superseded v1 bundle IS on disk.
+# This is the packaging fault the comment above _webui_v2_dir describes, and
+# it has shipped in a real wheel. The page exists so the person looking at
+# the screen learns the same thing the person reading the log learns.
+_PACKAGING_FAULT_HTML = """<!DOCTYPE html>
+<html><head><title>FERAL Brain: dashboard not bundled</title>
+<style>body{font-family:system-ui;background:#0a0a0a;color:#e0e0e0;display:flex;align-items:center;
+justify-content:center;min-height:100vh;margin:0;padding:2rem}
+.card{background:#141414;border:1px solid #3a2a10;border-radius:16px;padding:2.5rem;max-width:620px}
+h1{color:#f59e0b;margin-bottom:.5rem;font-size:1.4rem}code{background:#1a1a1a;padding:.2em .5em;border-radius:4px;font-size:.85em}
+a{color:#06b6d4}p{line-height:1.6}li{line-height:1.9}
+.why{border-left:3px solid #3a2a10;padding-left:1rem;margin:1.5rem 0;opacity:.85;font-size:.92em}</style></head>
+<body><div class="card">
+<h1>This install shipped without the v2 dashboard</h1>
+<p>The FERAL API is running normally. The web dashboard
+(<code>feral-core/webui_v2/</code>) is not present in this install, so there is
+no current UI to serve.</p>
+<div class="why">
+<p><strong>Why you are not looking at the old dashboard instead.</strong>
+The superseded v1 client <em>is</em> on disk, and earlier builds quietly served
+it here. It is two generations old and calls API routes that have since been
+renamed, so it looks like a working dashboard while behaving like a broken one.
+Serving it silently turned a packaging fault into bug reports filed against
+retired code. This page is the packaging fault, stated plainly.</p>
+</div>
+<p><strong>Fix (rebuild with the dashboard):</strong></p>
+<ol>
+<li>Clone: <code>git clone https://github.com/FERAL-AI/FERAL-AI.git</code></li>
+<li>Build UI: <code>cd FERAL-AI && make bundle-webui</code></li>
+<li>Install: <code>pip install -e feral-core[llm]</code></li>
+<li>Restart: <code>feral serve</code></li>
+</ol>
+<p style="opacity:.75">If you deliberately want the superseded v1 client, start the
+brain with <code>FERAL_SERVE_LEGACY_WEBUI=1</code>. It will be served with a
+permanent banner saying which client you are in.</p>
+<p style="margin-top:1.5rem"><a href="/docs">API Docs</a> &middot;
+<a href="/api/config">Config</a> &middot;
+<a href="/skills">Skills</a> &middot;
+<a href="/health">Health</a></p>
+</div></body></html>"""
+
+
+# Injected into v1's index.html on the FERAL_SERVE_LEGACY_WEBUI=1 path.
+# Deliberately: fixed position, no close control, no JavaScript, and a
+# z-index above anything v1 sets, so it cannot be dismissed or scrolled
+# away from. It is a sibling of v1's #root, so React re-renders never
+# touch it.
+_LEGACY_WEBUI_BANNER = """
+<div id="feral-legacy-webui-banner" role="alert" style="position:fixed;top:0;left:0;right:0;
+z-index:2147483647;background:#7c2d12;color:#fff7ed;font-family:system-ui,sans-serif;
+font-size:13px;line-height:1.5;padding:8px 16px;border-bottom:1px solid #f59e0b;
+box-shadow:0 1px 6px rgba(0,0,0,.45);text-align:center">
+<strong>You are looking at the superseded v1 FERAL client.</strong>
+This install did not ship <code>webui_v2/</code>, and v1 is being served only because
+<code>FERAL_SERVE_LEGACY_WEBUI=1</code> is set. It calls API routes that have since been
+renamed. Report bugs against the v2 client, not this one. Fix: run
+<code>make bundle-webui</code> and reinstall.
+</div>
+<style>body{padding-top:52px !important}</style>
+"""
+
+
+def _inject_legacy_banner(html: str) -> str:
+    """Put the banner immediately after ``<body ...>``.
+
+    Falls back to prepending when there is no body tag; an unrecognised
+    index.html must still carry the warning rather than lose it.
+    """
+    lowered = html.lower()
+    start = lowered.find("<body")
+    if start != -1:
+        end = html.find(">", start)
+        if end != -1:
+            return html[: end + 1] + _LEGACY_WEBUI_BANNER + html[end + 1:]
+    return _LEGACY_WEBUI_BANNER + html
+
+
+def _legacy_index_response() -> HTMLResponse:
+    """Serve v1's index.html with the non-dismissible banner injected."""
+    index = _webui_legacy_dir / "index.html"
+    try:
+        html = index.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        logger.error("Could not read legacy web UI index at %s: %s", index, exc)
+        return HTMLResponse(_PACKAGING_FAULT_HTML)
+    return HTMLResponse(_inject_legacy_banner(html))
+
+
+def _webui_fallback_html() -> str:
+    """Pick the fallback page that names the actual situation.
+
+    Two different faults were previously collapsed into one page: "nothing
+    was ever built here" and "this install shipped without the current
+    client while carrying the retired one". They need different remedies,
+    so they get different pages.
+    """
+    if _webui_legacy_ready and not _webui_v2_ready:
+        return _PACKAGING_FAULT_HTML
+    return _FALLBACK_HTML
+
+
 @app.get("/setup/legacy")
 async def setup_legacy_redirect():
     """Hard-redirect the deleted /setup/legacy route to /setup.
@@ -4893,8 +5042,14 @@ async def serve_webui_or_fallback(full_path: str = ""):
             return HTMLResponse("Forbidden", status_code=403)
         if full_path and file_path.is_file():
             return FileResponse(file_path)
+        # The v1 bundle is only reachable via the FERAL_SERVE_LEGACY_WEBUI
+        # opt-in, and every HTML entry point it serves carries the banner.
+        # Injecting here rather than at the file level covers deep SPA
+        # routes too, which all fall through to index.html.
+        if _webui_variant == "v1-legacy":
+            return _legacy_index_response()
         return FileResponse(_webui_dir / "index.html")
-    return HTMLResponse(_FALLBACK_HTML)
+    return HTMLResponse(_webui_fallback_html())
 
 
 def _assert_allowlist_routes_exist(target_app) -> None:

@@ -5,7 +5,9 @@ import Glass from '../ui/Glass';
 import EmptyState from '../ui/EmptyState';
 import StatusDot from '../ui/StatusDot';
 import CodeEditor from '../ui/CodeEditor';
+import ErrorState from '../ui/ErrorState';
 import { SelfWorkspace } from '../components/SelfEditors';
+import { toApiError } from '../hooks/useResource';
 import { apiFetch, apiJson } from '../lib/api';
 import { API_BASE } from '../lib/config';
 
@@ -2116,31 +2118,229 @@ function AuditSub() {
   );
 }
 
+/**
+ * Local box for the one failure ErrorState cannot describe: the document
+ * never left the browser. ErrorState's fixed note reads "This is a failed
+ * request, not an empty result", which would be a lie about a syntax error
+ * the user has not sent anywhere yet. Colours come from tokens.css; the
+ * inline-style-reading-`--v2-*`-tokens shape follows pages/Oversight.jsx.
+ */
+const POLICY_JSON_ERROR_STYLE = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 4,
+  marginTop: 10,
+  padding: '10px 12px',
+  border: '1px solid var(--v2-state-warn-soft, var(--v2-state-error-soft))',
+  borderRadius: 'var(--v2-radius-sm)',
+  background: 'var(--v2-state-warn-soft, var(--v2-state-error-soft))',
+  color: 'var(--v2-state-warn, var(--v2-state-error))',
+  fontSize: 'var(--v2-size-sm)',
+  lineHeight: 1.45,
+};
+
+const POLICY_ERROR_TITLE_STYLE = { fontWeight: 600 };
+
+const POLICY_EXCERPT_STYLE = {
+  fontFamily: 'var(--v2-font-mono, ui-monospace, monospace)',
+  fontSize: 'var(--v2-size-xs, 12px)',
+  opacity: 0.85,
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-all',
+};
+
+/**
+ * Turn a JSON.parse failure into a location the user can navigate to.
+ *
+ * There is no portable "where" on a SyntaxError: it has no line/column
+ * properties and engines word the message differently. V8 alone emits two
+ * families and only one of them carries an offset:
+ *
+ *   "Expected ',' or '}' after property value in JSON at position 66
+ *    (line 5 column 5)"                              -> exact offset
+ *   "Unexpected token ',', ...\"  \"mode\": ,\"... is not valid JSON"
+ *                                                    -> no offset, but it
+ *                                                       quotes the source
+ *                                                       around the fault
+ *
+ * The second family is the common one for a stray character, so "read the
+ * position out of the message" would have covered maybe half of real
+ * mistakes and silently said nothing for the rest. Three strategies, in
+ * descending precision, and the result says which one it got:
+ *
+ *   precise=true   an offset was reported; line + column are exact.
+ *   precise=false  the message quoted a snippet that was found verbatim in
+ *                  the document, so the line is where that quote starts.
+ *   line=0         nothing locatable; show the engine's sentence and say
+ *                  plainly that we do not know where.
+ *
+ * Exported so the location logic can be asserted directly, without going
+ * through a render and a specific engine's phrasing.
+ */
+export function locateJsonError(source, err) {
+  const raw = String(err?.message || 'Invalid JSON');
+  const text = typeof source === 'string' ? source : '';
+  const at = (offset, precise) => {
+    const clamped = Math.max(0, Math.min(offset, text.length));
+    const before = text.slice(0, clamped);
+    const line = before.split('\n').length;
+    return {
+      raw,
+      precise,
+      line,
+      column: clamped - (before.lastIndexOf('\n') + 1) + 1,
+      position: clamped,
+      excerpt: (text.split('\n')[line - 1] || '').trim().slice(0, 160),
+    };
+  };
+  const nowhere = { raw, precise: false, line: 0, column: 0, position: -1, excerpt: '' };
+
+  if (!text) return nowhere;
+
+  const offset = /position\s+(\d+)/i.exec(raw);
+  if (offset) return at(Number(offset[1]), true);
+
+  // "Unexpected end of JSON input" means truncation: the fault is at the
+  // end of what the user typed, which is a real and useful location.
+  if (/unexpected end of (json|input|data)/i.test(raw)) {
+    return at(text.length, false);
+  }
+
+  // The quoted-source family. The quote may be elided at either end with
+  // "...", and it contains raw quotes of its own, so the capture is lazy
+  // between the outermost delimiters of the fixed sentence.
+  const quoted = /(?:\.\.\.)?"([\s\S]*?)"(?:\.\.\.)? is not valid JSON/.exec(raw);
+  if (quoted && quoted[1]) {
+    const index = text.indexOf(quoted[1]);
+    // Only trust it when the quote occurs exactly once; two matches mean
+    // we would be pointing at an arbitrary one of them.
+    if (index >= 0 && index === text.lastIndexOf(quoted[1])) {
+      return at(index, false);
+    }
+  }
+
+  return nowhere;
+}
+
 function PolicySub() {
   const [policy, setPolicy] = useState('');
   const [dirty, setDirty] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  // Exactly one of these is ever set. They are separate pieces of state
+  // rather than one tagged union field because they are separate failures
+  // with separate remedies, and the pre-fix `catch {}` collapsing them into
+  // silence is the defect being fixed here.
+  const [jsonError, setJsonError] = useState(null);
+  const [saveError, setSaveError] = useState(null);
+
   useEffect(() => {
     apiJson('/api/policy').then((d) => setPolicy(JSON.stringify(d, null, 2))).catch(() => setPolicy('{}'));
   }, []);
+
   const save = async () => {
+    setJsonError(null);
+    setSaveError(null);
+
+    // Failure 1: the document is not JSON. It never leaves the browser, so
+    // there is no status code to show and no point retrying the request.
+    let parsed;
     try {
-      const parsed = JSON.parse(policy);
+      parsed = JSON.parse(policy);
+    } catch (err) {
+      setJsonError(locateJsonError(policy, err));
+      setSaved(false);
+      return;
+    }
+
+    // Failure 2: the brain rejected it. The brain validates the document
+    // against SandboxPolicy and answers 400 naming the offending field, so
+    // `detail` is the useful part and ApiError already carries it.
+    setBusy(true);
+    try {
       await apiFetch('/api/policy/update', { method: 'POST', body: JSON.stringify(parsed) });
       setSaved(true);
       setDirty(false);
       setTimeout(() => setSaved(false), 2000);
-    } catch { /* silent */ }
+    } catch (err) {
+      // Not `silent: true`. A rejected write to the safety policy should
+      // reach the global error surface as well; this inline box is the
+      // permanent, specific version of the same news.
+      setSaveError(toApiError(err, '/api/policy/update'));
+      setSaved(false);
+    } finally {
+      setBusy(false);
+    }
   };
+
+  const onEdit = (v) => {
+    setPolicy(v);
+    setDirty(true);
+    // Any edit invalidates a previous verdict about the old text.
+    setJsonError(null);
+    setSaveError(null);
+  };
+
   return (
     <Glass level={1} radius="md" padding="lg">
-      <h3>Policy {dirty && <span className="v2-chip v2-chip--warn">unsaved</span>}{saved && <span className="v2-chip v2-chip--live">saved</span>}</h3>
+      <h3>
+        Policy
+        {' '}
+        {dirty && <span className="v2-chip v2-chip--warn">unsaved</span>}
+        {saved && <span className="v2-chip v2-chip--live">saved</span>}
+      </h3>
       <p className="v2-p v2-p--muted">
         The Brain's safety policy as JSON — network allowlists, auto-approve
         categories, tier gates. Saves to the running Brain immediately.
       </p>
-      <CodeEditor value={policy} onChange={(v) => { setPolicy(v); setDirty(true); }} rows={12} language="json" />
-      <div className="v2-forge-actions"><button type="button" className="v2-btn v2-btn--primary" onClick={save} disabled={!dirty}>Save policy</button></div>
+      <CodeEditor value={policy} onChange={onEdit} rows={12} language="json" />
+
+      {jsonError && (
+        <div style={POLICY_JSON_ERROR_STYLE} role="alert" data-testid="policy-json-error">
+          <div style={POLICY_ERROR_TITLE_STYLE}>
+            {jsonError.line === 0 && 'Not saved: the editor contents are not valid JSON'}
+            {jsonError.line > 0 && jsonError.precise
+              && `Not saved: invalid JSON at line ${jsonError.line}, column ${jsonError.column}`}
+            {jsonError.line > 0 && !jsonError.precise
+              && `Not saved: invalid JSON near line ${jsonError.line}`}
+          </div>
+          <div>
+            Nothing was sent to the Brain, so the running policy is unchanged.
+            Fix the syntax and save again.
+          </div>
+          {jsonError.excerpt && (
+            <div style={POLICY_EXCERPT_STYLE}>{`line ${jsonError.line}: ${jsonError.excerpt}`}</div>
+          )}
+          <div style={POLICY_EXCERPT_STYLE}>{jsonError.raw}</div>
+        </div>
+      )}
+
+      {saveError && (
+        <div data-testid="policy-save-error-wrap">
+          <ErrorState
+            error={saveError}
+            what="the safety policy"
+            title="Not saved: the Brain rejected this policy"
+            hint={
+              'The JSON parsed fine, so this is the Brain refusing the document, '
+              + 'not a syntax problem. The running policy is unchanged.'
+            }
+            onRetry={save}
+            testId="policy-save-error"
+          />
+        </div>
+      )}
+
+      <div className="v2-forge-actions">
+        <button
+          type="button"
+          className="v2-btn v2-btn--primary"
+          onClick={save}
+          disabled={!dirty || busy}
+        >
+          {busy ? 'Saving…' : 'Save policy'}
+        </button>
+      </div>
     </Glass>
   );
 }
