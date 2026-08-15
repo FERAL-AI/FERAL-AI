@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { Play, X, RefreshCw, Plus, Pause } from 'lucide-react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
@@ -6,8 +6,35 @@ import Modal from '../ui/Modal';
 import Tabs from '../ui/Tabs';
 import StatusDot from '../ui/StatusDot';
 import EmptyState from '../ui/EmptyState';
+import ErrorState from '../ui/ErrorState';
 import StepBuilder from '../components/StepBuilder';
-import { apiJson, apiFetch } from '../lib/api';
+import { apiFetch } from '../lib/api';
+import { useResource, toApiError } from '../hooks/useResource';
+
+/** Normalise `{key: [...]}` / a bare array / anything else into a list. */
+function asList(value, key) {
+  if (Array.isArray(value?.[key])) return value[key];
+  if (Array.isArray(value)) return value;
+  return [];
+}
+
+/**
+ * Every create modal on this page offers a skill picker fed by
+ * `/skills`. When that call fails the picker used to render with no
+ * options, which reads as "this brain has no skills". `skills === null`
+ * means we never got the list, and each picker says so instead.
+ */
+function SkillPickerNote({ error }) {
+  if (!error) return null;
+  return (
+    <ErrorState
+      error={error}
+      what="the skill list"
+      hint="The picker below is empty because the list never arrived, not because this brain has no skills."
+      compact
+    />
+  );
+}
 
 function statusTone(status) {
   return {
@@ -23,11 +50,12 @@ function statusTone(status) {
 
 export default function Flows() {
   const [tab, setTab] = useState('taskflows');
-  const [skills, setSkills] = useState([]);
-
-  useEffect(() => {
-    apiJson('/skills').then((d) => setSkills(d.skills || d || [])).catch(() => setSkills([]));
-  }, []);
+  // Was `.catch(() => setSkills([]))`, which turned a dropped request
+  // into an empty skill picker in all three create modals.
+  const { data: skillRows, error: skillsError } = useResource('/skills', {
+    select: (d) => asList(d, 'skills'),
+  });
+  const skills = skillRows || [];
 
   return (
     <div className="v2-page v2-page--stack" data-testid="v2-marker">
@@ -48,33 +76,27 @@ export default function Flows() {
         </p>
       </Pane>
 
-      {tab === 'taskflows' && <TaskFlowsTab skills={skills} />}
+      {tab === 'taskflows' && <TaskFlowsTab skills={skills} skillsError={skillsError} />}
       {tab === 'packs' && <PacksTab />}
-      {tab === 'routines' && <RoutinesTab skills={skills} />}
-      {tab === 'automations' && <AutomationsTab skills={skills} />}
+      {tab === 'routines' && <RoutinesTab skills={skills} skillsError={skillsError} />}
+      {tab === 'automations' && <AutomationsTab skills={skills} skillsError={skillsError} />}
     </div>
   );
 }
 
 function PacksTab() {
-  const [packs, setPacks] = useState([]);
-  const [loading, setLoading] = useState(true);
+  // The catch here did set an error chip, but it left `packs` at `[]`,
+  // so the pane rendered the chip AND "No first-party workflow packs
+  // loaded / Check the Brain log for 'Loaded N first-party workflow
+  // packs'". That second sentence sent the user to debug a boot that
+  // was fine.
+  const {
+    data: packRows, error: loadError, loading, refresh,
+  } = useResource('/api/workflows/packs', { select: (d) => asList(d, 'packs') });
+  const packs = packRows || [];
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState(null);
   const [lastCreated, setLastCreated] = useState(null);
-
-  const refresh = useCallback(async () => {
-    try {
-      const d = await apiJson('/api/workflows/packs');
-      setPacks(d.packs || []);
-    } catch (err) {
-      setError(err?.message || 'Failed to load workflow packs');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { refresh(); }, [refresh]);
 
   const instantiate = async (pack) => {
     setBusyId(pack.workflow_id);
@@ -99,11 +121,14 @@ function PacksTab() {
 
   return (
     <Pane
-      title={`Workflow packs (${packs.length})`}
+      title={packRows ? `Workflow packs (${packs.length})` : 'Workflow packs'}
       actions={<button type="button" className="v2-btn v2-btn--ghost" onClick={refresh}><RefreshCw size={13} /></button>}
     >
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && packs.length === 0 && (
+      {loading && !packRows && <EmptyState title="Loading…" />}
+      {loadError && !packRows && (
+        <ErrorState error={loadError} what="the workflow packs" onRetry={refresh} />
+      )}
+      {!loading && !loadError && packRows && packs.length === 0 && (
         <EmptyState
           title="No first-party workflow packs loaded"
           hint="The Brain reads feral-core/workflows/*.json at boot. Check the Brain log for 'Loaded N first-party workflow packs'."
@@ -149,36 +174,39 @@ function PacksTab() {
 
 // ── TaskFlows ───────────────────────────────────────────────────
 
-function TaskFlowsTab({ skills }) {
-  const [flows, setFlows] = useState([]);
-  const [loading, setLoading] = useState(true);
+function TaskFlowsTab({ skills, skillsError }) {
+  // `try { … } finally` with no catch: the rejection escaped as an
+  // unhandled promise rejection every 5s while `flows` stayed `[]`, so
+  // an unreachable brain rendered "No flows yet / Create your first
+  // flow" over however many flows were actually queued or running.
+  // `silent` because a permanent inline ErrorState beats a toast loop
+  // on a 5s poll.
+  const {
+    data: flowRows, error: loadError, loading, refresh,
+  } = useResource('/api/taskflows?limit=100', {
+    select: (d) => asList(d, 'flows'),
+    pollMs: 5000,
+    silent: true,
+  });
+  const flows = flowRows || [];
   const [selected, setSelected] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
-
-  const refresh = useCallback(async () => {
-    try {
-      const d = await apiJson('/api/taskflows?limit=100');
-      setFlows(d.flows || []);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 5000);
-    return () => clearInterval(t);
-  }, [refresh]);
+  const [actionError, setActionError] = useState(null);
 
   const action = async (id, which) => {
-    await apiFetch(`/api/taskflows/${id}/${which}`, { method: 'POST' });
-    refresh();
+    setActionError(null);
+    try {
+      await apiFetch(`/api/taskflows/${id}/${which}`, { method: 'POST' });
+      await refresh();
+    } catch (err) {
+      setActionError({ id, which, error: toApiError(err) });
+    }
   };
 
   return (
     <>
       <Pane
-        title={`TaskFlows (${flows.length})`}
+        title={flowRows ? `TaskFlows (${flows.length})` : 'TaskFlows'}
         actions={(
           <>
             <button type="button" className="v2-btn v2-btn--ghost" onClick={refresh}><RefreshCw size={13} /></button>
@@ -188,8 +216,32 @@ function TaskFlowsTab({ skills }) {
           </>
         )}
       >
-        {loading && <EmptyState title="Loading…" />}
-        {!loading && flows.length === 0 && (
+        {loading && !flowRows && <EmptyState title="Loading…" />}
+        {loadError && !flowRows && (
+          <ErrorState error={loadError} what="the TaskFlow list" onRetry={refresh} />
+        )}
+        {/* The poll is silent, so a mid-session outage would otherwise
+         * leave a frozen list on screen with nothing to say it is
+         * frozen. The rows below are real, just no longer current. */}
+        {loadError && flowRows && (
+          <ErrorState
+            error={loadError}
+            what="the latest TaskFlow statuses"
+            hint="The rows below are the last successful read and have stopped updating. They are real, but they may be out of date."
+            compact
+            onRetry={refresh}
+          />
+        )}
+        {actionError && (
+          <ErrorState
+            error={actionError.error}
+            what={`the ${actionError.which} of ${actionError.id}`}
+            hint="The flow was left in whatever state it was already in."
+            compact
+            onRetry={() => action(actionError.id, actionError.which)}
+          />
+        )}
+        {!loading && !loadError && flowRows && flows.length === 0 && (
           <EmptyState
             title="No flows yet"
             hint="Create a multi-step flow: save a note, call a skill, prompt the LLM, branch, etc."
@@ -224,13 +276,13 @@ function TaskFlowsTab({ skills }) {
         </div>
       </Pane>
 
-      {showCreate && <CreateFlowModal skills={skills} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); refresh(); }} />}
+      {showCreate && <CreateFlowModal skills={skills} skillsError={skillsError} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); refresh(); }} />}
       {selected && <FlowDetailModal flow={selected} onClose={() => setSelected(null)} onAction={action} />}
     </>
   );
 }
 
-function CreateFlowModal({ skills, onClose, onCreated }) {
+function CreateFlowModal({ skills, skillsError, onClose, onCreated }) {
   const [title, setTitle] = useState('New TaskFlow');
   const [sessionId, setSessionId] = useState('');
   const [steps, setSteps] = useState([
@@ -292,6 +344,7 @@ function CreateFlowModal({ skills, onClose, onCreated }) {
         </label>
       </div>
       <div className="v2-p v2-p--muted" style={{ marginTop: 16 }}>Steps</div>
+      <SkillPickerNote error={skillsError} />
       <StepBuilder steps={steps} onChange={setSteps} skills={skills} />
       {error && <div className="v2-chip v2-chip--error" style={{ marginTop: 12 }}>{error}</div>}
     </Modal>
@@ -299,24 +352,36 @@ function CreateFlowModal({ skills, onClose, onCreated }) {
 }
 
 function FlowDetailModal({ flow, onClose, onAction }) {
-  const [detail, setDetail] = useState(flow);
-
-  useEffect(() => {
-    apiJson(`/api/taskflows/${flow.id}`).then(setDetail).catch(() => {});
-  }, [flow.id]);
-
-  const steps = detail.steps || flow.steps || [];
+  // Was `.catch(() => {})`. The fallback to the list row is genuinely
+  // useful, so it stays: the row is real data we already have. What was
+  // missing is any sign that the detailed read failed, so the "Steps"
+  // count silently reported the row's step count (often 0 for a row the
+  // list endpoint summarised) as if it were the flow's real one.
+  const {
+    data: detail, error, refresh,
+  } = useResource(`/api/taskflows/${flow.id}`, { initialData: flow, silent: true });
+  const current = detail || flow;
+  const steps = current.steps || flow.steps || [];
 
   return (
-    <Modal open onClose={onClose} title={detail.title || flow.title || flow.id} size="lg">
+    <Modal open onClose={onClose} title={current.title || flow.title || flow.id} size="lg">
+      {error && (
+        <ErrorState
+          error={error}
+          what="the full detail for this flow"
+          hint="Everything below is the summary row from the list, which may be less complete than the flow itself."
+          compact
+          onRetry={refresh}
+        />
+      )}
       <div className="v2-setting-stack">
         <div className="v2-setting-row">
           <div className="v2-setting-label"><div>Status</div></div>
-          <div className="v2-setting-control"><StatusDot tone={statusTone(detail.status)} /> {detail.status}</div>
+          <div className="v2-setting-control"><StatusDot tone={statusTone(current.status)} /> {current.status}</div>
         </div>
         <div className="v2-setting-row">
           <div className="v2-setting-label"><div>ID</div></div>
-          <div className="v2-setting-control"><code className="v2-code-inline">{detail.id}</code></div>
+          <div className="v2-setting-control"><code className="v2-code-inline">{current.id}</code></div>
         </div>
         <div className="v2-setting-row">
           <div className="v2-setting-label"><div>Steps</div></div>
@@ -366,25 +431,16 @@ function routineStatus(r) {
   return { paused: false, tone: 'live', label: 'armed' };
 }
 
-function RoutinesTab({ skills }) {
-  const [routines, setRoutines] = useState([]);
-  const [loading, setLoading] = useState(true);
+function RoutinesTab({ skills, skillsError }) {
+  // The catch here did set an error chip, but it left `routines` at
+  // `[]`, so the pane rendered the chip AND "No routines / Routines run
+  // on a cron schedule", i.e. an assertion that nothing is scheduled.
+  const {
+    data: routineRows, error: loadError, loading, refresh,
+  } = useResource('/api/routines', { select: (d) => asList(d, 'routines') });
+  const routines = routineRows || [];
   const [err, setErr] = useState('');
   const [showCreate, setShowCreate] = useState(false);
-
-  const refresh = useCallback(async () => {
-    setErr('');
-    try {
-      const d = await apiJson('/api/routines');
-      setRoutines(d.routines || []);
-    } catch (e) {
-      setErr(e?.message || 'failed to list routines');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { refresh(); }, [refresh]);
 
   const action = async (id, verb, method = 'POST') => {
     setErr('');
@@ -403,7 +459,7 @@ function RoutinesTab({ skills }) {
   return (
     <>
       <Pane
-        title={`Routines (${routines.length})`}
+        title={routineRows ? `Routines (${routines.length})` : 'Routines'}
         actions={(
           <button type="button" className="v2-btn v2-btn--primary" onClick={() => setShowCreate(true)}>
             <Plus size={13} /> New routine
@@ -411,8 +467,11 @@ function RoutinesTab({ skills }) {
         )}
       >
         {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
-        {loading && <EmptyState title="Loading…" />}
-        {!loading && routines.length === 0 && (
+        {loading && !routineRows && <EmptyState title="Loading…" />}
+        {loadError && !routineRows && (
+          <ErrorState error={loadError} what="the routine list" onRetry={refresh} />
+        )}
+        {!loading && !loadError && routineRows && routines.length === 0 && (
           <EmptyState title="No routines" hint="Routines run on a cron schedule and call a skill or shell prompt." />
         )}
         <div className="v2-flow-list">
@@ -440,12 +499,12 @@ function RoutinesTab({ skills }) {
         </div>
       </Pane>
 
-      {showCreate && <CreateRoutineModal skills={skills} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); refresh(); }} />}
+      {showCreate && <CreateRoutineModal skills={skills} skillsError={skillsError} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); refresh(); }} />}
     </>
   );
 }
 
-function CreateRoutineModal({ skills, onClose, onCreated }) {
+function CreateRoutineModal({ skills, skillsError, onClose, onCreated }) {
   const [description, setDescription] = useState('New routine');
   const [cronExpr, setCronExpr] = useState('0 9 * * 1-5');
   const [skillId, setSkillId] = useState('');
@@ -504,6 +563,7 @@ function CreateRoutineModal({ skills, onClose, onCreated }) {
         </>
       )}
     >
+      <SkillPickerNote error={skillsError} />
       <div className="v2-setting-stack">
         <label className="v2-setting-row">
           <div className="v2-setting-label"><div>Description</div></div>
@@ -558,39 +618,52 @@ function CreateRoutineModal({ skills, onClose, onCreated }) {
 
 // ── Automations ────────────────────────────────────────────────
 
-function AutomationsTab({ skills }) {
-  const [autos, setAutos] = useState([]);
-  const [loading, setLoading] = useState(true);
+function AutomationsTab({ skills, skillsError }) {
+  // `try { … } finally` with no catch: the rejection escaped as an
+  // unhandled promise rejection while `autos` stayed `[]`, so an
+  // unreachable brain rendered "No automations" over however many
+  // triggers the user has actually armed.
+  const {
+    data: autoRows, error: loadError, loading, refresh,
+  } = useResource('/api/automations', { select: (d) => asList(d, 'automations') });
+  const autos = autoRows || [];
   const [showCreate, setShowCreate] = useState(false);
-
-  const refresh = useCallback(async () => {
-    try {
-      const d = await apiJson('/api/automations');
-      setAutos(d.automations || []);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { refresh(); }, [refresh]);
+  const [removeError, setRemoveError] = useState(null);
 
   const remove = async (id) => {
-    await apiFetch(`/api/automations/${id}`, { method: 'DELETE' });
-    refresh();
+    setRemoveError(null);
+    try {
+      await apiFetch(`/api/automations/${id}`, { method: 'DELETE' });
+      await refresh();
+    } catch (err) {
+      setRemoveError({ id, error: toApiError(err) });
+    }
   };
 
   return (
     <>
       <Pane
-        title={`Automations (${autos.length})`}
+        title={autoRows ? `Automations (${autos.length})` : 'Automations'}
         actions={(
           <button type="button" className="v2-btn v2-btn--primary" onClick={() => setShowCreate(true)}>
             <Plus size={13} /> New automation
           </button>
         )}
       >
-        {loading && <EmptyState title="Loading…" />}
-        {!loading && autos.length === 0 && (
+        {loading && !autoRows && <EmptyState title="Loading…" />}
+        {loadError && !autoRows && (
+          <ErrorState error={loadError} what="the automation list" onRetry={refresh} />
+        )}
+        {removeError && (
+          <ErrorState
+            error={removeError.error}
+            what={`the deletion of ${removeError.id}`}
+            hint="The automation is still armed and will still fire on its trigger."
+            compact
+            onRetry={() => remove(removeError.id)}
+          />
+        )}
+        {!loading && !loadError && autoRows && autos.length === 0 && (
           <EmptyState
             title="No automations"
             hint="Automations fire a skill when a trigger event occurs (cron, webhook, geofence, etc.)."
@@ -631,7 +704,7 @@ function AutomationsTab({ skills }) {
         </div>
       </Pane>
 
-      {showCreate && <CreateAutomationModal skills={skills} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); refresh(); }} />}
+      {showCreate && <CreateAutomationModal skills={skills} skillsError={skillsError} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); refresh(); }} />}
     </>
   );
 }
@@ -645,7 +718,7 @@ function AutomationsTab({ skills }) {
 //   English (e.g. "every Monday at 9am, summarise my inbox") AND
 //   provides a structured-builder fallback that we serialise into
 //   the same `text` payload the backend expects.
-function CreateAutomationModal({ skills, onClose, onCreated }) {
+function CreateAutomationModal({ skills, skillsError, onClose, onCreated }) {
   const [text, setText] = useState('');
   const [trigger, setTrigger] = useState('event');
   const [triggerValue, setTriggerValue] = useState('');
@@ -732,6 +805,7 @@ function CreateAutomationModal({ skills, onClose, onCreated }) {
         </label>
         <details>
           <summary className="v2-p v2-p--muted v2-p--tiny" style={{ cursor: 'pointer' }}>Structured builder (optional)</summary>
+          <SkillPickerNote error={skillsError} />
           <label className="v2-setting-row">
             <div className="v2-setting-label"><div>Trigger type</div></div>
             <div className="v2-setting-control">

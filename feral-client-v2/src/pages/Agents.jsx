@@ -5,7 +5,18 @@ import Glass from '../ui/Glass';
 import Modal from '../ui/Modal';
 import Tabs from '../ui/Tabs';
 import EmptyState from '../ui/EmptyState';
+import ErrorState from '../ui/ErrorState';
 import { apiJson, apiFetch } from '../lib/api';
+import { useResource, firstRejection, toApiError } from '../hooks/useResource';
+
+/** Normalise `{key: [...]}` / a bare array / anything else into a list. */
+function asList(value, ...keys) {
+  for (const key of keys) {
+    if (Array.isArray(value?.[key])) return value[key];
+  }
+  if (Array.isArray(value)) return value;
+  return [];
+}
 
 /**
  * Agents page. Two catalogs + one timeline:
@@ -49,23 +60,16 @@ export default function Agents() {
 }
 
 function PersonasTab() {
-  const [personas, setPersonas] = useState([]);
-  const [loading, setLoading] = useState(true);
+  // The catch here did set an error chip, but it left `personas` at
+  // `[]`, so the pane rendered the chip AND "No first-party personas
+  // loaded / Check the Brain log for 'Loaded N first-party personas'".
+  // That second sentence sent the user to debug a boot that was fine.
+  const {
+    data: personaRows, error: loadError, loading, refresh,
+  } = useResource('/api/agents/personas', { select: (d) => asList(d, 'personas') });
+  const personas = personaRows || [];
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState(null);
-
-  const refresh = useCallback(async () => {
-    try {
-      const d = await apiJson('/api/agents/personas');
-      setPersonas(d.personas || []);
-    } catch (err) {
-      setError(err?.message || 'Failed to load personas');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { refresh(); }, [refresh]);
 
   const spawnFromPersona = async (p) => {
     setBusyId(p.agent_id);
@@ -93,11 +97,14 @@ function PersonasTab() {
 
   return (
     <Pane
-      title={`Personas (${personas.length})`}
+      title={personaRows ? `Personas (${personas.length})` : 'Personas'}
       actions={<button type="button" className="v2-btn v2-btn--ghost" onClick={refresh}><RefreshCw size={13} /></button>}
     >
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && personas.length === 0 && (
+      {loading && !personaRows && <EmptyState title="Loading…" />}
+      {loadError && !personaRows && (
+        <ErrorState error={loadError} what="the persona catalog" onRetry={refresh} />
+      )}
+      {!loading && !loadError && personaRows && personas.length === 0 && (
         <EmptyState
           title="No first-party personas loaded"
           hint="The Brain looks for feral-core/agents/personas/*.json at boot. Check the Brain log for 'Loaded N first-party personas'."
@@ -144,40 +151,56 @@ function PersonasTab() {
 }
 
 function SpecialistsTab() {
-  const [agents, setAgents] = useState([]);
+  // `Promise.allSettled` never rejects, so the `try { … } finally` had
+  // nothing to catch and the two `if (status === 'fulfilled')` guards
+  // had no else. With the brain down `agents` stayed `[]` and the pane
+  // rendered "No specialists yet" beside a "Spawn first specialist"
+  // button, which is a claim about agents the client never read.
+  const [agents, setAgents] = useState(null);
+  const [loadError, setLoadError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [showSpawn, setShowSpawn] = useState(false);
-  const [skills, setSkills] = useState([]);
+  const [skills, setSkills] = useState(null);
+  const [feedbackError, setFeedbackError] = useState(null);
 
   const refresh = useCallback(async () => {
-    try {
-      const [a, s] = await Promise.allSettled([
-        apiJson('/api/agents/list'),
-        apiJson('/skills'),
-      ]);
-      if (a.status === 'fulfilled') setAgents(a.value?.agents || a.value?.specialists || a.value || []);
-      if (s.status === 'fulfilled') setSkills(s.value?.skills || s.value || []);
-    } finally {
-      setLoading(false);
-    }
+    const [a, s] = await Promise.allSettled([
+      apiJson('/api/agents/list'),
+      apiJson('/skills'),
+    ]);
+    if (a.status === 'fulfilled') setAgents(asList(a.value, 'agents', 'specialists'));
+    if (s.status === 'fulfilled') setSkills(asList(s.value, 'skills'));
+    // Only the agent list speaks for the "no specialists" empty state.
+    // `/skills` fills the spawn modal's permission chips and is
+    // reported inside that modal instead.
+    setLoadError(firstRejection([a]));
+    setLoading(false);
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // Was `catch { /* silent */ }`: a rating that never reached the brain
+  // looked exactly like one that did.
   const feedback = async (id, score) => {
+    setFeedbackError(null);
     try {
       await apiFetch('/api/agents/feedback', {
         method: 'POST',
         body: JSON.stringify({ agent_id: id, score }),
+        silent: true,
       });
-      refresh();
-    } catch { /* silent */ }
+      await refresh();
+    } catch (err) {
+      setFeedbackError({ id, error: toApiError(err) });
+    }
   };
+
+  const rows = agents || [];
 
   return (
     <>
       <Pane
-        title={`Specialists (${agents.length})`}
+        title={agents ? `Specialists (${rows.length})` : 'Specialists'}
         actions={(
           <>
             <button type="button" className="v2-btn v2-btn--ghost" onClick={refresh}><RefreshCw size={13} /></button>
@@ -187,8 +210,19 @@ function SpecialistsTab() {
           </>
         )}
       >
-        {loading && <EmptyState title="Loading…" />}
-        {!loading && agents.length === 0 && (
+        {loading && !agents && !loadError && <EmptyState title="Loading…" />}
+        {loadError && !agents && (
+          <ErrorState error={loadError} what="the specialist list" onRetry={refresh} />
+        )}
+        {feedbackError && (
+          <ErrorState
+            error={feedbackError.error}
+            what={`the rating of ${feedbackError.id}`}
+            hint="The rating was not recorded. Mitosis has not seen it."
+            compact
+          />
+        )}
+        {!loading && !loadError && agents && rows.length === 0 && (
           <EmptyState
             title="No specialists yet"
             hint="Spawn one manually or wait for Agent Mitosis to propose one based on recurring task patterns."
@@ -196,7 +230,7 @@ function SpecialistsTab() {
           />
         )}
         <div className="v2-skills-grid">
-          {agents.map((a) => (
+          {rows.map((a) => (
             <Glass key={a.agent_id || a.id} level={0} radius="md" padding="md" className="v2-skill-card">
               <header className="v2-skill-card-head">
                 <h3 className="v2-skill-card-name">{a.name || a.agent_id}</h3>
@@ -288,8 +322,18 @@ function SpawnModal({ skills, onClose, onSpawned }) {
         <textarea className="v2-code-editor" rows={6} value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} />
       </label>
       <div className="v2-p v2-p--muted" style={{ marginTop: 12 }}>Tool permissions</div>
+      {/* `skills` is null when `/skills` did not answer. An empty chip
+       * row would read as "this brain has no tools to grant", which is
+       * a different and much more alarming claim. */}
+      {!skills && (
+        <p className="v2-p v2-p--muted v2-p--tiny">
+          The skill list could not be loaded, so no tool permissions can be listed here.
+          This is a failed request, not a brain with no skills. Spawning still works;
+          grant permissions later from the specialist card.
+        </p>
+      )}
       <div className="v2-skill-card-phrases">
-        {skills.map((s) => {
+        {(skills || []).map((s) => {
           const id = s.skill_id || s.id;
           return (
             <button
@@ -309,19 +353,21 @@ function SpawnModal({ skills, onClose, onSpawned }) {
 }
 
 function ProposalsTab() {
-  const [proposals, setProposals] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    apiJson('/api/agents/proposals')
-      .then((d) => setProposals(d.proposals || d || []))
-      .finally(() => setLoading(false));
-  }, []);
+  // `.then(…).finally(…)` with no catch: a failure rendered "No
+  // recurring patterns yet", i.e. a claim about what Mitosis has
+  // observed across the user's whole history.
+  const { data, error, loading, refresh } = useResource('/api/agents/proposals', {
+    select: (d) => asList(d, 'proposals'),
+  });
+  const proposals = data || [];
 
   return (
-    <Pane title={`Proposals (${proposals.length})`}>
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && proposals.length === 0 && <EmptyState title="No recurring patterns yet" hint="Mitosis watches your recent turns for 5+ uses of the same tool set." />}
+    <Pane title={data ? `Proposals (${proposals.length})` : 'Proposals'}>
+      {loading && !data && <EmptyState title="Loading…" />}
+      {error && !data && (
+        <ErrorState error={error} what="the Mitosis proposals" onRetry={refresh} />
+      )}
+      {!loading && !error && data && proposals.length === 0 && <EmptyState title="No recurring patterns yet" hint="Mitosis watches your recent turns for 5+ uses of the same tool set." />}
       <ul className="v2-mem-list">
         {proposals.map((p, i) => (
           <li key={p.pattern_id || i}>
@@ -340,13 +386,35 @@ function ProposalsTab() {
 }
 
 function StatsTab() {
-  const [stats, setStats] = useState(null);
-  useEffect(() => { apiJson('/api/agents/stats').then(setStats).catch(() => setStats({})); }, []);
-  if (!stats) return <Pane title="Stats"><EmptyState title="Loading…" /></Pane>;
+  // `.catch(() => setStats({}))` swapped a failure for an answer: the
+  // page left its loading branch and rendered the "Mitosis stats"
+  // heading over a stat grid the brain never filled in, so every
+  // counter it would have reported silently ceased to exist.
+  const { data: stats, error, loading, refresh } = useResource('/api/agents/stats');
+  if (loading && !stats) return <Pane title="Stats"><EmptyState title="Loading…" /></Pane>;
+  if (error && !stats) {
+    return (
+      <Pane title="Stats">
+        <ErrorState
+          error={error}
+          what="the Mitosis stats"
+          hint="No counters are shown rather than zeroes. The client never received these numbers, and a zero here would be an invented measurement."
+          onRetry={refresh}
+        />
+      </Pane>
+    );
+  }
+  const entries = Object.entries(stats && typeof stats === 'object' ? stats : {});
   return (
     <Pane title="Mitosis stats">
+      {entries.length === 0 && (
+        <EmptyState
+          title="The brain reports no Mitosis counters"
+          hint="The stats endpoint answered, and the answer was empty."
+        />
+      )}
       <div className="v2-grid v2-grid--stats">
-        {Object.entries(stats).map(([k, v]) => (
+        {entries.map(([k, v]) => (
           <Glass key={k} level={1} radius="md" padding="md">
             <div className="v2-stat-label">{k.replace(/_/g, ' ')}</div>
             <div className="v2-stat-value">{typeof v === 'number' ? v : JSON.stringify(v)}</div>

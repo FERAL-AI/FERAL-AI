@@ -1,11 +1,21 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { Check, Plus, RefreshCw, Target } from 'lucide-react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import Tabs from '../ui/Tabs';
-import Modal from '../ui/Modal';
 import EmptyState from '../ui/EmptyState';
-import { apiJson, apiFetch } from '../lib/api';
+import ErrorState from '../ui/ErrorState';
+import { apiFetch } from '../lib/api';
+import { useResource, toApiError } from '../hooks/useResource';
+
+/** Normalise `{key: [...]}` / a bare array / anything else into a list. */
+function asList(value, ...keys) {
+  for (const key of keys) {
+    if (Array.isArray(value?.[key])) return value[key];
+  }
+  if (Array.isArray(value)) return value;
+  return [];
+}
 
 /**
  * Intents — short-term plans the orchestrator compiles from user goals.
@@ -49,29 +59,41 @@ export default function Intents() {
 }
 
 function TodayTab() {
-  const [actions, setActions] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  const refresh = useCallback(async () => {
-    try {
-      const d = await apiJson('/api/intents/today');
-      setActions(d.actions || d.items || []);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { refresh(); }, [refresh]);
+  // `try { … } finally` with no catch: the rejection escaped as an
+  // unhandled promise rejection while `actions` stayed at its initial
+  // `[]`, so a dropped request told the user "Nothing planned for
+  // today". That is a statement about their plans, made without one.
+  const { data, error, loading, refresh } = useResource('/api/intents/today', {
+    select: (d) => asList(d, 'actions', 'items'),
+  });
+  const actions = data || [];
+  const [completeError, setCompleteError] = useState(null);
 
   const complete = async (planId, actionId) => {
-    await apiFetch(`/api/intents/${encodeURIComponent(planId)}/complete/${encodeURIComponent(actionId)}`, { method: 'POST' });
-    refresh();
+    setCompleteError(null);
+    try {
+      await apiFetch(`/api/intents/${encodeURIComponent(planId)}/complete/${encodeURIComponent(actionId)}`, { method: 'POST' });
+      await refresh();
+    } catch (err) {
+      setCompleteError({ actionId, error: toApiError(err) });
+    }
   };
 
   return (
-    <Pane title={`Today (${actions.length})`} actions={<button type="button" className="v2-btn v2-btn--ghost" onClick={refresh}><RefreshCw size={13} /></button>}>
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && actions.length === 0 && <EmptyState title="Nothing planned for today" hint="Compile a new plan from a goal." />}
+    <Pane title={data ? `Today (${actions.length})` : 'Today'} actions={<button type="button" className="v2-btn v2-btn--ghost" onClick={refresh}><RefreshCw size={13} /></button>}>
+      {loading && !data && <EmptyState title="Loading…" />}
+      {error && !data && (
+        <ErrorState error={error} what="today's planned actions" onRetry={refresh} />
+      )}
+      {completeError && (
+        <ErrorState
+          error={completeError.error}
+          what={`the completion of ${completeError.actionId}`}
+          hint="The action is still open. Nothing was marked done."
+          compact
+        />
+      )}
+      {!loading && !error && data && actions.length === 0 && <EmptyState title="Nothing planned for today" hint="Compile a new plan from a goal." />}
       <ul className="v2-mem-list">
         {actions.map((a) => (
           <li key={a.action_id || a.id}>
@@ -98,17 +120,20 @@ function TodayTab() {
 }
 
 function PlansTab() {
-  const [plans, setPlans] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    apiJson('/api/intents/list').then((d) => setPlans(d.plans || d || [])).finally(() => setLoading(false));
-  }, []);
+  // `.then(…).finally(…)` with no catch, so a failure rendered
+  // "No plans yet" over every goal the user has ever compiled.
+  const { data, error, loading, refresh } = useResource('/api/intents/list', {
+    select: (d) => asList(d, 'plans'),
+  });
+  const plans = data || [];
 
   return (
-    <Pane title={`Plans (${plans.length})`}>
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && plans.length === 0 && <EmptyState title="No plans yet" />}
+    <Pane title={data ? `Plans (${plans.length})` : 'Plans'}>
+      {loading && !data && <EmptyState title="Loading…" />}
+      {error && !data && (
+        <ErrorState error={error} what="the plan list" onRetry={refresh} />
+      )}
+      {!loading && !error && data && plans.length === 0 && <EmptyState title="No plans yet" />}
       <ul className="v2-mem-list">
         {plans.map((p) => (
           <li key={p.id}>
@@ -188,13 +213,35 @@ function NewPlanTab() {
 }
 
 function StatsTab() {
-  const [stats, setStats] = useState(null);
-  useEffect(() => { apiJson('/api/intents/stats').then(setStats).catch(() => setStats({})); }, []);
-  if (!stats) return <Pane title="Stats"><EmptyState title="Loading…" /></Pane>;
+  // `.catch(() => setStats({}))` swapped a failure for an answer: the
+  // page left its loading branch and rendered the "Intent stats"
+  // heading over a stat grid the brain never filled in, so every
+  // counter it would have reported silently ceased to exist.
+  const { data: stats, error, loading, refresh } = useResource('/api/intents/stats');
+  if (loading && !stats) return <Pane title="Stats"><EmptyState title="Loading…" /></Pane>;
+  if (error && !stats) {
+    return (
+      <Pane title="Stats">
+        <ErrorState
+          error={error}
+          what="the intent stats"
+          hint="No counters are shown rather than zeroes. The client never received these numbers, and a zero here would be an invented measurement."
+          onRetry={refresh}
+        />
+      </Pane>
+    );
+  }
+  const entries = Object.entries(stats && typeof stats === 'object' ? stats : {});
   return (
     <Pane title="Intent stats">
+      {entries.length === 0 && (
+        <EmptyState
+          title="The brain reports no intent counters"
+          hint="The stats endpoint answered, and the answer was empty."
+        />
+      )}
       <div className="v2-grid v2-grid--stats">
-        {Object.entries(stats).map(([k, v]) => (
+        {entries.map(([k, v]) => (
           <Glass key={k} level={1} radius="md" padding="md">
             <div className="v2-stat-label">{k.replace(/_/g, ' ')}</div>
             <div className="v2-stat-value">{typeof v === 'number' ? v : JSON.stringify(v)}</div>

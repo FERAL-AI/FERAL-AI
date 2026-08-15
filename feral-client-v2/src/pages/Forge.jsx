@@ -4,8 +4,17 @@ import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import Tabs from '../ui/Tabs';
 import EmptyState from '../ui/EmptyState';
+import ErrorState from '../ui/ErrorState';
 import StatusDot from '../ui/StatusDot';
 import { apiJson, apiFetch } from '../lib/api';
+import { useResource, firstRejection, toApiError } from '../hooks/useResource';
+
+/** Normalise `{key: [...]}` / a bare array / anything else into a list. */
+function asList(value, key) {
+  if (Array.isArray(value?.[key])) return value[key];
+  if (Array.isArray(value)) return value;
+  return [];
+}
 
 /**
  * Forge — Tool Genesis full surface.
@@ -46,30 +55,36 @@ export default function Forge() {
 }
 
 function PendingTab() {
-  const [pending, setPending] = useState([]);
+  // `null` means "no endpoint has answered yet", which is a different
+  // thing from an answer of zero drafts. It used to start at `[]`, and
+  // because `Promise.allSettled` never rejects the surrounding
+  // `try/finally` had nothing to catch: with the brain unreachable the
+  // list stayed `[]` and this pane asserted "No drafts pending".
+  const [pending, setPending] = useState(null);
+  const [loadError, setLoadError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(null);
+  const [decideError, setDecideError] = useState(null);
 
   const refresh = useCallback(async () => {
-    try {
-      const [tg, sk] = await Promise.allSettled([
-        apiJson('/api/tool-genesis/pending'),
-        apiJson('/api/skills/pending'),
-      ]);
-      const merged = [];
-      if (tg.status === 'fulfilled') merged.push(...(tg.value?.pending || tg.value || []));
-      if (sk.status === 'fulfilled') {
-        const arr = sk.value?.pending || sk.value || [];
-        for (const item of arr) {
-          if (!merged.some((m) => (m.id || m.skill_id) === (item.id || item.skill_id))) {
-            merged.push(item);
-          }
+    const [tg, sk] = await Promise.allSettled([
+      apiJson('/api/tool-genesis/pending'),
+      apiJson('/api/skills/pending'),
+    ]);
+    const merged = [];
+    if (tg.status === 'fulfilled') merged.push(...asList(tg.value, 'pending'));
+    if (sk.status === 'fulfilled') {
+      for (const item of asList(sk.value, 'pending')) {
+        if (!merged.some((m) => (m.id || m.skill_id) === (item.id || item.skill_id))) {
+          merged.push(item);
         }
       }
-      setPending(merged);
-    } finally {
-      setLoading(false);
     }
+    // Both queues feed one list, so a rejection from either means we do
+    // not know the list is complete and must not say it is empty.
+    if (tg.status === 'fulfilled' || sk.status === 'fulfilled') setPending(merged);
+    setLoadError(firstRejection([tg, sk]));
+    setLoading(false);
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
@@ -82,45 +97,77 @@ function PendingTab() {
   // tool_genesis side. Reordered to try the tool-genesis route first,
   // and send all three shapes so the legacy skills approve/reject
   // still works for plain-skill rows.
+  // `apiFetch` throws on every non-2xx, so the old `if (r.ok)` could
+  // only ever be true and the `r.json()` line under it was unreachable.
+  // Worse, the `throw` that ended the loop had no catch above it: the
+  // whole body was `try { … } finally`, so a draft that no endpoint
+  // would approve produced an unhandled rejection and told the user
+  // nothing. Each attempt is `silent` because trying the tool-genesis
+  // route first for a plain-skill row is expected to 404, and toasting
+  // that while the fallback succeeds is noise.
   const decide = async (id, approve) => {
     setBusy(id);
+    setDecideError(null);
+    const paths = approve
+      ? ['/api/tool-genesis/approve', '/api/skills/approve']
+      : ['/api/tool-genesis/reject', '/api/skills/reject'];
+    let lastErr = null;
     try {
-      const path = approve
-        ? ['/api/tool-genesis/approve', '/api/skills/approve']
-        : ['/api/tool-genesis/reject', '/api/skills/reject'];
-      let ok = false;
-      let lastErr = '';
-      for (const p of path) {
+      for (const p of paths) {
         try {
-          const r = await apiFetch(p, {
+          await apiFetch(p, {
             method: 'POST',
             body: JSON.stringify({ tool_id: id, id, skill_id: id }),
+            silent: true,
           });
-          if (r.ok) { ok = true; break; }
-          const body = await r.json().catch(() => ({}));
-          lastErr = body?.detail || body?.error || `${r.status}`;
+          await refresh();
+          return;
         } catch (e) {
-          lastErr = e?.message || 'request failed';
+          lastErr = toApiError(e, p);
         }
       }
-      if (!ok) throw new Error(lastErr || 'No approve endpoint accepted the id');
-      await refresh();
+      setDecideError({ id, approve, error: lastErr });
     } finally {
       setBusy(null);
     }
   };
 
+  const rows = pending || [];
+  // A count is a measurement. Only claim one when both queues answered.
+  const counted = pending !== null && !loadError;
+
   return (
-    <Pane title={`Pending (${pending.length})`} actions={<button type="button" className="v2-btn v2-btn--ghost" onClick={refresh}><RefreshCw size={13} /></button>}>
-      {loading && <EmptyState title="Loading drafts…" />}
-      {!loading && pending.length === 0 && (
+    <Pane title={counted ? `Pending (${rows.length})` : 'Pending'} actions={<button type="button" className="v2-btn v2-btn--ghost" onClick={refresh}><RefreshCw size={13} /></button>}>
+      {loading && pending === null && !loadError && <EmptyState title="Loading drafts…" />}
+      {loadError && pending === null && (
+        <ErrorState error={loadError} what="the pending drafts" onRetry={refresh} />
+      )}
+      {loadError && pending !== null && (
+        <ErrorState
+          error={loadError}
+          what="one of the two draft queues"
+          hint="The list below is whatever the queue that did answer returned. It may be missing drafts."
+          compact
+          onRetry={refresh}
+        />
+      )}
+      {decideError && (
+        <ErrorState
+          error={decideError.error}
+          what={`the ${decideError.approve ? 'approval' : 'rejection'} of ${decideError.id}`}
+          hint="The draft was left exactly as it was. Nothing was promoted or discarded."
+          compact
+          onRetry={() => decide(decideError.id, decideError.approve)}
+        />
+      )}
+      {!loading && !loadError && pending !== null && rows.length === 0 && (
         <EmptyState
           title="No drafts pending"
           hint="When you ask FERAL something none of the 25 skills can do, a draft appears here."
         />
       )}
       <ul className="v2-forge-list">
-        {pending.map((d) => {
+        {rows.map((d) => {
           const id = d.id || d.skill_id || d.draft_id;
           return (
             <li key={id} className="v2-forge-item">
@@ -162,20 +209,22 @@ function PendingTab() {
 }
 
 function ProposalsTab() {
-  const [proposals, setProposals] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    apiJson('/api/tool-genesis/proposals')
-      .then((d) => setProposals(d.proposals || d || []))
-      .finally(() => setLoading(false));
-  }, []);
+  // `.then(…).finally(…)` with no catch: a failure left `proposals` at
+  // its initial `[]` and the pane said "No capability gaps tracked",
+  // which is a claim about the orchestrator's findings.
+  const { data, error, loading, refresh } = useResource('/api/tool-genesis/proposals', {
+    select: (d) => asList(d, 'proposals'),
+  });
+  const proposals = data || [];
 
   return (
-    <Pane title={`Proposals (${proposals.length})`}>
+    <Pane title={data ? `Proposals (${proposals.length})` : 'Proposals'}>
       <p className="v2-p v2-p--muted">Capability gaps the orchestrator detected but hasn't drafted yet.</p>
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && proposals.length === 0 && <EmptyState title="No capability gaps tracked" />}
+      {loading && !data && <EmptyState title="Loading…" />}
+      {error && !data && (
+        <ErrorState error={error} what="the capability-gap proposals" onRetry={refresh} />
+      )}
+      {!loading && !error && data && proposals.length === 0 && <EmptyState title="No capability gaps tracked" />}
       <ul className="v2-forge-list">
         {proposals.map((p, i) => (
           <li key={p.id || i}>
@@ -194,20 +243,22 @@ function ProposalsTab() {
 }
 
 function GeneratedTab() {
-  const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    apiJson('/api/tool-genesis/list')
-      .then((d) => setItems(d.tools || d || []))
-      .finally(() => setLoading(false));
-  }, []);
+  // Same `.then(…).finally(…)` shape as ProposalsTab: a dropped request
+  // used to render "Nothing generated yet", i.e. a statement about this
+  // Brain's whole lifetime made without an answer.
+  const { data, error, loading, refresh } = useResource('/api/tool-genesis/list', {
+    select: (d) => asList(d, 'tools'),
+  });
+  const items = data || [];
 
   return (
-    <Pane title={`Generated skills (${items.length})`}>
+    <Pane title={data ? `Generated skills (${items.length})` : 'Generated skills'}>
       <p className="v2-p v2-p--muted">Skills Tool Genesis created during this Brain's lifetime.</p>
-      {loading && <EmptyState title="Loading…" />}
-      {!loading && items.length === 0 && <EmptyState title="Nothing generated yet" />}
+      {loading && !data && <EmptyState title="Loading…" />}
+      {error && !data && (
+        <ErrorState error={error} what="the generated skill list" onRetry={refresh} />
+      )}
+      {!loading && !error && data && items.length === 0 && <EmptyState title="Nothing generated yet" />}
       <ul className="v2-forge-list">
         {items.map((t, i) => (
           <li key={t.id || i}>
@@ -299,17 +350,39 @@ function GenerateTab() {
 }
 
 function StatsTab() {
-  const [stats, setStats] = useState(null);
-  useEffect(() => {
-    apiJson('/api/tool-genesis/stats').then(setStats).catch(() => setStats({}));
-  }, []);
+  // The worst instance in this file. `.catch(() => setStats({}))` moved
+  // the page out of its "loading" branch with a value the brain never
+  // sent, so a failed request rendered the "Tool Genesis stats" heading
+  // over a stat grid, and every counter the brain would have reported
+  // silently ceased to exist. A statistics surface must never present a
+  // number, or the absence of one, that it did not measure.
+  const { data: stats, error, loading, refresh } = useResource('/api/tool-genesis/stats');
 
-  if (!stats) return <Pane title="Stats"><EmptyState title="Loading…" /></Pane>;
+  if (loading && !stats) return <Pane title="Stats"><EmptyState title="Loading…" /></Pane>;
 
-  const entries = Object.entries(stats);
+  if (error && !stats) {
+    return (
+      <Pane title="Stats">
+        <ErrorState
+          error={error}
+          what="the Tool Genesis stats"
+          hint="No counters are shown rather than zeroes. The client never received these numbers, and a zero here would be an invented measurement."
+          onRetry={refresh}
+        />
+      </Pane>
+    );
+  }
+
+  const entries = Object.entries(stats && typeof stats === 'object' ? stats : {});
 
   return (
     <Pane title="Tool Genesis stats">
+      {entries.length === 0 && (
+        <EmptyState
+          title="The brain reports no Tool Genesis counters"
+          hint="The stats endpoint answered, and the answer was empty."
+        />
+      )}
       <div className="v2-grid v2-grid--stats">
         {entries.map(([key, value]) => (
           <Glass key={key} level={1} radius="md" padding="md">
