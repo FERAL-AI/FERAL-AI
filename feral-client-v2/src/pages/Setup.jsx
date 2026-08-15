@@ -565,7 +565,10 @@ function LLMStep({
                 className={isPicked ? 'v2-setup-provider is-picked' : 'v2-setup-provider'}
               >
                 <header style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                  <StatusDot tone={statusTone(p.reachable ? 'ready' : (p.configured ? 'unreachable' : 'needs_api_key'))} />
+                  <StatusDot
+                    tone={statusTone(p.reachable ? 'ready' : (p.configured ? 'unreachable' : 'needs_api_key'))}
+                    label={`${p.display_name}: ${p.reachable ? 'ready' : p.configured ? 'unreachable' : 'needs API key'}`}
+                  />
                   <div style={{ fontWeight: 600 }}>{p.display_name}</div>
                 </header>
                 <div className="v2-p v2-p--muted v2-p--tiny" style={{ marginBottom: 6 }}>
@@ -680,7 +683,10 @@ function AudioStep({ providers, value, onChange, error }) {
                 className={picked ? 'v2-setup-audio is-picked' : 'v2-setup-audio'}
               >
                 <header style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                  <StatusDot tone={statusTone(p.is_local ? (p.available ? 'ready' : 'unavailable') : (p.needs_api_key ? 'needs_api_key' : 'ready'))} />
+                  <StatusDot
+                    tone={statusTone(p.is_local ? (p.available ? 'ready' : 'unavailable') : (p.needs_api_key ? 'needs_api_key' : 'ready'))}
+                    label={`Speech to text ${p.display_name}: ${p.is_local ? (p.available ? 'installed' : 'not installed') : (p.needs_api_key ? 'needs API key' : 'ready')}`}
+                  />
                   <div style={{ fontWeight: 600 }}>{p.display_name}</div>
                 </header>
                 <div className="v2-p v2-p--tiny v2-p--muted">
@@ -730,7 +736,10 @@ function AudioStep({ providers, value, onChange, error }) {
                 className={picked ? 'v2-setup-audio is-picked' : 'v2-setup-audio'}
               >
                 <header style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                  <StatusDot tone={statusTone(p.is_local ? (p.available ? 'ready' : 'unavailable') : (p.needs_api_key ? 'needs_api_key' : 'ready'))} />
+                  <StatusDot
+                    tone={statusTone(p.is_local ? (p.available ? 'ready' : 'unavailable') : (p.needs_api_key ? 'needs_api_key' : 'ready'))}
+                    label={`Text to speech ${p.display_name}: ${p.is_local ? (p.available ? 'installed' : 'not installed') : (p.needs_api_key ? 'needs API key' : 'ready')}`}
+                  />
                   <div style={{ fontWeight: 600 }}>{p.display_name}</div>
                 </header>
                 <button

@@ -341,7 +341,7 @@ function GenerateTab() {
       {error && <div className="v2-chip v2-chip--error">{error}</div>}
       {result && (
         <Glass level={0} radius="md" padding="md">
-          <StatusDot tone="live" /> Draft queued — check Pending tab
+          <StatusDot tone="live" label="Draft queued" /> Draft queued — check Pending tab
           <pre className="v2-code">{JSON.stringify(result, null, 2).slice(0, 1200)}</pre>
         </Glass>
       )}

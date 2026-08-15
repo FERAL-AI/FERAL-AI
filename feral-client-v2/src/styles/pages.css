@@ -479,6 +479,12 @@
   0%, 50% { opacity: 1; }
   51%, 100% { opacity: 0; }
 }
+/* Hardcoded 1s duration, so the zeroed --v2-dur-* tokens never reach it.
+ * A blinking caret is a classic reduced-motion trigger; hold it solid so
+ * it still marks the streaming insertion point. */
+@media (prefers-reduced-motion: reduce) {
+  .v2-chat-cursor { animation: none; opacity: 1; }
+}
 
 .v2-chat-composer {
   display: flex;
@@ -497,6 +503,15 @@
   padding: 10px 0;
 }
 .v2-chat-input::placeholder { color: var(--v2-text-tertiary); }
+/* The rule above sets `outline: none` and nothing anywhere restored it,
+ * so the main chat composer, the most-used control in the client, gave a
+ * keyboard user no focus feedback at all. Inset offset so the ring stays
+ * inside the composer box and nothing reflows. */
+.v2-chat-input:focus-visible {
+  outline: 2px solid var(--v2-accent);
+  outline-offset: -2px;
+  border-radius: var(--v2-radius-xs);
+}
 .v2-chat-send {
   padding: 8px 16px;
   border-radius: var(--v2-radius-pill);
@@ -1593,6 +1608,14 @@
   font-size: var(--v2-size-md);
 }
 .v2-hub-search::placeholder { color: var(--v2-text-tertiary); }
+/* Same `outline: none` with no replacement. The Hub focuses this field on
+ * open, so a keyboard user's first focus position in the dialog was
+ * unmarked. */
+.v2-hub-search:focus-visible {
+  outline: 2px solid var(--v2-accent);
+  outline-offset: -2px;
+  border-radius: var(--v2-radius-xs);
+}
 .v2-hub-cta {
   display: flex;
   align-items: center;
@@ -1988,6 +2011,12 @@
 @keyframes pulse-record {
   0%,100% { opacity: 1; transform: scale(1); }
   50%     { opacity: 0.4; transform: scale(1.4); }
+}
+/* Own 1.2s duration, so the token zeroing misses it. Same rule as the
+ * perception chip dot: stop the motion, keep the dot at full opacity,
+ * because a recording indicator must not get quieter. */
+@media (prefers-reduced-motion: reduce) {
+  .phone-chat-recording-dot { animation: none; opacity: 1; }
 }
 
 .phone-chat-mic,
@@ -2531,4 +2560,49 @@
   font-size: 14px;
   color: var(--v2-text-tertiary);
   font-style: italic;
+}
+
+/* ── Focus visibility ────────────────────────────────────────────
+ *
+ * Before this block only .v2-btn, .v2-input/.v2-select, .v2-dock-btn and
+ * .v2-code-editor had a :focus-visible style. Everything else in the
+ * client was focusable and invisible while focused: all 13 Hub nav
+ * buttons (.v2-hub-item), the Home mode switcher (.v2-tab), the skill
+ * pins, the segmented controls, and the device / flow cards that are
+ * `role="button" tabIndex={0}` divs. A keyboard user could tab through a
+ * whole page without ever being told where they were.
+ *
+ * These use `outline` rather than the existing `box-shadow:
+ * var(--v2-shadow-focus)` pattern for a mechanical reason: several of
+ * these elements (Glass cards, .v2-tab.is-active) already carry a
+ * box-shadow that a focus ring would overwrite, and outline composes
+ * instead of replacing. A solid --v2-accent stroke also survives on top
+ * of the accent-tinted fills that .v2-skill-pin--more and .v2-hub-cta
+ * use, where the translucent --v2-accent-ring would wash out.
+ *
+ * Grouped in one block, in the sheet that loads last, so the next person
+ * adding an interactive element has one obvious place to register it.
+ */
+.v2-hub-item:focus-visible,
+.v2-hub-cta:focus-visible,
+.v2-tab:focus-visible,
+.v2-seg-btn:focus-visible,
+.v2-skill-pin:focus-visible,
+.v2-device-card:focus-visible,
+.v2-device-head[role="button"]:focus-visible,
+.v2-flow-card-title:focus-visible,
+.v2-menubar-voice:focus-visible,
+.v2-menubar-theme:focus-visible,
+.v2-skill-row-head:focus-visible,
+.v2-mindmap-svg g[role="button"]:focus-visible {
+  outline: 2px solid var(--v2-accent);
+  outline-offset: 2px;
+}
+
+/* SVG groups cannot take a border-radius, and in several engines an
+ * outline on a <g> is drawn round the union of its children's boxes,
+ * which is the behaviour we want for a mind-map node (circle + label).
+ * Kept as its own rule so the offset can differ from the DOM cases. */
+.v2-mindmap-svg g[role="button"]:focus-visible {
+  outline-offset: 1px;
 }

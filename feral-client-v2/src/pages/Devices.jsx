@@ -13,6 +13,29 @@ import { apiJson, apiFetch } from '../lib/api';
 import { useFeralSocket } from '../hooks/useFeralSocket';
 import { firstRejection } from '../hooks/useResource';
 
+/**
+ * Enter / Space activation for the `role="button" tabIndex={0}` cards
+ * below. They were focusable but had no key handler, so a keyboard user
+ * could land on a device card and had no way to open its detail modal:
+ * the whole modal was mouse-only. A native <button> is not available here
+ * because these cards contain their own buttons (Forget, Wake) and
+ * nesting interactive controls inside a button is invalid.
+ *
+ * The `e.target !== e.currentTarget` guard stops a nested button's own
+ * Enter/Space from bubbling up and opening the card at the same time.
+ * preventDefault on Space stops the page scrolling, which is what a
+ * native button does.
+ */
+function activateOnKey(fn) {
+  return (e) => {
+    if (e.target !== e.currentTarget) return;
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      fn();
+    }
+  };
+}
+
 // Labels we refuse to render verbatim — they are placeholders from
 // before commit 5 renamed the pair-QR default. Replaced by a
 // kind + short-id composite.
@@ -333,9 +356,20 @@ export default function Devices() {
           </p>
           <div className="v2-device-grid">
             {connected.map((d, i) => (
-              <Glass key={d.node_id || i} level={0} radius="md" padding="md" className="v2-device-card" onClick={() => setSelected({ ...d, _source: 'connected' })} role="button" tabIndex={0}>
+              <Glass
+                key={d.node_id || i}
+                level={0}
+                radius="md"
+                padding="md"
+                className="v2-device-card"
+                onClick={() => setSelected({ ...d, _source: 'connected' })}
+                onKeyDown={activateOnKey(() => setSelected({ ...d, _source: 'connected' }))}
+                role="button"
+                tabIndex={0}
+                aria-label={`${d.name || d.node_id || 'Device'}, connected. Open details`}
+              >
                 <header className="v2-device-head">
-                  <StatusDot tone="live" pulse />
+                  <StatusDot tone="live" pulse label={`${d.name || d.node_id || 'Device'} connected`} />
                   <h3 className="v2-device-name">{d.name || d.node_id || 'Device'}</h3>
                 </header>
                 <div className="v2-device-meta">
@@ -407,8 +441,10 @@ export default function Devices() {
                 className="v2-device-card"
                 data-testid="v2-devices-offline-card"
                 onClick={() => setSelected({ ...d, _source: 'offline' })}
+                onKeyDown={activateOnKey(() => setSelected({ ...d, _source: 'offline' }))}
                 role="button"
                 tabIndex={0}
+                aria-label={`${d.name || d.node_id || 'Device'}, disconnected. Open details`}
               >
                 <header className="v2-device-head">
                   <StatusDot tone="off" pulse={false} label={`${d.node_id} disconnected`} />
@@ -467,9 +503,24 @@ export default function Devices() {
         <Pane title={`HUP mesh (${mesh.length})`}>
           <div className="v2-device-grid">
             {mesh.map((n, i) => (
-              <Glass key={n.node_id || i} level={0} radius="md" padding="md" className="v2-device-card" onClick={() => setSelected({ ...n, _source: 'mesh' })} role="button" tabIndex={0}>
+              <Glass
+                key={n.node_id || i}
+                level={0}
+                radius="md"
+                padding="md"
+                className="v2-device-card"
+                onClick={() => setSelected({ ...n, _source: 'mesh' })}
+                onKeyDown={activateOnKey(() => setSelected({ ...n, _source: 'mesh' }))}
+                role="button"
+                tabIndex={0}
+                aria-label={`${n.name || n.node_id || 'Node'}, ${n.online ? 'online' : 'offline'}. Open details`}
+              >
                 <header className="v2-device-head">
-                  <StatusDot tone={n.online ? 'live' : 'off'} pulse={n.online} />
+                  <StatusDot
+                    tone={n.online ? 'live' : 'off'}
+                    pulse={n.online}
+                    label={`${n.name || n.node_id || 'Node'} ${n.online ? 'online' : 'offline'}`}
+                  />
                   <h3 className="v2-device-name">{n.name || n.node_id}</h3>
                 </header>
                 <div className="v2-device-meta">
@@ -571,11 +622,17 @@ function PairedPane({ paired, onSelect, onForget, onRefresh }) {
               <header
                 className="v2-device-head"
                 onClick={() => onSelect(d)}
+                onKeyDown={activateOnKey(() => onSelect(d))}
                 role="button"
                 tabIndex={0}
+                aria-label={`${labelFor(d)}, ${claimed ? 'claimed' : 'unclaimed'}. Open details`}
                 style={{ cursor: 'pointer' }}
               >
-                <StatusDot tone={claimed ? 'neutral' : 'off'} pulse={false} />
+                <StatusDot
+                  tone={claimed ? 'neutral' : 'off'}
+                  pulse={false}
+                  label={`${labelFor(d)} ${claimed ? 'claimed' : 'unclaimed'}`}
+                />
                 <h3 className="v2-device-name">{labelFor(d)}</h3>
               </header>
               <div className="v2-device-meta" title={d.explain || undefined}>

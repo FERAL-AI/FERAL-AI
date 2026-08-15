@@ -273,7 +273,10 @@ export default function Oversight() {
             <li key={ev.event_id} className="v2-oversight-row">
               <Glass level={0} radius="md" padding="sm">
                 <div className="v2-oversight-row-head">
-                  <StatusDot tone={DECISION_TONE[ev.decision] || 'neutral'} />
+                  <StatusDot
+                    tone={DECISION_TONE[ev.decision] || 'neutral'}
+                    label={`Decision: ${ev.decision || 'unknown'}`}
+                  />
                   <span className="v2-chip v2-chip--muted">{ev.source}</span>
                   <span className="v2-chip v2-chip--muted">{ev.kind}</span>
                   <span className="v2-chip v2-chip--muted" title={ev.actor}>by {ev.actor}</span>

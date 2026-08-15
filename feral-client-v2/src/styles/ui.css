@@ -99,7 +99,10 @@
   backdrop-filter: var(--v2-blur-md);
 }
 .v2-menubar-left { display: flex; align-items: center; gap: 8px; }
-.v2-menubar-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+/* Positional hook only. The connection indicator is a StatusDot now, so
+ * size, radius and shape come from .v2-dot; re-declaring border-radius
+ * here would fight the per-tone silhouettes. */
+.v2-menubar-dot { display: inline-block; }
 .v2-menubar-brand { font-size: var(--v2-size-sm); font-weight: 600; letter-spacing: 0.04em; }
 .v2-menubar-version {
   font-size: var(--v2-size-xs);
@@ -396,6 +399,22 @@
 .v2-orb--offline { filter: grayscale(1) opacity(0.5); }
 .v2-orb--offline .v2-orb-ring { box-shadow: none; }
 
+/* Every orb keyframe above declares its own duration (4.2s, 1.4s, 2.6s,
+ * 6s, 0.9s), so zeroing --v2-dur-* in tokens.css does not reach any of
+ * them. The orb is the largest moving object in the client and it never
+ * stops, which is precisely the case prefers-reduced-motion exists for.
+ * The dashed --thinking ring is kept: it is a static state marker, only
+ * its rotation is motion. */
+@media (prefers-reduced-motion: reduce) {
+  .v2-orb--idle,
+  .v2-orb--listening,
+  .v2-orb--thinking,
+  .v2-orb--thinking .v2-orb-ring,
+  .v2-orb--speaking .v2-orb-core {
+    animation: none;
+  }
+}
+
 /* ── Voice Mode ──────────────────────────────────────────────── */
 .v2-menubar-voice {
   display: inline-flex;
@@ -678,6 +697,31 @@
 .v2-empty-state-action { margin-top: 8px; }
 
 /* ── StatusDot ───────────────────────────────────────────────── */
+/*
+ * Shape is the second channel, and it is not decoration.
+ *
+ * --live, --warn, --error and --neutral used to be four identical 8px
+ * filled circles that differed only in hue. Green vs red at 8px is
+ * indistinguishable to a deuteranope (roughly 1 in 12 men), so the state
+ * of every device, flow, provider and channel in the client was carried
+ * on a channel a large minority of users cannot read. Each tone now has
+ * its own silhouette as well as its own hue:
+ *
+ *   live     filled circle
+ *   warn     triangle  (the universal caution glyph)
+ *   error    diamond   (distinct corner count from the triangle, and
+ *                       distinct from the circle at a glance)
+ *   neutral  rounded square
+ *   off      hollow ring
+ *
+ * All five stay inside the same 8x8 box, so nothing reflows and no call
+ * site changes. Shapes are cut with clip-path rather than by resizing,
+ * for the same reason.
+ *
+ * The glow moves from box-shadow to filter: drop-shadow because
+ * clip-path clips box-shadow to the unclipped box, which would have left
+ * the triangle and the diamond wearing a square halo.
+ */
 .v2-dot {
   display: inline-block;
   width: 8px;
@@ -686,15 +730,49 @@
   background: var(--v2-text-tertiary);
   flex-shrink: 0;
 }
-.v2-dot--live { background: var(--v2-state-live); box-shadow: 0 0 6px var(--v2-state-live-soft); }
-.v2-dot--warn { background: var(--v2-state-warn); box-shadow: 0 0 6px var(--v2-state-warn-soft); }
-.v2-dot--error { background: var(--v2-state-error); box-shadow: 0 0 6px var(--v2-state-error-soft); }
-.v2-dot--neutral { background: var(--v2-text-tertiary); }
-.v2-dot--off { background: transparent; border: 1px solid var(--v2-hairline); }
+.v2-dot--live {
+  background: var(--v2-state-live);
+  filter: drop-shadow(0 0 3px var(--v2-state-live-soft));
+}
+.v2-dot--warn {
+  background: var(--v2-state-warn);
+  border-radius: 0;
+  clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
+  filter: drop-shadow(0 0 3px var(--v2-state-warn-soft));
+}
+.v2-dot--error {
+  background: var(--v2-state-error);
+  border-radius: 0;
+  clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+  filter: drop-shadow(0 0 3px var(--v2-state-error-soft));
+}
+.v2-dot--neutral {
+  background: var(--v2-text-tertiary);
+  border-radius: 2px;
+}
+/* The ring used --v2-hairline (0.10 alpha), which at 8px was close to
+ * invisible and made "off" read as "nothing rendered". A tertiary-text
+ * stroke is the same weight as the neutral fill, so the ring is a real
+ * silhouette rather than a hint of one. */
+.v2-dot--off {
+  background: transparent;
+  border: 1px solid var(--v2-text-tertiary);
+}
 .v2-dot.is-pulse { animation: v2DotPulse 1.6s ease-in-out infinite; }
 @keyframes v2DotPulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.5; transform: scale(1.4); }
+}
+/* The --v2-dur-* tokens are zeroed under reduced motion, but this
+ * keyframe declares its own 1.6s duration so the token never reaches it.
+ * Stop the animation outright and pin full opacity: an indicator must
+ * never end up dimmer than it was while animating. */
+@media (prefers-reduced-motion: reduce) {
+  .v2-dot.is-pulse {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
 }
 
 /* ── PerceptionShare privacy chip ────────────────────────────── */

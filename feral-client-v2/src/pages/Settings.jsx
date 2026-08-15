@@ -454,7 +454,11 @@ function ProvidersSection() {
         <div>
           <div className="v2-stat-label">Current provider</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
-            <StatusDot tone={status?.available ? 'live' : 'warn'} pulse={!!status?.available} />
+            <StatusDot
+              tone={status?.available ? 'live' : 'warn'}
+              pulse={!!status?.available}
+              label={`Current provider ${status?.provider || 'none'} ${status?.available ? 'available' : 'unavailable'}`}
+            />
             <strong>{status?.provider || 'none'}</strong>
             <span className="v2-p v2-p--muted">{status?.model || ''}</span>
           </div>
@@ -905,7 +909,10 @@ function FallbacksCard({ health, onChange }) {
             : 'off';
           return (
             <li key={p} className="v2-fallback-row" data-testid={`fallback-row-${p}`}>
-              <StatusDot tone={tone} />
+              <StatusDot
+                tone={tone}
+                label={`${p}: ${cand.in_cooldown ? 'cooling down' : cand.has_key ? 'ready' : 'no key'}`}
+              />
               <code>{p}</code>
               <span className="v2-p v2-p--tiny v2-p--muted" style={{ flex: 1 }}>
                 {cand.in_cooldown
@@ -1003,7 +1010,10 @@ function ProviderCard({ provider, isCurrent, activeModel, keysRefreshToken, isEd
           </div>
         </div>
         <div className="v2-provider-status">
-          <StatusDot tone={statusTone} />
+          <StatusDot
+            tone={statusTone}
+            label={`${provider.display_name || provider.provider_id}: ${statusLabel}`}
+          />
           <span className="v2-p v2-p--tiny">{statusLabel}</span>
         </div>
       </div>

@@ -53,7 +53,7 @@ export default function PerceptionShare() {
     <div data-testid="perception-share-pane">
     <Pane
       title="Share my camera"
-      actions={<StatusDot tone={STATUS_TONE[status]} pulse={isRunning} />}
+      actions={<StatusDot tone={STATUS_TONE[status]} pulse={isRunning} label={`Camera share ${status}`} />}
     >
       <p className="v2-p v2-p--muted">
         Grants FERAL live video + audio from this browser. Works on any phone

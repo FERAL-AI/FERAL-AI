@@ -167,7 +167,10 @@ function AlertsTab() {
           <li key={a.id || i}>
             <Glass level={0} radius="md" padding="md">
               <div className="v2-flow-card-head">
-                <StatusDot tone={tone(a.severity)} />
+                <StatusDot
+                  tone={tone(a.severity)}
+                  label={`${a.metric || a.title || a.id}: severity ${a.severity || 'unspecified'}`}
+                />
                 <div className="v2-flow-card-title"><AlertTriangle size={12} /> {a.metric || a.title || a.id}</div>
                 <div className="v2-flow-card-status">{a.severity}</div>
               </div>

@@ -104,6 +104,28 @@ export default function ConsciousnessMindMap() {
     if (pushes && pushes.length > 0) refresh();
   }, [pushes, refresh]);
 
+  /*
+   * The active-node halo below is an SVG SMIL <animate>, not a CSS
+   * animation, so neither the zeroed --v2-dur-* tokens nor a
+   * `@media (prefers-reduced-motion: reduce)` block in any stylesheet can
+   * reach it. On a busy brain that is up to 50 elements pulsing forever.
+   * The only lever is not rendering the <animate> at all, which needs the
+   * query in JS. Matches the CSS half of the same fix in ui.css: the halo
+   * itself stays, only its motion stops, so "active" is still marked.
+   */
+  const [reduceMotion, setReduceMotion] = useState(() => (
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      : false
+  ));
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onChange = (ev) => setReduceMotion(ev.matches);
+    mq.addEventListener?.('change', onChange);
+    return () => mq.removeEventListener?.('change', onChange);
+  }, []);
+
   // Track container size so the SVG scales with the pane.
   useEffect(() => {
     if (!containerRef.current || typeof ResizeObserver === 'undefined') return;
@@ -261,6 +283,12 @@ export default function ConsciousnessMindMap() {
               key={e.id}
               role="button"
               tabIndex={0}
+              /* Every node declared role="button" tabIndex={0} and had no
+                 key handler, so the entire mind map was reachable by Tab
+                 and activatable by nothing: navigation off a node was
+                 mouse-only. It also had no accessible name, so a screen
+                 reader announced 50 anonymous buttons. */
+              aria-label={`${shortLabel(e)} (${e.kind}, ${e.status || 'unknown'})`}
               onMouseEnter={() => setHovered(e.id)}
               onMouseLeave={() => setHovered((h) => (h === e.id ? null : h))}
               onFocus={() => setHovered(e.id)}
@@ -268,6 +296,11 @@ export default function ConsciousnessMindMap() {
               onClick={() => {
                 const route = KIND_ROUTE[e.kind] || '/';
                 navigate(route);
+              }}
+              onKeyDown={(ev) => {
+                if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') return;
+                ev.preventDefault();
+                navigate(KIND_ROUTE[e.kind] || '/');
               }}
               style={{ cursor: 'pointer' }}
             >
@@ -283,8 +316,12 @@ export default function ConsciousnessMindMap() {
                   stroke={color}
                   strokeOpacity={0.35}
                 >
-                  <animate attributeName="r" from={r + 4} to={r + 14} dur="2s" repeatCount="indefinite" />
-                  <animate attributeName="opacity" from="0.35" to="0" dur="2s" repeatCount="indefinite" />
+                  {!reduceMotion && (
+                    <>
+                      <animate attributeName="r" from={r + 4} to={r + 14} dur="2s" repeatCount="indefinite" />
+                      <animate attributeName="opacity" from="0.35" to="0" dur="2s" repeatCount="indefinite" />
+                    </>
+                  )}
                 </circle>
               )}
               <text

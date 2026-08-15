@@ -216,7 +216,11 @@ export default function ResumeCockpit() {
                 return (
                   <Glass key={e.id} level={0} radius="md" padding="sm" className="v2-cockpit-row">
                     <header className="v2-cockpit-row-head">
-                      <StatusDot tone={tone} pulse={e.status === 'active'} />
+                      <StatusDot
+                        tone={tone}
+                        pulse={e.status === 'active'}
+                        label={`${e.summary || e.id.slice(0, 8)}: ${e.status || 'unknown'}`}
+                      />
                       <div className="v2-cockpit-row-title">
                         <strong>{e.summary || e.id.slice(0, 8)}</strong>
                         <span className="v2-p v2-p--muted"> · {e.status}</span>

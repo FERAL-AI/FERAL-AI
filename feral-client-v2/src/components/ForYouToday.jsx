@@ -195,7 +195,7 @@ export default function ForYouToday() {
                 className="v2-foryou-row-head"
               >
                 <Icon size={14} aria-hidden="true" />
-                <StatusDot tone={tone} />
+                <StatusDot tone={tone} label={`Severity: ${idea.severity || 'unspecified'}`} />
                 <span className="v2-chip v2-chip--muted" style={{ textTransform: 'capitalize' }}>
                   {idea.kind}
                 </span>

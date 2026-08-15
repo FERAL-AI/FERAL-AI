@@ -24,7 +24,9 @@ describe('ErrorToast', () => {
     render(<ErrorToast />);
     const stack = screen.getByTestId('error-toast-stack');
     expect(stack).toHaveAttribute('role', 'alert');
-    expect(stack).toHaveAttribute('aria-live', 'polite');
+    // Was 'polite', which contradicted role="alert" (implicitly
+    // assertive). See a11y/roles.test.jsx for the reasoning.
+    expect(stack).toHaveAttribute('aria-live', 'assertive');
     expect(screen.getByText("Theme '' not found")).toBeInTheDocument();
 
     fireEvent.click(screen.getByLabelText('Dismiss error'));

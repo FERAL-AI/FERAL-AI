@@ -3,28 +3,47 @@ import { Mic, MicOff, Sun, Moon } from 'lucide-react';
 import { useConnectionStatus } from '../hooks/useConnectionStatus';
 import { useTheme } from '../hooks/useTheme';
 import { useVoice } from './VoiceContext';
+import StatusDot from '../ui/StatusDot';
 
 /**
  * Top menubar — minimal. Left: FERAL mark + connection state. Right: voice
  * toggle. Command palette + identity slot in later.
  */
+
+/*
+ * The connection indicator used to be a bare <span aria-hidden="true"> with
+ * an inline background colour and no text. It is the app's single global
+ * "is the brain reachable" signal and it was, by construction, invisible to
+ * assistive tech and unreadable to anyone who cannot separate the hues.
+ * Routing it through StatusDot gets it both an accessible name and the
+ * shape channel every other status indicator now carries.
+ */
+const CONNECTION_STATE = {
+  open: { tone: 'live', label: 'Brain connected' },
+  connecting: { tone: 'warn', label: 'Brain connecting' },
+  error: { tone: 'error', label: 'Brain connection failed' },
+};
+
 export default function Menubar() {
   const { state } = useConnectionStatus();
   const voice = useVoice();
   const { theme, toggle: toggleTheme } = useTheme();
 
-  const statusColor =
-    state === 'open' ? 'var(--v2-state-live)' :
-    state === 'connecting' ? 'var(--v2-state-warn)' :
-    state === 'error' ? 'var(--v2-state-error)' :
-    'var(--v2-text-tertiary)';
+  const connection = CONNECTION_STATE[state] || {
+    tone: 'off',
+    label: `Brain ${state || 'disconnected'}`,
+  };
 
   const voiceLabel = voice.active ? 'End voice session' : 'Start voice session';
 
   return (
     <header className="v2-menubar" role="banner">
       <div className="v2-menubar-left">
-        <span className="v2-menubar-dot" style={{ background: statusColor }} aria-hidden="true" />
+        <StatusDot
+          tone={connection.tone}
+          label={connection.label}
+          className="v2-menubar-dot"
+        />
         <span className="v2-menubar-brand">FERAL</span>
         <span className="v2-menubar-version">v2</span>
       </div>

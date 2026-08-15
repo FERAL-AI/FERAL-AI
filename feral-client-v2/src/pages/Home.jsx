@@ -572,6 +572,11 @@ export default function Home() {
                   <StatusDot
                     tone={devicesLiveNow ? 'live' : dashboardStale ? 'warn' : 'off'}
                     pulse={devicesLiveNow}
+                    label={devicesLiveNow
+                      ? `${onlineCount} devices online now`
+                      : dashboardStale
+                        ? `Device count stale, last known as of ${asOfText}`
+                        : 'No devices online'}
                   /> {onlineCount}
                 </div>
               ) : (
@@ -591,6 +596,11 @@ export default function Home() {
                   <StatusDot
                     tone={devicesLiveNow ? 'live' : dashboardStale ? 'warn' : 'neutral'}
                     pulse={devicesLiveNow}
+                    label={devicesLiveNow
+                      ? `${onlineCount} of ${pairedCount} devices online now`
+                      : dashboardStale
+                        ? `Device count stale, last known as of ${asOfText}`
+                        : `${pairedOfflineCount} paired but offline`}
                   /> {onlineCount}/{pairedCount}
                 </div>
               )}
@@ -898,7 +908,10 @@ export default function Home() {
           <div className="v2-channel-list">
             {Object.entries(channels).map(([name, info]) => (
               <Glass key={name} level={0} radius="sm" padding="sm" className="v2-channel-row">
-                <StatusDot tone={info?.connected ? 'live' : 'off'} />
+                <StatusDot
+                  tone={info?.connected ? 'live' : 'off'}
+                  label={`${name} ${info?.connected ? 'connected' : info?.enabled ? 'starting' : 'off'}`}
+                />
                 <span className="v2-channel-name">{name}</span>
                 <span className="v2-channel-state">
                   {info?.connected ? 'connected' : info?.enabled ? 'starting' : 'off'}
@@ -914,7 +927,10 @@ export default function Home() {
               <div className="v2-setting-row">
                 <div className="v2-setting-label"><div>Provider</div></div>
                 <div className="v2-setting-control">
-                  <StatusDot tone={llm.available ? 'live' : 'warn'} /> {llm.provider || '—'}
+                  <StatusDot
+                    tone={llm.available ? 'live' : 'warn'}
+                    label={`LLM provider ${llm.provider || 'unknown'} ${llm.available ? 'available' : 'unavailable'}`}
+                  /> {llm.provider || '—'}
                 </div>
               </div>
               <div className="v2-setting-row">
@@ -951,6 +967,7 @@ export default function Home() {
                   <StatusDot
                     tone={j.status === 'running' ? 'live' : j.status === 'failed' || j.status === 'error' ? 'error' : j.status === 'paused' ? 'warn' : 'neutral'}
                     pulse={j.status === 'running' || j.status === 'connected'}
+                    label={`${j.kind || 'Job'} ${j.name || ''}: ${j.status || 'unknown'}`}
                   />
                   <div className="v2-flow-title">
                     <span className="v2-chip v2-chip--muted" style={{ marginRight: 6 }}>{j.kind}</span>

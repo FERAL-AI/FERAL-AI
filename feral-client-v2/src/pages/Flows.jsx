@@ -36,6 +36,25 @@ function SkillPickerNote({ error }) {
   );
 }
 
+/**
+ * Enter / Space activation for the `role="button" tabIndex={0}` flow
+ * title below. It was focusable with no key handler, so the flow detail
+ * pane could not be opened from the keyboard at all. Not a real <button>
+ * because it sits inside a card head alongside other controls and a
+ * button element would inherit the card's flex sizing; the guard on
+ * `e.currentTarget` keeps a nested control's own activation from also
+ * opening the pane.
+ */
+function activateOnKey(fn) {
+  return (e) => {
+    if (e.target !== e.currentTarget) return;
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      fn();
+    }
+  };
+}
+
 function statusTone(status) {
   return {
     running: 'live',
@@ -252,8 +271,18 @@ function TaskFlowsTab({ skills, skillsError }) {
           {flows.map((f) => (
             <Glass key={f.id} level={0} radius="md" padding="md" className="v2-flow-card">
               <div className="v2-flow-card-head">
-                <StatusDot tone={statusTone(f.status)} pulse={f.status === 'running'} />
-                <div className="v2-flow-card-title" onClick={() => setSelected(f)} role="button" tabIndex={0}>
+                <StatusDot
+                  tone={statusTone(f.status)}
+                  pulse={f.status === 'running'}
+                  label={`Flow ${f.title || f.id}: ${f.status || 'unknown'}`}
+                />
+                <div
+                  className="v2-flow-card-title"
+                  onClick={() => setSelected(f)}
+                  onKeyDown={activateOnKey(() => setSelected(f))}
+                  role="button"
+                  tabIndex={0}
+                >
                   {f.title || f.id}
                 </div>
                 <div className="v2-flow-card-status">{f.status}</div>
@@ -377,7 +406,7 @@ function FlowDetailModal({ flow, onClose, onAction }) {
       <div className="v2-setting-stack">
         <div className="v2-setting-row">
           <div className="v2-setting-label"><div>Status</div></div>
-          <div className="v2-setting-control"><StatusDot tone={statusTone(current.status)} /> {current.status}</div>
+          <div className="v2-setting-control"><StatusDot tone={statusTone(current.status)} label={`Flow status: ${current.status || 'unknown'}`} /> {current.status}</div>
         </div>
         <div className="v2-setting-row">
           <div className="v2-setting-label"><div>ID</div></div>
@@ -391,7 +420,10 @@ function FlowDetailModal({ flow, onClose, onAction }) {
       <ol className="v2-step-detail-list">
         {steps.map((s, i) => (
           <li key={i} className="v2-step-detail-row">
-            <StatusDot tone={statusTone(s.status)} />
+            <StatusDot
+              tone={statusTone(s.status)}
+              label={`Step ${i + 1} ${s.step_type || s.type || ''}: ${s.status || 'unknown'}`}
+            />
             <span className="v2-step-detail-type">{s.step_type || s.type || 'step'}</span>
             {s.status && <span className="v2-step-detail-status">{s.status}</span>}
           </li>

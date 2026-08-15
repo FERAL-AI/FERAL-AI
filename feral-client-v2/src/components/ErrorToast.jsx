@@ -50,8 +50,21 @@ export default function ErrorToast() {
   return (
     <div
       className="v2-error-toast-stack"
+      /*
+       * role="alert" and aria-live="polite" were both set here, which is a
+       * contradiction: `alert` carries an implicit aria-live of `assertive`,
+       * so the explicit `polite` fought its own role and the announcement
+       * behaviour came down to which one a given screen reader resolved
+       * last. These are API and WebSocket failures, i.e. the user's action
+       * did not happen, so assertive is the correct reading and it is now
+       * stated rather than left to chance.
+       *
+       * aria-atomic stays false deliberately: this node is a stack, and an
+       * atomic region would re-read every visible error each time one more
+       * arrived.
+       */
       role="alert"
-      aria-live="polite"
+      aria-live="assertive"
       aria-atomic="false"
       data-testid="error-toast-stack"
       style={{

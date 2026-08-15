@@ -364,6 +364,7 @@ export default function DeviceTopology({
                               <StatusDot
                                 tone={s.live ? 'live' : 'off'}
                                 pulse={!!s.live}
+                                label={`${sv.label} ${s.live ? 'live' : 'stale'}`}
                               />
                               <sv.Icon size={11} style={{ marginLeft: 4 }} />
                               <span style={{ marginLeft: 4 }}>{sv.label}</span>

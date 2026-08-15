@@ -331,10 +331,27 @@ export function SduiNode({ node, onAction, depth = 0 }) {
 
   if (type === 'ProgressBar') {
     const pct = Math.max(0, Math.min(1, Number(node.value) || 0));
+    const now = Math.round(pct * 100);
+    // The track was a pair of nested plain divs: visually a progress bar,
+    // but to assistive tech two anonymous boxes with no role, no value and
+    // no name. The measurement itself is real (it comes off node.value),
+    // so aria-valuenow reports it rather than inventing it.
     return (
       <div className="v2-sdui-progress" style={{ width: '100%' }}>
         {node.label ? <div className="v2-stat-label">{node.label}</div> : null}
-        <div style={{ width: '100%', height: 6, borderRadius: 999, background: 'var(--v2-fill-strong)', overflow: 'hidden' }}>
+        <div
+          role="progressbar"
+          aria-valuenow={now}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuetext={`${now}%`}
+          /* aria-label rather than aria-labelledby: this renderer draws
+             server-driven trees where the same node can appear more than
+             once, so there is no id it can mint that is guaranteed unique
+             on the page. */
+          aria-label={node.label || 'Progress'}
+          style={{ width: '100%', height: 6, borderRadius: 999, background: 'var(--v2-fill-strong)', overflow: 'hidden' }}
+        >
           <div style={{ width: `${pct * 100}%`, height: '100%', background: node.color || 'currentColor', transition: 'width 300ms ease' }} />
         </div>
       </div>
