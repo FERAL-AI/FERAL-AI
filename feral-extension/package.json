@@ -10,5 +10,9 @@
     "@vitest/coverage-v8": "^4.1.4",
     "jsdom": "^24.0.0",
     "vitest": "^4.1.4"
+  },
+  "overrides": {
+    "postcss": "^8.5.23",
+    "nanoid": "^3.3.18"
   }
 }

@@ -16,14 +16,14 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
-    "dompurify": "^3.4.11",
+    "dompurify": "^3.4.13",
     "highlight.js": "^11.11.1",
     "leaflet": "^1.9.4",
     "lucide-react": "^1.7.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^10.1.0",
-    "react-router-dom": "^7.14.0",
+    "react-router-dom": "^7.18.2",
     "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.1",
     "tailwindcss": "^4.2.2",
@@ -45,6 +45,10 @@
     "vitest": "^4.1.4"
   },
   "overrides": {
-    "undici": "^7.28.0"
+    "undici": "^7.29.0",
+    "postcss": "^8.5.23",
+    "nanoid": "^3.3.18",
+    "js-yaml": "^4.3.1",
+    "brace-expansion": "^1.1.16"
   }
 }
