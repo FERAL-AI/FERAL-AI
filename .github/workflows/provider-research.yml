@@ -59,8 +59,54 @@ jobs:
       # of truth for every budget cap — kept serving April rates.
       #
       # OPERATOR ACTION REQUIRED: create these repository secrets.
-      # Until they exist this job fails loudly, which is the point.
+      #
+      # Until they exist this job used to fail every single morning. The
+      # intent was right and the mechanism was wrong: a scheduled job that
+      # cannot possibly succeed, failing on a timer, is not a warning. It
+      # is a red mark people learn to scroll past, and it devalues every
+      # other red mark in the repo.
+      #
+      # Staleness is now caught where it actually blocks work:
+      # feral-core/tests/test_provider_catalog_freshness.py fails the
+      # normal test suite once the catalog passes 14 days, on every PR and
+      # every push. That guard did not exist when this job was written,
+      # which is why failing here was the only lever at the time.
+      #
+      # So this step now reports "not configured" and stops, rather than
+      # failing. It does NOT swallow anything: with keys present it runs
+      # exactly as before, and without them the freshness test still turns
+      # the build red. The silent-swallow bug that motivated
+      # --require-keys is unaffected, because that flag governs what the
+      # script does once it is running.
+      - name: Check research keys are configured
+        id: keys
+        env:
+          KEY_BLOB: >-
+            ${{ secrets.PROVIDER_RESEARCH_OPENAI_KEY }}${{ secrets.PROVIDER_RESEARCH_ANTHROPIC_KEY }}${{ secrets.PROVIDER_RESEARCH_GROQ_KEY }}${{ secrets.PROVIDER_RESEARCH_DEEPSEEK_KEY }}${{ secrets.PROVIDER_RESEARCH_MOONSHOT_KEY }}${{ secrets.PROVIDER_RESEARCH_MISTRAL_KEY }}${{ secrets.PROVIDER_RESEARCH_DASHSCOPE_KEY }}${{ secrets.PROVIDER_RESEARCH_TOGETHER_KEY }}${{ secrets.PROVIDER_RESEARCH_OPENROUTER_KEY }}${{ secrets.PROVIDER_RESEARCH_GEMINI_KEY }}
+        run: |
+          # Concatenated so no individual secret can be inferred from the
+          # result, and length only, so nothing is ever echoed.
+          if [ -z "$KEY_BLOB" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Provider research skipped"
+              echo
+              echo "No \`PROVIDER_RESEARCH_*_KEY\` repository secrets are set, so there is"
+              echo "nothing to poll. This step reports rather than fails, because a"
+              echo "scheduled job that cannot succeed should not go red on a timer."
+              echo
+              echo "The catalog is still guarded: \`test_catalog_is_not_stale\` fails the"
+              echo "test suite once \`model_catalog.json\` passes 14 days, so a stale"
+              echo "catalog blocks work on every PR whether or not this job runs."
+              echo
+              echo "To enable: add the ten \`PROVIDER_RESEARCH_*_KEY\` secrets."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run research script
+        if: steps.keys.outputs.configured == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.PROVIDER_RESEARCH_OPENAI_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.PROVIDER_RESEARCH_ANTHROPIC_KEY }}
@@ -75,6 +121,7 @@ jobs:
         run: python scripts/research_providers.py --require-keys
 
       - name: Create PR on change
+        if: steps.keys.outputs.configured == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
