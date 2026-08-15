@@ -1,10 +1,125 @@
 # Changelog
 
-<!-- feral-version: 2026.8.9 -->
+<!-- feral-version: 2026.8.10 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.10] - 2026-08-15 - the interface stops asserting what it never checked
+
+An audit of every page and component in the web client and the desktop
+shell, against the backend routes they actually call. The recurring defect
+was one thing wearing different clothes: the UI making an affirmative
+statement about something it had not verified. A failed request rendering
+as an empty result, an indicator hardcoded to green, a control reporting
+success without reading the answer.
+
+### Fixed
+
+- **The kill switch reported "paused" without checking that it paused.**
+  `togglePause` set its state from the click, before the request, and threw
+  the server's answer away. `POST /api/supervisor/pause` returns the real
+  `{"paused": ...}`, and `_require_supervisor` raises 503 when the
+  Supervisor never initialised. On that 503 the await rejected, the refresh
+  never ran, and the pill read "Paused: yes" permanently while nothing was
+  halted. A safety control claiming every outgoing action is stopped, when
+  none is, is worse than one that says nothing.
+
+- **A failed request rendered as an empty result, in nineteen places.**
+  `apiJson` throws on any non-2xx, and page after page caught that and set
+  state to an empty value, so "we could not ask" was displayed as "there is
+  nothing". The health page turned five separate fetch failures into
+  affirmative all-clears including **"No anomalies detected"**. The audit
+  log rendered "no events" when the audit backend was unreachable. Forge,
+  Intents and Agents went further and fabricated zeros, presenting invented
+  numbers in the same tiles that normally carry real measurements.
+
+  Fixed structurally rather than nineteen times: `useResource` holds one
+  rule, that `data` is only ever what the brain returned and is untouched
+  on failure, so a page cannot render an empty state off a failed fetch.
+  `ErrorState` is deliberately impossible to mistake for `EmptyState`.
+
+- **The camera indicator never appeared and the mic mute did not mute.**
+  The hook kept state per component, and the floating chip and the pane are
+  separate mounts, so the chip never learned a share had started. The audio
+  handler captured the mute flag once at startup, so toggling it mid-stream
+  changed nothing while the button rendered as muted. `pause()` was worse:
+  it hid the chip and stopped video while leaving audio streaming. The
+  component's own text promised "there is no hidden-share mode". There was.
+  Muting video now also disables the track, so the camera light goes out.
+
+- **A dead brain showed a pulsing green Devices dot.** Once one poll
+  succeeded the health store's retained payload made the error branch
+  unreachable, so a stopped brain read "reconnecting..." forever while tiles
+  rendered live counts from cache. Stale tiles now keep their numbers, drop
+  the pulse, and carry an "as of HH:MM:SS" stamp.
+
+- **The Bluetooth tab reported a pair it never made.** It opened the browser
+  chooser and fired `onPaired`: no connection, no call to the brain, nothing
+  persisted. It cannot be implemented from that screen, because a
+  `BluetoothDevice` handle cannot claim a pairing token and the console is
+  not a HUP node, so it is now an honest "Bluetooth check" that says the
+  result is not registered.
+
+- **The desktop shell could not say why the brain failed.** The splash
+  polled forever with no timeout and no failure branch, and the spawned
+  brain's stdout and stderr were piped and read by nothing. A traceback, a
+  missing FTS5 module and a port conflict were all the same symptom: a
+  health dot that never turned green. The wait is bounded and the failure
+  screen now shows what the brain actually printed.
+
+- **The desktop setup form collected a Brain URL and API key and discarded
+  both.** No Rust command accepts either, and the app's own CSP allows
+  localhost only, so a remote brain could never have worked. The fields are
+  gone and the stored key is wiped from existing installs.
+
+- **The floating quick-ask window had never once loaded.** Declared in the
+  Tauri config and toggled by both a global shortcut and the tray, while
+  Vite only ever built `index.html`, so both paths opened a 404.
+
+- **The safety-policy editor swallowed every failure, and its backend
+  accepted anything.** Malformed JSON and a rejected request landed in the
+  same empty catch, while the route did `SandboxPolicy(body); save()` with
+  no validation and returned `{"ok": true}`. Validation now rejects the
+  cases that silently widen the sandbox, including `allow_shell_commands`
+  as the truthy string `"false"` and a misspelled `network.mode`, which
+  disabled allowlist enforcement entirely.
+
+- **Status was carried by hue alone**, four identical dots differing only in
+  colour, which green-red colourblind users cannot distinguish. Each tone
+  has a silhouette now. Roughly 24 of 35 indicators also passed no label and
+  rendered as decorative, so most status in the client was absent from
+  assistive tech.
+
+- **Body text failed WCAG AA.** `--v2-text-tertiary` measured 3.24:1 on the
+  shell base and 2.66:1 on raised surfaces. Now 5.57 and 4.57. Modals never
+  trapped or restored focus, six controls were focusable but not
+  activatable, and `prefers-reduced-motion` was declared but honoured by
+  nothing.
+
+### Changed
+
+- The desktop app uses the same design tokens as the web client, replacing
+  its own indigo and violet palette. Tokens are copied by a prebuild step
+  rather than by hand.
+- All 42 Dependabot alerts are closed across five manifests. None of the
+  five HIGH findings was reachable: they are build-only or test-only, and
+  read as production-facing because `@tailwindcss/vite` sits in
+  `dependencies`.
+- The provider catalog staleness guard now warns at 14 days and fails at 42.
+  Pricing is display-only until an operator sets a cap, since the budget
+  ships unlimited, so a permanently red build over a usage figure protected
+  nothing.
+- The provider-research workflow reports "not configured" instead of failing
+  daily for secrets it cannot create.
+- Dependabot no longer opens weekly version PRs for the superseded v1
+  client. Security alerts for it are unaffected.
+
+### Coverage
+- pytest (feral-core): 7926 collected, 7895 passed, 31 skipped.
+- vitest (feral-client-v2): 818 passed across 119 files.
+
 
 ## [2026.8.9] - 2026-08-13 - a disconnected device says so
 
