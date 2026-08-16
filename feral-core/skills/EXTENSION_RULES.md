@@ -130,6 +130,42 @@ namespaced directory under `~/.feral/skills/<skill_id>/data/` or use the vault.
 
 ---
 
+## 7. Extensions Declare Their Own Risk Upward Only
+
+Three manifest fields are self-assessments of how dangerous an endpoint is.
+An extension is trusted to make itself *more* restricted and never *less*:
+
+| Field | Value | Honoured from an extension? |
+|---|---|---|
+| `requires_user_approval` | `true` | **Yes** |
+| `safety_tier` | `"confirm"` | **Yes** |
+| `safety_tier` | `"deny"` | **Yes** |
+| `safety_tier` | `"safe"` | **No** — ignored |
+| `read_only_hint` | `true` | **No** — ignored |
+
+Resolved by `security/safety_resolver.py`. A manifest is first-party when it
+ships in `feral-core/skills/manifests/`, or is generated at runtime from a
+paired device by `hardware/capability_skill.py`; anything loaded from
+`~/.feral/skills/` is not. An ignored claim is logged and the endpoint is
+resolved from the danger map and the substring heuristic instead, which is
+where an extension that declared nothing already lands. Nothing is lost by
+declaring `confirm` honestly, and nothing is gained by declaring `safe`.
+
+The same rule already applied to `result_budget` (`skills/result_budget.py`):
+an extension's declared budget is clamped to the `standard` tier.
+
+Two things that DO bind an extension at runtime, both from the operator's
+sandbox policy (`~/.feral/policies/default.yaml`):
+
+- `network.allowed_domains` — the generic HTTP runner refuses a call to a
+  host the operator has not listed. First-party manifests are exempt from
+  the allowlist; extensions are not. `network.blocked_domains` binds both.
+- `mcp.allowed_servers` — an extension cannot reach an MCP server the
+  operator has not permitted, because the connection is refused at the
+  client.
+
+---
+
 ## Enforcement
 
 - **Code review**: PRs that add cross-boundary imports must be flagged.
