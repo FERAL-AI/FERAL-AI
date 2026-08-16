@@ -6,7 +6,7 @@ import Tabs from '../ui/Tabs';
 import EmptyState from '../ui/EmptyState';
 import ErrorState from '../ui/ErrorState';
 import StatusDot from '../ui/StatusDot';
-import { apiJson, apiFetch } from '../lib/api';
+import { ApiError, apiJson, apiFetch } from '../lib/api';
 import { useResource, firstRejection, toApiError } from '../hooks/useResource';
 
 /** Normalise `{key: [...]}` / a bare array / anything else into a list. */
@@ -105,6 +105,39 @@ function PendingTab() {
   // nothing. Each attempt is `silent` because trying the tool-genesis
   // route first for a plain-skill row is expected to 404, and toasting
   // that while the fallback succeeds is noise.
+  // `await apiFetch(...)` was still not enough on its own, and this is
+  // the part the previous pass missed. `apiFetch` raises on a non-2xx
+  // status, or on a 2xx body carrying an `error` key. Both endpoints
+  // behind these buttons could answer a failure with neither:
+  // `/api/skills/approve` returned `{"ok": false, "skill_id": ...,
+  // "registered": false}` at HTTP 200 when `SkillGenerator.approve_skill`
+  // returned False, and `/api/tool-genesis/approve` still returns
+  // `{"success": false, ...}` at HTTP 200 when the approved tool fails to
+  // promote into the registry. Nothing threw, this loop `return`ed, and a
+  // draft that was never registered rendered as promoted. The brain no
+  // longer sends the first shape, but the client must not depend on that:
+  // the desktop bundle ships its own copy of `api/routes/skills.py` and
+  // an operator can point this UI at an older brain.
+  const postDecision = async (path, id) => {
+    const response = await apiFetch(path, {
+      method: 'POST',
+      body: JSON.stringify({ tool_id: id, id, skill_id: id }),
+      silent: true,
+    });
+    const body = await response.json().catch(() => null);
+    if (body && (body.ok === false || body.success === false)) {
+      throw new ApiError({
+        status: response.status,
+        code: body.code || '',
+        detail: body.error || body.detail
+          || `the brain did not act on ${id}, and did not say why`,
+        raw: body,
+        path,
+      });
+    }
+    return body;
+  };
+
   const decide = async (id, approve) => {
     setBusy(id);
     setDecideError(null);
@@ -115,11 +148,7 @@ function PendingTab() {
     try {
       for (const p of paths) {
         try {
-          await apiFetch(p, {
-            method: 'POST',
-            body: JSON.stringify({ tool_id: id, id, skill_id: id }),
-            silent: true,
-          });
+          await postDecision(p, id);
           await refresh();
           return;
         } catch (e) {
@@ -127,6 +156,12 @@ function PendingTab() {
         }
       }
       setDecideError({ id, approve, error: lastErr });
+      // The list is refreshed on failure too, because a failed approval
+      // does not always leave the queue alone: the brain pops a draft off
+      // the pending queue before it registers it, so a failure after that
+      // point has already discarded it. Leaving the row on screen would
+      // be one more claim we cannot support.
+      await refresh();
     } finally {
       setBusy(null);
     }
@@ -155,7 +190,9 @@ function PendingTab() {
         <ErrorState
           error={decideError.error}
           what={`the ${decideError.approve ? 'approval' : 'rejection'} of ${decideError.id}`}
-          hint="The draft was left exactly as it was. Nothing was promoted or discarded."
+          hint={decideError.approve
+            ? 'Nothing was registered, so no new skill is live. The brain takes a draft off the pending queue before it registers it, so if it failed after that point the draft is gone from the list above as well. The list has been refreshed to whatever the brain still has.'
+            : 'Nothing was discarded. The draft is still whatever the refreshed list above says it is.'}
           compact
           onRetry={() => decide(decideError.id, decideError.approve)}
         />

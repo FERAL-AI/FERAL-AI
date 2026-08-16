@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Search, X, Pin, PinOff, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
 import Glass from '../ui/Glass';
-import { apiFetch } from '../lib/api';
+import { ApiError, apiFetch } from '../lib/api';
 
 /**
  * SkillsLauncher — full-surface popup showing every loaded skill.
@@ -12,6 +12,49 @@ import { apiFetch } from '../lib/api';
  *     Home page's compact strip is user-editable
  *   - Hot-reload a skill via POST /api/skills/reload
  */
+
+/**
+ * Inline reload outcome, styled from tokens.css only. `src/styles/` is
+ * owned elsewhere and this component has no stylesheet of its own, so the
+ * two states are inline styles reading `--v2-*`, the same way
+ * `pages/Oversight.jsx` renders its local error box. Nothing here
+ * hard-codes a colour.
+ */
+const RELOAD_NOTE_STYLE = {
+  display: 'flex',
+  alignItems: 'flex-start',
+  gap: 6,
+  marginTop: 6,
+  padding: '6px 10px',
+  borderRadius: 'var(--v2-radius-sm)',
+  fontSize: 'var(--v2-size-sm)',
+  lineHeight: 1.45,
+};
+
+const RELOAD_FAILED_STYLE = {
+  ...RELOAD_NOTE_STYLE,
+  border: '1px solid var(--v2-state-error-soft)',
+  background: 'var(--v2-state-error-soft)',
+  color: 'var(--v2-state-error)',
+};
+
+const RELOAD_OK_STYLE = {
+  ...RELOAD_NOTE_STYLE,
+  border: '1px solid var(--v2-state-live-soft)',
+  background: 'var(--v2-state-live-soft)',
+  color: 'var(--v2-state-live)',
+};
+
+const RETRY_STYLE = {
+  marginLeft: 'auto',
+  background: 'none',
+  border: 0,
+  padding: 0,
+  color: 'inherit',
+  font: 'inherit',
+  textDecoration: 'underline',
+  cursor: 'pointer',
+};
 
 export const PIN_STORAGE_KEY = 'feral_pinned_skills';
 export const DEFAULT_PINNED = [
@@ -46,9 +89,13 @@ export default function SkillsLauncher({ open, onClose, skills = [] }) {
   const [expanded, setExpanded] = useState(null);
   const [pinned, setPinned] = useState(readPinned());
   const [busy, setBusy] = useState(null);
+  // `{ id, ok, detail }` for the last reload attempt, or null. One at a
+  // time: only one reload can be in flight, and a note about a skill the
+  // user has moved on from is noise.
+  const [note, setNote] = useState(null);
 
   useEffect(() => {
-    if (!open) { setQuery(''); setExpanded(null); return undefined; }
+    if (!open) { setQuery(''); setExpanded(null); setNote(null); return undefined; }
     const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -75,10 +122,36 @@ export default function SkillsLauncher({ open, onClose, skills = [] }) {
     });
   };
 
+  // This button used to be `await apiFetch(...)` inside a bare
+  // `try/finally`: no body read, no catch, and no confirmation of any
+  // kind. Every outcome looked the same, a spinner that stopped. Since
+  // `apiFetch` raises on a non-2xx it now at least raises a global toast
+  // against a current brain, but two cases still went nowhere: an
+  // unhandled rejection on a thrown error, and a brain that predates the
+  // reload-status fix answering HTTP 200 with `{"ok": false}` and no
+  // `error` key, which `apiFetch` cannot see either. So: read the body,
+  // treat `ok: false` as the failure it is regardless of status, and say
+  // which of the two happened in the row itself. Same shape as
+  // `pages/Skills.jsx`.
   const reload = async (id) => {
     setBusy(id);
+    setNote(null);
+    const path = `/api/skills/reload?skill_id=${encodeURIComponent(id)}`;
     try {
-      await apiFetch(`/api/skills/reload?skill_id=${encodeURIComponent(id)}`, { method: 'POST' });
+      const response = await apiFetch(path, { method: 'POST' });
+      const body = await response.json().catch(() => null);
+      if (body && body.ok === false) {
+        throw new ApiError({
+          status: response.status,
+          code: body.code || '',
+          detail: body.error || `the brain did not reload ${id}, and did not say why`,
+          raw: body,
+          path,
+        });
+      }
+      setNote({ id, ok: true });
+    } catch (err) {
+      setNote({ id, ok: false, detail: err?.detail || err?.message || 'the reload failed' });
     } finally { setBusy(null); }
   };
 
@@ -163,6 +236,30 @@ export default function SkillsLauncher({ open, onClose, skills = [] }) {
                       <RefreshCw size={13} />
                     </button>
                   </div>
+                  {note && note.id === id && !note.ok && (
+                    <div
+                      style={RELOAD_FAILED_STYLE}
+                      role="alert"
+                      data-testid={`skill-reload-failed-${id}`}
+                    >
+                      <span>
+                        {id} was not reloaded: {note.detail} Whatever code the brain had
+                        loaded before is still what is running.
+                      </span>
+                      <button type="button" style={RETRY_STYLE} onClick={() => reload(id)}>
+                        Retry
+                      </button>
+                    </div>
+                  )}
+                  {note && note.id === id && note.ok && (
+                    <div
+                      style={RELOAD_OK_STYLE}
+                      role="status"
+                      data-testid={`skill-reload-ok-${id}`}
+                    >
+                      Hot-reloaded {id}
+                    </div>
+                  )}
                   {isExpanded && (
                     <div className="v2-skill-row-detail">
                       {s.description && <p className="v2-p">{s.description}</p>}

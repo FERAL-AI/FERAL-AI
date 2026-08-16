@@ -11,37 +11,278 @@ logger = logging.getLogger("feral.api.skills")
 router = APIRouter()
 
 
+# ── how this file reports a failure ──────────────────────────────
+#
+# One rule, applied to every route here, because a success status for a
+# failed operation does not merely mislead one caller, it disables every
+# generic caller at once. The v2 ``apiFetch`` raises on a non-2xx status,
+# or on a 2xx body carrying an ``error`` key; a 200 with neither is the
+# one shape no generic client can see, and it is the shape three routes
+# in this file used to send.
+#
+# 400  the request itself is wrong (a required field is missing). The
+#      caller can fix it without touching the brain.
+# 409  the request is fine and the route exists, but the brain's own
+#      state makes it impossible: no source on disk for that skill id, or
+#      no draft with that id in the approval queue. The machine-readable
+#      cause stays in ``code``.
+# 500  the brain accepted the work and then failed at it (an exception
+#      mid-flight, or a draft that was popped off the queue and did not
+#      survive registration). The reason for that one is in the brain
+#      log and nowhere else, and 500 is what sends an operator there.
+# 503  the subsystem the route needs was never initialized. Nothing is
+#      wrong with the request and retrying it changes nothing until the
+#      brain is started with that subsystem.
+#
+# Not 404 for any of them: the v2 client maps 404 to "this brain build
+# does not serve that route, your client and brain versions disagree" and
+# drops the body's reason on the floor (ui/ErrorState.jsx
+# describeApiError), which would send the operator to check versions over
+# a skill that simply has no file. Not 422 either: FastAPI already
+# answers 422 for its own request validation, so a hand-set 422 here
+# would be indistinguishable from a malformed ``skill_id``.
+_BAD_REQUEST = 400
+_STATE_CONFLICT = 409
+_BRAIN_FAILED = 500
+_SUBSYSTEM_MISSING = 503
+
+
+def _pending_ids() -> set[str] | None:
+    """Skill ids currently in the approval queue.
+
+    ``None`` means the queue could not be read at all, which is a
+    different thing from an empty queue and must not be flattened into
+    one: an empty queue proves an id was never pending, an unreadable
+    queue proves nothing.
+    """
+    getter = getattr(getattr(state, "skill_gen", None), "get_pending_skills", None)
+    if not callable(getter):
+        return None
+    try:
+        rows = getter()
+    except Exception as exc:  # pragma: no cover, defensive
+        logger.warning("could not read the pending skill queue: %s", exc)
+        return None
+    if not isinstance(rows, list):
+        return None
+    ids = set()
+    for row in rows:
+        if isinstance(row, dict):
+            sid = row.get("skill_id") or row.get("id")
+            if sid:
+                ids.add(str(sid))
+    return ids
+
+
 @router.post("/api/skills/generate")
-async def generate_skill(body: dict):
+async def generate_skill(body: dict, response: Response):
     """Generate a new skill from a capability description."""
     capability = body.get("capability", "")
     service = body.get("service", "")
     if not capability:
-        return {"error": "capability is required"}
+        response.status_code = _BAD_REQUEST
+        return {"ok": False, "error": "capability is required"}
     if not state.skill_gen:
-        return {"error": "Skill generator not initialized"}
+        response.status_code = _SUBSYSTEM_MISSING
+        return {"ok": False, "error": "skill generator not initialized"}
     manifest = await state.skill_gen.generate_skill(capability, service)
     if manifest:
         return {"ok": True, "manifest": manifest, "needs_approval": True}
-    return {"ok": False, "error": "Failed to generate skill"}
+    response.status_code = _BRAIN_FAILED
+    return {
+        "ok": False,
+        "code": "generation_failed",
+        "error": f"the brain could not draft a skill for '{capability}'. See the brain log for what the generator returned.",
+    }
 
 
 @router.post("/api/skills/approve")
-async def approve_skill(body: dict):
-    """Approve a pending generated skill — registers it live."""
+async def approve_skill(body: dict, response: Response):
+    """Approve a pending generated skill, registering it live.
+
+    It used to answer ``{"ok": false, "skill_id": ..., "registered":
+    false}`` with HTTP 200 and no ``error`` key when
+    ``SkillGenerator.approve_skill`` returned False, which is the same
+    invisible-failure shape ``/api/skills/reload`` shipped for two
+    releases: its client, ``pages/Forge.jsx``, awaited the call, never
+    read the body, and treated "did not throw" as "approved". A draft
+    that was never registered was rendered as promoted.
+
+    ``approve_skill`` returns False for two very different reasons and
+    they get two different statuses, because the operator's next move
+    differs:
+
+    * the id is not in the approval queue (a stale Forge tab, or a
+      restart, since the queue is in-process only) -> 409, the queue
+      the operator is looking at disagrees with the brain's;
+    * the id was in the queue and registration or the write to
+      ``~/.feral/skills/<id>/`` failed -> 500. ``approve_skill`` pops
+      the draft before it registers it and logs the exception on the way
+      out, so the draft is gone and the reason exists only in the brain
+      log. 500 is what sends an operator to a log.
+
+    When the queue cannot be read we cannot tell the two apart, so we do
+    not assert either: 409 with ``code: approve_failed`` and a reason
+    that names both possibilities.
+    """
     skill_id = body.get("skill_id", "")
     if not skill_id:
-        return {"error": "skill_id is required"}
-    success = await state.skill_gen.approve_skill(skill_id)
-    return {"ok": success, "skill_id": skill_id, "registered": success}
+        response.status_code = _BAD_REQUEST
+        return {"ok": False, "registered": False, "error": "skill_id is required"}
+
+    gen = getattr(state, "skill_gen", None)
+    if not gen:
+        response.status_code = _SUBSYSTEM_MISSING
+        return {
+            "ok": False,
+            "skill_id": skill_id,
+            "registered": False,
+            "error": "skill generator not initialized, so nothing can be approved",
+        }
+
+    was_pending = _pending_ids()
+    try:
+        success = bool(await gen.approve_skill(skill_id))
+    except Exception as exc:
+        logger.warning("approve_skill(%s) raised: %s", skill_id, exc)
+        response.status_code = _BRAIN_FAILED
+        return {
+            "ok": False,
+            "skill_id": skill_id,
+            "registered": False,
+            "code": "approve_raised",
+            "error": str(exc),
+        }
+
+    if success:
+        return {"ok": True, "skill_id": skill_id, "registered": True}
+
+    if was_pending is None:
+        response.status_code = _STATE_CONFLICT
+        code = "approve_failed"
+        reason = (
+            f"the brain did not register '{skill_id}'. It was either not in the approval "
+            "queue, or it failed on the way to disk; the pending queue could not be read "
+            "to tell which. The brain log has the answer."
+        )
+    elif skill_id not in was_pending:
+        response.status_code = _STATE_CONFLICT
+        code = "not_pending"
+        reason = (
+            f"'{skill_id}' is not in the approval queue, so there was nothing to approve. "
+            "The queue lives in memory only and is emptied by a brain restart."
+        )
+    else:
+        response.status_code = _BRAIN_FAILED
+        code = "registration_failed"
+        reason = (
+            f"'{skill_id}' was in the approval queue and the brain failed to register or "
+            "persist it. The draft has been dropped from the queue; see the brain log."
+        )
+    return {
+        "ok": False,
+        "skill_id": skill_id,
+        "registered": False,
+        "code": code,
+        "error": reason,
+    }
 
 
 @router.post("/api/skills/reject")
-async def reject_skill(body: dict):
-    """Reject a pending generated skill."""
+async def reject_skill(body: dict, response: Response):
+    """Reject a pending generated skill.
+
+    It used to return an unconditional ``{"ok": true}`` without looking
+    at what ``SkillGenerator.reject_skill`` returned, so rejecting an id
+    the brain had never heard of reported success for a no-op.
+
+    **Rejecting an unknown id is an error here, not an idempotent
+    no-op.** Both are defensible for a delete-shaped operation, and the
+    idempotent reading is the more usual one, but it is wrong for this
+    queue: it lives in ``SkillGenerator._pending_skills``, in memory, and
+    a brain restart empties it. "Reject" therefore has one common failure
+    mode, a Forge tab left open across a restart, and under the
+    idempotent reading that tab answers every click with a green tick
+    while the drafts the operator is trying to discard are still queued
+    somewhere else, or were already approved by another surface. An
+    operator rejecting a draft is acting on a list they can see; if the
+    brain's list disagrees with it, that is the single most useful thing
+    we can tell them. 409 with ``code: not_pending``, same status and
+    reasoning as a reload with no source, and the success path is
+    unchanged.
+    """
     skill_id = body.get("skill_id", "")
-    state.skill_gen.reject_skill(skill_id)
-    return {"ok": True, "skill_id": skill_id}
+    if not skill_id:
+        response.status_code = _BAD_REQUEST
+        return {"ok": False, "rejected": False, "error": "skill_id is required"}
+
+    gen = getattr(state, "skill_gen", None)
+    if not gen:
+        response.status_code = _SUBSYSTEM_MISSING
+        return {
+            "ok": False,
+            "skill_id": skill_id,
+            "rejected": False,
+            "error": "skill generator not initialized, so nothing can be rejected",
+        }
+
+    before = _pending_ids()
+    try:
+        returned = gen.reject_skill(skill_id)
+    except Exception as exc:
+        logger.warning("reject_skill(%s) raised: %s", skill_id, exc)
+        response.status_code = _BRAIN_FAILED
+        return {
+            "ok": False,
+            "skill_id": skill_id,
+            "rejected": False,
+            "code": "reject_raised",
+            "error": str(exc),
+        }
+    after = _pending_ids()
+
+    rejected, known = _rejected(skill_id, returned, before, after)
+    if rejected:
+        return {"ok": True, "skill_id": skill_id, "rejected": True}
+
+    response.status_code = _STATE_CONFLICT
+    if known:
+        reason = (
+            f"'{skill_id}' is not in the approval queue, so there was nothing to reject. "
+            "The queue lives in memory only and is emptied by a brain restart."
+        )
+        code = "not_pending"
+    else:
+        reason = (
+            f"the skill generator did not report whether it rejected '{skill_id}', and the "
+            "pending queue could not be read to check. Nothing is confirmed discarded."
+        )
+        code = "unconfirmed"
+    return {
+        "ok": False,
+        "skill_id": skill_id,
+        "rejected": False,
+        "code": code,
+        "error": reason,
+    }
+
+
+def _rejected(skill_id: str, returned, before, after) -> tuple[bool, bool]:
+    """``(rejected, we_know_that)`` for one reject call.
+
+    ``SkillGenerator.reject_skill`` returns a bool, and that is the
+    answer whenever we get one. A registry double, or the older copy of
+    ``agents/skill_generator.py`` bundled under ``desktop/``, may return
+    something else; in that case we do not guess from a truthy object, we
+    look at the queue before and after and report what we observed. With
+    neither signal available we report failure, because the whole point
+    of this route's fix is to never claim a rejection nobody saw happen.
+    """
+    if isinstance(returned, bool):
+        return returned, True
+    if before is not None and after is not None:
+        return (skill_id in before and skill_id not in after), True
+    return False, False
 
 
 @router.get("/api/skills/pending")
@@ -50,21 +291,6 @@ async def pending_skills():
     if not state.skill_gen:
         return {"pending": []}
     return {"pending": state.skill_gen.get_pending_skills()}
-
-
-# 409 Conflict for every "the reload did not happen" outcome: the request
-# was well formed and the route exists, the brain's own state is what makes
-# it impossible (no source on disk for that id, or a source it cannot
-# parse). The machine-readable difference stays in the ``code`` field.
-#
-# Not 404: the v2 client maps 404 to "this brain build does not serve that
-# route, your client and brain versions disagree" and drops the body's
-# reason on the floor (ui/ErrorState.jsx describeApiError), which would
-# send the operator to check versions over a skill that simply has no file.
-# Not 422 either: FastAPI already answers 422 for its own request
-# validation, so a hand-set 422 here would be indistinguishable from a
-# malformed ``skill_id``.
-_RELOAD_CONFLICT = 409
 
 
 @router.post("/api/skills/reload")
@@ -94,18 +320,18 @@ async def reload_skill(skill_id: str, response: Response):
     """
     registry = getattr(state, "skill_registry", None)
     if not registry:
-        response.status_code = 503
+        response.status_code = _SUBSYSTEM_MISSING
         return {"ok": False, "skill_id": skill_id, "error": "skill registry not initialized"}
 
     try:
         ok, code, reason = _reload(registry, skill_id)
     except Exception as exc:
         logger.warning("reload_skill(%s) raised: %s", skill_id, exc)
-        response.status_code = 500
+        response.status_code = _BRAIN_FAILED
         return {"ok": False, "skill_id": skill_id, "error": str(exc)}
 
     if not ok:
-        response.status_code = _RELOAD_CONFLICT
+        response.status_code = _STATE_CONFLICT
         return {
             "ok": False,
             "skill_id": skill_id,
@@ -135,17 +361,39 @@ def _reload(registry, skill_id: str) -> tuple[bool, str, str]:
 
 
 @router.get("/skills")
-async def list_skills():
-    return [
-        {
-            "skill_id": s.skill_id,
-            "name": s.brand.name,
-            "description": s.description,
-            "endpoints": len(s.endpoints),
-            "trigger_phrases": s.trigger_phrases,
+async def list_skills(response: Response):
+    """Every registered skill manifest, as the Skills page renders it.
+
+    The registry guard is not decoration. With ``state.skill_registry``
+    unset this read ``None.skills`` and FastAPI turned the AttributeError
+    into a 500 with a traceback in the brain log, and the v2 Skills page
+    showed "No skills loaded / Check the Brain boot log" against a boot
+    that was fine. 503 with a reason says which subsystem is missing, and
+    the page renders that instead of a claim about the skill count.
+    """
+    registry = getattr(state, "skill_registry", None)
+    if registry is None or getattr(registry, "skills", None) is None:
+        response.status_code = _SUBSYSTEM_MISSING
+        return {
+            "ok": False,
+            "skills": [],
+            "error": "skill registry not initialized, so the brain cannot say which skills are loaded",
         }
-        for s in state.skill_registry.skills.values()
-    ]
+    try:
+        return [
+            {
+                "skill_id": s.skill_id,
+                "name": s.brand.name,
+                "description": s.description,
+                "endpoints": len(s.endpoints),
+                "trigger_phrases": s.trigger_phrases,
+            }
+            for s in registry.skills.values()
+        ]
+    except Exception as exc:
+        logger.warning("list_skills failed: %s", exc)
+        response.status_code = _BRAIN_FAILED
+        return {"ok": False, "skills": [], "error": f"the skill registry could not be listed: {exc}"}
 
 
 # ─────────────────────────────────────────────
@@ -162,6 +410,18 @@ async def list_skills():
 # These three routes are the round trip: write goes to the SkillExecutor
 # (encrypted vault + live in-process cache), and the read-back reports
 # which skills are configured without ever echoing a secret.
+#
+# They are the one deliberate exception to the status rule at the top of
+# this file: their failures answer 200 with ``{"ok": false, "error":
+# ...}``. That status is wrong, but the ``error`` key means no caller is
+# blind to it (``apiFetch`` raises on a 2xx body carrying ``error``), so
+# it is a cosmetic fault rather than the invisible-failure one this file
+# was fixed for. Their only client is ``pages/Settings.jsx``
+# (SkillKeysCard / SkillKeyRow), which reads the 200 body and branches on
+# ``ok``; moving these to 503/400 would move that page onto a different
+# code path and raise a global toast where it renders an inline chip
+# today, which is a user-visible change in a page outside this change's
+# scope. Left as found, deliberately.
 
 
 def _key_auth_skills() -> list:

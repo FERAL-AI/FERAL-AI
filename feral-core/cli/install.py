@@ -27,7 +27,11 @@ For every install we:
    ``kind=mcp`` bundles are stitched into ``~/.feral/mcp_servers.json``
    and announced to the running Brain (if any).
 7. Best-effort hot-reload via ``POST /api/skills/reload`` so the
-   installed skill is usable without a restart.
+   installed skill is usable without a restart. "Best-effort" means the
+   install still succeeds when no brain is running; it does not mean the
+   outcome is unreported. A reload that the brain refused, or that no
+   brain answered, is printed with its reason, and the closing line says
+   "Restart the brain to use it" instead of "Ready to use."
 """
 
 from __future__ import annotations
@@ -193,10 +197,30 @@ def _brain_auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"}
 
 
-def _maybe_reload_skill(skill_id: str) -> None:
+def _maybe_reload_skill(skill_id: str) -> bool:
+    """Hot-reload ``skill_id`` on the running brain and say what happened.
+
+    Returns True only when the brain confirmed the reload, i.e. only when
+    the installed skill is usable right now.
+
+    This used to be unreportable by construction: the body was
+    ``if resp.status_code < 400: return``, and then it fell off the end
+    on every other path too, so a refused reload, a 500, an unreachable
+    brain and a successful reload were all the same ``None``. ``feral
+    install`` then printed "Ready to use." over a brain that had not
+    loaded the skill and would not until a restart.
+
+    ``ok is False`` is checked separately from the status because a brain
+    that predates the reload-status fix answers a reload that did nothing
+    with HTTP 200 and ``{"ok": false, "skill_id": ...}``, no ``error``
+    key. Trusting the status alone here would reproduce exactly the
+    defect this call site exists to report.
+    """
     base = _brain_base_url()
     if not base or httpx is None:
-        return
+        print(f"  No brain URL or httpx available, so {skill_id} was not hot-reloaded. "
+              "It loads on the next brain start.")
+        return False
     try:
         resp = httpx.post(
             f"{base}/api/skills/reload",
@@ -204,10 +228,31 @@ def _maybe_reload_skill(skill_id: str) -> None:
             headers=_brain_auth_headers(),
             timeout=5.0,
         )
-        if resp.status_code < 400:
-            return
+    except Exception as exc:
+        print(f"  No running brain answered at {base} ({exc.__class__.__name__}), "
+              f"so {skill_id} was not hot-reloaded. It loads on the next brain start.")
+        return False
+
+    body: Any = {}
+    try:
+        body = resp.json()
     except Exception:
-        pass
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    if resp.status_code < 400 and body.get("ok") is not False:
+        return True
+
+    reason = (
+        body.get("error")
+        or body.get("detail")
+        or (resp.text or "").strip()[:200]
+        or f"HTTP {resp.status_code}"
+    )
+    print(f"  The brain did not hot-reload {skill_id}: {reason}")
+    print(f"  The files are installed. Restart the brain to load {skill_id}.")
+    return False
 
 
 def _announce_mcp(server_config: dict) -> None:
@@ -285,8 +330,17 @@ def cmd_install(item_id: str, registry: Optional[str] = None) -> None:
 
     home = _feral_home()
 
-    dispatch_install(kind, manifest, tarball, item_id, home)
-    ui_kit.banner_line(f"Installed {name} v{version}. Ready to use.", style="green")
+    # "Ready to use." is a claim about the running brain, not about the
+    # files on disk, so it is only printed when the hot-reload said so.
+    live = dispatch_install(kind, manifest, tarball, item_id, home)
+    if live:
+        ui_kit.banner_line(f"Installed {name} v{version}. Ready to use.", style="green")
+    else:
+        ui_kit.banner_line(
+            f"Installed {name} v{version}, but it is not loaded in the running brain. "
+            "Restart the brain to use it.",
+            style="yellow",
+        )
 
 
 def dispatch_install(
@@ -295,12 +349,19 @@ def dispatch_install(
     tarball: Path,
     item_id: str,
     home: Path,
-) -> None:
+) -> bool:
     """Route a verified bundle to the correct install target per kind.
 
     Each of the eight registry categories extracts (or announces) to a
     different location under ``~/.feral/`` and pings a different
     hot-reload endpoint on the running Brain (best-effort).
+
+    Returns whether the item is live in the running brain now. Only the
+    ``skill`` path can answer that today: it is the one whose hot-reload
+    endpoint reports its own outcome. The others go through
+    ``_maybe_post``, which is silent by construction and cannot tell a
+    reload that worked from one that did not, so they answer True and the
+    caller's "Ready to use." stays as truthful as it was before.
     """
     kind = (kind or "skill").lower()
 
@@ -309,8 +370,7 @@ def dispatch_install(
         dest = home / "skills" / str(skill_id)
         dest.mkdir(parents=True, exist_ok=True)
         _safe_extract(tarball, dest)
-        _maybe_reload_skill(str(skill_id))
-        return
+        return _maybe_reload_skill(str(skill_id))
 
     if kind == "daemon":
         daemon_id = manifest.get("node_id") or manifest.get("id") or item_id
@@ -318,13 +378,13 @@ def dispatch_install(
         dest.mkdir(parents=True, exist_ok=True)
         _safe_extract(tarball, dest)
         _maybe_post("/api/devices/register", {"daemon_id": str(daemon_id)})
-        return
+        return True
 
     if kind == "mcp":
         server_config = manifest.get("server") or manifest.get("mcp_command") or manifest
         _append_mcp_config(server_config if isinstance(server_config, dict) else {"command": server_config})
         _announce_mcp(server_config if isinstance(server_config, dict) else {"command": server_config})
-        return
+        return True
 
     if kind == "channel":
         channel_id = manifest.get("channel_id") or manifest.get("id") or item_id
@@ -332,7 +392,7 @@ def dispatch_install(
         dest.mkdir(parents=True, exist_ok=True)
         _safe_extract(tarball, dest)
         _maybe_post("/api/channels/reload", {"channel_id": str(channel_id)})
-        return
+        return True
 
     if kind == "provider":
         provider_id = manifest.get("provider_id") or manifest.get("id") or item_id
@@ -340,7 +400,7 @@ def dispatch_install(
         dest.mkdir(parents=True, exist_ok=True)
         _safe_extract(tarball, dest)
         _maybe_post("/api/providers/reload", {"provider_id": str(provider_id)})
-        return
+        return True
 
     if kind == "memory":
         memory_id = manifest.get("memory_id") or manifest.get("id") or item_id
@@ -348,7 +408,7 @@ def dispatch_install(
         dest.mkdir(parents=True, exist_ok=True)
         _safe_extract(tarball, dest)
         print(f"  Memory backend {memory_id} extracted. Enable it in Settings → Memory.")
-        return
+        return True
 
     if kind == "workflow":
         workflow_id = manifest.get("workflow_id") or manifest.get("id") or item_id
@@ -356,7 +416,7 @@ def dispatch_install(
         dest.mkdir(parents=True, exist_ok=True)
         _safe_extract(tarball, dest)
         _maybe_post("/api/workflows/reload", {"workflow_id": str(workflow_id)})
-        return
+        return True
 
     if kind == "agent":
         agent_id = manifest.get("agent_id") or manifest.get("id") or item_id
@@ -364,7 +424,7 @@ def dispatch_install(
         dest.mkdir(parents=True, exist_ok=True)
         _safe_extract(tarball, dest)
         _maybe_post("/api/mitosis/reload", {"agent_id": str(agent_id)})
-        return
+        return True
 
     print(f"  Unknown item kind '{kind}'. Supported: skill, daemon, mcp, channel, provider, memory, workflow, agent.")
     sys.exit(1)
