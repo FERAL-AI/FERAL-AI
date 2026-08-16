@@ -9,14 +9,13 @@ from __future__ import annotations
 import ast
 import json
 import logging
-import os
 import re
 import shutil
 from pathlib import Path
 from typing import Optional
 
 from config.loader import feral_home
-from models.skill_manifest import SkillManifest
+from models.skill_manifest import SkillManifest, describe_permissions, permission_values
 
 logger = logging.getLogger("feral.skills.package")
 
@@ -72,6 +71,7 @@ class SkillPackage:
     def get_metadata(self) -> dict:
         if not self.manifest:
             return {}
+        permissions = permission_values(self.manifest.permissions)
         return {
             "skill_id": self.manifest.skill_id,
             "name": self.manifest.brand.name,
@@ -81,6 +81,12 @@ class SkillPackage:
             "path": str(self.path),
             "has_impl": self.impl_path.exists(),
             "has_readme": self.readme_path.exists(),
+            # What this skill can reach. Every consumer of this dict (the
+            # installed list, the install response, the consent dialog)
+            # reads the same two keys, and the human-readable copy is
+            # served with the ids so no client has to invent wording.
+            "permissions": permissions,
+            "permission_details": describe_permissions(permissions),
         }
 
 

@@ -269,6 +269,118 @@ that show a malicious operator-installed plugin doing privileged things
 are out of scope. Reports that show an *unauthenticated* path that lets
 a remote party install or invoke a plugin **are** in scope.
 
+Within that boundary, one asymmetry is enforced rather than assumed: a
+skill manifest may **escalate** its own safety verdict but may not
+**de-escalate** it unless the manifest ships in this repository.
+
+- `safety_tier: confirm`, `safety_tier: deny` and
+ `requires_user_approval: true` are honoured from any manifest. The
+ worst outcome is an extra prompt.
+- `safety_tier: safe` and `read_only_hint: true` are honoured only from
+ a manifest under `feral-core/skills/manifests/`, or one generated at
+ runtime from a currently paired device by
+ `feral-core/hardware/capability_skill.py`. From anything installed at
+ runtime under `~/.feral/skills/` they are ignored with a log line, and
+ the tool resolves through the danger map and the substring heuristic
+ exactly as an unannotated third-party skill would.
+
+Enforced in `feral-core/security/safety_resolver.py`
+(`_manifest_may_de_escalate`), which covers `resolve_policy` (the
+approval gate on every surface), `is_read_only` (the strict-autonomy
+skip in `agents/tool_runner.py`) and `is_read_only(strict=True)` (plan
+mode). Before this, an installed skill declaring itself `safe` executed
+with no confirmation on every surface. The same trust boundary already
+governed the declared `result_budget` in `skills/result_budget.py`.
+
+A third-party manifest that declares nothing is unchanged: it falls to
+the substring heuristic, which can still return `auto` for a name
+containing `search`, `get`, `list`, `read`, `status` or `current`. That
+heuristic is a legacy fallback, not a boundary; do not rely on it.
+
+### Getting into that boundary: install verification and consent
+
+Because an installed plugin runs with the brain's privileges, the
+decision that matters is the install itself. Every install path that a
+non-CLI user can reach is verified and consented to:
+
+| Path | Verification |
+|---|---|
+| `feral install <id>` | `cli/install.py`: SHA-256 of the downloaded tarball must match the registry record, and the publisher's detached Ed25519 signature over that digest must verify. A mismatch exits non-zero before anything is written. |
+| `POST /api/marketplace/preview` then `POST /api/marketplace/install` | The same `cli/install.py` `_verify` and `_safe_extract`, called from `skills/marketplace.py`. Not a second implementation. |
+| `POST /api/apps/install` | `agents/app_registry.py` `install_from_registry` (GenUI apps, separate bundle format). |
+| `MarketplaceClient.install(source_url=...)` | **None.** Developer local-iteration path, logs an `UNVERIFIED INSTALL` warning, and is refused by the HTTP route (403). Reachable only from a Python caller or the CLI. |
+
+The marketplace install is two steps, and the token that joins them is
+what makes the consent binding:
+
+1. `POST /api/marketplace/preview {kind, id}` fetches the registry
+   record, downloads the bundle, verifies digest + signature, unpacks it
+   into a staging directory and reads the manifest **out of the verified
+   archive**. The `manifest` field of the registry's JSON response is
+   not covered by the signature, so it is metadata, not evidence. The
+   response carries the permission list, the signature status and a
+   single-use `install_token`. Nothing under `~/.feral` is touched.
+2. `POST /api/marketplace/install {kind, id, install_token}` spends the
+   token and installs the staged tree. Without a token the request is
+   refused with 403.
+
+The token is an HMAC-SHA256 over `{kind, id, sha256, permissions,
+verified, nonce, iat, exp}` keyed by a random secret generated per
+process and never persisted. It cannot be replayed for a different
+package (the id and the bundle digest are inside the MAC), cannot be
+replayed twice (the nonce is dropped when spent), expires after five
+minutes, and does not survive a brain restart. Because the install
+consumes the *staged* bundle rather than re-downloading, the registry
+cannot serve different bytes between the preview and the install.
+
+A bundle that does not verify never produces a token, so the permission
+list is only ever rendered for bytes whose publisher is known. Package
+validation (`SkillValidator`) also runs on the staging copy, before the
+tree is copied into `~/.feral/skills/`.
+
+Permissions themselves are a closed vocabulary
+(`models/skill_manifest.py::SkillPermission`). A manifest naming a
+permission outside it fails to load, so a publisher cannot describe a
+capability in words the consent dialog has no sentence for.
+
+## Sandbox policy enforcement points
+
+`~/.feral/policies/default.yaml` (`SandboxPolicy`) is read at these
+points. Anything not listed here is not enforced anywhere:
+
+| Policy section | Enforced by |
+|---|---|
+| `hardware.sensors` | `POST /api/hardware/execute` |
+| `hardware.actuators` | `POST /api/hardware/execute` |
+| `hardware.cameras` | `POST /api/hardware/execute` (capture capabilities) |
+| `network.allowed_domains` / `blocked_domains` | the generic HTTP skill runner, `feral-core/skills/executor.py` |
+| `mcp.*` | `MCPClientManager.connect_server` and `connect_all` |
+| `filesystem.*` | the computer-use file tools and `security/exec_mode.py` |
+| `execution.allow_shell_commands`, `daemon.shell`, `daemon.applescript` | `validate_shell_command` / `validate_applescript` |
+
+Two properties of that table are deliberate:
+
+- **An empty allowlist denies.** `hardware.sensors.allowed`,
+ `hardware.actuators.allowed`, `hardware.cameras.allowed` and
+ `mcp.allowed_servers` used to read an empty or absent value as "allow
+ everything", while `network.allowed_domains` in the same class read it
+ as "allow nothing". A policy document does not have to be complete, so
+ an operator who wrote one section had the rest wide open. All four now
+ deny. `mcp.allowed_servers` takes `["*"]` (the shipped default) to
+ mean "any server", because server names are operator-chosen and the
+ shipped policy cannot enumerate them.
+- **The network allowlist binds third-party skills, not first-party
+ ones.** The shipped manifests name fixed URLs that are reviewed source
+ in this repo and legitimately reach dozens of vendors; holding them to
+ an operator's six-entry allowlist would break every integration and
+ the available fix would be to write `*`. `network.blocked_domains`
+ binds everyone, first-party included.
+
+`hardware.movement.max_speed_pct`, `permissions.max_tier`,
+`permissions.require_confirmation_above` and `skills.allow_generation` /
+`require_approval` / `blocked_skill_ids` currently have **no** reader.
+They are configuration that does nothing; do not rely on them.
+
 ## Shell execution modes
 
 A shell request resolves to exactly one of three modes, decided by

@@ -154,7 +154,7 @@
     "flows": [],
     "crons": [],
     "triggers": [],
-    "permissions": ["screen_capture", "input_control", "accessibility"],
+    "permissions": ["screen", "input_control"],
     "requires_daemon": false,
     "max_calls_per_hour": 5000
 }

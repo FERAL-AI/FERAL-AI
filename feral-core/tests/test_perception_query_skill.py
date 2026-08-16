@@ -262,5 +262,9 @@ class TestManifestContract:
         assert manifest["skill_id"] == "perception_query"
         assert any(ep["id"] == "what_do_i_see" for ep in manifest["endpoints"])
         # autonomy_tier intent rides the categories + permissions arrays.
+        # `permissions` is now a closed vocabulary (models.skill_manifest
+        # .SkillPermission) because it is rendered in the install consent
+        # dialog, so the free-text "autonomy:user_confirm" spelling is
+        # carried by `categories` and the capability by `autonomy`.
         assert "autonomy:user_confirm" in manifest["categories"]
-        assert "autonomy:user_confirm" in manifest["permissions"]
+        assert "autonomy" in manifest["permissions"]

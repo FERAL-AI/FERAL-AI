@@ -119,7 +119,7 @@
     ],
     "crons": [],
     "triggers": [],
-    "permissions": ["system", "shell"],
+    "permissions": ["system_settings", "code_execution"],
     "requires_daemon": false,
     "daemon_node_type": "desktop",
     "max_calls_per_hour": 500

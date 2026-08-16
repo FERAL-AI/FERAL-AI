@@ -234,8 +234,8 @@
  "triggers": [],
  "permissions": [
   "filesystem",
-  "process_spawn",
-  "autonomy:user_confirm"
+  "code_execution",
+  "autonomy"
  ],
  "requires_daemon": false,
  "daemon_node_type": null,

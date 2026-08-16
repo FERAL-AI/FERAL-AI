@@ -124,7 +124,7 @@
   "crons": [],
   "triggers": [],
   "permissions": [
-    "storage",
+    "memory",
     "notifications"
   ],
   "requires_daemon": false,

@@ -7,9 +7,189 @@ with GenUI hints, flows, and cron/trigger support.
 """
 
 from __future__ import annotations
+from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
 from uuid import uuid4
+
+
+class SkillPermission(str, Enum):
+    """The closed set of capabilities a skill may declare.
+
+    Before this was a vocabulary it was ``list[str]`` with no readers and
+    no spelling: the 39 shipped manifests between them used 34 distinct
+    strings for 22 capabilities (``screen`` / ``screen_capture`` /
+    ``computer.screen``; ``shell`` / ``execution`` / ``execute`` /
+    ``process_spawn``). A free-text field cannot be rendered in an
+    install dialog, because the dialog has to say what the string means
+    and there is no answer for a string nobody has seen before.
+
+    Closed on purpose. A manifest naming a permission that is not a
+    member fails to load, so a third party cannot smuggle a capability
+    past the consent dialog by inventing a word for it. Adding a member
+    here is the deliberate act of teaching the UI a new sentence, and
+    ``PERMISSION_DESCRIPTIONS`` below is where that sentence is written.
+    """
+
+    FILESYSTEM = "filesystem"
+    NETWORK = "network"
+    CODE_EXECUTION = "code_execution"
+    SCREEN = "screen"
+    INPUT_CONTROL = "input_control"
+    CAMERA = "camera"
+    VISION = "vision"
+    MESSAGING = "messaging"
+    CONTACTS = "contacts"
+    CALENDAR = "calendar"
+    HEALTH_DATA = "health_data"
+    SMART_HOME = "smart_home"
+    HARDWARE = "hardware"
+    SYSTEM_SETTINGS = "system_settings"
+    MEMORY = "memory"
+    IDENTITY = "identity"
+    NOTIFICATIONS = "notifications"
+    SCHEDULING = "scheduling"
+    AUTONOMY = "autonomy"
+    LLM = "llm"
+    BROWSER = "browser"
+    COMMERCE = "commerce"
+
+    # Format as the wire value, not "SkillPermission.FILESYSTEM". A
+    # permission id ends up in log lines and error strings, and the
+    # default Enum.__str__ would put a Python identifier in front of a
+    # user. json.dumps already emits the value (str subclass); this makes
+    # f-strings agree with it.
+    __str__ = str.__str__
+
+
+# Short label + one plain sentence per permission. This is consent copy,
+# not developer documentation: it is rendered verbatim in the install
+# dialog, so it says what the skill can reach in words someone who has
+# never read this file can act on. The API ships these strings with the
+# permission list rather than letting each client invent its own, so
+# there is exactly one place the wording can be reviewed.
+PERMISSION_LABELS: dict[SkillPermission, str] = {
+    SkillPermission.FILESYSTEM: "Your files",
+    SkillPermission.NETWORK: "Internet access",
+    SkillPermission.CODE_EXECUTION: "Run programs",
+    SkillPermission.SCREEN: "Screen contents",
+    SkillPermission.INPUT_CONTROL: "Keyboard and mouse",
+    SkillPermission.CAMERA: "Camera",
+    SkillPermission.VISION: "Image analysis",
+    SkillPermission.MESSAGING: "Messages",
+    SkillPermission.CONTACTS: "Contacts",
+    SkillPermission.CALENDAR: "Calendar",
+    SkillPermission.HEALTH_DATA: "Health data",
+    SkillPermission.SMART_HOME: "Smart home devices",
+    SkillPermission.HARDWARE: "Connected hardware",
+    SkillPermission.SYSTEM_SETTINGS: "System settings",
+    SkillPermission.MEMORY: "Stored memory",
+    SkillPermission.IDENTITY: "Your profile",
+    SkillPermission.NOTIFICATIONS: "Notifications",
+    SkillPermission.SCHEDULING: "Background schedules",
+    SkillPermission.AUTONOMY: "Acting on its own",
+    SkillPermission.LLM: "Model providers",
+    SkillPermission.BROWSER: "Your web browser",
+    SkillPermission.COMMERCE: "Purchases",
+}
+
+PERMISSION_DESCRIPTIONS: dict[SkillPermission, str] = {
+    SkillPermission.FILESYSTEM:
+        "Read and write files on this computer, including documents "
+        "outside FERAL's own folder.",
+    SkillPermission.NETWORK:
+        "Contact servers on the internet and send them data it can reach.",
+    SkillPermission.CODE_EXECUTION:
+        "Run shell commands and other programs on this computer under "
+        "your user account.",
+    SkillPermission.SCREEN:
+        "Capture what is on your screen, including any window you have open.",
+    SkillPermission.INPUT_CONTROL:
+        "Move the pointer, type, and click in any app as if it were you.",
+    SkillPermission.CAMERA:
+        "Turn on a camera and take photos or video.",
+    SkillPermission.VISION:
+        "Send images, such as screenshots or camera frames, to a model "
+        "to be described.",
+    SkillPermission.MESSAGING:
+        "Read and send messages in the messaging accounts you connected.",
+    SkillPermission.CONTACTS:
+        "Read your contact list.",
+    SkillPermission.CALENDAR:
+        "Read your calendar and create or change events.",
+    SkillPermission.HEALTH_DATA:
+        "Read health and fitness records synced from your devices.",
+    SkillPermission.SMART_HOME:
+        "See and control smart home devices such as lights, locks, and "
+        "thermostats.",
+    SkillPermission.HARDWARE:
+        "Send commands to robots and other hardware paired with FERAL.",
+    SkillPermission.SYSTEM_SETTINGS:
+        "Read and change system settings such as volume, display, and "
+        "network.",
+    SkillPermission.MEMORY:
+        "Read and write what FERAL has stored locally about you.",
+    SkillPermission.IDENTITY:
+        "Read your name, accounts, and the other identity details FERAL holds.",
+    SkillPermission.NOTIFICATIONS:
+        "Send you notifications.",
+    SkillPermission.SCHEDULING:
+        "Schedule work and run it later on its own, without you starting it.",
+    SkillPermission.AUTONOMY:
+        "Start multi-step actions and other agents without asking you for "
+        "each step.",
+    SkillPermission.LLM:
+        "Send your data to a language model provider to be processed.",
+    SkillPermission.BROWSER:
+        "Drive your web browser: open pages, click, and fill in forms.",
+    SkillPermission.COMMERCE:
+        "Place orders and make payments on your behalf.",
+}
+
+
+def permission_values(permissions) -> list[str]:
+    """Wire values for a manifest's permission list.
+
+    ``SkillManifest.permissions`` holds enum members after validation,
+    but pydantic does not validate plain attribute assignment, so a
+    caller that sets the list by hand can leave raw strings in it. This
+    accepts either rather than raising inside a listing endpoint.
+    """
+    return [str(getattr(p, "value", p)) for p in (permissions or [])]
+
+
+def describe_permissions(permissions) -> list[dict]:
+    """Render a permission list as ``[{id, label, description}]``.
+
+    Used by the marketplace preview / install / catalog responses so the
+    consent copy is served from one place instead of being reinvented in
+    each client.
+    """
+    out: list[dict] = []
+    for raw in permissions or []:
+        try:
+            perm = SkillPermission(raw)
+        except ValueError:
+            # Unreachable through SkillManifest (the field is validated),
+            # but describe_permissions is also called on registry payloads
+            # that have not been through the model yet. Name the unknown
+            # value rather than dropping it: a permission we cannot
+            # explain is exactly what the user needs to see.
+            value = str(raw)
+            out.append({
+                "id": value,
+                "label": value,
+                "description": "Unrecognised permission. FERAL cannot say what this reaches.",
+                "known": False,
+            })
+            continue
+        out.append({
+            "id": perm.value,
+            "label": PERMISSION_LABELS[perm],
+            "description": PERMISSION_DESCRIPTIONS[perm],
+            "known": True,
+        })
+    return out
 
 
 class BrandProfile(BaseModel):
@@ -166,8 +346,10 @@ class SkillManifest(BaseModel):
     # Event triggers
     triggers: list[TriggerDefinition] = []
     
-    # Permissions
-    permissions: list[str] = []  # ["location", "contacts", "camera", "messaging"]
+    # Permissions. Closed vocabulary (see SkillPermission): this list is
+    # what the install dialog shows the user before anything is written
+    # to disk, so every member has to be a capability the UI can name.
+    permissions: list[SkillPermission] = []
     
     # Hardware requirements (for hardware skills)
     requires_daemon: bool = False

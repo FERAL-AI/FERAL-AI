@@ -1,10 +1,51 @@
 """Marketplace and browser control HTTP endpoints."""
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
 from api.state import state
 
 router = APIRouter()
+
+# Kinds the registry publishes and this route can install. `app` is not
+# here: third-party GenUI apps install through AppRegistry via
+# /api/apps/install, which runs its own signature verification.
+INSTALLABLE_KINDS = ("skill", "daemon", "mcp", "channel", "provider", "memory", "workflow", "agent")
+
+
+def _with_permissions(item: dict) -> dict:
+    """Attach rendered permission copy to a catalog row that declares one.
+
+    The public catalog endpoint returns one row per item and does not
+    carry the manifest, so most rows have no permission list to show.
+    Where one is present (a row that carries ``permissions``, or an
+    embedded manifest that does) it is rendered here so the card can
+    show it before the user commits to a download.
+
+    A catalog row is unsigned metadata, so this is a hint, not the
+    decision. The list the user consents to is the one
+    ``/api/marketplace/preview`` reads out of the verified bundle, and
+    that is the only one the install is bound to.
+    """
+    from models.skill_manifest import describe_permissions
+
+    if not isinstance(item, dict):
+        return item
+    perms = item.get("permissions")
+    if perms is None:
+        manifest = item.get("manifest")
+        if isinstance(manifest, dict):
+            perms = manifest.get("permissions")
+    if not perms:
+        return item
+    perms = [str(p) for p in perms]
+    return {**item, "permissions": perms, "permission_details": describe_permissions(perms)}
+
+
+def _refused(error: str, status: int = 400, **extra):
+    """A refusal the client can render. Never 200: the v2 client treats a
+    2xx as "installed", and a consent failure is not an install."""
+    return JSONResponse(status_code=status, content={"success": False, "error": error, **extra})
 
 
 # ─────────────────────────────────────────────
@@ -18,7 +59,7 @@ async def marketplace_search(q: str = ""):
     if not state.marketplace:
         return {"results": []}
     results = await state.marketplace.search(q)
-    return {"results": results}
+    return {"results": [_with_permissions(r) for r in results]}
 
 
 @router.get("/api/marketplace/catalog")
@@ -54,7 +95,7 @@ async def marketplace_catalog(kind: str = "skill", q: str = "", sort: str = "new
                 data = resp.json()
                 items = data.get("items") or data.get("results") or []
                 return {
-                    "items": items,
+                    "items": [_with_permissions(it) for it in items],
                     "kind": kind,
                     "source": base,
                     "tried": bases,
@@ -76,39 +117,92 @@ async def marketplace_catalog(kind: str = "skill", q: str = "", sort: str = "new
     }
 
 
-@router.post("/api/marketplace/install")
-async def marketplace_install(body: dict):
-    """Install an item from the marketplace.
+@router.post("/api/marketplace/preview")
+async def marketplace_preview(body: dict):
+    """Step one of installing: say what the package is and what it reaches.
 
-    Accepts both the legacy shape ``{skill_id, version?, source_url?}`` and
-    the new kind-aware shape ``{kind, id}`` used by the rewritten Settings
-    UI. When ``kind`` is provided we delegate to the remote-registry
-    install path (`feral install`-style) which hot-reloads the skill or
-    registers the daemon / MCP server.
+    Downloads the bundle, verifies its SHA-256 and the publisher's
+    detached Ed25519 signature through the same code ``feral install``
+    runs, reads the manifest out of the *verified* archive, and returns
+    the permission list, the signature status and a single-use install
+    token. Nothing is written to ``~/.feral`` here.
+
+    A package that does not verify gets no token, so there is no way to
+    reach :func:`marketplace_install` for it. The permission list is only
+    ever shown for bytes that verified: showing it for anything else
+    would be decoration on an unauthenticated payload.
     """
     if not state.marketplace:
-        return {"success": False, "error": "Marketplace not available"}
+        return _refused("Marketplace not available", status=503)
 
-    kind = body.get("kind")
+    kind = (body.get("kind") or "skill").lower()
     item_id = body.get("id") or body.get("skill_id")
+    if not item_id:
+        return _refused("preview requires an item id")
+    if kind not in INSTALLABLE_KINDS:
+        return _refused(f"unknown kind '{kind}'")
 
-    if kind in ("skill", "daemon", "mcp") and item_id:
-        try:
-            install_from_registry = getattr(state.marketplace, "install_from_registry", None)
-            if callable(install_from_registry):
-                return await install_from_registry(kind, item_id)
-        except Exception as exc:
-            return {"success": False, "error": f"registry install failed: {exc}"}
-        if kind == "skill":
-            return await state.marketplace.install(item_id, "latest", None)
-        return {
-            "success": False,
-            "error": f"{kind} install requires registry.feral.sh client (pending deploy)",
-        }
+    try:
+        result = await state.marketplace.preview_from_registry(kind, item_id)
+    except Exception as exc:
+        return _refused(f"preview failed: {exc}")
+    if not result.get("success"):
+        return _refused(result.get("error") or "preview failed", signature=result.get("signature"))
+    return result
 
-    version = body.get("version", "latest")
-    source_url = body.get("source_url")
-    result = await state.marketplace.install(item_id or "", version, source_url)
+
+@router.post("/api/marketplace/install")
+async def marketplace_install(body: dict):
+    """Install an item the user has previewed and approved.
+
+    Requires ``{kind, id, install_token}``. The token comes from
+    ``POST /api/marketplace/preview`` and is bound to that package's
+    verified bytes, so the thing that gets installed is the thing whose
+    permissions were on screen.
+
+    There is no unverified fallback. This route used to probe for
+    ``install_from_registry``, find nothing (the method existed on
+    AppRegistry, not on MarketplaceClient), swallow the AttributeError
+    and quietly install over the unsigned path instead, under a page
+    header that reads "Signed community registry". The probe and the
+    fallthrough are both gone.
+
+    ``source_url`` is not accepted here. It is the developer's
+    local-iteration path and it performs no verification, so it stays on
+    the CLI where the person typing it is the person who wrote the code.
+    """
+    if not state.marketplace:
+        return _refused("Marketplace not available", status=503)
+
+    kind = (body.get("kind") or "skill").lower()
+    item_id = body.get("id") or body.get("skill_id")
+    install_token = body.get("install_token") or ""
+
+    if body.get("source_url"):
+        return _refused(
+            "source_url installs are unverified and are not available over HTTP. "
+            "Use `feral install <id>` for a published item, or the CLI for a local build.",
+            status=403,
+        )
+    if not item_id:
+        return _refused("install requires an item id")
+    if kind not in INSTALLABLE_KINDS:
+        return _refused(f"unknown kind '{kind}'")
+    if not install_token:
+        return _refused(
+            "install requires an install_token from POST /api/marketplace/preview, "
+            "so the permissions and signature are shown before anything is installed.",
+            status=403,
+            code="preview_required",
+        )
+
+    try:
+        result = await state.marketplace.install_from_registry(kind, item_id, install_token=install_token)
+    except Exception as exc:
+        return _refused(f"registry install failed: {exc}")
+    if not result.get("success"):
+        status = 403 if result.get("code") == "preview_required" else 400
+        return _refused(result.get("error") or "install failed", status=status, code=result.get("code"))
     return result
 
 

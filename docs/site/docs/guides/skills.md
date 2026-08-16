@@ -147,9 +147,43 @@ FERAL can auto-detect repeated patterns and generate skill manifests from usage 
 # List pending auto-generated skills
 curl http://localhost:9090/api/skills/pending
 
-# Approve one
-curl -X POST http://localhost:9090/api/skills/approve/skill_id
+# Approve one (registers it live and writes it to ~/.feral/skills/<id>/)
+curl -X POST http://localhost:9090/api/skills/approve \
+  -H "Content-Type: application/json" \
+  -d '{"skill_id": "my_skill"}'
+
+# Discard one
+curl -X POST http://localhost:9090/api/skills/reject \
+  -H "Content-Type: application/json" \
+  -d '{"skill_id": "my_skill"}'
 ```
+
+Both take the id in a JSON body, not in the path.
+
+### What a failure looks like
+
+The approval queue lives in memory and a brain restart empties it, so
+"approve" and "reject" both have a common failure: the id is no longer
+queued. Neither call reports that as a success.
+
+| Outcome | Status | Body |
+|---|---|---|
+| Approved and registered | 200 | `{"ok": true, "skill_id": "...", "registered": true}` |
+| Rejected | 200 | `{"ok": true, "skill_id": "...", "rejected": true}` |
+| Id is not in the approval queue | 409 | `{"ok": false, "code": "not_pending", "error": "..."}` |
+| Was queued, and the brain failed to register or persist it | 500 | `{"ok": false, "code": "registration_failed", "error": "..."}` |
+| No skill generator on this brain | 503 | `{"ok": false, "error": "..."}` |
+| `skill_id` missing from the body | 400 | `{"ok": false, "error": "skill_id is required"}` |
+
+Rejecting an id the brain does not have is an error, not an idempotent
+no-op: the usual cause is a UI left open across a restart, and a green
+tick there would say a draft was discarded when nothing was. Every
+failure carries both a non-2xx status and an `error` string, so a generic
+client sees it without knowing this route's body shape.
+
+`GET /skills` follows the same rule: it answers 503 with an `error` when
+the skill registry is not initialized, rather than an empty list that
+reads as "no skills installed".
 
 ## Skill Marketplace
 
@@ -160,9 +194,30 @@ feral marketplace search "weather"
 feral marketplace install weather_api
 ```
 
-Or via the API:
+Or via the API. Installing is two calls: `preview` verifies the
+publisher's signature and returns what the skill can reach plus a
+single-use `install_token`, and `install` spends that token. A request
+without a valid token is refused with 403, so nothing is installed
+before its permissions have been served to whoever is deciding.
 
 ```bash
 curl "http://localhost:9090/api/marketplace/search?q=weather"
-curl -X POST http://localhost:9090/api/marketplace/install -d '{"skill_id": "weather_api"}'
+
+# 1. Verify + describe. Nothing is written to disk.
+curl -X POST http://localhost:9090/api/marketplace/preview \
+  -H "Content-Type: application/json" \
+  -d '{"kind": "skill", "id": "weather_api"}'
+# -> {"success": true, "permissions": ["network"],
+#     "permission_details": [{"id": "network", "label": "Internet access", ...}],
+#     "signature": {"verified": true, "sha256": "..."},
+#     "install_token": "..."}
+
+# 2. Install exactly that package.
+curl -X POST http://localhost:9090/api/marketplace/install \
+  -H "Content-Type: application/json" \
+  -d '{"kind": "skill", "id": "weather_api", "install_token": "..."}'
 ```
+
+The token is bound to the item id and to the SHA-256 of the verified
+bundle, is good for one install, and expires after five minutes. A
+bundle whose signature does not verify never gets one.

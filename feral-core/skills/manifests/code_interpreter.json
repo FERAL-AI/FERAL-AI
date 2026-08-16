@@ -70,7 +70,7 @@
     "flows": [],
     "crons": [],
     "triggers": [],
-    "permissions": ["filesystem", "execution"],
+    "permissions": ["filesystem", "code_execution"],
     "requires_daemon": false,
     "requires_sandbox": true,
     "max_calls_per_hour": 1000,

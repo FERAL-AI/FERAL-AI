@@ -140,8 +140,7 @@
   "crons": [],
   "triggers": [],
   "permissions": [
-    "hardware",
-    "robotics"
+    "hardware"
   ],
   "requires_daemon": false
 }

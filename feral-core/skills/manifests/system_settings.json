@@ -120,7 +120,7 @@
     "flows": [],
     "crons": [],
     "triggers": [],
-    "permissions": ["system.write"],
+    "permissions": ["system_settings"],
     "requires_daemon": false,
     "max_calls_per_hour": 100
 }

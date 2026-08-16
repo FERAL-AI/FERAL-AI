@@ -43,7 +43,7 @@
     "flows": [],
     "crons": [],
     "triggers": [],
-    "permissions": ["computer.screen", "computer.input"],
+    "permissions": ["screen", "input_control"],
     "requires_daemon": false,
     "max_calls_per_hour": 50
 }

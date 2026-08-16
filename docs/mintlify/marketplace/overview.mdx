@@ -38,6 +38,31 @@ Under the hood:
    (`/api/skills/reload`, `/api/channels/reload`, `/api/providers/reload`, …).
 4. The new capability is live before your next turn.
 
+For `kind=skill`, step 3 reports its own outcome. `feral install` prints
+"Ready to use." only when the brain confirmed the hot-reload; when the
+reload was refused, or no brain was running to answer it, it prints the
+brain's reason and closes with "Installed …, but it is not loaded in the
+running brain. Restart the brain to use it." The files are on disk either
+way. The other kinds still ping their reload endpoint best-effort and
+cannot report the outcome, because those endpoints do not return one.
+
+### Installing from the web client
+
+The Marketplace page runs the same verification, split into two calls so
+a person can decide with the facts in front of them:
+
+1. `POST /api/marketplace/preview {kind, id}` performs steps 1 and 2
+   above, unpacks the verified bundle to a staging directory, and returns
+   the permission list read out of that bundle, the signature status, and
+   a single-use `install_token`. Nothing is written to `~/.feral`.
+2. The page shows what the item can reach and whether it is verified. On
+   confirm, `POST /api/marketplace/install {kind, id, install_token}`
+   spends the token and installs the staged bytes.
+
+An install without a valid token is refused (403), and a bundle that
+fails verification never gets one, so the browser cannot reach an
+unverified install path at all.
+
 ## Publish flow
 
 ```bash

@@ -195,7 +195,7 @@
   "crons": [],
   "triggers": [],
   "permissions": [
-    "automation"
+    "scheduling"
   ],
   "requires_daemon": false,
   "max_calls_per_hour": 10000

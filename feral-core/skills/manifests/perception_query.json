@@ -74,7 +74,7 @@
   "permissions": [
     "camera",
     "vision",
-    "autonomy:user_confirm"
+    "autonomy"
   ],
   "requires_daemon": true,
   "daemon_node_type": null,

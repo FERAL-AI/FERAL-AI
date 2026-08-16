@@ -9,3 +9,6 @@ coverage/
 playwright-report/
 test-results/
 playwright/.cache/
+# Screenshots written by specs that assert on layout (e.g.
+# marketplace_install_consent.spec.ts). Evidence for a run, not source.
+e2e/.artifacts/

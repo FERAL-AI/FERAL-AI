@@ -61,3 +61,67 @@ If you want the API server to perform the execution (e.g., hitting Stripe or Gma
 4. Define the execution override explicitly, handling the exact signature provided by your `endpoints`.
 
 The Orchestrator automatically handles the translation from LLM Tool Calling -> Payload Structuring -> Skill Invocation.
+
+## Declaring Permissions
+
+`permissions` is a closed vocabulary, not free text. It is what the
+install dialog shows the user before your skill is written to their
+disk, so every entry has to be a capability FERAL can describe in a
+sentence. A manifest naming anything else **fails to load**, with the
+allowed values in the error.
+
+The vocabulary is defined once, in
+`feral-core/models/skill_manifest.py::SkillPermission`:
+
+| Permission | Shown to the user as |
+|---|---|
+| `filesystem` | Your files |
+| `network` | Internet access |
+| `code_execution` | Run programs |
+| `screen` | Screen contents |
+| `input_control` | Keyboard and mouse |
+| `camera` | Camera |
+| `vision` | Image analysis |
+| `messaging` | Messages |
+| `contacts` | Contacts |
+| `calendar` | Calendar |
+| `health_data` | Health data |
+| `smart_home` | Smart home devices |
+| `hardware` | Connected hardware |
+| `system_settings` | System settings |
+| `memory` | Stored memory |
+| `identity` | Your profile |
+| `notifications` | Notifications |
+| `scheduling` | Background schedules |
+| `autonomy` | Acting on its own |
+| `llm` | Model providers |
+| `browser` | Your web browser |
+| `commerce` | Purchases |
+
+The one-line explanation attached to each is in `PERMISSION_DESCRIPTIONS`
+in the same file, and is served to clients with the permission list so
+the wording is reviewed in one place. Adding a member is a deliberate
+act: write the label and the sentence at the same time.
+
+Declare what your skill actually reaches. Under-declaring does not gain
+you any access (nothing grants capability from this list today; it is a
+disclosure), and it misleads the person deciding whether to install.
+
+## Publishing
+
+```bash
+feral publisher register           # registers your Ed25519 public key
+feral publish --skill ./my_skill   # signs the bundle and uploads it
+```
+
+`cli/publish.py` signs the SHA-256 of the tarball with your private key.
+Both install paths verify that signature before anything lands on disk:
+`feral install <id>` from a shell, and the Marketplace page in the web
+client, which additionally shows the user your permission list and the
+signature status and will not install until they confirm. An unsigned or
+tampered bundle is refused rather than installed with a warning.
+
+For local iteration, `MarketplaceClient.install(skill_id, source_url=...)`
+still installs straight from a URL or a git clone with no verification.
+It logs a loud warning and is not reachable from the HTTP API; use it
+from the CLI while you are developing your own skill.

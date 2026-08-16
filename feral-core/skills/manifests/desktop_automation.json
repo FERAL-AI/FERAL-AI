@@ -130,7 +130,7 @@
     "flows": [],
     "crons": [],
     "triggers": [],
-    "permissions": ["screen", "accessibility"],
+    "permissions": ["screen", "input_control"],
     "requires_daemon": false,
     "max_calls_per_hour": 5000
 }
