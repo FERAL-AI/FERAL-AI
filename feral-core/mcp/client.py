@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -724,6 +725,9 @@ class MCPClientManager:
         self._connect_backoff_cap_sec = max(
             1, int(os.environ.get("FERAL_MCP_RECONNECT_BACKOFF_CAP_SEC", "60"))
         )
+        # Sandbox policy override. None means "ask the running brain, then
+        # disk" — see :meth:`_policy`. Set directly by tests and embedders.
+        self.policy = None
 
     def _mark_degraded(
         self, name: str, reason: str, attempts: int, detail: str = "",
@@ -810,9 +814,25 @@ class MCPClientManager:
             logger.error("MCP config load failed: %s", e)
             return
 
+        policy = self._policy()
         for server_config in config.get("servers", []):
             name = server_config.get("name", "unnamed")
             if not server_config.get("enabled", True):
+                continue
+
+            # Same gate as connect_server. This is the boot path and it
+            # does not route through that method, so the check has to be
+            # repeated here or the policy only covers the REST/registry
+            # surface. audit P0.4.
+            if not policy.can_use_mcp_server(name):
+                self._mark_degraded(
+                    name, "blocked by sandbox policy (mcp section)", attempts=1,
+                )
+                logger.warning(
+                    "MCP server %r in %s refused by sandbox policy: it is not "
+                    "permitted by mcp.allowed_servers / allow_external_servers",
+                    name, self._config_path,
+                )
                 continue
 
             self._server_configs[name] = dict(server_config)
@@ -842,6 +862,26 @@ class MCPClientManager:
     # ``state.mcp_client._servers[name] = conn``. Both paths now go
     # through these two methods.
 
+    def _policy(self):
+        """The live sandbox policy.
+
+        Prefers the running brain's (``/api/policy/update`` swaps that
+        object in), falls back to whatever is on disk for CLI-style use,
+        and can be set directly on the instance by tests and embedders.
+        ``api.state`` is read out of ``sys.modules`` rather than imported
+        because ``api.state`` imports this module.
+        """
+        injected = getattr(self, "policy", None)
+        if injected is not None:
+            return injected
+        state_module = sys.modules.get("api.state")
+        live = getattr(getattr(state_module, "state", None), "policy", None)
+        if live is not None:
+            return live
+        from security.sandbox_policy import SandboxPolicy
+
+        return SandboxPolicy.load_default()
+
     async def connect_server(self, config: Union[MCPServerConfig, dict]) -> bool:
         """Start a single MCP server using the canonical
         :class:`MCPServerConfig`.
@@ -849,10 +889,26 @@ class MCPClientManager:
         Idempotent on ``config.name``: if a connection already exists
         we disconnect it first so configuration changes (e.g. updated
         env vars) take effect.
+
+        audit P0.4: this is the enforcement point for
+        ``SandboxPolicy.can_use_mcp_server``. An MCP server is an
+        arbitrary local process (stdio ``command``) or an arbitrary remote
+        endpoint whose tools are then offered to the model, so
+        ``mcp.allow_external_servers`` / ``allowed_servers`` /
+        ``blocked_servers`` were the most consequential unread section of
+        the policy. Both connect paths reach here: this method and
+        :meth:`connect_all`, which loops over the config file.
         """
         if not isinstance(config, MCPServerConfig):
             config = MCPServerConfig(**config)
         name = config.name
+        if not self._policy().can_use_mcp_server(name):
+            self._mark_degraded(name, "blocked by sandbox policy (mcp section)", attempts=1)
+            logger.warning(
+                "MCP server %r refused by sandbox policy: it is not permitted by "
+                "mcp.allowed_servers / allow_external_servers", name,
+            )
+            return False
         if name in self._servers:
             try:
                 await self._servers[name].disconnect()

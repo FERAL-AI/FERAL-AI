@@ -14,6 +14,7 @@ import logging
 import sys
 import uuid
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -25,6 +26,7 @@ from skills.result_budget import (
     ResultBudget,
     TruncationReport,
     budget_for,
+    builtin_skill_ids,
     clamp,
     get_budget,
 )
@@ -606,6 +608,13 @@ class SkillExecutor:
             if placeholder in url:
                 url = url.replace(placeholder, str(param_value))
 
+        # Checked AFTER substitution: a manifest may template the host
+        # itself (``https://{region}.api.example.com``), so the pre-
+        # substitution URL is not the host we are about to contact.
+        domain_error = self._domain_gate(skill.skill_id, url)
+        if domain_error is not None:
+            return domain_error
+
         try:
             if method == "GET":
                 query_params = {k: v for k, v in args.items() if f"{{{k}}}" not in endpoint.url}
@@ -640,6 +649,95 @@ class SkillExecutor:
         except Exception as e:
             logger.error(f"Error calling {url}: {e}")
             return {"success": False, "status_code": 0, "data": None, "error": str(e)}
+
+    @staticmethod
+    def _sandbox_policy():
+        """The live sandbox policy, without touching disk on the hot path.
+
+        ``/api/policy/update`` swaps a validated object into ``state.policy``
+        and persists it, so the running brain's object is both the freshest
+        and the one that costs nothing to read. ``sys.modules`` rather than
+        an import because ``api.state`` imports this module's package, and
+        because a CLI-style caller with no brain running should fall through
+        to disk rather than stand one up.
+        """
+        state_module = sys.modules.get("api.state")
+        live = getattr(getattr(state_module, "state", None), "policy", None)
+        if live is not None:
+            return live
+        from security.sandbox_policy import SandboxPolicy
+
+        return SandboxPolicy.load_default()
+
+    def _domain_gate(self, skill_id: str, url: str) -> Optional[dict]:
+        """Enforce ``network.allowed_domains`` on the generic HTTP runner.
+
+        audit P0.4. ``SandboxPolicy.can_access_domain`` had no production
+        caller, so this runner contacted any host a manifest named while
+        ``network.allowed_domains`` is the first thing an operator
+        configures. Returns the refusal envelope, or None to proceed.
+
+        FIRST-PARTY SKILLS ARE EXEMPT FROM THE ALLOWLIST, NOT FROM THE
+        BLOCKLIST. The two halves of that sentence are separate decisions:
+
+        * The allowlist is the operator's answer to "where may an untrusted
+          manifest send my data". A skill installed from the marketplace
+          names its own URLs, and an exfiltration endpoint is a legal value
+          for that field — this is precisely the case the allowlist exists
+          for. Third-party manifests are held to it.
+        * The shipped manifests name fixed URLs that are reviewed source in
+          this repository, and between them they legitimately reach Spotify,
+          Notion, GitHub, Google, Microsoft and a dozen more. The shipped
+          default allowlist has six entries, all of them LLM/search
+          infrastructure. Holding first-party skills to it would break every
+          integration the moment an operator edits the list, and the
+          available fix would be to add ``*``. A control that people are
+          trained to widen to ``*`` protects nobody, and it would have
+          bought nothing here: a first-party manifest that wanted to reach
+          an attacker's host would already be a compromise of this repo,
+          which the allowlist does not defend against.
+        * A ``blocked_domains`` entry is different in kind. It is an
+          operator naming a destination they do not want contacted, for any
+          reason, and no skill of any provenance gets to override it.
+
+        The trust boundary is the one ``skills/result_budget`` and
+        ``security/safety_resolver`` already use: does this manifest ship in
+        this repo.
+        """
+        host = urlparse(url).hostname or ""
+        if not host:
+            return None
+        try:
+            policy = self._sandbox_policy()
+        except Exception as exc:
+            # A policy that cannot be loaded must not silently become
+            # "allow everything"; say so and refuse.
+            logger.error("Sandbox policy unreadable, refusing HTTP call to %s: %s", host, exc)
+            return {
+                "success": False, "status_code": 0, "data": None,
+                "error": (
+                    f"Refusing to call {host}: the sandbox policy could not be "
+                    f"loaded ({exc}), so network.allowed_domains cannot be checked."
+                ),
+            }
+
+        if skill_id in builtin_skill_ids():
+            if not policy.is_domain_blocked(host):
+                return None
+            reason = f"'{host}' is listed in network.blocked_domains"
+        elif policy.can_access_domain(host):
+            return None
+        else:
+            reason = (
+                f"'{host}' is not listed in network.allowed_domains, and "
+                f"'{skill_id}' is not a first-party skill"
+            )
+
+        logger.warning("Sandbox policy refused HTTP call: %s (%s)", reason, skill_id)
+        return {
+            "success": False, "status_code": 0, "data": None,
+            "error": f"Blocked by sandbox policy: {reason}.",
+        }
 
     async def _execute_local_daemon(self, path: str, command: str) -> dict:
         """Execute daemon:// URLs as local shell or AppleScript commands.

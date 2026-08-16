@@ -58,6 +58,17 @@ from skills.registry import SkillRegistry  # noqa: E402
 # ── fixtures ──────────────────────────────────────────────────────────
 
 
+# audit P0.1: ``is_read_only`` only honours a manifest's ``read_only_hint``
+# / ``safety_tier: safe`` when the manifest ships in this repo, because a
+# third party declaring itself read-only was a way into plan mode (whose
+# whole contract is that nothing changes) and past the strict-autonomy
+# approval gate. This fixture is about plan mode, not about that clamp, so
+# it uses a real shipped skill id. The clamp itself is covered by
+# ``tests/test_p0_security_clamps_and_gates.py``.
+_DEMO_SKILL_ID = "github_api"
+_TIERED_SKILL_ID = "notion"
+
+
 def _manifest(skill_id: str, endpoints: list[SkillEndpoint]) -> SkillManifest:
     return SkillManifest(
         skill_id=skill_id,
@@ -82,7 +93,7 @@ def registry() -> SkillRegistry:
     # backing implementation for `python://` endpoints, and this fixture is
     # about safety metadata, not about backends.
     reg = SkillRegistry()
-    reg.register(_manifest("demo", [
+    reg.register(_manifest(_DEMO_SKILL_ID, [
         SkillEndpoint(
             id="read_file", method="GET", url="https://demo.test/read_file",
             description="read", read_only_hint=True, safety_tier="safe",
@@ -110,18 +121,18 @@ class TestStrictReadOnly:
 
         This is the behaviour strict mode has to opt OUT of, so pin it.
         """
-        assert is_read_only("demo__set_status", registry=registry) is True
+        assert is_read_only(f"{_DEMO_SKILL_ID}__set_status", registry=registry) is True
 
     def test_strict_mode_rejects_unannotated_endpoint(self, registry):
         """Absence of metadata means NOT plan-safe. That is the whole
         contract of a mode called 'cannot mutate'."""
-        assert is_read_only("demo__set_status", registry=registry, strict=True) is False
+        assert is_read_only(f"{_DEMO_SKILL_ID}__set_status", registry=registry, strict=True) is False
 
     def test_strict_mode_accepts_read_only_hint(self, registry):
-        assert is_read_only("demo__read_file", registry=registry, strict=True) is True
+        assert is_read_only(f"{_DEMO_SKILL_ID}__read_file", registry=registry, strict=True) is True
 
     def test_strict_mode_rejects_confirm_tier(self, registry):
-        assert is_read_only("demo__edit_file", registry=registry, strict=True) is False
+        assert is_read_only(f"{_DEMO_SKILL_ID}__edit_file", registry=registry, strict=True) is False
 
     def test_strict_mode_rejects_unknown_skill(self, registry):
         """No registry entry -> no metadata -> not plan-safe, fail closed."""
@@ -173,9 +184,14 @@ class TestSafetyTierIsNotProofOfNonMutation:
 
         ``is_read_only(strict=True)`` still admits it, by design, since
         the graduated-autonomy caller wants that. Plan mode must not.
+
+        The skill id is a first-party one because audit P0.1 made
+        ``is_read_only`` ignore a de-escalating claim from a manifest that
+        does not ship in this repo; with a third-party id the first
+        assertion would hold for the wrong reason.
         """
         reg = SkillRegistry()
-        reg.register(_manifest("tiered", [
+        reg.register(_manifest(_TIERED_SKILL_ID, [
             SkillEndpoint(
                 id="delete_thing", method="POST",
                 url="https://tiered.test/delete_thing",
@@ -183,8 +199,8 @@ class TestSafetyTierIsNotProofOfNonMutation:
                 safety_tier="safe",
             ),
         ]))
-        assert is_read_only("tiered__delete_thing", registry=reg, strict=True) is True
-        assert is_plan_safe_tool("tiered__delete_thing", registry=reg) is False
+        assert is_read_only(f"{_TIERED_SKILL_ID}__delete_thing", registry=reg, strict=True) is True
+        assert is_plan_safe_tool(f"{_TIERED_SKILL_ID}__delete_thing", registry=reg) is False
 
     def test_shipped_mutating_endpoints_are_not_plan_safe(self):
         """Real endpoints from this repo's manifests, every one of which
@@ -237,11 +253,11 @@ class TestSafetyTierIsNotProofOfNonMutation:
 
 class TestExposureFilter:
     def test_filter_tools_keeps_only_plan_safe(self, registry):
-        tools = registry.get_tools_for_skills([registry.skills["demo"]])
+        tools = registry.get_tools_for_skills([registry.skills[_DEMO_SKILL_ID]])
         assert len(tools) == 3
         kept = filter_tools_for_plan_mode(tools, registry=registry)
         names = {t["function"]["name"] for t in kept}
-        assert names == {"demo__read_file"}
+        assert names == {f"{_DEMO_SKILL_ID}__read_file"}
 
     def test_filter_tools_drops_mcp_tools(self, registry):
         """MCP tools carry no FERAL manifest metadata, so they fail closed."""
@@ -261,9 +277,9 @@ class TestExposureFilter:
         manifest, so the prompt view must be pruned at ENDPOINT granularity
         or the model is told ``edit_file`` is active and then refused."""
         pruned = filter_skills_for_plan_mode(
-            [registry.skills["demo"]], registry=registry,
+            [registry.skills[_DEMO_SKILL_ID]], registry=registry,
         )
-        assert [s.skill_id for s in pruned] == ["demo"]
+        assert [s.skill_id for s in pruned] == [_DEMO_SKILL_ID]
         assert [e.id for e in pruned[0].endpoints] == ["read_file"]
 
     def test_filter_skills_drops_skills_with_no_plan_safe_endpoints(self):
@@ -281,15 +297,15 @@ class TestExposureFilter:
     def test_tooling_catalog_does_not_advertise_filtered_endpoints(self, registry):
         """The prompt-side trap: a filtered tools array is not enough,
         ``build_tooling_catalog`` reads the manifest independently."""
-        skills = [registry.skills["demo"]]
+        skills = [registry.skills[_DEMO_SKILL_ID]]
         unfiltered = build_tooling_catalog(skills, skills)
-        assert "demo__edit_file" in unfiltered
+        assert f"{_DEMO_SKILL_ID}__edit_file" in unfiltered
 
         pruned = filter_skills_for_plan_mode(skills, registry=registry)
         catalog = build_tooling_catalog(pruned, pruned)
         active_block = catalog.split("### Available (full catalog)")[0]
-        assert "demo__read_file" in active_block
-        assert "demo__edit_file" not in active_block
+        assert f"{_DEMO_SKILL_ID}__read_file" in active_block
+        assert f"{_DEMO_SKILL_ID}__edit_file" not in active_block
 
 
 # ── 3. session state ──────────────────────────────────────────────────
@@ -442,7 +458,7 @@ class TestDispatchGate:
         runner = _tool_runner(registry)
         runner.plan_mode.enter("s1")
         out = await runner.execute_tool_call_for_llm(
-            "s1", {"name": "demo__edit_file", "args": {}, "id": "c1"}, [],
+            "s1", {"name": f"{_DEMO_SKILL_ID}__edit_file", "args": {}, "id": "c1"}, [],
         )
         assert out["success"] is False
         assert out["error_code"] == PLAN_REFUSAL_CODE
@@ -456,7 +472,7 @@ class TestDispatchGate:
             return_value={"success": True, "data": {"ok": 1}},
         )
         out = await runner.execute_tool_call_for_llm(
-            "s1", {"name": "demo__read_file", "args": {}, "id": "c1"}, [],
+            "s1", {"name": f"{_DEMO_SKILL_ID}__read_file", "args": {}, "id": "c1"}, [],
         )
         assert out["success"] is True
 
@@ -469,13 +485,13 @@ class TestDispatchGate:
         """
         voice_tools = registry.get_all_tools()
         voice_names = {t["function"]["name"] for t in voice_tools}
-        assert "demo__edit_file" in voice_names
+        assert f"{_DEMO_SKILL_ID}__edit_file" in voice_names
 
         exposed = {
             t["function"]["name"]
             for t in filter_tools_for_plan_mode(voice_tools, registry=registry)
         }
-        assert "demo__edit_file" not in exposed
+        assert f"{_DEMO_SKILL_ID}__edit_file" not in exposed
 
         runner = _tool_runner(registry)
         runner.plan_mode.enter("voice-session")
@@ -484,7 +500,7 @@ class TestDispatchGate:
         )
         out = await runner.execute_tool_call_for_llm(
             "voice-session",
-            {"name": "demo__edit_file", "args": {}, "id": "c1"},
+            {"name": f"{_DEMO_SKILL_ID}__edit_file", "args": {}, "id": "c1"},
             [],
             surface="voice",
         )
@@ -538,14 +554,14 @@ class TestDispatchGate:
             return_value={"success": True, "data": {}},
         )
         out = await runner.execute_tool_call_for_llm(
-            "s1", {"name": "demo__edit_file", "args": {}, "id": "c1"}, [],
+            "s1", {"name": f"{_DEMO_SKILL_ID}__edit_file", "args": {}, "id": "c1"}, [],
         )
         assert out.get("error_code") != PLAN_REFUSAL_CODE
         assert out["status"] == "pending_approval"
 
         runner.set_autonomy_mode("loose")
         out = await runner.execute_tool_call_for_llm(
-            "s1", {"name": "demo__edit_file", "args": {}, "id": "c2"}, [],
+            "s1", {"name": f"{_DEMO_SKILL_ID}__edit_file", "args": {}, "id": "c2"}, [],
         )
         assert out["success"] is True
 
@@ -557,7 +573,7 @@ class TestDispatchGate:
             return_value={"success": True, "data": {}},
         )
         await runner.execute_tool_call(
-            "s1", {"name": "demo__edit_file", "args": {}, "id": "c1"}, [],
+            "s1", {"name": f"{_DEMO_SKILL_ID}__edit_file", "args": {}, "id": "c1"}, [],
         )
         runner._orch.executor.execute.assert_not_awaited()
 
@@ -584,7 +600,7 @@ class TestIndependenceFromAutonomyMode:
         runner.plan_mode.record_plan("s1", {"summary": "do it", "steps": ["a"]})
         runner.plan_mode.exit("s1", approved=True, actor="user")
 
-        denial = runner.enforce_safety("demo__edit_file", {}, session_id="s1")
+        denial = runner.enforce_safety(f"{_DEMO_SKILL_ID}__edit_file", {}, session_id="s1")
         assert denial is not None
         assert denial["status"] == "pending_approval"
 
@@ -647,8 +663,8 @@ class TestOrchestratorPlanMode:
         assert "plan" not in Orchestrator.ALWAYS_INCLUDE_SKILLS
 
     def test_exposure_filter_is_a_no_op_outside_plan_mode(self, orchestrator, registry):
-        tools = registry.get_tools_for_skills([registry.skills["demo"]])
-        skills = [registry.skills["demo"]]
+        tools = registry.get_tools_for_skills([registry.skills[_DEMO_SKILL_ID]])
+        skills = [registry.skills[_DEMO_SKILL_ID]]
         out_tools, out_skills = orchestrator._apply_plan_mode_filter("s1", tools, skills)
         assert out_tools == tools
         assert out_skills == skills
@@ -656,13 +672,13 @@ class TestOrchestratorPlanMode:
     def test_exposure_filter_narrows_and_adds_the_plan_tool(self, orchestrator, registry):
         registry.load_from_file(ROOT / "skills" / "manifests" / "plan.json")
         orchestrator.plan_mode.enter("s1")
-        tools = registry.get_tools_for_skills([registry.skills["demo"]])
+        tools = registry.get_tools_for_skills([registry.skills[_DEMO_SKILL_ID]])
         out_tools, out_skills = orchestrator._apply_plan_mode_filter(
-            "s1", tools, [registry.skills["demo"]],
+            "s1", tools, [registry.skills[_DEMO_SKILL_ID]],
         )
         names = {t["function"]["name"] for t in out_tools}
-        assert names == {"demo__read_file", "plan__submit"}
-        assert {s.skill_id for s in out_skills} == {"demo", "plan"}
+        assert names == {f"{_DEMO_SKILL_ID}__read_file", "plan__submit"}
+        assert {s.skill_id for s in out_skills} == {_DEMO_SKILL_ID, "plan"}
 
     @pytest.mark.asyncio
     async def test_system_prompt_carries_the_plan_block_and_no_write_tools(
@@ -675,15 +691,15 @@ class TestOrchestratorPlanMode:
         orchestrator.plan_mode.enter("s1")
         _tools, skills = orchestrator._apply_plan_mode_filter(
             "s1",
-            registry.get_tools_for_skills([registry.skills["demo"]]),
-            [registry.skills["demo"]],
+            registry.get_tools_for_skills([registry.skills[_DEMO_SKILL_ID]]),
+            [registry.skills[_DEMO_SKILL_ID]],
         )
         prompt = await orchestrator._build_system_prompt(
             PerceptionFrame(), skills, "s1",
         )
         assert "## Plan Mode (ACTIVE)" in prompt
-        assert "demo__read_file" in prompt
-        assert "demo__edit_file" not in prompt
+        assert f"{_DEMO_SKILL_ID}__read_file" in prompt
+        assert f"{_DEMO_SKILL_ID}__edit_file" not in prompt
 
     @pytest.mark.asyncio
     async def test_system_prompt_is_unchanged_outside_plan_mode(
@@ -692,10 +708,10 @@ class TestOrchestratorPlanMode:
         from perception.fusion import PerceptionFrame
 
         prompt = await orchestrator._build_system_prompt(
-            PerceptionFrame(), [registry.skills["demo"]], "s1",
+            PerceptionFrame(), [registry.skills[_DEMO_SKILL_ID]], "s1",
         )
         assert "## Plan Mode (ACTIVE)" not in prompt
-        assert "demo__edit_file" in prompt
+        assert f"{_DEMO_SKILL_ID}__edit_file" in prompt
 
 
 # ── 7. REST surface ───────────────────────────────────────────────────

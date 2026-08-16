@@ -47,6 +47,14 @@ from security.safety_resolver import (  # noqa: E402
 )
 
 
+# audit P0.1: a manifest may only DE-ESCALATE (safety_tier "safe",
+# read_only_hint) when it ships in this repo, so the fixtures below that
+# exercise de-escalation have to use a real shipped skill id. The ones that
+# exercise escalation keep their arbitrary names, because escalation is
+# honoured from any author.
+BUILTIN_SKILL_ID = "notes_memory"
+
+
 class _FakeRegistry:
     """In-memory skill registry sufficient for the resolver. We avoid
     standing up the full SkillRegistry to keep tests pure unit-tests."""
@@ -104,10 +112,16 @@ def test_surface_deny_does_not_fire_on_allowed_surface():
 
 def test_manifest_safe_overrides_confirm_substring():
     """A `*_create` endpoint declared safe in its manifest should not
-    be confirm-walled by the legacy substring rule."""
-    skill = _make_skill("benign_skill", {"safety_tier": "safe"})
+    be confirm-walled by the legacy substring rule.
+
+    audit P0.1: the skill id is now a FIRST-PARTY one. De-escalation is
+    only honoured from a manifest that ships in this repo; the third-party
+    half of this matrix lives in
+    ``tests/test_p0_security_clamps_and_gates.py``.
+    """
+    skill = _make_skill(BUILTIN_SKILL_ID, {"safety_tier": "safe"})
     registry = _FakeRegistry([skill])
-    decision = _resolve("benign_skill__do_thing", registry=registry)
+    decision = _resolve(f"{BUILTIN_SKILL_ID}__do_thing", registry=registry)
     # Without manifest this would have been CONFIRM via "create"/"unknown"
     # tokens; with manifest=safe it must be AUTO.
     assert decision.level == LEVEL_AUTO
@@ -133,7 +147,7 @@ def test_manifest_read_only_hint_promotes_to_auto():
     substring rule. A `read_only_hint=True` manifest claim should
     promote it to AUTO."""
     skill = SkillManifest(
-        skill_id="readonly_skill",
+        skill_id=BUILTIN_SKILL_ID,
         version="1.0.0",
         author="test",
         brand=BrandProfile(name="readonly"),
@@ -150,7 +164,7 @@ def test_manifest_read_only_hint_promotes_to_auto():
         ],
     )
     registry = _FakeRegistry([skill])
-    decision = _resolve("readonly_skill__update_thing", registry=registry)
+    decision = _resolve(f"{BUILTIN_SKILL_ID}__update_thing", registry=registry)
     assert decision.level == LEVEL_AUTO
 
 
@@ -199,9 +213,9 @@ def test_unknown_tool_defaults_to_confirm():
 
 
 def test_is_read_only_uses_manifest_when_present():
-    skill = _make_skill("ro_skill", {"read_only_hint": True})
+    skill = _make_skill(BUILTIN_SKILL_ID, {"read_only_hint": True})
     registry = _FakeRegistry([skill])
-    assert is_read_only("ro_skill__do_thing", registry=registry) is True
+    assert is_read_only(f"{BUILTIN_SKILL_ID}__do_thing", registry=registry) is True
 
 
 def test_is_read_only_falls_back_to_substring():
@@ -222,9 +236,9 @@ class _StubOrchestrator:
 def test_tool_runner_enforce_safety_routes_through_resolver():
     from agents.tool_runner import ToolRunner
 
-    skill = _make_skill("benign_skill", {"safety_tier": "safe"})
+    skill = _make_skill(BUILTIN_SKILL_ID, {"safety_tier": "safe"})
     runner = ToolRunner(_StubOrchestrator(_FakeRegistry([skill])), autonomy_mode="hybrid")
-    result = runner.enforce_safety("benign_skill__do_thing", args={})
+    result = runner.enforce_safety(f"{BUILTIN_SKILL_ID}__do_thing", args={})
     # AUTO -> no gating dict returned
     assert result is None
 

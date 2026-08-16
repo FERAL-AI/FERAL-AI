@@ -252,9 +252,14 @@ class TestSkills:
         assert r.json()["pending"] == []
 
     def test_generate_skill_missing_capability(self, client):
+        # 400, not the 200 this used to assert: a missing required field is
+        # a bad request, and answering it with a success status means every
+        # generic caller has to know this route's private body shape to see
+        # the failure. See the status rule at the top of
+        # api/routes/skills.py and tests/test_skill_approval_reporting.py.
         r = client.post("/api/skills/generate", json={"service": "test"})
-        assert r.status_code == 200
-        assert "error" in r.json()
+        assert r.status_code == 400
+        assert r.json()["error"] == "capability is required"
 
 
 # ═══════════════════════════════════════════════

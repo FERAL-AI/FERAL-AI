@@ -388,6 +388,13 @@ def get_danger_level(tool_name: str) -> DangerLevel:
 
     Honours both naming conventions: ``shell.exec`` and ``shell__exec``
     resolve to the same entry.
+
+    ``SAFE`` here means "this table says nothing about that tool", not
+    "this tool is harmless" — the entries are first-party tool names and a
+    third-party skill id can never match one. Callers must treat the SAFE
+    return as absence of information; ``security.safety_resolver`` does,
+    deferring to the substring heuristic rather than auto-approving on it.
+    Do not add an auto-approval that keys off this function alone.
     """
     for cand in _candidate_forms(tool_name):
         level = TOOL_DANGER_MAP.get(cand)

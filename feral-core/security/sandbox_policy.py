@@ -96,8 +96,35 @@ class SandboxPolicy:
                         "gps": 0.2,
                     },
                 },
+                # Entries are matched against the HUP capability id the
+                # caller actually sends (``/api/hardware/execute``'s
+                # ``capability_id``), so this list has to name capabilities,
+                # not device categories. The first four are the generic
+                # actuator-type names the reference glasses manifest
+                # declares in ``DeviceManifest.actuators``
+                # (``hardware/protocol.py``); the rest are the capability
+                # ids every in-repo adapter exposes. Before audit P0.4 this
+                # list had no reader at all, so its contents had no effect;
+                # wiring the check without extending it would have denied
+                # the CuteBot, the robot arm and the Hue bridge on a fresh
+                # install. ``test_default_policy_permits_every_shipped_actuator``
+                # fails if an adapter grows a capability this misses.
                 "actuators": {
-                    "allowed": ["display", "speaker", "haptic", "led"],
+                    "allowed": [
+                        # generic actuator types (glasses / phone manifests)
+                        "display", "speaker", "haptic", "led",
+                        # hardware/protocol.py — reference glasses
+                        "display_notification", "play_audio",
+                        # hardware/mesh.py — phone node
+                        "notification",
+                        # hardware/adapters/cutebot.py
+                        "follow_line", "explore", "halt", "drive", "set_lights",
+                        # hardware/adapters/robot_arm.py
+                        "move_joints", "move_cartesian", "gripper", "home", "estop",
+                        # hardware/adapters/smart_home.py
+                        "lights_toggle", "lights_brightness", "lights_color",
+                        "scene_activate",
+                    ],
                     "blocked": [],
                     "requires_confirmation": ["motor", "servo", "relay", "lock", "valve"],
                     "max_actions_per_minute": 30,
@@ -132,9 +159,15 @@ class SandboxPolicy:
                 "auto_forget_after_days": None,
             },
 
+            # ``["*"]``, not ``[]``: server names come from the operator's
+            # own ``~/.feral/mcp_servers.json``, so there is nothing for the
+            # shipped policy to enumerate. The wildcard states the shipped
+            # posture explicitly and lets an empty list mean what an empty
+            # list means everywhere else in this file. See
+            # :meth:`can_use_mcp_server`.
             "mcp": {
                 "allow_external_servers": True,
-                "allowed_servers": [],
+                "allowed_servers": ["*"],
                 "blocked_servers": [],
                 "max_concurrent_connections": 5,
             },
@@ -432,11 +465,21 @@ class SandboxPolicy:
     # Network Checks
     # ─────────────────────────────────────────
 
+    def is_domain_blocked(self, domain: str) -> bool:
+        """Whether ``network.blocked_domains`` names this host.
+
+        Split out of :meth:`can_access_domain` for the generic HTTP runner
+        (``skills/executor.py``), which exempts first-party skills from the
+        *allowlist* but never from the *blocklist*: an explicit block is an
+        operator decision about a destination and binds every caller.
+        """
+        blocked = self._data.get("network", {}).get("blocked_domains", []) or []
+        return any(self._domain_match(domain, b) for b in blocked)
+
     def can_access_domain(self, domain: str) -> bool:
-        net = self._data.get("network", {})
-        blocked = net.get("blocked_domains", [])
-        if any(self._domain_match(domain, b) for b in blocked):
+        if self.is_domain_blocked(domain):
             return False
+        net = self._data.get("network", {})
         mode = net.get("mode", "allowlist")
         if mode == "allowlist":
             allowed = net.get("allowed_domains", [])
@@ -446,14 +489,26 @@ class SandboxPolicy:
     # ─────────────────────────────────────────
     # Hardware Checks
     # ─────────────────────────────────────────
+    #
+    # audit P0.4. Four checks in this block used to fail OPEN on a partial
+    # policy: ``sensor_type in allowed or not allowed`` reads an empty (or
+    # absent) allowlist as "allow everything", where ``can_access_domain``
+    # a few lines above reads an empty allowlist as "allow nothing". A
+    # partial policy is legal — the route validator deliberately does not
+    # require sections — so an operator who wrote a ``network`` block and
+    # nothing else had every sensor, actuator, camera and MCP server wide
+    # open with no indication. They now deny, matching the network check.
+    # The shipped default in ``_default_policy`` names every sensor,
+    # actuator and camera FERAL itself uses, so a default install is
+    # unaffected; ``tests/test_p0_security_clamps_and_gates.py`` pins that
+    # per capability.
 
     def can_read_sensor(self, sensor_type: str) -> bool:
         hw = self._data.get("hardware", {}).get("sensors", {})
         blocked = hw.get("blocked", [])
         if sensor_type in blocked:
             return False
-        allowed = hw.get("allowed", [])
-        return sensor_type in allowed or not allowed
+        return sensor_type in hw.get("allowed", [])
 
     def can_use_actuator(self, actuator_type: str) -> tuple[bool, bool]:
         """Returns (allowed, needs_confirmation)."""
@@ -462,15 +517,36 @@ class SandboxPolicy:
         if actuator_type in blocked:
             return False, False
         needs_confirm = actuator_type in hw.get("requires_confirmation", [])
-        allowed = hw.get("allowed", [])
-        is_allowed = actuator_type in allowed or not allowed
-        return is_allowed, needs_confirm
+        return actuator_type in hw.get("allowed", []), needs_confirm
+
+    def emergency_stop_enabled(self) -> bool:
+        """Whether a stop/halt command bypasses the actuator allowlist.
+
+        Default True, and True in the shipped policy. Refusing a stop leaves
+        hardware running, which is a worse outcome than the action the
+        refusal prevents, so the allowlist does not get to deny one unless
+        the operator turns this off deliberately.
+        """
+        movement = self._data.get("hardware", {}).get("movement", {})
+        return bool(movement.get("emergency_stop_enabled", True))
 
     def max_movement_speed(self) -> int:
+        """Percentage cap on commanded movement speed. Default 50, not 0.
+
+        Deliberately NOT flipped with the four allowlists above. Those
+        answer "may this happen at all?", where the fail-closed answer is a
+        refusal the caller can see and report. This one answers "how fast?",
+        and 0 is not a refusal: it is a command that a device accepts,
+        executes as no motion, and acknowledges as success. Every caller
+        would then report a move that never happened. A bounded 50% that is
+        honestly reported beats a silent no-op. Note that nothing reads this
+        yet (see the audit note in ``api/routes/security_and_hardware.py``).
+        """
         return self._data.get("hardware", {}).get("movement", {}).get("max_speed_pct", 50)
 
     def can_capture_camera(self) -> bool:
-        return self._data.get("hardware", {}).get("cameras", {}).get("allowed", True)
+        cameras = self._data.get("hardware", {}).get("cameras", {})
+        return bool(cameras.get("allowed", False))
 
     # ─────────────────────────────────────────
     # Skill Checks
@@ -491,14 +567,25 @@ class SandboxPolicy:
     # ─────────────────────────────────────────
 
     def can_use_mcp_server(self, server_name: str) -> bool:
+        """Whether ``server_name`` may be connected.
+
+        audit P0.4, and the one member of the group whose allowlist cannot
+        be a literal enumeration: MCP server names are chosen by the
+        operator in ``~/.feral/mcp_servers.json``, so the shipped default
+        cannot list them the way it lists sensors and actuators. Rather than
+        keep "empty means anything" as an unwritten rule, the default policy
+        says ``allowed_servers: ["*"]`` out loud. Empty now denies, an
+        absent ``mcp`` section denies, and an operator who wants everything
+        writes the wildcard.
+        """
         mcp = self._data.get("mcp", {})
-        if not mcp.get("allow_external_servers", True):
+        if not mcp.get("allow_external_servers", False):
             return False
         blocked = mcp.get("blocked_servers", [])
         if server_name in blocked:
             return False
         allowed = mcp.get("allowed_servers", [])
-        return not allowed or server_name in allowed
+        return "*" in allowed or server_name in allowed
 
     # ─────────────────────────────────────────
     # Execution Checks
