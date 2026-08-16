@@ -255,20 +255,69 @@ class SkillRegistry:
             except Exception as e:
                 logger.error(f"Failed to load skill {skill_file}: {e}")
 
+    @staticmethod
+    def _first_party_manifest(skill_id: str) -> Path | None:
+        """Path of the shipped manifest that DECLARES ``skill_id``.
+
+        The file name is not the skill id. Eight of the shipped manifests
+        declare an id that differs from their file stem (``calendar.json``
+        -> ``calendar_google``, ``github.json`` -> ``github_api``,
+        ``task.json`` -> ``background_task``, ``messaging.json`` ->
+        ``messaging_sms``, ``notes.json`` -> ``notes_memory``,
+        ``robot_action.json`` -> ``robot_ext``, ``smart_home.json`` ->
+        ``smart_home_hue``, ``spotify.json`` -> ``spotify_music``).
+
+        ``register()`` keys on the declared id, which is what ``/skills``
+        reports and therefore what the Skills page sends back to
+        ``/api/skills/reload``. Resolving the path as
+        ``manifests/{skill_id}.json`` and nothing else meant a reload of
+        any of those eight found no file and returned False, so the stem
+        is only a fast path now and the declared id decides.
+        """
+        manifests_dir = Path(__file__).parent / "manifests"
+        direct = manifests_dir / f"{skill_id}.json"
+        if direct.is_file():
+            return direct
+        if not manifests_dir.is_dir():
+            return None
+        for path in sorted(manifests_dir.glob("*.json")):
+            try:
+                with open(path) as fh:
+                    declared = json.load(fh).get("skill_id")
+            except Exception as exc:
+                logger.warning("manifest %s could not be read while resolving %s: %s", path, skill_id, exc)
+                continue
+            if declared == skill_id:
+                return path
+        return None
+
     def reload_skill(self, skill_id: str) -> bool:
         """Re-load a skill from disk and hot-swap its implementation.
+
+        ``True`` on success. Callers that need to tell the operator WHY a
+        reload did nothing should use :meth:`reload_skill_detail`.
+        """
+        ok, _code, _reason = self.reload_skill_detail(skill_id)
+        return ok
+
+    def reload_skill_detail(self, skill_id: str) -> tuple[bool, str, str]:
+        """Re-load a skill from disk, returning ``(ok, code, reason)``.
 
         Looks for the manifest + optional impl.py under:
           1. ``~/.feral/skills/<skill_id>/``  (marketplace-installed / promoted)
           2. ``~/.feral/skills/generated/<skill_id>/`` (Tool Genesis output)
-          3. ``skills/manifests/<skill_id>.json`` (first-party)
+          3. the shipped ``skills/manifests/`` entry declaring this skill id
 
         Registers the manifest, invalidates the tool cache for this skill id,
         and if an ``impl.py`` is present alongside the manifest, re-imports it
         via ``importlib.util`` so the in-process LLM tool list picks up the
         new definition without a restart.
 
-        Returns ``True`` on success.
+        ``code`` is ``""`` on success, ``"unloadable"`` when a source was
+        found but could not be read, and ``"no_source"`` when this skill id
+        has nothing on disk to reload (a manifest defined in Python, such
+        as ``weather_current``, is the honest example: there is no file to
+        re-read, and saying so beats reporting a reload that did nothing).
         """
         from skills.package import SkillPackage
 
@@ -277,30 +326,44 @@ class SkillRegistry:
         candidates.append(home / "skills" / skill_id)
         candidates.append(home / "skills" / "generated" / skill_id)
 
-        firstparty = Path(__file__).parent / "manifests" / f"{skill_id}.json"
-        if firstparty.exists():
+        firstparty = self._first_party_manifest(skill_id)
+        if firstparty is not None:
             candidates.append(firstparty)
 
+        failures: list[str] = []
         for candidate in candidates:
             try:
                 if candidate.is_file() and candidate.suffix == ".json":
                     self.load_from_file(candidate)
-                    logger.info("reload_skill(%s): loaded first-party manifest", skill_id)
-                    return True
+                    logger.info("reload_skill(%s): loaded first-party manifest %s", skill_id, candidate)
+                    return True, "", ""
                 if candidate.is_dir() and (candidate / "manifest.json").exists():
                     pkg = SkillPackage(candidate)
                     if not (pkg.load() and pkg.manifest):
+                        failures.append(f"{candidate}: {'; '.join(pkg.errors) or 'manifest did not load'}")
                         continue
                     self.skills.pop(skill_id, None)
                     self._tool_cache.pop(skill_id, None)
                     self.register(pkg.manifest)
                     self._reimport_dynamic_impl(candidate, skill_id)
                     logger.info("reload_skill(%s): hot-reloaded from %s", skill_id, candidate)
-                    return True
+                    return True, "", ""
             except Exception as exc:
                 logger.warning("reload_skill(%s) from %s failed: %s", skill_id, candidate, exc)
-        logger.warning("reload_skill(%s): no manifest found in %s", skill_id, candidates)
-        return False
+                failures.append(f"{candidate}: {exc}")
+
+        if failures:
+            reason = f"found a source for '{skill_id}' but could not load it: " + " | ".join(failures)
+            logger.warning("reload_skill(%s): %s", skill_id, reason)
+            return False, "unloadable", reason
+
+        reason = (
+            f"nothing on disk to reload for '{skill_id}': no package under "
+            f"{home / 'skills'} or {home / 'skills' / 'generated'}, and no shipped "
+            f"manifest declares that skill id"
+        )
+        logger.warning("reload_skill(%s): %s", skill_id, reason)
+        return False, "no_source", reason
 
     @staticmethod
     def _reimport_dynamic_impl(skill_dir: Path, skill_id: str):

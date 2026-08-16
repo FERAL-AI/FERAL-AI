@@ -261,6 +261,19 @@
   gap: 16px;
   padding: 8px 0;
   overflow-y: auto;
+  /* The log is the ONLY thing on this page that scrolls, so it also has
+     to be the containing block for anything positioned inside it. An
+     absolutely positioned descendant whose containing block sits outside
+     a scroller is not clipped by that scroller, and its layout overflow
+     lands on the ancestor instead. That is how a hidden 1px live region
+     per message (see .v2-copy-btn) made `.v2-shell-main` scrollable and
+     let the user scroll the entire chat surface out of view. Anchoring
+     here keeps any future positioned descendant inside the scroller. */
+  position: relative;
+  /* Stop the wheel from chaining into `.v2-shell-main` (and the document)
+     once the transcript hits either end. Reaching the last message should
+     be the end of the gesture, not the start of scrolling the page. */
+  overscroll-behavior: contain;
   /* v2026.5.30 — never bleed sideways. Pre-fix, a long assistant turn
      (e.g. a code-style line with no break-points, or a foreign-script
      URL the user pasted) forced a horizontal scrollbar at the bottom

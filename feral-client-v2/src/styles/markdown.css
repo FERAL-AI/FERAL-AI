@@ -110,7 +110,23 @@
 .v2-md-codeblock[data-lang="diff"] .hljs-deletion { background: var(--v2-state-error-soft); display: inline-block; width: 100%; }
 
 /* ── Copy affordance (code blocks, tool results, messages) ─── */
+/*
+ * `position: relative` is load-bearing, not cosmetic. CopyButton renders
+ * its "Copied" live region as an inline-styled `position: absolute`
+ * sr-only span. With a statically positioned button the span's
+ * containing block resolved past the scroll container to the nearest
+ * positioned ancestor, which in chat is `.v2-pane` (`.v2-glass` is
+ * `position: relative`). An absolutely positioned box is only clipped by
+ * ancestors between it and its containing block, so `.v2-chat-log`'s
+ * `overflow-y: auto` did not clip it: every assistant turn parked a 1px
+ * box at its own transcript offset and pushed that much layout overflow
+ * into `.v2-pane`, then `.v2-chat`, then `.v2-shell-main`. The shell
+ * became scrollable by the height of the whole conversation and scrolled
+ * the chat frame clean off the top of the viewport. Anchoring the span
+ * to its own button keeps it inside the scroller, where it is clipped.
+ */
 .v2-copy-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;

@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 
 from api.state import state
 
@@ -52,20 +52,86 @@ async def pending_skills():
     return {"pending": state.skill_gen.get_pending_skills()}
 
 
+# 409 Conflict for every "the reload did not happen" outcome: the request
+# was well formed and the route exists, the brain's own state is what makes
+# it impossible (no source on disk for that id, or a source it cannot
+# parse). The machine-readable difference stays in the ``code`` field.
+#
+# Not 404: the v2 client maps 404 to "this brain build does not serve that
+# route, your client and brain versions disagree" and drops the body's
+# reason on the floor (ui/ErrorState.jsx describeApiError), which would
+# send the operator to check versions over a skill that simply has no file.
+# Not 422 either: FastAPI already answers 422 for its own request
+# validation, so a hand-set 422 here would be indistinguishable from a
+# malformed ``skill_id``.
+_RELOAD_CONFLICT = 409
+
+
 @router.post("/api/skills/reload")
-async def reload_skill(skill_id: str):
+async def reload_skill(skill_id: str, response: Response):
     """Hot-reload a skill manifest + impl from disk.
 
-    Thin wrapper around ``state.skill_registry.reload_skill`` used by
-    ``feral install`` after extracting a new skill bundle.
+    Thin wrapper around ``state.skill_registry.reload_skill_detail`` used
+    by ``feral install`` after extracting a new skill bundle, and by the
+    Skills page's per-skill Hot-reload button.
+
+    A failed reload answers with a 4xx/5xx AND an ``error`` string. It
+    used to answer ``{"ok": false, "skill_id": ...}`` with HTTP 200 and no
+    ``error`` key, which is the one shape the client cannot see: the v2
+    ``apiFetch`` only raises on a non-2xx status or on a 2xx body carrying
+    ``error``, so ``Skills.jsx`` fell through to its success branch and
+    rendered "Hot-reloaded <id>" for a reload that had done nothing at
+    all. Reporting success without checking the result is the defect class
+    this repo has spent two releases removing, and it survived inside the
+    change that was written to close it: the commit added the error state,
+    the retry affordance and the "Whatever code the brain had loaded
+    before is still what is running" hint, then awaited the response
+    without ever reading it. An unread body is an unchecked result.
+
+    A success status for a failed operation does not merely mislead one
+    caller, it disables every generic caller at once, which is why this
+    stayed invisible for two releases while looking well handled.
     """
-    if not state.skill_registry:
-        return {"ok": False, "error": "skill registry not initialized"}
+    registry = getattr(state, "skill_registry", None)
+    if not registry:
+        response.status_code = 503
+        return {"ok": False, "skill_id": skill_id, "error": "skill registry not initialized"}
+
     try:
-        ok = state.skill_registry.reload_skill(skill_id)
+        ok, code, reason = _reload(registry, skill_id)
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
-    return {"ok": bool(ok), "skill_id": skill_id}
+        logger.warning("reload_skill(%s) raised: %s", skill_id, exc)
+        response.status_code = 500
+        return {"ok": False, "skill_id": skill_id, "error": str(exc)}
+
+    if not ok:
+        response.status_code = _RELOAD_CONFLICT
+        return {
+            "ok": False,
+            "skill_id": skill_id,
+            "code": code,
+            "error": reason or f"reload of '{skill_id}' did not happen",
+        }
+    return {"ok": True, "skill_id": skill_id}
+
+
+def _reload(registry, skill_id: str) -> tuple[bool, str, str]:
+    """``(ok, code, reason)`` from whichever reload API the registry has.
+
+    ``reload_skill_detail`` is the one that can say why. The boolean
+    ``reload_skill`` is kept as a fallback so a registry double, or an
+    older bundled copy of ``skills/registry.py`` under ``desktop/``, still
+    works; it just cannot name a reason, and we do not invent one.
+    """
+    detail = getattr(registry, "reload_skill_detail", None)
+    if callable(detail):
+        result = detail(skill_id)
+        if isinstance(result, tuple) and len(result) == 3:
+            return bool(result[0]), str(result[1]), str(result[2])
+    ok = bool(registry.reload_skill(skill_id))
+    if ok:
+        return True, "", ""
+    return False, "", f"the skill registry did not reload '{skill_id}' and gave no reason"
 
 
 @router.get("/skills")

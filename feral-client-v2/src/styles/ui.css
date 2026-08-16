@@ -59,8 +59,16 @@
  */
 .v2-shell {
   position: relative;
+  /* `vh` first as the fallback for engines without dynamic viewport
+     units. On mobile Safari `100vh` is the LARGE viewport (toolbar
+     retracted), so a shell sized in vh is taller than what is on screen
+     while the toolbar is up: the document gains a scrollable strip, and
+     dragging it pushes the fixed dock and the chat frame past the bottom
+     edge. `100dvh` tracks the visible viewport instead. */
   height: 100vh;
+  height: 100dvh;
   min-height: 100vh;
+  min-height: 100dvh;
   color: var(--v2-text-primary);
   background: var(--v2-shell-ambient);
   overflow: hidden;

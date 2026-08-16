@@ -5,7 +5,7 @@ import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import EmptyState from '../ui/EmptyState';
 import ErrorState from '../ui/ErrorState';
-import { apiFetch } from '../lib/api';
+import { ApiError, apiFetch } from '../lib/api';
 import { useResource, toApiError } from '../hooks/useResource';
 
 function asList(value, key) {
@@ -47,16 +47,39 @@ export default function Skills() {
 
   // A hot-reload used to look identical whether it worked or not: no
   // catch, no confirmation. Now both outcomes say so.
+  //
+  // The catch alone was not enough, and this is the part the previous
+  // pass missed. `apiFetch` throws on a non-2xx status, and on a 2xx
+  // whose body carries an `error` key. A brain that predates the status
+  // fix answers a reload that did nothing with HTTP 200 and
+  // `{"ok": false, "skill_id": "..."}` with no `error` key, so neither
+  // trigger fires. `await apiFetch(...)` resolved, nothing threw, and
+  // `setReloaded(id)` painted "Hot-reloaded <id>" over a skill whose
+  // code had not moved. The response body was never read at all, which
+  // is the same "report success without checking the result" shape the
+  // rest of this file was rewritten to remove. So: read the body, and
+  // treat `ok: false` as the failure it is regardless of the status.
   const reload = async (id) => {
     setReloading(id);
     setReloadError(null);
     setReloaded(null);
+    const path = `/api/skills/reload?skill_id=${encodeURIComponent(id)}`;
     try {
-      await apiFetch(`/api/skills/reload?skill_id=${encodeURIComponent(id)}`, { method: 'POST' });
+      const response = await apiFetch(path, { method: 'POST' });
+      const body = await response.json().catch(() => null);
+      if (body && body.ok === false) {
+        throw new ApiError({
+          status: response.status,
+          code: body.code || '',
+          detail: body.error || `the brain did not reload ${id}, and did not say why`,
+          raw: body,
+          path,
+        });
+      }
       await refreshSkills();
       setReloaded(id);
     } catch (err) {
-      setReloadError({ id, error: toApiError(err) });
+      setReloadError({ id, error: toApiError(err, path) });
     } finally {
       setReloading(null);
     }
