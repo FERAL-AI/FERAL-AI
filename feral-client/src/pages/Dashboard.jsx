@@ -135,7 +135,7 @@ export default function Dashboard() {
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Control Center</h1>
             <p className="text-xs text-feral-text-muted mt-0.5">
-              FERAL Brain v{info?.version || '2026.8.10'}
+              FERAL Brain v{info?.version || '2026.8.11'}
               {d.llm_available && <span className="ml-2 text-emerald-400">LLM ready</span>}
             </p>
           </div>

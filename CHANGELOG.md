@@ -1,10 +1,145 @@
 # Changelog
 
-<!-- feral-version: 2026.8.10 -->
+<!-- feral-version: 2026.8.11 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.11] - 2026-08-16 - checks that could not fail, and a door that was locked
+
+Two themes. Things that reported success without checking anything, and a
+third-party path that could not be walked end to end by anyone outside
+this repo.
+
+### BREAKING
+
+- **`POST /api/marketplace/install` and `POST /api/apps/install` now
+  require an `install_token`** from the matching `/preview`, and answer
+  403 without one. Anything scripted against the old shape must take the
+  two steps. `feral install` and `feral app install` do this for you.
+
+### Fixed
+
+- **A third-party skill could declare itself safe and never prompt.**
+  `safety_resolver` returned a manifest's own `safety_tier` before
+  consulting the danger map, and the only gate above it was a deny list of
+  first-party tool names a third-party id cannot match. So an installed
+  skill declaring `safety_tier: "safe"` executed with no confirmation, on
+  every surface, indefinitely. The same clamp `result_budget` already
+  applied to a less important field now applies here: a third party may
+  escalate, never de-escalate. There were two doors, not one; `is_read_only`
+  skips approval outright under `FERAL_AUTONOMY=strict` and is clamped too.
+
+- **Installing an app silently installed code.** An `AppManifest` declares
+  `skill_dependencies`, and the install path resolved them through the
+  unverified developer path whose own log line reads `UNVERIFIED INSTALL`.
+  Skills execute Python in-process at boot. Both install paths now preview,
+  disclose the transitive skill set in three buckets, and bind a
+  single-use token to the sha256 of the verified tarball, so what was
+  agreed to and what installs are provably the same artifact.
+
+- **The sandbox policy had one enforcement call site.**
+  `can_use_actuator`, `can_capture_camera`, `can_use_mcp_server` and
+  `can_access_domain` had none, so cameras, actuators, MCP servers and the
+  HTTP domain allowlist failed open with a complete and correct policy,
+  because nothing asked. Four also failed open on a partial policy, where
+  an empty allowlist meant allow-everything while `can_access_domain` in
+  the same class meant allow-nothing.
+
+- **The desktop app shipped a virtualenv pointing at the build machine.**
+  `uv python find` resolves the ambient project environment before the
+  managed install, so the staged interpreter was the repo's own `.venv`:
+  `pyvenv.cfg` naming an absolute home, `lib/python3.11/` holding only
+  site-packages, no stdlib. The shipped app loaded its standard library
+  from the builder's home directory and could not start anywhere else. It
+  was self-perpetuating, because the reuse guard matched on version alone.
+
+- **The release wheel smoke test was satisfied by the failure it existed
+  to catch.** Its root assertion was "200, contains FERAL and v2, lacks
+  leaflet", and the page served when the wheel ships *without* the v2
+  bundle satisfies all three. It now reads the hashed entry points out of
+  `index.html` and fetches each over HTTP.
+
+- **`feral publish --skill` could not publish.** Three stacked blockers:
+  the posted manifest had no `kind` or `name`, the signature covered the
+  raw digest where every verifier uses hex-ASCII, and `--daemon` lacked
+  `node_id`. The second was masked by the first and was documented as
+  already-correct in a comment on a sibling file.
+
+- **The registry could not be asked for an item by name.**
+  `/api/v1/item/{ref}` resolved only the UUID primary key while every
+  caller passes a name, so every declared skill dependency resolved as
+  "not published" and every app installed degraded. It now resolves id
+  then name, answers ambiguity explicitly (409 across kinds, highest
+  version within one kind, 409 for version sets that cannot be ordered)
+  rather than guessing.
+
+- **The skill validator rejected every skill containing Python.** It
+  scanned raw source for dangerous calls with a substring test, and `exec`
+  is a substring of `execute`, the mandatory entry point of every skill.
+  28 of 29 shipped skills were flagged, 25 solely on that collision. Since
+  the validator gates the Marketplace preview, the web install and every
+  app dependency refused any real skill. It now matches call nodes.
+
+- **`feral doctor` reported voice healthy from a key's existence.** An
+  install whose key had been rotated printed red "key rejected by API" in
+  one section and green "Voice runtime: key set" four blocks later.
+
+- **A corrupt settings file silenced the network-exposure warning.** The
+  bind-host read substituted `""` on any error and logged nothing, and
+  empty reads as loopback-safe, so the one warning that says this brain is
+  reachable from the network with authentication off disappeared.
+
+- Four more silent degradations now say what was lost: the probe sweeper
+  failing to start, the default-namespace vault fallback, an `ImportError`
+  from FERAL's own code filed as "missing dependency", and the boot
+  report's advice to install something no install could fix.
+
+### Changed
+
+- **`make lint` lints.** It ran pytest with `2>/dev/null || true`,
+  reported success unconditionally including when every test failed, and
+  linted nothing. **`make test` runs both suites**; it ran only the Python
+  side, so changing a page and running it gave a green result that had not
+  executed one line of the change. `ruff` is declared in `[dev]` rather
+  than installed inline by CI.
+
+- **The mypy ratchet can fail.** It had three stacked levers making it
+  advisory, and a crashed mypy produced empty output that counted as zero
+  errors and read as "all 683 fixed". The audits no longer launder their
+  own exit codes.
+
+- **Four committed test suites now run in CI**: the 13 client e2e specs
+  (whose config cited a workflow file that has never existed),
+  `feral-extension`, `ts-node-sdk`, and the Mintlify nav check.
+
+- `make dev-deps` installs `feral-client-v2`, which it never did, and
+  downloads the Playwright browser, which `npm install` does not fetch.
+  Two e2e specs had been unrunnable and the rest borrowed the system
+  Chrome.
+
+- `make test-py` echoes its seed, so a shuffled failure can be replayed
+  with `make test-py PYTEST_SEED=N`.
+
+### Known issues
+
+- Two order-dependent test failures remain, in `test_cli_repl_websockets`
+  and `test_embeddings_local_first`. Both pass in isolation. They are
+  tracked as real bugs rather than filed as flaky, and the seed change
+  above is what makes them reproducible.
+- `MarketplaceClient.update` remains unverified and unconsented: an update
+  can widen a skill's permissions with nobody asked. Install is gated;
+  update is not.
+- The desktop app builds on no automatic trigger, and `scripts/install.sh`,
+  the installer users actually run, is executed by no CI job.
+
+### Coverage
+- pytest (feral-core): 8157 collected, 8126 passed, 31 skipped.
+- pytest (feral-registry): 91 passed.
+- vitest (feral-client-v2): 848 passed across 125 files.
+- playwright e2e: 13 passed on chromium.
+
 
 ## [2026.8.10] - 2026-08-15 - the interface stops asserting what it never checked
 
