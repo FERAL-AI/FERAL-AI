@@ -306,12 +306,32 @@ docker-logs:
 
 # ── Testing & quality ────────────────────────────────────────
 
-test:
-	cd feral-core && $(PYTHON) -m pytest tests/ -v
+# Both suites, because the client is half the product and `make test` used to
+# run only the Python side. A contributor who changed a page and ran `make
+# test` got a green result that had not executed one line of their change.
+test: test-py test-client
 
+test-py:
+	cd feral-core && $(PYTHON) -m pytest tests/ -q --no-cov
+
+test-client:
+	@if [ -d feral-client-v2 ] && command -v npm >/dev/null 2>&1; then \
+		cd feral-client-v2 && npm test; \
+	else \
+		echo "  [skip] feral-client-v2 tests (npm not found)"; \
+	fi
+
+# This target used to run pytest with `2>/dev/null || true`: stderr discarded,
+# exit code forced to zero. It reported success unconditionally, including
+# when every test in the repo failed, and it did not lint anything. A gate
+# that cannot fail is worse than no gate, because people trust it.
+#
+# It now runs the exact ruff invocation CI runs, so a green `make lint` and a
+# green CI mean the same thing. The ignore list is CI's, not a preference:
+# keep the two in step or this stops being a preview of the gate.
 lint:
-	cd feral-core && $(PYTHON) -m pytest tests/ -v --tb=short -q 2>/dev/null || true
-	@echo "  (Full lint tooling planned — currently relies on pytest)"
+	cd feral-core && $(PYTHON) -m ruff check \
+		--select=E,F,W --ignore=E501,E402,F401,W291,W293 .
 
 # ── Utilities ────────────────────────────────────────────────
 
