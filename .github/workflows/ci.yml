@@ -43,8 +43,41 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install ruff
-        run: pip install ruff
+      # NOT a bare `pip install ruff`. ruff is the linter that blocks merges,
+      # and it used to be declared in no manifest at all: CI installed it
+      # unpinned from PyPI, so a fresh `.venv[dev]` could not run the gate and
+      # a new ruff release could turn the build red with no version recorded
+      # anywhere in the repo. The bound now lives in
+      # feral-core/pyproject.toml's [dev] extra (`make lint` gets it from
+      # there). This step READS that bound rather than restating it, because a
+      # restated version is a version that drifts.
+      - name: Install ruff (bound read from pyproject.toml [dev])
+        shell: bash
+        run: |
+          set -euo pipefail
+          spec="$(python - <<'PY'
+          import pathlib
+          import sys
+          import tomllib
+
+          data = tomllib.loads(
+              pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          )
+          dev = data["project"]["optional-dependencies"]["dev"]
+          for dep in dev:
+              if dep.replace(" ", "").lower().startswith("ruff"):
+                  print(dep)
+                  break
+          else:
+              sys.exit(
+                  "no ruff requirement in [project.optional-dependencies].dev "
+                  "of feral-core/pyproject.toml; the lint gate has no pinned "
+                  "tool to install"
+              )
+          PY
+          )"
+          echo "installing ${spec}"
+          pip install "${spec}"
 
       - name: Run ruff
         run: ruff check --output-format=github --select=E,F,W --ignore=E501,E402,F401,W291,W293 .
@@ -84,19 +117,63 @@ jobs:
           pip install mypy==1.20.2
 
       - name: Run mypy
+        shell: bash
         run: |
+          set -uo pipefail
           # Config lives in feral-core/mypy.ini so this matches a local run.
           # It enables the pydantic plugin, without which Field("", ...) is
           # read as a required field and every construction that omits it is
           # reported as call-arg.
+          #
+          # `|| true` on the mypy line only: with a 683-error baseline mypy
+          # always exits non-zero, and the exit code is not the signal we
+          # want — the COUNT is. The count is checked below and does fail.
           mypy . | tee mypy-current.txt || true
+
           echo "--- baseline comparison ---"
-          baseline=$(grep -cE '^\S+\.py:[0-9]+: error:' mypy-baseline.txt || echo 0)
-          current=$(grep -cE '^\S+\.py:[0-9]+: error:' mypy-current.txt || echo 0)
+          # A missing baseline file used to fall through `|| echo 0` to a
+          # baseline of zero, which silently converts the ratchet into
+          # "any error at all is a regression" and would fire on every run.
+          # A ratchet with no baseline is not a lenient ratchet, it is a
+          # broken one; say so instead of guessing.
+          if [ ! -f mypy-baseline.txt ]; then
+            echo "::error::mypy-baseline.txt is missing; the ratchet has nothing to compare against"
+            exit 1
+          fi
+          # A crashed mypy writes little or nothing to mypy-current.txt, and
+          # `|| true` on the run above means a crash and a clean run are the
+          # same exit code. Counting errors in an empty file yields 0, which
+          # the ratchet would read as "all 683 errors fixed" and celebrate.
+          # mypy always terminates with one of these two summary lines, so
+          # their absence means it did not finish. This is the difference
+          # between a tolerated failure and an undetected one.
+          if ! grep -qE '^(Found [0-9]+ error|Success: no issues found)' mypy-current.txt; then
+            echo "::error::mypy did not produce a summary line; it crashed or was killed rather than finding zero errors"
+            tail -30 mypy-current.txt
+            exit 1
+          fi
+          baseline=$(grep -cE '^\S+\.py:[0-9]+: error:' mypy-baseline.txt || true)
+          current=$(grep -cE '^\S+\.py:[0-9]+: error:' mypy-current.txt || true)
+          baseline=${baseline:-0}
+          current=${current:-0}
           echo "baseline: ${baseline} errors"
           echo "current : ${current} errors"
+
+          # This step FAILS on a rise. The job stays non-blocking via the
+          # single `continue-on-error: true` on the job above; that is the
+          # one lever, deliberately chosen and documented there. Previously
+          # there were three stacked (job continue-on-error, `|| true` on the
+          # whole comparison, and a warning-only branch), so the ratchet
+          # could not even report red on its own step. A ratchet that only
+          # ever prints a warning is a number nobody watches.
           if [ "${current}" -gt "${baseline}" ]; then
-            echo "::warning::mypy errors rose from ${baseline} to ${current}"
+            echo "::error::mypy errors rose from ${baseline} to ${current}. Fix the new errors, or regenerate mypy-baseline.txt in the same commit with a reason."
+            diff <(grep -oE '^\S+\.py' mypy-baseline.txt | sort | uniq -c | sort -rn) \
+                 <(grep -oE '^\S+\.py' mypy-current.txt  | sort | uniq -c | sort -rn) || true
+            exit 1
+          fi
+          if [ "${current}" -lt "${baseline}" ]; then
+            echo "::notice::mypy errors fell from ${baseline} to ${current}. Regenerate mypy-baseline.txt to lock the improvement in."
           fi
 
   brain-tests:
@@ -152,7 +229,24 @@ jobs:
         run: pip install --constraint requirements.lock -e ".[all,dev]"
 
       - name: Audit Python dependencies
-        run: pip install pip-audit && pip-audit --strict 2>&1 || echo "::warning::pip-audit found vulnerabilities"
+        # OPTIONAL gate, one lever only. It used to carry BOTH
+        # `|| echo "::warning::..."` and `continue-on-error: true`: the
+        # `|| echo` made the step exit 0 unconditionally, so
+        # `continue-on-error` was dead configuration and the step could not
+        # even render as failed-but-tolerated. Worse, the `|| echo` also
+        # swallowed a pip-audit that never ran (network failure, resolver
+        # error) as if it were a clean audit.
+        #
+        # Now: no exit-code laundering. `continue-on-error: true` is the
+        # single, deliberate lever. WHAT IS LOST when it trips: a known-CVE
+        # dependency can still merge. That is accepted because a new
+        # advisory against a transitive pin lands with no code change and
+        # must not block unrelated PRs at 3am. It is visible as a red
+        # (tolerated) step, which a `::warning::` in a green log is not.
+        run: |
+          set -euo pipefail
+          pip install pip-audit
+          pip-audit --strict
         continue-on-error: true
 
       - name: Run tests with coverage (50% threshold)
@@ -251,12 +345,32 @@ jobs:
         run: npm run build
 
       - name: Audit npm dependencies
-        run: npm audit --audit-level=high 2>&1 || echo "::warning::npm audit found vulnerabilities"
+        # OPTIONAL, same reasoning as the pip-audit step in brain-tests:
+        # `|| echo` forced exit 0 and made `continue-on-error` unreachable.
+        # WHAT IS LOST when it trips: a high-severity advisory in the npm
+        # tree can still merge; it shows as a red tolerated step rather than
+        # a warning buried in a green log.
+        run: npm audit --audit-level=high
         continue-on-error: true
 
       - name: Coverage gate note
+        shell: bash
+        # The numbers used to be hard-coded here as "20/40/18/20" while
+        # vitest.config.js actually enforces 20/18/18/20. The branches figure
+        # was overstated by more than 2x, so the log advertised a gate
+        # stronger than the one that runs. Read them out of the config so the
+        # note cannot drift from the gate it describes.
         run: |
-          echo "::notice::vitest coverage gate: 20/40/18/20 (stmts/branches/funcs/lines)."
+          set -euo pipefail
+          node -e '
+            const src = require("fs").readFileSync("vitest.config.js", "utf8");
+            const pick = (k) => {
+              const m = src.match(new RegExp(k + "\\s*:\\s*(\\d+)"));
+              if (!m) { console.error("could not read " + k + " threshold"); process.exit(1); }
+              return m[1];
+            };
+            console.log(`::notice::vitest coverage gate: ${pick("statements")}/${pick("branches")}/${pick("functions")}/${pick("lines")} (stmts/branches/funcs/lines), read live from vitest.config.js.`);
+          '
           echo "::notice::New pages, hooks, or lib files must ship with a matching smoke test in src/__tests__/ so this gate stays honest."
 
       - name: Run tests with coverage
@@ -284,10 +398,145 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Run tests with coverage (25/18/19/27)
+      # The step name used to restate the thresholds as "(25/18/19/27)" while
+      # vitest.config.js enforces 33/26/27/35. Restating a number in a step
+      # name guarantees it goes stale, and a stale claim about a gate is the
+      # same defect as a gate that cannot fail: people read the label, not
+      # the config. The name no longer carries numbers; the real ones are
+      # printed below, live.
+      - name: Run tests with coverage
         # Thresholds live in vitest.config.js — the ratchet is documented
         # in docs/coverage.md. Raising them is a single-file change.
         run: npm run test:coverage
+
+  client-v2-e2e:
+    # ─────────────────────────────────────────────────────────────
+    # This job did not exist. `@playwright/test` was a declared
+    # devDependency, five specs were committed under
+    # feral-client-v2/e2e/, and NOTHING ran them: not CI, and until
+    # recently not the Makefile either. playwright.config.ts still
+    # points at ".github/workflows/v2-e2e.yml" as the thing that owns
+    # the "full e2e program" — that file has never existed in this
+    # repo, so the comment described a workflow nobody wrote.
+    #
+    # The specs were not merely unrun, they had adapted to not being
+    # run: two of them pinned `channel: 'chrome'` to borrow whatever
+    # Chrome the developer's machine happened to have, because the
+    # Playwright browser binaries were never downloaded anywhere. Both
+    # pins are gone; this job downloads chromium explicitly.
+    #
+    # REQUIRED, not optional. It fails the build like any other test
+    # job. It covers what jsdom structurally cannot see: layout,
+    # scroll containment, overlap, focus rings, painted colour.
+    # ─────────────────────────────────────────────────────────────
+    name: Client v2 — playwright e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: feral-client-v2
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: feral-client-v2/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # npm install does NOT fetch browser binaries. Without this step every
+      # spec fails to launch, which is the gap that produced the
+      # `channel: 'chrome'` workaround in the first place. No `|| true`:
+      # if the browser cannot be fetched the specs cannot run, and a job
+      # that reports success without running its specs is the defect this
+      # job exists to close.
+      - name: Install Playwright chromium
+        run: npm run e2e:install
+
+      # playwright.config.ts starts `npm run preview` against dist/, so the
+      # production-style bundle must exist before the specs run.
+      - name: Build the bundle the specs run against
+        run: npm run build
+
+      - name: Run e2e specs
+        run: npm run e2e
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: feral-client-v2/playwright-report/
+          if-no-files-found: warn
+          retention-days: 7
+
+  extension-tests:
+    # feral-extension ships three committed vitest suites (19 tests) and a
+    # package-lock.json, and Dependabot opens weekly bump PRs against it —
+    # against a package no CI job has ever installed, built or tested. A
+    # bump PR therefore went green having compiled nothing. Declared tests
+    # nobody runs are the same defect as a gate that cannot fail; they just
+    # fail more quietly.
+    name: Extension — vitest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: feral-extension
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: feral-extension/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  ts-node-sdk:
+    # feral-nodes/ts-node-sdk declares `build`, `test` and `typecheck`
+    # scripts, has two committed vitest suites (25 tests), and is a
+    # Dependabot npm ecosystem. Nothing in CI ran any of the three.
+    # CLAUDE.md trap 6 recorded this ("the TypeScript, Swift, and Kotlin
+    # SDKs are never compiled by CI at all") as a known gap; the
+    # TypeScript half of it is now closed. Swift and Kotlin remain open.
+    name: SDK — ts-node-sdk typecheck + vitest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: feral-nodes/ts-node-sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: feral-nodes/ts-node-sdk/package-lock.json
+
+      - name: Install dependencies
+        # `prepare` runs `tsc`, so npm ci already fails on a type error.
+        # The explicit typecheck step below is kept anyway: it reports the
+        # failure under its own name instead of as "npm ci failed".
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
 
   webui-v2-coherence:
     name: WebUI v2 — bundled asset coherence
@@ -351,9 +600,34 @@ jobs:
           python-version: "3.11"
 
       - name: Check Python syntax (all .py files)
+        shell: bash
         run: |
-          find . -name '*.py' -not -path './.git/*' -not -path './venv/*' \
-            | xargs python -m py_compile
+          set -euo pipefail
+          # `find | xargs` is a vacuous pass if find ever matches nothing:
+          # xargs then runs `python -m py_compile` with no arguments, which
+          # exits 0. Count first and refuse to report success on an empty
+          # set. -r/--no-run-if-empty keeps xargs from firing at all in that
+          # case; the count check is what actually fails the step.
+          #
+          # build/ is excluded: feral-core/build/lib is a complete duplicate
+          # of the source tree (trap 1 in CLAUDE.md), so compiling it doubles
+          # the work and reports the same file twice.
+          # Deliberately two `find` passes rather than one `mapfile`: mapfile
+          # is a bash-4 builtin, and while the runner has bash 5 it cannot be
+          # exercised on a stock macOS bash 3.2, so the form that was verified
+          # before commit is the one that ships.
+          FIND_ARGS=(. -name '*.py'
+            -not -path './.git/*'
+            -not -path './venv/*'
+            -not -path './build/*'
+            -not -path './dist/*')
+          COUNT=$(find "${FIND_ARGS[@]}" | wc -l | tr -d ' ')
+          echo "compiling ${COUNT} Python files"
+          if [ "${COUNT}" -eq 0 ]; then
+            echo "::error::no .py files found; this check would pass vacuously"
+            exit 1
+          fi
+          find "${FIND_ARGS[@]}" -print0 | xargs -0 python -m py_compile
 
   boundary-check:
     name: Architecture boundaries
@@ -364,12 +638,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check skill boundaries
+        shell: bash
         run: |
-          echo "Checking that skill implementations don't import core modules..."
+          set -uo pipefail
+          # The `|| true` below is correct and necessary — grep exits 1 when
+          # it finds nothing, which is the PASS case. But it also swallows
+          # grep's exit 2, so if skills/impl/ were ever renamed or removed
+          # this check would print "PASS: No boundary violations" forever
+          # while scanning nothing. Assert the target exists and is
+          # non-empty first, so a vacuous pass is impossible.
+          if [ ! -d skills/impl ]; then
+            echo "::error::feral-core/skills/impl does not exist; this check would pass vacuously"
+            exit 1
+          fi
+          SCANNED=$(find skills/impl -name '*.py' -not -name '__init__.py' | wc -l | tr -d ' ')
+          if [ "$SCANNED" -eq 0 ]; then
+            echo "::error::no .py files under feral-core/skills/impl; this check would pass vacuously"
+            exit 1
+          fi
+          echo "Checking ${SCANNED} skill implementations for core-module imports..."
           VIOLATIONS=$(grep -rn "^from agents\.\|^from api\.\|^from memory\.\|^import agents\|^import api\|^import memory" skills/impl/ --include="*.py" | grep -v "# boundary-ok" | grep -v "__init__.py" || true)
           if [ -n "$VIOLATIONS" ]; then
             echo "BOUNDARY VIOLATIONS FOUND:"
             echo "$VIOLATIONS"
             exit 1
           fi
-          echo "PASS: No boundary violations"
+          echo "PASS: No boundary violations across ${SCANNED} files"

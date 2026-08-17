@@ -28,22 +28,50 @@ Version `2026.8.8`. Public beta. Single-user local deployment is the only suppor
 
 ```bash
 make dev                                  # build pinned .venv, install feral-core[all,dev] + client deps
-make test                                 # cd feral-core && python -m pytest tests/ -v
+make test                                 # both suites: test-py + test-client
+make test-py                              # cd feral-core && python -m pytest tests/ -q --no-cov  (~6 min)
+make test-client                          # cd feral-client-v2 && npm test  (125 files / 848 tests)
+make e2e                                  # cd feral-client-v2 && npm run e2e  (13 playwright specs)
+make lint                                 # ruff, the exact ruleset CI gates on
 make serve                                # feral serve
 make doctor                               # feral doctor — reports real runtime state
 ```
 
 `make dev` installs into `.venv/` at the repo root, built from `.python-pin`, and every other target routes through it. It needs `uv >= 0.12` and fetches a repo-local one if your machine has none. See below.
 
+`make lint` **does** lint. It used to run pytest with `2>/dev/null || true` and print a note, so it reported success unconditionally and linted nothing; it now runs the ruff invocation below verbatim, and a green `make lint` and a green CI lint job mean the same thing.
+
+`make test` **does** run both suites. It used to run only the Python side, so changing a page and running `make test` gave a green result that had not executed one line of the change.
+
+`make e2e` needs the Playwright browser, which `npm install` does not fetch. `make dev-deps` downloads chromium; the target fails loudly rather than silently if it is missing, and builds `dist/` for you if it is absent.
+
 CI equivalents (what actually gates a PR):
 
 ```bash
+# lint job — ruff's version bound comes from feral-core/pyproject.toml [dev],
+# which is also what `make lint` uses. CI reads the bound out of the manifest
+# rather than restating it.
 cd feral-core && ruff check --select=E,F,W --ignore=E501,E402,F401,W291,W293 .
+
+# install, both pytest jobs
 cd feral-core && pip install --constraint requirements.lock -e ".[all,dev]"
-cd feral-core && python -m pytest tests/ --cov --cov-fail-under=50
+
+# PR fast lane (brain-tests-pr): skips tests/perf, 60s per-test ceiling
+cd feral-core && python -m pytest tests/ -p no:randomly -v --cov --cov-fail-under=50 \
+  --ignore=tests/perf --timeout=60 --timeout-method=thread
+
+# push-to-main matrix (brain-tests): 3.11 + 3.12, includes tests/perf, 300s ceiling
+cd feral-core && python -m pytest tests/ -p no:randomly -x --cov --cov-fail-under=50 \
+  --timeout=300 --timeout-method=thread
+
+# client-v2 vitest coverage gate (thresholds live in vitest.config.js)
+cd feral-client-v2 && npm run test:coverage
+
+# client-v2 playwright e2e (job `client-v2-e2e`, REQUIRED)
+cd feral-client-v2 && npm ci && npm run e2e:install && npm run build && npm run e2e
 ```
 
-`make lint` does **not** lint — it runs pytest and prints a note. Use the ruff line above.
+`--strict-markers` is on in `[tool.pytest.ini_options]`. An unrecognised or undeclared marker is a collection **error**, not a warning, so `markers` in `pyproject.toml` describes what actually exists. Declare a new marker there before using it.
 
 ## The interpreter: pinned for dev, bundled for users
 
@@ -108,16 +136,22 @@ After removing it, both resolve normally again. `.python-pin` is read only by th
 
 `desktop/` ships its own interpreter. `desktop/scripts/stage_bundle.sh` (run automatically by `tauri build`, or by hand with `npm run stage:bundle`) stages into `desktop/src-tauri/resources/`:
 
-- `feral-core/`: the brain source, because the app starts it as `python -m api.server` with cwd set here. `build/`, `tests/` and caches are excluded; shipping `feral-core/build/lib/` would put a stale second copy of `agents/`, `api/` and `memory/` on the path (trap 1 below).
-- `python/`: a relocatable python-build-standalone CPython at the version in `.python-pin`, with `feral-core[llm]` installed **non-editable** (an editable install writes the build machine's path into a `.pth`).
+- `feral-core/`: the brain source **and the built `webui_v2/` dashboard**, because the app starts it as `python -m api.server` with cwd set here. `build/`, `tests/`, caches and `.venv/` are excluded; shipping `feral-core/build/lib/` would put a stale second copy of `agents/`, `api/` and `memory/` on the path (trap 1 below).
+- `python/`: a relocatable python-build-standalone CPython at the version in `.python-pin`, with `feral-core[llm]` installed **non-editable** into the interpreter's own `site-packages` (an editable install writes the build machine's path into a `.pth`).
 
-The script verifies FTS5 on the staged interpreter and imports the brain under it before declaring success, because a bundled interpreter without FTS5 produces an app that installs, launches, and whose health dot simply never turns green. Payload is ~460MB (110MB core, 347MB interpreter), which is what makes the resulting `.app` ~517MB.
+**A python-build-standalone installation, never a virtualenv.** This is the load-bearing distinction and it was got wrong in a shipped build. A pbs install is relocatable: stdlib under its own `lib/`, internal symlinks relative. A venv is not relocatable in any sense: `pyvenv.cfg` names an absolute `home =`, `bin/python` is a symlink to that absolute path, and `lib/pythonX.Y/` holds only `site-packages` with no stdlib at all. `uv python find "$PIN"` resolves the ambient project environment *before* the managed install, so run from the repo root it answers `$REPO_ROOT/.venv/bin/python3`, and the script staged the development virtualenv. Measured on the `.app` in `desktop/src-tauri/target/release/bundle/` at the time this was found, the shipped interpreter's `os.__file__` was `/Users/<builder>/.local/share/uv/python/cpython-3.11.15-.../lib/python3.11/os.py`. That is the `CARGO_MANIFEST_DIR` defect reintroduced in the payload instead of the binary. Use `uv python find --managed-python --system --no-project`, and installing into the result needs `uv pip install --break-system-packages` because uv marks its managed installs externally managed and suggests a venv, which is the one thing that cannot be bundled.
+
+The script now fails the build (never warns) unless: the v2 dashboard and every asset its `index.html` references are staged; the staged interpreter is self-contained (`sys.base_prefix` and the stdlib both resolve inside the payload, no `pyvenv.cfg`); no symlink in the payload resolves outside it; no `.pth` names the build machine's checkout; FTS5 works; the brain's modules import; and the imported brain reports web UI variant `v2`. Reuse of an already-staged interpreter is gated on self-containment as well as version, because matching on version alone is what let the broken venv survive every subsequent build. Payload is ~525MB (110MB core, 415MB interpreter: 78MB CPython plus dependencies).
+
+The failure mode all of this is designed against is a single symptom with many causes: an app that installs, launches, and whose health dot never turns green, or turns green over a brain with no dashboard behind it.
 
 `desktop/src-tauri/src/main.rs` resolves both at **run** time. It used to use `env!("CARGO_MANIFEST_DIR")`, a compile-time constant, so the shipped binary carried the build machine's source path and `start_brain` returned Err on every other machine; and it spawned bare `python3` from the user's PATH, which is an interpreter the app knows nothing about. Now:
 
 - feral-core: `FERAL_CORE_DIR` → `Contents/Resources/feral-core` → an upward walk from the executable (bounded to 8 levels) looking for `feral-core/api/server.py`.
 - interpreter: `FERAL_PYTHON` → `Contents/Resources/python/bin/python3` → the repo's `.venv` for dev builds. Every candidate is capability-probed for FTS5 before use, and PATH is never consulted.
 - `brain_runtime_info` (Tauri command) reports what was resolved.
+
+Both the health probe and the interpreter capability probe are **time-bounded**. `reqwest::blocking::get` and `Command::output()` each wait forever by default, and the health probe runs on a 2 second tray loop: a brain that accepts a connection and never answers used to park that thread and freeze the tooltip on its last value, which for a brain that came up and then hung is the green dot. `probe_health_at` uses a 1s connect / 2s total timeout and reports a silent brain differently from an absent one; `output_with_timeout` kills a probe that outlives `PROBE_TIMEOUT`.
 
 ### What is still not fixed
 
@@ -147,7 +181,11 @@ For tools, this trap is worse than a skewed count — it takes them to zero. `my
 
 **5. `ruff` runs on `--select=E,F,W` minus six ignores** — roughly 1.5% of its rules, with `F401` (unused imports) disabled. A clean ruff run means very little.
 
-**6. Only `feral-core` is in CI.** `feral-registry`, `feral-nodes`, `feral-relay`, `scripts`, `sdk/python`, `packages` (102 Python files total) have zero lint and zero tests. The TypeScript, Swift, and Kotlin SDKs are never compiled by CI at all.
+**6. Only `feral-core` is in CI** on the Python side. `feral-registry`, `feral-nodes`, `feral-relay`, `scripts`, `sdk/python`, `packages` (102 Python files total) have zero lint and zero tests. The **Swift and Kotlin** SDKs are still never compiled by CI. On the JS/TS side CI now covers: `feral-client` (v1, build + vitest), `feral-client-v2` (build + vitest coverage + playwright e2e), `feral-extension` (vitest), and `feral-nodes/ts-node-sdk` (typecheck + build + vitest). The last two were added after an audit found they had committed test suites, lockfiles, and weekly Dependabot bump PRs, but no job that installed or ran them.
+
+`desktop/` is still uncovered: it is a Dependabot npm ecosystem whose only workflow is `workflow_dispatch:`, so a bump PR there builds nothing.
+
+**7. `desktop/` is built by no automatic trigger.** `.github/workflows/desktop.yml` is `workflow_dispatch:` only — deliberately, per the note at the top of that file, because the artifacts are not shipped until signing certs land. A change to `desktop/src-tauri/` compiles in no CI run until somebody dispatches it by hand.
 
 ## Conventions
 

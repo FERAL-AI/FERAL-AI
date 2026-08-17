@@ -1,4 +1,4 @@
-.PHONY: install dev dev-python dev-brain dev-deps dev-verify dev-reset guard-python-version serve client docker docker-down test lint clean clean-uv setup doctor
+.PHONY: install dev dev-python dev-brain dev-deps dev-verify dev-reset guard-python-version serve client docker docker-down test test-py test-py-ci test-client e2e lint clean clean-uv setup doctor bundle-webui docker-logs help
 
 # ── Pinned development interpreter ───────────────────────────
 #
@@ -276,8 +276,30 @@ dev-deps:
 # browser and a built bundle, so they are slower and have a hard dependency
 # `make test` does not. They cover what jsdom structurally cannot see, which is
 # layout, scroll containment, overlap, focus rings and painted colour.
+#
+# The two preconditions are checked rather than assumed, because both fail in
+# ways that are easy to misread:
+#
+#   1. No chromium: playwright exits with "Executable doesn't exist at
+#      .../chromium-*/chrome" per spec. Thirteen identical launch errors read
+#      as a broken suite, not a missing download. `make dev-deps` fetches it.
+#   2. No dist/: playwright.config.ts starts `npm run preview`, which serves
+#      dist/. Without a build, preview serves nothing and every spec times out
+#      waiting for the baseURL. That reads as a hang, not a missing build.
+#
+# These are hard errors, not warnings. An e2e target that cannot launch a
+# browser must not exit 0.
 e2e:
-	cd feral-client-v2 && npx playwright test
+	@if [ ! -d feral-client-v2/node_modules/@playwright ]; then \
+	    echo "  [error] @playwright/test is not installed in feral-client-v2."; \
+	    echo "          Run:  make dev-deps"; \
+	    exit 1; \
+	fi
+	@if [ ! -d feral-client-v2/dist ]; then \
+	    echo "  [info] feral-client-v2/dist is missing; building it first."; \
+	    (cd feral-client-v2 && npm run build) || exit 1; \
+	fi
+	cd feral-client-v2 && npm run e2e
 
 serve:
 	$(FERAL) serve
@@ -311,15 +333,60 @@ docker-logs:
 # test` got a green result that had not executed one line of their change.
 test: test-py test-client
 
+# pytest-randomly is a [dev] dependency, so it is ACTIVE here and shuffles
+# collection order with a fresh seed on every run. That is deliberate (it is
+# how order-dependent bleed gets surfaced before CI, per the policy note in
+# feral-core/pyproject.toml) and CI deliberately runs the other way, with
+# `-p no:randomly`, so a CI result is reproducible and bisectable.
+#
+# What was broken is the pairing of that shuffle with `-q`: pytest suppresses
+# the header under `-q`, and the header is the only place pytest-randomly
+# prints "Using --randomly-seed=N". So this target could fail on an order
+# dependency and discard the one piece of information needed to reproduce it.
+# Re-running just drew a different seed and usually came back green, which
+# teaches people that a red `make test-py` means nothing.
+#
+# The seed is now chosen here and echoed, so every run is reproducible:
+#   make test-py PYTEST_SEED=1754000000
+# The randomness is unchanged; only its traceability is fixed.
 test-py:
-	cd feral-core && $(PYTHON) -m pytest tests/ -q --no-cov
+	@seed="$${PYTEST_SEED:-$$(date +%s)}"; \
+	echo "  pytest-randomly seed: $$seed"; \
+	echo "  reproduce this exact order with:  make test-py PYTEST_SEED=$$seed"; \
+	echo "  run in CI's deterministic order with:  make test-py-ci"; \
+	cd feral-core && $(PYTHON) -m pytest tests/ -q --no-cov --randomly-seed="$$seed"
 
+# The order CI actually runs. Use this to confirm a failure is real rather
+# than order-dependent, and to reproduce a CI result locally.
+test-py-ci:
+	cd feral-core && $(PYTHON) -m pytest tests/ -q --no-cov -p no:randomly
+
+# The npm-missing branch is an OPTIONAL skip and says what is lost, per the
+# same rule dev-deps follows: a contributor working only on Python should not
+# be blocked on a Node toolchain. It is a skip, never a silent pass — the
+# banner names the 125 spec files that did not run, so nobody reads a green
+# `make test` here as "the client is fine".
+#
+# The missing-node_modules branch is NOT lenient. `npm test` with no
+# node_modules fails with "vitest: not found", which reads as a broken repo
+# rather than an un-run install step.
 test-client:
-	@if [ -d feral-client-v2 ] && command -v npm >/dev/null 2>&1; then \
-		cd feral-client-v2 && npm test; \
-	else \
-		echo "  [skip] feral-client-v2 tests (npm not found)"; \
+	@if [ ! -d feral-client-v2 ]; then \
+	    echo "  [error] feral-client-v2 is missing from this tree."; \
+	    exit 1; \
 	fi
+	@if ! command -v npm >/dev/null 2>&1; then \
+	    echo "  [skip] feral-client-v2 vitest suite: npm not found on PATH."; \
+	    echo "         LOST: the entire client suite (125 spec files) did not run."; \
+	    echo "         Install Node >= 20 and run 'make dev-deps' to cover it."; \
+	    exit 0; \
+	fi; \
+	if [ ! -d feral-client-v2/node_modules ]; then \
+	    echo "  [error] feral-client-v2/node_modules is missing."; \
+	    echo "          Run:  make dev-deps"; \
+	    exit 1; \
+	fi; \
+	cd feral-client-v2 && npm test
 
 # This target used to run pytest with `2>/dev/null || true`: stderr discarded,
 # exit code forced to zero. It reported success unconditionally, including
@@ -370,7 +437,14 @@ help:
 	@echo "    make dev-verify    print this interpreter's SQLite features"
 	@echo "    make serve         start the brain server"
 	@echo "    make client        start the web UI dev server"
-	@echo "    make test          run tests"
+	@echo ""
+	@echo "  Testing & quality:"
+	@echo "    make test          both suites (test-py + test-client)"
+	@echo "    make test-py       feral-core pytest suite (shuffled; prints seed)"
+	@echo "    make test-py-ci    same suite in CI's deterministic order"
+	@echo "    make test-client   feral-client-v2 vitest suite only"
+	@echo "    make e2e           playwright browser specs (needs make dev-deps)"
+	@echo "    make lint          ruff, the exact ruleset CI gates on"
 	@echo ""
 	@echo "  Docker:"
 	@echo "    make docker        build and start all services"

@@ -11,9 +11,22 @@ jobs:
   chaos:
     name: Memory sync chaos + recovery
     runs-on: ubuntu-latest
-    # Allow this job to fail without blocking anything else; the point
-    # is to surface regressions, not gate releases. Logs always upload.
-    continue-on-error: true
+    # The job-level `continue-on-error: true` that used to be here was
+    # justified as "allow this job to fail without blocking anything else;
+    # the point is to surface regressions, not gate releases". Nothing was
+    # ever blocked by it: this workflow is `schedule` + `workflow_dispatch`
+    # only, it is not called by ci.yml or publish.yml, and no job anywhere
+    # `needs` it. What it actually did was mark the run successful whatever
+    # the chaos suite found, so a real recovery regression produced a green
+    # badge and no notification, and the summary it wrote was a page nobody
+    # had a reason to open.
+    #
+    # The property that WAS wanted is "run every step, collect every log,
+    # then report". That comes from the per-step `continue-on-error: true`
+    # below plus `if: always()` on the collection steps, not from the job
+    # level. Those are kept. The new gate step at the end converts the
+    # collected outcomes into the job's exit status, so the run is red
+    # exactly when the chaos suite found something.
     timeout-minutes: 20
     defaults:
       run:
@@ -31,19 +44,36 @@ jobs:
 
       - name: Run chaos pytest suite
         id: pytest
+        shell: bash
         run: |
+          # `set -o pipefail` is load-bearing, not hygiene. This command
+          # pipes into `tee`, and without pipefail the pipeline's exit
+          # status is tee's, which is 0 whenever tee could write the file.
+          # So this step recorded outcome=success on every run no matter
+          # what the chaos suite reported, and `continue-on-error: true`
+          # above it was masking a step that could not fail in the first
+          # place. soak-nightly.yml already had the pipefail; this file
+          # did not.
+          set -o pipefail
           mkdir -p artifacts
           pytest -m chaos -v --no-cov \
             --tb=short \
             tests/test_memory_sync_chaos.py \
             tests/test_memory_recovery.py \
             2>&1 | tee artifacts/pytest-chaos.log
+        # Kept so a failure here still lets the sync_kill leg and the
+        # forensics collection run. The job's status comes from the
+        # "Gate on chaos outcomes" step at the end.
         continue-on-error: true
 
       - name: Run sync_kill chaos script (5 iterations)
         id: sync_kill
         working-directory: ${{ github.workspace }}
+        shell: bash
         run: |
+          # See the pytest step: `| tee` without pipefail made this step
+          # unconditionally succeed.
+          set -o pipefail
           mkdir -p feral-core/artifacts
           python scripts/chaos/sync_kill.py \
             --iterations 5 \
@@ -51,6 +81,8 @@ jobs:
             --kill-grace 0.5 \
             --seed 1 \
             2>&1 | tee feral-core/artifacts/sync-kill.log
+        # Kept so the forensics collection still runs. Status is gated at
+        # the end of the job.
         continue-on-error: true
 
       - name: Collect /tmp/feral-chaos-* run dirs (forensics)
@@ -85,3 +117,28 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Artifacts uploaded as 'chaos-logs-${{ github.run_id }}'." \
             >> "$GITHUB_STEP_SUMMARY"
+
+      # This step is what makes the run's status mean something. The two
+      # chaos steps above keep `continue-on-error: true` so that a failure
+      # in the first does not skip the second and lose half the forensics;
+      # this converts their recorded outcomes into the job's exit status.
+      # Without it, per-step continue-on-error alone would leave the job
+      # green — which is exactly the state this workflow was in.
+      - name: Gate on chaos outcomes
+        if: always()
+        run: |
+          set -euo pipefail
+          FAILED=0
+          if [ "${{ steps.pytest.outcome }}" != "success" ]; then
+            echo "::error::pytest -m chaos: ${{ steps.pytest.outcome }}"
+            FAILED=1
+          fi
+          if [ "${{ steps.sync_kill.outcome }}" != "success" ]; then
+            echo "::error::scripts/chaos/sync_kill.py: ${{ steps.sync_kill.outcome }}"
+            FAILED=1
+          fi
+          if [ "$FAILED" -ne 0 ]; then
+            echo "Chaos artifacts: 'chaos-logs-${{ github.run_id }}' on this run."
+            exit 1
+          fi
+          echo "Both chaos legs passed."

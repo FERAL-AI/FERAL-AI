@@ -593,15 +593,33 @@ asyncio_default_fixture_loop_scope = "function"
 asyncio_default_test_loop_scope = "function"
 markers = [
     "no_auto_feral_home: skip the autouse FERAL_HOME isolation fixture",
-    "chaos: federated-sync chaos / recovery tests (W11, roadmap §3.3 #1)",    "soak: long-duration soak test (gated behind --runsoak); see W12 / roadmap §3.4 #3-4",
+    "chaos: federated-sync chaos / recovery tests (W11, roadmap §3.3 #1)",
+    "soak: long-duration soak test (gated behind --runsoak); see W12 / roadmap §3.4 #3-4",
     "live: round-trip against live external APIs (OpenAI etc); gated by FERAL_LIVE_TESTS=1 + API key env vars; never run in CI",
     "allow_network: test may open sockets to non-local hosts; the autouse block_outbound_network guard is skipped for it",
+    # tests/perf/ carries `pytestmark = pytest.mark.perf` in two modules and
+    # this marker was never declared. Undeclared markers only warn, so
+    # `pytest -m perf` selected nothing and exited 5 while looking like a
+    # configuration detail. Both the CI matrix job and the PR fast lane
+    # address tests/perf by path (--ignore=tests/perf), so nothing was
+    # silently dropped there, but a future `-m perf` selection would have
+    # been a no-op. Declared here and enforced by --strict-markers below.
+    "perf: latency / hardware benchmarks under tests/perf (Lane 08, Lane 11); excluded from the PR fast lane by path",
 ]
 # Coverage is on by default for every `pytest` run. The previous setup
 # configured [tool.coverage.*] but never forced `--cov`, so pytest-cov
 # was installed and dormant. Overridable: `pytest --no-cov` to skip
 # (e.g. when profiling or debugging).
-addopts = "--cov=. --cov-report=term-missing:skip-covered --cov-fail-under=50"
+#
+# --strict-markers turns an unrecognised marker into a collection ERROR
+# instead of a warning. Without it the `markers` list above was
+# decorative: a typo in a marker name, or a marker used but never
+# declared (which is what happened to `perf`), degraded silently into a
+# selector that matches nothing. `pytest -m <typo>` then exits 5 with no
+# tests run, which reads as "nothing to do" rather than "your filter is
+# broken". This is the difference between the marker list documenting
+# reality and merely describing an intention.
+addopts = "--strict-markers --cov=. --cov-report=term-missing:skip-covered --cov-fail-under=50"
 
 [tool.coverage.run]
 source = ["."]
@@ -613,6 +631,16 @@ omit = [
     "demo/*",
     "docs/*",
     "*/__pycache__/*",
+    # build/ and dist/ are gitignored and exist only on a machine that has
+    # run `python -m build`. feral-core/build/lib is a complete duplicate of
+    # the source tree (trap 1 in CLAUDE.md): 404 .py files that no test ever
+    # imports, so `source = ["."]` reported every one of them at 0% and
+    # dragged the measured total down against the same --cov-fail-under=50
+    # that CI applies. CI checks out a clean tree and has no build/, so the
+    # local number and the CI number were measuring different denominators
+    # and could not be compared. Omitting them makes the two agree.
+    "build/*",
+    "dist/*",
 ]
 
 [tool.coverage.report]

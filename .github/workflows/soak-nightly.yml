@@ -5,9 +5,29 @@ name: Soak — nightly
 # tests skip cleanly when their FERAL_SOAK_*_TOKEN env vars are absent —
 # wire them in via repo secrets to flip them on for a real provider.
 #
-# This workflow uses continue-on-error so a flaky overnight run never
-# blocks the morning's main CI; failures still surface in the workflow
-# summary and uploaded artifacts.
+# WHY continue-on-error IS GONE FROM THE JOBS BELOW.
+#
+# Both jobs carried `continue-on-error: true` at JOB level, justified as
+# "so a flaky overnight run never blocks the morning's main CI". That
+# justification does not hold: this is a `schedule`-triggered workflow
+# with no `workflow_call`, no `needs` from any other workflow, and no
+# required-check relationship to ci.yml. A red run here has never been
+# able to block a PR or a merge. What continue-on-error actually bought
+# was a soak suite that reported success no matter what it found — the
+# workflow badge was green on every run, and GitHub's failure
+# notification (the only thing that gets a nightly looked at) never
+# fired. Sixty minutes of soak per protocol, and the result was
+# unreadable without opening the run by hand.
+#
+# The claim that "failures still surface in the workflow summary" was
+# also untrue for this file specifically: unlike sync-chaos-nightly.yml,
+# neither job here ever wrote to $GITHUB_STEP_SUMMARY.
+#
+# Now: a failing soak fails its job and the run goes red. `fail-fast:
+# false` on the matrix is what keeps one protocol's failure from
+# cancelling the others, which is the real property that was wanted, and
+# `if: always()` on the upload steps keeps the logs regardless. Nothing
+# downstream is blocked, because there is nothing downstream.
 #
 # ── Why every job below runs exactly ONE soak test ────────────────────
 # Soak duration is per-test, not per-job: each test soaks for
@@ -49,7 +69,9 @@ jobs:
   voice-soak:
     name: Voice soak — ${{ matrix.test }}
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # No continue-on-error: see the header. This soak runs against
+    # in-process fake WS peers, so a failure here is a real regression in
+    # our own reconnect/streaming code, not provider flake.
     # One test per job, so this is duration (60) + install headroom,
     # not duration × number of tests.
     timeout-minutes: 80
@@ -95,7 +117,14 @@ jobs:
   channels-soak:
     name: Channels soak (env-gated) — ${{ matrix.test }}
     runs-on: ubuntu-latest
-    continue-on-error: true
+    # No continue-on-error: see the header. These tests skip cleanly when
+    # their FERAL_SOAK_*_TOKEN secrets are absent, which is the correct
+    # OPTIONAL shape — pytest reports them as skipped and the job is
+    # honestly green. Once the secrets exist they talk to a live third
+    # party, and a genuine outage there will turn this red. That is the
+    # right trade: an outage that breaks a 5-hour channel soak is worth a
+    # notification, and the alternative (a permanently green job) is how
+    # this suite spent its whole life so far.
     # ── SCOPE CHANGE, flagged deliberately ───────────────────────────
     # Was: one job, timeout-minutes 1500, FERAL_SOAK_DURATION_MIN 1440.
     # A GitHub-hosted runner kills any job at 6 hours, so a 24-hour

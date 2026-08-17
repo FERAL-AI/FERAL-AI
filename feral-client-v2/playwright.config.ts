@@ -1,16 +1,22 @@
 /**
- * Minimal Playwright config used by the pair-device regression spec.
+ * Playwright config for the v2 e2e specs under ./e2e.
  *
- * NOT the full v2 e2e setup — the full program owns that bigger surface
- * (`.github/workflows/v2-e2e.yml`, multi-browser matrix, full webServer
- * wiring against the brain). We deliberately keep this tight so it
- * can stand on its own when run as `npx playwright test pair_device`
- * without dragging the rest of the e2e program in.
+ * This header used to defer to "the full program" and cite
+ * `.github/workflows/v2-e2e.yml` as the thing that owned a multi-browser
+ * matrix and real-brain wiring. That file has never existed in this repo.
+ * The effect of the citation was that this config looked provisional and
+ * nobody noticed the specs were running in no workflow at all. They are
+ * now run by the `client-v2-e2e` job in .github/workflows/ci.yml and by
+ * `make e2e`, both against this config.
+ *
+ * SCOPE, stated plainly rather than deferred: chromium only, and `/api/*`
+ * is stubbed per-spec. A multi-browser matrix and a real-brain harness are
+ * genuinely not covered here. That is a known gap, not a hidden one.
  *
  * Behavior:
- *   - Chromium only (just needs to repro the modal-stacking bug).
+ *   - Chromium only.
  *   - baseURL reads from FERAL_E2E_URL so devs can point at any
- *     running instance (`pnpm dev` or `vite preview`).
+ *     running instance (`npm run dev` or `npm run preview`).
  *   - When FERAL_E2E_URL is unset, vite preview is started on 5173
  *     against the production-style bundle.
  */

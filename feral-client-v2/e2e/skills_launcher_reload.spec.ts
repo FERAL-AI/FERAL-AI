@@ -21,7 +21,10 @@
  */
 import { test, expect } from '@playwright/test';
 
-test.use({ channel: 'chrome' });
+// Runs on the config's default `chromium` project. The `channel: 'chrome'`
+// pin that used to be here borrowed whatever Chrome the machine had,
+// which is why nobody noticed the Playwright browsers were never
+// downloaded. `make dev-deps` and the CI e2e job fetch chromium.
 
 const SKILLS = [
   {

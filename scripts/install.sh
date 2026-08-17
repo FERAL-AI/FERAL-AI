@@ -154,9 +154,28 @@ fi
 
 rm -f "$PIP_LOG" 2>/dev/null || true
 
-# ─── Browser Runtime (best effort) ─────────────────────
-echo -e "  ${DIM}Installing Playwright Chromium runtime (best effort)...${NC}"
-$PYTHON -m playwright install chromium --with-deps >/dev/null 2>&1 || true
+# ─── Browser Runtime (OPTIONAL) ─────────────────────────
+# This download is genuinely optional: FERAL installs and runs without it,
+# and it is ~150MB plus (on Linux) an apt step that needs sudo. But the
+# previous form sent stdout AND stderr to /dev/null and ended in `|| true`,
+# so a failure was indistinguishable from a success and the user was left
+# believing they had a browser runtime. The skills that need it then fail
+# much later with an error that names Playwright, not this install step.
+#
+# Same shape as `make dev-deps`: still non-fatal, but it says what was lost.
+echo -e "  ${DIM}Installing Playwright Chromium runtime (optional)...${NC}"
+PLAYWRIGHT_LOG=$(mktemp /tmp/feral-playwright-XXXXXX.log 2>/dev/null || echo "/tmp/feral-playwright.log")
+if $PYTHON -m playwright install chromium --with-deps > "$PLAYWRIGHT_LOG" 2>&1; then
+    echo -e "  ${GREEN}✓${NC} Playwright Chromium runtime installed"
+    rm -f "$PLAYWRIGHT_LOG" 2>/dev/null || true
+else
+    echo -e "  ${YELLOW}!${NC} Playwright Chromium download failed (this is not fatal)."
+    echo -e "    ${DIM}LOST: browser-driven skills (browser_use, agentic_computer_use,${NC}"
+    echo -e "    ${DIM}      browser_memory) cannot run until a browser is present.${NC}"
+    echo -e "    ${DIM}Everything else works. To retry:${NC}"
+    echo -e "    ${DIM}  $PYTHON -m playwright install chromium --with-deps${NC}"
+    echo -e "    ${DIM}Log: $PLAYWRIGHT_LOG${NC}"
+fi
 
 # ─── Installed Package Diagnostics ──────────────────────
 PKG_INFO="$($PYTHON -m pip show feral-ai 2>/dev/null || true)"

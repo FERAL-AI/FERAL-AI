@@ -8,6 +8,7 @@ on:
       - 'README.md'
       - 'CONTRIBUTING.md'
       - 'scripts/check_docs_no_internal_leakage.py'
+      - 'scripts/check_mintlify_nav.py'
   push:
     branches: [main]
     paths:
@@ -30,3 +31,13 @@ jobs:
         run: python3 scripts/check_docs_no_internal_leakage.py
         shell: bash
         continue-on-error: false
+
+      # scripts/check_mintlify_nav.py existed, passed, and was invoked by
+      # nothing: not this workflow, not the Makefile, not a test. A check
+      # nobody runs is indistinguishable from a check that cannot fail —
+      # an .mdx page added without a docs.json nav entry ships unreachable
+      # and no gate says so. It is a docs check, so it belongs here, behind
+      # the same paths filter.
+      - name: Check every shipped .mdx is reachable from docs.json nav
+        run: python3 scripts/check_mintlify_nav.py
+        shell: bash

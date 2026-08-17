@@ -23,8 +23,14 @@
  */
 import { test, expect, Route } from '@playwright/test';
 
-// Drive real Chrome, not bundled chromium: this is a rendering claim.
-test.use({ channel: 'chrome' });
+// Runs on the config's default `chromium` project. It used to pin
+// `channel: 'chrome'` with the note "drive real Chrome, not bundled
+// chromium: this is a rendering claim". The rendering claim is real, but
+// borrowing the machine's Chrome is not how to keep it: the Playwright
+// browsers had simply never been downloaded, so the channel pin made the
+// spec run on one developer's laptop and skip everywhere else. `make
+// dev-deps` and the CI e2e job both fetch chromium now, so the spec runs
+// on a browser the repo controls the version of.
 
 const CATALOG_ITEM = {
   id: 'trail_notes',
