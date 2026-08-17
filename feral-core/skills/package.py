@@ -14,10 +14,51 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
+
 from config.loader import feral_home
 from models.skill_manifest import SkillManifest, describe_permissions, permission_values
 
 logger = logging.getLogger("feral.skills.package")
+
+
+def _dotted_call_name(func: ast.expr) -> Optional[str]:
+    """Return the dotted name a call expression targets, or None.
+
+    ``exec(x)`` gives ``"exec"``; ``os.system(x)`` gives ``"os.system"``;
+    ``subprocess.Popen(x)`` gives ``"subprocess.Popen"``. Anything whose
+    target is computed rather than named (``handlers[k](x)``,
+    ``getattr(os, name)(x)``) gives None, because there is no name to
+    match and guessing one would be worse than saying nothing.
+
+    This replaces a substring scan of the raw source, ``if call in
+    source``, which could not distinguish a call from a word that happened
+    to contain one. ``exec`` is a substring of ``execute``, and
+    ``execute(self, endpoint_id, args, vault)`` is the mandatory entry
+    point of every Python skill (``BaseSkill.execute``), so the old check
+    rejected 28 of the 29 shipped skills, 25 of them on that collision
+    alone. Since SkillValidator gates ``MarketplaceClient.preview_from_registry``,
+    that meant the web Marketplace and every app ``skill_dependencies``
+    resolution refused any skill carrying Python at all.
+
+    Matching real call nodes is also strictly more accurate in the other
+    direction: the substring scan fired on the word inside a comment, a
+    docstring or a string literal, none of which execute.
+    """
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        parts: list[str] = []
+        node: ast.expr = func
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if not isinstance(node, ast.Name):
+            # A call on a computed value, e.g. ``get_mod().system(...)``.
+            return None
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
 
 SKILLS_DIR = feral_home() / "skills"
 
@@ -130,13 +171,15 @@ class SkillValidator:
         except Exception as e:
             return [f"Cannot read {path}: {e}"]
 
-        for call in self.DANGEROUS_CALLS:
-            if call in source:
-                issues.append(f"SECURITY: Found potentially dangerous call '{call}' in {path.name}")
-
         try:
             tree = ast.parse(source)
             for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    called = _dotted_call_name(node.func)
+                    if called and called in self.DANGEROUS_CALLS:
+                        issues.append(
+                            f"SECURITY: Found potentially dangerous call '{called}' in {path.name}"
+                        )
                 if isinstance(node, ast.Import):
                     for alias in node.names:
                         if alias.name in self.DANGEROUS_IMPORTS:

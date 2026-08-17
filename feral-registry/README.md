@@ -58,6 +58,20 @@ and a red install.
 not import feral-core, and a stale copy here would reject a valid new skill at
 upload. Structure is checked, vocabulary is not.
 
+### `name` is the item's identifier
+
+`name` is the natural key alongside `kind` and `version`, and it is what
+`GET /item/{ref}` resolves. It must be the publisher's **stable identifier**,
+never a display name: `skill_id` for a skill, `node_id` for a daemon, `app_id`
+for an app. `cli/publish.py::registry_envelope` on the feral-core side is where
+that mapping is applied, and `feral-core/tests/test_cli_publish_envelope.py`
+pins it against `_REQUIRED_PER_KIND` here so the two vocabularies cannot drift.
+
+The per-kind identifier matters beyond the key: `cli/install.py::dispatch_install`
+reads it to choose the install directory, and falls through to the registry's
+UUID when it is absent. A daemon published without `node_id` installs into
+`~/.feral/daemons/<uuid>/`, a directory named after a database row.
+
 ---
 
 ## Routes

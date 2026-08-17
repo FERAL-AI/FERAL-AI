@@ -46,6 +46,11 @@ ASOS_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_DIR = ASOS_ROOT / "feral-core" / "skills"
 PUBLISHER_KEY = Path.home() / ".feral" / "publisher.key"
 
+# Must equal `SkillManifest.version`'s default in feral-core, so the
+# version the registry lists is the version the installed manifest
+# reports. See seed_first_party.py::DEFAULT_SKILL_VERSION.
+DEFAULT_SKILL_VERSION = "1.0.0"
+
 
 def _load_or_create_key() -> SigningKey:
     """Return an Ed25519 signing key, generating + saving one if needed."""
@@ -74,7 +79,7 @@ def _build_skill_bundle(manifest_path: Path) -> tuple[dict, bytes]:
     manifest = json.loads(manifest_path.read_text())
     stem = manifest_path.stem
     name = manifest.get("skill_id") or manifest.get("name") or stem
-    version = str(manifest.get("version", "0.1.0"))
+    version = str(manifest.get("version") or DEFAULT_SKILL_VERSION)
 
     pub_manifest = {
         "kind": "skill",

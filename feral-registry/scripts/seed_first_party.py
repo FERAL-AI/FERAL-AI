@@ -45,6 +45,17 @@ FIRST_PARTY_LOGIN = "feral"
 FIRST_PARTY_GH_ID = 1
 SEED_KEY_ENV = "FERAL_REGISTRY_SEED_KEY_HEX"
 
+# The version a skill manifest with no explicit `version` publishes as.
+#
+# This has to equal the default on `feral-core`'s
+# `models/skill_manifest.py::SkillManifest.version`, because that model
+# is what the brain loads the installed bundle with. While this said
+# "0.1.0" and the model said "1.0.0", `robot_action.json` (which
+# declares no version) published as 0.1.0 and then reported 1.0.0 once
+# installed: the catalog and the running skill disagreed about the same
+# bytes. Pinned by tests/test_seed_bundle_layout.py.
+DEFAULT_SKILL_VERSION = "1.0.0"
+
 
 @dataclass
 class SeedItem:
@@ -87,7 +98,7 @@ def _load_skill_seeds() -> list[SeedItem]:
         except json.JSONDecodeError:
             continue
         name = manifest.get("skill_id") or manifest.get("name") or manifest_path.stem
-        version = str(manifest.get("version", "0.1.0"))
+        version = str(manifest.get("version") or DEFAULT_SKILL_VERSION)
         # Root-level manifest.json + impl.py: the layout SkillPackage
         # reads. The old nested `manifests/x.json` + `impl/x.py` layout
         # put no manifest.json where the installer looks for one.
@@ -281,7 +292,17 @@ def _load_daemon_seeds() -> list[SeedItem]:
                 raw_manifest = json.loads(manifest_file.read_text())
             except json.JSONDecodeError:
                 raw_manifest = {}
-        name = raw_manifest.get("name", dirname)
+        # `node_id` is the daemon's stable identifier: it is the key the
+        # registry requires for kind=daemon, and it is what
+        # `cli.install.dispatch_install` reads to pick
+        # `~/.feral/daemons/<id>/`. `manifest["name"]` is the package's
+        # display name (`wristband_daemon`), which is a different thing.
+        # Seeding under the display name and omitting node_id meant
+        # dispatch_install fell through to the registry's UUID and
+        # installed the daemon into a directory named after a database
+        # row. See cli/publish.py::registry_envelope for the same rule on
+        # the publish side.
+        name = raw_manifest.get("node_id") or raw_manifest.get("id") or dirname
         version = str(raw_manifest.get("version", "0.1.0"))
         files: list[tuple[str, bytes]] = []
         for p in sorted(daemon_dir.rglob("*")):
@@ -297,6 +318,8 @@ def _load_daemon_seeds() -> list[SeedItem]:
                     "kind": "daemon",
                     "name": name,
                     "version": version,
+                    "node_id": name,
+                    "capabilities": list(raw_manifest.get("capabilities") or []),
                     "description": raw_manifest.get(
                         "description", f"First-party {dirname} daemon."
                     ),

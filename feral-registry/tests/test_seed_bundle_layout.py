@@ -89,6 +89,45 @@ def test_seed_first_party_ships_the_skill_manifest_at_the_root():
         assert validate_bundle_for_kind("skill", tarball) == [], seed.name
 
 
+def test_seeder_version_default_matches_the_model_that_loads_the_bundle():
+    """One version for one set of bytes.
+
+    While the seeders defaulted to ``0.1.0`` and ``SkillManifest.version``
+    defaulted to ``1.0.0``, ``robot_action.json`` (which declares no
+    version) published as 0.1.0 and reported 1.0.0 once installed. The
+    catalog and the running skill disagreed about the same tarball.
+    """
+    if str(REPO_ROOT / "feral-core") not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT / "feral-core"))
+    try:
+        from models.skill_manifest import SkillManifest
+    except Exception as exc:  # pragma: no cover - feral-core not installed here
+        pytest.skip(f"feral-core is not importable: {exc}")
+
+    model_default = SkillManifest.model_fields["version"].default
+    seed_first_party = _import_seeder("seed_first_party")
+    seed_remote = _import_seeder("seed_remote")
+
+    assert seed_first_party.DEFAULT_SKILL_VERSION == model_default
+    assert seed_remote.DEFAULT_SKILL_VERSION == model_default
+
+
+def test_a_versionless_manifest_seeds_at_the_model_default():
+    seed_first_party = _import_seeder("seed_first_party")
+    versionless = [
+        path.stem
+        for path in sorted(MANIFESTS_DIR.glob("*.json"))
+        if "version" not in json.loads(path.read_text())
+    ]
+    if not versionless:
+        pytest.skip("every first-party manifest declares a version")
+
+    seeds = {s.name: s for s in seed_first_party._load_skill_seeds()}
+    for stem in versionless:
+        skill_id = json.loads((MANIFESTS_DIR / f"{stem}.json").read_text()).get("skill_id", stem)
+        assert seeds[skill_id].version == seed_first_party.DEFAULT_SKILL_VERSION
+
+
 def test_seed_first_party_puts_impl_beside_the_manifest():
     """``SkillPackage`` reads ``impl.py`` next to ``manifest.json``.
 

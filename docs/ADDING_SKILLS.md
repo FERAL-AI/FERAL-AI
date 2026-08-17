@@ -130,16 +130,27 @@ feral publisher register           # registers your Ed25519 public key
 feral publish --skill ./my_skill   # signs the bundle and uploads it
 ```
 
-`cli/publish.py` signs the SHA-256 of the tarball with your private key.
-Both install paths verify that signature before anything lands on disk:
-`feral install <name>` from a shell, and the Marketplace page in the web
-client, which additionally shows the user your permission list and the
-signature status and will not install until they confirm. An unsigned or
-tampered bundle is refused rather than installed with a warning.
+`cli/publish.py` signs the SHA-256 of the tarball with your private key,
+as its **hex digest encoded ASCII**, which is the message
+`feral_registry/signing.py` verifies and the one `cli/install.py`
+re-verifies on the way back in. Both install paths check it before
+anything lands on disk: `feral install <name>` from a shell, and the
+Marketplace page in the web client, which additionally shows the user
+your permission list and the signature status and will not install until
+they confirm. An unsigned or tampered bundle is refused rather than
+installed with a warning.
+
+`feral publish` posts two documents: the tarball, and a metadata
+envelope derived from your manifest (`kind`, `name`, `version`,
+description, author, plus `skill_id`). You do not write the envelope;
+`registry_envelope()` builds it, and `name` is your `skill_id`, not your
+`brand.name`. See
+[Marketplace, publish flow](mintlify/marketplace/overview.mdx) for the
+per-kind table.
 
 The bundle is your skill directory as it stands: `manifest.json` at the
 root next to `impl.py`. That `manifest.json` must be the `SkillManifest`
-itself, not a registry envelope wrapping it — publish reads the tarball
+itself, not a registry envelope wrapping it. Publish reads the tarball
 and rejects a bundle whose `manifest.json` FERAL could not load, naming
 the missing key.
 
@@ -151,6 +162,16 @@ versions of your skill are published, a bare name resolves to the
 highest; see the
 [marketplace overview](mintlify/marketplace/overview.mdx) for the full
 rule, including the two cases the registry refuses to guess at.
+
+A successful publish is a **submission**, not a release. The item lands
+`submitted` / `private` and `feral install` answers 404 until a reviewer
+approves it; `feral publish` prints the status it got back so you are
+not left testing against a 404. Track it with:
+
+```bash
+curl -H "Authorization: Bearer $(cat ~/.feral/publisher.token)" \
+  https://registry.feral.sh/api/v1/publisher/submissions
+```
 
 For local iteration, `MarketplaceClient.install(skill_id, source_url=...)`
 still installs straight from a URL or a git clone with no verification.

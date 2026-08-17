@@ -160,25 +160,78 @@ fields for each kind are listed in
 — the registry rejects a publish that's missing required keys with a
 clear error.
 
+Your source directory is the bundle. Put `manifest.json` at its root
+with `impl.py` beside it, and `feral publish` tars the directory as it
+stands (minus anything in `.feralignore`), signs it, and uploads it.
+
 ### Two manifests, and they are not the same document
 
-A publish carries two things, and confusing them is the mistake the
-registry itself made:
+A publish carries two things, and confusing them is the mistake this
+repo made at both ends:
 
 - the **metadata manifest** (`manifest_json`, the form field): `kind`,
-  `name`, `version`, description, author. This is what the catalog and
+  `name`, `version`, description, author, plus the per-kind identifier
+  the registry indexes on. This is what the catalog and
   `GET /item/{ref}` serve. It is *not* covered by the bundle signature.
 - the **bundle's own `manifest.json`**: the document FERAL loads at
   install. For `kind=skill` that is a `SkillManifest`, and it is where
   the install dialog reads the permission list from, precisely because
   it is inside the signed tarball.
 
-Publish now opens the tarball and refuses a skill bundle that FERAL
+You write the second one. `feral publish` derives the first from it, in
+`cli/publish.py::registry_envelope`, and carries your whole manifest
+along under `original` so the marketplace can describe your item without
+downloading it. You never write the envelope by hand.
+
+### `name` is your item's identifier, not its display name
+
+The registry's key is `(kind, name, version)`, and `name` is the string
+that `GET /api/v1/item/{ref}` resolves, that `feral install <name>`
+takes, and that an app writes in `skill_dependencies`. It comes from
+your manifest's identifier field:
+
+| Kind | `name` comes from | Also sent as |
+|---|---|---|
+| `skill` | `skill_id` | `skill_id` |
+| `daemon` | `node_id` (or `id`) | `node_id` + `capabilities` |
+| `app` | `app_id` | `app_id`, `brand`, `entry_surface_id`, `surfaces` |
+
+`brand.name` ("Smart Bulb") and a daemon manifest's `name` ("Wristband
+Bridge") are human display names and are deliberately *not* the key.
+Keying on them would make `feral install "Smart Bulb"` the interface.
+
+`version` is read off the validated model, not the raw file, so the
+version the catalog lists is the version the installed manifest reports.
+
+### What publish refuses, and where
+
+The registry opens the tarball and refuses a skill bundle that FERAL
 could not load: no `manifest.json`, unparseable JSON, or a manifest
 missing `skill_id`, `brand.name`, or `description`. `brand` is required
-and stays required — it is the name shown in the install dialog. A
+and stays required: it is the name shown in the install dialog. A
 validator that accepts at publish and rejects at install is its own
 defect, and it is the publisher, not the user, who should see the error.
+
+`feral publish` refuses the same things locally first, before it spends
+an upload on them.
+
+### Publishing is a submission, not a release
+
+The registry is acceptance-gated. A successful publish lands your item
+as `status=submitted` / `visibility=private`, and it is **not
+installable** until a reviewer approves it: the catalog does not list
+it, `GET /api/v1/item/<name>` answers 404, and the blob route refuses.
+`feral publish` prints the status it got back rather than "Published!",
+because testing an install against your own fresh submission and getting
+a 404 is a confusing way to learn this.
+
+Check where yours stands with the publisher submissions endpoint, using
+the same bearer token `feral publisher login` stored:
+
+```bash
+curl -H "Authorization: Bearer $(cat ~/.feral/publisher.token)" \
+  https://registry.feral.sh/api/v1/publisher/submissions
+```
 
 ## Trust model
 

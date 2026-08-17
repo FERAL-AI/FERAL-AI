@@ -460,6 +460,17 @@ feral publish --skill ./my-skill/
 feral publish --daemon ./my-daemon/
 ```
 
+The directory *is* the bundle: `manifest.json` at its root (a `SkillManifest`
+or `DaemonManifest`, not a registry envelope), with `impl.py` or your
+entrypoint beside it. The registry metadata is derived from that manifest, and
+the item publishes under its identifier: `skill_id` for a skill, `node_id` for
+a daemon. Your `brand.name` is a display name and is not the key.
+
+A publish is a **submission**. It lands `submitted` / `private` and is not
+installable until a reviewer approves it; the command prints the status it got
+back and the endpoint to track it. See
+[Marketplace → Publish flow](/marketplace/overview).
+
 ### `feral publisher`
 
 Manage the publisher identity used by `feral publish`.

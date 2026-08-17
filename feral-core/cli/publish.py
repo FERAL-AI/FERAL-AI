@@ -317,6 +317,115 @@ def _read_manifest(directory: Path) -> dict:
 
 
 # ─────────────────────────────────────────────
+# The registry envelope
+# ─────────────────────────────────────────────
+
+# Where each kind keeps its stable identifier, as (registry key, domain
+# manifest fields to read it from in order).
+#
+# The registry key is the name of the field the registry's per-kind
+# validator requires (feral_registry/schemas.py::_REQUIRED_PER_KIND) and
+# that `cli.install.dispatch_install` reads to decide the install
+# directory. The domain fields are what the manifest model on this side
+# actually calls it, which is not always the same word: a daemon's
+# identifier is `id` in `DaemonManifest` and `node_id` in the registry.
+#
+# Only the kinds `cmd_publish` can publish are listed. The registry
+# accepts nine; `feral publish` offers two, and `feral app publish`
+# offers a third from cli/app_commands.py. Adding a kind here is a
+# two-line change plus a publish path to call it; inventing entries for
+# kinds with no publish path would be untested code claiming to work.
+_IDENTITY_FIELDS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "skill": ("skill_id", ("skill_id",)),
+    "daemon": ("node_id", ("node_id", "id")),
+}
+
+
+def registry_envelope(kind: str, manifest: dict) -> dict:
+    """Derive the registry's metadata document from a domain manifest.
+
+    A publish carries two documents, and they are not the same thing:
+
+    * the tarball's ``manifest.json`` is the **domain manifest** -- a
+      ``SkillManifest`` or ``DaemonManifest``. It is what FERAL loads at
+      install, and it is inside the signed bytes.
+    * ``manifest_json``, the form field, is **registry metadata**:
+      ``kind``, ``name``, ``version``, description, author, plus the
+      per-kind identifier the registry indexes on. It is what the catalog
+      and ``GET /item/{ref}`` serve, and the signature does not cover it.
+
+    ``cmd_publish`` used to post the domain manifest where the metadata
+    was expected. ``SkillManifest`` carries ``skill_id``, ``brand`` and
+    ``description`` and has no ``kind`` and no ``name``, while the
+    registry's ``Manifest`` requires both, so every ``feral publish
+    --skill`` was refused with ``400 invalid manifest`` before it reached
+    any of the signing, resolution or consent machinery. ``--daemon``
+    failed the same way on ``kind``, and again on ``node_id``.
+
+    **``name`` is the item's stable identifier, not its display name.**
+    The registry's natural key is ``(kind, name, version)``, and ``name``
+    is the string that ``GET /api/v1/item/{ref}`` resolves, that
+    ``feral install <name>`` takes, and that an ``AppManifest`` writes in
+    ``skill_dependencies``. On this side that string is ``skill_id`` for
+    a skill and ``id`` for a daemon: one item, two vocabularies, joined
+    here. ``brand.name`` ("Robot Node") and ``DaemonManifest.name``
+    ("Wristband Bridge") are human display names; keying on either would
+    make ``feral install "Robot Node"`` the interface.
+
+    ``version`` comes off the validated model rather than the raw JSON,
+    so the version the registry publishes is the version the installed
+    manifest reports. Reading it from the raw file is what let a
+    versionless manifest publish as ``0.1.0`` while ``SkillManifest``
+    defaulted it to ``1.0.0``.
+
+    The full domain manifest rides along under ``original`` so the
+    marketplace can describe an item without downloading it, matching
+    the shape already published. It is metadata, not evidence: the
+    install path reads permissions out of the verified tarball, never
+    from here.
+    """
+    kind = (kind or "").lower()
+    try:
+        registry_key, domain_fields = _IDENTITY_FIELDS[kind]
+    except KeyError:
+        raise ValueError(
+            f"no registry envelope rule for kind '{kind}'; "
+            f"known kinds: {', '.join(sorted(_IDENTITY_FIELDS))}"
+        ) from None
+
+    identifier = ""
+    for field in domain_fields:
+        value = manifest.get(field)
+        if isinstance(value, str) and value.strip():
+            identifier = value.strip()
+            break
+    if not identifier:
+        raise ValueError(
+            f"manifest.json is missing a non-empty '{domain_fields[0]}'; it is the "
+            f"name this {kind} publishes under and the name users install it by"
+        )
+
+    version = str(manifest.get("version") or "").strip()
+    if not version:
+        raise ValueError("manifest.json is missing a non-empty 'version'")
+
+    envelope = {
+        "kind": kind,
+        "name": identifier,
+        "version": version,
+        "description": manifest.get("description"),
+        "author": manifest.get("author") or "",
+        registry_key: identifier,
+        "original": manifest,
+    }
+    if kind == "daemon":
+        # The registry requires `capabilities` for kind=daemon, and
+        # `dispatch_install` has no fallback for it.
+        envelope["capabilities"] = list(manifest.get("capabilities") or [])
+    return envelope
+
+
+# ─────────────────────────────────────────────
 # Publish flow
 # ─────────────────────────────────────────────
 
@@ -342,12 +451,18 @@ def cmd_publish(
     raw_manifest = _read_manifest(source)
     if kind == "skill":
         manifest = _validate_skill_manifest(raw_manifest)
-        name = manifest.get("skill_id") or manifest.get("brand", {}).get("name") or "skill"
-        version = manifest.get("version", "0.0.0")
     else:
         manifest = _validate_daemon_manifest(raw_manifest)
-        name = manifest.get("id", "daemon")
-        version = manifest.get("version", "0.0.0")
+
+    # The metadata the registry indexes on, derived from the validated
+    # manifest rather than being it. See `registry_envelope`.
+    try:
+        envelope = registry_envelope(kind, manifest)
+    except ValueError as exc:
+        print(f"  {exc}")
+        sys.exit(1)
+    name = envelope["name"]
+    version = envelope["version"]
 
     token = _load_token_or_exit()
     signing_key = load_or_create_signing_key(verbose=False)
@@ -355,8 +470,16 @@ def cmd_publish(
     print(f"  Packaging {kind} '{name}' v{version} from {source}...")
     tarball = _build_tarball(source, str(name), str(version))
     digest = _sha256_file(tarball)
-    signature = signing_key.sign(digest).signature
-    sig_b64 = base64.b64encode(signature).decode("ascii")
+    # Sign the SHA-256 as its **hex digest in ASCII**, not the raw 32
+    # bytes. `feral_registry/signing.py::verify_bundle_signature` calls
+    # `sha256_hex.encode("ascii")`, and `cli/install.py::_verify` checks
+    # the same bytes on the way back in. This path signed the raw digest,
+    # so even a well-formed publish was refused with 400 "signature
+    # verification failed"; the comment in cli/app_commands.py claiming
+    # this path already got it right was written without checking.
+    sig_b64 = base64.b64encode(
+        signing_key.sign(digest.hex().encode("ascii")).signature
+    ).decode("ascii")
 
     base = registry_base_url(registry)
     url = f"{base}/api/v1/publish"
@@ -367,7 +490,7 @@ def cmd_publish(
             files = {"bundle": (tarball.name, fp, "application/gzip")}
             data = {
                 "signature": sig_b64,
-                "manifest_json": json.dumps(manifest),
+                "manifest_json": json.dumps(envelope),
                 "kind": kind,
                 "sha256": digest.hex(),
             }
@@ -387,8 +510,29 @@ def cmd_publish(
     except Exception:
         body = {}
     item_id = body.get("item_id") or body.get("id") or "<unknown>"
-    print(f"  Published! Registry item id: {item_id}")
-    print(f"  Install with: feral install {item_id}")
+    status = str(body.get("status") or "")
+    visibility = str(body.get("visibility") or "")
+
+    print(f"  Submitted {kind} '{name}' v{version}.")
+    print(f"  Registry item id: {item_id}")
+    # `name` is what resolves and what a person types; the id is the
+    # permalink. Print both, name first.
+    print(f"  Installs as: feral install {name}")
+
+    # The registry is acceptance-gated: a publish lands `submitted` /
+    # `private` and is not installable until a reviewer approves it. The
+    # response says so and this used to print "Published!" over the top
+    # of it, sending publishers to test an install that returns 404.
+    if status and status != "approved":
+        print(f"  Status: {status} ({visibility}), pending review.")
+        message = str(body.get("message") or "").strip()
+        if message:
+            print(f"  {message}")
+        print("  `feral install` will not find it until it is approved.")
+        # No CLI verb for this yet: `feral publisher` takes login and
+        # register only. Name the endpoint that does exist rather than a
+        # command that does not.
+        print(f"  Track it: GET {base}/api/v1/publisher/submissions (same bearer token)")
 
 
 # ─────────────────────────────────────────────
