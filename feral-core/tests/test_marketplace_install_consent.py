@@ -91,7 +91,12 @@ def skills_dir(tmp_path, monkeypatch):
 
 def _wire_registry(client: MarketplaceClient, monkeypatch, item: dict, bundle: bytes, tmp_path):
     """Serve ``item`` / ``bundle`` without touching the network."""
-    async def fake_fetch(item_id: str):
+    # Signature mirrors the real ``_registry_fetch_item``, ``kind`` and
+    # all: the reference the brain sends is a *name*, and the kind rides
+    # along because a name is unique per (kind, version) rather than
+    # globally. A double that drops the parameter passes here and lies
+    # about the call site.
+    async def fake_fetch(item_id: str, kind: str = ""):
         return item
 
     async def fake_download(url: str):

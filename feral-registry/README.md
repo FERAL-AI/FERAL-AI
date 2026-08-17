@@ -32,12 +32,31 @@ only guarantees **who** signed a given bundle and **what bytes** were uploaded.
 
 A bundle is a single tarball (`.tar.gz`) that contains:
 
-- the manifest JSON for a skill/daemon/MCP (as documented in `feral-core`),
-- the implementation files referenced by the manifest.
+- `manifest.json` at the root: the manifest FERAL loads at install time (for
+  `kind=skill`, a `SkillManifest` as documented in `feral-core`),
+- the implementation files referenced by the manifest, beside it
+  (`impl.py` for a skill).
 
-The `manifest_json` form field submitted at publish time MUST match the manifest
-embedded in the tarball. The registry verifies only the top-level shape (`kind`,
-`name`, `version`); deeper validation is the client's responsibility.
+**Two manifests, and they are different documents.** The `manifest_json` form
+field is *registry metadata*: `kind`, `name`, `version`, description, author.
+It is what the catalog and `GET /item/{ref}` serve, and it is not covered by
+the bundle signature. The tarball's own `manifest.json` is what the brain
+loads. Writing the metadata envelope into the tarball in place of the real
+manifest is a real bug that shipped: every published skill then failed at
+install with `brand field required`, because the envelope has no `brand`.
+
+The registry validates both. The form field is checked for the per-kind shape
+(see `schemas.py::validate_manifest_for_kind`). For `kind=skill` the tarball is
+opened and its `manifest.json` must parse and carry a non-empty `skill_id`,
+`brand.name`, and `description` — the keys `SkillManifest` declares with no
+default, plus the stable id that makes the skill nameable. Publish is allowed
+to be stricter than install; it is being *looser* that produced a green upload
+and a red install.
+
+`feral_registry/bundle.py` deliberately does not re-implement feral-core's
+`SkillPermission` vocabulary: that enum grows in feral-core, the registry does
+not import feral-core, and a stale copy here would reject a valid new skill at
+upload. Structure is checked, vocabulary is not.
 
 ---
 
@@ -53,11 +72,38 @@ All endpoints live under `/api/v1`.
 | POST   | `/auth/github/register_pubkey` | register Ed25519 pubkey (hex) for the authenticated publisher |
 | POST   | `/publish` | multipart upload: `bundle`, `signature`, `manifest_json`. Requires `Authorization: Bearer <publisher_token>`. |
 | GET    | `/catalog?kind=&q=&sort=newest\|popular` | list items |
-| GET    | `/item/{id}` | item detail including download URL, pubkey, and signature |
+| GET    | `/item/{ref}?kind=&version=` | item detail including download URL, pubkey, and signature. `ref` is the item's UUID **or** its `name` (see below). |
 | POST   | `/flag/{id}` | community moderation flag |
 | GET    | `/blobs/{sha256}` | serve a bundle blob; increments `downloads` |
 
 Every route returns typed Pydantic models.
+
+### Resolving `/item/{ref}`
+
+`ref` is what a caller actually holds. Every one of them is a name: `feral
+install robot_ext`, an `AppManifest` declaring `skill_dependencies:
+["robot_ext"]`, the `name` column in the catalog. Nobody types the UUID, and a
+manifest pinning dependencies by UUID would be unreadable, so the endpoint
+resolves both. `UniqueConstraint("kind", "name", "version")` on `items` is what
+makes a name a legal key.
+
+Order and rules (implemented once, in `feral_registry/resolve.py`):
+
+1. **By `id` first.** An exact primary-key hit wins, so a published item's id
+   stays a permalink that a later item's `name` cannot shadow.
+2. **By `name`**, over exactly the rows the caller may see. Anonymous callers
+   resolve against `approved` + `public` only, so a name cannot confirm that a
+   pending or rejected submission exists. Reviewers resolve against everything.
+3. Several rows under one name:
+   - **different kinds** -> `409`, naming the kinds. No rule chooses between a
+     skill and a daemon called `robot_ext`. Pass `?kind=`.
+   - **different versions, one kind** -> the **highest** version, compared as
+     dot-separated integers (`0.10.0` > `0.9.0`). This is not a guess; it is
+     what `feral install robot_ext` means.
+   - **versions that cannot be ordered** (`1.0.0` beside `1.0.0-beta`) ->
+     `409`, naming them. Picking one would be arbitrary. Pass `?version=`.
+4. Nothing visible matches -> `404 item not found`, the same answer a hidden
+   row gives.
 
 If `GITHUB_CLIENT_ID` is unset, the `/auth/github/*` endpoints return
 **501 Not Implemented** with `{"detail": "not configured"}` — the rest of the

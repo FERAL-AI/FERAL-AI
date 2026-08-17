@@ -40,6 +40,22 @@ Every capability inside FERAL must be governed by a schema explicitly readable b
 
 The `requires_daemon: true` field explicitly tells the Orchestrator to bypass HTTP routing and instead pack the execution as an `execute` payload directed at a connected WebSocket node.
 
+### `skill_id` and `brand` are both required, and both are load-bearing
+
+`skill_id` is the skill's **name** everywhere it is referred to: the
+directory it installs into (`~/.feral/skills/<skill_id>/`), the string a
+user types (`feral install iot_light`), the string an app writes in
+`skill_dependencies`, and the `name` the registry publishes it under.
+Leave it out and `SkillManifest` generates a UUID, the skill installs
+under a random directory name, and nothing can name it again. The
+registry refuses to publish a bundle without one.
+
+`brand.name` is what the install dialog shows as the skill's name before
+anything is written to the user's disk. `SkillManifest.brand` has no
+default, so a manifest without it does not load, and the registry
+refuses that bundle at publish rather than letting it fail on a user's
+machine.
+
 ## Defining the Hardware Code
 
 To handle the incoming payload, modify your daemon code (e.g. `robot_template.py`) to map against the `skill_id` endpoints.
@@ -116,10 +132,25 @@ feral publish --skill ./my_skill   # signs the bundle and uploads it
 
 `cli/publish.py` signs the SHA-256 of the tarball with your private key.
 Both install paths verify that signature before anything lands on disk:
-`feral install <id>` from a shell, and the Marketplace page in the web
+`feral install <name>` from a shell, and the Marketplace page in the web
 client, which additionally shows the user your permission list and the
 signature status and will not install until they confirm. An unsigned or
 tampered bundle is refused rather than installed with a warning.
+
+The bundle is your skill directory as it stands: `manifest.json` at the
+root next to `impl.py`. That `manifest.json` must be the `SkillManifest`
+itself, not a registry envelope wrapping it — publish reads the tarball
+and rejects a bundle whose `manifest.json` FERAL could not load, naming
+the missing key.
+
+Your item is then addressable by `skill_id`. `feral install iot_light`
+and `skill_dependencies: ["iot_light"]` both resolve through
+`GET /api/v1/item/iot_light?kind=skill`; the registry's UUID also
+resolves, but nothing you write by hand should carry one. If two
+versions of your skill are published, a bare name resolves to the
+highest; see the
+[marketplace overview](mintlify/marketplace/overview.mdx) for the full
+rule, including the two cases the registry refuses to guess at.
 
 For local iteration, `MarketplaceClient.install(skill_id, source_url=...)`
 still installs straight from a URL or a git clone with no verification.

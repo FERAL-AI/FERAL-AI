@@ -53,6 +53,20 @@ class SeedItem:
     version: str
     manifest: dict
     files: list[tuple[str, bytes]]  # (arcname, bytes)
+    # The document written to the tarball as ``manifest.json``, when it
+    # differs from the registry metadata in ``manifest``.
+    #
+    # These are two different things and conflating them is what broke
+    # every published skill: ``manifest`` is registry metadata (kind /
+    # name / version, what the catalog shows), while the tarball's
+    # ``manifest.json`` is the document FERAL loads at install. For a
+    # skill that is the SkillManifest, and shipping the envelope in its
+    # place made every bundle fail ``SkillPackage.load()``.
+    #
+    # None keeps the historical behaviour (envelope in the tarball) for
+    # the kinds whose loaders have not been re-verified against this
+    # distinction yet: app, daemon, agent, workflow.
+    bundle_manifest: dict | None = None
 
 
 def _repo_root() -> Path:
@@ -74,12 +88,13 @@ def _load_skill_seeds() -> list[SeedItem]:
             continue
         name = manifest.get("skill_id") or manifest.get("name") or manifest_path.stem
         version = str(manifest.get("version", "0.1.0"))
-        files: list[tuple[str, bytes]] = [
-            (f"manifests/{manifest_path.name}", manifest_path.read_bytes()),
-        ]
+        # Root-level manifest.json + impl.py: the layout SkillPackage
+        # reads. The old nested `manifests/x.json` + `impl/x.py` layout
+        # put no manifest.json where the installer looks for one.
+        files: list[tuple[str, bytes]] = []
         impl_py = impl_dir / f"{manifest_path.stem}.py"
         if impl_py.exists():
-            files.append((f"impl/{impl_py.name}", impl_py.read_bytes()))
+            files.append(("impl.py", impl_py.read_bytes()))
         seeds.append(
             SeedItem(
                 kind="skill",
@@ -91,9 +106,11 @@ def _load_skill_seeds() -> list[SeedItem]:
                     "version": version,
                     "description": manifest.get("description"),
                     "author": manifest.get("author", "feral-core"),
+                    "skill_id": name,
                     "original": manifest,
                 },
                 files=files,
+                bundle_manifest=manifest,
             )
         )
     return seeds
@@ -295,7 +312,8 @@ def _load_daemon_seeds() -> list[SeedItem]:
 def _build_tarball(seed: SeedItem) -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        manifest_bytes = json.dumps(seed.manifest, sort_keys=True).encode("utf-8")
+        in_bundle = seed.bundle_manifest if seed.bundle_manifest is not None else seed.manifest
+        manifest_bytes = json.dumps(in_bundle, sort_keys=True).encode("utf-8")
         info = tarfile.TarInfo("manifest.json")
         info.size = len(manifest_bytes)
         tar.addfile(info, io.BytesIO(manifest_bytes))

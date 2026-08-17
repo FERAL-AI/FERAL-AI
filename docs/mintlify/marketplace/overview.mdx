@@ -7,7 +7,7 @@ description: "Install and publish skills, hardware daemons, MCP servers, channel
 
 [registry.feral.sh](https://registry.feral.sh) hosts **eight categories**
 of content that plug into any FERAL brain. Install any of them with
-`feral install <id>`.
+`feral install <name>`.
 
 | Category | What it is | Install location |
 |---|---|---|
@@ -20,15 +20,51 @@ of content that plug into any FERAL brain. Install any of them with
 | **Workflow pack** | Named multi-step TaskFlow template (PR triage, standup composer, research assistant). | `~/.feral/workflows/<id>/` |
 | **Agent persona** | Specialist system prompt + narrow tool permission list the AgentMitosisEngine spawns on demand. | `~/.feral/agents/<id>/` |
 
+## Naming an item
+
+Everything that installs an item names it the same way: by its **name**,
+the string in the `name` column of the catalog and in a skill manifest's
+`skill_id`.
+
+```bash
+feral install robot_ext
+```
+
+An item also has an `id`, the UUID the registry minted when it was
+published. Both work everywhere a reference is accepted, and an id is a
+permalink that a later item cannot take over. But nothing you write by
+hand should contain a UUID: an `AppManifest` declaring
+`skill_dependencies: ["robot_ext"]` is the readable, maintainable form,
+and it is the supported one.
+
+### When a bare name is not enough
+
+Names are unique per `(kind, version)`, not globally, so one name can
+match several rows. The registry answers each case with a rule rather
+than a guess:
+
+| Situation | What happens |
+|---|---|
+| One match | Resolved. |
+| Several **versions** of one kind | The **highest** version wins, compared numerically (`0.10.0` beats `0.9.0`). Pin an older one with `?version=`. |
+| Versions that cannot be ordered (`1.0.0` next to `1.0.0-beta`) | **409**, naming the versions it found. Choosing between them would be arbitrary, so it does not. Pass `?version=`. |
+| Several **kinds** under one name | **409**, naming the kinds. Pass `?kind=`. |
+| No match, or a match the caller may not see | **404 `item not found`**, the same answer for a pending submission as for a name that never existed. |
+
+The brain always sends `?kind=` when it resolves an app's skill
+dependency, because the kind is known at that call site, so a
+cross-kind clash never reaches the user there.
+
 ## Install flow
 
 ```bash
-feral install <item_id>
+feral install <name>
 ```
 
 Under the hood:
 
-1. `GET https://registry.feral.sh/api/v1/item/<id>` returns the manifest,
+1. `GET https://registry.feral.sh/api/v1/item/<name>` (or `<id>`, or
+   either with `?kind=` / `?version=`) returns the manifest,
    signed-tarball URL, SHA-256, Ed25519 signature, and the publisher's
    public key.
 2. The client recomputes SHA-256 locally and verifies the detached
@@ -99,6 +135,10 @@ on every call, so it disappears by itself once you install the skill.
 feral install <skill_id>
 ```
 
+The `skill_id` in `skill_dependencies` is resolved against the registry
+by **name**, scoped to `kind=skill`. It is the same string a user would
+type, and it is the same string the catalog lists.
+
 A dependency that verified at preview time and then failed to install is
 treated differently: the app is rolled back, because a half-working app
 that claims to be installed is its own lie.
@@ -119,6 +159,26 @@ fields for each kind are listed in
 [feral-registry/feral_registry/schemas.py](https://github.com/FERAL-AI/FERAL-AI/blob/main/feral-registry/feral_registry/schemas.py)
 — the registry rejects a publish that's missing required keys with a
 clear error.
+
+### Two manifests, and they are not the same document
+
+A publish carries two things, and confusing them is the mistake the
+registry itself made:
+
+- the **metadata manifest** (`manifest_json`, the form field): `kind`,
+  `name`, `version`, description, author. This is what the catalog and
+  `GET /item/{ref}` serve. It is *not* covered by the bundle signature.
+- the **bundle's own `manifest.json`**: the document FERAL loads at
+  install. For `kind=skill` that is a `SkillManifest`, and it is where
+  the install dialog reads the permission list from, precisely because
+  it is inside the signed tarball.
+
+Publish now opens the tarball and refuses a skill bundle that FERAL
+could not load: no `manifest.json`, unparseable JSON, or a manifest
+missing `skill_id`, `brand.name`, or `description`. `brand` is required
+and stays required — it is the name shown in the install dialog. A
+validator that accepts at publish and rejects at install is its own
+defect, and it is the publisher, not the user, who should see the error.
 
 ## Trust model
 

@@ -437,12 +437,19 @@ feral bridge install
 
 ### `feral install`
 
-Install a published skill or daemon from the FERAL registry.
+Install a published skill or daemon from the FERAL registry. The argument is
+the item's **name** (the `skill_id` for a skill, and what the catalog lists);
+the registry's UUID also resolves, but nothing you type should be one.
 
 ```bash
 feral install weather-skill
 feral install weather-skill --registry https://registry.example.com
 ```
+
+A name that matches items of more than one kind, or versions the registry
+cannot order, is refused with a message naming what it found rather than
+resolved to an arbitrary pick. See
+[Marketplace → Naming an item](/marketplace/overview).
 
 ### `feral publish`
 

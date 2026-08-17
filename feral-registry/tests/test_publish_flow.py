@@ -11,130 +11,36 @@ meantime.
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import io
 import json
-import tarfile
 
-import pytest
-import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
-from nacl.signing import SigningKey
-
-
-REVIEWER_SECRET = "test-reviewer-secret"
-
-
-@pytest_asyncio.fixture
-async def app_client(tmp_path, monkeypatch):
-    """Spin up a fresh registry instance with a temp SQLite DB.
-
-    We deliberately avoid ``importlib.reload`` here -- the SQLAlchemy
-    declarative registry survives reloads in 2.x, which used to cause
-    ``Table 'publishers' is already defined`` errors. Instead we point
-    the existing modules at a fresh engine/session and reset cached
-    settings.
-    """
-
-    blob_dir = tmp_path / "blobs"
-    db_path = tmp_path / "registry.db"
-    monkeypatch.setenv("FERAL_REGISTRY_BLOB_DIR", str(blob_dir))
-    monkeypatch.setenv("FERAL_REGISTRY_DB_URL", f"sqlite+aiosqlite:///{db_path}")
-    monkeypatch.setenv("JWT_SECRET", "test-secret")
-    monkeypatch.setenv("FEATURED_PUBLISHERS", "feral")
-    monkeypatch.setenv("FERAL_REGISTRY_PUBLIC_URL", "http://testserver")
-    monkeypatch.setenv("FERAL_REGISTRY_REVIEWER_SECRET", REVIEWER_SECRET)
-
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-    from feral_registry import config as config_mod
-    config_mod.get_settings.cache_clear()  # type: ignore[attr-defined]
-    settings = config_mod.get_settings()
-
-    from feral_registry import db as db_mod
-    from feral_registry import models as models_mod
-    from feral_registry import main as main_mod
-
-    new_engine = create_async_engine(settings.db_url, echo=False, future=True)
-    new_session_factory = async_sessionmaker(
-        new_engine, expire_on_commit=False, class_=db_mod.AsyncSession
-    )
-    monkeypatch.setattr(db_mod, "engine", new_engine, raising=False)
-    monkeypatch.setattr(db_mod, "SessionLocal", new_session_factory, raising=False)
-
-    app = main_mod.create_app()
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        async with new_engine.begin() as conn:
-            await conn.run_sync(db_mod.Base.metadata.create_all)
-        yield client, db_mod, models_mod
-    await new_engine.dispose()
-
-
-def _build_bundle(manifest: dict) -> bytes:
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        manifest_bytes = json.dumps(manifest).encode("utf-8")
-        info = tarfile.TarInfo("manifest.json")
-        info.size = len(manifest_bytes)
-        tar.addfile(info, io.BytesIO(manifest_bytes))
-
-        impl_bytes = b"def run():\n    return 'hello'\n"
-        info = tarfile.TarInfo("impl.py")
-        info.size = len(impl_bytes)
-        tar.addfile(info, io.BytesIO(impl_bytes))
-    return buf.getvalue()
-
-
-async def _make_publisher(db_mod, models_mod, github_login: str, pubkey_hex: str | None = None):
-    async with db_mod.SessionLocal() as session:
-        pub = models_mod.Publisher(
-            github_login=github_login,
-            github_id=123456,
-            pubkey_hex=pubkey_hex,
-        )
-        session.add(pub)
-        await session.commit()
-        await session.refresh(pub)
-        return pub.id
-
-
-def _token_for(github_login: str) -> str:
-    from feral_registry.auth import issue_publisher_token
-    from feral_registry.config import get_settings
-
-    token, _ = issue_publisher_token(github_login, get_settings())
-    return token
+from .conftest import REVIEWER_SECRET
+from .helpers import (
+    build_bundle,
+    metadata_envelope,
+    publish_bundle,
+    skill_manifest,
+    token_for as _token_for,
+    upsert_publisher as _make_publisher,
+)
 
 
 async def _publish_item(client, db_mod, models_mod, *, login: str = "feral") -> tuple[str, str]:
     """Publish a fresh skill bundle and return (item_id, sha256)."""
+    import hashlib
 
-    sk = SigningKey.generate()
-    pubkey_hex = sk.verify_key.encode().hex()
-    await _make_publisher(db_mod, models_mod, login, pubkey_hex)
-
-    manifest = {
-        "kind": "skill",
-        "name": f"hello_skill_{login}",
-        "version": "0.1.0",
-        "description": "Minimal test skill.",
-        "skill_id": f"hello_skill_{login}",
-    }
-    bundle = _build_bundle(manifest)
-    sha256 = hashlib.sha256(bundle).hexdigest()
-    sig = base64.b64encode(sk.sign(sha256.encode("ascii")).signature).decode("ascii")
-    token = _token_for(login)
-
-    r = await client.post(
-        "/api/v1/publish",
-        headers={"Authorization": f"Bearer {token}"},
-        files={"bundle": ("hello.tar.gz", bundle, "application/gzip")},
-        data={"signature": sig, "manifest_json": json.dumps(manifest)},
+    skill_id = f"hello_skill_{login}"
+    bundle = build_bundle(skill_manifest(skill_id))
+    r = await publish_bundle(
+        client,
+        db_mod,
+        models_mod,
+        envelope=metadata_envelope(skill_id),
+        bundle=bundle,
+        login=login,
     )
     assert r.status_code == 200, r.text
     body = r.json()
+    assert body["sha256"] == hashlib.sha256(bundle).hexdigest()
     return body["id"], body["sha256"]
 
 
@@ -309,12 +215,11 @@ async def test_publisher_jwt_cannot_act_as_reviewer(app_client):
 
 async def test_publish_requires_pubkey(app_client):
     client, db_mod, models_mod = app_client
-    await _make_publisher(db_mod, models_mod, "nokey")
+    await _make_publisher(db_mod, models_mod, "nokey", None)
 
     token = _token_for("nokey")
-    manifest = {"kind": "skill", "name": "x", "version": "0.0.1", "skill_id": "x"}
-    bundle = _build_bundle(manifest)
-    _ = hashlib.sha256(bundle).hexdigest()
+    manifest = metadata_envelope("x", version="0.0.1")
+    bundle = build_bundle(skill_manifest("x", version="0.0.1"))
 
     r = await client.post(
         "/api/v1/publish",

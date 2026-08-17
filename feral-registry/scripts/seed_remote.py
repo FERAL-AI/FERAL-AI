@@ -60,7 +60,17 @@ def _load_or_create_key() -> SigningKey:
 
 
 def _build_skill_bundle(manifest_path: Path) -> tuple[dict, bytes]:
-    """Return (manifest_dict, tarball_bytes) for a single skill manifest."""
+    """Return (registry_metadata, tarball_bytes) for a single skill manifest.
+
+    Two documents, and conflating them is what broke every published
+    skill: the returned dict is **registry metadata** posted as the
+    ``manifest_json`` form field (kind/name/version, what the catalog
+    shows), while the tarball's ``manifest.json`` is the **SkillManifest
+    itself**, which is what FERAL loads at install. This used to write
+    the metadata envelope into the tarball, so every published bundle
+    failed ``SkillPackage.load()`` with "brand field required" and the
+    happy path had never run.
+    """
     manifest = json.loads(manifest_path.read_text())
     stem = manifest_path.stem
     name = manifest.get("skill_id") or manifest.get("name") or stem
@@ -78,7 +88,7 @@ def _build_skill_bundle(manifest_path: Path) -> tuple[dict, bytes]:
 
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        _add_bytes(tar, "manifest.json", json.dumps(pub_manifest, indent=2).encode())
+        _add_bytes(tar, "manifest.json", json.dumps(manifest, indent=2).encode())
         impl = SKILLS_DIR / "impl" / f"{stem}.py"
         if impl.exists():
             _add_bytes(tar, "impl.py", impl.read_bytes())

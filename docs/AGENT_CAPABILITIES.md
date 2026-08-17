@@ -215,7 +215,8 @@ Under the hood (`feral-core/cli/publish.py`):
 ### Install
 
 ```bash
-feral install <item_id_or_slug>
+feral install <name>          # the skill_id, e.g. `feral install web_search`
+feral install <registry_uuid> # also resolves; nobody types this
 ```
 
 `feral-core/cli/install.py`:

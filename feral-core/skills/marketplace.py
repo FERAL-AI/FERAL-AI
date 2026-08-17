@@ -70,6 +70,17 @@ class MarketplaceError(Exception):
     """A registry lookup or download failed in a way worth reporting."""
 
 
+def _registry_detail(resp) -> str:
+    """FastAPI's ``{"detail": ...}`` off an error response, or ""."""
+    try:
+        body = resp.json()
+    except Exception:
+        return ""
+    if isinstance(body, dict) and isinstance(body.get("detail"), str):
+        return body["detail"]
+    return ""
+
+
 def _run_cli_gate(fn, *args):
     """Run one of ``cli.install``'s gates and translate its CLI contract.
 
@@ -257,22 +268,42 @@ class MarketplaceClient:
     # Verified registry install (preview -> consent -> install)
     # ─────────────────────────────────────────────
 
-    async def _registry_fetch_item(self, item_id: str) -> dict:
-        """``GET /api/v1/item/{id}`` walking the registry fallback list."""
+    async def _registry_fetch_item(self, item_id: str, kind: str = "") -> dict:
+        """``GET /api/v1/item/{ref}`` walking the registry fallback list.
+
+        ``item_id`` is a *reference*: the registry resolves either the
+        UUID primary key or the item's name. Names are what callers
+        actually hold. An ``AppManifest`` declares
+        ``skill_dependencies: ["robot_ext"]`` and a user types
+        ``feral install robot_ext``; neither has ever seen a UUID.
+
+        ``kind`` is passed through as a query parameter when known,
+        because a name is unique per ``(kind, version)`` rather than
+        globally. Every caller of this method already knows the kind it
+        wants, so sending it turns a possible cross-kind 409 into an
+        exact lookup rather than a coin flip.
+        """
         from cli.publish import registry_base_urls
 
         bases = registry_base_urls()
+        params = {"kind": kind} if kind else None
         last_error = ""
         for base in bases:
             url = f"{base}/api/v1/item/{item_id}"
             try:
-                resp = await self._client.get(url, follow_redirects=True)
+                resp = await self._client.get(url, params=params, follow_redirects=True)
             except Exception as exc:
                 last_error = f"registry unreachable at {base}: {exc}"
                 logger.debug("registry item fetch failed for %s: %s", url, exc)
                 continue
             if resp.status_code == 404:
                 raise MarketplaceError(f"'{item_id}' is not published in the registry at {base}")
+            if resp.status_code == 409:
+                # The registry found several items under this name and
+                # refused to pick one. Its message names the candidates,
+                # so relay it rather than replacing it with a generic
+                # HTTP-status string the user cannot act on.
+                raise MarketplaceError(_registry_detail(resp) or f"'{item_id}' is ambiguous in the registry")
             if resp.status_code >= 400:
                 last_error = f"registry returned {resp.status_code} for {item_id}"
                 continue
@@ -354,7 +385,7 @@ class MarketplaceClient:
         if kind not in INSTALLABLE_KINDS:
             return {"success": False, "error": f"unknown item kind '{kind}'"}
         try:
-            item = await self._registry_fetch_item(item_id)
+            item = await self._registry_fetch_item(item_id, kind=kind)
         except MarketplaceError as exc:
             return {"success": False, "error": str(exc)}
 

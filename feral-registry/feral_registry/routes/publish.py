@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import current_publisher
+from ..bundle import validate_bundle_for_kind
 from ..config import Settings, get_settings
 from ..db import get_session
 from ..models import (
@@ -71,6 +72,19 @@ async def publish(
     sha = sha256_bytes(data)
     if not verify_bundle_signature(publisher.pubkey_hex, signature, sha):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "signature verification failed")
+
+    # The metadata manifest above describes the bundle; this reads the
+    # bundle. Both have to hold, because the metadata is what the catalog
+    # shows and the bundle's own manifest.json is what FERAL loads. See
+    # feral_registry.bundle for why this runs after the signature check
+    # (never inspect bytes whose publisher has not been established) and
+    # for what it deliberately does not check.
+    bundle_problems = validate_bundle_for_kind(manifest_obj.kind, data)
+    if bundle_problems:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"bundle would not install: {'; '.join(bundle_problems)}",
+        )
 
     existing = await session.execute(
         select(Item).where(
