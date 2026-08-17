@@ -98,6 +98,15 @@ ALLOWED_FAIL_LABELS: set[str] = {
     # ComputerUseDriver normalisation is shipped inside feral-core; an
     # import failure here means the wheel is corrupted.
     "Computer-use driver",
+    # Multi-emission label, same shape as "Memory database" below: the
+    # fresh-install branch is still _info ("no realtime provider key set"),
+    # and this entry covers the branch where a realtime key IS configured
+    # and every realtime probe rejected it. That row used to be a green
+    # _pass derived from key presence alone, so an install with a rotated
+    # OpenAI key printed a red "OpenAI Realtime: key rejected by API" in
+    # the Voice providers section and a green "Voice runtime — key set"
+    # here, and the green one is the row named after the feature.
+    "Voice runtime",
     # Operator selected a non-default vector backend (chroma/qdrant) in
     # settings.json but the optional dependency is not installed — the
     # configured backend cannot load, so the brain falls back / degrades.
@@ -199,6 +208,17 @@ ALLOWED_WARN_LABELS: set[str] = {
     # Persistence stores that exist as a file but failed to open.
     "Coding-agent store",
     "Upload store",
+    # Also in ALLOWED_FAIL_LABELS, and multi-branch for the same reason
+    # as "Local-agent grants" below. Fresh install (no realtime key) is
+    # still _info. This entry is the branch where a key is configured but
+    # the realtime probe registry produced no result for it, so doctor
+    # can say the key is present and cannot say it works. Naming that gap
+    # is the point: the previous code resolved it by calling it green.
+    "Voice runtime",
+    # The vault raised while doctor was reading a realtime key back. That
+    # is not the same answer as "no key is configured", and collapsing
+    # the two told an operator to set a key they had already set.
+    "Voice runtime credential lookup",
     # Local-agent grants: this label has TWO branches. The
     # "no workspace_grants.json yet" branch was demoted to ``_info``
     # in v2026.5.36 (covered by ``test_demoted_probes_no_longer_warn``
@@ -322,20 +342,27 @@ class TestDoctorSeverityAllowlist:
         come back as _warn or _fail in the labels that have a SINGLE
         emission site.
 
-        Some labels (``Memory database``, ``Local-agent grants``) have
-        multiple emission sites — one demoted branch (fresh install)
-        plus a legitimate degradation branch (corrupt DB, JSON read
-        error). The behaviour test
+        Some labels (``Memory database``, ``Local-agent grants``,
+        ``Voice runtime``) have multiple emission sites — one demoted
+        branch (fresh install) plus a legitimate degradation branch
+        (corrupt DB, JSON read error, a configured realtime key that the
+        provider rejects). The behaviour test
         ``test_fresh_install_has_no_warnings_or_failures`` is the
         authoritative guard for those: on a clean install only the
         demoted branch fires, and zero warnings/failures are
         permitted in the output.
+
+        ``Voice runtime`` left this set when the row stopped being
+        answerable from key presence. Its fresh-install branch is still
+        ``_info`` and the behaviour test still pins that; what it no
+        longer does is report green for a key that has been rotated,
+        which is a claim the row was making while the Voice providers
+        section three blocks up rendered the same key as rejected.
         """
         single_emission_demoted = {
             "Chrome (CDP endpoint)",
             "Local STT (faster-whisper)",
             "Local TTS (piper)",
-            "Voice runtime",
         }
         calls = _collect_doctor_severity_calls()
         warn_labels = set(calls["_warn"])

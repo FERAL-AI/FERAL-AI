@@ -2777,18 +2777,69 @@ def cmd_doctor():
             from security.vault import BlindVault  # type: ignore
 
             return bool(BlindVault().get_credential(key))
-        except Exception:
+        except Exception as exc:
+            # A vault that cannot be opened is not the same answer as "no
+            # key". Returning False for both made an unreadable vault
+            # render as the cyan "voice is off, set a key" row, which tells
+            # the operator to set a key they have already set.
+            _warn(
+                "Voice runtime credential lookup",
+                f"could not read {key} from the vault ({type(exc).__name__}: {exc}); "
+                "treating it as unset",
+                "Check the OS keychain entry holding the vault master key, "
+                "or re-add the key with `feral key add`",
+            )
             return False
 
-    voice_keys = ("OPENAI_API_KEY", "GOOGLE_API_KEY")
-    have_voice_key = any(_key_available(k) for k in voice_keys)
-    if have_voice_key:
-        providers = []
-        if _key_available("OPENAI_API_KEY"):
-            providers.append("OpenAI Realtime")
-        if _key_available("GOOGLE_API_KEY"):
-            providers.append("Google Gemini Realtime")
-        _pass("Voice runtime", "key set: " + ", ".join(providers))
+    # Voice realtime ids are ``openai_realtime`` / ``gemini_live`` in the
+    # probe registry, and those probes ran above. Prefer their answer.
+    # A key that exists is not a key that works: this row used to go green
+    # on presence alone, so an install whose OpenAI key had been rotated
+    # showed a red "OpenAI Realtime: key rejected by API" three sections
+    # up and a green "Voice runtime — key set: OpenAI Realtime" here, and
+    # the green one is the row named after the feature.
+    _VOICE_RUNTIME_KEYS = (
+        ("OPENAI_API_KEY", "openai_realtime", "OpenAI Realtime"),
+        ("GOOGLE_API_KEY", "gemini_live", "Google Gemini Realtime"),
+    )
+    working: list[str] = []
+    rejected: list[str] = []
+    unprobed: list[str] = []
+    for _env_key, _probe_id, _label in _VOICE_RUNTIME_KEYS:
+        if not _key_available(_env_key):
+            continue
+        _voice_result = probe_results.get(_probe_id)
+        if _voice_result is None:
+            unprobed.append(_label)
+        elif _voice_result.ok:
+            working.append(_label)
+        else:
+            rejected.append(f"{_label} ({_voice_result.reason or 'probe failed'})")
+
+    if working:
+        detail = "probed OK: " + ", ".join(working)
+        if rejected:
+            detail += "; NOT working: " + ", ".join(rejected)
+        if unprobed:
+            detail += "; key set but unprobed: " + ", ".join(unprobed)
+        _pass("Voice runtime", detail)
+    elif rejected:
+        _fail(
+            "Voice runtime",
+            "a realtime key is configured but no realtime provider answered: "
+            + ", ".join(rejected),
+            "Re-add the key with `feral key add --provider openai --label default`, "
+            "or see the Voice providers rows above for the exact rejection",
+        )
+    elif unprobed:
+        # Key present, no probe result to check it against. Say that rather
+        # than promoting presence to health.
+        _warn(
+            "Voice runtime",
+            "key set but not verified (no realtime probe result): "
+            + ", ".join(unprobed),
+            "Re-run `feral doctor` once the network is reachable to verify the key",
+        )
     else:
         # v2026.5.36 — was `_warn`. Voice (in-composer realtime
         # speech) is opt-in. The text agent works perfectly without

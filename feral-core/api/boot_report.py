@@ -5,9 +5,49 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("feral.boot")
+
+_FIRST_PARTY_ROOTS: frozenset[str] | None = None
+
+
+def first_party_roots() -> frozenset[str]:
+    """Top-level package names that ship inside feral-core.
+
+    Read off the tree rather than written down, because a hand-maintained
+    list is exactly the thing that goes stale the week a package is added
+    and then makes this classifier wrong in the quiet direction.
+
+    ``boot_report.py`` lives at ``feral-core/api/``, so the core root is
+    two parents up; every directory under it holding an ``__init__.py``
+    is one of ours. ``build/`` and ``dist/`` are skipped: they are stale
+    duplicates of the same names and contribute nothing.
+    """
+    global _FIRST_PARTY_ROOTS
+    if _FIRST_PARTY_ROOTS is not None:
+        return _FIRST_PARTY_ROOTS
+    core_root = Path(__file__).resolve().parent.parent
+    roots: set[str] = set()
+    try:
+        for child in core_root.iterdir():
+            if not child.is_dir() or child.name in ("build", "dist"):
+                continue
+            if (child / "__init__.py").is_file():
+                roots.add(child.name)
+    except OSError as exc:
+        # A boot classifier that cannot read its own tree must not claim
+        # every import failure is a third-party one, so say so and treat
+        # the set as empty (every ImportError then reports as SKIPPED,
+        # the pre-existing behaviour, but loudly rather than silently).
+        logger.warning(
+            "[boot] could not enumerate first-party packages under %s (%s); "
+            "an ImportError from FERAL's own code will be reported as a "
+            "missing optional dependency.", core_root, exc,
+        )
+    _FIRST_PARTY_ROOTS = frozenset(roots)
+    return _FIRST_PARTY_ROOTS
 
 
 class SubsystemStatus(str, Enum):
@@ -196,10 +236,44 @@ def boot_subsystem(report: BootReport, name: str, optional: bool = True,
                     )
     except ImportError as e:
         elapsed = (time.time() - start) * 1000
-        report.record(name, SubsystemStatus.SKIPPED,
-                      message=f"Missing dependency: {e}", elapsed_ms=elapsed, optional=optional)
-        if not optional:
-            raise
+        # "Missing dependency" is a claim about a third party, and this
+        # handler used to make it about every ImportError, silently. A
+        # renamed helper, a circular import or a typo inside feral-core
+        # raises ImportError too, and was filed as SKIPPED with no log
+        # line at any level: the subsystem was gone, the boot report said
+        # an optional extra was not installed, and no pip install could
+        # ever fix it. The distinction is the same one memory/sqlite_features
+        # draws between FTS5 and loadable extensions: absent third-party
+        # code is a degrade, absent first-party code is a defect.
+        failed_root = (getattr(e, "name", "") or "").split(".")[0]
+        if failed_root and failed_root in first_party_roots():
+            report.record(
+                name, SubsystemStatus.FAILED,
+                message=f"first-party import failed: {e}",
+                elapsed_ms=elapsed, optional=optional,
+            )
+            logger.warning(
+                "[boot] %s init failed (%s): %r is FERAL's own package, not an "
+                "optional dependency, so this is a defect in the build or the "
+                "import graph and no install will fix it: %s",
+                name, "required" if not optional else "optional",
+                failed_root, e,
+            )
+            if not optional:
+                raise
+        else:
+            report.record(name, SubsystemStatus.SKIPPED,
+                          message=f"Missing dependency: {e}", elapsed_ms=elapsed, optional=optional)
+            # INFO, not silence. SKIPPED only reached the operator through
+            # the end-of-boot summary, so a subsystem that vanished because
+            # an extra was not installed left no line naming the subsystem
+            # at the moment it was lost.
+            logger.info(
+                "[boot] %s skipped: optional dependency %s is not installed (%s)",
+                name, failed_root or "(unknown)", e,
+            )
+            if not optional:
+                raise
     except Exception as e:
         elapsed = (time.time() - start) * 1000
         report.record(name, SubsystemStatus.FAILED,

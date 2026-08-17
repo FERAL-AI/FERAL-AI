@@ -1167,17 +1167,137 @@ def execute_routine_job(job):
         state.cron_service.record_run_finish(run_id, "error", {}, str(exc))
 
 
+def check_local_bypass_safety() -> None:
+    """Report ``FERAL_LOCAL_BYPASS=1`` on a bind the operator did not intend.
+
+    audit-r12 A1 — the middleware enforces the actual policy (loopback still
+    bypasses by default); this makes the trust degradation visible the moment
+    the brain comes up.
+
+    The resolver failing is NOT a reason to stay quiet, which is what made
+    this worth splitting out of ``startup`` and testing. ``brain_bind_host``
+    reads ~/.feral/settings.json, so a corrupt or unreadable settings file
+    raises here, and the previous ``_bind = ""`` fallback fed
+    ``warn_if_unsafe_bypass`` a value it treats as loopback-safe. The one
+    configuration this check exists to shout about (bypass on, bind wide) was
+    therefore silenced by the same file corruption that could have widened the
+    bind in the first place, and the swallow logged nothing at any level.
+    """
+    try:
+        bind = brain_bind_host()
+    except Exception as exc:
+        logger.warning(
+            "Could not resolve the brain's bind host at boot (%s: %s), so the "
+            "FERAL_LOCAL_BYPASS safety check could not be evaluated. Check "
+            "~/.feral/settings.json.",
+            type(exc).__name__, exc,
+        )
+        if local_bypass_enabled():
+            logger.warning(
+                "FERAL_LOCAL_BYPASS=1 and the bind host is unknown. If this "
+                "brain is not on loopback, every host that can reach it has "
+                "UNAUTHENTICATED access. Set FERAL_LOCAL_BYPASS=0 (the "
+                "default) unless this is a trusted single-user dev box."
+            )
+        return
+    warn_if_unsafe_bypass(bind)
+
+
+# What an operator loses when the integration probe sweeper is not running.
+# One string so the three call sites below cannot describe it three ways.
+_PROBE_SWEEPER_LOSS = (
+    "Integration status badges will report token presence instead of a "
+    "live probe, so a revoked or expired credential reads as connected. "
+    "Force a one-off refresh with POST /api/integrations/refresh."
+)
+
+
+def start_probe_sweeper(brain_state) -> bool:
+    """Start the integration probe sweeper, and say so when it does not.
+
+    Integration probes were only ever written once, right after a token
+    exchange, with a 60s cache. After that the "connected" badge fell back to
+    "a token string exists", which is not the same claim and was not what the
+    UI said. The sweeper is what makes the badge true, and it is started at
+    boot rather than lazily on the first /api/integrations request, or a brain
+    nobody has opened Settings on keeps cold badges and a revoked credential
+    reads as healthy until someone looks.
+
+    Both the exception and the falsy return are reported. This used to be a
+    debug-level swallow that also discarded ``ensure_started``'s boolean, so
+    the one outcome that matters (the sweeper is not running) produced no
+    operator-visible signal at all.
+
+    Returns True when a sweep loop is running afterwards.
+    """
+    try:
+        from integrations import probe_sweeper
+
+        started = probe_sweeper.ensure_started(
+            vault=getattr(brain_state, "vault", None),
+            register=brain_state.register_background_task,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Integration probe sweeper did not start (%s: %s). %s",
+            type(exc).__name__, exc, _PROBE_SWEEPER_LOSS,
+        )
+        return False
+    if started:
+        return True
+    if probe_sweeper.sweep_interval_seconds() <= 0:
+        # Explicitly switched off by the operator. Still said out loud,
+        # because the consequence is the same and nothing else in the
+        # process mentions it.
+        logger.info(
+            "Integration probe sweeper is disabled by %s=0. %s",
+            probe_sweeper.ENV_SWEEP_SECONDS, _PROBE_SWEEPER_LOSS,
+        )
+    else:
+        logger.warning(
+            "Integration probe sweeper refused to start even though %s is "
+            "%.0fs. %s",
+            probe_sweeper.ENV_SWEEP_SECONDS,
+            probe_sweeper.sweep_interval_seconds(),
+            _PROBE_SWEEPER_LOSS,
+        )
+    return False
+
+
+# Hours between provider-catalog refreshes. Named because the warning below
+# multiplies by it to state how stale the served list has become.
+PROVIDER_CATALOG_REFRESH_HOURS = 6
+
+
+async def refresh_provider_catalog_once(catalog, consecutive_failures: int) -> int:
+    """One refresh cycle. Returns the new consecutive-failure count.
+
+    Consecutive failures, not a per-cycle flag: one 6-hourly refresh losing a
+    race with the network is noise, and the same refresh failing every six
+    hours is a model list that has stopped moving. The old handler logged at
+    debug, so the second case looked exactly like the first, which is how a
+    refresher can serve a frozen catalogue for months while the process
+    reports nothing.
+    """
+    try:
+        if catalog is not None:
+            await catalog.refresh_async()
+    except Exception as exc:
+        consecutive_failures += 1
+        logger.warning(
+            "Provider catalog refresh failed (%s: %s). This is failure %d in "
+            "a row; the Settings model picker keeps serving the list from the "
+            "last successful refresh, which is now at least %dh old.",
+            type(exc).__name__, exc, consecutive_failures,
+            consecutive_failures * PROVIDER_CATALOG_REFRESH_HOURS,
+        )
+        return consecutive_failures
+    return 0
+
+
 @app.on_event("startup")
 async def startup():
-    # audit-r12 A1 — surface FERAL_LOCAL_BYPASS=1 on non-loopback bind
-    # as a loud boot warning. The middleware enforces the actual policy
-    # (loopback still bypasses by default); the warning makes the trust
-    # degradation visible the moment the brain comes up.
-    try:
-        _bind = brain_bind_host()
-    except Exception:
-        _bind = ""
-    warn_if_unsafe_bypass(_bind)
+    check_local_bypass_safety()
 
     await state.init()
     if state.memory:
@@ -1214,34 +1334,17 @@ async def startup():
         # Initial nudge so Settings sees fresh data shortly after boot
         # without waiting six hours.
         await asyncio.sleep(60)
+        consecutive_failures = 0
         while True:
-            try:
-                if state.provider_catalog is not None:
-                    await state.provider_catalog.refresh_async()
-            except Exception as exc:
-                logger.debug("provider catalog refresh failed: %s", exc)
-            await asyncio.sleep(6 * 3600)
+            consecutive_failures = await refresh_provider_catalog_once(
+                state.provider_catalog, consecutive_failures,
+            )
+            await asyncio.sleep(PROVIDER_CATALOG_REFRESH_HOURS * 3600)
     state.register_background_task(
         asyncio.create_task(_provider_catalog_refresher(), name="feral-provider-catalog-refresher")
     )
 
-    # Integration probes were only ever written once, right after a token
-    # exchange, with a 60s cache. After that the "connected" badge fell
-    # back to "a token string exists", which is not the same claim and
-    # was not what the UI said. The sweeper is what makes the badge true.
-    #
-    # Started at boot rather than lazily on the first /api/integrations
-    # request, or a brain nobody has opened Settings on keeps cold badges
-    # and a revoked credential reads as healthy until someone looks.
-    try:
-        from integrations import probe_sweeper
-
-        probe_sweeper.ensure_started(
-            vault=getattr(state, "vault", None),
-            register=state.register_background_task,
-        )
-    except Exception as exc:
-        logger.debug("probe sweeper did not start: %s", exc)
+    start_probe_sweeper(state)
 
 
 @app.on_event("shutdown")

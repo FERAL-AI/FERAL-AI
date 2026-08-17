@@ -3045,13 +3045,49 @@ class BrainState:
             try:
                 from security.vault import BlindVault
                 vault = BlindVault()
+            except Exception as exc:
+                # WARNING, matching the two handlers above. This is the
+                # default-namespace vault, which is where
+                # ``/api/config/credentials`` and
+                # ``/api/llm/providers/{id}/configure`` write, so losing it
+                # means every key the operator entered through the UI is
+                # unreadable for the life of the process. At debug the only
+                # symptom was a brain that boots clean and then answers
+                # "no API key configured" to a user who can see their key in
+                # Settings.
+                logger.warning(
+                    "Boot credential hydration: the default-namespace vault "
+                    "could not be opened (%s: %s). %d credential(s) stay "
+                    "unset: %s. Anything configured through Settings or "
+                    "`/api/config/credentials` is unreadable this boot. "
+                    "Run `feral doctor` to see which providers still "
+                    "authenticate.",
+                    type(exc).__name__, exc, len(missing_keys),
+                    ", ".join(missing_keys),
+                )
+            else:
+                unreadable: list[str] = []
                 for key in missing_keys:
-                    val = vault.retrieve(key) if hasattr(vault, "retrieve") else None
+                    try:
+                        val = vault.retrieve(key) if hasattr(vault, "retrieve") else None
+                    except Exception as exc:
+                        # Per-key, so one undecryptable entry cannot strand
+                        # the keys after it in the loop, which is what the
+                        # single outer handler did.
+                        unreadable.append(f"{key} ({type(exc).__name__}: {exc})")
+                        continue
                     if val:
                         os.environ[key] = val
                         loaded.append(key + "(vault)")
-            except Exception as exc:
-                logger.debug("vault fallback during boot failed: %s", exc)
+                if unreadable:
+                    logger.warning(
+                        "Boot credential hydration: %d vault entr(y/ies) could "
+                        "not be read back and stay unset: %s. Those providers "
+                        "will report unauthorized. Re-add them with "
+                        "`feral key add`, or check the OS keychain entry the "
+                        "vault master key lives in.",
+                        len(unreadable), "; ".join(unreadable),
+                    )
 
         if loaded:
             logger.info(f"Loaded credentials: {', '.join(loaded)}")
