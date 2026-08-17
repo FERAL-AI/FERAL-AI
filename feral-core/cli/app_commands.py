@@ -11,9 +11,11 @@ Subcommands
                                   action contracts, schemas).
 * ``feral app build <dir>``     — produce a reproducible tarball under
                                   ``<dir>/dist/<app_id>-<version>.tar.gz``.
-* ``feral app install <path>``  — POST /api/apps/install {path: ...} so
-                                  the running brain loads the app into
-                                  AppRegistry.
+* ``feral app install <path>``  : POST /api/apps/preview, show what the
+                                  app reaches and which skills it pulls
+                                  in, ask, then POST /api/apps/install
+                                  with the ``install_token`` the preview
+                                  minted.
 * ``feral app publish <dir>``   — sign the tarball with the publisher's
                                   Ed25519 key and POST to
                                   registry.feral.sh/api/v1/publish with
@@ -129,7 +131,13 @@ A FERAL GenUI app.
 ## Build + install locally
 
     feral app validate ./
-    feral app install ./
+    feral app install ./ --unsigned
+
+`install` shows what the app reaches and which skills it pulls into the
+brain, then asks. `--unsigned` is needed until the manifest is signed
+(`feral app sign ./ --key-id <your-key-id>`), because nothing otherwise
+proves who wrote the bundle. Add `--yes` to answer in advance from a
+script.
 
 ## Publish
 
@@ -162,7 +170,10 @@ def cmd_app_init(name: str) -> None:
     (dest / "README.md").write_text(_SCAFFOLD_README.format(title=name.title()))
     (dest / ".feralignore").write_text("dist/\nnode_modules/\n__pycache__/\n")
     _print(f"  Scaffolded FERAL app at {dest}")
-    _print("  Edit manifest.yaml, then: feral app validate ./ && feral app install ./")
+    _print("  Edit manifest.yaml, then:")
+    _print(f"      feral app validate {dest}")
+    _print(f"      feral app install {dest} --unsigned")
+    _print("  (--unsigned until you sign it: `feral app sign <dir> --key-id <id>`)")
 
 
 def _slugify(name: str) -> str:
@@ -283,7 +294,33 @@ def _is_ignored(rel_path: str, patterns: list[str]) -> bool:
 # ---------------------------------------------------------------------
 
 
-def cmd_app_install(path: str, host: Optional[str] = None, port: Optional[str] = None) -> None:
+def cmd_app_install(
+    path: str,
+    host: Optional[str] = None,
+    port: Optional[str] = None,
+    *,
+    assume_yes: bool = False,
+    unsigned: bool = False,
+    high_trust: bool = False,
+) -> None:
+    """Preview an app install, show what it brings, ask, then install it.
+
+    ``POST /api/apps/install`` requires an ``install_token`` minted by
+    ``POST /api/apps/preview`` and answers 403 without one, because an
+    app's ``skill_dependencies`` install skills and a skill executes
+    Python inside the brain. This used to post the ungated shape and got
+    that 403.
+
+    The token is not the point of this function; the disclosure is. A
+    terminal is a consent surface, so the same three decisions the web
+    sheet presents are presented here: the app's own reach, the skills
+    that will be installed (new code), the skills already present
+    (nothing new runs), and the skills FERAL could not verify (named,
+    with the brain's reason, what breaks, and what to do). Every word of
+    that copy comes from the brain, which reads it out of
+    ``models/skill_manifest.py``, so the terminal cannot drift from the
+    dialog.
+    """
     if httpx is None:
         _print(_HTTPX_MISSING.format(command="feral app install"))
         sys.exit(1)
@@ -291,23 +328,461 @@ def cmd_app_install(path: str, host: Optional[str] = None, port: Optional[str] =
     if not source.is_dir():
         _print(f"  Not a directory: {source}")
         sys.exit(2)
+
     base = _brain_base_url(host, port)
-    url = f"{base.rstrip('/')}/api/apps/install"
-    body = {"path": str(source), "overwrite": True}
+    preview = _preview_app(
+        base, source, path=path, unsigned=unsigned, high_trust=high_trust
+    )
+    _print_disclosure(preview, unsigned=unsigned)
+    _decide(
+        preview,
+        path=path,
+        assume_yes=assume_yes,
+        unsigned=unsigned,
+        high_trust=high_trust,
+    )
+    _install_previewed(base, preview)
+
+
+# --- step one: preview -------------------------------------------------
+
+
+def _preview_app(
+    base: str,
+    source: Path,
+    *,
+    path: str,
+    unsigned: bool,
+    high_trust: bool,
+) -> dict:
+    """Ask the brain what installing *source* would do. Installs nothing."""
+    url = f"{base.rstrip('/')}/api/apps/preview"
+    body = {
+        "path": str(source),
+        "overwrite": True,
+        "unsigned": bool(unsigned),
+        "user_high_trust": bool(high_trust),
+    }
     try:
-        resp = httpx.post(url, json=body, timeout=30.0)
+        resp = httpx.post(url, json=body, timeout=60.0, headers=_brain_auth_headers())
     except httpx.HTTPError as exc:
-        _print(f"  Could not reach brain at {url}: {exc}")
+        _print(f"  Could not reach the brain at {url}: {exc}")
+        _print("  Start it with `feral start`, or name another one with --host/--port.")
         sys.exit(1)
+
     if resp.status_code >= 400:
-        _print(f"  Install rejected ({resp.status_code}): {resp.text[:400]}")
+        _print_preview_refusal(resp, path=path, unsigned=unsigned, high_trust=high_trust)
         sys.exit(1)
+
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict) or not data.get("install_token"):
+        # An install without a token is refused by the brain, so there is
+        # nothing to fall back to and saying "installed" would be a lie.
+        _print(f"  The brain answered {resp.status_code} with no install_token, so")
+        _print("  there is nothing to install with. Response:")
+        _print(f"      {resp.text[:400]}")
+        sys.exit(1)
+    return data
+
+
+def _detail_of(resp) -> tuple[dict, str]:
+    """Split an error body into its structured detail and a readable message."""
+    try:
+        body = resp.json()
+    except Exception:
+        return {}, (resp.text or "").strip()[:400]
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, dict):
+        return detail, str(detail.get("message") or detail.get("error") or "")
+    if isinstance(detail, str):
+        return {}, detail
+    return {}, (resp.text or "").strip()[:400]
+
+
+def _print_preview_refusal(resp, *, path: str, unsigned: bool, high_trust: bool) -> None:
+    """Say why the brain will not install this, and what to do next.
+
+    Only next steps that were run against this build are printed. There
+    is deliberately no advice on a signature failure of the app bundle
+    itself: every install path runs the same verifier, so re-running one
+    would send the user in a circle.
+    """
+    detail, message = _detail_of(resp)
+    error = str(detail.get("error") or "")
+    _print("")
+    _print(f"  The brain refused to preview this app ({resp.status_code}).")
+    if message:
+        for line in _wrap(message, indent="  "):
+            _print(line)
+
+    low = message.lower()
+    if error == "unverified_manifest" and (
+        "verification failed" in low or "unreadable" in low
+    ):
+        # A bundle that HAS a signature and fails it is not the same as
+        # one that has none. Offering --unsigned here would be offering a
+        # way around a check that just caught something, and every other
+        # install path runs the same verifier, so nothing is printed to
+        # run. This mirrors the web sheet, which shows no command either.
+        _print("")
+        _print("  These files carry a signature and it does not match them, so FERAL")
+        _print("  cannot tell who wrote them or whether they were altered on the way.")
+        _print("  Retrying will not help: every install path runs this same check.")
+        _print("  Get an intact copy from the publisher.")
+        return
+    if error == "unverified_manifest" and not unsigned:
+        _print("")
+        _print("  Nothing here proves who wrote these files. Two ways forward:")
+        _print("    Sign it with your publisher key, then install the signed bundle:")
+        _print(f"        feral app sign {path} --key-id <your-key-id>")
+        _print(f"        feral app install {path}")
+        _print("    Or install it unsigned, on your own judgement, having read the")
+        _print("    disclosure it prints:")
+        _print(f"        feral app install {path} --unsigned")
+        return
+    if error == "permissions_policy_violation":
+        _print("")
+        for line in _wrap(str(detail.get("remediation") or ""), indent="  "):
+            _print(line)
+        if not high_trust:
+            _print("  The last of those is --high-trust, and it only counts on a signed")
+            _print("  bundle whose manifest carries a justification:")
+            _print(f"        feral app install {path} --high-trust")
+        return
+    remediation = str(detail.get("remediation") or "")
+    if remediation:
+        _print("")
+        for line in _wrap(remediation, indent="  "):
+            _print(line)
+
+
+# --- the disclosure ----------------------------------------------------
+
+
+def _wrap(text: str, *, indent: str = "  ", width: int = 78) -> list[str]:
+    """Wrap server copy for a terminal, keeping it readable at 80 columns."""
+    text = " ".join(str(text or "").split())
+    if not text:
+        return []
+    return textwrap.wrap(
+        text, width=width, initial_indent=indent, subsequent_indent=indent
+    ) or [indent + text]
+
+
+def _permission_lines(rows, fallback_ids=None, *, indent: str = "    ") -> list[str]:
+    """Render ``[{id, label, description}]`` as consent copy.
+
+    The labels and descriptions are the brain's, out of
+    ``models/skill_manifest.PERMISSION_LABELS`` /
+    ``PERMISSION_DESCRIPTIONS``. The CLI never writes its own sentence
+    for a capability; when the brain sends only ids it shows the ids.
+    """
+    out: list[str] = []
+    rows = list(rows or [])
+    if not rows:
+        rows = [{"id": str(i), "label": str(i), "description": ""} for i in (fallback_ids or [])]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label") or row.get("id") or "")
+        if not label:
+            continue
+        out.append(f"{indent}- {label}")
+        out.extend(_wrap(row.get("description") or "", indent=indent + "  "))
+    return out
+
+
+def _app_name(preview: dict) -> str:
+    app = preview.get("app") or {}
+    brand = app.get("brand") or {}
+    return str(brand.get("name") or app.get("app_id") or "this app")
+
+
+def _print_disclosure(preview: dict, *, unsigned: bool = False) -> None:
+    """Print what installing this app would do, before anything is asked."""
+    from cli import ui_kit
+
+    app = preview.get("app") or {}
+    name = _app_name(preview)
+    version = str(app.get("version") or "?")
+    ui_kit.brand_panel(
+        f"feral app install: {app.get('app_id') or name} v{version}",
+        body=str(app.get("description") or ""),
+    )
+
+    source = preview.get("source") or {}
+    origin = str(source.get("origin") or "")
+    origin_label = {
+        "path": "local directory",
+        "git_url": "git clone",
+        "registry_id": "registry",
+    }.get(origin, origin or "source")
+    _print(f"  Source: {source.get('value') or '?'} ({origin_label})")
+    if app.get("author"):
+        _print(f"  Author: {app['author']}")
+
+    sig = preview.get("signature") or {}
+    if sig.get("verified"):
+        signer = str(sig.get("key_id") or sig.get("publisher") or "").strip()
+        by = f" by {signer}" if signer else ""
+        _print(f"  Signature: verified{by}. These are the bytes that were signed.")
+    else:
+        reason = str(sig.get("reason") or "").strip()
+        _print("  Signature: none. Nothing here proves who wrote these files or")
+        _print("  whether they were altered.")
+        if unsigned:
+            _print("  You asked for that with --unsigned.")
+        if reason:
+            for line in _wrap(f"Reason: {reason}", indent="  "):
+                _print(line)
+
+    _print("")
+    _print("  What the app itself can reach")
+    _print("  (its screens run in a sandbox, so this is where data may go)")
+    lines = _permission_lines(preview.get("permission_details"), preview.get("permissions"))
+    for line in lines or ["    - Nothing declared."]:
+        _print(line)
+
+    deps = preview.get("skill_dependencies") or {}
+    _print_new_skills(list(deps.get("to_install") or []))
+    _print_existing_skills(list(deps.get("already_installed") or []))
+    _print_unavailable_skills(list(deps.get("unavailable") or []), app_name=name)
+    _print("")
+
+
+def _print_new_skills(rows: list) -> None:
+    if not rows:
+        return
+    _print("")
+    _print(f"  Skills it will install ({len(rows)})")
+    _print("  (these are not screens: each one runs its own Python inside FERAL,")
+    _print("   and each was checked against its publisher's signature)")
+    for dep in rows:
+        skill_id = str(dep.get("skill_id") or "?")
+        title = str(dep.get("name") or skill_id)
+        meta = [skill_id]
+        if dep.get("version"):
+            meta.append(f"v{dep['version']}")
+        if dep.get("publisher"):
+            meta.append(f"by {dep['publisher']}")
+        _print(f"    - {title} ({', '.join(meta)})")
+        perms = _permission_lines(
+            dep.get("permission_details"), dep.get("permissions"), indent="      "
+        )
+        if perms:
+            _print("      It can reach:")
+            for line in perms:
+                _print(line)
+        else:
+            _print("      It declares no permissions, which is not the same as doing")
+            _print("      nothing: it still runs its own code inside FERAL. Install it")
+            _print("      only if you trust its publisher.")
+
+
+def _print_existing_skills(rows: list) -> None:
+    if not rows:
+        return
+    _print("")
+    _print(f"  Skills you already have ({len(rows)})")
+    _print("  (nothing new is installed for these; they are listed so the app's")
+    _print("   full reach is visible)")
+    for dep in rows:
+        skill_id = str(dep.get("skill_id") or "?")
+        title = str(dep.get("name") or skill_id)
+        version = f" v{dep['version']}" if dep.get("version") else ""
+        labels = [
+            str(r.get("label") or r.get("id") or "")
+            for r in (dep.get("permission_details") or [])
+            if isinstance(r, dict)
+        ]
+        labels = [lbl for lbl in labels if lbl] or list(dep.get("permissions") or [])
+        suffix = f" reaches: {', '.join(str(x) for x in labels)}" if labels else ""
+        _print(f"    - {title} ({skill_id}{version}){suffix}")
+
+
+def _print_unavailable_skills(rows: list, *, app_name: str) -> None:
+    if not rows:
+        return
+    _print("")
+    _print(f"  Skills FERAL cannot install ({len(rows)})")
+    for dep in rows:
+        skill_id = str(dep.get("skill_id") or "?")
+        remediation = dep.get("remediation") or {}
+        _print(f"    - {skill_id}")
+        why = str(remediation.get("message") or dep.get("reason") or "")
+        for line in _wrap(why, indent="      "):
+            _print(line)
+        impact = [a for a in (dep.get("impact") or []) if isinstance(a, dict)]
+        if impact:
+            _print(f"      Without it, {app_name} cannot:")
+            for action in impact:
+                what = str(action.get("description") or action.get("action_id") or "")
+                where = str(action.get("surface_id") or "")
+                _print(f"        - {what}" + (f" ({where})" if where else ""))
+        for line in _wrap(str(remediation.get("action") or ""), indent="      "):
+            _print(line)
+        command = str(remediation.get("command") or "").strip()
+        if command:
+            # Empty on purpose for a signature failure and for a package
+            # the brain refused: every install path runs the same check,
+            # so a command there would be a loop. Do not invent one.
+            _print(f"          {command}")
+
+
+# --- the decision ------------------------------------------------------
+
+
+def _decide(
+    preview: dict,
+    *,
+    path: str,
+    assume_yes: bool,
+    unsigned: bool,
+    high_trust: bool,
+) -> None:
+    """Get consent, or exit without installing anything.
+
+    ``--yes`` is consent given in advance, so it installs, and the
+    disclosure above is printed either way: a scripted run leaves the
+    same record on stdout as an answered one.
+
+    Without ``--yes`` and without a TTY there is nobody to answer, and
+    the prompt is not asked at all rather than read off a pipe. An empty
+    pipe would answer "no" and a pipe carrying an unrelated line could
+    answer "yes"; neither is consent. It exits 2, which is what this CLI
+    uses for "invoked in a way that cannot work", and names the exact
+    command that would work.
+    """
+    from cli import ui_kit
+
+    name = _app_name(preview)
+    missing = list((preview.get("skill_dependencies") or {}).get("unavailable") or [])
+    if missing:
+        plural = "" if len(missing) == 1 else "s"
+        question = f"  Install {name} without {len(missing)} skill{plural}?"
+    else:
+        question = f"  Install {name}?"
+
+    if assume_yes:
+        _print(f"{question}  --yes, so it installs without asking.")
+        return
+
+    if not ui_kit.is_interactive():
+        flags = "".join(
+            f" {flag}"
+            for flag, on in (("--unsigned", unsigned), ("--high-trust", high_trust))
+            if on
+        )
+        _print(f"{question}  not asked: stdin is not a terminal.")
+        _print("  Nothing was installed. There is nobody here to answer, and an app")
+        _print("  install installs code, so the answer is not assumed. Re-run where")
+        _print("  you can answer, or accept the disclosure above in advance:")
+        _print(f"      feral app install {path}{flags} --yes")
+        sys.exit(2)
+
+    if not ui_kit.confirm(question, default=False):
+        _print("  Nothing was installed.")
+        sys.exit(1)
+
+
+# --- step two: install -------------------------------------------------
+
+
+def _install_previewed(base: str, preview: dict) -> None:
+    """Spend the token on exactly the app the disclosure described.
+
+    The source is not sent: it lives inside the token, bound to the bytes
+    the brain staged and verified during the preview, so nothing can be
+    swapped between the disclosure and the install.
+    """
+    url = f"{base.rstrip('/')}/api/apps/install"
+    try:
+        resp = httpx.post(
+            url,
+            json={"install_token": preview["install_token"]},
+            timeout=120.0,
+            headers=_brain_auth_headers(),
+        )
+    except httpx.HTTPError as exc:
+        _print(f"  Could not reach the brain at {url}: {exc}")
+        _print("  Nothing was installed.")
+        sys.exit(1)
+
+    if resp.status_code >= 400:
+        _print_install_refusal(resp)
+        sys.exit(1)
+
     try:
         data = resp.json()
     except Exception:
         data = {}
     app = data.get("app") or {}
+    deps = data.get("skill_dependencies") or {}
+    _print("")
     _print(f"  Installed {app.get('app_id', '<unknown>')} v{app.get('version', '?')}.")
+    installed = [str(s) for s in (deps.get("installed") or [])]
+    present = [str(s) for s in (deps.get("already_present") or [])]
+    if installed:
+        _print(f"  Skills installed: {', '.join(installed)}")
+    if present:
+        _print(f"  Skills already present: {', '.join(present)}")
+
+    unavailable = [
+        str(d.get("skill_id") or "?")
+        for d in (deps.get("unavailable") or [])
+        if isinstance(d, dict)
+    ]
+    if unavailable:
+        _print("")
+        _print(f"  Installed without {', '.join(unavailable)}.")
+        _print("  The Apps page keeps showing what is missing, what it costs and how")
+        _print("  to get it: the brain recomputes that on every listing, so it clears")
+        _print("  itself the moment the skill is installed.")
+    else:
+        _print("  It is loaded in the running brain; open it from the Apps page.")
+
+
+def _print_install_refusal(resp) -> None:
+    detail, message = _detail_of(resp)
+    error = str(detail.get("error") or "")
+    _print("")
+    _print(f"  Install rejected ({resp.status_code}).")
+    if message:
+        for line in _wrap(message, indent="  "):
+            _print(line)
+
+    if error == "preview_required":
+        # The common cause is elapsed time: a preview lasts
+        # APP_PREVIEW_TTL_SECONDS (300s) and is single-use.
+        _print("  Previews are single-use and expire after 5 minutes. Run the same")
+        _print("  command again to see the disclosure fresh and answer it.")
+    for failed in detail.get("failed") or []:
+        if not isinstance(failed, dict):
+            continue
+        _print(f"    - {failed.get('skill_id', '?')}: {failed.get('error', '')}")
+        remediation = failed.get("remediation") or {}
+        for line in _wrap(str(remediation.get("action") or ""), indent="      "):
+            _print(line)
+        command = str(remediation.get("command") or "").strip()
+        if command:
+            _print(f"          {command}")
+    remediation = detail.get("remediation")
+    if isinstance(remediation, str) and remediation:
+        for line in _wrap(remediation, indent="  "):
+            _print(line)
+
+    if error == "skill_dependency_install_failed":
+        # Precise on purpose. The brain uninstalls the app
+        # (``registry.uninstall`` in the route) but does not uninstall the
+        # dependencies that installed successfully before one failed, so
+        # "nothing was installed" would be false here.
+        _print("  The app was rolled back and is not installed. Any skill that did")
+        _print("  install before the failure is still installed.")
+    else:
+        _print("  Nothing was installed.")
 
 
 # ---------------------------------------------------------------------
@@ -553,6 +1028,23 @@ def _load_manifest(source: Path) -> dict:
     return raw
 
 
+def _brain_auth_headers() -> dict:
+    """Bearer header for a brain that is not on loopback.
+
+    Loopback bypasses HTTP auth (``api/server.APIKeyMiddleware``), so the
+    usual local install needs nothing. A brain named with --host or
+    FERAL_BRAIN_URL does need the key, and there is exactly one answer to
+    "which key", in ``cli/install.py``. Reused rather than restated so
+    the two install commands cannot disagree about it.
+    """
+    try:
+        from cli.install import _brain_auth_headers as _headers
+
+        return dict(_headers() or {})
+    except Exception:
+        return {}
+
+
 def _brain_base_url(host: Optional[str], port: Optional[str]) -> str:
     if host or port:
         h = host or "localhost"
@@ -585,10 +1077,48 @@ def register_app_subparser(sub) -> None:
     build_p.add_argument("path", nargs="?", default=".")
     build_p.add_argument("--out", default=None)
 
-    inst_p = app_sub.add_parser("install", help="Install a local app bundle into the running brain.")
+    inst_p = app_sub.add_parser(
+        "install",
+        help=(
+            "Show what a local app bundle installs, ask, then install it into "
+            "the running brain."
+        ),
+    )
     inst_p.add_argument("path", nargs="?", default=".")
     inst_p.add_argument("--host", default=None)
     inst_p.add_argument("--port", default=None)
+    # dest= is spelled out because `feral app` shares one argparse
+    # namespace with 30-odd other subcommands; a bare `--yes` would
+    # collide with the `key`/`integration` ones that already own that
+    # attribute name.
+    inst_p.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        dest="app_assume_yes",
+        help=(
+            "Consent in advance: print the disclosure, then install without "
+            "prompting. Required when stdin is not a terminal."
+        ),
+    )
+    inst_p.add_argument(
+        "--unsigned",
+        action="store_true",
+        dest="app_unsigned",
+        help=(
+            "Install a bundle with no publisher signature. Nothing then proves "
+            "who wrote it; the disclosure says so."
+        ),
+    )
+    inst_p.add_argument(
+        "--high-trust",
+        action="store_true",
+        dest="app_high_trust",
+        help=(
+            "Opt into the permissions the install policy otherwise refuses "
+            "(network: '*'), which also needs a signed manifest carrying a "
+            "justification."
+        ),
+    )
 
     pub_p = app_sub.add_parser("publish", help="Sign + publish an app bundle to registry.feral.sh.")
     pub_p.add_argument("path", nargs="?", default=".")
@@ -629,7 +1159,14 @@ def dispatch_app_subcommand(args: argparse.Namespace) -> None:
     elif sub == "build":
         cmd_app_build(args.path, out=args.out)
     elif sub == "install":
-        cmd_app_install(args.path, host=args.host, port=args.port)
+        cmd_app_install(
+            args.path,
+            host=args.host,
+            port=args.port,
+            assume_yes=bool(getattr(args, "app_assume_yes", False)),
+            unsigned=bool(getattr(args, "app_unsigned", False)),
+            high_trust=bool(getattr(args, "app_high_trust", False)),
+        )
     elif sub == "publish":
         cmd_app_publish(args.path, registry=args.registry)
     elif sub == "sign":

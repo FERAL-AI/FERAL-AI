@@ -384,15 +384,48 @@ feral app publish ./my-app
 
 `sign` uses your publisher key at `~/.feral/publisher.key`; there is no `--private-key` flag.
 
-<Warning>
-`feral app install` is **currently broken**. It posts straight to
-`POST /api/apps/install`, which now requires an `install_token` from
-`POST /api/apps/preview` and answers 403 `preview_required` without one.
-The command has not yet been updated to take the two steps and show the
-disclosure, so it exits with `Install rejected (403)`. Install from the
-Marketplace page in the web client, which does implement the flow. See
-[Marketplace → Installing a GenUI app](/marketplace/overview).
-</Warning>
+#### `feral app install` asks first
+
+Installing an app is two steps, because an app's `skill_dependencies` install
+skills and a skill executes Python inside the brain. `install` calls
+`POST /api/apps/preview`, prints what it found, asks, and only then calls
+`POST /api/apps/install` with the `install_token` the preview minted. The route
+answers 403 `preview_required` without one, so there is no unattended path.
+
+What it prints, all of it served by the brain so the terminal and the web
+install sheet cannot drift:
+
+* the bundle's signature status, and the app's own reach (where its sandboxed
+  surfaces may send data),
+* **skills it will install**: new code, each verified against its publisher's
+  signature, with what each one can reach,
+* **skills you already have**: nothing new runs, listed so the app's full
+  reach is visible,
+* **skills FERAL cannot install**: the brain's own reason, the actions that
+  will not work without them, and what to do about it.
+
+A dependency FERAL cannot verify does not end the install. The app installs
+without it and `GET /api/apps` recomputes `missing_skill_dependencies` on every
+call, so the Apps page keeps showing the shortfall until the skill is there.
+
+```bash
+feral app install ./my-app                 # signed bundle: preview, ask, install
+feral app install ./my-app --unsigned      # no manifest.signed.json (local dev)
+feral app install ./my-app --yes           # consent in advance; still prints it all
+feral app install ./my-app --high-trust    # opt into permissions the policy refuses
+```
+
+| Flag | Effect |
+|---|---|
+| `--yes`, `-y` | Skip the prompt. The disclosure is still printed. |
+| `--unsigned` | Install a bundle with no publisher signature; nothing then proves who wrote it. |
+| `--high-trust` | Allow `permissions.network: ["*"]`, which also needs a signed manifest carrying a justification. |
+| `--host`, `--port` | Reach a brain other than `$FERAL_BRAIN_URL` / `localhost:9090`. |
+
+Exit codes: `0` installed, `1` declined or refused, `2` bad invocation. **A
+non-TTY stdin never prompts.** Piped or scripted, without `--yes`, it prints the
+disclosure, installs nothing and exits 2 naming the command that would work; an
+answer read off a pipe is not consent.
 
 ### `feral bridge`
 
