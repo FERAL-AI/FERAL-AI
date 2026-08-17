@@ -84,9 +84,30 @@
     var(--v2-bg-base);
 
   /* ── Text ramps ──────────────────────────────────────────────── */
+  /*
+   * --v2-text-tertiary is a body-text colour, not a decoration: it dresses
+   * .v2-device-meta, .v2-flow-status, .v2-channel-state, .v2-timeline-time,
+   * .v2-event-body, .v2-stat-label, .v2-chip--muted, .v2-p--tiny (11px) and
+   * every .v2-btn--ghost label. It therefore has to clear WCAG AA 4.5:1,
+   * and #6E6E76 did not: measured against the effective dark glass
+   * background #1F1F27 it was 3.24:1, and against the elevated surface
+   * (--v2-surface-elev composited over the base, #2E2E38) only 2.66:1.
+   *
+   * #96969E measured against every dark background in this file:
+   *   #1F1F27 shell base   5.57:1
+   *   #1C1C22 surface-0    5.78:1
+   *   #1E1E25 surface-1    5.64:1
+   *   #23232B surface-2    5.31:1
+   *   #2E2E38 surface-elev 4.57:1   <- worst case, still AA
+   *
+   * That deliberately narrows the secondary/tertiary lightness step
+   * (secondary is 6.37:1 on the base, tertiary now 5.57:1). On a charcoal
+   * base you cannot have both a very quiet grey and AA; hierarchy here is
+   * carried by size, weight and tracking as much as by lightness.
+   */
   --v2-text-primary: #F5F5F7;
   --v2-text-secondary: #A1A1A8;
-  --v2-text-tertiary: #6E6E76;
+  --v2-text-tertiary: #96969E;
   --v2-text-inverse: #0B0B0D;
 
   /* Foreground for anything sitting ON a filled accent or filled state
@@ -101,6 +122,25 @@
   --v2-accent: #0A84FF;
   --v2-accent-soft: rgba(10, 132, 255, 0.18);
   --v2-accent-ring: rgba(10, 132, 255, 0.35);
+
+  /* The accent as TEXT, which is a different problem from the accent as a
+   * fill. #0A84FF measures 4.49:1 on the shell base, one hundredth under
+   * AA, and only 3.68:1 on --v2-surface-elev, which is where most of these
+   * labels actually sit. A chip on a raised card was the worst case and
+   * the easiest to miss, because checking the accent against the page
+   * background alone says "borderline" rather than "failing".
+   *
+   * Lightened to clear AA on the worst dark surface: 5.71 on the base,
+   * 4.69 on elevated. Deliberately a separate token rather than moving
+   * --v2-accent, because the accent is overwhelmingly used as a FILL
+   * behind white text, where 4.49 against the page is irrelevant and
+   * lightening it would wash out every primary button in the client.
+   * Same hue, same family, one step brighter.
+   *
+   * Light mode needs no split: #0066CC on the light base is 6.55:1, so
+   * --v2-accent-text is simply the accent there.
+   */
+  --v2-accent-text: #3D9BFF;
 
   /* Primary-CTA fill. A single-hue ramp: the accent falling to a deeper
    * shade of itself. Replaces an accent-to-indigo (#5E5CE6) gradient that
@@ -219,24 +259,40 @@
 
   --v2-text-primary: #0B0B0D;
   --v2-text-secondary: #4C4C55;
-  --v2-text-tertiary: #8E8E96;
+  /* Was #8E8E96: 2.93:1 on the light shell background #F2F3F8, well under
+   * AA, on the same body-text classes listed in the dark block above.
+   * #6B6B73 measures 4.77:1 there. Light-mode glass composites *towards
+   * white* (--v2-surface-0 over the base resolves to ~#F5F6F9), so
+   * #F2F3F8 is the conservative end of the range, not the average. */
+  --v2-text-tertiary: #6B6B73;
   --v2-text-inverse: #FFFFFF;
 
   --v2-accent: #0066CC;
   --v2-accent-soft: rgba(0, 102, 204, 0.12);
   --v2-accent-ring: rgba(0, 102, 204, 0.28);
+  /* 6.55:1 on the light base, so no split is needed here. */
+  --v2-accent-text: #0066CC;
   --v2-accent-gradient: linear-gradient(135deg, #0066CC 0%, #004C99 100%);
 
-  --v2-state-live: #1F9D48;
-  --v2-state-live-soft: rgba(31, 157, 72, 0.14);
-  --v2-state-warn: #B98900;
-  --v2-state-warn-soft: rgba(185, 137, 0, 0.14);
+  /* The light-mode state colours are used as *text* by .v2-chip--live,
+   * .v2-chip--loose, .v2-chip--warn, .v2-chip--strict and the liveops
+   * tags, so they carry the 4.5:1 obligation too. Measured on #F2F3F8:
+   *   live  #1F9D48 3.17:1  ->  #177636 5.15:1
+   *   warn  #B98900 2.85:1  ->  #8B6700 4.69:1
+   *   error #D70015 4.86:1  (already AA, unchanged)
+   * Both are the same hue scaled darker, so the palette reads the same;
+   * they also serve as the .v2-dot--live / --warn fills, where a darker
+   * value is strictly more visible on a light surface. */
+  --v2-state-live: #177636;
+  --v2-state-live-soft: rgba(23, 118, 54, 0.14);
+  --v2-state-warn: #8B6700;
+  --v2-state-warn-soft: rgba(139, 103, 0, 0.14);
   --v2-state-error: #D70015;
   --v2-state-error-soft: rgba(215, 0, 21, 0.14);
 
   --v2-accent-rgb: 0 102 204;
-  --v2-state-live-rgb: 31 157 72;
-  --v2-state-warn-rgb: 185 137 0;
+  --v2-state-live-rgb: 23 118 54;
+  --v2-state-warn-rgb: 139 103 0;
   --v2-state-error-rgb: 215 0 21;
 
   /* --v2-on-accent, --v2-bg-immersive, --v2-surface-immersive and
@@ -280,21 +336,23 @@
       var(--v2-bg-base);
     --v2-text-primary: #0B0B0D;
     --v2-text-secondary: #4C4C55;
-    --v2-text-tertiary: #8E8E96;
+    --v2-text-tertiary: #6B6B73;
     --v2-text-inverse: #FFFFFF;
     --v2-accent: #0066CC;
     --v2-accent-soft: rgba(0, 102, 204, 0.12);
     --v2-accent-ring: rgba(0, 102, 204, 0.28);
+  /* 6.55:1 on the light base, so no split is needed here. */
+  --v2-accent-text: #0066CC;
     --v2-accent-gradient: linear-gradient(135deg, #0066CC 0%, #004C99 100%);
-    --v2-state-live: #1F9D48;
-    --v2-state-live-soft: rgba(31, 157, 72, 0.14);
-    --v2-state-warn: #B98900;
-    --v2-state-warn-soft: rgba(185, 137, 0, 0.14);
+    --v2-state-live: #177636;
+    --v2-state-live-soft: rgba(23, 118, 54, 0.14);
+    --v2-state-warn: #8B6700;
+    --v2-state-warn-soft: rgba(139, 103, 0, 0.14);
     --v2-state-error: #D70015;
     --v2-state-error-soft: rgba(215, 0, 21, 0.14);
     --v2-accent-rgb: 0 102 204;
-    --v2-state-live-rgb: 31 157 72;
-    --v2-state-warn-rgb: 185 137 0;
+    --v2-state-live-rgb: 23 118 54;
+    --v2-state-warn-rgb: 139 103 0;
     --v2-state-error-rgb: 215 0 21;
     --v2-shadow-glass:
       0 0 0 1px var(--v2-hairline),

@@ -271,6 +271,77 @@ fn venv_relative_exe() -> PathBuf {
     }
 }
 
+/// Longest a capability probe may take before it is killed.
+///
+/// The probe is `python -c` over a one-line sqlite3 check, which is
+/// milliseconds of work. Any interpreter that has not answered in this
+/// long is not going to: a partially-copied bundle, a binary being
+/// scanned by an endpoint-security agent, or an interpreter blocked on
+/// something at import. Without a bound, `resolve_python` inherits that
+/// wait, and so does everything that calls it: `start_brain` from the
+/// click that is supposed to start FERAL, and `brain_runtime_info` from
+/// the diagnostics panel a user opens precisely because something is
+/// already wrong.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run a command to completion, killing it if it outlives `limit`.
+///
+/// `Command::output()` waits forever, which is the same defect as an
+/// un-timed-out HTTP get: correct on every machine where the thing works
+/// and an indefinite hang on the ones where it does not.
+///
+/// Returns the exit status and whatever the process wrote to stderr.
+fn output_with_timeout(
+    cmd: &mut Command,
+    limit: Duration,
+) -> Result<(std::process::ExitStatus, String), String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run it: {e}"))?;
+
+    // Drained on its own thread for the same reason the brain's pipes
+    // are: a probe that fills the 64KiB pipe buffer would block on its
+    // next write and never exit, and then the timeout below would be the
+    // only thing that ended it.
+    let stderr = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut raw = Vec::new();
+        if let Some(mut s) = stderr {
+            let _ = s.read_to_end(&mut raw);
+        }
+        String::from_utf8_lossy(&raw).into_owned()
+    });
+
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let detail = reader.join().unwrap_or_default();
+                return Ok((status, detail));
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Deliberately not joining the reader here. The pipe
+                    // closes when the child dies so the thread ends on
+                    // its own, and waiting on it would reintroduce the
+                    // unbounded wait this function exists to remove.
+                    return Err(format!(
+                        "it did not answer within {}s and was killed",
+                        limit.as_secs()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => return Err(format!("could not wait for it: {e}")),
+        }
+    }
+}
+
 /// Ask an interpreter whether it can actually run FERAL's memory store.
 ///
 /// Not a version check. The two things that matter are SQLite build
@@ -292,17 +363,15 @@ fn interpreter_is_usable(python: &Path) -> Result<(), String> {
                  c=sqlite3.connect(':memory:')\n\
                  try:\n    c.execute('CREATE VIRTUAL TABLE t USING fts5(x)')\n\
                  except Exception as e:\n    sys.exit('no SQLite FTS5 (%s); the memory store cannot start' % e)\n";
-    let out = Command::new(python)
-        .args(["-c", probe])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("could not run it: {e}"))?;
-    if out.status.success() {
+    let mut cmd = Command::new(python);
+    cmd.args(["-c", probe]);
+    let (status, stderr) = output_with_timeout(&mut cmd, PROBE_TIMEOUT)?;
+    if status.success() {
         return Ok(());
     }
-    let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let detail = stderr.trim().to_string();
     Err(if detail.is_empty() {
-        format!("probe exited {}", out.status)
+        format!("probe exited {status}")
     } else {
         detail
     })
@@ -461,16 +530,67 @@ fn kill_pid(pid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-fn brain_health_probe() -> (bool, String) {
-    let url = format!("{}/health", brain_base_url().trim_end_matches('/'));
-    match reqwest::blocking::get(url) {
+// ---------------------------------------------------------------------------
+// Health probing
+//
+// `reqwest::blocking::get` has NO timeout by default. That is not a slow
+// path, it is an unbounded one, and it was being called from two places
+// where blocking forever is the worst available outcome:
+//
+//   * the tray loop below, which probes every 2 seconds on one dedicated
+//     thread. A brain that accepts the TCP connection and then never
+//     answers (a python wedged mid-boot, a socket inherited by a
+//     process that is not reading it, a stopped process still holding
+//     the port) parks that thread permanently. The tooltip then freezes
+//     on whatever it last said, which for a brain that came up and then
+//     hung is the GREEN dot. The one indicator the user has would be
+//     stuck reporting health, indefinitely, because of the failure.
+//   * `check_brain_health`, invoked from the UI on a timer.
+//
+// A connect that has not completed in a second and a response that has
+// not arrived in two are both, for a loopback server, a failure. Saying
+// so is strictly more informative than waiting.
+// ---------------------------------------------------------------------------
+
+const HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+const HEALTH_TOTAL_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Probe `<base>/health`, bounded.
+///
+/// Split from `brain_health_probe` so it can be tested against a real
+/// socket without touching process-wide environment variables.
+fn probe_health_at(base_url: &str) -> (bool, String) {
+    let url = format!("{}/health", base_url.trim_end_matches('/'));
+    let client = match reqwest::blocking::Client::builder()
+        .connect_timeout(HEALTH_CONNECT_TIMEOUT)
+        .timeout(HEALTH_TOTAL_TIMEOUT)
+        .build()
+    {
+        Ok(c) => c,
+        // Constructing a client fails only on a broken TLS backend. It
+        // is still a probe result, not a reason to panic on a UI thread.
+        Err(e) => return (false, format!("probe unavailable: {e}")),
+    };
+    match client.get(url).send() {
         Ok(resp) => {
             let code = resp.status().as_u16();
             let ok = resp.status().is_success();
             (ok, format!("HTTP {code}"))
         }
+        Err(e) if e.is_timeout() => (
+            false,
+            format!(
+                "no answer within {}s (the brain is accepting connections but \
+                 not responding)",
+                HEALTH_TOTAL_TIMEOUT.as_secs()
+            ),
+        ),
         Err(e) => (false, format!("unreachable: {e}")),
     }
+}
+
+fn brain_health_probe() -> (bool, String) {
+    probe_health_at(&brain_base_url())
 }
 
 #[tauri::command]
@@ -488,12 +608,24 @@ fn get_brain_url() -> String {
 // Graceful brain shutdown
 // ---------------------------------------------------------------------------
 
+/// Kill the brain we started, on quit and on window destruction.
+///
+/// The lock is recovered from poisoning rather than skipped. `if let
+/// Ok(guard) = lock()` reads as defensive and is not: poisoning only
+/// means some other thread panicked while holding this mutex, and the
+/// `Child` behind it is still the process this app spawned and is
+/// responsible for reaping. Declining to take it on that path leaves a
+/// python holding port 9090 after FERAL has quit, which the user then
+/// experiences as an app that will not start next time ("address already
+/// in use") with no visible process to blame.
 fn shutdown_brain(state: &BrainProcess) {
-    if let Ok(mut guard) = state.0.lock() {
-        if let Some(mut child) = guard.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+    let mut guard = match state.0.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(mut child) = guard.take() {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -899,6 +1031,149 @@ mod tests {
         assert!(tail.contains("no such module: fts5"), "{tail}");
         assert!(tail.contains("[stderr]"), "{tail}");
         assert!(tail.contains("end of stream"), "{tail}");
+    }
+
+    // -- bounded waits ---------------------------------------------------
+    //
+    // Both of these lock out the same defect: an operation that is fast
+    // when it works and unbounded when it does not, on a thread that has
+    // no other job. They assert a ceiling, not a duration, so they do not
+    // become flaky on a loaded machine.
+
+    #[test]
+    fn a_probe_that_never_exits_is_killed_rather_than_waited_on() {
+        let limit = Duration::from_millis(300);
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 60"]);
+
+        let started = std::time::Instant::now();
+        let result = output_with_timeout(&mut cmd, limit);
+        let waited = started.elapsed();
+
+        let err = result.expect_err("a command that outlives the limit must fail");
+        assert!(err.contains("did not answer"), "{err}");
+        assert!(
+            waited < Duration::from_secs(10),
+            "waited {waited:?}; the timeout did not bound the wait"
+        );
+    }
+
+    #[test]
+    fn a_probe_that_exits_is_not_penalised_by_the_timeout() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+
+        let started = std::time::Instant::now();
+        let (status, _stderr) = output_with_timeout(&mut cmd, Duration::from_secs(30))
+            .expect("a command that exits must be reported, not timed out");
+        assert!(status.success());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a fast command must return as soon as it exits"
+        );
+    }
+
+    #[test]
+    fn a_failing_probe_reports_what_it_printed() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo 'no such module: fts5' >&2; exit 1"]);
+
+        let (status, stderr) =
+            output_with_timeout(&mut cmd, Duration::from_secs(30)).unwrap();
+        assert!(!status.success());
+        assert!(stderr.contains("fts5"), "{stderr}");
+    }
+
+    #[test]
+    fn a_brain_that_accepts_and_never_answers_does_not_stall_the_probe() {
+        // The reported defect, exactly: reqwest::blocking::get has no
+        // default timeout, so a server that completes the TCP handshake
+        // and then writes nothing parked the 2-second tray loop forever,
+        // freezing the tooltip on its last value.
+        //
+        // The listener accepts the connection and holds it. No response
+        // is ever written.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind a loopback listener");
+        let addr = listener.local_addr().unwrap();
+        let accepted = std::thread::spawn(move || {
+            // Hold the accepted socket open, and the listener with it, so
+            // the client is connected and waiting rather than refused.
+            if let Ok((stream, _)) = listener.accept() {
+                std::thread::sleep(Duration::from_secs(20));
+                drop(stream);
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let (ok, detail) = probe_health_at(&format!("http://{addr}"));
+        let waited = started.elapsed();
+
+        assert!(!ok, "a brain that never answers is not healthy: {detail}");
+        assert!(
+            waited < HEALTH_TOTAL_TIMEOUT + Duration::from_secs(5),
+            "probe took {waited:?}; it is not bounded by HEALTH_TOTAL_TIMEOUT"
+        );
+        assert!(
+            detail.contains("no answer within"),
+            "the operator needs to be told the brain is silent rather than \
+             absent, got: {detail}"
+        );
+        drop(accepted);
+    }
+
+    #[test]
+    fn a_closed_port_is_reported_as_unreachable_not_as_healthy() {
+        // Bind, read the port, drop the listener: nothing is listening
+        // there now. This is the ordinary "brain not started" case and it
+        // must be distinguishable from the silent-brain case above.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+
+        let started = std::time::Instant::now();
+        let (ok, detail) = probe_health_at(&format!("http://127.0.0.1:{port}"));
+
+        assert!(!ok);
+        assert!(detail.contains("unreachable"), "{detail}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn shutdown_takes_the_child_even_when_the_lock_is_poisoned() {
+        // Declining to act on a poisoned lock is what leaves an orphaned
+        // python on port 9090 after the app quits. The observable
+        // property is that the slot is emptied.
+        let state = BrainProcess(Mutex::new(None));
+        let child = Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a stand-in child");
+        *state.0.lock().unwrap() = Some(child);
+
+        // Poison the mutex the only way it can be poisoned: panic while
+        // holding it.
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.0.lock().unwrap();
+            panic!("a thread died holding the brain lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(state.0.is_poisoned(), "the test did not poison the lock");
+
+        shutdown_brain(&state);
+
+        let guard = match state.0.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        assert!(
+            guard.is_none(),
+            "shutdown left the brain process in place, so it outlives the app"
+        );
     }
 
     fn which_python() -> Result<PathBuf, ()> {
