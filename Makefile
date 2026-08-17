@@ -242,12 +242,42 @@ dev-brain: dev-python
 	        --constraint feral-core/requirements.lock -e "feral-core[$(DEV_EXTRAS)]"; \
 	fi
 
+# Client dependencies, including the browser Playwright needs.
+#
+# feral-client-v2 is the client the brain serves and the one every current
+# test targets, and it was missing from this target entirely. So was the
+# Playwright browser download: `@playwright/test` is a declared devDependency,
+# but npm install does not fetch the browser binaries, and without them every
+# e2e spec fails to launch. That is why the suite quietly grew a habit of
+# passing `channel: 'chrome'` to borrow whatever Chrome the machine happened
+# to have. A test that only runs on one developer's laptop is not a test.
+#
+# `playwright install --with-deps chromium` is the documented one-shot. It is
+# skipped rather than fatal when npx is unavailable, because a contributor who
+# only touches Python should not be blocked on a 92MB download.
 dev-deps:
-	@if [ -d feral-client ] && command -v npm >/dev/null 2>&1; then \
-		cd feral-client && npm install; \
+	@for dir in feral-client-v2 feral-client; do \
+		if [ -d "$$dir" ] && command -v npm >/dev/null 2>&1; then \
+			echo "  [deps] $$dir"; \
+			(cd "$$dir" && npm install) || exit 1; \
+		else \
+			echo "  [skip] $$dir npm install (npm not found or directory missing)"; \
+		fi; \
+	done
+	@if [ -d feral-client-v2 ] && command -v npx >/dev/null 2>&1; then \
+		echo "  [deps] playwright chromium"; \
+		(cd feral-client-v2 && npx playwright install chromium) \
+			|| echo "  [warn] playwright browser download failed; e2e specs will not run"; \
 	else \
-		echo "  [skip] feral-client npm install (npm not found or directory missing)"; \
+		echo "  [skip] playwright browser download (npx not found)"; \
 	fi
+
+# Browser-level tests. Separate from `make test` on purpose: they need a real
+# browser and a built bundle, so they are slower and have a hard dependency
+# `make test` does not. They cover what jsdom structurally cannot see, which is
+# layout, scroll containment, overlap, focus rings and painted colour.
+e2e:
+	cd feral-client-v2 && npx playwright test
 
 serve:
 	$(FERAL) serve
