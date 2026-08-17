@@ -283,6 +283,7 @@ The website ([feral.sh](https://feral.sh), source: [FERAL-AI/Feral-web](https://
 
 - **[Mahmoud Omar](https://github.com/mahmoudomarus)** — founder and primary maintainer.
 - **[Alpay Kasal](https://github.com/alpaykasal)** — co-founder, commercial and partnerships.
+- **[Noah Zerkin](https://github.com/bzerk)** - Co-founder, Hardware Lead and maintainer.
 
 Contact: [info@feral.sh](mailto:info@feral.sh) · Website: [feral.sh](https://feral.sh) · GitHub: [FERAL-AI](https://github.com/FERAL-AI).
 
