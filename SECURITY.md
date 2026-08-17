@@ -307,8 +307,8 @@ non-CLI user can reach is verified and consented to:
 |---|---|
 | `feral install <id>` | `cli/install.py`: SHA-256 of the downloaded tarball must match the registry record, and the publisher's detached Ed25519 signature over that digest must verify. A mismatch exits non-zero before anything is written. |
 | `POST /api/marketplace/preview` then `POST /api/marketplace/install` | The same `cli/install.py` `_verify` and `_safe_extract`, called from `skills/marketplace.py`. Not a second implementation. |
-| `POST /api/apps/install` | `agents/app_registry.py` `install_from_registry` (GenUI apps, separate bundle format). |
-| `MarketplaceClient.install(source_url=...)` | **None.** Developer local-iteration path, logs an `UNVERIFIED INSTALL` warning, and is refused by the HTTP route (403). Reachable only from a Python caller or the CLI. |
+| `POST /api/apps/preview` then `POST /api/apps/install` | `agents/app_registry.py` `stage_registry_bundle` + `install_staged_registry` for a registry bundle, `inspect_app` + `install_app` for a directory or git checkout (GenUI apps, separate bundle format). Both halves run the same gate, `AppRegistry._verify_source`. |
+| `MarketplaceClient.install(source_url=...)` | **None.** Developer local-iteration path, logs an `UNVERIFIED INSTALL` warning, and is refused by the HTTP route (403). Reachable only from a Python caller. No CLI command reaches it either: `feral install` and `feral marketplace install` both take a published registry id and run the verifier. |
 
 The marketplace install is two steps, and the token that joins them is
 what makes the consent binding:
@@ -342,6 +342,67 @@ Permissions themselves are a closed vocabulary
 (`models/skill_manifest.py::SkillPermission`). A manifest naming a
 permission outside it fails to load, so a publisher cannot describe a
 capability in words the consent dialog has no sentence for.
+
+### Installing an app installs code, so it asks the same way
+
+A GenUI app is a bundle of SDUI surfaces rendered inside a sandboxed
+iframe, so its own risk is data reach rather than in-process code, and
+`genui/permissions_policy.py` governs that: `permissions.network` becomes
+the iframe's CSP `connect-src`, and a wildcard grant needs a signed
+manifest, a publisher justification and `user_high_trust=true`.
+
+That is not the whole install. An `AppManifest` may declare
+`skill_dependencies`, and a **skill runs Python in the brain process** at
+load time (`skills/registry.py` `_try_load_dynamic_impl` calls
+`spec.loader.exec_module`). Until v2026.8.16 `POST /api/apps/install`
+required no token and resolved those dependencies by calling
+`MarketplaceClient.install(skill_id, "latest", None)`, the unverified
+developer path. Installing an app was therefore an unattended install of
+code-executing packages with no signature check and nothing on screen.
+
+`POST /api/apps/preview` now performs the whole install except the
+writing:
+
+1. The bundle is fetched and verified. A registry bundle goes through
+   `stage_registry_bundle` (SHA-256 + detached Ed25519 over the tarball);
+   a directory or git checkout goes through `inspect_app`, which runs
+   `AppRegistry._verify_source` — the same method `install_app` runs, so
+   a preview that says "this will install" and an install that then
+   refuses cannot drift apart. The verified tree is *kept*, and the
+   install writes it rather than fetching again.
+2. The app's own reach is rendered as consent copy by
+   `agents/app_registry.py::describe_app_permissions`.
+3. Every declared skill dependency is resolved into one of three buckets:
+   already installed, will be installed (verified through
+   `MarketplaceClient.preview_from_registry`, so its permission list
+   comes out of a bundle whose publisher signature checked out), or
+   cannot be installed.
+4. A single-use `install_token` is minted with
+   `skills/marketplace.py::sign_consent_token` — the same HMAC over the
+   same per-process secret the marketplace uses. The app token carries
+   the *skill* tokens of its dependencies, so the outer MAC covers them
+   and a dependency cannot be swapped after the list was read.
+
+`POST /api/apps/install` spends the token. Without one it returns 403
+`preview_required`. The token cannot be replayed, cannot be redirected to
+a different source, and expires after five minutes. Dependencies are
+installed with `MarketplaceClient.install_from_registry`; the unverified
+`install` is unreachable from any route, and
+`tests/test_app_install_consent.py` AST-scans `api/routes/` to keep it
+that way.
+
+**A dependency that cannot be verified does not refuse the install.** It
+is disclosed with the brain's own reason, the actions in the manifest
+that will stop working (`skill_dependency_impact` reads the surfaces'
+`skill_call` action targets), and a remediation that has been checked to
+be accurate — no command is offered where no command would help, which
+is why a signature failure prints none: every install path runs the same
+verifier. The user then chooses. The app installs without that skill,
+`/api/apps` recomputes `missing_skill_dependencies` on every listing, and
+the Apps page keeps showing the shortfall until the skill is installed.
+A dependency that *did* verify at preview time and then failed to install
+is a different case: that is a broken invariant rather than a choice, and
+the app is rolled back.
 
 ## Sandbox policy enforcement points
 

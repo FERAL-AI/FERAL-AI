@@ -34,7 +34,10 @@ Full policy (what to bump and when):
 
 You can ship headless-first today:
 
-- install: `POST /api/apps/install`
+- preview: `POST /api/apps/preview` — verifies the bundle and returns what
+  the app reaches, the skills it will install, and an `install_token`
+- install: `POST /api/apps/install` — spends the token; refused with 403
+  without one
 - render: `POST /api/apps/{app_id}/surfaces/{surface_id}/render`
 - dispatch: `POST /api/apps/{app_id}/dispatch`
 

@@ -21,6 +21,25 @@ from models.skill_manifest import BrandProfile
 pytestmark = pytest.mark.no_auto_feral_home
 
 
+def _consented_install(c, source: dict):
+    """Preview, then install with the token the preview minted.
+
+    Installing an app is a two-step consent flow: the app's own reach and
+    the skills it pulls in (which execute Python in this process) are
+    shown before anything is written. These tests are about the routes
+    downstream of that decision, so they take the same two steps a client
+    takes rather than asserting the old ungated shape. See
+    tests/test_app_install_consent.py for the gate itself.
+    """
+    preview = c.post("/api/apps/preview", json=source)
+    if preview.status_code != 200:
+        return preview
+    body = {"install_token": preview.json().get("install_token", "")}
+    if "overwrite" in source:
+        body["overwrite"] = source["overwrite"]
+    return c.post("/api/apps/install", json=body)
+
+
 def _write_manifest(path: Path, app_id: str = "demo-app") -> Path:
     src = path / f"src-{app_id}"
     src.mkdir()
@@ -107,7 +126,7 @@ def test_503_when_registry_missing():
 def test_install_from_local_dir(client):
     c, registry, tmp = client
     src = _write_manifest(tmp)
-    r = c.post("/api/apps/install", json={"path": str(src), "unsigned": True})
+    r = _consented_install(c, {"path": str(src), "unsigned": True})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["success"] is True
@@ -117,26 +136,51 @@ def test_install_from_local_dir(client):
 
 def test_install_rejects_without_source(client):
     c, _registry, _tmp = client
-    r = c.post("/api/apps/install", json={})
+    r = _consented_install(c, {})
     assert r.status_code == 400
 
 
 def test_install_rejects_multiple_sources(client):
     c, _registry, _tmp = client
-    r = c.post("/api/apps/install", json={"path": "/x", "git_url": "https://x/y.git"})
+    r = _consented_install(c, {"path": "/x", "git_url": "https://x/y.git"})
     assert r.status_code == 400
 
 
-def test_install_registry_id_calls_registry_installer(client):
+def test_install_registry_id_calls_registry_installer(client, tmp_path):
+    """A registry_id install stages the bundle, then installs *that* stage.
+
+    ``install_from_registry`` is now the sum of ``stage_registry_bundle``
+    (download + verify + unpack) and ``install_staged_registry`` (policy +
+    disk). The route drives the two halves so the bundle the consent
+    dialog described is the bundle that lands, rather than downloading a
+    second time and hoping the registry served the same bytes.
+    """
+    from agents.app_registry import RegistryStage
+
     c, registry, tmp = client
     src = _write_manifest(tmp, app_id="registry-app")
-    with patch.object(
-        registry,
-        "install_from_registry",
-        side_effect=lambda *args, **kwargs: registry.install_from_dir(src),
-    ) as install_mock:
-        r = c.post("/api/apps/install", json={"registry_id": "some-id"})
+    stage_root = tmp_path / "stage"
+    stage_root.mkdir()
+
+    stage = RegistryStage(
+        registry_id="some-id",
+        registry_url="https://registry.invalid",
+        stage_root=stage_root,
+        source_dir=src,
+        tarball=stage_root / "bundle.tar.gz",
+        item={"sha256": "f" * 64, "publisher": "acme"},
+        manifest=json.loads((src / "manifest.json").read_text()),
+        verified_signature=True,
+    )
+
+    with patch.object(registry, "stage_registry_bundle", return_value=stage) as stage_mock:
+        with patch.object(
+            registry, "install_staged_registry", wraps=registry.install_staged_registry
+        ) as install_mock:
+            r = _consented_install(c, {"registry_id": "some-id"})
+
     assert r.status_code == 200, r.text
+    assert stage_mock.called
     assert install_mock.called
     assert r.json()["app"]["app_id"] == "registry-app"
 
@@ -146,14 +190,14 @@ def test_install_invalid_manifest_returns_400(client, tmp_path):
     bad = tmp_path / "bad-src"
     bad.mkdir()
     (bad / "manifest.json").write_text(json.dumps({"app_id": "nope"}))
-    r = c.post("/api/apps/install", json={"path": str(bad), "unsigned": True})
+    r = _consented_install(c, {"path": str(bad), "unsigned": True})
     assert r.status_code == 400
 
 
 def test_get_manifest(client):
     c, registry, tmp = client
     src = _write_manifest(tmp)
-    c.post("/api/apps/install", json={"path": str(src), "unsigned": True})
+    _consented_install(c, {"path": str(src), "unsigned": True})
     r = c.get("/api/apps/demo-app/manifest")
     assert r.status_code == 200
     assert r.json()["app_id"] == "demo-app"
@@ -168,7 +212,7 @@ def test_get_manifest_unknown_404(client):
 def test_uninstall(client):
     c, registry, tmp = client
     src = _write_manifest(tmp)
-    c.post("/api/apps/install", json={"path": str(src), "unsigned": True})
+    _consented_install(c, {"path": str(src), "unsigned": True})
     r = c.delete("/api/apps/demo-app")
     assert r.status_code == 200
     assert registry.get("demo-app") is None
@@ -183,7 +227,7 @@ def test_uninstall_unknown_404(client):
 def test_open_returns_hydrated_surface(client):
     c, registry, tmp = client
     src = _write_manifest(tmp)
-    c.post("/api/apps/install", json={"path": str(src), "unsigned": True})
+    _consented_install(c, {"path": str(src), "unsigned": True})
     r = c.post("/api/apps/demo-app/open", json={"data": {"msg": "hi"}})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -201,7 +245,7 @@ def test_open_unknown_app_404(client):
 def test_render_surface(client):
     c, registry, tmp = client
     src = _write_manifest(tmp)
-    c.post("/api/apps/install", json={"path": str(src), "unsigned": True})
+    _consented_install(c, {"path": str(src), "unsigned": True})
     r = c.post("/api/apps/demo-app/surfaces/home/render", json={"data": {"msg": "render!"}})
     assert r.status_code == 200
     assert r.json()["root"]["children"][0]["value"] == "render!"
@@ -210,7 +254,7 @@ def test_render_surface(client):
 def test_render_unknown_surface_returns_400(client):
     c, registry, tmp = client
     src = _write_manifest(tmp)
-    c.post("/api/apps/install", json={"path": str(src), "unsigned": True})
+    _consented_install(c, {"path": str(src), "unsigned": True})
     r = c.post("/api/apps/demo-app/surfaces/ghost/render", json={})
     assert r.status_code == 400
 
@@ -218,7 +262,7 @@ def test_render_unknown_surface_returns_400(client):
 def test_dispatch_valid_action(client):
     c, registry, tmp = client
     src = _write_manifest(tmp)
-    c.post("/api/apps/install", json={"path": str(src), "unsigned": True})
+    _consented_install(c, {"path": str(src), "unsigned": True})
     r = c.post(
         "/api/apps/demo-app/dispatch",
         json={"surface_id": "home", "action_id": "hello", "value": None},
@@ -232,7 +276,7 @@ def test_dispatch_valid_action(client):
 def test_dispatch_unknown_action_returns_400(client):
     c, registry, tmp = client
     src = _write_manifest(tmp)
-    c.post("/api/apps/install", json={"path": str(src), "unsigned": True})
+    _consented_install(c, {"path": str(src), "unsigned": True})
     r = c.post(
         "/api/apps/demo-app/dispatch",
         json={"surface_id": "home", "action_id": "evil"},
@@ -243,7 +287,7 @@ def test_dispatch_unknown_action_returns_400(client):
 def test_dispatch_schema_violation_returns_400(client):
     c, _registry, tmp = client
     src = _write_manifest(tmp)
-    c.post("/api/apps/install", json={"path": str(src), "unsigned": True})
+    _consented_install(c, {"path": str(src), "unsigned": True})
     r = c.post(
         "/api/apps/demo-app/dispatch",
         json={"surface_id": "home", "action_id": "typed", "value": {"values": {}}},

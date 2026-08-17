@@ -63,6 +63,46 @@ An install without a valid token is refused (403), and a bundle that
 fails verification never gets one, so the browser cannot reach an
 unverified install path at all.
 
+### Installing a GenUI app
+
+Apps are not skills and do not use the marketplace install route. An app
+is a bundle of server-driven surfaces rendered in a sandboxed iframe, so
+its own risk is data reach, not code. But an `AppManifest` may declare
+`skill_dependencies`, and skills run Python inside the brain, so an app
+install is also a code install and asks accordingly.
+
+1. `POST /api/apps/preview {registry_id}` (or `{path}` / `{git_url}`)
+   verifies the bundle, keeps the verified tree staged, and returns four
+   things: the app's identity and signature status, the app's own reach
+   (its `permissions.network` allowlist, rendered as plain sentences),
+   the skills it will pull in, and a single-use `install_token`.
+2. The skills are split into three lists, because they are three
+   different decisions:
+   - **already installed** — nothing new runs; shown so the app's total
+     reach is visible,
+   - **will be installed** — new code, each one verified against its
+     publisher's signature and listed with its own permissions,
+   - **cannot be installed** — named, with the reason, the actions that
+     will not work without it, and what to do about it.
+3. `POST /api/apps/install {install_token}` spends the token. It installs
+   the staged bytes and installs each new skill over the verified
+   registry path. Without a token it is refused with 403.
+
+An app whose dependency cannot be verified still installs, without that
+skill. Refusing outright would leave you with nothing and no next step;
+instead the shortfall is disclosed before you decide and stays visible on
+the Apps page — `GET /api/apps` recomputes `missing_skill_dependencies`
+on every call, so it disappears by itself once you install the skill.
+
+```bash
+# what the Apps page suggests for a skill that is simply not installed
+feral install <skill_id>
+```
+
+A dependency that verified at preview time and then failed to install is
+treated differently: the app is rolled back, because a half-working app
+that claims to be installed is its own lie.
+
 ## Publish flow
 
 ```bash

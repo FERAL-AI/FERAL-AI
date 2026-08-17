@@ -147,12 +147,19 @@ def apps_route(monkeypatch):
         def install_app(self, source, **kwargs):
             raise RuntimeError("install must not be reached in these tests")
 
+        def inspect_app(self, source, **kwargs):
+            raise RuntimeError("inspect must not be reached in these tests")
+
     monkeypatch.setattr(mod.state, "app_registry", _Registry(), raising=False)
     return mod
 
 
 def _git_request(apps_route):
-    return apps_route.InstallRequest(git_url="https://example.invalid/app.git")
+    # The clone moved from install to preview: the bytes a user consents
+    # to have to be the bytes that get installed, and a second clone at
+    # install time could fetch a different commit. The loop-liveness
+    # contract travelled with it.
+    return apps_route.PreviewRequest(git_url="https://example.invalid/app.git")
 
 
 class TestInstallFromGitUrl:
@@ -166,7 +173,7 @@ class TestInstallFromGitUrl:
 
         async with _pulsing() as pulse:
             with pytest.raises(HTTPException) as excinfo:
-                await apps_route.install_app(_git_request(apps_route))
+                await apps_route.preview_app(_git_request(apps_route))
 
         # Error semantics are unchanged: same status, same detail string.
         assert excinfo.value.status_code == 400
@@ -188,7 +195,7 @@ class TestInstallFromGitUrl:
         monkeypatch.setattr(apps_route, "GIT_CLONE_TIMEOUT_S", _SHORT_TIMEOUT)
 
         with pytest.raises(subprocess.TimeoutExpired):
-            await apps_route.install_app(_git_request(apps_route))
+            await apps_route.preview_app(_git_request(apps_route))
 
         await asyncio.sleep(_WAIT_PAST_CHILD)
         assert not marker.exists(), "the timed-out git clone was left running"
@@ -208,7 +215,7 @@ class TestInstallFromGitUrl:
 
         async with _pulsing() as pulse:
             with pytest.raises(HTTPException):
-                await apps_route.install_app(_git_request(apps_route))
+                await apps_route.preview_app(_git_request(apps_route))
 
         assert seen["thread"] != loop_thread, "rmtree ran on the event loop thread"
         assert pulse.ticks > _MIN_TICKS, (

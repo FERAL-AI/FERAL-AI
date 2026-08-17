@@ -91,6 +91,30 @@ class InstalledApp:
     installed_at: float
 
 
+@dataclass
+class RegistryStage:
+    """A downloaded, verified, unpacked app bundle that is not installed yet.
+
+    Produced by :meth:`AppRegistry.stage_registry_bundle` and spent by
+    :meth:`AppRegistry.install_staged_registry`. Holding it between the
+    two is what lets the consent dialog describe the bundle and then have
+    *those* bytes installed: the registry cannot serve one thing to the
+    preview and another to the install.
+    """
+
+    registry_id: str
+    registry_url: str
+    stage_root: Path
+    source_dir: Path
+    tarball: Path
+    item: dict[str, Any]
+    manifest: dict[str, Any]
+    verified_signature: bool
+
+    def cleanup(self) -> None:
+        shutil.rmtree(self.stage_root, ignore_errors=True)
+
+
 class AppRegistryError(RuntimeError):
     """Raised when install/open fails in a way the caller should see."""
 
@@ -114,6 +138,107 @@ class UnapprovedRegistryItemError(AppRegistryError):
     path. It is also raised when an explicit override is required but
     not supplied. The message is safe to show to users.
     """
+
+
+def manifest_digest(manifest: dict[str, Any]) -> str:
+    """SHA-256 over the canonical JSON form of an app manifest.
+
+    What the install token commits to for an app. The app bundle formats
+    differ by source (a local directory, a git checkout, a signed
+    registry tarball) and only the registry one has a tarball digest, so
+    the manifest itself is the one artefact every source has in common
+    and the one the disclosure is actually about.
+    """
+    raw = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def describe_app_permissions(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """Render an app's own declared reach as consent copy.
+
+    An app is a bundle of SDUI surfaces rendered inside a sandboxed
+    iframe whose CSP is derived from this same block (see
+    ``genui/permissions_policy.build_csp_header``), so its own risk is
+    where its surfaces may send data, not what code it runs. That makes
+    the wording different from a skill's, and it is written here, once,
+    server-side, for the same reason ``PERMISSION_LABELS`` is written
+    once: a client must not invent its own sentence for a capability.
+
+    The rows carry the ``{id, label, description, known}`` shape
+    ``models.skill_manifest.describe_permissions`` produces, so one
+    component renders both lists.
+    """
+    from genui.permissions_policy import extract_permissions_block
+    from models.skill_manifest import describe_permissions
+
+    block = extract_permissions_block(manifest)
+    tags = [str(t) for t in (block.get("tags") or [])]
+    rows: list[dict[str, Any]] = list(describe_permissions(tags)) if tags else []
+
+    network = [str(o) for o in (block.get("network") or [])]
+    if network == ["*"]:
+        rows.append({
+            "id": "network:*",
+            "label": "Any server on the internet",
+            "description": (
+                "This app's surfaces may contact any server on the internet. "
+                "FERAL cannot limit where the data you enter into them ends up."
+            ),
+            "known": True,
+        })
+    elif network:
+        for origin in network:
+            rows.append({
+                "id": f"network:{origin}",
+                "label": f"Contact {origin}",
+                "description": (
+                    f"This app's surfaces may send and receive data from {origin}. "
+                    "No other server is reachable from them."
+                ),
+                "known": True,
+            })
+    elif not rows:
+        rows.append({
+            "id": "network:none",
+            "label": "No network access of its own",
+            "description": (
+                "Its surfaces cannot contact any server. Everything they show "
+                "comes from FERAL on this computer."
+            ),
+            "known": True,
+        })
+    return rows
+
+
+def skill_dependency_impact(manifest: dict[str, Any], skill_id: str) -> list[dict[str, str]]:
+    """Which declared actions stop working when *skill_id* is absent.
+
+    An action with ``handler == "skill_call"`` names its endpoint in
+    ``target`` as ``"<skill_id>/<endpoint_id>"``. Those are the actions
+    that fail at dispatch time with the skill missing, so those are what
+    the user is told they are giving up. Returns
+    ``[{surface_id, action_id, description}]``.
+    """
+    hits: list[dict[str, str]] = []
+    prefix = f"{skill_id}/"
+    for surface in manifest.get("surfaces") or []:
+        if not isinstance(surface, dict):
+            continue
+        surface_id = str(surface.get("surface_id") or "")
+        for action in surface.get("action_contract") or []:
+            if not isinstance(action, dict):
+                continue
+            if str(action.get("handler") or "") != "skill_call":
+                continue
+            target = str(action.get("target") or "")
+            if target == skill_id or target.startswith(prefix):
+                hits.append({
+                    "surface_id": surface_id,
+                    "action_id": str(action.get("action_id") or ""),
+                    "description": str(action.get("description") or ""),
+                    "target": target,
+                })
+    return hits
 
 
 class AppRegistry:
@@ -203,6 +328,139 @@ class AppRegistry:
             installed_at=now,
         )
 
+    def _verify_source(
+        self,
+        source: Path,
+        *,
+        allow_unsigned: bool,
+        user_high_trust: bool,
+        vault: Optional[Any] = None,
+        supervisor: Optional[Any] = None,
+        audit_callback: Optional[Callable[[dict], None]] = None,
+        audit: bool = True,
+    ) -> tuple[dict[str, Any], Optional[SignedManifest], Optional[Path], Optional[str]]:
+        """Decide whether *source* may be installed, without installing it.
+
+        The signature lookup, the Ed25519 check, the vault key pinning and
+        the permissions policy gate all live here so that
+        :meth:`install_app` and :meth:`inspect_app` reach exactly one
+        implementation of the decision. A preview that says "this will
+        install" and an install that then refuses would be the same class
+        of drift the marketplace's ``_run_cli_gate`` exists to avoid.
+
+        Returns ``(manifest_dict, signed, signed_path, verification_reason)``.
+        Raises :class:`UnverifiedManifestError` or
+        :class:`genui.permissions_policy.PolicyViolation` on refusal.
+
+        ``audit=False`` suppresses the audit records. A preview writes
+        nothing to disk, so emitting ``unsigned_install`` for one would
+        put an install in the audit trail that never happened; the
+        install that follows emits the real record.
+        """
+        if not source.is_dir():
+            raise AppRegistryError(f"not a directory: {source}")
+
+        def _audit(event: str, detail: dict[str, Any]) -> None:
+            if not audit:
+                return
+            self._audit_install(
+                event,
+                source=source,
+                detail=detail,
+                supervisor=supervisor,
+                callback=audit_callback,
+            )
+
+        signed_path = _find_signed_manifest(source)
+        signed: Optional[SignedManifest] = None
+        verification_reason: Optional[str] = None
+
+        if signed_path is not None:
+            try:
+                signed = _load_signed_manifest(signed_path)
+            except Exception as exc:
+                _audit("signature_invalid", {"reason": f"envelope_unreadable:{exc}"})
+                if not allow_unsigned:
+                    raise UnverifiedManifestError(
+                        f"signed manifest envelope unreadable: {exc}"
+                    ) from exc
+            else:
+                expected_pk = None
+                if vault is not None:
+                    expected_pk = _vault_lookup_key(vault, signed.key_id)
+                ok, reason = verify_signed_manifest(
+                    signed, expected_public_key_b64=expected_pk
+                )
+                if not ok:
+                    verification_reason = reason
+                    _audit(
+                        "signature_invalid",
+                        {"reason": reason, "key_id": signed.key_id},
+                    )
+                    if not allow_unsigned:
+                        raise UnverifiedManifestError(
+                            f"signature verification failed: {reason}"
+                        )
+
+        if signed is None:
+            if not allow_unsigned:
+                _audit("unsigned_install_refused", {"reason": "no_signed_manifest"})
+                raise UnverifiedManifestError(
+                    "manifest is unsigned (no manifest.signed.json found) "
+                    "and allow_unsigned=False"
+                )
+            _audit("unsigned_install", {"reason": "allow_unsigned=True"})
+
+        # Resolve the manifest dict the policy gate + install both see.
+        if signed is not None:
+            manifest_dict = dict(signed.manifest)
+        else:
+            manifest_dict = _load_manifest_dict(source)
+
+        try:
+            enforce_install_policy(
+                manifest_dict,
+                allow_unsigned=allow_unsigned,
+                user_high_trust=user_high_trust,
+            )
+        except PolicyViolation as exc:
+            _audit("policy_refused", {"reason": str(exc)})
+            raise
+
+        return manifest_dict, signed, signed_path, verification_reason
+
+    def inspect_app(
+        self,
+        source_dir: str | Path,
+        *,
+        allow_unsigned: bool = False,
+        user_high_trust: bool = False,
+        vault: Optional[Any] = None,
+    ) -> dict[str, Any]:
+        """Describe what installing *source_dir* would do. Writes nothing.
+
+        Runs the identical gate :meth:`install_app` runs, so a source
+        this returns for is a source that install accepts, and a source
+        that would be refused raises here rather than at confirm time.
+        """
+        source = Path(source_dir).expanduser().resolve()
+        manifest_dict, signed, _signed_path, reason = self._verify_source(
+            source,
+            allow_unsigned=allow_unsigned,
+            user_high_trust=user_high_trust,
+            vault=vault,
+            audit=False,
+        )
+        return {
+            "manifest": manifest_dict,
+            "signature": {
+                "verified": signed is not None and reason is None,
+                "key_id": signed.key_id if signed is not None else "",
+                "reason": reason or "",
+                "sha256": manifest_digest(manifest_dict),
+            },
+        }
+
     def install_app(
         self,
         source_dir: str | Path,
@@ -242,91 +500,14 @@ class AppRegistry:
           at install time.
         """
         source = Path(source_dir).expanduser().resolve()
-        if not source.is_dir():
-            raise AppRegistryError(f"not a directory: {source}")
-
-        signed_path = _find_signed_manifest(source)
-        signed: Optional[SignedManifest] = None
-        verification_reason: Optional[str] = None
-
-        if signed_path is not None:
-            try:
-                signed = _load_signed_manifest(signed_path)
-            except Exception as exc:
-                self._audit_install(
-                    "signature_invalid",
-                    source=source,
-                    detail={"reason": f"envelope_unreadable:{exc}"},
-                    supervisor=supervisor,
-                    callback=audit_callback,
-                )
-                if not allow_unsigned:
-                    raise UnverifiedManifestError(
-                        f"signed manifest envelope unreadable: {exc}"
-                    ) from exc
-            else:
-                expected_pk = None
-                if vault is not None:
-                    expected_pk = _vault_lookup_key(vault, signed.key_id)
-                ok, reason = verify_signed_manifest(
-                    signed, expected_public_key_b64=expected_pk
-                )
-                if not ok:
-                    verification_reason = reason
-                    self._audit_install(
-                        "signature_invalid",
-                        source=source,
-                        detail={"reason": reason, "key_id": signed.key_id},
-                        supervisor=supervisor,
-                        callback=audit_callback,
-                    )
-                    if not allow_unsigned:
-                        raise UnverifiedManifestError(
-                            f"signature verification failed: {reason}"
-                        )
-
-        if signed is None:
-            if not allow_unsigned:
-                self._audit_install(
-                    "unsigned_install_refused",
-                    source=source,
-                    detail={"reason": "no_signed_manifest"},
-                    supervisor=supervisor,
-                    callback=audit_callback,
-                )
-                raise UnverifiedManifestError(
-                    "manifest is unsigned (no manifest.signed.json found) "
-                    "and allow_unsigned=False"
-                )
-            self._audit_install(
-                "unsigned_install",
-                source=source,
-                detail={"reason": "allow_unsigned=True"},
-                supervisor=supervisor,
-                callback=audit_callback,
-            )
-
-        # Resolve the manifest dict the policy gate + install both see.
-        if signed is not None:
-            manifest_dict = dict(signed.manifest)
-        else:
-            manifest_dict = _load_manifest_dict(source)
-
-        try:
-            enforce_install_policy(
-                manifest_dict,
-                allow_unsigned=allow_unsigned,
-                user_high_trust=user_high_trust,
-            )
-        except PolicyViolation as exc:
-            self._audit_install(
-                "policy_refused",
-                source=source,
-                detail={"reason": str(exc)},
-                supervisor=supervisor,
-                callback=audit_callback,
-            )
-            raise
+        manifest_dict, signed, signed_path, verification_reason = self._verify_source(
+            source,
+            allow_unsigned=allow_unsigned,
+            user_high_trust=user_high_trust,
+            vault=vault,
+            supervisor=supervisor,
+            audit_callback=audit_callback,
+        )
 
         # Stage to a temp dir whose manifest.json IS the verified one,
         # then delegate to install_from_dir for the actual disk copy +
@@ -406,6 +587,39 @@ class AppRegistry:
 
         The tarball SHA-256 is always enforced. Detached signature
         verification is enforced unless ``allow_unsigned=True``.
+        """
+        stage = self.stage_registry_bundle(
+            registry_id,
+            registry_url=registry_url,
+            allow_unsigned=allow_unsigned,
+            internal_override=internal_override,
+        )
+        try:
+            return self.install_staged_registry(
+                stage,
+                user_high_trust=user_high_trust,
+                overwrite=overwrite,
+                supervisor=supervisor,
+                audit_callback=audit_callback,
+            )
+        finally:
+            stage.cleanup()
+
+    def stage_registry_bundle(
+        self,
+        registry_id: str,
+        *,
+        registry_url: Optional[str] = None,
+        allow_unsigned: bool = False,
+        internal_override: bool = False,
+    ) -> "RegistryStage":
+        """Fetch, verify and unpack a registry app bundle. Installs nothing.
+
+        The first half of :meth:`install_from_registry`, split out so the
+        two-step consent flow in ``api/routes/apps.py`` can show the user
+        what is in the bundle before anything is written, and then install
+        *those* bytes rather than downloading again. The caller owns the
+        returned stage and must call :meth:`RegistryStage.cleanup`.
         """
         if not registry_id:
             raise AppRegistryError("registry_id is required")
@@ -546,33 +760,68 @@ class AppRegistry:
             _safe_extract_tarball(tarball, extract_root)
             source_dir = _locate_manifest_source_dir(extract_root)
             manifest_dict = _load_manifest_dict(source_dir)
+            return RegistryStage(
+                registry_id=registry_id,
+                registry_url=base,
+                stage_root=stage_root,
+                source_dir=source_dir,
+                tarball=tarball,
+                item=item,
+                manifest=manifest_dict,
+                verified_signature=verified_signature,
+            )
+        except PolicyViolation:
+            shutil.rmtree(stage_root, ignore_errors=True)
+            raise
+        except AppRegistryError:
+            shutil.rmtree(stage_root, ignore_errors=True)
+            raise
+        except Exception as exc:
+            shutil.rmtree(stage_root, ignore_errors=True)
+            raise AppRegistryError(f"registry install failed: {exc}") from exc
+
+    def install_staged_registry(
+        self,
+        stage: "RegistryStage",
+        *,
+        user_high_trust: bool = False,
+        overwrite: bool = True,
+        supervisor: Optional[Any] = None,
+        audit_callback: Optional[Callable[[dict], None]] = None,
+    ) -> InstalledApp:
+        """Install an already-verified, already-unpacked registry bundle.
+
+        The second half of :meth:`install_from_registry`. The policy gate
+        runs here rather than in :meth:`stage_registry_bundle` because it
+        depends on ``user_high_trust``, which is a property of the install
+        decision and not of the bytes.
+        """
+        try:
             enforce_install_policy(
-                manifest_dict,
-                allow_unsigned=not verified_signature,
+                stage.manifest,
+                allow_unsigned=not stage.verified_signature,
                 user_high_trust=user_high_trust,
             )
-            installed = self.install_from_dir(source_dir, overwrite=overwrite)
-            self._audit_install(
-                "verified_install" if verified_signature else "unsigned_install",
-                source=stage_root,
-                detail={
-                    "registry_id": registry_id,
-                    "registry_url": base,
-                    "app_id": installed.app_id,
-                    "version": installed.version,
-                },
-                supervisor=supervisor,
-                callback=audit_callback,
-            )
-            return installed
+            installed = self.install_from_dir(stage.source_dir, overwrite=overwrite)
         except PolicyViolation:
             raise
         except AppRegistryError:
             raise
         except Exception as exc:
             raise AppRegistryError(f"registry install failed: {exc}") from exc
-        finally:
-            shutil.rmtree(stage_root, ignore_errors=True)
+        self._audit_install(
+            "verified_install" if stage.verified_signature else "unsigned_install",
+            source=stage.stage_root,
+            detail={
+                "registry_id": stage.registry_id,
+                "registry_url": stage.registry_url,
+                "app_id": installed.app_id,
+                "version": installed.version,
+            },
+            supervisor=supervisor,
+            callback=audit_callback,
+        )
+        return installed
 
     @staticmethod
     def _audit_install(

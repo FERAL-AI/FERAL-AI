@@ -117,15 +117,22 @@ def _extract_bundle(tarball: Path, dest: Path) -> tuple[bool, str]:
     return ok, reason
 
 
-def _sign_preview(payload: dict) -> str:
-    """Sign a preview payload so it cannot be edited or invented.
+def sign_consent_token(payload: dict) -> str:
+    """Sign a consent payload so it cannot be edited or invented.
 
-    The payload names the kind, the item id, the SHA-256 of the exact
-    verified tarball, the permission list that was rendered, whether the
-    signature verified, a single-use nonce and an expiry. Replay for a
-    different package is not possible because the id and the digest are
-    inside the MAC: a token issued for A does not authenticate a request
-    naming B, and the key never leaves this process.
+    For a skill the payload names the kind, the item id, the SHA-256 of
+    the exact verified tarball, the permission list that was rendered,
+    whether the signature verified, a single-use nonce and an expiry.
+    Replay for a different package is not possible because the id and
+    the digest are inside the MAC: a token issued for A does not
+    authenticate a request naming B, and the key never leaves this
+    process.
+
+    ``api/routes/apps.py`` mints its app-install tokens through the same
+    function against the same per-process secret. An app token carries
+    the *skill* tokens of the dependencies it disclosed, so the nested
+    consent is covered by the outer MAC and a dependency cannot be
+    swapped for another one after the user has read the list.
     """
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     mac = hmac.new(_PREVIEW_SECRET, raw, hashlib.sha256).digest()
@@ -136,7 +143,7 @@ def _sign_preview(payload: dict) -> str:
     )
 
 
-def _read_preview(token: str) -> Optional[dict]:
+def read_consent_token(token: str) -> Optional[dict]:
     """Return the payload of a token this process signed, else None."""
     if not token or not isinstance(token, str) or token.count(".") != 1:
         return None
@@ -154,6 +161,12 @@ def _read_preview(token: str) -> Optional[dict]:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+# The names the marketplace itself has always used. Kept so the two-step
+# skill install reads the same as it did; there is one implementation.
+_sign_preview = sign_consent_token
+_read_preview = read_consent_token
 
 # Wall-clock budget for `git pull` in the update path. Named so the
 # timeout-and-kill behaviour is testable without a 30s test.
@@ -296,6 +309,21 @@ class MarketplaceClient:
         if entry:
             shutil.rmtree(entry["stage_root"], ignore_errors=True)
         return entry
+
+    def release_preview(self, install_token: str) -> bool:
+        """Drop a staged preview without installing it.
+
+        The app-install flow previews a skill dependency in order to
+        describe it, and the user may then cancel or the app preview may
+        expire. Without this the staged bundle would sit in the pending
+        map until the TTL swept it, holding the tarball on disk and one
+        of the ``MAX_PENDING_PREVIEWS`` slots. Returns True when a staged
+        preview was actually dropped.
+        """
+        payload = read_consent_token(install_token or "")
+        if payload is None:
+            return False
+        return self._drop_preview(str(payload.get("nonce", ""))) is not None
 
     def _sweep_previews(self) -> None:
         """Expire old previews and bound the number held open."""

@@ -94,6 +94,25 @@ def test_demo_step_1_validate_manifest(brain):
     assert set(body["summary"]["surfaces"]) == {"home", "forecast"}
 
 
+def _consented_install(c, source: dict):
+    """Preview, then install with the token the preview minted.
+
+    Installing an app is a two-step consent flow: the app's own reach and
+    the skills it pulls in (which execute Python in this process) are
+    shown before anything is written. These tests are about the routes
+    downstream of that decision, so they take the same two steps a client
+    takes rather than asserting the old ungated shape. See
+    tests/test_app_install_consent.py for the gate itself.
+    """
+    preview = c.post("/api/apps/preview", json=source)
+    if preview.status_code != 200:
+        return preview
+    body = {"install_token": preview.json().get("install_token", "")}
+    if "overwrite" in source:
+        body["overwrite"] = source["overwrite"]
+    return c.post("/api/apps/install", json=body)
+
+
 def test_demo_step_2_install_from_manifest(brain, tmp_path):
     c, registry, _tmp = brain
     # Write the manifest to a temp app folder so /api/apps/install path
@@ -102,7 +121,7 @@ def test_demo_step_2_install_from_manifest(brain, tmp_path):
     src.mkdir()
     (src / "manifest.yaml").write_text(DEMO_MANIFEST)
 
-    r = c.post("/api/apps/install", json={"path": str(src), "overwrite": True, "unsigned": True})
+    r = _consented_install(c, {"path": str(src), "overwrite": True, "unsigned": True})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["success"] is True
@@ -115,7 +134,7 @@ def test_demo_step_3_fetch_manifest(brain, tmp_path):
     src = tmp_path / "src-demo"
     src.mkdir()
     (src / "manifest.yaml").write_text(DEMO_MANIFEST)
-    c.post("/api/apps/install", json={"path": str(src), "unsigned": True})
+    _consented_install(c, {"path": str(src), "unsigned": True})
 
     r = c.get("/api/apps/demo-weather/manifest")
     assert r.status_code == 200
@@ -129,7 +148,7 @@ def test_demo_step_4_open_home_surface(brain, tmp_path):
     src = tmp_path / "src-demo"
     src.mkdir()
     (src / "manifest.yaml").write_text(DEMO_MANIFEST)
-    c.post("/api/apps/install", json={"path": str(src), "unsigned": True})
+    _consented_install(c, {"path": str(src), "unsigned": True})
 
     r = c.post("/api/apps/demo-weather/open", json={"data": {"location": "Brooklyn"}})
     assert r.status_code == 200, r.text
@@ -149,7 +168,7 @@ def test_demo_step_5_uninstall(brain, tmp_path):
     src = tmp_path / "src-demo"
     src.mkdir()
     (src / "manifest.yaml").write_text(DEMO_MANIFEST)
-    c.post("/api/apps/install", json={"path": str(src), "unsigned": True})
+    _consented_install(c, {"path": str(src), "unsigned": True})
     assert registry.get("demo-weather") is not None
 
     r = c.delete("/api/apps/demo-weather")

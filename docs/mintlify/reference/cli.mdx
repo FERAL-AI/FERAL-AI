@@ -384,6 +384,16 @@ feral app publish ./my-app
 
 `sign` uses your publisher key at `~/.feral/publisher.key`; there is no `--private-key` flag.
 
+<Warning>
+`feral app install` is **currently broken**. It posts straight to
+`POST /api/apps/install`, which now requires an `install_token` from
+`POST /api/apps/preview` and answers 403 `preview_required` without one.
+The command has not yet been updated to take the two steps and show the
+disclosure, so it exits with `Install rejected (403)`. Install from the
+Marketplace page in the web client, which does implement the flow. See
+[Marketplace → Installing a GenUI app](/marketplace/overview).
+</Warning>
+
 ### `feral bridge`
 
 Install the phone-bridge daemon on this host.

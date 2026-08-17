@@ -2986,16 +2986,41 @@ class BrainState:
                 try:
                     labeled = get_active_provider_key(pid, vault=label_vault)
                 except Exception as exc:
-                    logger.debug(
-                        "labeled key lookup for %s failed during boot: %s",
-                        pid, exc,
+                    # WARNING, not debug. The operator ran
+                    # ``feral key add --provider <pid> --set-active`` and
+                    # the key is in the vault; this branch is the brain
+                    # failing to read it back at boot. At debug level the
+                    # only visible symptom is every env-reading surface
+                    # for that one provider reporting ``unauthorized``
+                    # while the others work, which is precisely the
+                    # v2026.5.46 bug this method's docstring describes.
+                    logger.warning(
+                        "Boot credential hydration: could not read the active "
+                        "labeled key for provider %r (%s: %s). %s stays unset, "
+                        "so this provider will report unauthorized. "
+                        "Check with `feral key list --provider %s`.",
+                        pid, type(exc).__name__, exc, env_var, pid,
                     )
                     continue
                 if labeled:
                     os.environ[env_var] = labeled
                     loaded.append(f"{env_var}(labeled:{pid})")
         except Exception as exc:
-            logger.debug("labeled-key hydration during boot failed: %s", exc)
+            # WARNING, not debug. This is the whole step-2 overlay failing
+            # (vault construction, keychain locked, import error), so EVERY
+            # provider key the operator added with
+            # ``feral key add --set-active`` is stranded in the vault at
+            # once. The brain then boots into "no LLM available" or falls
+            # back to a stale plaintext key with no explanation anywhere an
+            # operator looks.
+            logger.warning(
+                "Boot credential hydration: the labeled-key overlay failed "
+                "entirely (%s: %s). No `feral key add --set-active` key was "
+                "loaded; only credentials.json and default-namespace vault "
+                "entries are in effect. Run `feral doctor` to see which "
+                "providers still authenticate.",
+                type(exc).__name__, exc,
+            )
 
         for key in env_keys:
             if creds.get(key) and not os.environ.get(key):

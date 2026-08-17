@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Download, Trash2, RefreshCw, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { Download, Trash2, RefreshCw, ShieldCheck, ShieldAlert, AlertTriangle } from 'lucide-react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import Tabs from '../ui/Tabs';
@@ -91,6 +91,63 @@ const S = {
     fontSize: 'var(--v2-size-xs)',
     color: 'var(--v2-text-tertiary)',
     wordBreak: 'break-all',
+  },
+  depList: {
+    listStyle: 'none',
+    margin: '0 0 12px',
+    padding: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 10,
+  },
+  depRow: (tone) => ({
+    padding: '10px 12px',
+    borderRadius: 'var(--v2-radius-sm)',
+    border: `1px solid ${tone === 'warn' ? 'var(--v2-state-warn-soft)' : 'var(--v2-hairline)'}`,
+    background: tone === 'warn' ? 'var(--v2-state-warn-soft)' : 'var(--v2-fill-subtle)',
+  }),
+  depName: {
+    color: 'var(--v2-text-primary)',
+    fontSize: 'var(--v2-size-base)',
+    fontWeight: 600,
+    lineHeight: 1.35,
+  },
+  depMeta: {
+    color: 'var(--v2-text-tertiary)',
+    fontSize: 'var(--v2-size-xs)',
+    marginTop: 2,
+  },
+  depBody: {
+    color: 'var(--v2-text-secondary)',
+    fontSize: 'var(--v2-size-sm)',
+    lineHeight: 1.45,
+    marginTop: 6,
+  },
+  warnTitle: {
+    color: 'var(--v2-state-warn)',
+    fontSize: 'var(--v2-size-base)',
+    fontWeight: 600,
+    lineHeight: 1.35,
+  },
+  cmd: {
+    display: 'inline-block',
+    marginTop: 6,
+    padding: '4px 8px',
+    borderRadius: 'var(--v2-radius-xs)',
+    border: '1px solid var(--v2-hairline)',
+    background: 'var(--v2-well)',
+    fontFamily: 'var(--v2-font-mono)',
+    fontSize: 'var(--v2-size-xs)',
+    color: 'var(--v2-text-primary)',
+    wordBreak: 'break-all',
+  },
+  impactList: {
+    listStyle: 'disc',
+    margin: '6px 0 0',
+    paddingInlineStart: 18,
+    color: 'var(--v2-text-secondary)',
+    fontSize: 'var(--v2-size-sm)',
+    lineHeight: 1.45,
   },
 };
 
@@ -257,6 +314,210 @@ function InstallConsent({ pending, busy, onCancel, onConfirm }) {
   );
 }
 
+/**
+ * The consent step for a GenUI app.
+ *
+ * An app is not a skill and is not shown as one. Its own risk is where
+ * its sandboxed surfaces may send data, so that is the first list. But
+ * its `skill_dependencies` install skills, and a skill runs Python
+ * inside the brain, so the skills it pulls in are named here with what
+ * each of them reaches. That was the invisible half of an app install.
+ *
+ * A dependency FERAL could not verify does not end the flow. It is shown
+ * with the brain's own reason, the actions it will break, and what to do
+ * about it, and the user decides whether a partly working app is worth
+ * having. All copy comes from the server: one place to review the
+ * wording, per models/skill_manifest.py.
+ */
+function AppInstallConsent({ pending, busy, onCancel, onConfirm }) {
+  if (!pending) return null;
+  const { item, preview, error } = pending;
+  const sig = readSignature(preview);
+  const app = preview?.app || {};
+  const name = app.brand?.name || app.app_id || item?.name || item?.id;
+  const version = app.version || item?.version;
+  const deps = preview?.skill_dependencies || {};
+  const toInstall = deps.to_install || [];
+  const alreadyInstalled = deps.already_installed || [];
+  const unavailable = deps.unavailable || [];
+  const canInstall = sig.verified && !!preview?.install_token && !error;
+
+  const confirmLabel = busy
+    ? 'Installing…'
+    : (unavailable.length
+      ? `Install without ${unavailable.length} skill${unavailable.length > 1 ? 's' : ''}`
+      : 'Install');
+
+  return (
+    <Modal
+      open
+      onClose={onCancel}
+      title={`Install ${name}${version ? ` v${version}` : ''}?`}
+      actions={(
+        <>
+          <button
+            type="button"
+            className="v2-btn"
+            data-testid="v2-app-install-cancel"
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="v2-btn v2-btn--primary"
+            data-testid="v2-app-install-confirm"
+            onClick={onConfirm}
+            disabled={!canInstall || busy}
+          >
+            <Download size={12} /> {confirmLabel}
+          </button>
+        </>
+      )}
+    >
+      <div style={S.sigBox(sig.verified)} data-testid="v2-app-install-signature">
+        {sig.verified
+          ? <ShieldCheck size={16} aria-hidden="true" style={{ flex: '0 0 auto', marginTop: 1 }} />
+          : <ShieldAlert size={16} aria-hidden="true" style={{ flex: '0 0 auto', marginTop: 1 }} />}
+        <span>
+          {sig.verified ? (
+            <>
+              <strong>Signature verified.</strong>
+              <span style={S.sigDetail}>
+                {' '}
+                This bundle was signed by {sig.publisher || 'the publisher'} and arrived unchanged.
+              </span>
+            </>
+          ) : (
+            <>
+              <strong>Not verified. FERAL will not install this.</strong>
+              <span style={S.sigDetail}>
+                {' '}
+                The download could not be matched to the publisher&apos;s signature, so there is no
+                way to tell who wrote these files or whether they were altered.
+                {(error || sig.reason) ? ` Reason: ${error || sig.reason}` : ''}
+              </span>
+            </>
+          )}
+        </span>
+      </div>
+
+      {sig.verified && (
+        <>
+          <p style={S.lead}>
+            {name} draws its screens inside FERAL. Installing it gives it the access below, and
+            installs the skills it needs, until you uninstall it.
+          </p>
+
+          <p style={S.sectionLabel}>What the app itself can reach</p>
+          <PermissionList details={preview?.permission_details} />
+
+          {toInstall.length > 0 && (
+            <>
+              <p style={S.sectionLabel}>
+                Skills it will install ({toInstall.length})
+              </p>
+              <p style={S.permDesc}>
+                These are separate packages that run their own code inside FERAL, not just screens.
+                Each was checked against its publisher&apos;s signature.
+              </p>
+              <ul style={S.depList} data-testid="v2-app-install-new-skills">
+                {toInstall.map((d) => (
+                  <li key={d.skill_id} style={S.depRow('plain')}>
+                    <div style={S.depName}>{d.name || d.skill_id}</div>
+                    <div style={S.depMeta}>
+                      {d.skill_id}
+                      {d.version ? ` · v${d.version}` : ''}
+                      {d.publisher ? ` · by ${d.publisher}` : ''}
+                    </div>
+                    <PermissionList details={d.permission_details} permissions={d.permissions} />
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          {alreadyInstalled.length > 0 && (
+            <>
+              <p style={S.sectionLabel}>
+                Skills you already have ({alreadyInstalled.length})
+              </p>
+              <p style={S.permDesc}>
+                Nothing new is installed for these. They are listed so the app&apos;s full reach is
+                visible.
+              </p>
+              <ul style={S.depList} data-testid="v2-app-install-existing-skills">
+                {alreadyInstalled.map((d) => (
+                  <li key={d.skill_id} style={S.depRow('plain')}>
+                    <div style={S.depName}>{d.name || d.skill_id}</div>
+                    <div style={S.depMeta}>{d.skill_id}{d.version ? ` · v${d.version}` : ''}</div>
+                    <div style={S.cardPerms}>
+                      {(d.permission_details || []).map((p) => (
+                        <span key={p.id} className="v2-chip v2-chip--muted">{p.label || p.id}</span>
+                      ))}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          {unavailable.length > 0 && (
+            <>
+              <p style={S.sectionLabel}>
+                Skills FERAL cannot install ({unavailable.length})
+              </p>
+              <ul style={S.depList} data-testid="v2-app-install-unavailable-skills">
+                {unavailable.map((d) => (
+                  <li key={d.skill_id} style={S.depRow('warn')}>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                      <AlertTriangle
+                        size={15}
+                        aria-hidden="true"
+                        style={{ flex: '0 0 auto', marginTop: 2, color: 'var(--v2-state-warn)' }}
+                      />
+                      <div style={{ minWidth: 0 }}>
+                        <div style={S.warnTitle}>{d.skill_id}</div>
+                        <div style={S.depBody}>{d.remediation?.message || d.reason}</div>
+                        {d.impact?.length > 0 && (
+                          <>
+                            <div style={{ ...S.depBody, marginTop: 8 }}>
+                              Without it, {name} cannot:
+                            </div>
+                            <ul style={S.impactList}>
+                              {d.impact.map((a) => (
+                                <li key={`${a.surface_id}.${a.action_id}`}>
+                                  {a.description || a.action_id}
+                                  {' '}
+                                  <span style={{ color: 'var(--v2-text-tertiary)' }}>
+                                    ({a.surface_id})
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          </>
+                        )}
+                        {d.remediation?.action && (
+                          <div style={{ ...S.depBody, marginTop: 8 }}>{d.remediation.action}</div>
+                        )}
+                        {d.remediation?.command && (
+                          <code style={S.cmd}>{d.remediation.command}</code>
+                        )}
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          {sig.sha256 && <p style={S.hash}>SHA-256 {sig.sha256}</p>}
+        </>
+      )}
+    </Modal>
+  );
+}
+
 function BrowseTab() {
   const [kind, setKind] = useState('skill');
   const [query, setQuery] = useState('');
@@ -266,6 +527,7 @@ function BrowseTab() {
   const [busy, setBusy] = useState(null);
   const [msg, setMsg] = useState(null);
   const [pending, setPending] = useState(null);
+  const [pendingApp, setPendingApp] = useState(null);
   const [installing, setInstalling] = useState(false);
 
   const fetchList = useCallback(async () => {
@@ -294,19 +556,61 @@ function BrowseTab() {
     setTimeout(() => setMsg(null), 4000);
   };
 
-  const installApp = async (it, id) => {
+  // Step one for a GenUI app. This used to POST straight to
+  // /api/apps/install, which asked for nothing and silently installed
+  // the app's skill_dependencies over the unsigned path. It now previews
+  // first, and the route refuses an install without the token this
+  // returns.
+  const openAppPreview = async (it, id) => {
     setBusy(id);
     try {
-      const r = await apiFetch('/api/apps/install', {
+      const preview = await apiJson('/api/apps/preview', {
         method: 'POST',
         body: JSON.stringify({ registry_id: id }),
         silent: true,
       });
-      const data = await r.json().catch(() => ({}));
-      flash(data?.error || `Installed ${it.name || id}`);
+      setPendingApp({
+        item: { ...it, id, kind: 'app' },
+        preview,
+        error: preview?.success === false ? (preview.error || '') : '',
+      });
     } catch (err) {
-      flash(err?.detail || err?.message || 'Install failed');
+      setPendingApp({
+        item: { ...it, id, kind: 'app' },
+        preview: (err && typeof err.raw === 'object') ? err.raw : null,
+        error: err?.detail?.message || err?.detail || err?.message
+          || 'Could not verify this app',
+      });
     } finally { setBusy(null); }
+  };
+
+  // Step two: install exactly the app the dialog described, including
+  // exactly the skills it named.
+  const confirmAppInstall = async () => {
+    if (!pendingApp?.preview?.install_token) return;
+    const { item, preview } = pendingApp;
+    setInstalling(true);
+    try {
+      const r = await apiFetch('/api/apps/install', {
+        method: 'POST',
+        body: JSON.stringify({ install_token: preview.install_token }),
+        silent: true,
+      });
+      const data = await r.json().catch(() => ({}));
+      const appName = preview?.app?.brand?.name || preview?.app?.app_id || item.id;
+      if (data?.success === false || data?.detail) {
+        flash(data?.detail?.message || data?.error || 'Install failed');
+      } else if (data?.degraded) {
+        const missing = (data.skill_dependencies?.unavailable || [])
+          .map((d) => d.skill_id).join(', ');
+        flash(`Installed ${appName} without ${missing}. See the app for how to add it.`);
+      } else {
+        flash(`Installed ${appName}`);
+      }
+      setPendingApp(null);
+    } catch (err) {
+      flash(err?.detail?.message || err?.detail || err?.message || 'Install failed');
+    } finally { setInstalling(false); }
   };
 
   // Step one: verify and describe. Nothing is installed by this call, and
@@ -315,9 +619,7 @@ function BrowseTab() {
     const id = it.id || it.item_id;
     const itKind = it.kind || kind;
     if (itKind === 'app') {
-      // GenUI apps install through AppRegistry, which runs its own
-      // signature check; there is no marketplace preview for them.
-      return installApp(it, id);
+      return openAppPreview(it, id);
     }
     setBusy(id);
     try {
@@ -440,6 +742,12 @@ function BrowseTab() {
         busy={installing}
         onCancel={() => setPending(null)}
         onConfirm={confirmInstall}
+      />
+      <AppInstallConsent
+        pending={pendingApp}
+        busy={installing}
+        onCancel={() => setPendingApp(null)}
+        onConfirm={confirmAppInstall}
       />
     </Pane>
   );

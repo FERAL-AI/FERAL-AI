@@ -27,7 +27,9 @@ key id that the host pins to a row in the
 `publisher_keys` namespace of the local vault. If the manifest is
 unsigned, tampered, or signed by a key the host doesn't trust,
 installation raises `UnverifiedManifestError` (HTTP 422 from
-`POST /api/apps/install`).
+`POST /api/apps/preview`, which is where the check now runs; the install
+call spends a token the preview minted and cannot be reached without
+one).
 
 The only escape hatch is the explicit `allow_unsigned=True` flag (CLI
 `--allow-unsigned`, API `unsigned: true`). Choosing it writes an
@@ -80,31 +82,52 @@ signature.
 
 ## 3. Install
 
+Installing is two calls. An app may declare `skill_dependencies`, and a
+skill runs Python inside the brain, so the install has to say what code
+it brings before it brings it. See
+[Marketplace → Installing a GenUI app](/marketplace/overview).
+
 ### Production / signed
 
 ```bash
-curl -X POST $FERAL_HOST/api/apps/install \
+# 1. Verify and describe. Writes nothing.
+curl -X POST $FERAL_HOST/api/apps/preview \
   -H 'Content-Type: application/json' \
   -d '{"path": "/abs/path/to/app-bundle"}'
+
+# 2. Install exactly what step 1 described.
+curl -X POST $FERAL_HOST/api/apps/install \
+  -H 'Content-Type: application/json' \
+  -d '{"install_token": "<install_token from step 1>"}'
 ```
 
-`install_app` finds `manifest.signed.json`, calls `verify`, then
-proceeds with the existing install flow. On failure you get a 422 with
-an `error` envelope of:
+The preview runs `AppRegistry._verify_source` through `inspect_app`: it
+finds `manifest.signed.json`, calls `verify`, and applies the permissions
+policy. `install_app` runs the same method, so the two cannot disagree.
+On failure you get a 422 with an `error` envelope of:
 
 ```json
 { "error": "UnverifiedManifest", "reason": "signature_mismatch" }
 ```
 
+An install with no `install_token` is refused with 403
+`preview_required`, whatever the source. The token is single-use, bound
+to the staged bytes and to the source that produced them, and expires
+after five minutes.
+
 ### Local dev / unsigned (escape hatch)
 
+`unsigned: true` goes on the **preview**, because that is where
+verification happens. The token it mints carries the decision forward.
+
 ```bash
-curl -X POST $FERAL_HOST/api/apps/install \
+curl -X POST $FERAL_HOST/api/apps/preview \
   -H 'Content-Type: application/json' \
   -d '{"path": "/abs/path/to/app-bundle", "unsigned": true}'
 ```
 
-This still writes `unsigned_install` to the audit log.
+This still writes `unsigned_install` to the audit log when the install
+that follows is performed.
 
 ## 4. Verify a manifest
 
