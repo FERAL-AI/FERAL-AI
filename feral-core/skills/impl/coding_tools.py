@@ -10,10 +10,15 @@ The original computer_use.py is kept for backward compatibility.
 from __future__ import annotations
 
 import asyncio
+import atexit
+import base64
 import dataclasses
 import logging
 import os
 import re
+import signal
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -41,6 +46,31 @@ logger = logging.getLogger("feral.skills.coding_tools")
 
 MAX_OUTPUT = 50_000
 BASH_TIMEOUT = 30
+# Foreground ceiling. ENFORCED, NOT CLAMPED: the old code did
+# ``min(requested, 120)``, so a caller that asked for 600s was told
+# "timed out after 120s" and had no way to learn that the number it
+# passed had been quietly replaced. A request above this ceiling is now
+# a 400 that names the ceiling and points at run_in_background.
+BASH_MAX_TIMEOUT = 600
+# Background jobs are bounded too, an unbounded job is an orphan
+# waiting to happen. Default 1h, hard ceiling 24h.
+BACKGROUND_DEFAULT_TIMEOUT = 3_600
+BACKGROUND_MAX_TIMEOUT = 86_400
+# Per-stream ring buffer for a background job. 2 000 lines x 4 000 chars
+# is ~8 MB worst case per stream; the ring keeps the NEWEST lines and
+# reports how many it dropped, so nothing is lost silently.
+BG_MAX_BUFFER_LINES = 2_000
+BG_MAX_LINE_CHARS = 4_000
+BG_MAX_RUNNING_PER_SESSION = 8
+BG_MAX_RUNNING_TOTAL = 32
+# Finished jobs stay readable for a while so a poller can collect the
+# tail, then get pruned. Both bounds apply.
+BG_FINISHED_RETENTION = 32
+BG_FINISHED_TTL_SEC = 900
+BG_OUTPUT_DEFAULT_MAX_LINES = 500
+# Text read ceiling (unchanged). Images get their own, larger ceiling -
+# see ``_image_byte_ceiling``.
+MAX_TEXT_READ_BYTES = 2_000_000
 # Reference-codebase ergonomics (AUDIT-r14 round3 engine spec #4):
 # default grep to file names, paginate, relativize paths to keep tool
 # output compact for the LLM context window.
@@ -80,6 +110,498 @@ def _paginate(lines: "list[str]", head_limit: int, offset: int) -> "tuple[list[s
     return window, truncated
 
 
+# ── background jobs ───────────────────────────────────────────────
+#
+# Background execution runs on ``process/supervisor`` rather than a
+# second private subprocess implementation: the supervisor already owns
+# overall/no-output timeouts, TERM->KILL escalation, a run registry, and
+# scope-cancel. What it lacked was bounded buffering, incremental reads
+# and process-group kills; those were added there (see
+# ``process/supervisor/buffer.py`` and ``adapters/child.py``) so every
+# future caller gets them too.
+
+_LIVE_BACKGROUND_PGIDS: "dict[str, int]" = {}
+
+
+def _kill_orphan_background_jobs() -> None:
+    """Last-resort reaper: SIGKILL every background job's process group.
+
+    Registered with :mod:`atexit`. The event loop may already be gone by
+    then, so this deliberately uses raw ``os.killpg`` rather than the
+    supervisor's async kill ladder.
+    """
+    for job_id, pgid in list(_LIVE_BACKGROUND_PGIDS.items()):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        _LIVE_BACKGROUND_PGIDS.pop(job_id, None)
+
+
+atexit.register(_kill_orphan_background_jobs)
+
+
+@dataclasses.dataclass
+class _BackgroundJob:
+    """One backgrounded shell command and the cursors into its output."""
+
+    job_id: str
+    session_id: str
+    command: str
+    cwd: str
+    timeout_sec: int
+    handle: Any
+    loop_id: int
+    started_at: float
+    stdout_cursor: int = 0
+    stderr_cursor: int = 0
+
+    @property
+    def pid(self) -> int:
+        return int(getattr(self.handle, "pid", -1))
+
+    @property
+    def finished(self) -> bool:
+        return bool(getattr(self.handle, "finished", False))
+
+    def status(self) -> str:
+        record = getattr(self.handle, "record", None)
+        if record is None:
+            return "running"
+        reason = getattr(record, "kill_reason", None)
+        if reason in (None, "exit"):
+            return "completed"
+        if reason == "overall_timeout":
+            return "timed_out"
+        return "killed"
+
+    def exit_code(self) -> "int | None":
+        record = getattr(self.handle, "record", None)
+        return None if record is None else getattr(record, "exit_code", None)
+
+    def kill_reason(self) -> "str | None":
+        record = getattr(self.handle, "record", None)
+        return None if record is None else getattr(record, "kill_reason", None)
+
+
+# ── binary / image detection ──────────────────────────────────────
+#
+# Media types are limited to the set ``agents/multimodal_blocks.py``
+# knows how to sniff and deliver (``_B64_MAGIC`` there). Reading a file
+# type the image pipeline cannot carry as if it could would just move the
+# mojibake one layer up.
+_IMAGE_MAGIC: "tuple[tuple[bytes, str], ...]" = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"BM", "image/bmp"),
+)
+
+# Non-image binaries we can name in the refusal, so the model gets a fact
+# instead of "not text".
+_BINARY_MAGIC: "tuple[tuple[bytes, str], ...]" = (
+    (b"%PDF-", "PDF document"),
+    (b"\x7fELF", "ELF binary"),
+    (b"\xcf\xfa\xed\xfe", "Mach-O binary"),
+    (b"\xca\xfe\xba\xbe", "Mach-O universal binary or Java class"),
+    (b"PK\x03\x04", "ZIP archive (or .docx/.xlsx/.jar/.whl)"),
+    (b"\x1f\x8b", "gzip archive"),
+    (b"BZh", "bzip2 archive"),
+    (b"\xfd7zXZ\x00", "xz archive"),
+    (b"SQLite format 3\x00", "SQLite database"),
+    (b"ID3", "MP3 audio"),
+    (b"OggS", "Ogg media"),
+    (b"\x00\x00\x00\x18ftyp", "MP4 video"),
+    (b"\x00\x00\x00\x20ftyp", "MP4 video"),
+    (b"\x00asm", "WebAssembly module"),
+)
+
+
+def _sniff_image_media_type(head: bytes) -> "str | None":
+    """Return the image media type from magic bytes, or None."""
+    for magic, media_type in _IMAGE_MAGIC:
+        if head.startswith(magic):
+            return media_type
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _sniff_binary_kind(head: bytes) -> str:
+    """Name a non-image binary format, or fall back to a generic label."""
+    for magic, label in _BINARY_MAGIC:
+        if head.startswith(magic):
+            return label
+    if head.startswith(b"\xff\xfe") or head.startswith(b"\xfe\xff"):
+        return "UTF-16 text (not decodable as UTF-8)"
+    return "binary data"
+
+
+def _image_byte_ceiling() -> int:
+    """Largest image ``read_file`` will return, in bytes on disk.
+
+    Derived from the image pipeline's own ceiling
+    (``FERAL_TOOL_IMAGE_MAX_B64_CHARS``, default 5 000 000 base64 chars)
+    so this tool never hands the pipeline a payload the pipeline would
+    then refuse whole. base64 costs 4 chars per 3 bytes, plus the data:
+    URL prefix, so we take 3/4 of the char budget minus a small margin.
+    """
+    chars = 5_000_000
+    try:  # source of truth, read (never edited) from the image pipeline
+        from agents.multimodal_blocks import _max_image_b64_chars
+
+        chars = int(_max_image_b64_chars())
+    except Exception:  # pragma: no cover - stripped build / import cycle
+        raw = (os.environ.get("FERAL_TOOL_IMAGE_MAX_B64_CHARS") or "").strip()
+        if raw.isdigit() and int(raw) > 0:
+            chars = int(raw)
+    return max(1, (chars - 128) * 3 // 4)
+
+
+def _png_dimensions(data: bytes) -> "tuple[int, int] | None":
+    if len(data) < 24 or data[12:16] != b"IHDR":
+        return None
+    return (
+        int.from_bytes(data[16:20], "big"),
+        int.from_bytes(data[20:24], "big"),
+    )
+
+
+def _gif_dimensions(data: bytes) -> "tuple[int, int] | None":
+    if len(data) < 10:
+        return None
+    return (
+        int.from_bytes(data[6:8], "little"),
+        int.from_bytes(data[8:10], "little"),
+    )
+
+
+def _image_dimensions(media_type: str, data: bytes) -> "tuple[int, int] | None":
+    """Dimensions for the formats whose header is trivially parseable.
+
+    JPEG/WebP/BMP are deliberately NOT guessed at: returning nothing is
+    honest, returning a wrong number is not.
+    """
+    if media_type == "image/png":
+        return _png_dimensions(data)
+    if media_type == "image/gif":
+        return _gif_dimensions(data)
+    return None
+
+
+# ── argument validation ───────────────────────────────────────────
+
+
+def _unexpected_args(
+    args: dict,
+    allowed: "set[str]",
+    endpoint: str,
+) -> "dict | None":
+    """Refuse arguments the endpoint does not implement.
+
+    Silently ignoring an option the caller passed is the defect this
+    whole pass exists to remove: the caller believes ``-i`` took effect
+    and reads the (wrong) result as ground truth. Keys starting with
+    ``_`` are internal plumbing (e.g. ``_feral_require_sandbox``) and are
+    always allowed.
+    """
+    unknown = sorted(
+        k for k in args
+        if not str(k).startswith("_") and k not in allowed
+    )
+    if not unknown:
+        return None
+    return {
+        "success": False,
+        "status_code": 400,
+        "data": {"unsupported_params": unknown, "supported_params": sorted(allowed)},
+        "error": (
+            f"coding_tools__{endpoint} does not support "
+            f"{', '.join(repr(u) for u in unknown)}. Supported: "
+            f"{', '.join(sorted(allowed))}. Nothing was executed, these "
+            f"arguments are refused rather than ignored, so a result you "
+            f"read is never one where your options were dropped."
+        ),
+    }
+
+
+# ── grep options ──────────────────────────────────────────────────
+#
+# Names follow the reference coding-agent surface (``-i``, ``-A``,
+# ``-B``, ``-C``, ``type``, ``multiline``); the spelled-out aliases are
+# accepted too because a model that writes ``case_insensitive`` means the
+# same thing and should not get a refusal for spelling.
+GREP_ALIASES: "dict[str, tuple[str, ...]]" = {
+    "ignore_case": ("-i", "case_insensitive", "ignore_case"),
+    "after": ("-A", "after_context"),
+    "before": ("-B", "before_context"),
+    "context": ("-C", "context", "context_lines"),
+    "multiline": ("multiline",),
+    "file_type": ("type", "file_type"),
+}
+GREP_ALLOWED_ARGS = {
+    "pattern", "path", "include", "output_mode", "head_limit", "offset",
+} | {alias for aliases in GREP_ALIASES.values() for alias in aliases}
+
+# Field separators for rows that carry context. rg's defaults (':' for a
+# match row, '-' for a context row) are both legal path characters, so
+# `a-b:1:x` cannot be parsed back reliably; these two can appear in
+# neither a POSIX path nor a realistic source line.
+#
+# NOT \x1e (record separator), which would be the obvious pick: Python's
+# ``str.splitlines()`` treats \x1c, \x1d, \x1e and \x85 as line
+# boundaries, so every context row got shredded into three fragments and
+# the parser then dropped all of them, context silently vanished on the
+# ripgrep path while the fallback returned it. Verified by running it.
+# \x1f (unit separator) and \x01 (SOH) are not in that set.
+GREP_MATCH_SEP = "\x1f"
+GREP_CONTEXT_SEP = "\x01"
+GREP_MAX_CONTEXT = 100
+
+# What the pure-Python fallback knows about ``type``. ripgrep knows ~800
+# types; this is the documented subset, and anything else is refused
+# rather than quietly filtered by a different rule.
+FALLBACK_TYPE_GLOBS: "dict[str, tuple[str, ...]]" = {
+    "py": (".py", ".pyi"),
+    "js": (".js", ".jsx", ".mjs", ".cjs"),
+    "ts": (".ts", ".tsx", ".mts", ".cts"),
+    "swift": (".swift",),
+    "rust": (".rs",),
+    "go": (".go",),
+    "java": (".java",),
+    "kotlin": (".kt", ".kts"),
+    "c": (".c", ".h"),
+    "cpp": (".cpp", ".cc", ".cxx", ".hpp", ".hh"),
+    "objc": (".m", ".mm"),
+    "ruby": (".rb",),
+    "php": (".php",),
+    "sh": (".sh", ".bash", ".zsh"),
+    "md": (".md", ".markdown"),
+    "json": (".json",),
+    "yaml": (".yaml", ".yml"),
+    "toml": (".toml",),
+    "html": (".html", ".htm"),
+    "css": (".css", ".scss", ".sass"),
+    "sql": (".sql",),
+    "xml": (".xml",),
+    "config": (".cfg", ".ini", ".conf"),
+}
+
+_DEFAULT_GREP_OPTS: "dict[str, Any]" = {
+    "ignore_case": False,
+    "after": 0,
+    "before": 0,
+    "multiline": False,
+    "file_type": "",
+}
+
+
+def _grep_options(args: dict, output_mode: str) -> "tuple[dict, dict | None]":
+    """Normalise the grep flags, or return a refusal.
+
+    Every option is either applied or refused, never accepted and
+    dropped. Conflicting aliases (``-i: true`` next to
+    ``case_insensitive: false``) are a refusal too, because guessing
+    which one the caller meant is the same failure in a nicer costume.
+    """
+
+    def pick(canonical: str) -> "tuple[Any, str | None, dict | None]":
+        seen: "list[tuple[str, Any]]" = [
+            (name, args[name])
+            for name in GREP_ALIASES[canonical]
+            if name in args and args[name] is not None
+        ]
+        if not seen:
+            return None, None, None
+        values = {repr(v) for _n, v in seen}
+        if len(values) > 1:
+            return None, None, {
+                "success": False, "status_code": 400, "data": None,
+                "error": (
+                    "Conflicting values for the same option: "
+                    + ", ".join(f"{n}={v!r}" for n, v in seen)
+                    + ". Pass it once."
+                ),
+            }
+        return seen[0][1], seen[0][0], None
+
+    opts = dict(_DEFAULT_GREP_OPTS)
+
+    raw, name, err = pick("ignore_case")
+    if err:
+        return opts, err
+    if raw is not None:
+        coerced = _as_bool(raw)
+        if coerced is None:
+            return opts, {
+                "success": False, "status_code": 400, "data": None,
+                "error": f"{name} must be a boolean, got {raw!r}.",
+            }
+        opts["ignore_case"] = coerced
+
+    raw, name, err = pick("multiline")
+    if err:
+        return opts, err
+    if raw is not None:
+        coerced = _as_bool(raw)
+        if coerced is None:
+            return opts, {
+                "success": False, "status_code": 400, "data": None,
+                "error": f"{name} must be a boolean, got {raw!r}.",
+            }
+        opts["multiline"] = coerced
+
+    raw, name, err = pick("file_type")
+    if err:
+        return opts, err
+    if raw is not None:
+        if not isinstance(raw, str) or not raw.strip():
+            return opts, {
+                "success": False, "status_code": 400, "data": None,
+                "error": f"{name} must be a non-empty string such as 'py' or 'ts'.",
+            }
+        opts["file_type"] = raw.strip()
+
+    # -C sets both sides; an explicit -A/-B then overrides its own side.
+    for canonical in ("context", "after", "before"):
+        raw, name, err = pick(canonical)
+        if err:
+            return opts, err
+        if raw is None:
+            continue
+        try:
+            count = int(raw)
+        except (TypeError, ValueError):
+            return opts, {
+                "success": False, "status_code": 400, "data": None,
+                "error": f"{name} must be an integer number of lines, got {raw!r}.",
+            }
+        if count < 0 or count > GREP_MAX_CONTEXT:
+            return opts, {
+                "success": False, "status_code": 400, "data": None,
+                "error": (
+                    f"{name}={count} is out of range; context lines must be "
+                    f"0-{GREP_MAX_CONTEXT}."
+                ),
+            }
+        if canonical == "context":
+            opts["after"] = count
+            opts["before"] = count
+        else:
+            opts[canonical] = count
+
+    if (opts["after"] or opts["before"]) and output_mode != "content":
+        return opts, {
+            "success": False, "status_code": 400, "data": None,
+            "error": (
+                "Context lines (-A/-B/-C) only apply to "
+                "output_mode='content'; they are meaningless for "
+                f"{output_mode!r}, which returns no lines. Set "
+                "output_mode='content' or drop the context option."
+            ),
+        }
+    return opts, None
+
+
+def _parse_context_row(line: str) -> "dict | None":
+    """Parse one rg row emitted with the control-character separators.
+
+    Returns ``{file, line, text, is_context}``, or None for rg's ``--``
+    group-break rows (which carry no fields).
+    """
+    match_at = line.find(GREP_MATCH_SEP)
+    ctx_at = line.find(GREP_CONTEXT_SEP)
+    if match_at < 0 and ctx_at < 0:
+        return None
+    if match_at >= 0 and (ctx_at < 0 or match_at < ctx_at):
+        sep, is_context = GREP_MATCH_SEP, False
+    else:
+        sep, is_context = GREP_CONTEXT_SEP, True
+    parts = line.split(sep, 2)
+    if len(parts) < 3:
+        return {"text": line, "is_context": is_context}
+    return {
+        "file": _relativize(parts[0]),
+        "line": parts[1],
+        "text": parts[2],
+        "is_context": is_context,
+    }
+
+
+def _fallback_rows_for_file(
+    fp: Path, text: str, regex: "re.Pattern[str]", opts: dict,
+) -> "list[dict]":
+    """Match one file in the pure-Python path, with context + multiline.
+
+    Context rows are marked ``is_context: True`` exactly as in the
+    ripgrep path, and a line that is both a match and another match's
+    context is emitted once, as a match.
+    """
+    lines = text.splitlines()
+    hit_lines: "set[int]" = set()
+    if opts["multiline"]:
+        for m in regex.finditer(text):
+            # Every line the match SPANS counts as a match line, which is
+            # what ripgrep prints for a multiline hit. Emitting only the
+            # start line here would make the two engines disagree on the
+            # same file.
+            start = text.count("\n", 0, m.start()) + 1
+            end = text.count("\n", 0, max(m.start(), m.end() - 1)) + 1
+            hit_lines.update(range(start, end + 1))
+    else:
+        for i, line in enumerate(lines, 1):
+            if regex.search(line):
+                hit_lines.add(i)
+    if not hit_lines:
+        return []
+
+    before, after = int(opts["before"]), int(opts["after"])
+    wanted: "set[int]" = set()
+    for n in hit_lines:
+        wanted.update(range(max(1, n - before), min(len(lines), n + after) + 1))
+
+    rel = _relativize(fp)
+    rows = []
+    for n in sorted(wanted):
+        row = {"file": rel, "line": str(n), "text": lines[n - 1].strip()}
+        if before or after:
+            row["is_context"] = n not in hit_lines
+        rows.append(row)
+    return rows
+
+
+def _annotate_options(data: dict, opts: dict, *, engine: str) -> None:
+    """Echo the options that were actually applied, plus the engine.
+
+    A caller can then SEE that ``-i`` took effect rather than trusting
+    that it did.
+    """
+    data["engine"] = engine
+    data["options_applied"] = {
+        "case_insensitive": bool(opts["ignore_case"]),
+        "multiline": bool(opts["multiline"]),
+        "after_context": int(opts["after"]),
+        "before_context": int(opts["before"]),
+        "type": opts["file_type"] or None,
+    }
+
+
+def _as_bool(value: Any) -> "bool | None":
+    """Coerce a model-authored boolean. Returns None if not boolean-ish."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "1", "on"):
+            return True
+        if lowered in ("false", "no", "0", "off", ""):
+            return False
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    return None
+
+
 def _check_shell_quotes(command: str) -> str | None:
     """Return an error string if shell quotes are unbalanced, else None."""
     in_single = False
@@ -110,6 +632,22 @@ class CodingToolsSkill(BaseSkill):
         super().__init__(skill_id="coding_tools")
         self._sandbox_bash_enabled = os.getenv("FERAL_SANDBOX_BASH", "false").lower() in ("true", "1", "yes")
         self._policy: SandboxPolicy | None = None
+        # Background-job state. The skill is a process-wide singleton
+        # (``skills.impl.register_skill`` instantiates once), so this map
+        # is the process's job table. Jobs are keyed by id and carry
+        # their session id: one session can never read or kill another
+        # session's job.
+        self._bg_jobs: "dict[str, _BackgroundJob]" = {}
+        # One supervisor per event loop. ``asyncio.Lock`` binds to the
+        # loop that first awaits it, and a singleton skill outlives any
+        # single loop (tests build a fresh loop per case), so a supervisor
+        # cached across loops would raise "bound to a different event
+        # loop" on the second use.
+        self._supervisors: "dict[int, Any]" = {}
+        # Strong references to the per-job watchers that drop a finished
+        # job's pgid from the atexit reaper. The loop holds tasks only
+        # weakly (AUDIT-FIXES F-06), and the set self-prunes on done.
+        self._bg_watchers: "set[asyncio.Task]" = set()
 
     def _resolve_docker_sandbox(self):
         """Look up Docker per-call so a daemon that comes up after FERAL
@@ -165,6 +703,8 @@ class CodingToolsSkill(BaseSkill):
     async def execute(self, endpoint_id: str, args: Dict[str, Any], vault: Dict[str, str]) -> Dict[str, Any]:
         dispatch = {
             "bash": self._bash,
+            "bash_output": self._bash_output,
+            "kill_bash": self._kill_bash,
             "read_file": self._read_file,
             "write_file": self._write_file,
             "edit_file": self._edit_file,
@@ -193,10 +733,33 @@ class CodingToolsSkill(BaseSkill):
         The mode is now decided by ``security.exec_mode.resolve_execution_mode``
         from (command, resolved cwd, autonomy mode, grant state); see that
         module for the full table.
+
+        ``run_in_background: true`` hands the command to
+        ``process/supervisor`` and returns a job id immediately. Every
+        check below (destructive-command scan, quote balance, file-state
+        invalidation, and the full ``resolve_execution_mode`` grant /
+        sandbox decision) runs FIRST and identically for both lanes -
+        a background lane that skipped them would be a privilege
+        escalation, so the branch sits after the decision, not before it.
         """
+        bad_args = _unexpected_args(
+            args,
+            {"command", "cwd", "timeout", "run_in_background", "description"},
+            "bash",
+        )
+        if bad_args:
+            return bad_args
+
         command = args.get("command", "")
         if not command:
             return {"success": False, "status_code": 400, "data": None, "error": "No command provided"}
+
+        background = _as_bool(args.get("run_in_background", False))
+        if background is None:
+            return {
+                "success": False, "status_code": 400, "data": None,
+                "error": "run_in_background must be a boolean.",
+            }
 
         # Scan the unwrapped form as well as the raw one. This pattern set
         # reads the literal string, so `echo cm0gLXJmIC8K | base64 -d | sh`
@@ -215,7 +778,39 @@ class CodingToolsSkill(BaseSkill):
         if quote_err:
             return {"success": False, "status_code": 400, "data": None, "error": quote_err}
 
-        timeout = min(int(args.get("timeout", BASH_TIMEOUT)), 120)
+        ceiling = BACKGROUND_MAX_TIMEOUT if background else BASH_MAX_TIMEOUT
+        default_timeout = BACKGROUND_DEFAULT_TIMEOUT if background else BASH_TIMEOUT
+        raw_timeout = args.get("timeout", default_timeout)
+        try:
+            timeout = int(raw_timeout)
+        except (TypeError, ValueError):
+            return {
+                "success": False, "status_code": 400, "data": None,
+                "error": f"timeout must be an integer number of seconds, got {raw_timeout!r}.",
+            }
+        if timeout <= 0:
+            return {
+                "success": False, "status_code": 400, "data": None,
+                "error": "timeout must be a positive number of seconds.",
+            }
+        if timeout > ceiling:
+            # Refused, not clamped. The old code silently replaced the
+            # requested value with 120 and then reported the timeout as
+            # if the caller had asked for it.
+            hint = (
+                " Pass run_in_background: true for work that legitimately "
+                f"runs longer (background ceiling {BACKGROUND_MAX_TIMEOUT}s)."
+                if not background else ""
+            )
+            return {
+                "success": False, "status_code": 400,
+                "data": {"requested_timeout": timeout, "max_timeout": ceiling},
+                "error": (
+                    f"timeout={timeout}s exceeds the maximum of {ceiling}s for "
+                    f"{'background' if background else 'foreground'} bash. "
+                    f"Nothing was executed.{hint}"
+                ),
+            }
 
         # A shell command can rewrite any file on the machine, and working
         # out which ones from the command text is not decidable for a
@@ -246,6 +841,30 @@ class CodingToolsSkill(BaseSkill):
             docker_available=docker_sandbox is not None,
         )
 
+        if decision.mode == MODE_REFUSED:
+            return self._refuse_bash(decision)
+
+        if background:
+            if decision.mode == MODE_DOCKER:
+                # Refused rather than silently downgraded to a foreground
+                # Docker run: the caller asked for a job id and would
+                # otherwise block for the full command with no way to see
+                # that its request had been dropped.
+                return {
+                    "success": False, "status_code": 501,
+                    "data": {
+                        "execution_mode": MODE_DOCKER,
+                        "run_in_background": True,
+                    },
+                    "error": (
+                        "run_in_background is not supported in the Docker "
+                        "sandbox lane; the supervisor manages host processes "
+                        "only. Re-run without run_in_background, or run it in "
+                        "a granted host workspace."
+                    ),
+                }
+            return await self._start_background_job(command, decision, timeout)
+
         if decision.mode == MODE_DOCKER:
             original_timeout = getattr(docker_sandbox, "_timeout", BASH_TIMEOUT)
             try:
@@ -273,9 +892,6 @@ class CodingToolsSkill(BaseSkill):
                 "error": stderr if not success else None,
             }
 
-        if decision.mode == MODE_REFUSED:
-            return self._refuse_bash(decision)
-
         sandbox_note = None
         if self._sandbox_bash_enabled and docker_sandbox is None:
             sandbox_note = "FERAL_SANDBOX_BASH is enabled but Docker sandbox is unavailable; executed on host."
@@ -290,7 +906,16 @@ class CodingToolsSkill(BaseSkill):
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
-            return {"success": False, "status_code": 408, "data": None, "error": f"Command timed out after {timeout}s"}
+            return {
+                "success": False, "status_code": 408,
+                "data": {"timeout_sec": timeout, "max_timeout": BASH_MAX_TIMEOUT},
+                "error": (
+                    f"Command timed out after {timeout}s (the timeout you "
+                    f"asked for; foreground maximum is {BASH_MAX_TIMEOUT}s). "
+                    f"For longer work use run_in_background: true and poll "
+                    f"coding_tools__bash_output."
+                ),
+            }
 
         stdout = stdout_b.decode(errors="replace")[:MAX_OUTPUT]
         stderr = stderr_b.decode(errors="replace")[:MAX_OUTPUT]
@@ -308,6 +933,11 @@ class CodingToolsSkill(BaseSkill):
                 "workspace": decision.workspace,
                 "workspace_source": decision.workspace_source,
                 "note": sandbox_note,
+                # Echoed, not interpreted. Accepted because agent
+                # harnesses send it habitually and refusing it would be
+                # friction for nothing; echoing it is the only claim
+                # about it this tool can actually keep.
+                "description": args.get("description"),
             },
             "error": stderr if proc.returncode != 0 else None,
         }
@@ -348,10 +978,433 @@ class CodingToolsSkill(BaseSkill):
             "error": decision.reason,
         }
 
+    # ── background bash: start / poll / kill ──────────────────────
+
+    def _supervisor(self):
+        """The :class:`ProcessSupervisor` for the running event loop."""
+        from process.supervisor import create_process_supervisor
+
+        loop_id = id(asyncio.get_running_loop())
+        supervisor = self._supervisors.get(loop_id)
+        if supervisor is None:
+            supervisor = create_process_supervisor()
+            self._supervisors[loop_id] = supervisor
+        return supervisor
+
+    def _prune_background_jobs(self) -> None:
+        """Drop finished jobs that are old or in excess of the retention.
+
+        Running jobs are never pruned, they are killed explicitly, or by
+        their own wall-clock timeout, or by ``clear_session``.
+        """
+        now = time.monotonic()
+        finished = [
+            (job_id, job) for job_id, job in self._bg_jobs.items() if job.finished
+        ]
+        for job_id, job in finished:
+            _LIVE_BACKGROUND_PGIDS.pop(job_id, None)
+            if now - job.started_at > BG_FINISHED_TTL_SEC:
+                self._bg_jobs.pop(job_id, None)
+        finished = [
+            (job_id, job) for job_id, job in self._bg_jobs.items() if job.finished
+        ]
+        if len(finished) > BG_FINISHED_RETENTION:
+            finished.sort(key=lambda pair: pair[1].started_at)
+            for job_id, _job in finished[: len(finished) - BG_FINISHED_RETENTION]:
+                self._bg_jobs.pop(job_id, None)
+
+    async def _start_background_job(self, command: str, decision, timeout: int) -> dict:
+        """Spawn ``command`` under the process supervisor, return a job id.
+
+        Called only after every safety check in ``_bash`` has passed.
+        """
+        ctx = require_context("coding_tools__bash")
+        self._prune_background_jobs()
+
+        running = [j for j in self._bg_jobs.values() if not j.finished]
+        mine = [j for j in running if j.session_id == ctx.session_id]
+        if len(mine) >= BG_MAX_RUNNING_PER_SESSION:
+            return {
+                "success": False, "status_code": 429,
+                "data": {
+                    "running_jobs": [j.job_id for j in mine],
+                    "limit": BG_MAX_RUNNING_PER_SESSION,
+                },
+                "error": (
+                    f"This session already has {len(mine)} background jobs "
+                    f"running (limit {BG_MAX_RUNNING_PER_SESSION}). Kill one "
+                    f"with coding_tools__kill_bash first."
+                ),
+            }
+        if len(running) >= BG_MAX_RUNNING_TOTAL:
+            return {
+                "success": False, "status_code": 429,
+                "data": {"limit": BG_MAX_RUNNING_TOTAL},
+                "error": (
+                    f"{len(running)} background jobs are running across all "
+                    f"sessions (limit {BG_MAX_RUNNING_TOTAL})."
+                ),
+            }
+
+        supervisor = self._supervisor()
+        try:
+            handle = await supervisor.run(
+                ["/bin/sh", "-c", command],
+                scope_key=ctx.session_id,
+                overall_timeout_sec=float(timeout),
+                cwd=decision.cwd,
+                max_buffered_lines=BG_MAX_BUFFER_LINES,
+                max_line_chars=BG_MAX_LINE_CHARS,
+                # Own process group, so killing the job kills anything the
+                # shell spawned rather than leaving orphans behind.
+                start_new_session=True,
+            )
+        except OSError as exc:
+            return {
+                "success": False, "status_code": 500, "data": None,
+                "error": f"Could not start background job: {exc}",
+            }
+
+        job_id = f"bg_{uuid.uuid4().hex[:12]}"
+        job = _BackgroundJob(
+            job_id=job_id,
+            session_id=ctx.session_id,
+            command=command,
+            cwd=decision.cwd,
+            timeout_sec=timeout,
+            handle=handle,
+            loop_id=id(asyncio.get_running_loop()),
+            started_at=time.monotonic(),
+        )
+        self._bg_jobs[job_id] = job
+        try:
+            _LIVE_BACKGROUND_PGIDS[job_id] = os.getpgid(handle.pid)
+        except (OSError, ProcessLookupError):
+            _LIVE_BACKGROUND_PGIDS[job_id] = handle.pid
+        # Forget the pgid the moment the job ends. Waiting for the next
+        # prune would leave a dead pgid registered with the atexit
+        # reaper, and pids are reused: at exit that entry could name an
+        # unrelated process group.
+        watcher = asyncio.create_task(self._forget_pgid_when_done(job_id, handle))
+        self._bg_watchers.add(watcher)
+        watcher.add_done_callback(self._bg_watchers.discard)
+
+        return {
+            "success": True,
+            "status_code": 202,
+            "data": {
+                "job_id": job_id,
+                "status": "running",
+                "pid": handle.pid,
+                "command": command,
+                "cwd": decision.cwd,
+                "timeout_sec": timeout,
+                "execution_mode": decision.mode,
+                "workspace": decision.workspace,
+                "sandbox": "host",
+                "read_output_with": "coding_tools__bash_output",
+                "kill_with": "coding_tools__kill_bash",
+                "output_buffer": {
+                    "max_lines_per_stream": BG_MAX_BUFFER_LINES,
+                    "max_chars_per_line": BG_MAX_LINE_CHARS,
+                    "policy": (
+                        "newest lines are kept; anything dropped is reported "
+                        "as dropped_stdout_lines / dropped_stderr_lines"
+                    ),
+                },
+                "note": (
+                    f"Started in the background. It is killed automatically "
+                    f"after {timeout}s. Poll coding_tools__bash_output with "
+                    f"this job_id; each poll returns only output produced "
+                    f"since the previous poll."
+                ),
+            },
+            "error": None,
+        }
+
+    @staticmethod
+    async def _forget_pgid_when_done(job_id: str, handle) -> None:
+        """Drop ``job_id`` from the atexit reaper once its process exits."""
+        try:
+            await handle.wait()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("watcher for %s ended abnormally", job_id, exc_info=True)
+        finally:
+            _LIVE_BACKGROUND_PGIDS.pop(job_id, None)
+
+    def _lookup_job(self, args: dict, endpoint: str) -> "tuple[_BackgroundJob | None, dict | None]":
+        """Resolve ``job_id`` for the calling session, or build the error."""
+        job_id = str(args.get("job_id") or "").strip()
+        ctx = require_context(f"coding_tools__{endpoint}")
+        if not job_id:
+            return None, {
+                "success": False, "status_code": 400, "data": None,
+                "error": "job_id is required (returned by coding_tools__bash with run_in_background).",
+            }
+        self._prune_background_jobs()
+        job = self._bg_jobs.get(job_id)
+        # A job belongs to the session that started it. Cross-session
+        # reads are indistinguishable from "no such job" on purpose.
+        if job is None or job.session_id != ctx.session_id:
+            live = sorted(
+                j.job_id for j in self._bg_jobs.values()
+                if j.session_id == ctx.session_id
+            )
+            return None, {
+                "success": False, "status_code": 404,
+                "data": {"job_id": job_id, "jobs_in_this_session": live},
+                "error": (
+                    f"No background job {job_id!r} in this session. "
+                    + (f"Known job ids: {', '.join(live)}." if live else
+                       "This session has no background jobs.")
+                ),
+            }
+        if job.loop_id != id(asyncio.get_running_loop()):
+            return None, {
+                "success": False, "status_code": 409,
+                "data": {"job_id": job_id},
+                "error": (
+                    f"Background job {job_id} was started on a different "
+                    f"event loop and can no longer be controlled from here."
+                ),
+            }
+        return job, None
+
+    async def _bash_output(self, args: dict) -> dict:
+        """Return output a background job produced since the last poll."""
+        bad_args = _unexpected_args(
+            args, {"job_id", "filter", "max_lines"}, "bash_output"
+        )
+        if bad_args:
+            return bad_args
+
+        job, error = self._lookup_job(args, "bash_output")
+        if error is not None:
+            return error
+        assert job is not None
+
+        try:
+            max_lines = int(args.get("max_lines", BG_OUTPUT_DEFAULT_MAX_LINES))
+        except (TypeError, ValueError):
+            return {
+                "success": False, "status_code": 400, "data": None,
+                "error": "max_lines must be an integer (0 = no per-call cap).",
+            }
+        if max_lines < 0:
+            return {
+                "success": False, "status_code": 400, "data": None,
+                "error": "max_lines must be >= 0 (0 = no per-call cap).",
+            }
+
+        pattern = args.get("filter")
+        regex = None
+        if pattern:
+            try:
+                regex = compile_safe_regex(str(pattern))
+            except UnsafePatternError as exc:
+                return {
+                    "success": False, "status_code": 400, "data": None,
+                    "error": f"Unsafe filter regex rejected: {exc}",
+                }
+            except re.error as exc:
+                return {
+                    "success": False, "status_code": 400, "data": None,
+                    "error": f"Invalid filter regex: {exc}",
+                }
+
+        out_buf = job.handle.stdout_buffer
+        err_buf = job.handle.stderr_buffer
+        out_lines, out_cursor, out_skipped = out_buf.read_since(job.stdout_cursor, max_lines)
+        err_lines, err_cursor, err_skipped = err_buf.read_since(job.stderr_cursor, max_lines)
+        # Cursors advance past every CONSUMED line, including ones the
+        # filter removed, a filtered poll is a read, not a peek, and the
+        # response says so.
+        job.stdout_cursor = out_cursor
+        job.stderr_cursor = err_cursor
+
+        if regex is not None:
+            out_lines = [ln for ln in out_lines if regex.search(ln)]
+            err_lines = [ln for ln in err_lines if regex.search(ln)]
+
+        status = job.status()
+        data = {
+            "job_id": job.job_id,
+            "status": status,
+            "exit_code": job.exit_code(),
+            "kill_reason": job.kill_reason(),
+            "pid": job.pid,
+            "command": job.command,
+            "cwd": job.cwd,
+            "runtime_sec": round(time.monotonic() - job.started_at, 3),
+            "stdout": "\n".join(out_lines)[:MAX_OUTPUT],
+            "stderr": "\n".join(err_lines)[:MAX_OUTPUT],
+            "stdout_lines": len(out_lines),
+            "stderr_lines": len(err_lines),
+            "dropped_stdout_lines": out_skipped,
+            "dropped_stderr_lines": err_skipped,
+            "has_more_output": (
+                out_cursor < out_buf.total_appended
+                or err_cursor < err_buf.total_appended
+            ),
+            "filter": str(pattern) if pattern else None,
+        }
+        if regex is not None:
+            data["note"] = (
+                "filter applied after reading: lines that did not match were "
+                "consumed and will not appear in a later poll."
+            )
+        if status == "timed_out":
+            data["timeout_sec"] = job.timeout_sec
+        return {"success": True, "status_code": 200, "data": data, "error": None}
+
+    async def _kill_bash(self, args: dict) -> dict:
+        """Terminate a background job (SIGTERM, then SIGKILL)."""
+        bad_args = _unexpected_args(args, {"job_id", "force"}, "kill_bash")
+        if bad_args:
+            return bad_args
+
+        job, error = self._lookup_job(args, "kill_bash")
+        if error is not None:
+            return error
+        assert job is not None
+
+        force = _as_bool(args.get("force", False))
+        if force is None:
+            return {
+                "success": False, "status_code": 400, "data": None,
+                "error": "force must be a boolean.",
+            }
+
+        already = job.finished
+        if not already:
+            if force:
+                job.handle._trigger_kill("manual_cancel")
+                job.handle._adapter.kill(grace_sec=0.0)
+            else:
+                job.handle.cancel("manual_cancel")
+            try:
+                # Report the real outcome rather than "kill requested":
+                # SIGTERM plus the supervisor's 5s SIGKILL ladder means a
+                # live process is gone well inside this window.
+                await asyncio.wait_for(job.handle.wait(), timeout=8.0)
+            except asyncio.TimeoutError:
+                logger.warning("background job %s did not exit after kill", job.job_id)
+        _LIVE_BACKGROUND_PGIDS.pop(job.job_id, None)
+
+        out_buf = job.handle.stdout_buffer
+        err_buf = job.handle.stderr_buffer
+        tail_out, _c1, _s1 = out_buf.read_since(job.stdout_cursor, 0)
+        tail_err, _c2, _s2 = err_buf.read_since(job.stderr_cursor, 0)
+        job.stdout_cursor = out_buf.total_appended
+        job.stderr_cursor = err_buf.total_appended
+
+        return {
+            "success": True,
+            "status_code": 200,
+            "data": {
+                "job_id": job.job_id,
+                "status": job.status(),
+                "was_already_finished": already,
+                "exit_code": job.exit_code(),
+                "kill_reason": job.kill_reason(),
+                "signal": "SIGKILL" if force else "SIGTERM then SIGKILL after 5s",
+                "runtime_sec": round(time.monotonic() - job.started_at, 3),
+                "final_stdout": "\n".join(tail_out)[:MAX_OUTPUT],
+                "final_stderr": "\n".join(tail_err)[:MAX_OUTPUT],
+            },
+            "error": None,
+        }
+
+    async def clear_session(self, session_id: str) -> int:
+        """Kill every background job belonging to ``session_id``.
+
+        Called on session teardown. NOTE: nothing calls this yet, the
+        orchestrator's ``on_session_disconnect`` fan-out lives in files
+        this lane does not own. Until it is wired, background jobs are
+        still bounded by their wall-clock timeout, the per-session job
+        cap, and the atexit reaper, so none of them can outlive the
+        process.
+        """
+        victims = [
+            job for job in self._bg_jobs.values()
+            if job.session_id == session_id and not job.finished
+        ]
+        for job in victims:
+            try:
+                job.handle.cancel("manual_cancel")
+            except Exception:  # pragma: no cover - best effort teardown
+                logger.debug("kill of %s failed", job.job_id, exc_info=True)
+        for job_id in [
+            j.job_id for j in self._bg_jobs.values() if j.session_id == session_id
+        ]:
+            self._bg_jobs.pop(job_id, None)
+            _LIVE_BACKGROUND_PGIDS.pop(job_id, None)
+        return len(victims)
+
     # ── read_file ─────────────────────────────────────────────────
 
     async def _read_file(self, args: dict) -> dict:
+        bad_args = _unexpected_args(args, {"path", "offset", "limit"}, "read_file")
+        if bad_args:
+            return bad_args
+
         path = Path(args.get("path", "")).expanduser()
+
+        def _classify() -> "tuple[dict | None, str, bytes, int]":
+            """Permission check + stat + magic sniff, in one thread hop.
+
+            Returns ``(error, kind, head_bytes, size)`` where ``kind`` is
+            ``"text"``, ``"image"`` or ``"binary"``. Kept separate from
+            the text read below so an image never goes near
+            ``read_text``: that is what produced line-numbered mojibake
+            (`' 1|\\x89PNG'`) and reported it as a 200.
+            """
+            denied = self._check_read(str(path))
+            if denied:
+                return denied, "", b"", 0
+            if not path.exists():
+                return {"success": False, "status_code": 404, "data": None, "error": f"File not found: {path}"}, "", b"", 0
+            if not path.is_file():
+                return {"success": False, "status_code": 400, "data": None, "error": f"Not a file: {path}"}, "", b"", 0
+            size = path.stat().st_size
+            with path.open("rb") as fh:
+                head = fh.read(8192)
+            if _sniff_image_media_type(head) is not None:
+                return None, "image", head, size
+            # git's rule: a NUL byte in the first 8 KB means binary. It
+            # keeps every real source file (including latin-1 and other
+            # single-byte encodings) on the text path, where the existing
+            # errors="replace" read has always handled them.
+            if b"\x00" in head:
+                return None, "binary", head, size
+            return None, "text", head, size
+
+        error, kind, head, size = await asyncio.to_thread(_classify)
+        if error is not None:
+            return error
+
+        if kind == "image":
+            return await self._read_image(path, head, size, args)
+        if kind == "binary":
+            return {
+                "success": False,
+                "status_code": 415,
+                "data": {
+                    "path": str(path),
+                    "detected": _sniff_binary_kind(head),
+                    "size_bytes": size,
+                    "content_kind": "binary",
+                },
+                "error": (
+                    f"{path} is {_sniff_binary_kind(head)}, not text and not an "
+                    f"image format this tool can deliver (png, jpeg, gif, webp, "
+                    f"bmp). Reading it as text would return meaningless "
+                    f"replacement characters. Use coding_tools__bash with a "
+                    f"format-aware tool (file, xxd, strings, pdftotext, unzip -l)."
+                ),
+            }
 
         def _stat_read_and_observe() -> "tuple[dict | None, str, object]":
             """Blocking permission check + stat + read + fingerprint.
@@ -379,8 +1432,20 @@ class CodingToolsSkill(BaseSkill):
                 return {"success": False, "status_code": 404, "data": None, "error": f"File not found: {path}"}, "", None
             if not path.is_file():
                 return {"success": False, "status_code": 400, "data": None, "error": f"Not a file: {path}"}, "", None
-            if path.stat().st_size > 2_000_000:
-                return {"success": False, "status_code": 413, "data": None, "error": "File too large (>2MB). Use offset/limit."}, "", None
+            if path.stat().st_size > MAX_TEXT_READ_BYTES:
+                return {
+                    "success": False, "status_code": 413,
+                    "data": {
+                        "path": str(path),
+                        "size_bytes": path.stat().st_size,
+                        "max_bytes": MAX_TEXT_READ_BYTES,
+                    },
+                    "error": (
+                        f"File too large to read as text: {path.stat().st_size} bytes > "
+                        f"{MAX_TEXT_READ_BYTES} byte limit. Read a window with "
+                        f"offset/limit, or narrow with coding_tools__grep_search."
+                    ),
+                }, "", None
             text = path.read_text(errors="replace")
             return None, text, file_state.get_tracker().observe(path)
 
@@ -420,6 +1485,67 @@ class CodingToolsSkill(BaseSkill):
             "data": {"path": str(path), "content": numbered, "total_lines": len(lines)},
             "error": None,
         }
+
+    async def _read_image(self, path: Path, head: bytes, size: int, args: dict) -> dict:
+        """Return an image in the shape the tool-result image pipeline reads.
+
+        ``image_data`` carries a complete ``data:<media_type>;base64,...``
+        URL. That key is in ``agents.multimodal_blocks``'
+        ``TOOL_RESULT_IMAGE_FIELDS`` and a data URL is matched by its
+        ``_DATA_URL_RE`` at ANY size, so a 20x20 icon is delivered as a
+        real image block exactly like a full screenshot. (The bare-base64
+        recognition path there has a 512-char floor, which a tiny PNG
+        would fall under, hence the data URL rather than a raw payload.)
+        """
+        media_type = _sniff_image_media_type(head) or "image/png"
+
+        for name in ("offset", "limit"):
+            if args.get(name) is not None:
+                return {
+                    "success": False, "status_code": 400,
+                    "data": {"path": str(path), "content_kind": "image"},
+                    "error": (
+                        f"{name} is a line window and does not apply to an "
+                        f"image ({media_type}). Re-read without it; the image "
+                        f"is always delivered whole or not at all."
+                    ),
+                }
+
+        ceiling = _image_byte_ceiling()
+        if size > ceiling:
+            return {
+                "success": False,
+                "status_code": 413,
+                "data": {
+                    "path": str(path),
+                    "content_kind": "image",
+                    "media_type": media_type,
+                    "size_bytes": size,
+                    "max_bytes": ceiling,
+                },
+                "error": (
+                    f"Image is {size} bytes; the maximum this tool can deliver "
+                    f"is {ceiling} bytes, set by the image pipeline's base64 "
+                    f"budget (FERAL_TOOL_IMAGE_MAX_B64_CHARS). An image is "
+                    f"never truncated, so it is refused whole. Resize it first "
+                    f"(e.g. coding_tools__bash with sips or magick)."
+                ),
+            }
+
+        raw = await asyncio.to_thread(path.read_bytes)
+        encoded = base64.b64encode(raw).decode("ascii")
+        data = {
+            "path": str(path),
+            "content_kind": "image",
+            "media_type": media_type,
+            "format": media_type.split("/", 1)[1],
+            "size_bytes": size,
+            "image_data": f"data:{media_type};base64,{encoded}",
+        }
+        dims = _image_dimensions(media_type, raw)
+        if dims is not None:
+            data["width"], data["height"] = dims
+        return {"success": True, "status_code": 200, "data": data, "error": None}
 
     # ── shared write plumbing ─────────────────────────────────────
 
@@ -830,6 +1956,10 @@ class CodingToolsSkill(BaseSkill):
     # ── grep_search ───────────────────────────────────────────────
 
     async def _grep_search(self, args: dict) -> dict:
+        bad_args = _unexpected_args(args, GREP_ALLOWED_ARGS, "grep_search")
+        if bad_args:
+            return bad_args
+
         pattern = args.get("pattern", "")
         search_path = args.get("path", ".")
         include = args.get("include", "")
@@ -847,18 +1977,47 @@ class CodingToolsSkill(BaseSkill):
 
         if not pattern:
             return {"success": False, "status_code": 400, "data": None, "error": "No search pattern"}
+        if output_mode not in ("files_with_matches", "content", "count"):
+            return {
+                "success": False, "status_code": 400, "data": None,
+                "error": (
+                    f"output_mode={output_mode!r} is not supported. Use "
+                    f"'files_with_matches', 'content' or 'count'."
+                ),
+            }
+
+        opts, opt_error = _grep_options(args, output_mode)
+        if opt_error is not None:
+            return opt_error
+
         denied = self._check_read(search_path)
         if denied:
             return denied
 
+        wants_context = bool(opts["after"] or opts["before"])
         cmd = ["rg", "--color=never"]
+        if opts["ignore_case"]:
+            cmd.append("--ignore-case")
+        if opts["multiline"]:
+            cmd += ["--multiline", "--multiline-dotall"]
+        if opts["file_type"]:
+            cmd += ["--type", opts["file_type"]]
         if output_mode == "files_with_matches":
             cmd += ["--files-with-matches"]
         elif output_mode == "count":
             cmd += ["--count"]
         else:  # content
-            output_mode = "content"
             cmd += ["--line-number", "--no-heading"]
+            if wants_context:
+                cmd += ["--after-context", str(opts["after"])]
+                cmd += ["--before-context", str(opts["before"])]
+                # Unambiguous field separators. rg's defaults (':' for a
+                # match row, '-' for a context row) are also legal path
+                # characters, so with context on, `a-b:1:x` cannot be
+                # parsed back reliably. These control characters can not
+                # appear in a path.
+                cmd += [f"--field-match-separator={GREP_MATCH_SEP}"]
+                cmd += [f"--field-context-separator={GREP_CONTEXT_SEP}"]
         if include:
             cmd += ["--glob", include]
         cmd += ["--", pattern, search_path]
@@ -869,9 +2028,23 @@ class CodingToolsSkill(BaseSkill):
             )
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=15)
         except FileNotFoundError:
-            return await self._grep_fallback(pattern, search_path, include, output_mode, head_limit, offset)
+            return await self._grep_fallback(
+                pattern, search_path, include, output_mode, head_limit, offset, opts,
+            )
         except asyncio.TimeoutError:
             return {"success": False, "status_code": 408, "data": None, "error": "Search timed out"}
+
+        # rg exits 1 for "no matches" (not an error) and 2 for a real
+        # failure, a bad pattern, an unknown --type, an unreadable path.
+        # Returning an empty success for exit 2 is the same class of lie
+        # as dropping a flag.
+        if proc.returncode not in (0, 1):
+            stderr = stderr_b.decode(errors="replace").strip()[:2000]
+            return {
+                "success": False, "status_code": 400,
+                "data": {"ripgrep_exit_code": proc.returncode},
+                "error": f"ripgrep failed: {stderr or 'unknown error'}",
+            }
 
         stdout = stdout_b.decode(errors="replace")[:MAX_OUTPUT]
         raw_lines = stdout.strip().splitlines() if stdout.strip() else []
@@ -890,6 +2063,10 @@ class CodingToolsSkill(BaseSkill):
                 f, sep, c = line.rpartition(":")
                 counts.append({"file": _relativize(f) if sep else line, "count": c})
             data = {"mode": "count", "counts": counts, "total_files": total}
+        elif wants_context:
+            rows = [_parse_context_row(line) for line in window]
+            matches = [row for row in rows if row is not None]
+            data = {"mode": "content", "matches": matches, "total": total}
         else:
             matches = []
             for line in window:
@@ -903,7 +2080,7 @@ class CodingToolsSkill(BaseSkill):
         if truncated:
             data["truncated"] = True
             data["pagination"] = {"limit": head_limit, "offset": offset, "next_offset": offset + len(window)}
-
+        _annotate_options(data, opts, engine="ripgrep")
         return {"success": True, "status_code": 200, "data": data, "error": None}
 
     async def _grep_fallback(
@@ -914,17 +2091,31 @@ class CodingToolsSkill(BaseSkill):
         output_mode: str = "files_with_matches",
         head_limit: int = GREP_DEFAULT_HEAD_LIMIT,
         offset: int = 0,
+        opts: "dict | None" = None,
     ) -> dict:
-        """Pure-Python fallback when ripgrep is not installed. Honors the
-        same output_mode + pagination contract as the rg path."""
+        """Pure-Python fallback when ripgrep is not installed.
+
+        Honors the same output_mode, pagination, case-insensitivity,
+        context-line and multiline contract as the rg path. The one
+        documented divergence is ``type``: ripgrep knows ~800 file types,
+        this path knows the subset in ``FALLBACK_TYPE_GLOBS`` and REFUSES
+        (400) anything outside it rather than returning results filtered
+        by a different rule than the caller asked for.
+        """
+        opts = opts or _DEFAULT_GREP_OPTS
         # The pattern is model-authored, and Python's `re` backtracks, so
         # a catastrophic pattern hangs the brain with no timeout and no
         # way to interrupt it. Verified: `(a+)+$` against 30 characters
         # does not return. The ripgrep path above needs no guard because
         # Rust's regex engine is linear-time by construction; only this
         # fallback is exposed.
+        flags = 0
+        if opts["ignore_case"]:
+            flags |= re.IGNORECASE
+        if opts["multiline"]:
+            flags |= re.DOTALL | re.MULTILINE
         try:
-            regex = compile_safe_regex(pattern)
+            regex = compile_safe_regex(pattern, flags)
         except UnsafePatternError as exc:
             return {
                 "success": False, "status_code": 400, "data": None,
@@ -935,6 +2126,27 @@ class CodingToolsSkill(BaseSkill):
                     f"install ripgrep, whose engine has no such failure mode."
                 ),
             }
+
+        type_suffixes: "tuple[str, ...] | None" = None
+        if opts["file_type"]:
+            mapped = FALLBACK_TYPE_GLOBS.get(opts["file_type"])
+            if mapped is None:
+                return {
+                    "success": False, "status_code": 400,
+                    "data": {
+                        "requested_type": opts["file_type"],
+                        "supported_types": sorted(FALLBACK_TYPE_GLOBS),
+                    },
+                    "error": (
+                        f"ripgrep is not installed, and the pure-Python "
+                        f"fallback does not know the file type "
+                        f"{opts['file_type']!r}. Known types: "
+                        f"{', '.join(sorted(FALLBACK_TYPE_GLOBS))}. Use the "
+                        f"`include` glob instead, or install ripgrep."
+                    ),
+                }
+            type_suffixes = mapped
+
         root = Path(search_path).expanduser()
         glob_pat = include or "**/*"
         content_rows: list[dict] = []
@@ -950,20 +2162,18 @@ class CodingToolsSkill(BaseSkill):
         candidates = [root] if root.is_file() else root.glob(glob_pat)
 
         for fp in candidates:
+            if type_suffixes is not None and fp.suffix.lower() not in type_suffixes:
+                continue
             if not fp.is_file() or fp.stat().st_size > 1_000_000:
                 continue
             try:
-                hit_in_file = False
-                for i, line in enumerate(fp.read_text(errors="replace").splitlines(), 1):
-                    if regex.search(line):
-                        hit_in_file = True
-                        content_rows.append({"file": _relativize(fp), "line": str(i), "text": line.strip()})
-                        if len(content_rows) >= scan_cap:
-                            break
-                if hit_in_file:
-                    files_with.append(_relativize(fp))
+                text = fp.read_text(errors="replace")
             except (PermissionError, OSError):
                 continue
+            rows = _fallback_rows_for_file(fp, text, regex, opts)
+            if rows:
+                files_with.append(_relativize(fp))
+                content_rows.extend(rows)
             if len(content_rows) >= scan_cap:
                 break
 
@@ -972,8 +2182,10 @@ class CodingToolsSkill(BaseSkill):
             data: Dict[str, Any] = {"mode": "files_with_matches", "files": window, "total_files": len(files_with)}
         elif output_mode == "count":
             window, truncated = _paginate(files_with, head_limit, offset)
-            per = {}
+            per: Dict[str, int] = {}
             for r in content_rows:
+                if r.get("is_context"):
+                    continue
                 per[r["file"]] = per.get(r["file"], 0) + 1
             data = {"mode": "count", "counts": [{"file": f, "count": str(per.get(f, 0))} for f in window], "total_files": len(files_with)}
         else:
@@ -983,7 +2195,7 @@ class CodingToolsSkill(BaseSkill):
         if truncated:
             data["truncated"] = True
             data["pagination"] = {"limit": head_limit, "offset": offset, "next_offset": offset + len(window)}
-
+        _annotate_options(data, opts, engine="python-fallback")
         return {"success": True, "status_code": 200, "data": data, "error": None}
 
     # ── glob_search ───────────────────────────────────────────────

@@ -49,7 +49,7 @@
       "id": "bash",
       "method": "PYTHON",
       "url": "",
-      "description": "Execute a shell command and return stdout/stderr. Use for running programs, git, npm, pip, pytest, etc. Runs on the host in `cwd`, which must resolve inside a folder the operator granted; a command whose cwd or path arguments fall outside every grant is refused with `permission_needed` so the operator can grant access.",
+      "description": "Execute a shell command and return stdout/stderr. Use for running programs, git, npm, pip, pytest, etc. Runs on the host in `cwd`, which must resolve inside a folder the operator granted; a command whose cwd or path arguments fall outside every grant is refused with `permission_needed` so the operator can grant access. Commands matching the destructive-command blocklist (rm -rf /, mkfs, dd if=, shutdown, fork bombs) are refused, including when hidden behind base64/eval. Unbalanced shell quotes are refused before execution. Arguments this endpoint does not implement are REFUSED (400), never ignored. Set run_in_background for anything that outlives the foreground timeout ceiling of 600s; it returns a job_id immediately and you then poll coding_tools__bash_output and stop it with coding_tools__kill_bash. Background is host-only: it is refused (501) in the Docker sandbox lane.",
       "params": [
         {
           "name": "command",
@@ -67,10 +67,77 @@
           "name": "timeout",
           "type": "integer",
           "required": false,
-          "description": "Timeout in seconds (default 30)"
+          "description": "Timeout in seconds. Foreground: default 30, maximum 600. Background: default 3600, maximum 86400. The value is ENFORCED, never silently clamped: a request above the ceiling is refused with a 400 that names the ceiling and nothing is executed. On expiry the process (and, in background, its whole process group) is killed."
+        },
+        {
+          "name": "run_in_background",
+          "type": "boolean",
+          "required": false,
+          "description": "Run detached and return {job_id, pid, status:'running'} with status_code 202 instead of blocking (default false). All the same safety checks run first: destructive-command scan, quote check, and the full workspace-grant / sandbox decision. Output is kept in a ring buffer of the newest 2000 lines per stream (4000 chars per line); anything dropped is reported as dropped_stdout_lines / dropped_stderr_lines. Limits: 8 running jobs per session, 32 per process, both refused with 429. Not available in the Docker lane."
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "required": false,
+          "description": "Optional 5-10 word label for what the command does. Accepted for compatibility with harnesses that always send one, echoed back in the result, and not otherwise interpreted."
         }
       ],
-      "returns_description": "stdout, stderr, exit code, and the execution mode used (host_workspace or docker)",
+      "returns_description": "Foreground: {stdout, stderr, exit_code, execution_mode (host_workspace|docker), cwd, workspace}. Background (202): {job_id, pid, status:'running', timeout_sec, output_buffer, read_output_with, kill_with}. Refusals: 400 (bad/unsupported arg, timeout over ceiling), 403 (destructive command or missing workspace grant, with permission_needed), 408 (timed out, naming the timeout that was actually used), 429 (background job limit), 501 (background in the Docker lane), 503 (sandbox required but unavailable).",
+      "ui_hint": "detail_card",
+      "safety_tier": "confirm",
+      "emit_result_preview": true
+    },
+    {
+      "id": "bash_output",
+      "method": "PYTHON",
+      "url": "",
+      "description": "Read the output a background bash job has produced SINCE THE LAST CALL. Each call consumes what it returns, so polling in a loop streams the job's output without repeats. Only jobs started by this session are visible; another session's job_id reads as 'no such job'. Returns immediately whether the job is still running or has finished; a finished job stays readable for 15 minutes (or until 32 newer jobs have finished) so you can collect the tail.",
+      "params": [
+        {
+          "name": "job_id",
+          "type": "string",
+          "required": true,
+          "description": "The job_id returned by coding_tools__bash with run_in_background: true."
+        },
+        {
+          "name": "filter",
+          "type": "string",
+          "required": false,
+          "description": "Regex; only lines matching it are returned. Applied AFTER reading, so non-matching lines are still consumed and will not appear in a later call. Rejected (400) if the pattern is ReDoS-prone or invalid."
+        },
+        {
+          "name": "max_lines",
+          "type": "integer",
+          "required": false,
+          "description": "Cap on lines returned per stream in one call (default 500; 0 = no cap). When more is already buffered, has_more_output is true and the next call returns it."
+        }
+      ],
+      "returns_description": "{job_id, status (running|completed|timed_out|killed), exit_code, kill_reason, pid, command, cwd, runtime_sec, stdout, stderr, stdout_lines, stderr_lines, dropped_stdout_lines, dropped_stderr_lines, has_more_output}. 404 if the job id is unknown in this session (the response lists this session's job ids).",
+      "ui_hint": "detail_card",
+      "safety_tier": "safe",
+      "read_only_hint": true,
+      "emit_result_preview": true
+    },
+    {
+      "id": "kill_bash",
+      "method": "PYTHON",
+      "url": "",
+      "description": "Terminate a background bash job started by this session. Sends SIGTERM to the job's whole process group (so children the shell spawned die too), escalating to SIGKILL after 5s, and waits up to 8s to report the real final status rather than 'kill requested'. Killing an already-finished job is not an error: it returns was_already_finished: true. Only this session's jobs are reachable.",
+      "params": [
+        {
+          "name": "job_id",
+          "type": "string",
+          "required": true,
+          "description": "The job_id returned by coding_tools__bash with run_in_background: true."
+        },
+        {
+          "name": "force",
+          "type": "boolean",
+          "required": false,
+          "description": "Skip SIGTERM and send SIGKILL immediately (default false). Use only when a graceful stop has already failed; the process gets no chance to clean up."
+        }
+      ],
+      "returns_description": "{job_id, status, was_already_finished, exit_code, kill_reason, signal, runtime_sec, final_stdout, final_stderr}, the tail is whatever had not been read yet. 404 if the job id is unknown in this session.",
       "ui_hint": "detail_card",
       "safety_tier": "confirm",
       "emit_result_preview": true
@@ -79,7 +146,7 @@
       "id": "read_file",
       "method": "PYTHON",
       "url": "",
-      "description": "Read the contents of a file. Returns the text content with line numbers.",
+      "description": "Read a file. Text files come back with line numbers, up to 2MB (larger: use offset/limit, or narrow with grep_search first). Images (png, jpeg, gif, webp, bmp) are detected by their magic bytes and returned as an actual image you can see, whole or not at all, up to ~3.7MB on disk (the image pipeline's base64 budget, FERAL_TOOL_IMAGE_MAX_B64_CHARS); a larger image is refused with 413 rather than truncated, and offset/limit are refused (400) for images because a line window is meaningless there. Any other binary content (PDF, zip, ELF/Mach-O, sqlite, media) is refused with 415 naming the detected format instead of being decoded into replacement characters. Requires read access to the path; without a grant it returns permission_needed.",
       "params": [
         {
           "name": "path",
@@ -91,16 +158,16 @@
           "name": "offset",
           "type": "integer",
           "required": false,
-          "description": "Start reading from this line (1-based)"
+          "description": "Start reading from this line (1-based). Text files only."
         },
         {
           "name": "limit",
           "type": "integer",
           "required": false,
-          "description": "Maximum number of lines to read"
+          "description": "Maximum number of lines to read. Text files only."
         }
       ],
-      "returns_description": "File contents with line numbers",
+      "returns_description": "Text: {path, content (line-numbered), total_lines}. Image: {path, content_kind:'image', media_type, format, size_bytes, width/height when the header gives them, image_data (data: URL delivered to you as a real image)}. Refusals: 403 permission_needed, 404 not found, 413 too large (naming the limit), 415 non-image binary (naming the detected format).",
       "ui_hint": "detail_card",
       "safety_tier": "safe",
       "read_only_hint": true,
@@ -176,13 +243,13 @@
       "id": "grep_search",
       "method": "PYTHON",
       "url": "",
-      "description": "Search for a regex pattern in files (ripgrep-backed). Defaults to returning matching FILE NAMES (output_mode='files_with_matches'), which is cheap and best for narrowing; ask for output_mode='content' only after you know which files matter. Paths are relative to the workspace root.",
+      "description": "Search for a regex pattern in files (ripgrep-backed, with a pure-Python fallback when ripgrep is absent). Defaults to returning matching FILE NAMES (output_mode='files_with_matches'), which is cheap and best for narrowing; ask for output_mode='content' only after you know which files matter. Paths are relative to the workspace root. Supports case-insensitive (-i), context lines (-A/-B/-C, content mode only), multiline patterns, and ripgrep file types (type). Every response echoes `engine` and `options_applied` so you can see which flags took effect. An argument this endpoint does not implement is REFUSED with a 400 listing what is supported; nothing is ever silently ignored. Both engines behave identically except for `type`: the fallback knows a documented ~24-type subset and refuses anything outside it rather than filtering by a different rule.",
       "params": [
         {
           "name": "pattern",
           "type": "string",
           "required": true,
-          "description": "Regex pattern to search for"
+          "description": "Regex pattern to search for. Under ripgrep this is Rust regex syntax; in the fallback it is Python re, where ReDoS-prone patterns (nested quantifiers, backreferences, lookarounds) are refused with a 400."
         },
         {
           "name": "path",
@@ -212,10 +279,46 @@
           "name": "offset",
           "type": "integer",
           "required": false,
-          "description": "Skip first N results before head_limit (paging large result sets)."
+          "description": "Skip first N results before head_limit (paging large result sets). With context lines on, results are counted in ROWS (matches plus context), not matches."
+        },
+        {
+          "name": "-i",
+          "type": "boolean",
+          "required": false,
+          "description": "Case-insensitive match (default false). Alias: case_insensitive."
+        },
+        {
+          "name": "-A",
+          "type": "integer",
+          "required": false,
+          "description": "Lines of context AFTER each match, 0-100. output_mode='content' only; passing it with another mode is a 400. Alias: after_context."
+        },
+        {
+          "name": "-B",
+          "type": "integer",
+          "required": false,
+          "description": "Lines of context BEFORE each match, 0-100. output_mode='content' only. Alias: before_context."
+        },
+        {
+          "name": "-C",
+          "type": "integer",
+          "required": false,
+          "description": "Lines of context on BOTH sides, 0-100 (an explicit -A or -B overrides its own side). output_mode='content' only. Aliases: context, context_lines."
+        },
+        {
+          "name": "multiline",
+          "type": "boolean",
+          "required": false,
+          "description": "Let the pattern match across line boundaries, with `.` matching newlines (ripgrep --multiline --multiline-dotall; re.DOTALL|re.MULTILINE in the fallback). Default false. Every line a match spans is reported as a match row, on both engines."
+        },
+        {
+          "name": "type",
+          "type": "string",
+          "required": false,
+          "description": "Restrict to a ripgrep file type, e.g. 'py', 'ts', 'rust', 'md'. Combines with `include` (both must match). An unknown type is a 400 from ripgrep; in the pure-Python fallback only a documented ~24-type subset is known and anything else is refused with the list. Alias: file_type."
         }
       ],
-      "returns_description": "files_with_matches: {mode, files[], total_files}; content: {mode, matches[{file,line,text}], total}; count: {mode, counts[]}. Truncated results include {truncated, pagination}.",
+      "returns_description": "files_with_matches: {mode, files[], total_files}; content: {mode, matches[{file,line,text}], total} with an extra is_context flag on every row when context lines were requested; count: {mode, counts[]}. Every response carries {engine: 'ripgrep'|'python-fallback', options_applied:{case_insensitive, multiline, after_context, before_context, type}}. Truncated results include {truncated, pagination}. A ripgrep failure (bad pattern, unknown type) is a 400 carrying ripgrep's own message, not an empty success.",
       "ui_hint": "list",
       "safety_tier": "safe",
       "read_only_hint": true,
@@ -276,6 +379,25 @@
       "safety_tier": "safe",
       "read_only_hint": true,
       "result_budget": "standard"
+    },
+    {
+      "id": "index_folder",
+      "method": "PYTHON",
+      "url": "",
+      "description": "Summarise a folder: a size-annotated file tree plus the first 500 characters of up to 60 small source/config files. Skips .git, node_modules, __pycache__, virtualenvs, build output and .gitignore'd paths. Stops at 500 files or 50MB and says so. Use it once to orient in an unfamiliar repository; use glob_search/grep_search for anything targeted. Requires read access to the folder.",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true,
+          "description": "Directory to index. Must be a directory inside a granted folder."
+        }
+      ],
+      "returns_description": "{path, file_count, total_bytes, tree, file_previews}. 404 if the path is not a directory, 403 with permission_needed if it is not granted.",
+      "ui_hint": "detail_card",
+      "safety_tier": "safe",
+      "read_only_hint": true,
+      "emit_result_preview": true
     },
     {
       "id": "revert_turn",
