@@ -1,6 +1,6 @@
 {
     "skill_id": "desktop_control",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "author": "feral-core",
     "brand": {
         "name": "Desktop Control",
@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Control the local computer's UI: open any app, take screenshots, adjust volume, and read system info. Runs one allowlisted program at a time with no shell metacharacters, so it cannot create, read, or edit files. Use coding_tools__write_file / read_file / edit_file / bash for anything touching the filesystem or running a program.",
+    "description": "Control the local computer: open apps, open web pages in a chosen browser, quit apps, lock the screen, take screenshots, adjust volume, and read system info. Runs one allowlisted program at a time with no shell metacharacters, so it cannot create, read, or edit files. Use coding_tools__write_file / read_file / edit_file / bash for anything touching the filesystem or running a program.",
     "trigger_phrases": [
         "open chrome",
         "open safari",
@@ -23,22 +23,38 @@
         "open application",
         "launch app",
         "start app",
+        "open a website",
+        "open a url",
+        "open a link",
+        "open youtube",
+        "open google",
+        "play something on youtube",
+        "watch this on youtube",
+        "open this in chrome",
+        "open it in safari",
+        "go to a website",
         "lock my mac",
+        "lock the screen",
         "take a screenshot",
         "run a script",
         "run a command",
         "adjust volume",
         "mute",
         "turn up the volume",
+        "turn down the volume",
         "set volume",
         "dark mode",
         "what apps are running",
+        "which apps are open",
         "close this app",
+        "quit an app",
+        "quit slack",
         "system info",
         "cpu usage",
         "disk space",
         "battery level",
-        "how much storage"
+        "how much storage",
+        "how much space is left"
     ],
     "categories": ["system", "desktop", "hardware"],
     "auth": {
@@ -46,12 +62,62 @@
     },
     "endpoints": [
         {
-            "id": "open_app",
-            "method": "POST",
-            "url": "daemon://local/applescript",
-            "description": "Open ANY application on the user's Mac using AppleScript. Use this whenever the user asks to open, launch, or start an app (Music, Safari, Chrome, Spotify, Notes, Terminal, Finder, etc.). The script parameter should be AppleScript like: tell application \"AppName\" to activate. AppleScript that reaches a shell or another interpreter (`do shell script`, `do script`, `run script`, `use framework`) is rejected.",
+            "id": "open_url",
+            "method": "PYTHON",
+            "url": "python://desktop_control/open_url",
+            "description": "Open a web page on the user's Mac, optionally in a specific browser. USE THIS FOR ANY REQUEST THAT ENDS AT A WEB PAGE: 'open a YouTube song on Chrome', 'play lofi on YouTube', 'open google.com in Safari', 'pull up the weather'. Runs the allowlisted `open` program (the same program desktop_control__shell_command may run) with the URL as a separate argument and no shell. Do NOT use desktop_control__open_app for this: the natural AppleScript for opening a page is `open location`, which the sandbox policy rejects outright because it dispatches arbitrary URL schemes. Only http:// and https:// URLs are accepted here; file://, javascript:, data:, and application-private schemes are refused. To open a local folder or file instead, use desktop_control__shell_command with `open ~/Downloads`.",
             "params": [
-                {"name": "script", "type": "string", "required": true, "description": "AppleScript to execute. MUST use format: tell application \"AppName\" to activate. Examples: tell application \"Music\" to activate, tell application \"Safari\" to activate, tell application \"Notes\" to activate"}
+                {"name": "url", "type": "string", "required": true, "description": "Full http:// or https:// URL. Percent-encode spaces. Query strings with several parameters are fine (&, ?, = all work here, unlike in desktop_control__shell_command). Examples: https://www.youtube.com/results?search_query=lofi%20hip%20hop, https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30s, https://news.ycombinator.com"},
+                {"name": "app", "type": "string", "required": false, "description": "Optional browser or app to open the URL in, as its name in /Applications. Omit to use the user's default browser. Omitting it is the right choice unless the user named an app. Examples: Google Chrome, Safari, Firefox, Arc, Brave Browser."}
+            ],
+            "returns_description": "{url, app, output, exit_code}",
+            "ui_hint": null,
+            "safety_tier": "confirm"
+        },
+        {
+            "id": "open_app",
+            "method": "PYTHON",
+            "url": "daemon://local/applescript",
+            "description": "Launch or focus an application on the user's Mac with AppleScript. Use for 'open Spotify', 'launch Terminal', 'bring Chrome to the front'. The script parameter is AppleScript, normally `tell application \"AppName\" to activate`. THE SANDBOX POLICY REJECTS A SCRIPT CONTAINING ANY OF THESE PHRASES, and this is the complete list: `do shell script`, `do script`, `run script`, `load script`, `osascript`, `use framework`, `current application's`, `NSTask`, `system attribute`, `open location`. A script containing one of them returns 403 and nothing runs. In particular `open location` is what you would naturally write to open a web page, and it is denied; call desktop_control__open_url instead. To quit an app use desktop_control__quit_app. To run a program use desktop_control__shell_command.",
+            "params": [
+                {"name": "script", "type": "string", "required": true, "description": "AppleScript to execute, normally: tell application \"AppName\" to activate. Examples: tell application \"Music\" to activate; tell application \"Safari\" to activate; tell application \"Notes\" to activate; tell application \"Finder\" to activate. Other permitted forms: tell application \"System Events\" to keystroke \"s\" using command down; set the clipboard to \"some text\"; display notification \"done\" with title \"FERAL\"."}
+            ],
+            "returns_description": "{output, exit_code}",
+            "ui_hint": null,
+            "safety_tier": "confirm"
+        },
+        {
+            "id": "quit_app",
+            "method": "PYTHON",
+            "url": "daemon://local/applescript",
+            "description": "Quit an application on the user's Mac. Use for 'quit Slack', 'close Spotify', 'shut down Chrome'. The same denied-phrase list as desktop_control__open_app applies (`do shell script`, `do script`, `run script`, `load script`, `osascript`, `use framework`, `current application's`, `NSTask`, `system attribute`, `open location`). An app with unsaved work may show a save dialog and stay open.",
+            "params": [
+                {"name": "script", "type": "string", "required": true, "description": "AppleScript to quit one app. MUST use the format: tell application \"AppName\" to quit. Examples: tell application \"Slack\" to quit; tell application \"Spotify\" to quit; tell application \"Google Chrome\" to quit."}
+            ],
+            "returns_description": "{output, exit_code}",
+            "ui_hint": null,
+            "safety_tier": "confirm"
+        },
+        {
+            "id": "list_running_apps",
+            "method": "PYTHON",
+            "url": "daemon://local/applescript",
+            "description": "List the applications currently open on the user's Mac (foreground apps only, not background daemons). Use for 'what apps are running', 'what do I have open'. Requires macOS Accessibility/Automation permission for System Events; if that has not been granted the call returns an authorization error rather than a policy refusal.",
+            "params": [
+                {"name": "script", "type": "string", "required": false, "default": "tell application \"System Events\" to get name of every process whose background only is false", "description": "AppleScript that returns the running app names. The default is correct; leave it alone."}
+            ],
+            "returns_description": "{output, exit_code}: comma-separated application names",
+            "ui_hint": "list",
+            "safety_tier": "safe",
+            "read_only_hint": true
+        },
+        {
+            "id": "lock_screen",
+            "method": "PYTHON",
+            "url": "daemon://local/applescript",
+            "description": "Lock the user's Mac screen immediately. Use for 'lock my mac', 'lock the screen'. Sends Control-Command-Q through System Events, so macOS Accessibility permission must be granted to the FERAL process; without it the call returns an authorization error. Note that `pmset displaysleepnow` does NOT work here: `pmset` is not on the daemon shell allowlist.",
+            "params": [
+                {"name": "script", "type": "string", "required": false, "default": "tell application \"System Events\" to keystroke \"q\" using {command down, control down}", "description": "AppleScript that locks the screen. The default is correct; leave it alone."}
             ],
             "returns_description": "{output, exit_code}",
             "ui_hint": null,
@@ -59,11 +125,11 @@
         },
         {
             "id": "shell_command",
-            "method": "POST",
+            "method": "PYTHON",
             "url": "daemon://local/shell",
-            "description": "Run one allowlisted program on the user's Mac. The command must be a single program from the daemon shell allowlist (open, osascript, screencapture, say, pbcopy, pbpaste, defaults, system_profiler, sw_vers, caffeinate, mdfind, date, uname) with plain arguments. Shell metacharacters ($ ` | & ; > < \\) are rejected, so pipes, redirects, command substitution and chaining do NOT work here. To create or edit a file, use coding_tools__write_file. To run git, tests, or any other program, use coding_tools__bash.",
+            "description": "Run one allowlisted program on the user's Mac. The command must be a single program from the daemon shell allowlist (open, osascript, screencapture, say, pbcopy, pbpaste, defaults, system_profiler, sw_vers, caffeinate, mdfind, date, uname) with plain arguments. THESE CHARACTERS ARE REJECTED ANYWHERE IN THE COMMAND, quoted or not: $ ` | & ; > < \\ and newlines. So pipes, redirects, command substitution and chaining do NOT work, AND a URL containing & (a second query parameter) is refused. Use desktop_control__open_url for URLs. `pbcopy` is on the allowlist but reads its input from stdin, which this path cannot supply; to put text on the clipboard call desktop_control__open_app with `set the clipboard to \"text\"`. To create or edit a file, use coding_tools__write_file. To run git, tests, or any other program, use coding_tools__bash.",
             "params": [
-                {"name": "command", "type": "string", "required": true, "description": "One allowlisted program with arguments, no metacharacters. Examples: open -a Safari, screencapture -x /tmp/screenshot.png, pbpaste, sw_vers, mdfind kMDItemDisplayName=='notes.txt'"},
+                {"name": "command", "type": "string", "required": true, "description": "One allowlisted program with arguments, no metacharacters. Examples: open -a Safari; open ~/Downloads; open /Applications; screencapture -x /tmp/screenshot.png; pbpaste; sw_vers; say \"hello\"; mdfind kMDItemDisplayName=='notes.txt'; osascript -e 'set volume output volume 40'"},
                 {"name": "timeout_seconds", "type": "number", "required": false, "default": "10", "description": "Max execution time"}
             ],
             "returns_description": "{output, exit_code}",
@@ -72,9 +138,9 @@
         },
         {
             "id": "screenshot",
-            "method": "POST",
+            "method": "PYTHON",
             "url": "daemon://local/shell",
-            "description": "Capture a screenshot of the user's screen to /tmp/feral_screenshot.png.",
+            "description": "Capture a screenshot of the user's screen to /tmp/feral_screenshot.png. This writes a file and returns the path, it does not return the image; to have the screen described, use screen_capture or gui_computer_use__screenshot, which return the pixels.",
             "params": [
                 {"name": "command", "type": "string", "required": false, "default": "screencapture -x /tmp/feral_screenshot.png", "description": "Screenshot command. Must stay a single allowlisted program with no metacharacters."}
             ],
@@ -84,11 +150,11 @@
         },
         {
             "id": "system_info",
-            "method": "POST",
+            "method": "PYTHON",
             "url": "daemon://local/shell",
-            "description": "Get hardware and OS information for this Mac (model, chip, memory, OS version).",
+            "description": "Get hardware and OS information for this Mac (model, chip, memory, serial). Use for 'what Mac am I on', 'how much RAM do I have'. For free disk space use desktop_control__disk_space instead.",
             "params": [
-                {"name": "command", "type": "string", "required": false, "default": "system_profiler SPHardwareDataType", "description": "System info command. Must stay a single allowlisted program with no metacharacters."}
+                {"name": "command", "type": "string", "required": false, "default": "system_profiler SPHardwareDataType", "description": "System info command. Must stay a single allowlisted program with no metacharacters. Alternatives: sw_vers (OS version only), uname -a."}
             ],
             "returns_description": "{output, exit_code}: the system_profiler hardware report as text",
             "ui_hint": "metric",
@@ -96,12 +162,25 @@
             "read_only_hint": true
         },
         {
-            "id": "set_volume",
-            "method": "POST",
+            "id": "disk_space",
+            "method": "PYTHON",
             "url": "daemon://local/shell",
-            "description": "Set the system volume level on the Mac.",
+            "description": "Report free and total disk space on this Mac. Use for 'how much storage do I have', 'disk space', 'how much space is left'. Note that `df -h` does NOT work here: `df` is not on the daemon shell allowlist; system_profiler is.",
             "params": [
-                {"name": "command", "type": "string", "required": true, "description": "osascript command for volume. Example: osascript -e 'set volume output volume 50'"}
+                {"name": "command", "type": "string", "required": false, "default": "system_profiler SPStorageDataType", "description": "Storage report command. The default is correct; leave it alone."}
+            ],
+            "returns_description": "{output, exit_code}: free and total capacity per volume",
+            "ui_hint": "metric",
+            "safety_tier": "safe",
+            "read_only_hint": true
+        },
+        {
+            "id": "set_volume",
+            "method": "PYTHON",
+            "url": "daemon://local/shell",
+            "description": "Set or mute the system output volume on the Mac. Use for 'turn the volume down', 'set volume to 30', 'mute'. Single quotes around the AppleScript, never double quotes: \\ is a rejected character on this path.",
+            "params": [
+                {"name": "command", "type": "string", "required": true, "description": "osascript command for volume, single-quoted. Examples: osascript -e 'set volume output volume 50'; osascript -e 'set volume output volume 20'; osascript -e 'set volume output muted true'; osascript -e 'set volume output muted false'; osascript -e 'output volume of (get volume settings)' to read the current level."}
             ],
             "returns_description": "{output, exit_code}",
             "ui_hint": null,
@@ -113,7 +192,7 @@
             "id": "lock_screen",
             "description": "Lock the Mac screen immediately",
             "steps": [
-                {"endpoint_id": "shell_command"}
+                {"endpoint_id": "lock_screen"}
             ]
         }
     ],

@@ -45,6 +45,12 @@ class AppleScriptResult:
     # (tool_runner) can mint a ``tcc_card`` deeplinking to the right
     # Automation row in System Settings.
     tcc_target_bundle: Optional[str] = None
+    # When the call hit an *Accessibility* denial instead (osascript is
+    # a separate TCC subject from the Python host process, so it can be
+    # denied while `AXIsProcessTrustedWithOptions` says the brain is
+    # trusted), this carries the permission key `tcc_card` understands
+    #, currently always "accessibility".
+    tcc_permission: Optional[str] = None
 
     def to_envelope(self, *, action: str = "") -> dict:
         """Map to the standard tool envelope shape so the orchestrator
@@ -55,6 +61,13 @@ class AppleScriptResult:
                 "success": True,
                 "status_code": 200,
                 "data": {"stdout": self.stdout.rstrip("\n")},
+            }
+        if self.tcc_permission:
+            return {
+                "success": False,
+                "status_code": 403,
+                "error": f"tcc_denied:{self.tcc_permission}",
+                "data": {"stderr": self.stderr.rstrip("\n"), "action": action},
             }
         if self.tcc_target_bundle:
             return {
@@ -84,6 +97,37 @@ _AUTO_DENIAL_PATTERNS = [
     re.compile(r"execution error: ([^ ]+) got an error.*-1743", re.DOTALL),
     re.compile(r"errAEEventNotPermitted"),
 ]
+
+# Accessibility (assistive access) denials are a *different* TCC bucket
+# from Automation and deeplink to a different System Settings pane. The
+# markers osascript emits:
+#
+#   1. "System Events got an error: osascript is not allowed assistive
+#      access. (-25211)"                        (kAXErrorAPIDisabled)
+#   2. "... is not allowed to send keystrokes. (-25211)"
+#   3. bare "(-25211)" / "errAXAPIDisabled" on older releases
+#
+# Before this list existed, every one of these fell through to the
+# generic branch of `to_envelope` and surfaced as a raw 500 with an
+# opaque stderr string, so the operator never got a permission card.
+#
+# NOTE: -25211 is emitted by System Events for the *bulk* window query
+# form (`every window of every process whose visible is true`) even when
+# assistive access IS granted. That is a System Events quirk, not a real
+# denial, which is why `gui_computer_use` no longer uses that form. The
+# patterns below stay because a genuine denial reports identically and
+# there is no way to tell them apart from stderr alone.
+_ACCESSIBILITY_DENIAL_PATTERNS = [
+    re.compile(r"not allowed assistive access", re.IGNORECASE),
+    re.compile(r"not allowed to send keystrokes", re.IGNORECASE),
+    re.compile(r"-25211"),
+    re.compile(r"errAXAPIDisabled"),
+]
+
+
+def _is_accessibility_denial(stderr: str) -> bool:
+    """True when osascript stderr reports an Accessibility denial."""
+    return any(p.search(stderr or "") for p in _ACCESSIBILITY_DENIAL_PATTERNS)
 
 # Friendly name → bundle ID. Keep in sync with
 # `security.macos_permissions.DESKTOP_CONTROL_TARGETS` so callers can
@@ -190,14 +234,17 @@ def run_applescript(
             duration_ms=duration_ms,
         )
 
-    tcc_bundle = _resolve_denial_target(proc.stderr or "", target_bundle)
+    stderr_text = proc.stderr or ""
+    tcc_bundle = _resolve_denial_target(stderr_text, target_bundle)
+    tcc_permission = "accessibility" if _is_accessibility_denial(stderr_text) else None
     return AppleScriptResult(
         success=False,
         stdout=proc.stdout or "",
-        stderr=proc.stderr or "",
+        stderr=stderr_text,
         exit_code=proc.returncode,
         duration_ms=duration_ms,
         tcc_target_bundle=tcc_bundle,
+        tcc_permission=tcc_permission,
     )
 
 
@@ -205,4 +252,5 @@ __all__ = [
     "AppleScriptResult",
     "AppleScriptUnsupportedPlatform",
     "run_applescript",
+    "_is_accessibility_denial",
 ]

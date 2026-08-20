@@ -7,6 +7,19 @@ a Mac:
 * **Accessibility** — required by ``pyautogui`` (and any synthetic
   click/keystroke) so the OS will accept input events from a
   non-Apple-signed process. Apple's API: ``AXIsProcessTrustedWithOptions``.
+
+  This one is probed **twice**, because it has two subjects.
+  ``AXIsProcessTrustedWithOptions`` answers only for the *calling*
+  process (the Python interpreter). Everything AppleScript-backed
+  window enumeration, app control, System Events keystrokes, runs
+  inside ``osascript``, a different binary with a different TCC
+  identity, and the two do disagree in practice (verified: Python
+  ``granted`` while osascript returned ``-25211 not allowed assistive
+  access`` in the same second). ``check_accessibility`` covers the
+  first, ``check_accessibility_osascript`` the second. Reading either
+  as a verdict on the other is how ``feral doctor`` came to show a
+  green Accessibility row over a window listing that could not
+  enumerate a single window.
 * **Screen Recording** — required by ``screencapture`` and ``CGWindowList``
   to see anything beyond the menu bar wallpaper. Apple's API:
   ``CGPreflightScreenCaptureAccess``.
@@ -54,6 +67,15 @@ class TCCStatus:
     api: str
     setup_step: str
     error: Optional[str] = None
+    # Which OS-level *subject* this row describes. TCC grants are per
+    # executable, not per app-suite: the Python interpreter running the
+    # brain and the `osascript` binary it shells out to are separate
+    # subjects with separate grants, so one can be trusted while the
+    # other is denied. Verified live on macOS 15: AXIsProcessTrusted
+    # returned granted for the Python host in the same second that
+    # osascript reported "not allowed assistive access. (-25211)".
+    # A row without this field is about the Python host process.
+    subject: Optional[str] = None
 
     def to_dict(self) -> dict:
         out = {
@@ -62,6 +84,8 @@ class TCCStatus:
             "api": self.api,
             "setup_step": self.setup_step,
         }
+        if self.subject:
+            out["subject"] = self.subject
         if self.error:
             out["error"] = self.error
         return out
@@ -102,12 +126,157 @@ def _not_applicable(name: str, api: str) -> TCCStatus:
     )
 
 
+def _python_host_subject() -> str:
+    """Name the executable an AX probe result actually describes.
+
+    macOS attributes a TCC grant to the *responsible* process, which for
+    a Python brain launched from a terminal is that terminal, not
+    ``python3``. Reporting the interpreter path is still the most useful
+    handle we can give an operator staring at a Settings pane, so we
+    name it and say what it is.
+    """
+    import sys
+    return f"python-host ({sys.executable})"
+
+
+_OSASCRIPT_SUBJECT = "osascript (separate TCC identity from the Python host)"
+
+_ACCESSIBILITY_OSASCRIPT_REMEDIATION = (
+    "Grant Accessibility to the process that launches FERAL (System "
+    "Settings -> Privacy & Security -> Accessibility). osascript "
+    "inherits its TCC identity from the responsible parent process, so "
+    "the row to enable is your terminal / launcher, not 'osascript'. "
+    "Restart FERAL afterwards."
+)
+
+# The only honest readout for osascript's Accessibility state is to run
+# an AppleScript that needs it and classify the failure. That is
+# side-effecting (it can raise a one-time Automation consent dialog for
+# System Events the very first time), so operators who do not want a
+# doctor run touching the GUI can turn it off. Turning it off yields
+# `unknown`, never a green row: the point of this probe is that
+# `check_accessibility`'s green result does not cover this subject.
+_OSASCRIPT_PROBE_ENV = "FERAL_TCC_OSASCRIPT_PROBE"
+
+# Reads a window title through System Events, which is a genuine
+# Accessibility operation, and is per-process rather than the aggregate
+# form that trips System Events' spurious -25211.
+_OSASCRIPT_AX_PROBE_SCRIPT = (
+    'tell application "System Events" to get name of every window of '
+    "(first process whose frontmost is true)"
+)
+
+
+def check_accessibility_osascript() -> TCCStatus:
+    """Probe Accessibility **as osascript sees it**.
+
+    Why this exists as a second row: ``check_accessibility`` calls
+    ``AXIsProcessTrustedWithOptions``, which reports the trust of the
+    *calling* process, the Python interpreter. Every AppleScript-backed
+    capability in FERAL (window enumeration, app control, System Events
+    keystrokes) runs inside ``osascript``, a different binary with a
+    different TCC identity. Verified live on this codebase's dev Mac:
+    the Python probe answered ``granted`` in the same second osascript
+    answered ``-25211 not allowed assistive access``, and ``feral
+    doctor`` showed one green Accessibility row over a window_list that
+    could not enumerate a single window.
+
+    Set ``FERAL_TCC_OSASCRIPT_PROBE=0`` to skip the live probe; the row
+    then reports ``unknown`` (never ``granted``) so a doctor run still
+    refuses to vouch for a capability it did not exercise.
+    """
+    import os
+    import subprocess
+
+    if platform.system() != "Darwin":
+        return _not_applicable("accessibility_osascript", "osascript AX probe")
+
+    if os.getenv(_OSASCRIPT_PROBE_ENV, "1").strip().lower() in {"0", "false", "no"}:
+        return TCCStatus(
+            permission="accessibility_osascript",
+            status="unknown",
+            api="osascript AX probe",
+            subject=_OSASCRIPT_SUBJECT,
+            setup_step=_ACCESSIBILITY_OSASCRIPT_REMEDIATION,
+            error=(
+                f"live probe disabled by {_OSASCRIPT_PROBE_ENV}=0; osascript's "
+                "Accessibility state cannot be inferred from the Python "
+                "process's AXIsProcessTrusted result"
+            ),
+        )
+
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", _OSASCRIPT_AX_PROBE_SCRIPT],
+            capture_output=True, text=True, timeout=8,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        return TCCStatus(
+            permission="accessibility_osascript",
+            status="unknown",
+            api="osascript AX probe",
+            subject=_OSASCRIPT_SUBJECT,
+            setup_step=_ACCESSIBILITY_OSASCRIPT_REMEDIATION,
+            error=f"osascript probe could not run: {exc}",
+        )
+
+    if proc.returncode == 0:
+        return TCCStatus(
+            permission="accessibility_osascript",
+            status="granted",
+            api="osascript AX probe",
+            subject=_OSASCRIPT_SUBJECT,
+            setup_step="(no action needed)",
+        )
+
+    stderr = (proc.stderr or "").strip()
+    try:
+        from skills.desktop_control.applescript import _is_accessibility_denial
+        denied = _is_accessibility_denial(stderr)
+    except Exception:  # pragma: no cover, import guard only
+        denied = "not allowed assistive access" in stderr or "-25211" in stderr
+
+    if denied:
+        return TCCStatus(
+            permission="accessibility_osascript",
+            status="denied",
+            api="osascript AX probe",
+            subject=_OSASCRIPT_SUBJECT,
+            setup_step=_ACCESSIBILITY_OSASCRIPT_REMEDIATION,
+            error=stderr,
+        )
+
+    # Anything else (an Automation denial for System Events, a
+    # transient AppleScript error) leaves the question open. Saying
+    # "unknown" is the honest answer; saying "granted" because it was
+    # not specifically an AX error would restore the bug.
+    return TCCStatus(
+        permission="accessibility_osascript",
+        status="unknown",
+        api="osascript AX probe",
+        subject=_OSASCRIPT_SUBJECT,
+        setup_step=_ACCESSIBILITY_OSASCRIPT_REMEDIATION,
+        error=f"osascript exit {proc.returncode}: {stderr or '(no stderr)'}",
+    )
+
+
 def check_accessibility() -> TCCStatus:
-    """Probe Accessibility (synthetic input) entitlement.
+    """Probe Accessibility (synthetic input) entitlement **for this
+    Python process only**.
 
     Uses ``AXIsProcessTrustedWithOptions`` with the prompt option
     explicitly disabled — we never want a doctor probe to silently
     pop a system permission dialog.
+
+    Scope warning, and the reason ``subject`` exists: this API answers
+    "is the *calling* process AX-trusted", and the calling process is
+    the Python interpreter. It says nothing about ``osascript``, which
+    has its own TCC identity and carries every AppleScript-backed
+    capability in FERAL (window listing, app control, System Events
+    keystrokes). Treating this row as a verdict on those capabilities
+    is exactly how ``feral doctor`` showed a green Accessibility check
+    over a window_list that could not enumerate a single window. Use
+    :func:`check_accessibility_osascript` for that half.
     """
     if platform.system() != "Darwin":
         return _not_applicable("accessibility", "AXIsProcessTrustedWithOptions")
@@ -130,6 +299,7 @@ def check_accessibility() -> TCCStatus:
             permission="accessibility",
             status="unknown",
             api="AXIsProcessTrustedWithOptions",
+            subject=_python_host_subject(),
             setup_step=_PYOBJC_REMEDIATION_AX,
             error=f"PyObjC ApplicationServices not importable: {exc}",
         )
@@ -149,6 +319,7 @@ def check_accessibility() -> TCCStatus:
             permission="accessibility",
             status="unknown",
             api="AXIsProcessTrustedWithOptions",
+            subject=_python_host_subject(),
             setup_step=_ACCESSIBILITY_REMEDIATION,
             error=f"AX probe raised: {exc}",
         )
@@ -158,12 +329,14 @@ def check_accessibility() -> TCCStatus:
             permission="accessibility",
             status="granted",
             api="AXIsProcessTrustedWithOptions",
+            subject=_python_host_subject(),
             setup_step="(no action needed)",
         )
     return TCCStatus(
         permission="accessibility",
         status="denied",
         api="AXIsProcessTrustedWithOptions",
+        subject=_python_host_subject(),
         setup_step=_ACCESSIBILITY_REMEDIATION,
     )
 
@@ -290,6 +463,11 @@ def all_gui_permission_statuses() -> list[TCCStatus]:
     """
     return [
         check_accessibility(),
+        # Second Accessibility row, for osascript's own TCC identity.
+        # Without it, doctor rendered one green Accessibility check that
+        # covered only the Python process and silently vouched for every
+        # AppleScript-backed capability too.
+        check_accessibility_osascript(),
         check_screen_recording(),
         check_calendar(),
         check_reminders(),
@@ -852,6 +1030,7 @@ def request_permission(name: str) -> TCCStatus:
 __all__ = [
     "TCCStatus",
     "check_accessibility",
+    "check_accessibility_osascript",
     "check_screen_recording",
     "check_automation_for",
     "check_calendar",

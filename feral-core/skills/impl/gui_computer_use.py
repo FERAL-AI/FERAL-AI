@@ -159,20 +159,341 @@ async def capture_screenshot_bytes() -> Optional[bytes]:
     if not raw_data:
         return None
 
+    return encode_for_vlm(raw_data)
+
+
+def encode_for_vlm(raw_data: bytes) -> bytes:
+    """Downscale a screenshot and re-encode it as JPEG for a VLM.
+
+    Split out of :func:`capture_screenshot_bytes` so it is testable
+    without shelling out to ``screencapture``. Returns ``raw_data``
+    unchanged when Pillow is unavailable.
+    """
     try:
         from PIL import Image
-        img = Image.open(io.BytesIO(raw_data))
-        if img.width > _SCREENSHOT_MAX_WIDTH:
-            ratio = _SCREENSHOT_MAX_WIDTH / img.width
-            img = img.resize(
-                (_SCREENSHOT_MAX_WIDTH, int(img.height * ratio)),
-                Image.LANCZOS,
-            )
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=75)
-        return buf.getvalue()
     except ImportError:
         return raw_data
+
+    img = Image.open(io.BytesIO(raw_data))
+    if img.width > _SCREENSHOT_MAX_WIDTH:
+        ratio = _SCREENSHOT_MAX_WIDTH / img.width
+        img = img.resize(
+            (_SCREENSHOT_MAX_WIDTH, int(img.height * ratio)),
+            Image.LANCZOS,
+        )
+    # JPEG has no alpha channel, and macOS `screencapture -t png` writes
+    # RGBA. Without this flatten, `img.save(..., "JPEG")` raised
+    # `OSError: cannot write mode RGBA as JPEG` for every single capture
+    #, verified on macOS 15, where the endpoint returned a 500 on 100%
+    # of calls. `screen_capture` and `perception/screen_loop` already
+    # carried the same guard; this surface was the one that missed it.
+    # Composite onto black rather than dropping the channel so partially
+    # transparent windows do not come out with garbage colour.
+    if img.mode not in ("RGB", "L"):
+        if img.mode in ("RGBA", "LA") or "transparency" in img.info:
+            rgba = img.convert("RGBA")
+            flat = Image.new("RGB", rgba.size, (0, 0, 0))
+            flat.paste(rgba, mask=rgba.split()[-1])
+            img = flat
+        else:
+            img = img.convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=75)
+    return buf.getvalue()
+
+
+# ── AppleScript helpers ──────────────────────────────────────────
+
+def _as_str(value: str) -> str:
+    """Quote a Python string as an AppleScript string literal.
+
+    AppleScript escapes only backslash and double quote inside a
+    literal. Without this, any window title containing a quote (or a
+    backslash) produced a syntax error, and a hostile title could
+    close the literal and inject script.
+    """
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+class OSAResult:
+    """Thin result wrapper around one ``osascript`` invocation.
+
+    Deliberately not the ``skills.desktop_control.AppleScriptResult``
+    dataclass: this module must stay importable on non-macOS hosts,
+    where that runner raises on call. It reuses that module's denial
+    classifier so both surfaces agree on what a TCC denial looks like.
+    """
+
+    __slots__ = ("ok", "stdout", "stderr", "returncode", "tcc_permission")
+
+    def __init__(self, ok: bool, stdout: str, stderr: str, returncode: int):
+        self.ok = ok
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+        self.tcc_permission: Optional[str] = None
+        if not ok:
+            try:
+                from skills.desktop_control.applescript import _is_accessibility_denial
+                if _is_accessibility_denial(stderr):
+                    self.tcc_permission = "accessibility"
+            except Exception:  # pragma: no cover, import guard only
+                if "not allowed assistive access" in stderr or "-25211" in stderr:
+                    self.tcc_permission = "accessibility"
+
+
+def run_osascript(script: str, *, timeout_s: float = 8.0) -> OSAResult:
+    """Run AppleScript and report the truth about how it went.
+
+    The bug this exists to prevent: the previous window-list code ran
+    ``subprocess.run(["osascript", ...])`` and read only ``stdout``,
+    never ``returncode`` or ``stderr``. A denied or erroring script
+    produced an empty stdout, which the caller reported as "zero
+    windows, success".
+    """
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return OSAResult(False, "", f"osascript timed out after {timeout_s}s", 124)
+    except FileNotFoundError:
+        return OSAResult(False, "", "osascript binary not found on PATH", 127)
+    except Exception as exc:  # pragma: no cover, defensive
+        return OSAResult(False, "", f"osascript failed to launch: {exc}", 1)
+    return OSAResult(
+        proc.returncode == 0, proc.stdout or "", proc.stderr or "", proc.returncode,
+    )
+
+
+# ── Window enumeration ───────────────────────────────────────────
+
+# Per-process iteration. The aggregate form this replaces
+#   {name, position, size} of every window of every process whose visible is true
+#, fails on macOS with "System Events got an error: osascript is not
+# allowed assistive access. (-25211)" even when assistive access IS
+# granted (verified live: `get UI elements enabled` returns true and
+# `tell process "X" to get name of every window` succeeds in the same
+# second). Iterating processes one at a time avoids the quirk entirely.
+#
+# It also emits one tab-delimited record per line. The aggregate form
+# returned a single comma-joined blob for the whole machine, so
+# `splitlines()` produced one unparseable row and the caller shipped it
+# to the model as {"raw": <blob>} with no title and no bounds, while
+# the manifest promised "titles and bounds".
+_WINDOW_LIST_APPLESCRIPT = """
+set AppleScript's text item delimiters to ""
+set out to ""
+tell application "System Events"
+	set procs to every process whose background only is false
+	repeat with p in procs
+		set pname to name of p
+		try
+			repeat with w in (every window of p)
+				try
+					set wname to name of w
+				on error
+					set wname to ""
+				end try
+				try
+					set pos to position of w
+					set sz to size of w
+					set out to out & pname & tab & wname & tab & ¬
+						((item 1 of pos) as text) & tab & ((item 2 of pos) as text) & tab & ¬
+						((item 1 of sz) as text) & tab & ((item 2 of sz) as text) & linefeed
+				end try
+			end repeat
+		end try
+	end repeat
+end tell
+return out
+"""
+
+
+class WindowListing:
+    """Outcome of a window enumeration, errors included."""
+
+    __slots__ = ("ok", "windows", "source", "error", "tcc_permission", "attempts")
+
+    def __init__(self) -> None:
+        self.ok: bool = False
+        self.windows: List[dict] = []
+        self.source: Optional[str] = None
+        self.error: Optional[str] = None
+        self.tcc_permission: Optional[str] = None
+        # One entry per backend tried, so a failure is diagnosable
+        # without re-running anything.
+        self.attempts: List[dict] = []
+
+
+def _frontmost_pid() -> Optional[int]:
+    try:
+        from AppKit import NSWorkspace  # type: ignore[import-not-found]
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        return int(app.processIdentifier()) if app is not None else None
+    except Exception:
+        return None
+
+
+def _windows_via_quartz() -> Tuple[Optional[List[dict]], Optional[str]]:
+    """Enumerate windows through CoreGraphics.
+
+    Needs no Accessibility grant at all: bounds, owner name and pid come
+    back regardless. Window *titles* (``kCGWindowName``) are gated on
+    Screen Recording, so with that denied this returns rows with empty
+    titles and the AppleScript backend is preferred instead.
+    """
+    try:
+        import Quartz  # type: ignore[import-not-found]
+    except ImportError as exc:
+        return None, f"PyObjC Quartz not importable: {exc}"
+    try:
+        raw = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly
+            | Quartz.kCGWindowListExcludeDesktopElements,
+            Quartz.kCGNullWindowID,
+        )
+    except Exception as exc:
+        return None, f"CGWindowListCopyWindowInfo failed: {exc}"
+    if raw is None:
+        return None, "CGWindowListCopyWindowInfo returned NULL"
+
+    front_pid = _frontmost_pid()
+    out: List[dict] = []
+    for entry in raw:
+        # Layer 0 is the normal application-window layer. Higher layers
+        # are menu bar items, the Dock, tooltips, status popovers.
+        if int(entry.get("kCGWindowLayer") or 0) != 0:
+            continue
+        if float(entry.get("kCGWindowAlpha") or 0.0) <= 0.0:
+            continue
+        bounds = entry.get("kCGWindowBounds") or {}
+        pid = entry.get("kCGWindowOwnerPID")
+        out.append({
+            "app": str(entry.get("kCGWindowOwnerName") or ""),
+            "title": str(entry.get("kCGWindowName") or ""),
+            "x": int(bounds.get("X", 0)),
+            "y": int(bounds.get("Y", 0)),
+            "width": int(bounds.get("Width", 0)),
+            "height": int(bounds.get("Height", 0)),
+            "pid": int(pid) if pid is not None else None,
+            "window_id": int(entry.get("kCGWindowNumber") or 0) or None,
+            "focused": bool(front_pid is not None and pid is not None
+                            and int(pid) == front_pid),
+        })
+    return out, None
+
+
+def _windows_via_applescript() -> Tuple[Optional[List[dict]], Optional[str], Optional[str]]:
+    """Enumerate windows through System Events, one process at a time.
+
+    Returns ``(windows, error, tcc_permission)``.
+    """
+    res = run_osascript(_WINDOW_LIST_APPLESCRIPT, timeout_s=15.0)
+    if not res.ok:
+        return None, (res.stderr.strip() or f"osascript exit {res.returncode}"), res.tcc_permission
+
+    front_pid = _frontmost_pid()
+    front_app = ""
+    if front_pid is not None:
+        try:
+            from AppKit import NSWorkspace  # type: ignore[import-not-found]
+            app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            front_app = str(app.localizedName() or "") if app is not None else ""
+        except Exception:
+            front_app = ""
+
+    windows: List[dict] = []
+    for line in res.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) != 6:
+            logger.debug("window_list: unparseable AppleScript row: %r", line)
+            continue
+        app, title, x, y, w, h = parts
+        try:
+            rect = (int(x), int(y), int(w), int(h))
+        except ValueError:
+            logger.debug("window_list: non-numeric bounds in row: %r", line)
+            continue
+        windows.append({
+            "app": app,
+            "title": title,
+            "x": rect[0], "y": rect[1], "width": rect[2], "height": rect[3],
+            "pid": None,
+            "window_id": None,
+            "focused": bool(front_app and app == front_app),
+        })
+    return windows, None, None
+
+
+def collect_windows() -> WindowListing:
+    """List on-screen windows, trying every backend and reporting why.
+
+    Order: CoreGraphics first (no Accessibility grant needed), then
+    System Events. A backend that returns rows but no titles at all
+    (Screen Recording denied, in the CoreGraphics case) loses to a
+    backend that returns titles.
+    """
+    listing = WindowListing()
+    if platform.system() != "Darwin":
+        listing.error = (
+            f"window_list is implemented for macOS only; host is {platform.system()}"
+        )
+        listing.attempts.append({"backend": "platform", "error": listing.error})
+        return listing
+
+    # Only backends that actually *succeeded* become candidates. A
+    # backend returning zero windows without an error is a legitimate
+    # answer (nothing is open), and must not be reported as a failure
+    # that would be the mirror image of the bug being fixed here.
+    candidates: List[Tuple[str, List[dict]]] = []
+
+    quartz_windows, quartz_err = _windows_via_quartz()
+    listing.attempts.append({
+        "backend": "coregraphics",
+        "ok": quartz_err is None,
+        "count": len(quartz_windows or []),
+        "error": quartz_err,
+    })
+    if quartz_err is None:
+        candidates.append(("coregraphics", quartz_windows or []))
+
+    # CoreGraphics reports bounds without any grant but leaves
+    # kCGWindowName empty unless Screen Recording is granted, so fall
+    # through to System Events whenever it produced no titles.
+    if not any(w["title"] for w in (quartz_windows or [])):
+        as_windows, as_err, as_tcc = _windows_via_applescript()
+        listing.attempts.append({
+            "backend": "applescript",
+            "ok": as_err is None,
+            "count": len(as_windows or []),
+            "error": as_err,
+            "tcc_permission": as_tcc,
+        })
+        if as_err is None:
+            candidates.append(("applescript", as_windows or []))
+        elif as_tcc and not candidates:
+            listing.tcc_permission = as_tcc
+
+    if not candidates:
+        errors = [
+            f"{a['backend']}: {a['error']}"
+            for a in listing.attempts if a.get("error")
+        ]
+        listing.error = "; ".join(errors) or "every window backend failed"
+        return listing
+
+    titled = [c for c in candidates if any(w["title"] for w in c[1])]
+    non_empty = [c for c in candidates if c[1]]
+    chosen = (titled or non_empty or candidates)[0]
+
+    listing.ok = True
+    listing.source, listing.windows = chosen
+    return listing
 
 
 # ── Skill implementation ─────────────────────────────────────────
@@ -331,10 +652,36 @@ class GUIComputerUseSkill(BaseSkill):
     # ── window_list ───────────────────────────────────────────────
 
     async def _window_list(self, args: dict) -> dict:
-        windows = await asyncio.to_thread(self._get_windows)
+        """List on-screen windows with real titles and bounds.
+
+        Pre-fix this returned ``{"success": True, "status_code": 200,
+        "windows": []}`` whenever the underlying AppleScript failed,
+        because ``_get_windows`` swallowed every error and the caller
+        never inspected the return code. On a Mac where the AppleScript
+        was denied, the model was told with a 200 that the machine had
+        no windows open. It now fails loudly and says why.
+        """
+        result = await asyncio.to_thread(collect_windows)
+        if not result.ok:
+            code = 403 if result.tcc_permission else 500
+            error = (
+                f"tcc_denied:{result.tcc_permission}"
+                if result.tcc_permission
+                else (result.error or "window enumeration failed")
+            )
+            return {
+                "success": False, "status_code": code,
+                "data": {"attempts": result.attempts},
+                "error": error,
+            }
         return {
             "success": True, "status_code": 200,
-            "data": {"windows": windows},
+            "data": {
+                "windows": result.windows,
+                "count": len(result.windows),
+                "source": result.source,
+                "attempts": result.attempts,
+            },
             "error": None,
         }
 
@@ -344,10 +691,34 @@ class GUIComputerUseSkill(BaseSkill):
         title = args.get("title", "")
         if not title:
             return self._err(400, "title is required")
-        ok = await asyncio.to_thread(self._focus_window, title)
-        if ok:
-            return self._ok(f"Focused window: {title}")
-        return self._err(404, f"Window not found: {title}")
+        outcome = await asyncio.to_thread(self._focus_window, title)
+        if outcome.get("ok"):
+            return {
+                "success": True, "status_code": 200,
+                "data": {
+                    "message": f"Focused: {outcome.get('matched') or title}",
+                    "app": outcome.get("app"),
+                    "matched": outcome.get("matched"),
+                    "strategy": outcome.get("strategy"),
+                },
+                "error": None,
+            }
+        if outcome.get("tcc_permission"):
+            return {
+                "success": False, "status_code": 403,
+                "data": {"detail": outcome.get("error")},
+                "error": f"tcc_denied:{outcome['tcc_permission']}",
+            }
+        if outcome.get("status_code") == 404:
+            return {
+                "success": False, "status_code": 404,
+                "data": {"candidates": outcome.get("candidates", [])},
+                "error": outcome.get("error") or f"No window or app matched: {title}",
+            }
+        return self._err(
+            outcome.get("status_code", 500),
+            outcome.get("error") or f"window_focus failed for: {title}",
+        )
 
     # ── internal helpers ──────────────────────────────────────────
 
@@ -429,73 +800,103 @@ class GUIComputerUseSkill(BaseSkill):
 
     @staticmethod
     def _get_windows() -> List[dict]:
-        """List visible windows with titles and bounds (macOS only for now)."""
-        if platform.system() != "Darwin":
-            return []
-        try:
-            script = (
-                'tell application "System Events" to get '
-                '{name, position, size} of every window of every process '
-                'whose visible is true'
-            )
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=5,
-            )
-            windows: List[dict] = []
-            for line in result.stdout.strip().splitlines():
-                line = line.strip()
-                if line:
-                    windows.append({"raw": line})
-            return windows
-        except Exception:
-            return []
+        """Back-compat shim: the window rows only, no error detail.
+
+        Kept because callers outside this module import it. New code
+        should call :func:`collect_windows`, which reports *why* an
+        enumeration returned nothing instead of pretending the machine
+        has no windows.
+        """
+        return collect_windows().windows
 
     @staticmethod
-    def _focus_window(title: str) -> bool:
-        if platform.system() == "Darwin":
-            script = (
-                f'tell application "System Events"\n'
-                f'  set targetProc to first process whose visible is true '
-                f'and (name of every window contains "{title}")\n'
-                f'  set frontmost of targetProc to true\n'
-                f'end tell'
-            )
-            try:
-                result = subprocess.run(
-                    ["osascript", "-e", script],
-                    capture_output=True, text=True, timeout=5,
-                )
-                return result.returncode == 0
-            except Exception:
-                pass
+    def _focus_window(title: str) -> dict:
+        """Bring a window (or its owning app) to the front.
 
-            try:
-                result = subprocess.run(
-                    ["osascript", "-e",
-                     f'tell application "{title}" to activate'],
-                    capture_output=True, text=True, timeout=5,
-                )
-                return result.returncode == 0
-            except Exception:
-                return False
-        elif platform.system() == "Linux":
-            if shutil.which("wmctrl"):
+        Returns a dict rather than a bare bool so the caller can tell
+        "no such window" from "the OS refused us".
+
+        The pre-fix macOS path interpolated ``title`` straight into an
+        AppleScript string literal (a title containing a double quote
+        produced a syntax error, and the aggregate
+        ``first process whose ... name of every window contains``
+        form is the same shape that trips System Events' -25211), then
+        collapsed every outcome to ``returncode == 0``.
+        """
+        system = platform.system()
+        if system == "Darwin":
+            return _focus_window_macos(title)
+        if system == "Linux":
+            for tool, argv in (
+                ("wmctrl", ["wmctrl", "-a", title]),
+                ("xdotool", ["xdotool", "search", "--name", title, "windowactivate"]),
+            ):
+                if not shutil.which(tool):
+                    continue
                 try:
                     result = subprocess.run(
-                        ["wmctrl", "-a", title],
-                        capture_output=True, text=True, timeout=5,
+                        argv, capture_output=True, text=True, timeout=5,
                     )
-                    return result.returncode == 0
-                except Exception:
-                    pass
-            if shutil.which("xdotool"):
-                try:
-                    result = subprocess.run(
-                        ["xdotool", "search", "--name", title, "windowactivate"],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                    return result.returncode == 0
-                except Exception:
-                    pass
-        return False
+                except Exception as exc:
+                    return {"ok": False, "status_code": 500, "error": f"{tool}: {exc}"}
+                if result.returncode == 0:
+                    return {"ok": True, "matched": title, "strategy": tool}
+            return {
+                "ok": False, "status_code": 404,
+                "error": (
+                    f"No window matched {title!r} "
+                    "(wmctrl/xdotool unavailable or no match)"
+                ),
+            }
+        return {
+            "ok": False, "status_code": 501,
+            "error": f"window_focus is not implemented for platform {system}",
+        }
+
+
+def _focus_window_macos(title: str) -> dict:
+    """macOS focus: match a window title first, fall back to app name."""
+    listing = collect_windows()
+    needle = title.casefold()
+
+    exact = [w for w in listing.windows if (w.get("title") or "").casefold() == needle]
+    partial = [w for w in listing.windows if needle in (w.get("title") or "").casefold()]
+    by_app = [w for w in listing.windows if needle in (w.get("app") or "").casefold()]
+    target = (exact or partial or by_app or [None])[0]
+
+    app_name = (target or {}).get("app") or title
+    res = run_osascript(f'tell application {_as_str(app_name)} to activate', timeout_s=8)
+    if res.ok:
+        # Raising a specific window inside the app needs Accessibility.
+        # Best effort: never let its failure turn a successful activate
+        # into a reported failure.
+        if target and target.get("title"):
+            run_osascript(
+                'tell application "System Events" to tell process '
+                f'{_as_str(app_name)} to perform action "AXRaise" of '
+                f'(first window whose name is {_as_str(target["title"])})',
+                timeout_s=8,
+            )
+        return {
+            "ok": True,
+            "app": app_name,
+            "matched": (target or {}).get("title") or app_name,
+            "strategy": "window_match" if target else "app_name",
+        }
+    if res.tcc_permission:
+        return {
+            "ok": False, "status_code": 403,
+            "tcc_permission": res.tcc_permission, "error": res.stderr.strip(),
+        }
+    if target is None:
+        return {
+            "ok": False, "status_code": 404,
+            "error": (
+                f"No open window or running app matched {title!r}; "
+                f"activate failed: {res.stderr.strip()}"
+            ),
+            "candidates": sorted(
+                {w.get("app", "") for w in listing.windows if w.get("app")}
+            ),
+        }
+    return {"ok": False, "status_code": 500, "error": res.stderr.strip()}
