@@ -2545,28 +2545,120 @@ class BrainState:
                 return val.lower() in ("true", "1", "yes", "on")
             return bool(val)
 
+        # ── Inbound owner allowlists ────────────────────────────────
+        #
+        # A messaging channel is an unauthenticated inbound path to
+        # ``orchestrator.handle_command``. ``channels.base.Channel``
+        # enforces DEFAULT DENY; this block is where the allowlist is
+        # resolved and handed to it.
+        #
+        # Two sources, unioned, both of which the operator already uses
+        # for channel configuration:
+        #   * credentials/env, through the same ``_cred`` ladder the bot
+        #     tokens use (vault -> os.environ -> credentials.json), e.g.
+        #     ``FERAL_TELEGRAM_ALLOWED_SENDERS="123456789"``.
+        #   * ``settings.json`` under the ``channels`` section, e.g.
+        #     ``{"channels": {"telegram_allowed_senders": ["123456789"]}}``
+        #     which is what the pairing hook below writes.
+        # An id may be a sender id (who is talking) or a chat id (where);
+        # the channel accepts a message when either matches.
+        channels_cfg = merged_cfg.get("channels") or {}
+        if not isinstance(channels_cfg, dict):
+            channels_cfg = {}
+
+        def _access(name: str) -> dict:
+            """Resolve the inbound access policy for one channel."""
+            env_prefix = f"FERAL_{name.upper()}"
+            senders: list = []
+            chats: list = []
+            for value in (
+                _cred(f"{env_prefix}_ALLOWED_SENDERS"),
+                channels_cfg.get(f"{name}_allowed_senders"),
+            ):
+                if value:
+                    senders.append(value)
+            for value in (
+                _cred(f"{env_prefix}_ALLOWED_CHATS"),
+                channels_cfg.get(f"{name}_allowed_chats"),
+            ):
+                if value:
+                    chats.append(value)
+            # Time-boxed first-sender pairing. 0 (off) unless the
+            # operator sets it explicitly; see the channel docstring for
+            # why it must stay opt-in.
+            raw_window = (
+                _cred(f"{env_prefix}_PAIRING_WINDOW_SEC")
+                or channels_cfg.get(f"{name}_pairing_window_sec")
+                or channels_cfg.get("pairing_window_sec")
+                or 0
+            )
+            try:
+                window = max(0, int(raw_window))
+            except (TypeError, ValueError):
+                window = 0
+            return {
+                "allowed_senders": senders,
+                "allowed_chats": chats,
+                "pairing_window_sec": window,
+                "on_pair": _persist_pairing,
+            }
+
+        def _persist_pairing(channel_type: str, user_id: str, chat_id: str) -> None:
+            """Write a paired sender into settings.json so it survives a restart.
+
+            Called by ``Channel._bind_owner`` only, i.e. only when the
+            operator explicitly opened a pairing window and exactly one
+            sender used it.
+            """
+            if not self.config or not hasattr(self.config, "update_settings"):
+                return
+            try:
+                current = (getattr(self.config, "_merged", {}) or {}).get("channels", {})
+                if not isinstance(current, dict):
+                    current = {}
+                for key, value in (
+                    (f"{channel_type}_allowed_senders", user_id),
+                    (f"{channel_type}_allowed_chats", chat_id),
+                ):
+                    if not value:
+                        continue
+                    existing = current.get(key) or []
+                    if isinstance(existing, str):
+                        existing = [p.strip() for p in existing.split(",") if p.strip()]
+                    elif not isinstance(existing, list):
+                        existing = [str(existing)]
+                    if str(value) not in {str(v) for v in existing}:
+                        existing = list(existing) + [str(value)]
+                    self.config.update_settings("channels", key, existing)
+            except Exception as exc:
+                logger.error("Failed to persist %s pairing: %s", channel_type, exc)
+
         channel_configs = {
             "telegram": {
                 "bot_token": _cred("FERAL_TELEGRAM_BOT_TOKEN"),
                 "enabled": _ch_enabled("telegram")
                            and bool(_cred("FERAL_TELEGRAM_BOT_TOKEN")),
+                **_access("telegram"),
             },
             "discord": {
                 "bot_token": _cred("FERAL_DISCORD_BOT_TOKEN"),
                 "enabled": _ch_enabled("discord")
                            and bool(_cred("FERAL_DISCORD_BOT_TOKEN")),
+                **_access("discord"),
             },
             "slack": {
                 "bot_token": _cred("FERAL_SLACK_BOT_TOKEN"),
                 "app_token": _cred("FERAL_SLACK_APP_TOKEN"),
                 "enabled": _ch_enabled("slack")
                            and bool(_cred("FERAL_SLACK_BOT_TOKEN")),
+                **_access("slack"),
             },
             "whatsapp": {
                 "access_token": _cred("FERAL_WHATSAPP_ACCESS_TOKEN"),
                 "phone_number_id": _cred("FERAL_WHATSAPP_PHONE_NUMBER_ID"),
                 "app_secret": _cred("FERAL_WHATSAPP_APP_SECRET"),
                 "enabled": bool(_cred("FERAL_WHATSAPP_ACCESS_TOKEN") and _cred("FERAL_WHATSAPP_PHONE_NUMBER_ID")),
+                **_access("whatsapp"),
             },
         }
 
@@ -2585,10 +2677,22 @@ class BrainState:
             logger.debug("No messaging channels configured (set FERAL_TELEGRAM_BOT_TOKEN etc.)")
 
     def _register_browser_skill(self):
-        """Register browser control as a skill the agent can call via tool use."""
+        """Register browser control as a skill the agent can call via tool use.
+
+        ``skills/manifests/browser_use.json`` is the source of truth and is
+        already loaded by ``load_builtin_skills()`` at this point. When it is
+        present we keep that manifest and only bind the bridge instance,
+        because rebuilding it from the raw dict below is LOSSY: the
+        conversion carries id / method / url / description / params /
+        returns_description / ui_hint and drops ``safety_tier``,
+        ``read_only_hint``, ``requires_user_approval``, ``result_budget``
+        and ``trigger_phrases``. Overwriting the registered manifest with
+        the rebuilt one therefore silently disarmed every safety
+        declaration the manifest made and clamped every result back to the
+        2 000-character default tier.
+        """
         try:
             from skills.impl.browser_use import get_browser_skill_manifest
-            from skills.impl import register_instance
             from models.skill_manifest import (
                 SkillManifest,
                 SkillEndpoint,
@@ -2598,6 +2702,16 @@ class BrainState:
             )
 
             raw_manifest = get_browser_skill_manifest()
+            declared_id = str(raw_manifest.get("skill_id", "browser"))
+            already = self.skill_registry.skills.get(declared_id)
+            if already is not None and getattr(already, "endpoints", None):
+                self._bind_browser_bridge(already.skill_id)
+                logger.info(
+                    "Browser skill kept from shipped manifest: %s (%d endpoints)",
+                    already.skill_id, len(already.endpoints),
+                )
+                return
+
             endpoints: list[SkillEndpoint] = []
             for endpoint in raw_manifest.get("endpoints", []):
                 params = []
@@ -2647,46 +2761,74 @@ class BrainState:
                 endpoints=endpoints,
             )
             self.skill_registry.register(manifest)
-
-            class _BrowserSkillBridge:
-                def __init__(self, state_ref: "BrainState"):
-                    self.skill_id = manifest.skill_id
-                    self._state = state_ref
-
-                async def execute(self, endpoint_id: str, args: dict, vault: dict):
-                    result = await self._state._execute_browser_action(endpoint_id, args or {})
-                    success = not isinstance(result, dict) or bool(result.get("success", "error" not in result))
-                    error = result.get("error") if isinstance(result, dict) else None
-                    return {
-                        "success": success,
-                        "status_code": 200 if success else 500,
-                        "data": result,
-                        "error": error,
-                    }
-
-            register_instance(manifest.skill_id, _BrowserSkillBridge(self))
-            logger.info(f"Browser skill registered: {manifest.skill_id} ({len(endpoints)} endpoints)")
-
-            # Hand the shared controller to WebActionsSkill so we don't
-            # boot a second Chrome / Playwright pair for higher-level
-            # web flows. The skill exposes set_browser() exactly for
-            # this purpose; without injection it lazily makes its own
-            # BrowserController() on first call.
-            try:
-                from skills.impl import get_implementation
-                web_actions = get_implementation("web_actions")
-                if web_actions is not None and hasattr(web_actions, "set_browser"):
-                    web_actions.set_browser(self.browser)
-                    logger.info("WebActionsSkill bound to shared BrowserController")
-            except Exception as e:
-                logger.debug("WebActionsSkill browser injection skipped: %s", e)
+            self._bind_browser_bridge(manifest.skill_id)
+            logger.info(
+                "Browser skill registered from in-code fallback manifest: %s "
+                "(%d endpoints, no safety metadata)",
+                manifest.skill_id, len(endpoints),
+            )
         except Exception as e:
             logger.warning(f"Browser skill registration failed: {e}")
 
-    # Manifest endpoint id → controller method name. Manifest history
-    # outpaced the controller (save_session vs save_cookies, etc.); this
-    # alias map is the single source of truth that keeps both honest
-    # without renaming public agent-visible endpoints again.
+    def _bind_browser_bridge(self, skill_id: str) -> None:
+        """Point ``skill_id`` at the live BrowserController and share it.
+
+        Split out of ``_register_browser_skill`` so the shipped-manifest
+        path and the in-code fallback path bind identically. Two bindings
+        that drift is how a manifest ends up registered with nothing behind
+        it.
+        """
+        from skills.impl import register_instance
+
+        state_ref = self
+
+        class _BrowserSkillBridge:
+            def __init__(self):
+                self.skill_id = skill_id
+                self._state = state_ref
+
+            async def execute(self, endpoint_id: str, args: dict, vault: dict):
+                result = await self._state._execute_browser_action(endpoint_id, args or {})
+                success = not isinstance(result, dict) or bool(result.get("success", "error" not in result))
+                error = result.get("error") if isinstance(result, dict) else None
+                return {
+                    "success": success,
+                    "status_code": 200 if success else 500,
+                    "data": result,
+                    "error": error,
+                }
+
+        register_instance(skill_id, _BrowserSkillBridge())
+
+        # Hand the shared controller to WebActionsSkill so we don't
+        # boot a second Chrome / Playwright pair for higher-level
+        # web flows. The skill exposes set_browser() exactly for
+        # this purpose; without injection it lazily makes its own
+        # BrowserController() on first call.
+        try:
+            from skills.impl import get_implementation
+            web_actions = get_implementation("web_actions")
+            if web_actions is not None and hasattr(web_actions, "set_browser"):
+                web_actions.set_browser(self.browser)
+                logger.info("WebActionsSkill bound to shared BrowserController")
+        except Exception as e:
+            logger.debug("WebActionsSkill browser injection skipped: %s", e)
+
+    # Manifest endpoint id → controller method name, for the endpoints
+    # whose agent-visible id is deliberately not the method name
+    # (save_session reads better to a model than save_cookies, and
+    # pinning the agent surface to an internal method name means a rename
+    # breaks the agent).
+    #
+    # This map is now a MIRROR. The live one is
+    # ``skills.impl.browser_use.BROWSER_ENDPOINT_ALIASES``, next to the
+    # dispatch table it belongs to, so a test can prove every declared
+    # endpoint routes without booting the brain. It is restated here as
+    # literals rather than imported because it is the documented,
+    # agent-visible surface of this class and because
+    # tests/test_brain_browser_alias_map.py reads it out of this source.
+    # ``tests/test_browser_use_endpoints.py`` asserts the two are equal,
+    # so the mirror cannot drift silently.
     _BROWSER_ENDPOINT_ALIASES = {
         "save_session": "save_cookies",
         "restore_session": "restore_cookies",
@@ -2701,6 +2843,7 @@ class BrainState:
         "har_start": "start_har",
         "har_stop": "stop_har",
         "download_next": "wait_for_download",
+        "reload": "reload_page",
     }
 
     async def _execute_browser_action(self, endpoint_id: str, args: dict) -> dict:
@@ -2814,64 +2957,34 @@ class BrainState:
         return str(getattr(self, "_browser_last_url", "") or "")
 
     async def _dispatch_browser_action(self, endpoint_id: str, args: dict) -> dict:
-        """Execute a browser action when called by the agent."""
+        """Execute a browser action when called by the agent.
+
+        Argument marshalling and the endpoint-id -> method mapping live in
+        ``BrowserController.execute`` (skills/impl/browser_use.py), next to
+        the methods they call and next to the manifest they have to agree
+        with. This used to be a 30-branch if/elif here, which is how the
+        surface drifted: an endpoint declared in the manifest with no
+        branch here fell through to ``method(**args)`` and raised
+        TypeError, and an endpoint with no method at all returned a bare
+        "Unknown browser action" the model only found by calling it.
+
+        What stays here is the part that is genuinely BrainState's: owning
+        the controller, connecting it on first use, and (in the caller,
+        ``_execute_browser_action``) the per-domain memory hook.
+        """
         if not self.browser:
-            return {"error": "Browser not available"}
+            return {"success": False, "error": "Browser not available"}
         if not self.browser.connected:
             ok = await self.browser.initialize()
             if not ok:
-                return {"error": "Cannot connect to Chrome. Start it with --remote-debugging-port=9222"}
-        method_name = self._BROWSER_ENDPOINT_ALIASES.get(endpoint_id, endpoint_id)
-        method = getattr(self.browser, method_name, None)
-        if not method:
-            return {"error": f"Unknown browser action: {endpoint_id}"}
-        if endpoint_id == "navigate":
-            # Forward `wait_until` so the agent can choose between
-            # `domcontentloaded` (default), `load`, `networkidle`, or
-            # `commit`. Previously dropped on the floor.
-            return await method(
-                args.get("url", ""),
-                wait_until=args.get("wait_until", "domcontentloaded"),
-            )
-        elif endpoint_id == "screenshot":
-            return await method(args.get("full_page", False))
-        elif endpoint_id == "snapshot":
-            return await method()
-        elif endpoint_id == "click":
-            return await method(args.get("ref_or_selector", ""))
-        elif endpoint_id == "hover":
-            return await method(args.get("ref_or_selector", ""))
-        elif endpoint_id == "type_text":
-            return await method(args.get("ref_or_selector", ""), args.get("text", ""))
-        elif endpoint_id == "fill_form":
-            return await method(args.get("fields", {}))
-        elif endpoint_id == "evaluate":
-            return await method(args.get("js_code", ""))
-        elif endpoint_id == "scroll":
-            return await method(args.get("direction", "down"), args.get("amount", 500))
-        elif endpoint_id == "get_console_logs":
-            return await method(args.get("limit", 50), args.get("clear", False))
-        elif endpoint_id == "get_page_pdf":
-            return await method(
-                args.get("print_background", True),
-                args.get("landscape", False),
-            )
-        elif endpoint_id == "get_page_info":
-            return await method()
-        elif endpoint_id == "wait_for_selector":
-            return await method(
-                args.get("ref_or_selector", ""),
-                timeout_ms=int(args.get("timeout_ms", 5000)),
-                poll_ms=int(args.get("poll_ms", 100)),
-                state=args.get("state", "visible"),
-            )
-        elif endpoint_id == "save_session" or endpoint_id == "restore_session":
-            return await method(args.get("profile", "default"))
-        elif endpoint_id == "network_log":
-            return await method(args.get("filter_type", ""))
-        elif endpoint_id == "network_monitor_start":
-            return await method()
-        return await method(**args) if args else await method()
+                return {
+                    "success": False,
+                    "error": (
+                        "Cannot connect to Chrome. Start it with "
+                        "--remote-debugging-port=9222"
+                    ),
+                }
+        return await self.browser.execute(endpoint_id, args or {})
 
     @staticmethod
     def _load_stored_credentials():

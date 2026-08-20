@@ -9,19 +9,10 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Global mouse and keyboard control for vision-action automation loops. Click, type, scroll, and press key combos anywhere on screen.",
+    "description": "DEPRECATED ALIAS of gui_computer_use. Every endpoint here forwards to the matching gui_computer_use endpoint; it exists only so callers that hardcoded desktop_automation__* endpoint ids keep resolving. Use gui_computer_use for all new mouse, keyboard, scroll and window work: it is the canonical surface, it handles Retina/HiDPI scaling, and it also has screenshot, window_list and window_focus, which this alias does not.",
     "trigger_phrases": [
-        "click on",
-        "move mouse",
-        "type text",
         "press keys",
-        "scroll down",
-        "scroll up",
-        "key combo",
-        "double click",
-        "right click",
         "where is my cursor",
-        "cursor position",
         "automate desktop",
         "control my screen"
     ],

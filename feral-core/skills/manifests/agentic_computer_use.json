@@ -22,7 +22,11 @@
         "help me with this window",
         "complete this workflow"
     ],
-    "categories": ["computer_use", "automation", "vision"],
+    "categories": [
+        "computer_use",
+        "automation",
+        "vision"
+    ],
     "auth": {
         "type": "none"
     },
@@ -33,8 +37,19 @@
             "url": "internal://agentic_computer_use/execute_task",
             "description": "Execute a complex GUI task using a vision-action loop. The agent takes screenshots, analyzes them with AI vision, and performs mouse/keyboard actions iteratively until the task is complete.",
             "params": [
-                {"name": "task", "type": "string", "required": true, "description": "Plain language description of the GUI task to perform (e.g. 'Open Safari, go to google.com, and search for AI news')"},
-                {"name": "max_steps", "type": "number", "required": false, "default": "10", "description": "Maximum number of screenshot-action iterations (safety limit)"}
+                {
+                    "name": "task",
+                    "type": "string",
+                    "required": true,
+                    "description": "Plain language description of the GUI task to perform (e.g. 'Open Safari, go to google.com, and search for AI news')"
+                },
+                {
+                    "name": "max_steps",
+                    "type": "integer",
+                    "required": false,
+                    "default": "10",
+                    "description": "Maximum number of screenshot-action iterations (safety limit)"
+                }
             ],
             "returns_description": "{completed: bool, steps: int, log: [{step, action, detail, result}], summary: string}",
             "ui_hint": "detail_card"
@@ -43,7 +58,10 @@
     "flows": [],
     "crons": [],
     "triggers": [],
-    "permissions": ["screen", "input_control"],
+    "permissions": [
+        "screen",
+        "input_control"
+    ],
     "requires_daemon": false,
     "max_calls_per_hour": 50
 }

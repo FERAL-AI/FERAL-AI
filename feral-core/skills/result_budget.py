@@ -421,6 +421,93 @@ class TruncationReport:
     _tier = DEFAULT_TIER
 
 
+_image_limits_cache: Optional[tuple[tuple[str, ...], int]] = None
+
+
+def _image_field_limits() -> tuple[tuple[str, ...], int]:
+    """``(image field names, max base64 chars)`` from
+    :mod:`agents.multimodal_blocks`.
+
+    Resolved on FIRST USE, not at import time, and memoised. ``agents``
+    imports ``skills.result_budget``, so binding this at module scope
+    resolved during the partially-initialised half of that cycle and
+    silently produced an empty tuple -- which meant the image exemption
+    below did nothing and screenshots kept being shredded.
+    """
+    global _image_limits_cache
+    if _image_limits_cache is not None:
+        return _image_limits_cache
+    try:
+        from agents.multimodal_blocks import (
+            TOOL_RESULT_IMAGE_FIELDS,
+            _max_image_b64_chars,
+        )
+        _image_limits_cache = (TOOL_RESULT_IMAGE_FIELDS, _max_image_b64_chars())
+    except Exception:  # pragma: no cover - import guard
+        logger.warning(
+            "agents.multimodal_blocks unavailable; image fields will be "
+            "clamped as ordinary text", exc_info=True,
+        )
+        _image_limits_cache = ((), 0)
+    return _image_limits_cache
+
+
+def _clamp_image_field(
+    key: str,
+    value: str,
+    budget: ResultBudget,
+    report: Optional[TruncationReport],
+) -> Any:
+    """Bound an IMAGE payload without ever producing a partial one.
+
+    ``clamp``'s string rule (cut at ``max_str_len``, append a "re-run with
+    offset/limit" marker) is correct for text and catastrophic for base64:
+    a screenshot under ``standard`` came out as 2 000 chars of a 400 000
+    char JPEG, which is not a smaller image, it is a decode error. Worse,
+    it happened HERE, in the executor, before the orchestrator could lift
+    the image out for delivery as a real image block -- so no downstream
+    fix could have recovered it.
+
+    Returns the value untouched when it fits the image ceiling, and a
+    whole-value replacement marker when it does not. Never a prefix.
+    """
+    _fields, ceiling = _image_field_limits()
+    if ceiling <= 0:
+        return None  # signals "not an image field"; caller falls through
+    if len(value) <= ceiling:
+        return value
+    dropped = len(value)
+    if report is not None:
+        report.chars_dropped += dropped
+    return (
+        f"[image dropped whole: {dropped} base64 chars under '{key}' "
+        f"exceeds the {ceiling}-char image ceiling. A partial base64 "
+        "string is a decode error, not a smaller image, so nothing was "
+        "kept. Re-capture at a lower resolution or higher compression.]"
+    )
+
+
+_B64_SAMPLE_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r"
+)
+
+
+def _looks_like_image_value(value: str) -> bool:
+    """Cheap guard so a short path/flag under a key like ``screenshot`` is
+    still clamped as ordinary text.
+
+    Note the base64 sample rather than a leading-character heuristic: a
+    JPEG payload begins ``/9j/``, so "starts with a slash means it is a
+    filesystem path" is exactly wrong for the commonest screenshot format
+    FERAL produces.
+    """
+    if len(value) < 512:
+        return False
+    if value.startswith(("data:image/", "http://", "https://")):
+        return True
+    return set(value[:128]) <= _B64_SAMPLE_CHARS
+
+
 def clamp(
     data: Any,
     budget: ResultBudget,
@@ -434,6 +521,12 @@ def clamp(
     unbounded or adversarial payload cannot exhaust the context regardless
     of which tier is in play. Raising a tier raises the numbers; it never
     removes the bound.
+
+    The ONE exception is an image payload under a recognised image field
+    name (``image_base64`` / ``image_b64`` / ...). Those are bounded by a
+    separate image ceiling and are kept WHOLE or dropped WHOLE -- see
+    :func:`_clamp_image_field`. They never reach the model as text: the
+    orchestrator lifts them out and sends them as image content blocks.
     """
     if report is not None:
         report._tier = budget.name
@@ -448,10 +541,19 @@ def clamp(
         items = list(data.items())
         if len(items) > budget.max_dict_keys and report is not None:
             report.keys_dropped += len(items) - budget.max_dict_keys
-        return {
-            key: clamp(value, budget, report, depth - 1)
-            for key, value in items[: budget.max_dict_keys]
-        }
+        out: dict = {}
+        for key, value in items[: budget.max_dict_keys]:
+            if (
+                isinstance(value, str)
+                and key in _image_field_limits()[0]
+                and _looks_like_image_value(value)
+            ):
+                kept = _clamp_image_field(str(key), value, budget, report)
+                if kept is not None:
+                    out[key] = kept
+                    continue
+            out[key] = clamp(value, budget, report, depth - 1)
+        return out
 
     if isinstance(data, list):
         if len(data) > budget.max_list_len and report is not None:
@@ -617,3 +719,91 @@ def _annotate(
         "_pagination_hint": hint or None,
         "data": candidate,
     }
+
+
+# ── image-bearing tool results ───────────────────────────────────────
+#
+# A screenshot is ~400 000 base64 chars. ``gui_computer_use`` resolves to
+# the ``standard`` tier (max_result_chars = 2000), so the blob above went
+# through the text budget and came back as a 1405-char string ending in
+# "You have NOT seen the whole result". Every vision-dependent capability
+# in FERAL was dead as a result.
+#
+# The fix splits the result in two BEFORE any budgeting happens:
+#
+#   * the text half (success, format, dpi_scale, path, size_bytes, ...)
+#     goes through ``serialize_tool_result`` exactly as before, so the
+#     budget regression surface is unchanged;
+#   * the image travels out of band, whole, as a provider-appropriate
+#     content block (see ``agents.multimodal_blocks``).
+#
+# A truncated image is never produced. If an image cannot be sent whole
+# it is not sent at all, and the text says so in plain language.
+
+def serialize_tool_result_with_images(
+    tool_name: str,
+    result_data: Any,
+    *,
+    registry: Any = None,
+    budget: Optional[ResultBudget] = None,
+    allow_images: bool = True,
+) -> tuple[str, list]:
+    """Serialize one tool result, lifting any image out of the text budget.
+
+    Returns ``(content_string, images)`` where ``images`` is a list of
+    ``agents.multimodal_blocks.ToolResultImage``. When the result carries
+    no image the return is byte-identical to
+    ``serialize_tool_result(...)`` with an empty image list -- the
+    no-image path is deliberately untouched.
+
+    ``allow_images=False`` (the caller knows the active provider cannot
+    take image input) still lifts the blob out of the text -- sending
+    400 000 truncated base64 chars helps nobody -- but returns no images
+    and marks the payload so the caller can tell the model an image
+    existed and did not arrive.
+    """
+    try:
+        from agents.multimodal_blocks import extract_tool_result_images
+    except Exception:  # pragma: no cover - import guard for stripped builds
+        logger.debug("multimodal_blocks unavailable; text-only tool result", exc_info=True)
+        return serialize_tool_result(
+            tool_name, result_data, registry=registry, budget=budget,
+        ), []
+
+    stripped, images, omissions = extract_tool_result_images(
+        result_data, tool_name=tool_name, deliverable=allow_images,
+    )
+    if not images and not omissions:
+        return serialize_tool_result(
+            tool_name, result_data, registry=registry, budget=budget,
+        ), []
+
+    payload = stripped
+    if isinstance(payload, dict):
+        payload = dict(payload)
+    else:
+        payload = {"data": payload}
+
+    if images and allow_images:
+        payload["_images_attached"] = len(images)
+        payload["_image_note"] = (
+            f"{len(images)} image(s) from this tool are delivered to you as "
+            "image content, complete and untruncated. They were removed from "
+            "this JSON so the text budget applies only to the text fields."
+        )
+    elif images and not allow_images:
+        payload["_images_attached"] = 0
+        payload["_image_omitted"] = True
+        payload["_image_note"] = (
+            f"{len(images)} image(s) were produced by this tool but the "
+            "active model/provider does not accept image input, so they were "
+            "NOT sent. You have not seen them."
+        )
+    if omissions:
+        payload["_image_omitted"] = True
+        payload["_image_omission_reasons"] = omissions
+
+    text = serialize_tool_result(
+        tool_name, payload, registry=registry, budget=budget,
+    )
+    return text, (images if allow_images else [])

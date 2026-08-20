@@ -72,11 +72,18 @@ def test_stop_tracing_without_start_returns_error():
 
 
 def test_artifacts_directory_is_namespaced_under_feral_home():
-    """Tracing/HAR/download artefacts must live under
-    ~/.feral/browser/artifacts so the user has a single place to look."""
+    """Tracing/HAR/download artefacts live under the FERAL data home.
+
+    Assertion updated from a literal ``~/.feral`` suffix to the resolver:
+    ``_artifacts_root`` built ``Path.home() / ".feral"`` by hand and so
+    ignored ``FERAL_HOME`` entirely, which meant an isolated run still
+    wrote into the operator's real home directory. The old assertion
+    passed either way, which is why it never caught it.
+    """
+    from config.loader import feral_data_home
     from skills.impl.browser_use import BrowserController
 
     bc = BrowserController()
     p = bc._artifacts_root
-    assert str(p).endswith("/.feral/browser/artifacts")
+    assert p == feral_data_home() / "browser" / "artifacts", p
     assert p.exists() and p.is_dir()

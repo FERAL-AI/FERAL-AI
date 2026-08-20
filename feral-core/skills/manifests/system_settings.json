@@ -108,12 +108,13 @@
             "id": "create_skill",
             "method": "POST",
             "url": "internal://system_settings/create_skill",
-            "description": "Create and register a brand new skill from a capability description. Use when the user asks you to learn something new, add a capability, or integrate with a service you don't currently support.",
+            "description": "Generate and register a brand new skill from a capability description, using the configured LLM. Two limits decide whether the result is usable, so say them out loud before promising the user a new capability. First, the capability text must be at least 8 characters and must not contain a destructive phrase (rm -rf, delete all, erase disk, factory reset, format disk, shutdown, reboot, self destruct, credential dump); those are refused with 403. Second, a generated skill is NOT first-party, so every HTTP call it makes is held to network.allowed_domains in the sandbox policy: unless the operator adds the new service's host there, every call to the skill you just created is refused with 'Blocked by sandbox policy'. Tell the user which host they need to allow.",
             "params": [
-                {"name": "capability", "type": "string", "required": true, "description": "What the skill should do, in plain language (e.g. 'check my Notion pages', 'control Spotify playback')"},
-                {"name": "service", "type": "string", "required": false, "description": "The service or API to integrate with (e.g. 'Notion API', 'Spotify Web API')"}
+                {"name": "capability", "type": "string", "required": true, "description": "What the skill should do, in plain language, at least 8 characters (e.g. 'check my Notion pages', 'control Spotify playback')"},
+                {"name": "service", "type": "string", "required": false, "description": "The service or API to integrate with (e.g. 'Notion API', 'Spotify Web API')"},
+                {"name": "auto_approve", "type": "boolean", "required": false, "description": "Register the generated skill immediately instead of leaving it pending operator approval. Defaults to true. The result reports auto_approved and needs_approval; when needs_approval is true the skill exists but cannot be called yet."}
             ],
-            "returns_description": "{skill_id, name, endpoints, message}",
+            "returns_description": "{skill_id, name, endpoints, auto_approved, needs_approval, message}",
             "ui_hint": "detail_card"
         }
     ],

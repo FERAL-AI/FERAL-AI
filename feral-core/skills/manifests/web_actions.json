@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Higher-level browser automation for purchases, bookings, price comparison, and structured data extraction. Always stops before financial commitment and shows a confirmation card.",
+    "description": "Higher-level browser automation for purchases, bookings, price comparison and structured data extraction. Always stops before financial commitment and shows a confirmation card. Every endpoint drives a real browser through FERAL's CDP controller, so it needs a browser FERAL can attach to; with none available the call fails with the driver's error rather than returning partial data. Use coding_tools__web_fetch when plain page text is enough, and this skill only when the page has to be interacted with.",
     "trigger_phrases": [
         "buy",
         "purchase",

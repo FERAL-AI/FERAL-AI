@@ -22,7 +22,6 @@
     "categories": ["files", "productivity"],
     "auth": {
         "type": "oauth2",
-        "provider": "google",
         "scopes": ["https://www.googleapis.com/auth/drive"]
     },
     "endpoints": [

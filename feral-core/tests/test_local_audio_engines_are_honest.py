@@ -99,8 +99,27 @@ def test_boot_does_not_claim_a_missing_local_engine_is_ready(local_audio, caplog
 
     assert pipeline.local_stt_ready is False
     assert pipeline.local_tts_ready is False
-    assert "not downloaded" in pipeline.local_stt_detail
-    assert "not downloaded" in pipeline.local_tts_detail
+
+    # There are two honest reasons an engine cannot run, and they need
+    # different remedies: the PACKAGE is absent (pip install), or the
+    # package is present and the MODEL is absent (fetch it). Asserting
+    # the literal "not downloaded" accepted only the second, so this
+    # test failed on any machine without piper-tts installed even though
+    # the pipeline was reporting the situation correctly.
+    #
+    # The invariant is not a wording. It is that the detail names an
+    # actionable cause instead of a vague "not configured".
+    for engine, detail in (
+        ("stt", pipeline.local_stt_detail),
+        ("tts", pipeline.local_tts_detail),
+    ):
+        assert detail, f"local {engine} is not ready and gave no reason"
+        assert ("not installed" in detail) or ("not downloaded" in detail), (
+            f"local {engine} detail does not name an actionable cause: {detail!r}"
+        )
+        assert "pip install" in detail or "expected at" in detail or "fetch" in detail, (
+            f"local {engine} detail names no remedy: {detail!r}"
+        )
 
     text = " ".join(r.getMessage() for r in caplog.records)
     assert "NOT READY" in text

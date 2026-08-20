@@ -76,6 +76,79 @@ _URL_SECRET_PARAMS = re.compile(
 )
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
+# ── Native JavaScript dialogs ────────────────────────────────────────
+#
+# alert()/confirm()/prompt()/beforeunload block the renderer until some
+# CDP client answers them. An unanswered dialog is indistinguishable from
+# a hung page: every subsequent Runtime.evaluate simply never returns.
+#
+# The default is DISMISS, not accept. Accepting is the dangerous side of
+# a confirm() ("Delete account?", "Discard 40 unsaved edits?"), and a
+# model that never saw the dialog cannot have consented to it. Dismiss is
+# the conservative answer for every dialog type: alert() ignores the
+# distinction, confirm() reads it as Cancel, prompt() as Cancel, and
+# beforeunload as "stay on the page", which cancels a navigation rather
+# than throwing away the user's work.
+#
+# Whatever the policy, every dialog is RECORDED and surfaced on the next
+# endpoint result (``dialog_events``) so it is never handled behind the
+# model's back.
+DIALOG_POLICIES = ("dismiss", "accept", "manual")
+DEFAULT_DIALOG_POLICY = "dismiss"
+# In `manual` mode the page stays blocked until handle_dialog is called.
+# A watchdog dismisses it after this long so a forgotten dialog degrades
+# into a recorded, explained event instead of a permanently frozen tab.
+DIALOG_MANUAL_TIMEOUT_S = 60.0
+DIALOG_LOG_MAX = 50
+
+# ── Accessibility snapshot ───────────────────────────────────────────
+#
+# Chrome's own menu bar and shell contribute hundreds of AX nodes before
+# any page content, so an unfiltered head-of-list cap silently drops the
+# elements the agent actually needs. Snapshot therefore filters to
+# interactive roles by default and paginates over the full match list,
+# reporting TRUNCATED with the next offset (the same contract the
+# macos_ax skill uses).
+SNAPSHOT_DEFAULT_MAX_NODES = 200
+SNAPSHOT_MAX_MAX_NODES = 2000
+# Skipped under BOTH filters: these carry no name an agent can act on and
+# no structure it can orient by. Everything else survives filter=all, so
+# "all" means all.
+SNAPSHOT_SKIP_ROLES = frozenset({
+    "none", "presentation", "generic", "InlineTextBox", "LineBreak",
+})
+# Roles that either accept input or carry the structure an agent needs to
+# orient itself. Everything else is prose, which get_page_text reads far
+# more cheaply than the AX tree does.
+SNAPSHOT_INTERACTIVE_ROLES = frozenset({
+    "button", "link", "textbox", "searchbox", "combobox", "listbox",
+    "option", "checkbox", "radio", "radiogroup", "switch", "slider",
+    "spinbutton", "menuitem", "menuitemcheckbox", "menuitemradio",
+    "menu", "menubar", "tab", "tablist", "treeitem", "textarea",
+    "ComboBox", "DisclosureTriangle", "PopUpButton", "ToggleButton",
+    "form", "search", "dialog", "alertdialog", "heading", "img",
+    "table", "row", "cell", "columnheader", "rowheader", "list",
+    "listitem", "progressbar", "alert", "status", "tooltip",
+    "colorwell", "date", "datetime", "InputTime",
+})
+
+
+def feral_browser_root() -> Path:
+    """Root for everything this skill writes: ``$FERAL_HOME/browser``.
+
+    ``config.loader.feral_data_home`` is the canonical resolver and it is
+    the ONLY correct way to reach it. Parts of this file used to build
+    ``Path.home() / ".feral"`` by hand, which ignores ``FERAL_HOME``
+    outright: an isolated end-to-end run with ``FERAL_HOME`` pointed at a
+    scratch directory still wrote live session cookies into the operator's
+    real ``~/.feral/browser/cookies/``. That is a test-isolation hazard and
+    a split brain for anyone who relocated their install, and it was
+    inconsistent inside this one file, since ``_recordings_root`` already
+    did it correctly.
+    """
+    from config.loader import feral_data_home
+    return feral_data_home() / "browser"
+
 
 def redact_recording_text(value: object) -> str:
     """Scrub secrets and identities out of text bound for a recording manifest.
@@ -140,16 +213,49 @@ class CDPConnection:
         """
         return "/devtools/page/" in (self._page_ws_url or "")
 
-    async def connect(self, prefer_page: bool = False) -> bool:
+    @property
+    def target_id(self) -> str:
+        """CDP target id of the tab this socket is attached to, if any.
+
+        Empty for a browser-level socket. This is what lets the
+        controller know which tab every ``Page.*``/``Runtime.*`` command
+        it sends is actually going to hit, which is the whole point of
+        :meth:`BrowserController.attach_to_tab`.
+        """
+        url = self._page_ws_url or ""
+        marker = "/devtools/page/"
+        if marker not in url:
+            return ""
+        return url.rsplit(marker, 1)[-1].strip()
+
+    async def connect(self, prefer_page: bool = False, target_id: str = "") -> bool:
         """Connect to Chrome CDP endpoint.
 
         ``prefer_page`` resolves a tab target first instead of the
         browser endpoint. It is opt-in so existing callers keep the
         browser-level socket they already depend on.
+
+        ``target_id`` pins the socket to one specific tab. Without it a
+        reconnect lands on ``/json``'s first page target, which is not
+        necessarily the tab the caller asked for, which is precisely the
+        silent wrong-target failure ``switch_tab`` used to have.
         """
         try:
             import httpx
-            if prefer_page:
+            if target_id:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        f"http://{self._host}:{self._port}/json",
+                        timeout=5.0,
+                    )
+                    for t in resp.json():
+                        if str(t.get("id")) == str(target_id):
+                            self._page_ws_url = t.get("webSocketDebuggerUrl")
+                            break
+                if not self._page_ws_url:
+                    logger.error("No CDP target with id %r", target_id)
+                    return False
+            elif prefer_page:
                 async with httpx.AsyncClient() as client:
                     resp = await client.get(
                         f"http://{self._host}:{self._port}/json",
@@ -303,29 +409,88 @@ class BrowserController:
         # Session video recording (CDP screencast) bookkeeping
         self._recording: Optional[dict] = None
         self._recording_listener: Optional[Callable[[dict], object]] = None
+        # Native JavaScript dialog bookkeeping. ``_pending_dialog`` is the
+        # one currently blocking the renderer (manual policy only);
+        # ``_dialog_log`` is the audit trail every endpoint result drains
+        # so a dialog is never handled behind the model's back.
+        self._dialog_policy: str = DEFAULT_DIALOG_POLICY
+        self._dialog_accept_text: str = ""
+        self._dialog_manual_timeout_s: float = DIALOG_MANUAL_TIMEOUT_S
+        self._pending_dialog: Optional[dict] = None
+        self._dialog_log: list[dict] = []
+        self._dialog_seq = 0
+        self._dialog_listener: Optional[Callable[[dict], object]] = None
+        self._pw_dialog_handler: Optional[Callable] = None
+        # Background tasks (dialog watchdogs). Held strongly with a
+        # done-callback discard: the event loop keeps tasks only weakly,
+        # so a bare create_task can be collected mid-flight.
+        self._bg_tasks: set = set()
+        # CDP target id of the tab this controller is currently driving.
+        self._attached_target_id: str = ""
 
     @property
     def connected(self) -> bool:
         return self._cdp.connected
 
     async def initialize(self) -> bool:
-        """Connect to Chrome CDP and optionally Playwright. Auto-launches Chrome if needed."""
-        cdp_ok = await self._cdp.connect()
+        """Connect to Chrome CDP and optionally Playwright. Auto-launches Chrome if needed.
+
+        ``prefer_page=True`` is load-bearing, not a preference. ``connect()``
+        defaults to the ``/json/version`` endpoint, which is the BROWSER
+        target, and the browser target implements neither ``Page`` nor
+        ``Runtime`` nor ``Accessibility`` nor ``Network``. Every CDP-domain
+        endpoint on this controller was therefore dead on a default
+        connection, and measurably so:
+
+          * ``snapshot`` (Accessibility.getFullAXTree), the ARIA tree the
+            agent needs to address elements, returned success=False on
+            every call. It has no Playwright fallback, so it never worked.
+          * ``get_console_logs`` always returned zero entries, because
+            ``Runtime.enable``/``Log.enable`` failed inside a try/except
+            that logged at debug and moved on.
+          * ``network_monitor_start`` raised "'Network.enable' wasn't
+            found" out of the skill.
+          * ``get_page_pdf`` and the CDP-only ``screenshot`` path failed
+            the same way.
+
+        Playwright masked this for click/type/navigate/screenshot, which is
+        why it survived: the endpoints with a Playwright path worked and
+        the ones without silently did not. ``_screencast_cdp`` already
+        opened its own page-level socket to work around it for recording;
+        this fixes it once, for every endpoint.
+
+        Browser-domain commands still work over a page socket, so
+        ``Target.getTargets``, ``Browser.setDownloadBehavior`` and
+        ``Network.getAllCookies`` are unaffected. ``connect`` falls back to
+        the browser endpoint when Chrome has no page target yet, so a
+        freshly launched browser with no tab still connects.
+        """
+        cdp_ok = await self._cdp.connect(prefer_page=True)
         if not cdp_ok:
             launched = await self._auto_launch_chrome()
             if launched:
                 await asyncio.sleep(2.0)
-                cdp_ok = await self._cdp.connect()
+                cdp_ok = await self._cdp.connect(prefer_page=True)
             if not cdp_ok:
                 logger.warning("CDP not available — browser control disabled.")
                 return False
+        if not self._cdp.is_page_target:
+            logger.warning(
+                "CDP attached to the browser target, not a tab: Chrome exposes no "
+                "page target yet. snapshot, get_console_logs, network_log and "
+                "get_page_pdf will fail until a tab exists."
+            )
 
         if not self._console_listener_attached:
-            self._cdp.add_event_listener(self._on_cdp_event)
+            self._attach_cdp_listeners(self._cdp)
             self._console_listener_attached = True
+        self._attached_target_id = getattr(self._cdp, "target_id", "") or ""
         try:
             await self._cdp.send_command("Runtime.enable")
             await self._cdp.send_command("Log.enable")
+            # Page.enable is what delivers Page.javascriptDialogOpening.
+            # Without it a blocking alert() is invisible to this process
+            # and every later Runtime.evaluate simply never returns.
             await self._cdp.send_command("Page.enable")
         except Exception as e:
             logger.debug(f"CDP event channels setup skipped: {e}")
@@ -348,6 +513,28 @@ class BrowserController:
             else:
                 ctx = await self._browser.new_context()
                 self._page = await ctx.new_page()
+            # Playwright and CDP each pick a "first" page independently,
+            # and there is no guarantee they pick the SAME tab. When they
+            # disagree, selector actions (Playwright) and evaluate /
+            # snapshot / screenshot (CDP) drive two different tabs while
+            # every result reads like success. Align them on the tab the
+            # CDP socket actually holds.
+            if self._attached_target_id:
+                aligned = await self._playwright_page_for_target(
+                    self._attached_target_id
+                )
+                if aligned is not None:
+                    self._page = aligned
+                else:
+                    logger.debug(
+                        "No Playwright page matches CDP target %s; leaving the "
+                        "Playwright page as-is.", self._attached_target_id,
+                    )
+            # Playwright auto-dismisses every dialog on a page that has no
+            # `dialog` listener, and it does so before our CDP handler can
+            # look at it. Registering a listener is what hands dialog
+            # policy back to this controller.
+            self._install_pw_dialog_handler()
             logger.info("Playwright connected via CDP")
         except Exception as e:
             # Roll back any partial driver start so we don't leak it on
@@ -439,39 +626,784 @@ class BrowserController:
             logger.warning(f"Failed to list tabs: {e}")
             return []
 
-    async def switch_tab(self, tab_id: str) -> bool:
-        """Activate a tab by its CDP target id."""
+    async def switch_tab(self, tab_id: str) -> dict:
+        """Activate a tab AND move this controller onto it.
+
+        The bug this fixes: the old implementation only asked Chrome to
+        bring the tab to the front. ``self._page`` (Playwright) and
+        ``self._cdp`` (the page-level websocket) both stayed bound to the
+        ORIGINAL tab, so every endpoint called afterwards, including
+        ``snapshot``, ``get_page_text``, ``click`` and ``screenshot``,
+        silently acted on the tab the user was no longer looking at and
+        reported success. Wrong-target-but-successful is the worst
+        failure mode a driver can have, because nothing above it can tell.
+
+        Refusals (each returns ``success: false`` with the reason):
+          * no such tab id, or the tab is not a page target;
+          * a screencast recording is in flight on the shared CDP socket
+            (re-attaching would sever it mid-recording; stop_recording
+            first);
+          * a HAR session is active (``self._page`` belongs to the HAR
+            context; har_stop first).
+        """
+        tab_id = str(tab_id or "").strip()
+        if not tab_id:
+            return {"success": False, "error": "tab_id is required (get one from list_tabs)."}
         import aiohttp
+        activated = False
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://{CDP_HOST}:{CDP_PORT}/json/activate/{tab_id}") as resp:
-                    return resp.status == 200
+                async with session.get(
+                    f"http://{CDP_HOST}:{CDP_PORT}/json/activate/{tab_id}"
+                ) as resp:
+                    activated = resp.status == 200
+                    if not activated:
+                        body = (await resp.text())[:200]
+                        return {
+                            "success": False,
+                            "tab_id": tab_id,
+                            "error": (
+                                f"Chrome refused to activate tab {tab_id!r} "
+                                f"(HTTP {resp.status}): {body}"
+                            ),
+                        }
         except Exception as e:
             logger.warning(f"Failed to switch tab: {e}")
-            return False
+            return {"success": False, "tab_id": tab_id, "error": str(e)}
 
-    async def new_tab(self, url: str = "about:blank") -> Optional[str]:
-        """Open a new browser tab."""
+        attached = await self.attach_to_tab(tab_id)
+        attached["activated"] = activated
+        return attached
+
+    async def attach_to_tab(self, tab_id: str) -> dict:
+        """Re-point the CDP socket and the Playwright page at one tab.
+
+        Both halves must move together. Moving only one leaves selector
+        actions on one tab and evaluate/snapshot/screenshot on another,
+        which is a harder bug to see than either half failing outright.
+        """
+        tab_id = str(tab_id or "").strip()
+        if not tab_id:
+            return {"success": False, "error": "tab_id is required."}
+        if self._recording is not None and not self._recording.get("owns_cdp"):
+            return {
+                "success": False,
+                "tab_id": tab_id,
+                "error": (
+                    f"Recording {self._recording['recording_id']} is using this "
+                    "CDP socket; switching tabs would sever the screencast. "
+                    "Call stop_recording first."
+                ),
+            }
+        if getattr(self, "_har_active", False):
+            return {
+                "success": False,
+                "tab_id": tab_id,
+                "error": (
+                    "A HAR session owns the active page. Call har_stop before "
+                    "switching tabs, or the HAR would capture the wrong tab."
+                ),
+            }
+
+        if self._attached_target_id == tab_id and self._cdp.connected:
+            page_ok = await self._attach_playwright_page(tab_id)
+            return {
+                "success": True, "tab_id": tab_id, "already_attached": True,
+                "playwright_attached": page_ok,
+                **(await self._attached_identity()),
+            }
+
+        host = getattr(self._cdp, "_host", CDP_HOST)
+        port = getattr(self._cdp, "_port", CDP_PORT)
+        fresh = CDPConnection(host=host, port=port)
+        if not await fresh.connect(target_id=tab_id):
+            return {
+                "success": False,
+                "tab_id": tab_id,
+                "error": (
+                    f"No CDP page target {tab_id!r} on {host}:{port}. Call "
+                    "list_tabs for current ids; a tab id goes stale when the "
+                    "tab is closed."
+                ),
+            }
+
+        old = self._cdp
+        self._cdp = fresh
+        self._console_listener_attached = False
+        self._attach_cdp_listeners(fresh)
+        self._console_listener_attached = True
+        self._attached_target_id = fresh.target_id or tab_id
+        # ARIA refs are backend node ids in the OLD tab's DOM. Reusing
+        # them after a switch would resolve to nothing, or worse, to a
+        # coincidentally-valid node in the new document.
+        self._aria_refs.clear()
+        try:
+            await old.disconnect()
+        except Exception as e:
+            logger.debug("Old CDP socket did not close cleanly: %s", e)
+
+        for domain in ("Runtime.enable", "Log.enable", "Page.enable"):
+            try:
+                await fresh.send_command(domain)
+            except Exception as e:
+                logger.debug("%s failed on the new tab socket: %s", domain, e)
+        if self._network_monitoring:
+            try:
+                await fresh.send_command("Network.enable")
+            except Exception as e:
+                logger.debug("Network.enable failed on the new tab socket: %s", e)
+
+        page_ok = await self._attach_playwright_page(tab_id)
+        return {
+            "success": True,
+            "tab_id": tab_id,
+            "already_attached": False,
+            "playwright_attached": page_ok,
+            "aria_refs_invalidated": True,
+            **(await self._attached_identity()),
+        }
+
+    async def _attached_identity(self) -> dict:
+        info = await self.get_page_info()
+        return {"url": info.get("url", ""), "title": info.get("title", "")}
+
+    async def _attach_playwright_page(self, tab_id: str) -> bool:
+        """Point ``self._page`` at the Playwright page for ``tab_id``."""
+        if not self._browser:
+            return False
+        page = await self._playwright_page_for_target(tab_id)
+        if page is None:
+            logger.warning(
+                "CDP moved to tab %s but no Playwright page matches it; "
+                "selector-based endpoints would still drive the old tab, so "
+                "the Playwright page has been dropped and those endpoints "
+                "will use the CDP fallback.", tab_id,
+            )
+            self._page = None
+            return False
+        self._page = page
+        self._install_pw_dialog_handler()
+        return True
+
+    async def _playwright_page_for_target(self, tab_id: str):
+        """Find the Playwright ``Page`` whose CDP target id is ``tab_id``.
+
+        Identity comes from ``Target.getTargetInfo`` over a per-page CDP
+        session, not from a URL comparison: two tabs on the same URL are
+        completely ordinary, and matching them by URL would pick the
+        wrong one without any signal that it had.
+        """
+        if not self._browser:
+            return None
+        pages = []
+        try:
+            for ctx in self._browser.contexts:
+                pages.extend(ctx.pages)
+        except Exception as e:
+            logger.debug("Could not enumerate Playwright pages: %s", e)
+            return None
+        for page in pages:
+            try:
+                if page.is_closed():
+                    continue
+                session = await page.context.new_cdp_session(page)
+                try:
+                    info = await session.send("Target.getTargetInfo")
+                finally:
+                    try:
+                        await session.detach()
+                    except Exception:
+                        pass
+                if str((info.get("targetInfo") or {}).get("targetId")) == tab_id:
+                    return page
+            except Exception as e:
+                logger.debug("Target id probe failed for a Playwright page: %s", e)
+                continue
+        return None
+
+    async def new_tab(self, url: str = "about:blank", activate: bool = True) -> dict:
+        """Open a new browser tab and (by default) move the controller onto it.
+
+        PUT, not GET. Chrome stopped honouring ``GET /json/new`` in M111 and
+        now answers it with the plain-text body "Using unsafe HTTP verb GET
+        to invoke /json/new. This action supports only PUT verb." The old
+        GET therefore failed on every current Chrome, and it failed as a
+        JSON decode error swallowed into ``return None``, so the endpoint
+        reported "no tab id" rather than "your browser rejected the verb",
+        and nothing above could tell the difference between that and a
+        browser that was not running.
+
+        ``activate`` defaults to True because "open a new tab" almost
+        always means "and work in it". With ``activate=False`` the tab is
+        opened but every other endpoint keeps acting on the current tab,
+        which is what this endpoint used to do unconditionally.
+        """
         import aiohttp
+        tab_id = ""
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://{CDP_HOST}:{CDP_PORT}/json/new?{url}") as resp:
-                    data = await resp.json()
-                    return data.get("id")
+                async with session.put(
+                    f"http://{CDP_HOST}:{CDP_PORT}/json/new?{url}"
+                ) as resp:
+                    body = await resp.text()
+                    if resp.status >= 400:
+                        logger.warning(
+                            "Failed to open new tab: CDP answered %s: %s",
+                            resp.status, body[:200],
+                        )
+                        return {
+                            "success": False, "tab_id": "", "url": url,
+                            "error": f"Chrome answered {resp.status}: {body[:200]}",
+                        }
+                    tab_id = str(json.loads(body).get("id") or "")
         except Exception as e:
             logger.warning(f"Failed to open new tab: {e}")
-            return None
+            return {"success": False, "tab_id": "", "url": url, "error": str(e)}
 
-    async def close_tab(self, tab_id: str) -> bool:
-        """Close a browser tab by its CDP target id."""
+        if not tab_id:
+            return {
+                "success": False, "tab_id": "", "url": url,
+                "error": "Chrome opened a tab but reported no target id.",
+            }
+        result = {"success": True, "tab_id": tab_id, "url": url, "attached": False}
+        # Only re-attach if there is a live connection to move. A fresh
+        # controller that has never connected has nothing to switch.
+        if activate and self._cdp.connected:
+            attached = await self.attach_to_tab(tab_id)
+            result["attached"] = bool(attached.get("success"))
+            if not attached.get("success"):
+                result["attach_error"] = attached.get("error", "")
+            else:
+                result["ready_state"] = await self._wait_for_document_ready()
+                result["title"] = (await self._attached_identity()).get("title", "")
+        return result
+
+    async def _wait_for_document_ready(self, timeout_s: float = 10.0) -> str:
+        """Poll ``document.readyState`` until the new tab is usable.
+
+        ``PUT /json/new`` answers the moment the target exists, long
+        before the document parses. Acting on that gap is not a
+        theoretical race: a drag issued straight after new_tab returned
+        SUCCESS and moved nothing, because the page's own dragstart
+        listener had not been attached yet. A success that did nothing is
+        the failure mode this whole lane is about, so new_tab waits.
+        """
+        deadline = time.monotonic() + max(0.5, float(timeout_s))
+        state = ""
+        while time.monotonic() < deadline:
+            try:
+                out = await self._cdp.send_command(
+                    "Runtime.evaluate",
+                    {"expression": "document.readyState", "returnByValue": True},
+                    timeout=5.0,
+                )
+                state = str((out.get("result") or {}).get("value") or "")
+            except Exception as e:
+                logger.debug("readyState poll failed: %s", e)
+                state = ""
+            if state == "complete":
+                return state
+            await asyncio.sleep(0.1)
+        logger.info(
+            "Tab did not reach readyState=complete within %.0fs (last: %r).",
+            timeout_s, state,
+        )
+        return state or "unknown"
+
+    async def close_tab(self, tab_id: str) -> dict:
+        """Close a browser tab by its CDP target id.
+
+        Closing the tab the controller is attached to leaves it driving a
+        dead socket, so this re-attaches to another open tab and says
+        which one in ``reattached_to``. If no tab is left, every
+        subsequent endpoint fails loudly rather than acting on nothing.
+        """
+        tab_id = str(tab_id or "").strip()
+        if not tab_id:
+            return {"success": False, "error": "tab_id is required (get one from list_tabs)."}
+        was_attached = self._attached_target_id == tab_id
         import aiohttp
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://{CDP_HOST}:{CDP_PORT}/json/close/{tab_id}") as resp:
-                    return resp.status == 200
+                async with session.get(
+                    f"http://{CDP_HOST}:{CDP_PORT}/json/close/{tab_id}"
+                ) as resp:
+                    if resp.status != 200:
+                        body = (await resp.text())[:200]
+                        return {
+                            "success": False, "tab_id": tab_id,
+                            "error": f"Chrome refused to close tab {tab_id!r} "
+                                     f"(HTTP {resp.status}): {body}",
+                        }
         except Exception as e:
             logger.warning(f"Failed to close tab: {e}")
+            return {"success": False, "tab_id": tab_id, "error": str(e)}
+
+        result = {"success": True, "tab_id": tab_id, "closed": True,
+                  "was_active_tab": was_attached, "reattached_to": ""}
+        if not was_attached:
+            return result
+        # Chrome needs a beat to retire the target before /json stops
+        # listing it; re-attaching too early can land back on the corpse.
+        await asyncio.sleep(0.2)
+        for tab in await self.list_tabs():
+            if tab.get("id") and tab["id"] != tab_id:
+                attached = await self.attach_to_tab(tab["id"])
+                if attached.get("success"):
+                    result["reattached_to"] = tab["id"]
+                    result["url"] = attached.get("url", "")
+                return result
+        self._attached_target_id = ""
+        result["error"] = (
+            "Closed the tab this controller was driving and no other tab is "
+            "open. Call new_tab before any further browser action."
+        )
+        return result
+
+    # ── Native JavaScript dialogs ────────────────────────────────────
+    #
+    # alert(), confirm(), prompt() and beforeunload freeze the renderer
+    # until a CDP client answers. Before this, nothing in this controller
+    # answered them on the CDP path, so a page that popped a confirm went
+    # from "loading" to permanently unresponsive with no error anywhere:
+    # every later Runtime.evaluate just timed out. A blocked page is
+    # indistinguishable from a hung one.
+    #
+    # Policy, and why the default is dismiss:
+    #   dismiss (DEFAULT) - Cancel/stay. Safe for every dialog type.
+    #   accept            - OK/leave. Opt-in only, because "Delete
+    #                       account?" is a confirm() and auto-accepting
+    #                       it destroys data on the user's behalf with no
+    #                       one having read the question.
+    #   manual            - leave it open for handle_dialog. The page
+    #                       stays blocked meanwhile, so a watchdog
+    #                       dismisses it after dialog_manual_timeout_s and
+    #                       records that it did.
+    # Every dialog is logged either way, and the log is drained onto the
+    # next endpoint result as `dialog_events`.
+
+    def _attach_cdp_listeners(self, cdp) -> None:
+        """Wire the console and dialog listeners onto a CDP socket."""
+        cdp.add_event_listener(self._on_cdp_event)
+        self._dialog_listener = self._on_cdp_dialog_event
+        cdp.add_event_listener(self._dialog_listener)
+
+    def _install_pw_dialog_handler(self) -> None:
+        """Take dialog control back from Playwright's auto-dismiss.
+
+        Playwright dismisses every dialog on a page with no ``dialog``
+        listener, and it does so before our CDP handler sees it, so
+        without this the policy would be permanently stuck on "dismiss"
+        and handle_dialog could never accept anything. Playwright's own
+        default is not even uniform: with no listener it DISMISSES an
+        alert/confirm/prompt but ACCEPTS a beforeunload, so "leave the
+        default alone" would silently mean "walk away from the user's
+        unsaved work".
+
+        The handler must also be the thing that ANSWERS, not just
+        observes. Answering over this controller's raw CDP socket instead
+        was tried and is wrong: Playwright's Dialog additionally runs
+        ``frameAbortedNavigation`` when a beforeunload is dismissed, and
+        that is what settles the ``page.goto`` waiting on it. Measured
+        against Chrome 151, answering behind Playwright's back left the
+        goto pending forever and wedged the page's protocol channel, with
+        the tab permanently frozen.
+        """
+        if not self._page:
+            return
+        try:
+            if self._pw_dialog_handler is not None:
+                try:
+                    self._page.remove_listener("dialog", self._pw_dialog_handler)
+                except Exception:
+                    pass
+            handler = self._on_pw_dialog
+            self._page.on("dialog", handler)
+            self._pw_dialog_handler = handler
+        except Exception as e:
+            logger.debug("Could not install the Playwright dialog handler: %s", e)
+
+    def _is_duplicate_dialog(self, entry: dict) -> bool:
+        """True when this is the SAME dialog arriving down a second path.
+
+        Chrome delivers ``Page.javascriptDialogOpening`` to every attached
+        CDP client, and Playwright is one, so one dialog can surface twice
+        inside this process. Answering it twice fails the second time with
+        "No dialog is showing".
+
+        The test is "a matching dialog is STILL OPEN", not "a matching one
+        was seen recently". A time window was tried first and was wrong in
+        a way that mattered: a page that raises the same beforeunload on
+        two navigation attempts a few hundred milliseconds apart had its
+        second dialog silently classified as an echo of the first, so
+        nothing ever answered it and the tab hung with the modal up. The
+        pending check cannot make that mistake, because Chrome shows at
+        most one dialog per page: if one with this identity is open right
+        now, this delivery is that same dialog.
+        """
+        pending = self._pending_dialog
+        return bool(
+            pending
+            and pending.get("pending")
+            and pending.get("type") == entry.get("type")
+            and pending.get("message") == entry.get("message")
+        )
+
+    def _record_dialog(self, entry: dict) -> dict:
+        self._dialog_seq += 1
+        entry["dialog_id"] = f"dlg{self._dialog_seq}"
+        entry["seen_at"] = round(time.time(), 3)
+        entry.setdefault("handled", False)
+        entry.setdefault("action", "")
+        self._dialog_log.append(entry)
+        if len(self._dialog_log) > DIALOG_LOG_MAX:
+            self._dialog_log = self._dialog_log[-DIALOG_LOG_MAX:]
+        logger.info(
+            "JavaScript dialog (%s) on the page: %r -> policy=%s",
+            entry.get("type"), str(entry.get("message", ""))[:120],
+            self._dialog_policy,
+        )
+        return entry
+
+    def _spawn(self, coro, name: str) -> None:
+        """Run a coroutine as a strongly-referenced background task."""
+        task = asyncio.ensure_future(coro)
+        try:
+            task.set_name(name)
+        except AttributeError:
+            pass
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _on_cdp_dialog_event(self, msg: dict) -> None:
+        """Answer (or park) a dialog seen on the raw CDP socket."""
+        method = msg.get("method", "")
+        if method == "Page.javascriptDialogClosed":
+            # Fires whoever answered, including another attached client or
+            # Playwright's driver. Marking the entry as well as clearing
+            # the handle keeps the log from reporting a dialog as still
+            # blocking the page after it has plainly gone.
+            entry = self._pending_dialog
+            self._pending_dialog = None
+            if entry is not None and entry.get("pending"):
+                entry["pending"] = False
+                if not entry.get("handled"):
+                    entry["handled"] = True
+                    entry["handled_by"] = "closed_by_another_cdp_client"
+                    entry["action"] = (
+                        "accept" if (msg.get("params") or {}).get("result")
+                        else "dismiss"
+                    )
+            return
+        if method != "Page.javascriptDialogOpening":
+            return
+        # Playwright owns a dialog on a tab it has a page for. It must be
+        # the one to answer it: for a beforeunload raised by page.goto,
+        # only Playwright's own Dialog also runs frameAbortedNavigation,
+        # and without that its goto stays pending forever and the page's
+        # protocol channel wedges. Measured against Chrome 151: answering
+        # over this socket instead left the tab permanently frozen.
+        if self._page is not None and self._pw_dialog_handler is not None:
+            return
+        params = msg.get("params") or {}
+        candidate = {
+            "type": params.get("type", "alert"),
+            "message": str(params.get("message", "")),
+            "default_value": str(params.get("defaultPrompt", "")),
+            "url": str(params.get("url", "")),
+            "via": "cdp",
+        }
+        if self._is_duplicate_dialog(candidate):
+            return
+        entry = self._record_dialog(candidate)
+        entry["pending"] = True
+        self._pending_dialog = entry
+        if self._dialog_policy == "manual":
+            self._spawn(self._dialog_watchdog(entry["dialog_id"]), "dialog-watchdog")
+            return
+        await self._answer_pending(
+            self._dialog_policy, self._dialog_accept_text, reason="policy"
+        )
+
+    async def _on_pw_dialog(self, dialog) -> None:
+        """Answer (or park) a dialog delivered by the Playwright driver."""
+        candidate = {
+            "type": getattr(dialog, "type", "alert"),
+            "message": str(getattr(dialog, "message", "")),
+            "default_value": str(getattr(dialog, "default_value", "") or ""),
+            "url": self._page.url if self._page else "",
+            "via": "playwright",
+        }
+        if self._is_duplicate_dialog(candidate):
+            return
+        entry = self._record_dialog(candidate)
+        entry["pending"] = True
+        entry["_dialog"] = dialog
+        self._pending_dialog = entry
+        if self._dialog_policy == "manual":
+            self._spawn(self._dialog_watchdog(entry["dialog_id"]), "dialog-watchdog")
+            return
+        await self._answer_pending(
+            self._dialog_policy, self._dialog_accept_text, reason="policy"
+        )
+
+    async def _dialog_watchdog(self, dialog_id: str) -> None:
+        """Dismiss a manually-parked dialog that nobody ever answered.
+
+        Without this, ``dialog_policy=manual`` plus a forgotten
+        ``handle_dialog`` is a permanently frozen tab, which is the exact
+        symptom this whole feature exists to remove.
+        """
+        try:
+            await asyncio.sleep(max(1.0, float(self._dialog_manual_timeout_s)))
+        except asyncio.CancelledError:
+            return
+        pending = self._pending_dialog
+        if not pending or pending.get("dialog_id") != dialog_id:
+            return
+        logger.warning(
+            "Dialog %s was left open for %.0fs under dialog_policy=manual; "
+            "dismissing it so the page stops being blocked.",
+            dialog_id, self._dialog_manual_timeout_s,
+        )
+        await self._answer_pending("dismiss", "", reason="manual_timeout")
+
+    async def _answer_pending(self, action: str, prompt_text: str, reason: str) -> dict:
+        """Actually answer the open dialog and mark the log entry."""
+        entry = self._pending_dialog
+        if entry is None:
+            return {"success": False, "error": "No dialog is currently open."}
+        accept = action == "accept"
+        dialog = entry.pop("_dialog", None)
+        # promptText belongs to a prompt() and nothing else. Sending it on
+        # an alert, a confirm or a beforeunload is not harmless: passing an
+        # explicit empty promptText while accepting a beforeunload left
+        # Chrome 151 never answering, so page.goto sat out its full 30s
+        # timeout and the tab was left blocked. Omitting it entirely on
+        # every non-prompt dialog is what makes accept work.
+        is_prompt = entry.get("type") == "prompt"
+        text = prompt_text or entry.get("default_value", "")
+        params = {"accept": accept}
+        if accept and is_prompt:
+            params["promptText"] = text
+        try:
+            if dialog is not None:
+                # Bounded, with a raw-socket fallback. An answer that never
+                # returns would leave the tab frozen with no way for the
+                # caller to find out, which is the failure mode this whole
+                # feature exists to remove.
+                if not accept:
+                    answer = dialog.dismiss()
+                elif is_prompt:
+                    answer = dialog.accept(text)
+                else:
+                    answer = dialog.accept()
+                try:
+                    await asyncio.wait_for(answer, timeout=10.0)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Playwright did not answer dialog %s within 10s; "
+                        "unblocking the page over the raw CDP socket.",
+                        entry.get("dialog_id"),
+                    )
+                    await self._cdp.send_command(
+                        "Page.handleJavaScriptDialog", params, timeout=10.0,
+                    )
+            else:
+                await self._cdp.send_command(
+                    "Page.handleJavaScriptDialog", params, timeout=10.0,
+                )
+        except Exception as e:
+            entry["pending"] = False
+            self._pending_dialog = None
+            # "No dialog is showing" means someone else (Playwright's own
+            # driver, or another attached CDP client) got there first. The
+            # page is unblocked, which is the outcome that matters, so
+            # this is a note rather than a failure.
+            if "No dialog is showing" in str(e):
+                entry["handled"] = True
+                entry["handled_by"] = "already_answered_by_another_cdp_client"
+                logger.debug("Dialog %s was already answered elsewhere.",
+                             entry.get("dialog_id"))
+                return {"success": True, "dialog": self._public_dialog(entry),
+                        "note": "The dialog had already been answered by another "
+                                "attached CDP client; the page is not blocked."}
+            entry["error"] = str(e)
+            logger.warning("Could not answer dialog %s: %s", entry.get("dialog_id"), e)
+            return {"success": False, "error": f"Could not answer the dialog: {e}",
+                    "dialog": self._public_dialog(entry)}
+        entry["pending"] = False
+        entry["handled"] = True
+        entry["action"] = "accept" if accept else "dismiss"
+        entry["handled_by"] = reason
+        if accept and entry.get("type") == "prompt":
+            entry["prompt_text"] = prompt_text or entry.get("default_value", "")
+        self._pending_dialog = None
+        return {"success": True, "dialog": self._public_dialog(entry)}
+
+    @staticmethod
+    def _public_dialog(entry: dict) -> dict:
+        return {k: v for k, v in entry.items() if not k.startswith("_")}
+
+    async def set_dialog_policy(
+        self, policy: str = DEFAULT_DIALOG_POLICY, prompt_text: str = "",
+        manual_timeout_s: float = DIALOG_MANUAL_TIMEOUT_S,
+    ) -> dict:
+        """Choose how alert/confirm/prompt/beforeunload are answered."""
+        policy = str(policy or "").strip().lower()
+        if policy not in DIALOG_POLICIES:
+            return {
+                "success": False,
+                "error": f"policy must be one of {', '.join(DIALOG_POLICIES)}; got {policy!r}.",
+            }
+        try:
+            timeout = max(1.0, min(float(manual_timeout_s), 600.0))
+        except (TypeError, ValueError):
+            timeout = DIALOG_MANUAL_TIMEOUT_S
+        self._dialog_policy = policy
+        self._dialog_accept_text = str(prompt_text or "")
+        self._dialog_manual_timeout_s = timeout
+        note = {
+            "dismiss": "Dialogs are cancelled. confirm() reads false, prompt() null, "
+                       "beforeunload keeps the page.",
+            "accept": "DANGEROUS: every confirm() is answered OK without anyone "
+                      "reading the question, including destructive ones.",
+            "manual": (
+                f"The page stays BLOCKED until handle_dialog is called. A watchdog "
+                f"dismisses an unanswered dialog after {timeout:.0f}s."
+            ),
+        }[policy]
+        return {"success": True, "policy": policy, "prompt_text": self._dialog_accept_text,
+                "manual_timeout_s": timeout, "note": note}
+
+    async def handle_dialog(self, action: str = "dismiss", prompt_text: str = "") -> dict:
+        """Answer the dialog currently blocking the page.
+
+        Only useful under ``dialog_policy=manual``; under the automatic
+        policies the dialog has already been answered by the time any
+        endpoint could run, and this reports that there is nothing open.
+        """
+        action = str(action or "").strip().lower()
+        if action not in ("accept", "dismiss"):
+            return {"success": False, "error": "action must be 'accept' or 'dismiss'."}
+        if self._pending_dialog is None:
+            return await self._answer_untracked(action, str(prompt_text or ""))
+        return await self._answer_pending(action, str(prompt_text or ""), reason="manual")
+
+    async def _answer_untracked(self, action: str, prompt_text: str) -> dict:
+        """Blind-answer a dialog this controller never saw open.
+
+        This is the escape hatch, and it is not hypothetical. A dialog
+        that was ALREADY on screen when the controller attached to the
+        tab produced its ``Page.javascriptDialogOpening`` before anyone
+        was listening, so there is nothing tracked and no CDP command to
+        ask "is one showing". Refusing here would leave the agent staring
+        at a tab that answers nothing, with no way out, which is the
+        exact trap this feature exists to remove. Chrome answers "No
+        dialog is showing" when there is genuinely nothing to clear, and
+        that is reported truthfully rather than as an error.
+        """
+        params = {"accept": action == "accept"}
+        if action == "accept" and prompt_text:
+            params["promptText"] = prompt_text
+        try:
+            await self._cdp.send_command(
+                "Page.handleJavaScriptDialog", params, timeout=10.0,
+            )
+        except Exception as e:
+            if "No dialog is showing" in str(e):
+                return {
+                    "success": False,
+                    "no_dialog_open": True,
+                    "policy": self._dialog_policy,
+                    "error": (
+                        "Chrome reports no dialog is open, so there was nothing to "
+                        f"{action}. Dialogs are answered automatically under "
+                        f"dialog_policy={self._dialog_policy!r}; set it to 'manual' "
+                        "if you need to answer one by hand, and call get_dialogs to "
+                        "see what has already been answered."
+                    ),
+                }
+            return {"success": False, "error": f"Could not clear the dialog: {e}"}
+        entry = self._record_dialog({
+            "type": "unknown",
+            "message": "(dialog was already open before this controller attached)",
+            "default_value": "",
+            "url": "",
+            "via": "blind",
+        })
+        entry["handled"] = True
+        entry["action"] = action
+        entry["handled_by"] = "blind_clear"
+        return {
+            "success": True,
+            "untracked": True,
+            "dialog": self._public_dialog(entry),
+            "note": (
+                "Cleared a dialog that was already open before this controller "
+                "started watching, so its text was never captured. Take a "
+                "screenshot before answering next time if the wording matters."
+            ),
+        }
+
+    async def get_dialogs(self, limit: int = 20, clear: bool = False) -> dict:
+        """Return the dialogs this session has seen, newest last."""
+        try:
+            bounded = max(1, min(int(limit), DIALOG_LOG_MAX))
+        except (TypeError, ValueError):
+            bounded = 20
+        entries = [self._public_dialog(e) for e in self._dialog_log[-bounded:]]
+        if clear:
+            self._dialog_log.clear()
+        result = {
+            "success": True,
+            "count": len(entries),
+            "dialogs": entries,
+            "policy": self._dialog_policy,
+            "pending": self._public_dialog(self._pending_dialog)
+            if self._pending_dialog else None,
+        }
+        blocked = await self._renderer_is_blocked()
+        result["page_blocked"] = blocked
+        if blocked:
+            result["blocked_hint"] = (
+                "The renderer is not answering, which is what a page with an "
+                "unanswered modal dialog looks like from here. It may be a dialog "
+                "that was already open before this controller attached, so nothing "
+                "was recorded about it. Call handle_dialog with action=dismiss to "
+                "clear it blind, then take a screenshot to see where you are."
+            )
+        return result
+
+    async def _renderer_is_blocked(self) -> bool:
+        """True when the renderer stops answering, i.e. a modal is up.
+
+        There is no CDP command that asks "is a dialog showing", so the
+        only honest signal is that the renderer has stopped evaluating.
+        A blocked page and a hung page look identical from outside, which
+        is exactly why the agent needs to be TOLD rather than left to
+        infer it from a timeout it cannot distinguish from a slow page.
+        """
+        if not self._cdp.connected:
             return False
+        try:
+            await self._cdp.send_command(
+                "Runtime.evaluate",
+                {"expression": "1", "returnByValue": True},
+                timeout=3.0,
+            )
+            return False
+        except asyncio.TimeoutError:
+            return True
+        except Exception:
+            return False
+
+    def _drain_dialog_events(self) -> list[dict]:
+        """Unreported dialogs, for attaching to the next endpoint result."""
+        fresh = [e for e in self._dialog_log if not e.get("_reported")]
+        for entry in fresh:
+            entry["_reported"] = True
+        return [self._public_dialog(e) for e in fresh]
 
     def _on_cdp_event(self, event: dict):
         """Capture console/log events so the agent can inspect browser errors."""
@@ -638,34 +1570,326 @@ class BrowserController:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def snapshot(self) -> dict:
-        """Get ARIA accessibility tree as structured text with resolved selectors."""
+    async def snapshot(
+        self,
+        filter: str = "interactive",
+        max_nodes: int = SNAPSHOT_DEFAULT_MAX_NODES,
+        offset: int = 0,
+        include_coordinates: bool = True,
+    ) -> dict:
+        """Get the ARIA accessibility tree, filtered and paginated.
+
+        What this fixes: the tree used to be cut at a hard ``nodes[:500]``
+        head slice with no filter, no offset and no signal that anything
+        had been dropped. Chrome contributes hundreds of chrome-shell and
+        text nodes before the page's own content, so on a real app the
+        buttons the agent needed fell off the end of the list and were
+        simply unreachable, with the result still reporting success.
+
+        Now it filters to interactive roles by default, paginates over the
+        FULL match list, and says ``TRUNCATED`` with the next offset in
+        the tree text itself so the model reads it without inspecting
+        fields.
+        """
+        mode = str(filter or "interactive").strip().lower()
+        if mode not in ("interactive", "all"):
+            return {
+                "success": False,
+                "error": f"filter must be 'interactive' or 'all'; got {filter!r}.",
+            }
+        try:
+            limit = max(1, min(int(max_nodes), SNAPSHOT_MAX_MAX_NODES))
+        except (TypeError, ValueError):
+            limit = SNAPSHOT_DEFAULT_MAX_NODES
+        try:
+            start = max(0, int(offset))
+        except (TypeError, ValueError):
+            start = 0
         try:
             await self._cdp.send_command("DOM.enable")
             await self._cdp.send_command("Accessibility.enable")
             result = await self._cdp.send_command("Accessibility.getFullAXTree")
             nodes = result.get("nodes", [])
             self._aria_refs.clear()
-            text = self._build_aria_text(nodes)
-            # Resolve backend DOM node IDs to CSS selectors
-            await self._resolve_aria_selectors()
-            return {"success": True, "aria_tree": text, "ref_count": len(self._aria_refs)}
+            matched = [n for n in nodes if self._ax_node_matches(n, mode)]
+            page = matched[start:start + limit]
+            text = self._build_aria_text(page, ref_offset=start)
+            # Resolve backend DOM node IDs to CSS selectors (and, when
+            # asked, viewport coordinates) for the page we just emitted.
+            await self._resolve_aria_selectors(
+                include_coordinates=bool(include_coordinates)
+            )
+            text = self._annotate_aria_text(text)
+            truncated = start + len(page) < len(matched)
+            header = (
+                f"{len(matched)} matching elements (filter={mode}), "
+                f"showing {start}-{start + len(page)}."
+            )
+            if truncated:
+                header += (
+                    f"\nTRUNCATED: call snapshot again with offset="
+                    f"{start + len(page)} for the next page, raise max_nodes, "
+                    f"or narrow with find."
+                )
+            if mode == "interactive":
+                header += (
+                    "\n(filter=interactive: prose and layout nodes are omitted. "
+                    "Use get_page_text to read content, or filter=all to see "
+                    "every node.)"
+                )
+            ambiguous = sorted(
+                ref for ref, info in self._aria_refs.items()
+                if info.get("selector_unique") is False
+            )
+            if ambiguous:
+                header += (
+                    f"\nAMBIGUOUS SELECTORS ({len(ambiguous)}): "
+                    f"{', '.join(ambiguous[:12])}"
+                    f"{'...' if len(ambiguous) > 12 else ''} match more than one "
+                    "element. Clicking them by selector would hit the first "
+                    "match, which may not be the one listed; click_at with the "
+                    "ref's reported x/y instead."
+                )
+            return {
+                "success": True,
+                "aria_tree": f"{header}\n{text}",
+                "ref_count": len(self._aria_refs),
+                "total_matched": len(matched),
+                "total_nodes": len(nodes),
+                "offset": start,
+                "shown": len(page),
+                "next_offset": start + len(page) if truncated else None,
+                "truncated": truncated,
+                "filter": mode,
+                "ambiguous_refs": ambiguous,
+                "refs": self._public_refs() if include_coordinates else {},
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def _resolve_aria_selectors(self):
-        """Resolve ARIA refs to CSS selectors via DOM.describeNode.
+    def _annotate_aria_text(self, text: str) -> str:
+        """Append each ref's viewport centre to its line in the tree.
 
-        Selector strategy is dual-mode aware:
-        * Always emit a *plain* CSS form (id / data-testid / tag.class)
-          when the DOM offers one — these work in both Playwright and
-          CDP `document.querySelector` paths.
-        * Only when nothing else is available do we fall back to
-          ``tag:has-text(...)``. That is a Playwright pseudo-selector
-          (not real CSS), so we also stash the ARIA name in
-          ``text_match`` so the CDP-only path can find the element via
-          a JS text scan instead of choking on the unknown pseudo.
+        This is the bridge that was missing: the snapshot named elements
+        the agent could only reach through a selector, so when the
+        selector failed (overlay, ambiguity, shadow DOM) there was no
+        coordinate to fall back to and no way to get one without a second
+        round trip. ``!ambiguous`` marks a ref whose selector matches more
+        than one element, where the coordinate is the only safe route.
         """
+        out = []
+        for line in text.split("\n"):
+            match = re.match(r"^(\s*)\[(ax\d+)\]", line)
+            info = self._aria_refs.get(match.group(2)) if match else None
+            if info:
+                centre = info.get("center")
+                if centre:
+                    line += f" @{centre['x']:.0f},{centre['y']:.0f}"
+                    if info.get("visible") is False:
+                        line += " !offscreen"
+                if info.get("selector_unique") is False:
+                    line += " !ambiguous"
+            out.append(line)
+        return "\n".join(out)
+
+    def _public_refs(self) -> dict:
+        """Ref -> {selector, x, y, ...} so a failed click has a fallback.
+
+        Without coordinates in the snapshot there is no bridge from a ref
+        to click_at, so a selector-based click that fails (overlay,
+        ambiguous selector, shadow DOM) is a dead end.
+        """
+        out = {}
+        for ref, info in self._aria_refs.items():
+            entry = {
+                "role": info.get("role", ""),
+                "name": info.get("name", ""),
+                "selector": info.get("selector", ""),
+                "selector_unique": info.get("selector_unique"),
+            }
+            centre = info.get("center")
+            if centre:
+                entry["x"] = centre["x"]
+                entry["y"] = centre["y"]
+                entry["visible"] = info.get("visible")
+            out[ref] = entry
+        return out
+
+    @staticmethod
+    def _ax_node_matches(node: dict, mode: str) -> bool:
+        role = (node.get("role") or {}).get("value", "")
+        if not role or role in SNAPSHOT_SKIP_ROLES:
+            return False
+        if node.get("ignored"):
+            return False
+        if mode == "all":
+            return True
+        if role in SNAPSHOT_INTERACTIVE_ROLES:
+            return True
+        # A node the page has explicitly made focusable or clickable is
+        # interactive whatever its role says.
+        for prop in node.get("properties") or []:
+            if prop.get("name") == "focusable" and (prop.get("value") or {}).get("value"):
+                return True
+        return False
+
+    # Runs inside the page against one element (via Runtime.callFunctionOn
+    # on a resolved backend node) and returns a UNIQUE selector plus the
+    # element's viewport geometry in a single round trip.
+    #
+    # Uniqueness is the point. The old resolver emitted `f"{tag}.{cls}"`
+    # with no check at all, so `div.row` on a table of 40 rows became the
+    # selector for every one of them and `querySelector` silently took the
+    # first. A wrong-element click looks exactly like a successful one,
+    # which made it the most dangerous defect in this file. Here the
+    # candidate is verified in the page, and an nth-of-type path is built
+    # from the element itself when the short form is not unique.
+    _REF_RESOLVE_JS = """
+    function () {
+      var el = this;
+      if (!el || el.nodeType !== 1) {
+        el = el && el.parentElement ? el.parentElement : null;
+      }
+      if (!el) return null;
+      function esc(v) { return String(v).replace(/["\\\\]/g, '\\\\$&'); }
+      function unique(sel) {
+        if (!sel) return false;
+        try { return document.querySelectorAll(sel).length === 1; }
+        catch (e) { return false; }
+      }
+      function pathFor(node) {
+        var parts = [];
+        while (node && node.nodeType === 1 && parts.length < 12) {
+          if (node.id && unique('#' + esc(node.id))) {
+            parts.unshift('#' + esc(node.id));
+            break;
+          }
+          var tag = node.tagName.toLowerCase();
+          var parent = node.parentElement;
+          if (parent) {
+            var same = Array.prototype.filter.call(
+              parent.children, function (c) { return c.tagName === node.tagName; });
+            if (same.length > 1) {
+              tag += ':nth-of-type(' + (same.indexOf(node) + 1) + ')';
+            }
+          }
+          parts.unshift(tag);
+          node = parent;
+        }
+        return parts.join(' > ');
+      }
+      var tag = el.tagName.toLowerCase();
+      var candidates = [];
+      if (el.id) candidates.push('#' + esc(el.id));
+      var testid = el.getAttribute('data-testid');
+      if (testid) candidates.push('[data-testid="' + esc(testid) + '"]');
+      var nm = el.getAttribute('name');
+      if (nm) candidates.push(tag + '[name="' + esc(nm) + '"]');
+      var aria = el.getAttribute('aria-label');
+      if (aria) candidates.push(tag + '[aria-label="' + esc(aria) + '"]');
+      var cls = (el.getAttribute('class') || '').split(/\\s+/).filter(Boolean)[0];
+      if (cls) candidates.push(tag + '.' + esc(cls));
+      candidates.push(tag);
+      var selector = '';
+      for (var i = 0; i < candidates.length; i++) {
+        if (unique(candidates[i])) { selector = candidates[i]; break; }
+      }
+      var isUnique = true;
+      if (!selector) {
+        selector = pathFor(el);
+        isUnique = unique(selector);
+        if (!isUnique) { selector = candidates[0] || tag; }
+      }
+      var rect = el.getBoundingClientRect();
+      var style = window.getComputedStyle(el);
+      return {
+        selector: selector,
+        unique: isUnique,
+        match_count: (function () {
+          try { return document.querySelectorAll(selector).length; }
+          catch (e) { return 0; }
+        })(),
+        tag: tag,
+        x: rect.x + rect.width / 2,
+        y: rect.y + rect.height / 2,
+        width: rect.width,
+        height: rect.height,
+        visible: rect.width > 0 && rect.height > 0 &&
+                 style.visibility !== 'hidden' && style.display !== 'none' &&
+                 rect.bottom > 0 && rect.right > 0 &&
+                 rect.top < (window.innerHeight || 0) &&
+                 rect.left < (window.innerWidth || 0)
+      };
+    }
+    """
+
+    async def _resolve_one_ref(self, ref_id: str, info: dict) -> None:
+        """Resolve a single ARIA ref in the page, geometry included."""
+        backend_id = info.get("backend_id")
+        try:
+            resolved = await self._cdp.send_command(
+                "DOM.resolveNode", {"backendNodeId": backend_id}, timeout=10.0,
+            )
+            object_id = (resolved.get("object") or {}).get("objectId")
+            if not object_id:
+                return
+            try:
+                out = await self._cdp.send_command("Runtime.callFunctionOn", {
+                    "objectId": object_id,
+                    "functionDeclaration": self._REF_RESOLVE_JS,
+                    "returnByValue": True,
+                }, timeout=10.0)
+            finally:
+                try:
+                    await self._cdp.send_command(
+                        "Runtime.releaseObject", {"objectId": object_id}, timeout=5.0,
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("In-page resolve failed for %s: %s", ref_id, e)
+            return
+        value = (out.get("result") or {}).get("value")
+        if not isinstance(value, dict) or not value.get("selector"):
+            return
+        info["selector"] = value["selector"]
+        info["selector_unique"] = bool(value.get("unique"))
+        info["match_count"] = int(value.get("match_count") or 0)
+        info["visible"] = bool(value.get("visible"))
+        info["center"] = {"x": float(value.get("x", 0.0)), "y": float(value.get("y", 0.0))}
+        info["size"] = {
+            "width": float(value.get("width", 0.0)),
+            "height": float(value.get("height", 0.0)),
+        }
+
+    async def _resolve_aria_selectors(self, include_coordinates: bool = True):
+        """Resolve ARIA refs to CSS selectors.
+
+        Two passes, in this order:
+
+        1. An in-page pass (``DOM.resolveNode`` + ``Runtime.callFunctionOn``)
+           that produces a VERIFIED-UNIQUE selector and the element's
+           viewport centre in one round trip per ref, all refs gathered
+           concurrently over the one socket. This is what makes a ref
+           usable with ``click_at`` when the selector route fails.
+        2. ``DOM.describeNode`` for anything pass 1 could not resolve
+           (detached node, cross-process frame, no Runtime domain). That
+           fallback is the original strategy and is dual-mode aware:
+           a plain CSS form when the DOM offers one, otherwise a
+           Playwright-only ``tag:has-text(...)`` plus a ``text_match``
+           record so the CDP path can do a JS text scan instead of
+           choking on the unknown pseudo.
+        """
+        if include_coordinates:
+            pending = [
+                (ref_id, info) for ref_id, info in self._aria_refs.items()
+                if info.get("backend_id") and not info.get("selector")
+            ]
+            if pending:
+                await asyncio.gather(
+                    *(self._resolve_one_ref(ref_id, info) for ref_id, info in pending),
+                    return_exceptions=True,
+                )
         for ref_id, info in list(self._aria_refs.items()):
             backend_id = info.get("backend_id")
             if not backend_id or info.get("selector"):
@@ -693,6 +1917,11 @@ class BrowserController:
                 # resolve the element directly without parsing the
                 # selector string.
                 info["backend_id"] = backend_id
+                # This path could not verify uniqueness (no Runtime
+                # domain, or the node had already gone). None means
+                # "unknown", which is not the same as "unique" and must
+                # not be reported as it.
+                info.setdefault("selector_unique", None)
             except Exception:
                 pass
 
@@ -892,6 +2121,17 @@ class BrowserController:
                 await self.stop_recording()
             except Exception:
                 pass
+        # A dialog watchdog outliving the controller would try to answer a
+        # dialog over a socket that is about to close.
+        for task in list(self._bg_tasks):
+            task.cancel()
+        self._bg_tasks.clear()
+        if self._page is not None and self._pw_dialog_handler is not None:
+            try:
+                self._page.remove_listener("dialog", self._pw_dialog_handler)
+            except Exception:
+                pass
+        self._pw_dialog_handler = None
         await self._cdp.disconnect()
         if self._browser:
             try:
@@ -914,7 +2154,7 @@ class BrowserController:
 
     @property
     def _artifacts_root(self) -> Path:
-        root = Path.home() / ".feral" / "browser" / "artifacts"
+        root = feral_browser_root() / "artifacts"
         root.mkdir(parents=True, exist_ok=True)
         return root
 
@@ -952,7 +2192,7 @@ class BrowserController:
         }
 
     async def stop_tracing(self, *, name: str = "") -> dict:
-        """Stop tracing and write the artifact to ~/.feral/browser/artifacts/<name>.zip."""
+        """Stop tracing and write the zip under $FERAL_HOME/browser/artifacts/."""
         if not getattr(self, "_tracing_active", False) or not self._page:
             return {"success": False, "error": "No active tracing session."}
         ctx = self._page.context
@@ -1079,8 +2319,7 @@ class BrowserController:
         and the directory is 0700 so other accounts on a shared machine
         cannot read them.
         """
-        from config.loader import feral_data_home
-        root = feral_data_home() / "browser" / "recordings"
+        root = feral_browser_root() / "recordings"
         root.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(root, 0o700)
@@ -1691,7 +2930,7 @@ class BrowserController:
 
     async def save_cookies(self, profile: str = "default") -> dict:
         """Save all cookies to disk for session persistence."""
-        cookies_dir = Path.home() / ".feral" / "browser" / "cookies"
+        cookies_dir = feral_browser_root() / "cookies"
         cookies_dir.mkdir(parents=True, exist_ok=True)
         cookies_path = cookies_dir / f"{profile}.json"
 
@@ -1709,7 +2948,7 @@ class BrowserController:
 
     async def restore_cookies(self, profile: str = "default") -> dict:
         """Restore cookies from disk."""
-        cookies_path = Path.home() / ".feral" / "browser" / "cookies" / f"{profile}.json"
+        cookies_path = feral_browser_root() / "cookies" / f"{profile}.json"
         if not cookies_path.exists():
             return {"success": False, "error": "No saved cookies"}
 
@@ -1773,7 +3012,7 @@ class BrowserController:
 
     async def set_download_path(self, path: str = "") -> dict:
         """Configure file download behavior."""
-        download_dir = path or str(Path.home() / ".feral" / "browser" / "downloads")
+        download_dir = path or str(feral_browser_root() / "downloads")
         Path(download_dir).mkdir(parents=True, exist_ok=True)
 
         if self._cdp.connected:
@@ -1783,12 +3022,24 @@ class BrowserController:
             })
         return {"success": True, "download_path": download_dir}
 
-    def _build_aria_text(self, nodes: list[dict], max_depth: int = 10) -> str:
-        """Convert AX tree nodes to readable text with assigned refs."""
-        lines = []
-        ref_counter = 0
+    def _build_aria_text(
+        self, nodes: list[dict], max_depth: int = 10, ref_offset: int = 0,
+    ) -> str:
+        """Convert AX tree nodes to readable text with assigned refs.
 
-        for node in nodes[:500]:
+        No cap here any more. ``snapshot`` decides how many nodes to hand
+        over and reports the truncation; a second silent cap inside this
+        function is exactly how the useful elements used to disappear.
+
+        ``ref_offset`` numbers the refs by their ABSOLUTE position in the
+        match list, so page two of a paginated snapshot starts at ax200
+        rather than restarting at ax0. Two different elements answering to
+        ax0 within one page load is a trap, not a convenience.
+        """
+        lines = []
+        ref_counter = int(ref_offset or 0)
+
+        for node in nodes:
             role = node.get("role", {}).get("value", "")
             name = node.get("name", {}).get("value", "")
             if not role or role in ("none", "generic", "InlineTextBox"):
@@ -1989,9 +3240,991 @@ class BrowserController:
             "error": last_error or f"Selector {target!r} not visible within {deadline}ms",
         }
 
+    # ── Page reading primitives ──────────────────────────────────────
+    #
+    # `snapshot()` returns the ARIA tree, which is what an agent needs to
+    # ACT on a page. It is not what an agent needs to READ one: the AX
+    # tree drops paragraph prose, and it is capped at 500 nodes. Article
+    # text, prices, error banners and search results all live in the
+    # rendered text, so reading it needed its own primitive rather than
+    # the model hand-rolling `evaluate("document.body.innerText")`, an
+    # endpoint that is CRITICAL in the danger map and hard-denied on the
+    # http_api, mcp and cron surfaces.
+
+    async def get_page_text(self, max_chars: int = 20000, selector: str = "") -> dict:
+        """Return the page's rendered (visible) text.
+
+        ``selector`` narrows the read to one subtree. ``innerText`` rather
+        than ``textContent`` on purpose: textContent includes the contents
+        of <script>/<style> and of display:none nodes, which is noise the
+        model then has to pay for and reason around.
+        """
+        try:
+            bound = max(200, min(int(max_chars), 500_000))
+        except (TypeError, ValueError):
+            bound = 20000
+        target = self._resolve_selector(selector) if selector else ""
+        expression = (
+            "(function(){"
+            f"var sel = {json.dumps(target)};"
+            "var root = sel ? document.querySelector(sel) : document.body;"
+            "if (!root) return null;"
+            "return root.innerText || root.textContent || '';"
+            "})()"
+        )
+        result = await self.evaluate(expression)
+        if not result.get("success"):
+            return result
+        text = result.get("result")
+        if text is None:
+            return {
+                "success": False,
+                "error": (
+                    f"No element matched selector {target!r}."
+                    if target else "Page has no <body> to read yet."
+                ),
+            }
+        text = str(text)
+        truncated = len(text) > bound
+        return {
+            "success": True,
+            "text": text[:bound],
+            "chars": min(len(text), bound),
+            "truncated": truncated,
+            "selector": target,
+        }
+
+    # JS that locates candidate elements by a natural-language-ish
+    # description. Kept as a module-level constant so the escaping is
+    # reviewed in one place; the caller's text is injected as a JSON
+    # literal, never concatenated into the source.
+    _FIND_JS = """
+    (function(query, limit) {
+      function cssEscape(v) {
+        return String(v).replace(/["\\\\]/g, '\\\\$&');
+      }
+      function selectorFor(el) {
+        if (el.id) return '#' + el.id;
+        var testid = el.getAttribute('data-testid');
+        if (testid) return '[data-testid="' + cssEscape(testid) + '"]';
+        var name = el.getAttribute('name');
+        if (name) return el.tagName.toLowerCase() + '[name="' + cssEscape(name) + '"]';
+        var aria = el.getAttribute('aria-label');
+        if (aria) return el.tagName.toLowerCase() + '[aria-label="' + cssEscape(aria) + '"]';
+        var parts = [];
+        var node = el;
+        while (node && node.nodeType === 1 && parts.length < 6) {
+          var tag = node.tagName.toLowerCase();
+          if (node.id) { parts.unshift('#' + node.id); break; }
+          var parent = node.parentElement;
+          if (parent) {
+            var same = Array.prototype.filter.call(
+              parent.children, function (c) { return c.tagName === node.tagName; });
+            if (same.length > 1) {
+              tag += ':nth-of-type(' + (same.indexOf(node) + 1) + ')';
+            }
+          }
+          parts.unshift(tag);
+          node = node.parentElement;
+        }
+        return parts.join(' > ');
+      }
+      var SEL = 'a,button,input,select,textarea,summary,label,[role],[onclick],' +
+                '[contenteditable="true"],h1,h2,h3';
+      var q = String(query || '').toLowerCase().trim();
+      var terms = q.split(/\\s+/).filter(Boolean);
+      var out = [];
+      var seen = 0;
+      var els = Array.prototype.slice.call(document.querySelectorAll(SEL));
+      for (var i = 0; i < els.length && seen < 4000; i++) {
+        var el = els[i];
+        seen++;
+        var rect = el.getBoundingClientRect();
+        var style = window.getComputedStyle(el);
+        var visible = rect.width > 0 && rect.height > 0 &&
+                      style.visibility !== 'hidden' && style.display !== 'none';
+        var hay = [
+          el.innerText || el.textContent || '',
+          el.getAttribute('aria-label') || '',
+          el.getAttribute('placeholder') || '',
+          el.getAttribute('title') || '',
+          el.getAttribute('name') || '',
+          el.getAttribute('value') || '',
+          el.id || ''
+        ].join(' ').replace(/\\s+/g, ' ').trim();
+        var low = hay.toLowerCase();
+        var score = 0;
+        if (!terms.length) {
+          score = visible ? 1 : 0;
+        } else {
+          for (var t = 0; t < terms.length; t++) {
+            if (low.indexOf(terms[t]) !== -1) score += 1;
+          }
+          if (low.indexOf(q) !== -1) score += terms.length;
+        }
+        if (score <= 0) continue;
+        if (!visible) score -= 0.5;
+        out.push({
+          score: score,
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute('role') || '',
+          type: el.getAttribute('type') || '',
+          text: hay.slice(0, 200),
+          selector: selectorFor(el),
+          visible: visible,
+          x: Math.round(rect.x + rect.width / 2),
+          y: Math.round(rect.y + rect.height / 2)
+        });
+      }
+      out.sort(function (a, b) { return b.score - a.score; });
+      return out.slice(0, limit);
+    })
+    """
+
+    async def find(self, description: str, limit: int = 10) -> dict:
+        """Locate candidate elements matching a plain-language description.
+
+        Returns ranked candidates with a ready-to-use ``selector`` and the
+        element's viewport centre, so the caller can follow up with
+        ``click``/``fill`` (selector) or ``click_at`` (coordinates).
+
+        This is a text/attribute matcher, not a vision model: it scores on
+        the element's own text, aria-label, placeholder, title, name, value
+        and id. "the blue button in the corner" will not match; "sign in"
+        will. An empty ``candidates`` list means no element carried those
+        words, NOT that the element does not exist.
+        """
+        query = str(description or "").strip()
+        if not query:
+            return {"success": False, "error": "description is required."}
+        try:
+            bound = max(1, min(int(limit), 50))
+        except (TypeError, ValueError):
+            bound = 10
+        expression = f"{self._FIND_JS}({json.dumps(query)}, {bound})"
+        result = await self.evaluate(expression)
+        if not result.get("success"):
+            return result
+        candidates = result.get("result") or []
+        return {
+            "success": True,
+            "query": query,
+            "count": len(candidates),
+            "candidates": candidates,
+        }
+
+    # ── Keyboard / pointer primitives ────────────────────────────────
+    #
+    # `click(selector)` cannot press Enter, cannot Tab between fields and
+    # cannot reach a canvas or a custom widget that has no selector. Those
+    # are the three cases every real form hits, so both a key primitive
+    # and a coordinate primitive are needed alongside the selector ones.
+
+    # CDP has no name->keycode table, so the common navigation/editing
+    # keys carry theirs here. Anything not listed is sent as literal text.
+    _CDP_KEYS: dict = {
+        "Enter": (13, "\r"), "Return": (13, "\r"), "Tab": (9, "\t"),
+        "Escape": (27, ""), "Esc": (27, ""), "Backspace": (8, ""),
+        "Delete": (46, ""), "ArrowUp": (38, ""), "ArrowDown": (40, ""),
+        "ArrowLeft": (37, ""), "ArrowRight": (39, ""), "Home": (36, ""),
+        "End": (35, ""), "PageUp": (33, ""), "PageDown": (34, ""),
+        "Space": (32, " "),
+    }
+
+    async def press_key(self, key: str, ref_or_selector: str = "") -> dict:
+        """Press a single key, optionally focusing an element first.
+
+        ``key`` uses Playwright/DOM names: ``Enter``, ``Tab``, ``Escape``,
+        ``ArrowDown``, ``Backspace``, ``Control+a``, ``a``. Chords are only
+        supported on the Playwright path; the CDP-only fallback presses the
+        final key of a chord and reports ``modifiers_dropped``.
+        """
+        key = str(key or "").strip()
+        if not key:
+            return {"success": False, "error": "key is required."}
+        try:
+            if self._page:
+                if ref_or_selector:
+                    await self._page.press(
+                        self._resolve_selector(ref_or_selector), key, timeout=5000,
+                    )
+                else:
+                    await self._page.keyboard.press(key)
+                return {"success": True, "key": key, "via": "playwright"}
+
+            dropped = "+" in key
+            bare = key.rsplit("+", 1)[-1]
+            if ref_or_selector:
+                focus = await self._focus_cdp(self._resolve_selector(ref_or_selector))
+                if not focus.get("success"):
+                    return focus
+            code, text = self._CDP_KEYS.get(bare, (0, bare if len(bare) == 1 else ""))
+            for phase in ("keyDown", "keyUp"):
+                params = {"type": phase, "key": bare, "windowsVirtualKeyCode": code,
+                          "nativeVirtualKeyCode": code}
+                if phase == "keyDown" and text:
+                    params["text"] = text
+                await self._cdp.send_command("Input.dispatchKeyEvent", params)
+            out = {"success": True, "key": key, "via": "cdp"}
+            if dropped:
+                out["modifiers_dropped"] = True
+            return out
+        except Exception as e:
+            return {"success": False, "error": str(e), "key": key}
+
+    async def _focus_cdp(self, selector: str) -> dict:
+        result = await self.evaluate(
+            "(function(){var el=document.querySelector(%s);"
+            "if(!el) return false; el.focus(); return true;})()"
+            % json.dumps(selector)
+        )
+        if not result.get("success"):
+            return result
+        if not result.get("result"):
+            return {"success": False, "error": f"Element not found: {selector}"}
+        return {"success": True}
+
+    async def click_at(
+        self, x: float, y: float, button: str = "left", click_count: int = 1,
+    ) -> dict:
+        """Click at viewport coordinates, for elements no selector reaches.
+
+        Coordinates are CSS pixels relative to the viewport's top-left, the
+        same frame ``find`` and ``screenshot`` report. They go stale the
+        moment the page scrolls or relayouts, so re-read them rather than
+        reusing coordinates across a navigation.
+        """
+        try:
+            bx, by = float(x), float(y)
+        except (TypeError, ValueError):
+            return {"success": False, "error": "x and y must be numbers."}
+        btn = str(button or "left").lower()
+        if btn not in ("left", "right", "middle"):
+            return {"success": False, "error": "button must be left, right or middle."}
+        try:
+            count = max(1, min(int(click_count), 3))
+        except (TypeError, ValueError):
+            count = 1
+        try:
+            if self._page:
+                await self._page.mouse.click(bx, by, button=btn, click_count=count)
+            else:
+                for phase in ("mousePressed", "mouseReleased"):
+                    await self._cdp.send_command("Input.dispatchMouseEvent", {
+                        "type": phase, "x": bx, "y": by,
+                        "button": btn, "clickCount": count,
+                    })
+            return {"success": True, "x": bx, "y": by, "button": btn, "click_count": count}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── Drag and drop ────────────────────────────────────────────────
+    #
+    # Reordering a list, moving a Kanban card, dragging a slider handle,
+    # selecting a range of spreadsheet cells and dropping a file on a
+    # drop zone are all one gesture that click/hover cannot express, and
+    # none of them are reachable any other way.
+    #
+    # There are two incompatible drag mechanisms on the web and the
+    # endpoint has to be honest about which one it is driving:
+    #
+    #   mouse  - mousedown, several mousemoves, mouseup. This is what
+    #            sliders, canvases, range selections and the pointer-event
+    #            sortables (SortableJS in fallback mode, dnd-kit,
+    #            react-beautiful-dnd) listen for. INTERMEDIATE moves are
+    #            mandatory: a single jump from A to B leaves most of these
+    #            libraries thinking the drag never started, so the press
+    #            and release read as a plain click on the source.
+    #   html5  - the native draggable/dragstart/dragover/drop protocol.
+    #            Chrome does NOT synthesise these from raw
+    #            Input.dispatchMouseEvent, so the mouse path silently does
+    #            nothing on a native drop zone. Playwright's drag_and_drop
+    #            drives Chromium's drag interception and does work.
+    #
+    # `auto` therefore prefers html5 (Playwright) when both endpoints are
+    # selectors and Playwright is connected, and uses the mouse sequence
+    # otherwise, including for every coordinate drag.
+
+    async def drag(
+        self,
+        from_ref_or_selector: str = "",
+        to_ref_or_selector: str = "",
+        from_x=None,
+        from_y=None,
+        to_x=None,
+        to_y=None,
+        steps: int = 12,
+        hold_ms: int = 120,
+        settle_ms: int = 120,
+        mode: str = "auto",
+    ) -> dict:
+        """Drag from one point to another, by refs/selectors or coordinates.
+
+        Give EITHER ``from_ref_or_selector`` + ``to_ref_or_selector``
+        (ARIA refs from snapshot or CSS selectors) OR the four
+        coordinates, which are CSS pixels from the viewport's top-left,
+        the same frame ``find``, ``screenshot`` and ``click_at`` use. The
+        two forms can be mixed: a ref source with a coordinate target is
+        valid and is how you drop onto a canvas.
+
+        This performs a real gesture, so it commits whatever the drop
+        does (reordering, moving between lists, setting a slider value).
+        """
+        mode = str(mode or "auto").strip().lower()
+        if mode not in ("auto", "mouse", "html5"):
+            return {"success": False, "error": "mode must be auto, mouse or html5."}
+        try:
+            steps = max(2, min(int(steps), 100))
+        except (TypeError, ValueError):
+            steps = 12
+        try:
+            hold = max(0, min(int(hold_ms), 5000))
+        except (TypeError, ValueError):
+            hold = 120
+        try:
+            settle = max(0, min(int(settle_ms), 5000))
+        except (TypeError, ValueError):
+            settle = 120
+
+        src_sel = str(from_ref_or_selector or "").strip()
+        dst_sel = str(to_ref_or_selector or "").strip()
+        has_src_xy = from_x is not None and from_y is not None
+        has_dst_xy = to_x is not None and to_y is not None
+        if not src_sel and not has_src_xy:
+            return {
+                "success": False,
+                "error": "Give from_ref_or_selector, or both from_x and from_y.",
+            }
+        if not dst_sel and not has_dst_xy:
+            return {
+                "success": False,
+                "error": "Give to_ref_or_selector, or both to_x and to_y.",
+            }
+
+        if mode == "html5" and not (src_sel and dst_sel):
+            return {
+                "success": False,
+                "error": (
+                    "mode=html5 needs a selector or ARIA ref for BOTH ends: "
+                    "the native drag protocol targets elements, not points."
+                ),
+            }
+        if mode == "html5" and not self._page:
+            return {
+                "success": False,
+                "error": (
+                    "mode=html5 requires the Playwright driver (Chrome does not "
+                    "synthesise dragstart/drop from raw CDP mouse events). "
+                    "Install with `pip install playwright`, or use mode=mouse."
+                ),
+            }
+
+        use_html5 = mode == "html5" or (
+            mode == "auto" and self._page is not None and src_sel and dst_sel
+        )
+        if use_html5:
+            try:
+                await self._page.drag_and_drop(
+                    self._resolve_selector(src_sel),
+                    self._resolve_selector(dst_sel),
+                    timeout=10000,
+                )
+                return {
+                    "success": True, "via": "playwright_html5",
+                    "from": src_sel, "to": dst_sel,
+                    "note": (
+                        "Drop dispatched. Verify with snapshot or get_page_text: "
+                        "a page can accept the gesture and reject the drop."
+                    ),
+                }
+            except Exception as e:
+                if mode == "html5":
+                    return {"success": False, "via": "playwright_html5",
+                            "error": str(e), "from": src_sel, "to": dst_sel}
+                logger.info(
+                    "Playwright drag_and_drop failed (%s); falling back to a "
+                    "synthesised mouse drag.", e,
+                )
+
+        try:
+            sx, sy = (
+                (float(from_x), float(from_y)) if has_src_xy
+                else await self._point_for(src_sel)
+            )
+            dx, dy = (
+                (float(to_x), float(to_y)) if has_dst_xy
+                else await self._point_for(dst_sel)
+            )
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        except Exception as e:
+            return {"success": False, "error": f"Could not locate a drag endpoint: {e}"}
+
+        try:
+            await self._mouse_drag(sx, sy, dx, dy, steps, hold, settle)
+        except Exception as e:
+            return {"success": False, "via": "mouse", "error": str(e)}
+        return {
+            "success": True,
+            "via": "mouse_playwright" if self._page else "mouse_cdp",
+            "from": {"x": sx, "y": sy, "selector": src_sel},
+            "to": {"x": dx, "y": dy, "selector": dst_sel},
+            "steps": steps,
+            "note": (
+                "Synthesised mouse drag. Native HTML5 drop zones (draggable=true "
+                "elements) do NOT respond to this; retry with mode=html5 and "
+                "selectors for both ends if nothing moved."
+            ),
+        }
+
+    async def _point_for(self, ref_or_selector: str) -> tuple[float, float]:
+        """Viewport-centre coordinates for a ref or selector.
+
+        Prefers the ARIA snapshot's cached box (already measured), then
+        Playwright's bounding_box, then the CDP measurement. Raises
+        ValueError with an actionable message when the element cannot be
+        located, because a drag to (0, 0) looks like a working drag that
+        did the wrong thing.
+        """
+        cached = self._aria_refs.get(ref_or_selector) if ref_or_selector.startswith("ax") else None
+        if cached and cached.get("center"):
+            return float(cached["center"]["x"]), float(cached["center"]["y"])
+        selector = self._resolve_selector(ref_or_selector)
+        if not selector:
+            raise ValueError(f"Cannot resolve {ref_or_selector!r} to an element.")
+        if self._page:
+            try:
+                box = await self._page.locator(selector).first.bounding_box(timeout=5000)
+            except Exception as e:
+                box = None
+                logger.debug("Playwright bounding_box failed for %r: %s", selector, e)
+            if box:
+                return (
+                    float(box["x"]) + float(box["width"]) / 2.0,
+                    float(box["y"]) + float(box["height"]) / 2.0,
+                )
+        try:
+            return await self._cdp_get_element_center(selector)
+        except Exception as e:
+            raise ValueError(
+                f"No element matched {selector!r}, so there is nothing to drag "
+                f"to or from ({e}). Call snapshot or find for a live selector."
+            ) from e
+
+    async def _mouse_drag(
+        self, sx: float, sy: float, dx: float, dy: float,
+        steps: int, hold_ms: int, settle_ms: int,
+    ) -> None:
+        """press, hold, move in increments, dwell, release."""
+        if self._page:
+            mouse = self._page.mouse
+            await mouse.move(sx, sy)
+            await mouse.down()
+            if hold_ms:
+                await asyncio.sleep(hold_ms / 1000.0)
+            for i in range(1, steps + 1):
+                await mouse.move(
+                    sx + (dx - sx) * i / steps, sy + (dy - sy) * i / steps,
+                )
+                await asyncio.sleep(0.008)
+            if settle_ms:
+                await asyncio.sleep(settle_ms / 1000.0)
+            await mouse.move(dx, dy)
+            await mouse.up()
+            return
+
+        async def _mouse(event_type: str, x: float, y: float, buttons: int) -> None:
+            await self._cdp.send_command("Input.dispatchMouseEvent", {
+                "type": event_type, "x": x, "y": y,
+                "button": "left" if buttons else "none",
+                "buttons": buttons, "clickCount": 1,
+            })
+
+        # `buttons: 1` on the moves is load-bearing. Without the bitmask
+        # Chrome delivers the moves with no button held, so a drag
+        # listener that checks event.buttons never starts the drag.
+        await _mouse("mouseMoved", sx, sy, 0)
+        await _mouse("mousePressed", sx, sy, 1)
+        if hold_ms:
+            await asyncio.sleep(hold_ms / 1000.0)
+        for i in range(1, steps + 1):
+            await _mouse(
+                "mouseMoved", sx + (dx - sx) * i / steps, sy + (dy - sy) * i / steps, 1,
+            )
+            await asyncio.sleep(0.008)
+        if settle_ms:
+            await asyncio.sleep(settle_ms / 1000.0)
+        await _mouse("mouseMoved", dx, dy, 1)
+        await _mouse("mouseReleased", dx, dy, 0)
+
+    async def type_keys(self, text: str, delay_ms: int = 0) -> dict:
+        """Type text into whatever currently has focus.
+
+        Unlike ``type_text``/``fill`` this takes no selector and does not
+        clear the field: it is the primitive for canvases, rich-text
+        editors, and anything already focused by ``click_at``/``press_key``.
+        """
+        value = "" if text is None else str(text)
+        if not value:
+            return {"success": False, "error": "text is required."}
+        try:
+            delay = max(0, min(int(delay_ms), 1000))
+        except (TypeError, ValueError):
+            delay = 0
+        try:
+            if self._page:
+                await self._page.keyboard.type(value, delay=delay)
+            else:
+                await self._cdp.send_command("Input.insertText", {"text": value})
+            return {"success": True, "typed_chars": len(value)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── History navigation ───────────────────────────────────────────
+
+    async def go_back(self) -> dict:
+        """Go back one entry in session history."""
+        return await self._history_step(-1, "back")
+
+    async def go_forward(self) -> dict:
+        """Go forward one entry in session history."""
+        return await self._history_step(1, "forward")
+
+    async def _history_step(self, delta: int, label: str) -> dict:
+        try:
+            if self._page:
+                # Two Playwright behaviours make the obvious implementation
+                # report failure on a Back that plainly worked, and both
+                # were observed against a real Chrome:
+                #
+                # 1. `wait_until` defaults to "load". A page restored from
+                #    the back/forward cache does not re-fire `load`, so
+                #    go_back raised "Timeout 15000ms exceeded ... navigated
+                #    to https://example.com/", the log line naming the
+                #    successful navigation is inside the timeout error.
+                #    "commit" is what Back actually means: the history entry
+                #    became the current document.
+                # 2. A null Response also does not mean "no history entry";
+                #    a bfcache restore issues no network response at all.
+                #
+                # The URL is the evidence in both cases, so it decides.
+                before = self._page.url
+                try:
+                    resp = await (
+                        self._page.go_back(timeout=15000, wait_until="commit")
+                        if delta < 0 else
+                        self._page.go_forward(timeout=15000, wait_until="commit")
+                    )
+                except Exception as nav_exc:
+                    if self._page.url == before:
+                        return {"success": False, "error": str(nav_exc)}
+                    resp = None
+                after = self._page.url
+                if resp is None and after == before:
+                    return {
+                        "success": False,
+                        "error": f"No {label} entry in this tab's history.",
+                    }
+                return {"success": True, "direction": label, "url": after,
+                        "title": await self._get_title()}
+            history = await self._cdp.send_command("Page.getNavigationHistory")
+            entries = history.get("entries", [])
+            index = int(history.get("currentIndex", 0)) + delta
+            if index < 0 or index >= len(entries):
+                return {"success": False, "error": f"No {label} entry in this tab's history."}
+            await self._cdp.send_command(
+                "Page.navigateToHistoryEntry", {"entryId": entries[index]["id"]},
+            )
+            info = await self.get_page_info()
+            return {"success": True, "direction": label, "url": info.get("url", ""),
+                    "title": info.get("title", "")}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def reload_page(self, ignore_cache: bool = False) -> dict:
+        """Reload the current page."""
+        try:
+            if self._page:
+                await self._page.reload(timeout=30000)
+            else:
+                await self._cdp.send_command(
+                    "Page.reload", {"ignoreCache": bool(ignore_cache)},
+                )
+            info = await self.get_page_info()
+            return {"success": True, "url": info.get("url", ""), "title": info.get("title", "")}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── File upload ──────────────────────────────────────────────────
+
+    async def upload_file(self, ref_or_selector: str, file_paths) -> dict:
+        """Attach local files to an ``<input type=file>`` on the page.
+
+        The paths are read from the machine FERAL runs on, so this uploads
+        the operator's own files to whatever site is loaded. Every path is
+        checked to exist first: a silent no-op on a typo'd path would leave
+        a form looking filled when nothing was attached.
+        """
+        if isinstance(file_paths, str):
+            paths = [file_paths]
+        elif isinstance(file_paths, (list, tuple)):
+            paths = [str(p) for p in file_paths]
+        else:
+            return {"success": False, "error": "file_paths must be a path or list of paths."}
+        if not paths:
+            return {"success": False, "error": "file_paths must not be empty."}
+
+        resolved: list[str] = []
+        missing: list[str] = []
+        for raw in paths:
+            path = Path(str(raw)).expanduser()
+            if path.is_file():
+                resolved.append(str(path.resolve()))
+            else:
+                missing.append(str(raw))
+        if missing:
+            return {
+                "success": False,
+                "error": f"File(s) not found on this machine: {', '.join(missing)}",
+                "missing": missing,
+            }
+
+        selector = self._resolve_selector(ref_or_selector)
+        if not selector:
+            return {"success": False, "error": "ref_or_selector is required."}
+        try:
+            if self._page:
+                await self._page.set_input_files(selector, resolved, timeout=10000)
+                return {"success": True, "selector": selector, "files": resolved,
+                        "via": "playwright"}
+            doc = await self._cdp.send_command("DOM.getDocument", {"depth": 0})
+            node = await self._cdp.send_command("DOM.querySelector", {
+                "nodeId": doc["root"]["nodeId"], "selector": selector,
+            })
+            node_id = node.get("nodeId")
+            if not node_id:
+                return {"success": False, "error": f"No file input matched {selector!r}."}
+            await self._cdp.send_command("DOM.setFileInputFiles", {
+                "files": resolved, "nodeId": node_id,
+            })
+            return {"success": True, "selector": selector, "files": resolved, "via": "cdp"}
+        except Exception as e:
+            return {"success": False, "error": str(e), "selector": selector}
+
+    # ── Viewport ─────────────────────────────────────────────────────
+
+    async def set_viewport(
+        self, width: int = 1280, height: int = 800, device_scale_factor: float = 1.0,
+        mobile: bool = False,
+    ) -> dict:
+        """Resize the rendered viewport (CDP device-metrics override).
+
+        This changes what the page LAYS OUT to and what a screenshot
+        captures. It overrides metrics rather than resizing the OS window,
+        so the visible Chrome window keeps its size.
+        """
+        try:
+            w, h = int(width), int(height)
+        except (TypeError, ValueError):
+            return {"success": False, "error": "width and height must be integers."}
+        if not (100 <= w <= 10000 and 100 <= h <= 10000):
+            return {"success": False, "error": "width/height must be between 100 and 10000."}
+        try:
+            scale = float(device_scale_factor or 1.0)
+        except (TypeError, ValueError):
+            scale = 1.0
+        try:
+            await self._cdp.send_command("Emulation.setDeviceMetricsOverride", {
+                "width": w, "height": h,
+                "deviceScaleFactor": scale, "mobile": bool(mobile),
+            })
+            return {"success": True, "width": w, "height": h,
+                    "device_scale_factor": scale, "mobile": bool(mobile)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── Endpoint dispatch ────────────────────────────────────────────
+
+    async def execute(self, endpoint_id: str, args: Optional[dict] = None) -> dict:
+        """Route one manifest endpoint id to the controller method behind it.
+
+        This is the single dispatcher for the agent-visible browser
+        surface. ``skills/manifests/browser_use.json`` declares exactly the
+        ids in ``_DISPATCH``; ``api.state.BrainState._dispatch_browser_action``
+        calls straight through to here. Keeping the table in this module
+        rather than in ``api/state.py`` is what lets a test prove that every
+        declared endpoint routes, without booting the brain.
+
+        An unknown id returns an error naming the id: never a silent
+        no-op, and never a fabricated success.
+        """
+        args = dict(args or {})
+        handler = self._DISPATCH.get(str(endpoint_id))
+        if handler is None:
+            return {
+                "success": False,
+                "error": (
+                    f"Unknown browser endpoint {endpoint_id!r}. Known endpoints: "
+                    + ", ".join(sorted(self._DISPATCH))
+                ),
+            }
+        try:
+            result = await handler(self, args)
+            return await self._with_dialog_events(result)
+        except TypeError as e:
+            return {"success": False, "error": f"Bad arguments for {endpoint_id}: {e}"}
+        except Exception as e:
+            # Most controller methods already return a structured failure.
+            # The ones that talk straight to CDP (enable_network_monitor,
+            # save_cookies) do not, and a raw CDP exception such as
+            # "'Network.enable' wasn't found" propagating out of the skill
+            # aborts the whole tool call instead of giving the model a
+            # result it can read and route around.
+            logger.warning("browser endpoint %s raised: %s", endpoint_id, e)
+            return await self._with_dialog_events(
+                {"success": False, "error": f"{endpoint_id} failed: {e}"}
+            )
+
+    async def _settle_dialog_answers(self) -> None:
+        """Let an in-flight automatic answer land before we report on it.
+
+        The dialog handler runs as its own task, so an endpoint can return
+        while the answer is still on the wire. Reporting then said
+        ``handled: false, pending: true`` for a dialog that was dismissed
+        a few milliseconds later, which is a worse lie than saying nothing:
+        it tells the model the page is still blocked when it is not.
+        Skipped under ``manual``, where pending is the intended state and
+        waiting would tax every call.
+        """
+        if self._dialog_policy == "manual":
+            return
+        for _ in range(25):
+            if not any(
+                e.get("pending") for e in self._dialog_log if not e.get("_reported")
+            ):
+                return
+            await asyncio.sleep(0.02)
+
+    async def _with_dialog_events(self, result):
+        """Attach any dialog seen since the last endpoint call.
+
+        A dialog handled by policy is still a thing that HAPPENED to the
+        page: a confirm() that was cancelled means the action behind it
+        did not run. Reporting it on the next result is what stops the
+        model reasoning about a page state that a silent auto-answer
+        already changed. Non-dict results (list_tabs) are left alone.
+        """
+        if not isinstance(result, dict):
+            return result
+        await self._settle_dialog_answers()
+        events = self._drain_dialog_events()
+        if events:
+            result["dialog_events"] = events
+            result["dialog_policy"] = self._dialog_policy
+            # A dismissed beforeunload is the specific case where the
+            # dialog is the REASON the action failed, and the failure
+            # itself says nothing about it.
+            if result.get("success") is False and any(
+                e.get("type") == "beforeunload" and e.get("action") == "dismiss"
+                for e in events
+            ):
+                result["dialog_hint"] = (
+                    "The page raised a beforeunload ('leave site?') prompt and the "
+                    "current dialog policy dismissed it, which CANCELS the "
+                    "navigation and keeps the page. That is why this failed. The "
+                    "page believes it has unsaved work; leaving anyway means "
+                    "discarding it, so confirm with the user before calling "
+                    "dialog_policy with policy=accept and retrying."
+                )
+        if self._pending_dialog is not None:
+            result["dialog_pending"] = self._public_dialog(self._pending_dialog)
+        return result
+
+# ── Agent-visible endpoint surface ───────────────────────────────────
+#
+# The manifest (skills/manifests/browser_use.json) and this table are two
+# halves of one contract: an id in the manifest that is not a key here is
+# a runtime 404 the model only discovers by calling it, and a key here
+# that the manifest does not declare is code nothing can reach.
+# tests/test_browser_use_endpoints.py asserts both directions.
+#
+# Endpoint ids are deliberately NOT method names. `save_session` reads
+# better to a model than `save_cookies`, and pinning the agent surface to
+# an internal method name means renaming the method breaks the agent.
+BROWSER_ENDPOINT_ALIASES: dict[str, str] = {
+    "save_session": "save_cookies",
+    "restore_session": "restore_cookies",
+    "network_monitor_start": "enable_network_monitor",
+    "network_log": "get_network_log",
+    "trace_start": "start_tracing",
+    "trace_stop": "stop_tracing",
+    "har_start": "start_har",
+    "har_stop": "stop_har",
+    "download_next": "wait_for_download",
+    "reload": "reload_page",
+}
+
+
+def _s(args: dict, key: str, default: str = "") -> str:
+    value = args.get(key, default)
+    return default if value is None else str(value)
+
+
+def _i(args: dict, key: str, default: int) -> int:
+    try:
+        return int(args.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _b(args: dict, key: str, default: bool = False) -> bool:
+    value = args.get(key, default)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+BrowserController._DISPATCH = {
+    # ── navigation ──
+    "navigate": lambda c, a: c.navigate(
+        _s(a, "url"), wait_until=_s(a, "wait_until", "domcontentloaded")),
+    "go_back": lambda c, a: c.go_back(),
+    "go_forward": lambda c, a: c.go_forward(),
+    "reload": lambda c, a: c.reload_page(ignore_cache=_b(a, "ignore_cache")),
+    # ── reading ──
+    "get_page_info": lambda c, a: c.get_page_info(),
+    "get_page_text": lambda c, a: c.get_page_text(
+        max_chars=_i(a, "max_chars", 20000), selector=_s(a, "selector")),
+    "snapshot": lambda c, a: c.snapshot(
+        filter=_s(a, "filter", "interactive"),
+        max_nodes=_i(a, "max_nodes", SNAPSHOT_DEFAULT_MAX_NODES),
+        offset=_i(a, "offset", 0),
+        include_coordinates=_b(a, "include_coordinates", True)),
+    "screenshot": lambda c, a: c.screenshot(_b(a, "full_page")),
+    "find": lambda c, a: c.find(_s(a, "description"), limit=_i(a, "limit", 10)),
+    "get_page_pdf": lambda c, a: c.get_page_pdf(
+        _b(a, "print_background", True), _b(a, "landscape")),
+    # ── interaction ──
+    "click": lambda c, a: c.click(_s(a, "ref_or_selector")),
+    "click_at": lambda c, a: c.click_at(
+        a.get("x"), a.get("y"), button=_s(a, "button", "left"),
+        click_count=_i(a, "click_count", 1)),
+    "hover": lambda c, a: c.hover(_s(a, "ref_or_selector")),
+    "drag": lambda c, a: c.drag(
+        from_ref_or_selector=_s(a, "from_ref_or_selector"),
+        to_ref_or_selector=_s(a, "to_ref_or_selector"),
+        from_x=a.get("from_x"), from_y=a.get("from_y"),
+        to_x=a.get("to_x"), to_y=a.get("to_y"),
+        steps=_i(a, "steps", 12), hold_ms=_i(a, "hold_ms", 120),
+        settle_ms=_i(a, "settle_ms", 120), mode=_s(a, "mode", "auto")),
+    "type_text": lambda c, a: c.type_text(_s(a, "ref_or_selector"), _s(a, "text")),
+    "type_keys": lambda c, a: c.type_keys(_s(a, "text"), delay_ms=_i(a, "delay_ms", 0)),
+    "press_key": lambda c, a: c.press_key(
+        _s(a, "key"), ref_or_selector=_s(a, "ref_or_selector")),
+    "fill_form": lambda c, a: c.fill_form(a.get("fields") or {}),
+    "select_option": lambda c, a: c.select(_s(a, "ref_or_selector"), _s(a, "value")),
+    "scroll": lambda c, a: c.scroll(_s(a, "direction", "down"), _i(a, "amount", 500)),
+    "upload_file": lambda c, a: c.upload_file(
+        _s(a, "ref_or_selector"), a.get("file_paths")),
+    "set_viewport": lambda c, a: c.set_viewport(
+        width=_i(a, "width", 1280), height=_i(a, "height", 800),
+        device_scale_factor=a.get("device_scale_factor", 1.0),
+        mobile=_b(a, "mobile")),
+    "evaluate": lambda c, a: c.evaluate(_s(a, "js_code")),
+    # ── waiting ──
+    "wait": lambda c, a: c.wait(_i(a, "ms", 1000)),
+    "wait_for_selector": lambda c, a: c.wait_for_selector(
+        _s(a, "ref_or_selector"), timeout_ms=_i(a, "timeout_ms", 5000),
+        poll_ms=_i(a, "poll_ms", 100), state=_s(a, "state", "visible")),
+    # ── tabs ──
+    "list_tabs": lambda c, a: c.list_tabs(),
+    "new_tab": lambda c, a: c.new_tab(
+        _s(a, "url", "about:blank"), activate=_b(a, "activate", True)),
+    "switch_tab": lambda c, a: c.switch_tab(_s(a, "tab_id")),
+    "close_tab": lambda c, a: c.close_tab(_s(a, "tab_id")),
+    # ── native dialogs ──
+    "dialog_policy": lambda c, a: c.set_dialog_policy(
+        policy=_s(a, "policy", DEFAULT_DIALOG_POLICY),
+        prompt_text=_s(a, "prompt_text"),
+        manual_timeout_s=a.get("manual_timeout_s", DIALOG_MANUAL_TIMEOUT_S)),
+    "handle_dialog": lambda c, a: c.handle_dialog(
+        action=_s(a, "action", "dismiss"), prompt_text=_s(a, "prompt_text")),
+    "get_dialogs": lambda c, a: c.get_dialogs(
+        limit=_i(a, "limit", 20), clear=_b(a, "clear")),
+    # ── frames ──
+    "list_iframes": lambda c, a: c.list_iframes(),
+    "execute_in_iframe": lambda c, a: c.execute_in_iframe(
+        _i(a, "frame_index", 0), _s(a, "script")),
+    # ── diagnostics ──
+    "get_console_logs": lambda c, a: c.get_console_logs(
+        _i(a, "limit", 50), _b(a, "clear")),
+    "network_monitor_start": lambda c, a: c.enable_network_monitor(),
+    "network_log": lambda c, a: c.get_network_log(_s(a, "filter_type")),
+    # ── session ──
+    "save_session": lambda c, a: c.save_cookies(_s(a, "profile", "default")),
+    "restore_session": lambda c, a: c.restore_cookies(_s(a, "profile", "default")),
+    # ── downloads / artifacts ──
+    "set_download_path": lambda c, a: c.set_download_path(_s(a, "path")),
+    "download_next": lambda c, a: c.wait_for_download(
+        save_as=_s(a, "save_as"), timeout_ms=_i(a, "timeout_ms", 30000)),
+    "trace_start": lambda c, a: c.start_tracing(
+        screenshots=_b(a, "screenshots", True), snapshots=_b(a, "snapshots", True),
+        sources=_b(a, "sources"), name=_s(a, "name")),
+    "trace_stop": lambda c, a: c.stop_tracing(name=_s(a, "name")),
+    "har_start": lambda c, a: c.start_har(name=_s(a, "name")),
+    "har_stop": lambda c, a: c.stop_har(),
+    # ── session video ──
+    "start_recording": lambda c, a: c.start_recording(
+        name=_s(a, "name"), quality=_i(a, "quality", RECORDING_FRAME_QUALITY),
+        max_width=_i(a, "max_width", RECORDING_MAX_WIDTH),
+        max_height=_i(a, "max_height", RECORDING_MAX_HEIGHT),
+        every_nth_frame=_i(a, "every_nth_frame", 1),
+        max_frames=_i(a, "max_frames", RECORDING_MAX_FRAMES),
+        redact_selectors=a.get("redact_selectors")),
+    "stop_recording": lambda c, a: c.stop_recording(
+        assemble=_b(a, "assemble", True),
+        output_format=_s(a, "output_format", "mp4")),
+    "assemble_recording": lambda c, a: c.assemble_recording(
+        _s(a, "recording_id"), output_format=_s(a, "output_format", "mp4"),
+        overwrite=_b(a, "overwrite")),
+    "list_recordings": lambda c, a: c.list_recordings(_i(a, "limit", 20)),
+}
+
+
+BROWSER_MANIFEST_PATH = (
+    Path(__file__).resolve().parent.parent / "manifests" / "browser_use.json"
+)
+
 
 def get_browser_skill_manifest() -> dict:
-    """Return the skill manifest for browser control."""
+    """Return the agent-visible browser skill manifest.
+
+    Source of truth is ``skills/manifests/browser_use.json`` so the
+    registry, the safety resolver and the result-budget trust check all
+    read the same declaration. The in-code dict below is the fallback for
+    a stripped install where the manifests directory is absent; it is a
+    strict subset and carries no safety metadata, which is why the JSON
+    is preferred whenever it is readable.
+    """
+    try:
+        data = json.loads(BROWSER_MANIFEST_PATH.read_text(encoding="utf-8"))
+        if data.get("endpoints"):
+            return data
+        logger.warning(
+            "%s declares no endpoints; falling back to the in-code manifest.",
+            BROWSER_MANIFEST_PATH,
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Could not read %s (%s); falling back to the in-code browser "
+            "manifest, which carries no safety_tier metadata.",
+            BROWSER_MANIFEST_PATH, exc,
+        )
+    return _fallback_browser_manifest()
+
+
+def _fallback_browser_manifest() -> dict:
+    """Minimal in-code manifest used only when the JSON file is missing."""
     return {
         "skill_id": "browser",
         "name": "Browser Control",
@@ -2067,7 +4300,7 @@ def get_browser_skill_manifest() -> dict:
                 {"name": "script", "type": "string", "required": True, "description": "JavaScript to execute"},
             ]},
             {"id": "set_download_path", "description": "Configure browser file download directory", "params": [
-                {"name": "path", "type": "string", "required": False, "description": "Download directory path (default: ~/.feral/browser/downloads)"},
+                {"name": "path", "type": "string", "required": False, "description": "Download directory path (default: $FERAL_HOME/browser/downloads)"},
             ]},
             {"id": "start_recording", "description": "Start recording the current tab to video via CDP screencast. Frames are stored under the FERAL data home; call stop_recording to assemble.", "params": [
                 {"name": "name", "type": "string", "required": False, "description": "Recording id (default: timestamped)"},

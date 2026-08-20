@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Capture desktop screenshots and optionally analyze them with FERAL vision models.",
+    "description": "Capture desktop screenshots and optionally describe them with a vision model. Uses the macOS 'screencapture' binary on macOS and 'import' / gnome-screenshot / scrot on Linux; on Linux with none of those installed, and on any other OS, the call fails with a message naming what is missing. Scene analysis needs a VLM (OPENAI_API_KEY or FERAL_VLM_PROVIDER); without one the screenshot still comes back and the response carries analysis_error instead of a description.",
     "trigger_phrases": [
         "take a screenshot",
         "analyze my screen",
@@ -26,7 +26,7 @@
             "id": "capture",
             "method": "PYTHON",
             "url": "",
-            "description": "Capture a desktop screenshot and optionally analyze it with a VLM.",
+            "description": "Capture a desktop screenshot and optionally describe it with a vision model. Returns the file path plus base64 image bytes. Setting analyze or query needs a configured VLM; when none is configured the image still comes back and analysis_error says so, so do not describe the screen from imagination.",
             "params": [
                 {
                     "name": "path",
@@ -38,7 +38,7 @@
                     "name": "region",
                     "type": "string",
                     "required": false,
-                    "description": "macOS only: x,y,width,height capture region"
+                    "description": "macOS only: x,y,width,height capture region. Ignored on Linux, which always captures the whole root window."
                 },
                 {
                     "name": "analyze",

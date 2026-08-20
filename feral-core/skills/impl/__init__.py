@@ -58,13 +58,22 @@ AUTOLOAD_MODULES: tuple[str, ...] = (
     "subagent",
     "code_interpreter",
     "desktop_automation",
+    # Structured ``open_url`` (http/https only) plus the script/command
+    # endpoints, which it forwards to the executor's daemon lane.
+    "desktop_control",
+    # macOS accessibility tree: text snapshot with [axN] refs, then act
+    # on a ref. Imports cleanly off Darwin (pyobjc is bound lazily) and
+    # refuses with 501 there.
+    "macos_ax",
     "system_settings",
     "coding_tools",
     "gui_computer_use",
     "agentic_computer_use",
     "web_actions",
-    # Registers nothing itself: the `browser` manifest and instance are
-    # built at boot by api.state._register_browser_skill. Imported here
+    # Registers nothing itself. The `browser` manifest ships as
+    # skills/manifests/browser_use.json (file stem != skill id) and is
+    # loaded by load_builtin_skills; api.state._register_browser_skill
+    # then binds the live BrowserController instance to it. Imported here
     # so an import-time break in the CDP driver surfaces at boot.
     "browser_use",
     "messaging_channels",

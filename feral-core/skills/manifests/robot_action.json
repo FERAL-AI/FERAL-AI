@@ -14,7 +14,7 @@
       "id": "robot_move",
       "method": "WS_EXECUTE",
       "url": "local_daemon",
-      "description": "Moves the robotic chassis or arm in a specified mapping direction.",
+      "description": "Moves the robotic chassis or arm in a specified mapping direction. Runs on a paired FERAL Robot Node daemon over the WebSocket link, not on this machine: with no robot daemon connected the call returns 503 and nothing moves.",
       "params": [
         {
           "name": "direction",
@@ -25,18 +25,19 @@
         {
           "name": "speed",
           "type": "number",
-          "description": "The speed percentage from 0 to 100. >50 triggers safety rails.",
+          "description": "The speed percentage from 0 to 80. Above 80 the call is refused outright by the safety resolver before it reaches the daemon, so never send a larger number. Values at or below 80 are dispatched after the operator confirms. Defaults to 30.",
           "required": false,
           "default": "30"
         }
       ],
+      "returns_description": "{status, stdout}: whatever the robot daemon's executor reported for the move.",
       "ui_hint": "card"
     },
     {
       "id": "robot_grip",
       "method": "WS_EXECUTE",
       "url": "local_daemon",
-      "description": "Actuates the robotic end-effector to open or close.",
+      "description": "Actuates the robotic end-effector to open or close. Runs on a paired FERAL Robot Node daemon over the WebSocket link; with no robot daemon connected the call returns 503 and nothing moves.",
       "params": [
         {
           "name": "action",
@@ -46,6 +47,7 @@
           "required": true
         }
       ],
+      "returns_description": "{status, stdout}: whatever the robot daemon's executor reported for the gripper.",
       "ui_hint": "card"
     }
   ]

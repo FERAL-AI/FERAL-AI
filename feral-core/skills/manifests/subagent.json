@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Spawn parallel child agents to handle multiple tasks concurrently, then return structured results.",
+    "description": "Spawn parallel child agents to handle several independent tasks at once, then return their structured results. Each child runs its own reasoning loop with tool access and cannot see this conversation, so write each task as a self-contained brief.",
     "trigger_phrases": [
         "research in parallel",
         "split into subtasks",
@@ -25,7 +25,7 @@
             "id": "spawn_subagent",
             "method": "PYTHON",
             "url": "",
-            "description": "Run one or more tasks in parallel using isolated subagent contexts with tool access.",
+            "description": "Run one or more tasks in parallel in isolated subagent contexts with tool access. Neither 'tasks' nor 'task' is marked required in the schema, but exactly one of them must be sent: with neither there is nothing to run. Use 'tasks' for the parallel case and 'task' for a single job.",
             "params": [
                 {
                     "name": "tasks",

@@ -27,7 +27,11 @@
         "note that",
         "note this"
     ],
-    "categories": ["productivity", "memory", "notes"],
+    "categories": [
+        "productivity",
+        "memory",
+        "notes"
+    ],
     "auth": {
         "type": "none"
     },
@@ -35,12 +39,37 @@
         {
             "id": "save_note",
             "method": "POST",
-            "url": "http://localhost:9090/internal/memory/save",
+            "url": "python://notes_memory/save_note",
             "description": "Save a note or piece of information to FERAL's memory. User says 'remember X' and X gets stored.",
             "params": [
-                {"name": "content", "type": "string", "required": true, "description": "The content to remember"},
-                {"name": "tags", "type": "array", "items": {"type": "string"}, "required": false, "description": "Tags for categorization"},
-                {"name": "importance", "type": "string", "required": false, "default": "normal", "description": "Priority", "enum": ["low", "normal", "high", "critical"]}
+                {
+                    "name": "content",
+                    "type": "string",
+                    "required": true,
+                    "description": "The content to remember"
+                },
+                {
+                    "name": "tags",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "required": false,
+                    "description": "Tags for categorization"
+                },
+                {
+                    "name": "importance",
+                    "type": "string",
+                    "required": false,
+                    "default": "normal",
+                    "description": "Priority",
+                    "enum": [
+                        "low",
+                        "normal",
+                        "high",
+                        "critical"
+                    ]
+                }
             ],
             "returns_description": "{id, content, tags, created_at, importance}",
             "ui_hint": "detail_card"
@@ -49,11 +78,22 @@
             "id": "search_notes",
             "read_only_hint": true,
             "method": "GET",
-            "url": "http://localhost:9090/internal/memory/search",
+            "url": "python://notes_memory/search_notes",
             "description": "Search saved NOTES ONLY (user-written snippets tagged in memory). Does NOT query episodic robot/device activity, chat turns, or calendar events — those live in the fused timeline. For temporal recall ('what did my cutebot do yesterday', 'what was I doing this morning') call `fused_timeline`, NOT this endpoint.",
             "params": [
-                {"name": "query", "type": "string", "required": true, "description": "Search query"},
-                {"name": "limit", "type": "number", "required": false, "default": "10", "description": "Max results"}
+                {
+                    "name": "query",
+                    "type": "string",
+                    "required": true,
+                    "description": "Search query"
+                },
+                {
+                    "name": "limit",
+                    "type": "integer",
+                    "required": false,
+                    "default": "10",
+                    "description": "Max results"
+                }
             ],
             "returns_description": "Array of {id, content, tags, created_at, relevance_score}",
             "ui_hint": "list",
@@ -63,10 +103,16 @@
             "id": "list_recent",
             "read_only_hint": true,
             "method": "GET",
-            "url": "http://localhost:9090/internal/memory/recent",
+            "url": "python://notes_memory/list_recent",
             "description": "List the most recently saved notes.",
             "params": [
-                {"name": "limit", "type": "number", "required": false, "default": "10", "description": "Number of recent notes"}
+                {
+                    "name": "limit",
+                    "type": "integer",
+                    "required": false,
+                    "default": "10",
+                    "description": "Number of recent notes"
+                }
             ],
             "returns_description": "Array of {id, content, tags, created_at}",
             "ui_hint": "list",
@@ -78,11 +124,38 @@
             "url": "python://notes_memory/fused_timeline",
             "description": "Answer temporal-recall questions ('what did I do yesterday', 'summarize my morning', 'last Tuesday afternoon') by fusing episodes + notes + knowledge graph + calendar + health into a single chronological timeline. Returns {entries, summary, window, sources_queried, degraded_sources}. Sources that aren't configured (no calendar token, no health provider) are gracefully skipped and listed in degraded_sources so the UI can render an honest chip instead of a silently missing section. Call this for any natural-language temporal-recall query; the orchestrator emits a TimelineCard frame to the chat client in parallel.",
             "params": [
-                {"name": "query", "type": "string", "required": true, "description": "The original user question, e.g. 'what did I do yesterday?'"},
-                {"name": "window_label", "type": "string", "required": false, "default": "yesterday", "description": "Natural-language window: yesterday | today | morning | afternoon | evening | last_week | last_tuesday | etc. Used when from_ts/to_ts are not provided."},
-                {"name": "from_ts", "type": "number", "required": false, "description": "Explicit UNIX epoch start of the window (overrides window_label)."},
-                {"name": "to_ts", "type": "number", "required": false, "description": "Explicit UNIX epoch end of the window (overrides window_label)."},
-                {"name": "per_source_limit", "type": "number", "required": false, "default": "50", "description": "Cap entries returned per source. Default 50."}
+                {
+                    "name": "query",
+                    "type": "string",
+                    "required": true,
+                    "description": "The original user question, e.g. 'what did I do yesterday?'"
+                },
+                {
+                    "name": "window_label",
+                    "type": "string",
+                    "required": false,
+                    "default": "yesterday",
+                    "description": "Natural-language window: yesterday | today | morning | afternoon | evening | last_week | last_tuesday | etc. Used when from_ts/to_ts are not provided."
+                },
+                {
+                    "name": "from_ts",
+                    "type": "number",
+                    "required": false,
+                    "description": "Explicit UNIX epoch start of the window (overrides window_label)."
+                },
+                {
+                    "name": "to_ts",
+                    "type": "number",
+                    "required": false,
+                    "description": "Explicit UNIX epoch end of the window (overrides window_label)."
+                },
+                {
+                    "name": "per_source_limit",
+                    "type": "integer",
+                    "required": false,
+                    "default": "50",
+                    "description": "Cap entries returned per source. Default 50."
+                }
             ],
             "returns_description": "{entries: [{type, timestamp, title, content, source, metadata}], summary, window: {from, to, label}, sources_queried: [...], degraded_sources: [{source, reason}]}",
             "ui_hint": "timeline_card",

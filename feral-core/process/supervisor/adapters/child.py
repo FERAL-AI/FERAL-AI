@@ -17,11 +17,19 @@ Contract (consumed by ``supervisor.RunHandle``):
 * ``kill(grace_sec=5.0)`` sends ``SIGTERM`` immediately and schedules
   a ``SIGKILL`` after ``grace_sec`` if the child has not exited yet.
   ``grace_sec=0`` skips ``SIGTERM`` and goes straight to ``SIGKILL``.
+
+``start_new_session=True`` puts the child in its own process group and
+makes ``kill`` signal the whole GROUP. That is what a shell command
+needs: ``sh -c 'foo & bar'`` leaves grandchildren that survive a
+pid-targeted SIGTERM, and those are exactly the orphans a background
+runner must not leak. It is off by default so existing callers keep
+pid-targeted semantics.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import signal as _signal
 from typing import Optional
 
@@ -29,8 +37,14 @@ from typing import Optional
 class ChildAdapter:
     """Async subprocess wrapper with line-buffered stdout/stderr queues."""
 
-    def __init__(self, proc: asyncio.subprocess.Process) -> None:
+    def __init__(
+        self,
+        proc: asyncio.subprocess.Process,
+        *,
+        process_group: bool = False,
+    ) -> None:
         self._proc = proc
+        self._process_group = process_group
         self.pid: int = proc.pid if proc.pid is not None else -1
         self.stdout_queue: asyncio.Queue = asyncio.Queue()
         self.stderr_queue: asyncio.Queue = asyncio.Queue()
@@ -87,10 +101,28 @@ class ChildAdapter:
             return
         self._sigterm_sent = True
         try:
-            self._proc.send_signal(_signal.SIGTERM)
+            self._signal(_signal.SIGTERM)
         except ProcessLookupError:
             return
         self._kill_task = asyncio.create_task(self._kill_after_grace(grace_sec))
+
+    def _signal(self, sig: int) -> None:
+        """Signal the child, or its whole process group when the child
+        was started with ``start_new_session=True``.
+
+        Falls back to the pid if the group lookup fails (the child may
+        have already been reaped), because a missed grandchild is worse
+        than a redundant signal.
+        """
+        if self._process_group and self._proc.pid is not None:
+            try:
+                os.killpg(os.getpgid(self._proc.pid), sig)
+                return
+            except ProcessLookupError:
+                raise
+            except OSError:
+                pass
+        self._proc.send_signal(sig)
 
     async def _kill_after_grace(self, grace_sec: float) -> None:
         try:
@@ -103,7 +135,7 @@ class ChildAdapter:
             return
         self._sigkill_sent = True
         try:
-            self._proc.kill()
+            self._signal(_signal.SIGKILL)
         except ProcessLookupError:
             return
 
@@ -113,8 +145,13 @@ async def create_child_adapter(
     *,
     env: Optional[dict] = None,
     cwd: Optional[str] = None,
+    start_new_session: bool = False,
 ) -> ChildAdapter:
-    """Spawn a child process and wrap it in :class:`ChildAdapter`."""
+    """Spawn a child process and wrap it in :class:`ChildAdapter`.
+
+    ``start_new_session=True`` gives the child its own session/process
+    group so ``kill`` reaches grandchildren too (see module docstring).
+    """
     if not argv:
         raise ValueError("argv must not be empty")
     proc = await asyncio.create_subprocess_exec(
@@ -124,5 +161,6 @@ async def create_child_adapter(
         stderr=asyncio.subprocess.PIPE,
         env=env,
         cwd=cwd,
+        start_new_session=start_new_session,
     )
-    return ChildAdapter(proc)
+    return ChildAdapter(proc, process_group=start_new_session)

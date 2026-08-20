@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Production-grade PDF reader: layout-preserving text, markdown tables, embedded images, OCR fallback, and metadata extraction.",
+    "description": "Read local PDF files: layout-preserving text, markdown tables, embedded images as base64, and document metadata. Needs PyMuPDF, which ships as a dependency. OCR of scanned pages is NOT included: it needs pytesseract and a tesseract binary, neither of which FERAL installs, and without them a page with no embedded text layer comes back as the literal string '[OCR not available - install pytesseract]' rather than as text. Say that plainly instead of guessing at the page contents.",
     "trigger_phrases": [
         "read this pdf",
         "extract pdf text",
@@ -29,13 +29,13 @@
             "id": "extract_text",
             "method": "PYTHON",
             "url": "",
-            "description": "Extract rich text from a local PDF file with layout-preserving structure, markdown tables, and optional images. Falls back to OCR for scanned pages.",
+            "description": "Extract rich text from a local PDF with layout-preserving structure, markdown tables and optional images. A page with an embedded text layer always works. A scanned page falls through to OCR, which is only available when pytesseract and tesseract are installed; otherwise that page returns '[OCR not available - install pytesseract]'.",
             "params": [
                 {
                     "name": "path",
                     "type": "string",
                     "required": true,
-                    "description": "Absolute or relative path to a PDF file"
+                    "description": "Absolute or relative path to a PDF file on this machine. Read directly from disk with no workspace-grant check, so any path this process can read works, and a path that does not exist comes back as 404 rather than as a permission error."
                 },
                 {
                     "name": "page_start",
@@ -69,13 +69,13 @@
             "id": "metadata",
             "method": "PYTHON",
             "url": "",
-            "description": "Extract PDF metadata: title, author, creation date, page count, keywords, etc.",
+            "description": "Read PDF metadata: title, author, creation date, page count, keywords. Needs no OCR.",
             "params": [
                 {
                     "name": "path",
                     "type": "string",
                     "required": true,
-                    "description": "Absolute or relative path to a PDF file"
+                    "description": "Absolute or relative path to a PDF file on this machine. Read directly from disk with no workspace-grant check, so any path this process can read works, and a path that does not exist comes back as 404 rather than as a permission error."
                 }
             ],
             "returns_description": "PDF metadata fields (title, author, subject, dates, page count)",
@@ -91,7 +91,7 @@
                     "name": "path",
                     "type": "string",
                     "required": true,
-                    "description": "Absolute or relative path to a PDF file"
+                    "description": "Absolute or relative path to a PDF file on this machine. Read directly from disk with no workspace-grant check, so any path this process can read works, and a path that does not exist comes back as 404 rather than as a permission error."
                 },
                 {
                     "name": "page_start",

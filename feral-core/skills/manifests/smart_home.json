@@ -9,7 +9,7 @@
     "logo_url": "",
     "icon_set": "sf_symbols"
   },
-  "description": "Control your Home Assistant smart home: list entities, read state, toggle switches, change light brightness/color, and trigger automations. Backend: HomeAssistantIntegration (REST API + long-lived access token). NOT for the CuteBot/QtBot desk robot \u2014 that device's headlight/underglow uses `cutebot__set_lights`, not this skill.",
+  "description": "Control your Home Assistant smart home: list entities, read state, turn lights on and off, change brightness/colour, toggle switches, drive a vacuum, and trigger automations. Backend: HomeAssistantIntegration (REST API + long-lived access token). Needs a Home Assistant base URL and token to be configured; without them every endpoint fails on the HTTP call rather than returning data. NOT for the CuteBot/QtBot desk robot: that device's headlight/underglow uses `cutebot__set_lights`, not this skill.",
   "trigger_phrases": [
     "turn on the lights",
     "turn off the lights",
@@ -86,7 +86,7 @@
       "id": "set_light",
       "method": "PYTHON",
       "url": "python://smart_home_hue/set_light",
-      "description": "Turn on a light and optionally set brightness, color temperature, or RGB color. Calls the HA service light.turn_on. To turn a light off, use toggle_entity instead.",
+      "description": "Turn a light ON and optionally set brightness, colour temperature or RGB colour. Calls the Home Assistant service light.turn_on. To turn a light OFF use smart_home_hue__light_turn_off, which always ends with the light off; toggle_entity only flips whatever the current state is, so it turns an already-off light back on.",
       "params": [
         {
           "name": "entity_id",
@@ -117,6 +117,22 @@
         }
       ],
       "returns_description": "{called, entity}",
+      "ui_hint": "detail_card"
+    },
+    {
+      "id": "light_turn_off",
+      "method": "PYTHON",
+      "url": "python://smart_home_hue/light_turn_off",
+      "description": "Turn a light OFF. Calls the Home Assistant service light.turn_off, so the light ends up off whatever state it was in. This is the endpoint for 'turn the lights off'; do not use toggle_entity for that, because toggle turns an already-off light back on.",
+      "params": [
+        {
+          "name": "entity_id",
+          "type": "string",
+          "required": true,
+          "description": "Light entity id, e.g. 'light.living_room'."
+        }
+      ],
+      "returns_description": "{on: false, entity_id, service}",
       "ui_hint": "detail_card"
     },
     {

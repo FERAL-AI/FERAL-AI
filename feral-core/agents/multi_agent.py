@@ -27,7 +27,11 @@ from agents.turn_attribution import (
 )
 
 from skills.call_context import bind_context
-from skills.result_budget import serialize_tool_result
+from skills.result_budget import serialize_tool_result_with_images
+from agents.multimodal_blocks import (
+    image_delivery_mode,
+    materialize_tool_result_images,
+)
 
 logger = logging.getLogger("feral.multi_agent")
 
@@ -216,6 +220,38 @@ class AgentWorker:
         if context:
             full_prompt += f"\n\n[Additional Context]\n{context}"
 
+        # Tool-result images ride out of band, keyed by tool_call_id, and
+        # are spliced into a per-request copy of ``messages`` just before
+        # each chat call. Keeping them out of the message list means this
+        # worker's history stays text-only and provider-agnostic, so it
+        # survives a failover to a provider that cannot take images.
+        _images_by_call_id: dict[str, dict] = {}
+
+        def _materialize(msgs: list) -> list:
+            """Per-request view of ``msgs`` with images spliced in."""
+            if not _images_by_call_id:
+                return msgs
+            provider = str(getattr(self._llm, "provider", "") or "")
+            vision_ok = True
+            status = getattr(self._llm, "_vision_support_status", None)
+            if callable(status):
+                try:
+                    vision_ok = bool(status()[0])
+                except Exception:
+                    vision_ok = False
+            try:
+                return materialize_tool_result_images(
+                    msgs,
+                    _images_by_call_id,
+                    image_delivery_mode(provider, vision_supported=vision_ok),
+                )
+            except Exception:
+                logger.warning(
+                    "worker tool-result image materialization failed; text only",
+                    exc_info=True,
+                )
+                return msgs
+
         messages = [
             {"role": "system", "content": full_prompt},
             {"role": "user", "content": user_text},
@@ -263,7 +299,7 @@ class AgentWorker:
                 # that rides the multi-agent path (iOS chat, voice). 4096
                 # matches the single-agent orchestrator's chat budget.
                 response = await self._llm.chat(
-                    messages=messages,
+                    messages=_materialize(messages),
                     tools=None if final_answer_only else (tools if tools else None),
                     max_tokens=4096,
                     force_tool=forced_tool,
@@ -342,6 +378,13 @@ class AgentWorker:
                                                 "multi-agent tool_result emit failed",
                                                 exc_info=True,
                                             )
+                                    _tool_text, _tool_images = (
+                                        serialize_tool_result_with_images(
+                                            tc["name"],
+                                            result.get("data") or result,
+                                            registry=self._skills,
+                                        )
+                                    )
                                     messages.append({
                                         "role": "tool",
                                         "tool_call_id": tc.get("id", str(uuid4())[:8]),
@@ -350,12 +393,34 @@ class AgentWorker:
                                         # [:2000] slice. Workers read files
                                         # too, so they share the per-tool
                                         # budget (skills/result_budget.py).
-                                        "content": serialize_tool_result(
-                                            tc["name"],
-                                            result.get("data") or result,
-                                            registry=self._skills,
-                                        ),
+                                        # serialize_tool_result stringified the
+                                        # whole envelope, so a screenshot (about
+                                        # 400 000 base64 chars) was clamped to the
+                                        # per-tool character budget and the worker
+                                        # was handed a truncated blob it could not
+                                        # decode. Images now travel out of band
+                                        # and are spliced in at request-build time
+                                        # (_materialize below), which keeps this
+                                        # message list provider-agnostic.
+                                        "content": _tool_text,
                                     })
+                                    if _tool_images:
+                                        # ``.to_dict()`` matters: materialize
+                                        # rebuilds each image with
+                                        # ToolResultImage.from_dict and filters
+                                        # on isinstance(raw, dict), so storing
+                                        # the objects themselves yields zero
+                                        # images with no error raised. Same
+                                        # shape the orchestrator stores.
+                                        _images_by_call_id[
+                                            str(tc.get("id", "")) or tc["name"]
+                                        ] = {
+                                            "images": [
+                                                img.to_dict() for img in _tool_images
+                                            ],
+                                            "pruned": False,
+                                            "tool_name": tc["name"],
+                                        }
                                     guard_level = budget.observe_tool(
                                         tc["name"], tc.get("args", {}),
                                         bool(result.get("success")), result,
@@ -420,7 +485,9 @@ class AgentWorker:
                         "performed for the user, in plain text.)"
                     ),
                 })
-                response = await self._llm.chat(messages=messages, tools=None, max_tokens=2048)
+                response = await self._llm.chat(
+                    messages=_materialize(messages), tools=None, max_tokens=2048
+                )
                 accumulate_turn_usage(w_usage, response)
                 _m = model_of_llm_response(response)
                 if _m:

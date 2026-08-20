@@ -1231,7 +1231,22 @@ class LLMProvider:
         return False
 
     def _vision_support_status(self) -> tuple[bool, str]:
-        if self.provider in ("openai", "gemini"):
+        """Vision capability of the LIVE (primary) provider/model."""
+        return self._vision_support_for(self.provider, self.model)
+
+    def _vision_support_for(
+        self, provider: str, model: str = "",
+    ) -> tuple[bool, str]:
+        """Vision capability of an ARBITRARY candidate provider/model.
+
+        Split out of ``_vision_support_status`` so ``chat_with_failover``
+        can ask the question per hop: capability belongs to the
+        candidate the request is about to be sent to, not to
+        ``self.provider``. ``_vision_support_status`` keeps its old
+        signature and meaning (the primary) for every existing caller.
+        """
+        model = model or self.model
+        if provider in ("openai", "gemini"):
             return True, ""
 
         # OpenRouter is a router — vision capability is per-route, not
@@ -1241,8 +1256,8 @@ class LLMProvider:
         # adapter fix adds vision to the superset; here we consult the
         # narrower ``_capabilities_for_model`` when the catalog knows
         # the route's modality, and otherwise trust the superset.
-        if self.provider == "openrouter":
-            ok, narrow_reason = _openrouter_route_supports_vision(self.model)
+        if provider == "openrouter":
+            ok, narrow_reason = _openrouter_route_supports_vision(model)
             if ok:
                 return True, ""
             return False, narrow_reason
@@ -1251,7 +1266,7 @@ class LLMProvider:
         # the provider registry carries that signal in the bundled
         # ``_capabilities`` set. If we ever ship a text-only Anthropic
         # build the per-model hook ``_capabilities_for_model`` narrows it.
-        if self.provider in ("anthropic", "groq"):
+        if provider in ("anthropic", "groq"):
             return True, ""
 
         # DeepSeek was listed above on the assumption that every frontier
@@ -1264,18 +1279,23 @@ class LLMProvider:
         # this returned True, the vision guard let the request through, so a
         # DeepSeek hop in the failover chain 400'd on any turn carrying a
         # screen frame or an attached image instead of degrading to text.
+        #
         # Returning False here makes the caller strip the image blocks and
         # send the text, which is a usable answer rather than an exhausted
-        # chain.
-        if self.provider == "deepseek":
+        # chain. That claim used to be false: the only caller,
+        # ``chat_with_failover``, answered ``{"error": ...}`` instead of
+        # stripping anything. The stripping now genuinely happens, in
+        # ``_strip_vision_for_text_only_hop`` below, which
+        # ``chat_with_failover`` applies per candidate.
+        if provider == "deepseek":
             return (
                 False,
                 "DeepSeek chat models are text-only and reject image content "
                 "blocks. Images will be dropped for this hop.",
             )
 
-        if self.provider == "ollama":
-            model_lower = (self.model or "").lower()
+        if provider == "ollama":
+            model_lower = (model or "").lower()
             if any(hint in model_lower for hint in VISION_READY_OLLAMA_MODELS):
                 return True, ""
             return (
@@ -1284,7 +1304,7 @@ class LLMProvider:
                 "Use a VLM model such as 'llava' or apply preset 'ollama_vision'.",
             )
 
-        if self.provider in ("local", "hybrid") and self._local_engine:
+        if provider in ("local", "hybrid") and self._local_engine:
             if getattr(self._local_engine, "supports_vision", False):
                 return True, ""
             return (
@@ -1293,7 +1313,92 @@ class LLMProvider:
                 "Use Ollama VLM for local vision (`provider=ollama`, model `llava`).",
             )
 
-        return False, f"Provider '{self.provider}' does not support vision input."
+        return False, f"Provider '{provider}' does not support vision input."
+
+    # Wording for an image that could not ride along on this hop. Mirrors
+    # the convention established in ``agents/multimodal_blocks.py``
+    # (``_UNDELIVERED_NOTE`` / ``_PRUNED_NOTE``): when an image cannot
+    # reach the model, the model is told IN WORDS that one existed and
+    # that it has not seen it. Silently dropping the block would leave
+    # the model answering a question about a picture it does not know is
+    # missing.
+    VISION_STRIPPED_NOTE = (
+        "[{count} image(s) were removed from this message before it was "
+        "sent. The model answering this turn is {provider!r}, which does "
+        "not accept image input. Reason: {reason} You have NOT seen the "
+        "image(s). Do not describe or guess at their contents. Say plainly "
+        "that the image could not be processed by the current model, and "
+        "either ask the operator to switch to a vision-capable model or "
+        "use a tool that returns a text description.]"
+    )
+
+    _VISION_BLOCK_TYPES = ("image_url", "input_image", "image", "image_base64")
+
+    @classmethod
+    def _is_vision_block(cls, block: Any) -> bool:
+        """Mirror of ``_messages_contain_vision``'s per-block predicate."""
+        if not isinstance(block, dict):
+            return False
+        if str(block.get("type", "")) in cls._VISION_BLOCK_TYPES:
+            return True
+        return "image_url" in block
+
+    @classmethod
+    def _strip_vision_for_text_only_hop(
+        cls, messages: list[dict], *, provider: str = "", reason: str = "",
+    ) -> tuple[list[dict], int]:
+        """Return ``(messages_without_images, images_removed)``.
+
+        Used when a failover hop lands on a provider that cannot take
+        image input. Degrading to text is strictly better than the
+        ``{"error": ...}`` this used to produce: the turn still gets an
+        answer, and the answer is honest about the missing image because
+        every stripped message gains a note saying so.
+
+        The input list is never mutated: only the messages that actually
+        carried an image are rebuilt.
+        """
+        out: list[dict] = []
+        removed_total = 0
+        for msg in messages:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            blocks: list[Any]
+            if isinstance(content, list):
+                blocks = content
+            elif isinstance(content, dict) and cls._is_vision_block(content):
+                blocks = [content]
+            else:
+                out.append(msg)
+                continue
+
+            kept = [b for b in blocks if not cls._is_vision_block(b)]
+            removed = len(blocks) - len(kept)
+            if not removed:
+                out.append(msg)
+                continue
+            removed_total += removed
+
+            note = cls.VISION_STRIPPED_NOTE.format(
+                count=removed,
+                provider=provider or "the fallback provider",
+                reason=(reason or "").strip() or "no reason reported.",
+            )
+            new_msg = dict(msg)
+            if msg.get("role") == "tool":
+                # An OpenAI-compatible ``role: "tool"`` message wants a
+                # plain string body; a list survives only because the
+                # Anthropic translator understands it. Collapse to text
+                # so the stripped result is legal on every wire shape.
+                texts = [
+                    str(b.get("text", "")) for b in kept
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ]
+                texts = [t for t in texts if t]
+                new_msg["content"] = "\n".join(texts + [note])
+            else:
+                new_msg["content"] = list(kept) + [{"type": "text", "text": note}]
+            out.append(new_msg)
+        return out, removed_total
 
     async def _chat_anthropic(
         self, messages: list[dict], tools: Optional[list[dict]],
@@ -1339,6 +1444,14 @@ class LLMProvider:
         # Reasoning-family fork for Claude thinking-capable models.
         apply_reasoning_fork("anthropic", self.model, body)
         _enforce_anthropic_thinking_max_tokens(body)
+        # Same breakpoints as ``_build_anthropic_body``: this method is
+        # the OTHER place an Anthropic body is assembled (the direct
+        # ``chat()`` path with no fallback chain), and it reports
+        # ``cache_creation_input_tokens`` / ``cache_read_input_tokens``
+        # below, which stayed permanently zero while nothing on the
+        # request asked for a cache.
+        if self._anthropic_cache_enabled():
+            self._apply_anthropic_cache_breakpoints(body)
 
         try:
             async def _do_anthropic():
@@ -4469,6 +4582,97 @@ class LLMProvider:
         return candidates
 
     @staticmethod
+    def _anthropic_cache_enabled() -> bool:
+        """Kill switch for Anthropic prompt-cache breakpoints.
+
+        On by default. Set ``FERAL_ANTHROPIC_PROMPT_CACHE=0`` to send
+        bodies with no ``cache_control`` at all, useful when pointing
+        ``base_url`` at a proxy or gateway that does not understand the
+        field.
+        """
+        raw = os.environ.get("FERAL_ANTHROPIC_PROMPT_CACHE", "1").strip().lower()
+        return raw not in ("0", "false", "no", "off")
+
+    @staticmethod
+    def _apply_anthropic_cache_breakpoints(body: dict) -> dict:
+        """Place Anthropic prompt-cache breakpoints on ``body`` in place.
+
+        Source: platform.claude.com computer-use-tool docs, "Manage
+        screenshot history for prompt caching" (fetched 2026-08-19):
+
+          "Place one ``cache_control`` breakpoint after the system
+           prompt and tool definitions, and up to three more on the most
+           recent ``tool_result`` blocks, advancing them each turn."
+           "Prune old screenshots in *batches*, not one each turn ...
+           keep the last three screenshots and prune every 25 turns, so
+           the prefix stays byte-identical between prune events."
+
+        and platform.claude.com prompt-caching docs (same date) for the
+        mechanics: render order is ``tools`` -> ``system`` ->
+        ``messages``, so a breakpoint on the LAST system block caches
+        tools and system together; the hard ceiling is 4 breakpoints per
+        request (a 5th is a 400); the lookback window when matching a
+        prior write is 20 blocks.
+
+        1 (system+tools) + 3 (recent tool_results) = exactly 4, which is
+        why no other breakpoint may be added here.
+
+        This is the missing other half of the batch screenshot-pruning
+        the tool-result-image lane already implements
+        (``multimodal_blocks.should_prune_images``): that scheduler
+        exists solely to keep the prefix byte-stable between prune
+        events, which is worth nothing without a breakpoint to cache
+        against.
+
+        Below-minimum prefixes (512-4096 tokens depending on model) are
+        silently not cached by the API rather than erroring, so there is
+        no size check to make here.
+        """
+        marker = {"type": "ephemeral"}
+
+        # Breakpoint 1: end of the tools+system prefix.
+        #
+        # ``system`` is emitted as a plain string elsewhere in this
+        # builder because Anthropic accepts both forms; the block-list
+        # form is required to carry ``cache_control``, so promote it.
+        # Falling back to the last tool definition covers a tools-only
+        # request (no system prompt), where the tools ARE the prefix.
+        system = body.get("system")
+        if isinstance(system, str) and system:
+            body["system"] = [
+                {"type": "text", "text": system, "cache_control": dict(marker)}
+            ]
+        elif isinstance(system, list) and system:
+            for block in reversed(system):
+                if isinstance(block, dict):
+                    block["cache_control"] = dict(marker)
+                    break
+        else:
+            tools = body.get("tools")
+            if isinstance(tools, list) and tools and isinstance(tools[-1], dict):
+                tools[-1]["cache_control"] = dict(marker)
+
+        # Breakpoints 2-4: the three most recent ``tool_result`` blocks,
+        # advancing each turn. In a growing agentic conversation the
+        # newest one writes a fresh entry and the older ones stay valid
+        # read points, which is what keeps a hit reachable inside the
+        # 20-block lookback when a single turn appends many blocks.
+        remaining = 3
+        for msg in reversed(body.get("messages") or []):
+            if remaining <= 0:
+                break
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for block in reversed(content):
+                if remaining <= 0:
+                    break
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    block["cache_control"] = dict(marker)
+                    remaining -= 1
+        return body
+
+    @staticmethod
     def _build_anthropic_body(
         model: str, messages: list[dict], tools: Optional[list[dict]],
         temperature: float, max_tokens: int,
@@ -4505,6 +4709,11 @@ class LLMProvider:
                         body["tool_choice"] = translated
         apply_reasoning_fork("anthropic", model, body)
         _enforce_anthropic_thinking_max_tokens(body)
+        # Last, so the breakpoint lands on the final shape of ``system``
+        # and ``tools`` (the reasoning fork can still add top-level keys,
+        # but those render outside the cached prefix).
+        if LLMProvider._anthropic_cache_enabled():
+            LLMProvider._apply_anthropic_cache_breakpoints(body)
         return body
 
     async def _call_provider(
@@ -4718,11 +4927,19 @@ class LLMProvider:
             route_provider = str(route.get("provider") or "").strip()
             route_model = str(route.get("model") or "").strip()
 
-        if self._messages_contain_vision(messages):
-            ok, reason = self._vision_support_status()
-            if not ok:
-                logger.warning(reason)
-                return {"error": reason, "choices": []}
+        # Vision is resolved PER HOP further down, not here.
+        #
+        # This used to be a hard gate on ``self._vision_support_status()``
+        # (the PRIMARY provider's capability) that answered
+        # ``{"error": ...}`` and never tried the chain. Two ways that was
+        # wrong: a text-only primary with a vision-capable fallback never
+        # reached the fallback that could actually see the image, and a
+        # vision-capable primary that failed over to a text-only hop
+        # turned a recoverable degradation into a dead turn. Both now
+        # degrade: the candidate loop strips the images for any hop that
+        # cannot take them and tells the model, in words, that an image
+        # was dropped.
+        messages_have_vision = self._messages_contain_vision(messages)
 
         if self._local_engine and self.provider in ("local", "hybrid"):
             return await self.chat(messages, tools, **kwargs)
@@ -4828,11 +5045,42 @@ class LLMProvider:
                     "reason": FailoverReason.COOLDOWN.value,
                 })
                 continue
+            # Per-hop vision resolution. Capability belongs to the
+            # candidate we are about to call, not to ``self.provider``.
+            hop_messages = messages
+            vision_degraded: Optional[dict] = None
+            if messages_have_vision:
+                vision_ok, vision_reason = self._vision_support_for(
+                    provider_name, candidate_model,
+                )
+                if not vision_ok:
+                    hop_messages, dropped = self._strip_vision_for_text_only_hop(
+                        messages, provider=provider_name, reason=vision_reason,
+                    )
+                    if dropped:
+                        vision_degraded = {
+                            "provider": provider_name,
+                            "model": candidate_model,
+                            "images_dropped": dropped,
+                            "reason": vision_reason,
+                        }
+                        logger.warning(
+                            "Vision degradation on hop to %s (%s): stripped %d "
+                            "image block(s) and continued as text. %s",
+                            provider_name, candidate_model, dropped, vision_reason,
+                        )
+                        increment(
+                            "feral.llm.vision_stripped_total",
+                            attributes={"provider": provider_name},
+                        )
+                    else:
+                        hop_messages = messages
+
             increment("feral.llm.calls_total", attributes={"provider": provider_name, "model": config.get("model", self.model)})
             try:
                 with measure("feral.llm.latency", {"provider": provider_name, "model": config.get("model", self.model)}):
                     result = await self._call_provider(
-                        provider_name, config, messages, tools,
+                        provider_name, config, hop_messages, tools,
                         **retry_kwargs, **kwargs,
                     )
                 self._cooldown.record_success(provider_name)
@@ -4854,6 +5102,15 @@ class LLMProvider:
                     # the next call's health snapshot doesn't keep
                     # advertising an out-of-date fallback chip.
                     self._last_failover = None
+                # Tell the caller (orchestrator / WebUI) that the answer
+                # it is about to render was produced WITHOUT the image.
+                # The model was told in words too, but a machine-readable
+                # flag lets the UI say so without parsing prose.
+                if vision_degraded and isinstance(result, dict):
+                    result.setdefault("metadata", {})
+                    if isinstance(result["metadata"], dict):
+                        result["metadata"]["vision_degraded"] = vision_degraded
+                    result["vision_degraded"] = vision_degraded
                 # Bill actual token usage. ``record_usage`` itself
                 # checks the per-call-site / global caps after the
                 # fact and raises ``BudgetExceeded`` if THIS call

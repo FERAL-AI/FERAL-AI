@@ -16,15 +16,24 @@ Public surface::
     )
     record = await handle.wait()
 
-The abstraction ships READY for /voice/Codex CLI/Claude Code CLI
-integrations but is intentionally NOT wired into ``agents/orchestrator``
-in this PR (no callers yet).
+Callers in production today:
+
+* ``skills/impl/coding_tools.py``, ``coding_tools__bash`` with
+  ``run_in_background: true`` runs every background shell job through
+  this supervisor (bounded output buffers, wall-clock timeout,
+  ``scope_key`` = the FERAL session id so one call kills a session's
+  whole job set).
+
+Still unwired (ready, no caller): voice service restarts, Codex CLI /
+Claude Code CLI integrations, ffmpeg pipelines.
 """
 
+from .buffer import BoundedLineBuffer
 from .registry import RunRecord, RunRegistry
 from .supervisor import ProcessSupervisor, RunHandle, create_process_supervisor
 
 __all__ = [
+    "BoundedLineBuffer",
     "ProcessSupervisor",
     "RunHandle",
     "RunRecord",

@@ -2641,8 +2641,15 @@ def cmd_doctor():
             from security.macos_permissions import all_gui_permission_statuses
             for probe in all_gui_permission_statuses():
                 label = f"{probe.permission.replace('_', ' ').title()} (TCC)"
+                # Name the subject on any row that has one. A TCC grant
+                # belongs to an executable, and the Accessibility rows
+                # cover two different ones (the Python host and
+                # osascript); a bare "granted" hid that split and let
+                # one green row vouch for a capability it never
+                # exercised.
+                subject = f" [{probe.subject}]" if probe.subject else ""
                 if probe.status == "granted":
-                    _pass(label, f"{probe.api}: granted")
+                    _pass(label, f"{probe.api}: granted{subject}")
                 elif probe.status == "denied":
                     # v2026.5.36 — was `_fail`. A denied TCC grant
                     # only blocks the GUI computer-use code path

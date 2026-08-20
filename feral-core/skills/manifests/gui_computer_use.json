@@ -132,22 +132,23 @@
         },
         {
             "id": "window_list",
+            "read_only_hint": true,
             "method": "PYTHON",
             "url": "",
-            "description": "List all visible windows with their titles and bounds.",
+            "description": "List the on-screen windows. Each entry has app, title, x, y, width, height, pid, window_id and focused. Backed by CoreGraphics with a System Events fallback; if neither can enumerate, the call FAILS with the real reason instead of reporting an empty desktop.",
             "params": [],
-            "returns_description": "Array of window objects",
+            "returns_description": "windows (array of {app, title, x, y, width, height, pid, window_id, focused}), count, source, and the per-backend attempt log",
             "ui_hint": "list"
         },
         {
             "id": "window_focus",
             "method": "PYTHON",
             "url": "",
-            "description": "Bring a window to the front by its title or application name.",
+            "description": "Bring a window to the front by its title or by its application name. Matches an open window title first (exact, then substring), then falls back to the app name. Returns 404 with the list of candidate apps when nothing matches.",
             "params": [
                 {"name": "title", "type": "string", "required": true, "description": "Window title or application name to focus"}
             ],
-            "returns_description": "Confirmation of window focus",
+            "returns_description": "Confirmation with the app and window title actually focused, and which strategy matched",
             "ui_hint": "detail_card"
         }
     ],

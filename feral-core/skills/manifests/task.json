@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Run long-horizon work autonomously in the background. Use this when the user asks you to 'go work on', 'spend some time', 'keep working until', or otherwise take on a multi-step job that won't finish in a single reply. The task survives the user navigating away AND a brain restart, and each step runs with a generous tool budget. Then check progress with status/list.",
+    "description": "Run long-horizon work autonomously in the background. Use this when the user asks you to 'go work on', 'spend some time', 'keep working until', or otherwise take on a multi-step job that won't finish in a single reply. The task survives the user navigating away AND a brain restart, and each step runs with a generous tool budget. Then check progress with status/list. These endpoints reach the brain's own HTTP surface on http://localhost:9090, which is the default port and is not re-derived from configuration: on a brain started on a different port (FERAL_PORT / network.port) every call here fails with a connection error, and the fix is the operator's port setting, not a retry.",
     "trigger_phrases": [
         "go work on",
         "work on this for a while",
@@ -23,7 +23,11 @@
         "check on the task",
         "what background tasks are running"
     ],
-    "categories": ["productivity", "agent", "automation"],
+    "categories": [
+        "productivity",
+        "agent",
+        "automation"
+    ],
     "auth": {
         "type": "none"
     },
@@ -34,9 +38,27 @@
             "url": "http://localhost:9090/internal/task/start",
             "description": "Start a persistent background task. Use `goal` for a single autonomous job, or `subtasks` (an ordered list) to break a larger goal into steps that run sequentially in the background. Each step is an autonomous agent turn with the full tool budget (up to ~15 minutes of work). Returns a flow_id you can use with `status`. Tell the user the task started and that you'll keep working; do NOT claim it's finished.",
             "params": [
-                {"name": "goal", "type": "string", "required": false, "description": "Natural-language description of the single background job, e.g. 'research the top 5 competitors and summarize each'. Provide this OR subtasks."},
-                {"name": "subtasks", "type": "array", "items": {"type": "string"}, "required": false, "description": "Ordered list of sub-goals to run one after another in the background. Use for multi-stage work so progress is checkpointed between stages."},
-                {"name": "title", "type": "string", "required": false, "description": "Short human-readable title for the task list UI."}
+                {
+                    "name": "goal",
+                    "type": "string",
+                    "required": false,
+                    "description": "Natural-language description of the single background job, e.g. 'research the top 5 competitors and summarize each'. Provide this OR subtasks."
+                },
+                {
+                    "name": "subtasks",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "required": false,
+                    "description": "Ordered list of sub-goals to run one after another in the background. Use for multi-stage work so progress is checkpointed between stages."
+                },
+                {
+                    "name": "title",
+                    "type": "string",
+                    "required": false,
+                    "description": "Short human-readable title for the task list UI."
+                }
             ],
             "returns_description": "{ok, flow_id, steps, status, title}",
             "ui_hint": "detail_card"
@@ -48,7 +70,12 @@
             "url": "http://localhost:9090/internal/task/status",
             "description": "Check progress of a background task by flow_id. Use this when the user asks how a task is going.",
             "params": [
-                {"name": "flow_id", "type": "string", "required": true, "description": "The flow_id returned by start."}
+                {
+                    "name": "flow_id",
+                    "type": "string",
+                    "required": true,
+                    "description": "The flow_id returned by start."
+                }
             ],
             "returns_description": "{flow_id, title, status, current_step, steps_total, steps_completed, error}",
             "ui_hint": "detail_card"
@@ -60,7 +87,13 @@
             "url": "http://localhost:9090/internal/task/list",
             "description": "List recent background tasks and their statuses.",
             "params": [
-                {"name": "limit", "type": "number", "required": false, "default": "20", "description": "Max tasks to return"}
+                {
+                    "name": "limit",
+                    "type": "integer",
+                    "required": false,
+                    "default": "20",
+                    "description": "Max tasks to return"
+                }
             ],
             "returns_description": "{tasks: [{flow_id, title, status, current_step}]}",
             "ui_hint": "list"

@@ -31,6 +31,7 @@ from uuid import uuid4
 
 from .adapters.child import ChildAdapter, create_child_adapter
 from .adapters.pty import PtyAdapter, create_pty_adapter
+from .buffer import BoundedLineBuffer
 from .registry import KillReason, RunRecord, RunRegistry
 
 CmdType = Union[str, Sequence[str]]
@@ -55,6 +56,8 @@ class RunHandle:
         adapter: AdapterType,
         registry: RunRegistry,
         on_finalize,
+        max_buffered_lines: int = 0,
+        max_line_chars: int = 0,
     ) -> None:
         self.run_id = run_id
         self.pid = pid
@@ -63,8 +66,12 @@ class RunHandle:
         self._registry = registry
         self._on_finalize = on_finalize
         self._kill_reason: Optional[KillReason] = None
-        self._stdout_lines: list[str] = []
-        self._stderr_lines: list[str] = []
+        # 0/0 == unbounded, which is what every pre-existing caller gets:
+        # short-lived runs that are read once after exit. Background /
+        # streaming callers pass real bounds so a process that prints
+        # forever cannot grow the brain's heap forever.
+        self._stdout_lines = BoundedLineBuffer(max_buffered_lines, max_line_chars)
+        self._stderr_lines = BoundedLineBuffer(max_buffered_lines, max_line_chars)
         self._last_output_at = time.monotonic()
         self._final_record: Optional[RunRecord] = None
         self._finalize_event = asyncio.Event()
@@ -75,15 +82,38 @@ class RunHandle:
 
     @property
     def stdout(self) -> str:
-        return "\n".join(self._stdout_lines)
+        return self._stdout_lines.text()
 
     @property
     def stderr(self) -> str:
-        return "\n".join(self._stderr_lines)
+        return self._stderr_lines.text()
+
+    @property
+    def stdout_buffer(self) -> BoundedLineBuffer:
+        """The live stdout ring buffer (incremental cursor reads)."""
+        return self._stdout_lines
+
+    @property
+    def stderr_buffer(self) -> BoundedLineBuffer:
+        return self._stderr_lines
 
     @property
     def kill_reason(self) -> Optional[KillReason]:
         return self._kill_reason
+
+    @property
+    def finished(self) -> bool:
+        """True once the run is finalized (record published)."""
+        return self._final_record is not None
+
+    @property
+    def record(self) -> Optional[RunRecord]:
+        """The finalized record, or None while the run is still going.
+
+        Lets a poller read the outcome without ``await wait()`` blocking
+        it for the lifetime of a long background job.
+        """
+        return self._final_record
 
     # ── lifecycle ────────────────────────────────────────────────────
 
@@ -154,7 +184,7 @@ class RunHandle:
         await self._on_finalize(self.run_id)
 
     async def _consume(
-        self, queue: asyncio.Queue, sink: list[str]
+        self, queue: asyncio.Queue, sink: BoundedLineBuffer
     ) -> None:
         while True:
             line = await queue.get()
@@ -236,6 +266,9 @@ class ProcessSupervisor:
         env: Optional[dict] = None,
         cwd: Optional[str] = None,
         adapter: str = "child",
+        max_buffered_lines: int = 0,
+        max_line_chars: int = 0,
+        start_new_session: bool = False,
     ) -> RunHandle:
         """Spawn a supervised process and return its :class:`RunHandle`.
 
@@ -243,6 +276,15 @@ class ProcessSupervisor:
         for ``adapter='pty'`` (the PTY adapter always runs the command
         through a login shell; passing argv here would be a category
         error). Validates this at the boundary so callers fail loudly.
+
+        ``max_buffered_lines`` / ``max_line_chars`` bound the retained
+        output (0 = unbounded, the historical behaviour). A bounded
+        handle keeps the newest lines and reports how many it dropped -
+        see :class:`process.supervisor.buffer.BoundedLineBuffer`.
+
+        ``start_new_session=True`` (child adapter only) makes kills
+        reach the child's whole process group, so a shell command's
+        grandchildren cannot outlive the run.
         """
         if adapter == "child":
             if isinstance(cmd, str) or not isinstance(cmd, (list, tuple)):
@@ -250,12 +292,23 @@ class ProcessSupervisor:
                     "adapter='child' requires cmd as a list/tuple of args"
                 )
             adapter_obj: AdapterType = await create_child_adapter(
-                list(cmd), env=env, cwd=cwd
+                list(cmd),
+                env=env,
+                cwd=cwd,
+                start_new_session=start_new_session,
             )
         elif adapter == "pty":
             if not isinstance(cmd, str):
                 raise TypeError(
                     "adapter='pty' requires cmd as a string (login-shell -c)"
+                )
+            if start_new_session:
+                # The PTY adapter already calls setsid() in the forked
+                # child; asking for a second one would be a lie about
+                # what this flag does here.
+                raise ValueError(
+                    "start_new_session is implicit for adapter='pty' "
+                    "(the fork already calls setsid)"
                 )
             adapter_obj = await create_pty_adapter(cmd, env=env, cwd=cwd)
         else:
@@ -277,6 +330,8 @@ class ProcessSupervisor:
             adapter=adapter_obj,
             registry=self._registry,
             on_finalize=self._on_finalize,
+            max_buffered_lines=max_buffered_lines,
+            max_line_chars=max_line_chars,
         )
         async with self._lock:
             self._active[run_id] = handle

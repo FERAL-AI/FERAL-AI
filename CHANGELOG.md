@@ -1,10 +1,134 @@
 # Changelog
 
-<!-- feral-version: 2026.8.11 -->
+<!-- feral-version: 2026.8.12 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.12] - 2026-08-20 - the surfaces that reported success and did nothing
+
+One theme. A capability was declared, shipped, and silently broken, and
+every layer that could have noticed reported success instead. Found by
+executing each surface rather than reading it: none of what follows
+raised an error, appeared in a log, or failed a test.
+
+The release began with one symptom. Asked to open a YouTube song in
+Chrome, the brain refused. The cause was a manifest whose description
+enumerated the AppleScript phrases the sandbox rejects and omitted the
+one that mattered, so the model was handed an incomplete contract and
+got a 403 for following it exactly. Auditing that shape across the
+codebase is what produced the rest.
+
+### Added
+
+- **A macOS accessibility tree (`macos_ax`).** The desktop is now
+  addressable the way a web page is: a text snapshot with stable refs,
+  then act on a ref by name. Eight endpoints over AXUIElement. Snapshots
+  filter and paginate and announce truncation. Labels fall through
+  AXTitle, AXDescription, AXValue, AXHelp and AXRoleDescription, because
+  most controls put their name anywhere but AXTitle. This is the half
+  of computer use that needs no vision at all.
+- **`desktop_control__open_url`.** Opens a page in a chosen browser via
+  the allowlisted `open` program, no shell, http/https only.
+- **Tool-result images.** Screenshots now reach the model as real image
+  blocks, per provider, with batch pruning and prompt-cache breakpoints.
+- **Browser drag, native dialog handling, and per-tab isolation**, plus
+  bounding boxes on every ARIA ref so a failed selector click can fall
+  back to a coordinate click on the same element.
+- **Background shell execution** in `coding_tools__bash`, with
+  incremental output and kill, built on the existing supervisor.
+- **Three CI guards** that make this defect class structural rather than
+  a matter of review attention: manifest promises must match what the
+  gate actually permits (361 cases), every declared endpoint must
+  dispatch, and every name in the injection allowlist must resolve to a
+  skill that really registers. Each caught further live bugs the moment
+  it was written.
+
+### Fixed
+
+- **Prompt-injection screening was not running on the browser.** The
+  allowlist held the module name, `browser_use`; the skill registers as
+  `browser`. Every page FERAL read reached the model unwrapped and
+  unscreened. Three more entries had the same shape and were found by
+  the new guard, not by inspection: GitHub issues, calendar invites and
+  SMS, which is most of the realistic injection surface after web pages.
+- **Inbound channel messages had no sender gate.** Anyone who found the
+  Telegram bot handle got the full agent, with filesystem, shell and
+  computer-use skills, and with `autonomy_mode=loose` nothing prompted.
+  Now default-deny with no empty-means-open branch, gating Telegram,
+  Discord, Slack and WhatsApp.
+- **The model could not see any screenshot.** A 400 008-char image
+  arrived as 1 405 characters of "AAAA". The truncation was two layers
+  deep, so a fix at the obvious layer alone would have preserved an
+  already-destroyed image.
+- **`gui_computer_use__screenshot` returned 500 on every call** on macOS:
+  `screencapture` writes RGBA and the encoder asked for JPEG with no
+  flatten.
+- **`window_list` returned `{"success": true, "windows": []}` forever.**
+  The aggregate AppleScript form fails, and neither returncode nor
+  stderr was inspected. The `-25211` it reports is not an Accessibility
+  denial; it is a System Events quirk, and per-process queries work with
+  the grants the machine already has.
+- **The browser's accessibility tree failed on every call.** It attached
+  to Chrome's browser CDP target, which implements neither Page nor
+  Runtime nor Accessibility nor Network. Playwright masked it for click
+  and type, which is why it survived.
+- **Selectors were built as `tag.firstClass` with no uniqueness check.**
+  Measured on three identical rows, `div.row` matched three elements and
+  `querySelector` silently took the first: a wrong-element click that
+  looks exactly like success.
+- **Manifest parameter defaults were never applied** on six of the seven
+  dispatch lanes, so the same tool worked in chat and failed by voice.
+  103 defaulted params across 19 skills; 17 had no internal fallback.
+- **Spotify claimed success for commands it never carried out.** `pause`,
+  `next_track`, `previous_track`, `play_playlist` and `set_volume` never
+  read the response, and Spotify answers with 404 NO_ACTIVE_DEVICE.
+- **Channel sends reported delivery for messages Telegram rejected**,
+  which it signals with HTTP 200 and `ok: false`.
+- **`coding_tools__bash` silently clamped `timeout` to 120s** while the
+  manifest named no ceiling, and `grep_search` silently dropped `-A`,
+  `-B`, `-C`, `-i`, `multiline` and `type`.
+- **"Is Claude working on something?" was unanswerable.** The capability
+  existed; the router never offered it, and "what is my mac doing right
+  now" scored a confident wrong match on `web_search` that suppressed
+  the smarter fallback.
+- **The deprecated `desktop_automation` shim outranked the canonical
+  `gui_computer_use`**, which was not pinned in the always-include set
+  despite being the only surface with screenshot, window_list and
+  window_focus.
+- **`save_cookies` ignored `FERAL_HOME`**, writing into the real
+  `~/.feral` from isolated runs.
+
+### Changed
+
+- Browser page text and accessibility snapshots are no longer clamped to
+  2 000 characters. With no manifest file the browser was not a
+  first-party skill, so every result fell to the default tier.
+- Failover to a provider without vision now strips images and continues,
+  telling the model an image was dropped, instead of erroring.
+- Anthropic requests now carry `cache_control` breakpoints. The marker
+  is bare `ephemeral` with no `ttl`, because `cost/pricing.py` bills
+  every cache write at the 5-minute rate.
+- Count parameters (`per_page`, `limit`, `max_steps`) are typed
+  `integer` rather than `number`; `github_api__list_repos` was putting
+  `?per_page=10.0` on the wire.
+
+### Known limitations
+
+- `pdf_reader` advertises OCR that cannot run: `pytesseract` is in no
+  dependency list.
+- `workspace_scripts` and `code_interpreter` refuse every endpoint with
+  503 when Docker is absent, which is the default on macOS, including
+  `list_catalog` and `delete`, which run no code.
+- Skills created at runtime by `system_settings__create_skill` are
+  refused by the domain gate, so the advertised "integrate a service we
+  do not support" path does not complete without a policy edit.
+
+### Coverage
+- pytest (feral-core): 9474 passed, 49 skipped, 0 failed.
+- vitest (feral-client-v2): 848 passed across 125 files. No client change in this release; run to confirm the version-literal sync broke nothing.
+
 
 ## [2026.8.11] - 2026-08-16 - checks that could not fail, and a door that was locked
 
