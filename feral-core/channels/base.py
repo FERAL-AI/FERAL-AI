@@ -9,13 +9,99 @@ Supported: Telegram, Discord, Slack, WhatsApp
 
 from __future__ import annotations
 import asyncio
+import inspect
 import json
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
 from typing import Optional, Callable, Awaitable, Any
 
 logger = logging.getLogger("feral.channels")
+
+# Dedicated logger for inbound access decisions. Kept separate from the
+# noisy transport logger so an operator can raise/lower it on its own
+# (``logging.getLogger("feral.channels.access")``) and so the first-run
+# "who am I" flow below has one predictable place to look.
+access_logger = logging.getLogger("feral.channels.access")
+
+
+class ChannelSendError(RuntimeError):
+    """An outbound message was positively NOT delivered.
+
+    Raised by every ``Channel.send`` implementation when the provider
+    answered with a rejection. This is deliberately an exception rather
+    than a falsy return value: the skill-facing wrappers in
+    ``integrations/messaging.py`` call ``channel.send(...)`` and ignore
+    the return value entirely, so only a raise can stop them reporting
+    ``success: True`` for a message Telegram/Slack/Discord refused.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 502,
+        channel: str = "",
+        raw: Any = None,
+    ):
+        super().__init__(message)
+        self.status_code = int(status_code or 502)
+        self.channel = channel
+        self.raw = raw
+
+    def as_envelope(self) -> dict:
+        """The ``send_direct``-shaped failure envelope for this error."""
+        return {
+            "success": False,
+            "status_code": self.status_code,
+            "error": str(self),
+        }
+
+
+def _coerce_id_set(raw: Any) -> set[str]:
+    """Normalise an allowlist value into a set of string ids.
+
+    Accepts a list/tuple/set of ints or strings, or a single string of
+    comma / whitespace / semicolon separated ids (which is what an env
+    var or a credentials.json entry looks like). Empty and ``None``
+    both yield an empty set, which is the FAIL-CLOSED value.
+
+    Nesting is flattened, because ``api.state`` unions its two config
+    sources (credentials and settings) by collecting them into a list
+    before handing them over, so a list-shaped settings entry arrives
+    as a list inside a list. Flattening one such layer here beats
+    ``str()``-ing it into a single bogus id like ``"['222', '333']"``.
+    """
+    if raw is None:
+        return set()
+    if isinstance(raw, (list, tuple, set, frozenset)):
+        items: list = list(raw)
+    elif isinstance(raw, (int,)):
+        items = [raw]
+    elif isinstance(raw, str):
+        items = [chunk for chunk in raw.replace(";", ",").replace("\n", ",").split(",")]
+    else:
+        return set()
+    out: set[str] = set()
+    for item in items:
+        if item is None:
+            continue
+        if isinstance(item, (list, tuple, set, frozenset)):
+            out |= _coerce_id_set(item)
+            continue
+        if isinstance(item, str) and ("," in item or ";" in item or "\n" in item):
+            out |= _coerce_id_set(item)
+            continue
+        text = str(item).strip()
+        # Telegram/Discord ids are numeric, Slack's are "U…"/"C…". A
+        # leading '@' is how a human writes a handle; strip it so
+        # "@alice" and "alice" are the same entry.
+        if text.startswith("@"):
+            text = text[1:]
+        if text:
+            out.add(text)
+    return out
 
 
 class ChannelMessage:
@@ -111,6 +197,226 @@ class Channel(ABC):
         self._runtime_failures: int = 0
         self._degraded: bool = False
         self._degraded_reason: str = ""
+        self._load_access_policy()
+
+    # ── Inbound access control ──────────────────────────────────────
+    #
+    # Every messaging channel is an INBOUND path into the orchestrator,
+    # which on a ``loose`` autonomy install runs filesystem, shell and
+    # computer-use skills with no approval step. Before this gate the
+    # only thing standing between the whole internet and that
+    # orchestrator was knowing the bot's handle, which is public by
+    # construction (a Telegram bot is discoverable by name; a Discord
+    # bot is DM-able by anyone sharing a guild).
+    #
+    # The policy is DEFAULT DENY. An unconfigured channel accepts
+    # nobody. There is no "empty allowlist means allow all" escape,
+    # because that is precisely the misconfiguration that has to fail
+    # closed.
+    #
+    # First run, with no chicken-and-egg problem and no open door:
+    #   1. The owner starts the channel with no allowlist. It polls,
+    #      and it rejects every message, silently, from everyone.
+    #   2. The owner messages their own bot. They get NO reply. On
+    #      their own machine, the rejection is logged with the exact
+    #      sender id, and it is recorded in ``pending_senders`` which
+    #      ``ChannelManager.stats`` surfaces on the loopback API.
+    #   3. The owner copies that id into settings/credentials and
+    #      restarts (or re-starts the channel). Now they are in.
+    # At no point in that flow is any message accepted from anyone, so
+    # there is no window an attacker can race.
+    #
+    # ``pairing_window_sec`` is an OPTIONAL convenience for owners who
+    # do not want the two-step. It is 0 (off) unless the operator sets
+    # it explicitly, it is time-boxed, and it closes permanently the
+    # instant one sender binds. It is opt-in precisely because it IS a
+    # race: whoever messages first during the window wins.
+
+    ACCESS_CONFIG_KEYS = ("allowed_senders", "allowed_chats", "pairing_window_sec")
+    _MAX_PENDING_SENDERS = 50
+
+    def _load_access_policy(self) -> None:
+        cfg = self.config if isinstance(self.config, dict) else {}
+        self._allowed_senders: set[str] = _coerce_id_set(cfg.get("allowed_senders"))
+        self._allowed_chats: set[str] = _coerce_id_set(cfg.get("allowed_chats"))
+        try:
+            self._pairing_window_sec: int = max(0, int(cfg.get("pairing_window_sec") or 0))
+        except (TypeError, ValueError):
+            self._pairing_window_sec = 0
+        # Set by ``_open_pairing_window`` at start(); None means the
+        # window was never opened.
+        self._pairing_opened_at: Optional[float] = None
+        self._paired_once: bool = False
+        # Bounded record of senders we turned away, so the owner can
+        # find their own id without the channel ever answering one.
+        # Ids and counts only: no message text, and the display name is
+        # truncated, because everything here is attacker-controlled and
+        # ends up in the owner's console.
+        self._rejected_senders: dict[str, dict] = {}
+
+    @property
+    def access_configured(self) -> bool:
+        """True when this channel can ever accept an inbound message."""
+        return bool(self._allowed_senders or self._allowed_chats)
+
+    @property
+    def pending_senders(self) -> list[dict]:
+        """Senders that were rejected, newest first. Local diagnostics only."""
+        rows = list(self._rejected_senders.values())
+        rows.sort(key=lambda r: r.get("last_seen", 0), reverse=True)
+        return rows
+
+    def _open_pairing_window(self) -> None:
+        """Arm the opt-in, time-boxed first-sender pairing window."""
+        if self._pairing_window_sec <= 0 or self._paired_once:
+            return
+        self._pairing_opened_at = time.monotonic()
+        access_logger.warning(
+            "Channel %s: PAIRING WINDOW OPEN for %ds. The first sender to "
+            "message this bot will be bound as an allowed sender. Close it "
+            "by restarting with pairing_window_sec=0 once you are paired.",
+            self.channel_type, self._pairing_window_sec,
+        )
+
+    def _pairing_window_is_open(self) -> bool:
+        if self._paired_once or self._pairing_window_sec <= 0:
+            return False
+        if self._pairing_opened_at is None:
+            return False
+        return (time.monotonic() - self._pairing_opened_at) < self._pairing_window_sec
+
+    async def _bind_owner(self, user_id: str, channel_id: str) -> None:
+        """Bind a sender through the pairing window and close it."""
+        if user_id:
+            self._allowed_senders.add(str(user_id))
+        if channel_id:
+            self._allowed_chats.add(str(channel_id))
+        self._paired_once = True
+        self._pairing_opened_at = None
+        access_logger.warning(
+            "Channel %s: PAIRED sender_id=%s chat_id=%s. Pairing window is "
+            "now closed. Persist these ids in settings so they survive a "
+            "restart.",
+            self.channel_type, user_id, channel_id,
+        )
+        on_pair = (self.config or {}).get("on_pair")
+        if callable(on_pair):
+            try:
+                result = on_pair(self.channel_type, str(user_id), str(channel_id))
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                access_logger.error(
+                    "Channel %s: on_pair persistence hook failed: %s",
+                    self.channel_type, exc,
+                )
+
+    def _record_rejection(self, user_id: str, channel_id: str, username: str) -> int:
+        key = f"{user_id}|{channel_id}"
+        row = self._rejected_senders.get(key)
+        now = time.time()
+        if row is None:
+            if len(self._rejected_senders) >= self._MAX_PENDING_SENDERS:
+                # Drop the oldest so a flood cannot grow this unbounded.
+                oldest = min(
+                    self._rejected_senders,
+                    key=lambda k: self._rejected_senders[k].get("last_seen", 0),
+                )
+                self._rejected_senders.pop(oldest, None)
+            row = {
+                "channel": self.channel_type,
+                "user_id": str(user_id),
+                "chat_id": str(channel_id),
+                "display_name": str(username or "")[:32],
+                "first_seen": now,
+                "last_seen": now,
+                "count": 0,
+            }
+            self._rejected_senders[key] = row
+        row["last_seen"] = now
+        row["count"] = int(row.get("count", 0)) + 1
+        return int(row["count"])
+
+    async def _authorize_inbound(
+        self, user_id: str, channel_id: str, username: str = "",
+    ) -> bool:
+        """Decide whether an inbound message may reach the orchestrator.
+
+        Returns True only for an allowlisted sender (or the one sender
+        that binds through an explicitly-opened pairing window).
+        A rejected sender is logged and recorded; the caller must then
+        return WITHOUT sending anything, so the sender learns nothing
+        about whether a brain is on the other end.
+        """
+        uid = str(user_id or "")
+        cid = str(channel_id or "")
+        if uid and uid in self._allowed_senders:
+            return True
+        if cid and cid in self._allowed_chats:
+            return True
+
+        if self._pairing_window_is_open():
+            await self._bind_owner(uid, cid)
+            return True
+
+        count = self._record_rejection(uid, cid, username)
+        try:
+            from observability.metrics import increment
+            increment(
+                "feral.channel.inbound_denied_total",
+                attributes={"channel": self.channel_type},
+            )
+        except Exception:
+            pass
+        # Loud on the first hit from a given sender (that is the line
+        # the owner reads to learn their own id on first run), quieter
+        # afterwards so a hammering stranger cannot flood the log.
+        log = access_logger.warning if count == 1 or count % 25 == 0 else access_logger.debug
+        log(
+            "Channel %s: DENIED inbound message. sender_id=%s chat_id=%s "
+            "display_name=%r attempts=%d. %s",
+            self.channel_type, uid or "?", cid or "?",
+            str(username or "")[:32], count,
+            (
+                "No allowlist is configured for this channel, so it accepts "
+                "nobody. If this was you, add the sender_id above to the "
+                "channel's allowed_senders."
+                if not self.access_configured
+                else "This sender is not on the allowlist."
+            ),
+        )
+        # Local telemetry only: no text preview, and the display name is
+        # deliberately not forwarded, because both are attacker-supplied.
+        await self._emit_comms_event("in", uid or cid, "", {"denied": True})
+        return False
+
+    def _announce_access_posture(self) -> None:
+        """Arm pairing (if opted into) and say plainly who can get in.
+
+        Called from every channel's ``start()``. A channel with no
+        allowlist still starts and still polls, which is deliberate: it
+        is what lets the owner discover their own sender id from the
+        denial log without the channel ever accepting a message.
+        """
+        self._open_pairing_window()
+        if self.access_configured:
+            access_logger.info(
+                "Channel %s: inbound allowlist active (%d sender id(s), "
+                "%d chat id(s)). Everyone else is silently dropped.",
+                self.channel_type,
+                len(self._allowed_senders), len(self._allowed_chats),
+            )
+        elif self._pairing_window_sec > 0:
+            pass  # _open_pairing_window already said it, loudly.
+        else:
+            access_logger.warning(
+                "Channel %s: NO inbound allowlist configured. Every "
+                "inbound message will be denied. Message the bot once, "
+                "then read the sender_id from the 'DENIED inbound message' "
+                "line in this log and add it to the channel's "
+                "allowed_senders.",
+                self.channel_type,
+            )
 
     def _track_bg_task(self, task: "asyncio.Future") -> "asyncio.Future":
         """Hold a strong reference to a fire-and-forget task. See F-06.
@@ -129,10 +435,68 @@ class Channel(ABC):
         need richer behavior (e.g. resolving @handles) should override.
         """
         try:
-            await self.send(to, ChannelResponse(text=text))
-            return {"success": True, "message_id": None, "raw": None}
+            envelope = await self.send(to, ChannelResponse(text=text))
+        except ChannelSendError as e:
+            return e.as_envelope()
         except Exception as e:
             return {"success": False, "error": str(e), "status_code": 502}
+        if isinstance(envelope, dict):
+            return envelope
+        return {"success": True, "message_id": None, "raw": None}
+
+    # ── Outbound delivery verification ──────────────────────────────
+    #
+    # Telegram answers HTTP 200 with ``{"ok": false}`` for a blocked
+    # bot, a bad chat_id and a Markdown parse error; Slack answers 200
+    # with ``{"ok": false, "error": ...}``. Reading only the transport
+    # status is therefore not enough to know a message was delivered,
+    # which is why ``send`` used to report success for messages that
+    # never arrived. These two helpers are the shared parsing step; the
+    # per-provider verdict lives in each ``send`` next to its own
+    # already-correct ``send_direct``.
+
+    @staticmethod
+    def _http_status(resp: Any) -> Optional[int]:
+        """The integer status code, or None when it cannot be read."""
+        try:
+            return int(getattr(resp, "status_code", None))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _json_body(resp: Any) -> Optional[dict]:
+        """The response body as a dict, or None when it is not one."""
+        try:
+            data = resp.json()
+        except Exception:
+            return None
+        if inspect.isawaitable(data):
+            # ``httpx.Response.json`` is synchronous, so an awaitable
+            # here means a test double (or some other async client)
+            # handed back a coroutine. We cannot block on it, and
+            # leaving it unawaited emits a RuntimeWarning, so close it
+            # and report "no readable body".
+            try:
+                data.close()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _skipped_envelope() -> dict:
+        """Envelope for a send that had nothing to send.
+
+        Not a failure (no delivery was attempted, so nothing failed)
+        and not a delivery either, hence the explicit ``skipped`` flag.
+        """
+        return {
+            "success": True,
+            "skipped": True,
+            "status_code": 0,
+            "message_id": None,
+            "raw": None,
+        }
 
     async def resolve_username(self, handle: str) -> Optional[dict]:
         """Resolve an ``@handle`` to a channel-specific chat id.
@@ -185,7 +549,13 @@ class Channel(ABC):
         ...
 
     @abstractmethod
-    async def send(self, channel_id: str, response: ChannelResponse):
+    async def send(self, channel_id: str, response: ChannelResponse) -> dict:
+        """Deliver ``response`` to ``channel_id``.
+
+        Returns a ``send_direct``-shaped success envelope. Raises
+        :class:`ChannelSendError` when the provider positively rejected
+        the message; never reports success for an undelivered send.
+        """
         ...
 
     @property
@@ -272,6 +642,7 @@ class TelegramChannel(Channel):
 
         import httpx
         self._reset_runtime_health()
+        self._announce_access_posture()
         self._running = True
         self._http = httpx.AsyncClient(timeout=35.0)
         self._base_url = f"https://api.telegram.org/bot{token}"
@@ -468,6 +839,13 @@ class TelegramChannel(Channel):
         user = message.get("from", {})
         user_id = str(user.get("id", ""))
         username = user.get("first_name", "") or user.get("username", "")
+
+        # Gate BEFORE anything else. In particular before
+        # ``_known_chat_ids``, which feeds ``broadcast``: an unknown
+        # sender must not become a place the brain later talks to.
+        if not await self._authorize_inbound(user_id, chat_id, username):
+            return
+
         self._known_chat_ids.add(chat_id)
 
         text = message.get("text", "")
@@ -489,12 +867,31 @@ class TelegramChannel(Channel):
         )
         await self._emit_comms_event("in", username or user_id, text)
         response = await self._handler(channel_msg)
-        await self.send(chat_id, response)
+        await self._reply(chat_id, response)
+
+    async def _reply(self, chat_id: str, response: ChannelResponse) -> None:
+        """Send the handler's reply without letting a send failure kill
+        the poll loop. ``send`` now raises on a rejected delivery (that
+        is the point), but a Markdown parse error on one reply must not
+        trip the channel's runtime-failure fuse."""
+        try:
+            await self.send(chat_id, response)
+        except ChannelSendError as exc:
+            logging.getLogger("feral.channel.telegram").error(
+                "Telegram reply to %s was not delivered: %s", chat_id, exc,
+            )
 
     async def _handle_callback(self, callback: dict):
         chat_id = str(callback.get("message", {}).get("chat", {}).get("id", ""))
         data = callback.get("data", "")
         user_id = str(callback.get("from", {}).get("id", ""))
+
+        # A callback_query is an inbound command like any other: the
+        # button payload is routed straight to the orchestrator, so it
+        # needs the same gate as a text message.
+        if not await self._authorize_inbound(user_id, chat_id, ""):
+            return
+
         self._known_chat_ids.add(chat_id)
 
         channel_msg = ChannelMessage(
@@ -506,7 +903,7 @@ class TelegramChannel(Channel):
         )
         await self._emit_comms_event("in", user_id, data, {"callback": True})
         response = await self._handler(channel_msg)
-        await self.send(chat_id, response)
+        await self._reply(chat_id, response)
 
         await self._http.post(
             f"{self._base_url}/answerCallbackQuery",
@@ -526,27 +923,75 @@ class TelegramChannel(Channel):
             logger.error(f"Telegram file download failed: {e}")
         return ""
 
-    async def send(self, channel_id: str, response: ChannelResponse):
+    async def send(self, channel_id: str, response: ChannelResponse) -> dict:
         if not response.text and not response.image_b64:
-            return
+            return self._skipped_envelope()
         tg_logger = logging.getLogger("feral.channel.telegram")
-        try:
-            payload = {
-                "chat_id": channel_id,
-                "text": response.text or "(see attachment)",
-                "parse_mode": "Markdown",
+        payload = {
+            "chat_id": channel_id,
+            "text": response.text or "(see attachment)",
+            "parse_mode": "Markdown",
+        }
+        if response.buttons:
+            payload["reply_markup"] = {
+                "inline_keyboard": [
+                    [{"text": b.get("label", ""), "callback_data": b.get("action", "")}]
+                    for b in response.buttons
+                ]
             }
-            if response.buttons:
-                payload["reply_markup"] = {
-                    "inline_keyboard": [
-                        [{"text": b.get("label", ""), "callback_data": b.get("action", "")}]
-                        for b in response.buttons
-                    ]
-                }
-            await self._http_with_retry(self._http, "POST", f"{self._base_url}/sendMessage", json=payload)
-            await self._emit_comms_event("out", channel_id, response.text)
+        try:
+            r = await self._http_with_retry(
+                self._http, "POST", f"{self._base_url}/sendMessage", json=payload,
+            )
         except Exception as e:
             tg_logger.error("Telegram send error: %s", e)
+            raise ChannelSendError(str(e), status_code=502, channel="telegram") from e
+
+        # Same verdict ``send_direct`` twenty lines below already made:
+        # Telegram signals every application-level rejection with
+        # ``ok: false`` under a 200, so the body is authoritative when
+        # it parses and the transport status is the fallback.
+        status = self._http_status(r)
+        data = self._json_body(r)
+        if data is not None:
+            if not data.get("ok"):
+                desc = data.get("description") or f"HTTP {status if status is not None else '?'}"
+                tg_logger.warning("Telegram send failed: %s", desc)
+                raise ChannelSendError(
+                    f"Telegram API: {desc}",
+                    status_code=status if status is not None else 502,
+                    channel="telegram",
+                    raw=data,
+                )
+            await self._emit_comms_event("out", channel_id, response.text)
+            return {
+                "success": True,
+                "status_code": status if status is not None else 200,
+                "message_id": (data.get("result") or {}).get("message_id")
+                if isinstance(data.get("result"), dict) else None,
+                "raw": data.get("result"),
+            }
+        if status is not None and status >= 400:
+            tg_logger.warning("Telegram send failed: HTTP %s", status)
+            raise ChannelSendError(
+                f"Telegram API: HTTP {status}",
+                status_code=status, channel="telegram",
+            )
+        # No parseable JSON body and no failing status: we cannot prove
+        # non-delivery, so we do not claim one. Logged rather than
+        # silently treated as success.
+        tg_logger.warning(
+            "Telegram send: could not confirm delivery (status=%r, body was not JSON)",
+            status,
+        )
+        await self._emit_comms_event("out", channel_id, response.text)
+        return {
+            "success": True,
+            "status_code": status if status is not None else 200,
+            "message_id": None,
+            "raw": None,
+            "confirmed": False,
+        }
 
     async def resolve_username(self, handle: str) -> Optional[dict]:
         """Map @username → numeric chat_id via Telegram's getChat."""
@@ -656,6 +1101,7 @@ class DiscordChannel(Channel):
 
         import httpx
         self._reset_runtime_health()
+        self._announce_access_posture()
         self._running = True
         self._token = token
         self._http = httpx.AsyncClient(
@@ -731,6 +1177,13 @@ class DiscordChannel(Channel):
         user_id = data.get("author", {}).get("id", "")
         username = data.get("author", {}).get("username", "")
         text = data.get("content", "")
+
+        # Anyone who shares a guild with the bot can open a DM to it,
+        # so the gate runs before the message reaches the orchestrator
+        # and before the channel id is remembered for broadcast.
+        if not await self._authorize_inbound(user_id, channel_id, username):
+            return
+
         self._known_chat_ids.add(channel_id)
 
         if self._handler:
@@ -743,23 +1196,54 @@ class DiscordChannel(Channel):
             )
             await self._emit_comms_event("in", username or user_id, text)
             response = await self._handler(channel_msg)
-            await self.send(channel_id, response)
+            try:
+                await self.send(channel_id, response)
+            except ChannelSendError as exc:
+                logging.getLogger("feral.channel.discord").error(
+                    "Discord reply to %s was not delivered: %s", channel_id, exc,
+                )
 
     async def stop(self):
         self._running = False
         if hasattr(self, "_http"):
             await self._http.aclose()
 
-    async def send(self, channel_id: str, response: ChannelResponse):
+    async def send(self, channel_id: str, response: ChannelResponse) -> dict:
         if not response.text:
-            return
+            return self._skipped_envelope()
         dc_logger = logging.getLogger("feral.channel.discord")
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
         try:
-            url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
-            await self._http_with_retry(self._http, "POST", url, json={"content": response.text})
-            await self._emit_comms_event("out", channel_id, response.text)
+            r = await self._http_with_retry(
+                self._http, "POST", url, json={"content": response.text},
+            )
         except Exception as e:
             dc_logger.error("Discord send error: %s", e)
+            raise ChannelSendError(str(e), status_code=502, channel="discord") from e
+
+        # Discord reports rejection with a real HTTP status (unlike
+        # Telegram/Slack), which is what ``send_direct`` below checks.
+        status = self._http_status(r)
+        data = self._json_body(r)
+        if status is not None and status >= 400:
+            message = "error"
+            if isinstance(data, dict):
+                message = str(data.get("message") or "error")
+            dc_logger.warning("Discord send failed: HTTP %s %s", status, message)
+            raise ChannelSendError(
+                f"Discord API: {message}",
+                status_code=status, channel="discord", raw=data,
+            )
+        await self._emit_comms_event("out", channel_id, response.text)
+        envelope = {
+            "success": True,
+            "status_code": status if status is not None else 200,
+            "message_id": data.get("id") if isinstance(data, dict) else None,
+            "raw": data,
+        }
+        if status is None:
+            envelope["confirmed"] = False
+        return envelope
 
     async def send_direct(self, to: str, text: str, reply_to: Optional[str] = None) -> dict:
         dc_logger = logging.getLogger("feral.channel.discord")
@@ -831,6 +1315,7 @@ class SlackChannel(Channel):
 
         import httpx
         self._reset_runtime_health()
+        self._announce_access_posture()
         self._running = True
         self._http = httpx.AsyncClient(
             headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
@@ -914,6 +1399,12 @@ class SlackChannel(Channel):
         channel_id = event.get("channel", "")
         user_id = event.get("user", "")
         text = event.get("text", "")
+
+        # Every member of the workspace can DM the app, so the same
+        # default-deny gate applies here as on Telegram and Discord.
+        if not await self._authorize_inbound(user_id, channel_id, ""):
+            return
+
         self._known_chat_ids.add(channel_id)
 
         if self._handler:
@@ -925,37 +1416,85 @@ class SlackChannel(Channel):
             )
             await self._emit_comms_event("in", user_id, text)
             response = await self._handler(channel_msg)
-            await self.send(channel_id, response)
+            try:
+                await self.send(channel_id, response)
+            except ChannelSendError as exc:
+                logging.getLogger("feral.channel.slack").error(
+                    "Slack reply to %s was not delivered: %s", channel_id, exc,
+                )
 
     async def stop(self):
         self._running = False
         if hasattr(self, "_http"):
             await self._http.aclose()
 
-    async def send(self, channel_id: str, response: ChannelResponse):
+    async def send(self, channel_id: str, response: ChannelResponse) -> dict:
         if not response.text:
-            return
+            return self._skipped_envelope()
+        sl_logger = logging.getLogger("feral.channel.slack")
+        payload = {"channel": channel_id, "text": response.text}
+        if response.buttons:
+            payload["blocks"] = [
+                {"type": "section", "text": {"type": "mrkdwn", "text": response.text}},
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": b.get("label", "")},
+                            "action_id": b.get("action", ""),
+                        }
+                        for b in response.buttons
+                    ],
+                },
+            ]
         try:
-            payload = {"channel": channel_id, "text": response.text}
-            if response.buttons:
-                payload["blocks"] = [
-                    {"type": "section", "text": {"type": "mrkdwn", "text": response.text}},
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": b.get("label", "")},
-                                "action_id": b.get("action", ""),
-                            }
-                            for b in response.buttons
-                        ],
-                    },
-                ]
-            await self._http_with_retry(self._http, "POST", "https://slack.com/api/chat.postMessage", json=payload)
-            await self._emit_comms_event("out", channel_id, response.text)
+            r = await self._http_with_retry(
+                self._http, "POST",
+                "https://slack.com/api/chat.postMessage", json=payload,
+            )
         except Exception as e:
-            logging.getLogger("feral.channel.slack").error("Slack send error: %s", e)
+            sl_logger.error("Slack send error: %s", e)
+            raise ChannelSendError(str(e), status_code=502, channel="slack") from e
+
+        # Slack, like Telegram, answers 200 with ``ok: false`` for
+        # channel_not_found / not_in_channel / invalid_auth. This is the
+        # same check ``send_direct`` below already makes.
+        status = self._http_status(r)
+        data = self._json_body(r)
+        if data is not None:
+            if not data.get("ok"):
+                err = data.get("error") or f"HTTP {status if status is not None else '?'}"
+                sl_logger.warning("Slack send failed: %s", err)
+                raise ChannelSendError(
+                    f"Slack API: {err}",
+                    status_code=status if status is not None else 502,
+                    channel="slack", raw=data,
+                )
+            await self._emit_comms_event("out", channel_id, response.text)
+            return {
+                "success": True,
+                "status_code": status if status is not None else 200,
+                "message_id": data.get("ts"),
+                "raw": data,
+            }
+        if status is not None and status >= 400:
+            sl_logger.warning("Slack send failed: HTTP %s", status)
+            raise ChannelSendError(
+                f"Slack API: HTTP {status}", status_code=status, channel="slack",
+            )
+        sl_logger.warning(
+            "Slack send: could not confirm delivery (status=%r, body was not JSON)",
+            status,
+        )
+        await self._emit_comms_event("out", channel_id, response.text)
+        return {
+            "success": True,
+            "status_code": status if status is not None else 200,
+            "message_id": None,
+            "raw": None,
+            "confirmed": False,
+        }
 
     async def send_direct(self, to: str, text: str, reply_to: Optional[str] = None) -> dict:
         sl_logger = logging.getLogger("feral.channel.slack")
@@ -1012,6 +1551,7 @@ class WhatsAppChannel(Channel):
 
         import httpx
         self._reset_runtime_health()
+        self._announce_access_posture()
         self._running = True
         self._http = httpx.AsyncClient(timeout=10.0)
         self._connected = bool(self._access_token and self._phone_id)
@@ -1042,6 +1582,16 @@ class WhatsAppChannel(Channel):
                 for msg in value.get("messages", []):
                     text = msg.get("text", {}).get("body", "")
                     sender = msg.get("from", "")
+
+                    # Signature verification proves the webhook came from
+                    # Meta; it says nothing about WHO messaged the
+                    # business number. Same default-deny gate as the
+                    # other channels, keyed on the sender's phone number.
+                    if not await self._authorize_inbound(
+                        sender, getattr(self, "_phone_id", ""), "",
+                    ):
+                        continue
+
                     self._known_chat_ids.add(sender)
 
                     if text and self._handler:
@@ -1085,10 +1635,28 @@ class WhatsAppChannel(Channel):
             wa_logger.error("WhatsApp send failed: %s", e)
             return {"success": False, "error": str(e)}
 
-    async def send(self, channel_id: str, response: ChannelResponse):
+    async def send(self, channel_id: str, response: ChannelResponse) -> dict:
         if not response.text:
-            return
-        await self.send_text(channel_id, response.text)
+            return self._skipped_envelope()
+        result = await self.send_text(channel_id, response.text)
+        if not result.get("success"):
+            raise ChannelSendError(
+                str(result.get("error") or "WhatsApp send failed"),
+                status_code=502, channel="whatsapp", raw=result,
+            )
+        data = result.get("data") or {}
+        message_id = None
+        if isinstance(data, dict):
+            try:
+                message_id = data.get("messages", [{}])[0].get("id")
+            except Exception:
+                message_id = None
+        return {
+            "success": True,
+            "status_code": 200,
+            "message_id": message_id,
+            "raw": data,
+        }
 
     async def send_direct(self, to: str, text: str, reply_to: Optional[str] = None) -> dict:
         if not text:
@@ -1232,15 +1800,39 @@ class ChannelManager:
         self._channels.clear()
 
     async def broadcast(self, response: ChannelResponse):
-        """Send to all known chats across all active channels."""
+        """Send to all known chats across all active channels.
+
+        ``send`` now raises on a rejected delivery, so each recipient is
+        isolated: one blocked chat must not abort the fan-out to the
+        rest. Failures are logged, never swallowed silently.
+        """
         for ch in self._channels.values():
             for cid in ch.active_chat_ids:
-                await ch.send(cid, response)
+                try:
+                    await ch.send(cid, response)
+                except ChannelSendError as exc:
+                    logger.warning(
+                        "Broadcast to %s/%s failed: %s", ch.channel_type, cid, exc,
+                    )
 
-    async def send_to_channel(self, channel_type: str, channel_id: str, response: ChannelResponse):
+    async def send_to_channel(
+        self, channel_type: str, channel_id: str, response: ChannelResponse,
+    ) -> dict:
         ch = self._channels.get(channel_type)
-        if ch:
-            await ch.send(channel_id, response)
+        if not ch:
+            return {
+                "success": False,
+                "status_code": 404,
+                "error": f"Channel {channel_type!r} is not active",
+            }
+        try:
+            envelope = await ch.send(channel_id, response)
+        except ChannelSendError as exc:
+            logger.warning(
+                "send_to_channel %s/%s failed: %s", channel_type, channel_id, exc,
+            )
+            return exc.as_envelope()
+        return envelope if isinstance(envelope, dict) else {"success": True}
 
     def get_channel(self, channel_type: str) -> Optional[Channel]:
         return self._channels.get(channel_type)
@@ -1266,6 +1858,19 @@ class ChannelManager:
             }
             if row["degraded"]:
                 row["degraded_reason"] = str(getattr(ch, "_degraded_reason", "") or "")
+            # Inbound access posture. ``pending_senders`` is how the
+            # owner learns their own sender id on first run without the
+            # channel ever answering a stranger. See Channel's
+            # "Inbound access control" note.
+            row["access_configured"] = bool(getattr(ch, "access_configured", False))
+            row["allowed_sender_count"] = len(getattr(ch, "_allowed_senders", ()) or ())
+            row["allowed_chat_count"] = len(getattr(ch, "_allowed_chats", ()) or ())
+            row["pairing_window_open"] = bool(
+                getattr(ch, "_pairing_window_is_open", bool)()
+                if callable(getattr(ch, "_pairing_window_is_open", None))
+                else False
+            )
+            row["pending_senders"] = list(getattr(ch, "pending_senders", []) or [])
             bot_username = getattr(ch, "_bot_username", None)
             if bot_username:
                 row["bot_username"] = bot_username

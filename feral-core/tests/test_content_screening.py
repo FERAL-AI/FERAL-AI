@@ -572,15 +572,16 @@ def test_the_external_surfaces_are_the_networked_third_party_ones():
     for tool in (
         "web_search__search",
         "web_actions__fetch_page",
-        "browser_use__open",
+        "browser__navigate",
+        "browser__get_page_text",
         "email__list_messages",
-        "messaging__read",
+        "messaging_sms__read",
         "messaging_channels__poll",
-        "github__list_issues",
+        "github_api__list_issues",
         "notion__get_page",
         "google_drive__read_doc",
         "microsoft365__read_mail",
-        "calendar__list_events",
+        "calendar_google__list_events",
         "mcp_somebody_elses_server__do_thing",
     ):
         assert is_external_content_tool(tool) is True, tool

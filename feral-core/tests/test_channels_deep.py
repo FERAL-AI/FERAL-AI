@@ -37,7 +37,9 @@ async def test_telegram_callback_query_invokes_handler_and_answers_callback():
 
     handler = AsyncMock(return_value=ChannelResponse(text="picked"))
     with patch("httpx.AsyncClient", return_value=mock_http):
-        ch = TelegramChannel({"bot_token": "tok", "enabled": True})
+        ch = TelegramChannel(
+            {"bot_token": "tok", "enabled": True, "allowed_senders": ["99"]},
+        )
         ch.set_handler(handler)
         await ch.start()
 
@@ -71,7 +73,9 @@ async def test_telegram_photo_message_downloads_via_httpx_and_passes_image_b64()
     mock_http.get = AsyncMock(side_effect=[file_get, bin_get])
 
     handler = AsyncMock(return_value=ChannelResponse(text="got pic"))
-    ch = TelegramChannel({"bot_token": "tok", "enabled": True})
+    ch = TelegramChannel(
+        {"bot_token": "tok", "enabled": True, "allowed_senders": ["2"]},
+    )
     ch._http = mock_http
     ch._base_url = "https://api.telegram.org/bot/tok"
     ch.set_handler(handler)
@@ -125,7 +129,9 @@ async def test_telegram_poll_loop_one_update_then_stops():
     handler = AsyncMock(return_value=ChannelResponse(text="r"))
 
     with patch("httpx.AsyncClient", return_value=mock_http):
-        ch = TelegramChannel({"bot_token": "tok", "enabled": True})
+        ch = TelegramChannel(
+            {"bot_token": "tok", "enabled": True, "allowed_senders": ["3"]},
+        )
         ch_box[0] = ch
         ch.set_handler(handler)
         await ch.start()
@@ -196,7 +202,13 @@ async def test_discord_gateway_connect_delivers_message_create_to_handler():
     with patch("httpx.AsyncClient", return_value=mock_http), patch(
         "websockets.connect", fake_connect,
     ):
-        ch = DiscordChannel({"bot_token": "DISC.TOKEN", "enabled": True})
+        ch = DiscordChannel(
+            {
+                "bot_token": "DISC.TOKEN",
+                "enabled": True,
+                "allowed_senders": ["a1"],
+            },
+        )
         ch.set_handler(handler)
         await ch.start()
         await asyncio.sleep(0.15)
@@ -296,7 +308,12 @@ async def test_slack_socket_mode_events_api_acknowledges_and_handles_message():
         "websockets.connect", fake_connect,
     ):
         ch = SlackChannel(
-            {"bot_token": "xoxb-test", "app_token": "xapp-test", "enabled": True},
+            {
+                "bot_token": "xoxb-test",
+                "app_token": "xapp-test",
+                "enabled": True,
+                "allowed_senders": ["U12"],
+            },
         )
         ch.set_handler(handler)
         await ch.start()
@@ -359,7 +376,12 @@ async def test_slack_socket_mode_uses_async_with_connect_directly():
         "websockets.connect", strict_connect,
     ):
         ch = SlackChannel(
-            {"bot_token": "xoxb-test", "app_token": "xapp-test", "enabled": True},
+            {
+                "bot_token": "xoxb-test",
+                "app_token": "xapp-test",
+                "enabled": True,
+                "allowed_senders": ["U1"],
+            },
         )
         ch.set_handler(handler)
         await ch.start()
@@ -404,7 +426,14 @@ async def test_whatsapp_handle_webhook_skips_when_no_text_even_if_handler_set():
 
 @pytest.mark.asyncio
 async def test_whatsapp_handle_webhook_returns_first_response_when_multiple_messages():
-    ch = WhatsAppChannel({"access_token": "t", "phone_number_id": "p", "enabled": True})
+    ch = WhatsAppChannel(
+        {
+            "access_token": "t",
+            "phone_number_id": "p",
+            "enabled": True,
+            "allowed_senders": ["111", "222"],
+        },
+    )
     ch._running = True
     ch._phone_id = "p"
     ch._http = MagicMock()

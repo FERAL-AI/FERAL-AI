@@ -167,7 +167,12 @@ async def test_telegram_handle_message_invokes_handler_and_send():
     handler = AsyncMock(return_value=ChannelResponse(text="reply"))
 
     with patch("httpx.AsyncClient", return_value=mock_http):
-        ch = TelegramChannel({"bot_token": "tok", "enabled": True})
+        # Inbound is default-deny (channels.base "Inbound access
+        # control"), so the sender under test must be allowlisted
+        # for the handler to be reached at all.
+        ch = TelegramChannel(
+            {"bot_token": "tok", "enabled": True, "allowed_senders": ["7"]},
+        )
         ch.set_handler(handler)
         await ch.start()
         msg = {
@@ -270,7 +275,12 @@ async def test_whatsapp_start_without_config_warns(caplog):
 @pytest.mark.asyncio
 async def test_whatsapp_handle_webhook_processes_message_and_returns_response():
     ch = WhatsAppChannel(
-        {"access_token": "t", "phone_number_id": "pid", "enabled": True},
+        {
+            "access_token": "t",
+            "phone_number_id": "pid",
+            "enabled": True,
+            "allowed_senders": ["+1000"],
+        },
     )
     ch._running = True
     ch._phone_id = "pid"

@@ -45,7 +45,14 @@ def _instantiate_for_test(channel_id: str) -> Channel:
     if cls is None:
         pytest.skip(f"no adapter registered for manifest id {channel_id!r}")
     if channel_id == "telegram":
-        ch = cls({"bot_token": "test-token-not-real"})
+        # Inbound is default-deny (channels.base "Inbound access
+        # control"); the contract test drives a synthetic sender id
+        # of 999 in chat 12345, so both are allowlisted here.
+        ch = cls({
+            "bot_token": "test-token-not-real",
+            "allowed_senders": ["999"],
+            "allowed_chats": ["12345"],
+        })
         # Skip the real `start()` (which would hit api.telegram.org) and
         # patch the http client + base url manually.
         ch._base_url = "https://api.telegram.org/botfake"

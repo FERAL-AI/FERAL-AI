@@ -35,7 +35,6 @@ from agents.tool_dispatch_validator import (
     make_tool_error_envelope,
 )
 from skills.call_context import bind_context, new_turn_id
-from skills.result_budget import serialize_tool_result
 
 MAX_LLM_TOOLS = 64
 
@@ -100,15 +99,39 @@ VALID_AUTONOMY_MODES = ("strict", "hybrid", "loose")
 EXTERNAL_CONTENT_SKILLS = frozenset({
     "web_search",
     "web_actions",
+    # The CDP browser registers as "browser" (skills/impl/browser_use.py,
+    # the skill_id in get_browser_skill_manifest), not as its module name.
+    # Listing only "browser_use" here matched no real tool, so every page
+    # the browser read reached the model unwrapped and unscreened: no
+    # boundary fencing, no injection regexes, no classifier. That is the
+    # single largest untrusted-content intake in the system. Both names
+    # are listed because the module name is what a reader expects and a
+    # future registration path may use it.
+    "browser",
     "browser_use",
+    # The macOS accessibility tree is a desktop-shaped door that web
+    # content walks straight through. An ``macos_ax__snapshot`` of a
+    # Chrome window returns the page's OWN AX nodes -- AXWebArea,
+    # AXLink, AXStaticText all carry text the page author wrote, not the
+    # operator. Verified live against Chrome on macOS. Same class of
+    # intake as "browser" above, arriving under a different skill_id, so
+    # it needs the same wrap + screen.
+    "macos_ax",
     "email",
-    "messaging",
+    # These four are the registered skill_ids. The list previously held
+    # "messaging", "github" and "calendar", which are the informal names
+    # and match nothing: the predicate is an exact match on the prefix
+    # before "__", so github_api__list_issues, calendar_google__list_events
+    # and messaging_sms__read were all unscreened. Every one of them
+    # carries text an outsider can author (an issue anyone can open, an
+    # invite anyone can send, a message from any number).
+    "messaging_sms",
     "messaging_channels",
-    "github",
+    "github_api",
+    "calendar_google",
     "notion",
     "google_drive",
     "microsoft365",
-    "calendar",
 })
 
 # Cap on how much of one result is screened. The classifier truncates at
@@ -200,6 +223,10 @@ class ToolRunner:
     ):
         self._orch = orchestrator
         self._tool_repeat_state: dict[str, dict] = {}
+        # Strong references to in-flight background-job reapers. The
+        # loop holds tasks only weakly, so a bare create_task can be
+        # collected before the kill lands.
+        self._reaper_tasks: set[asyncio.Task] = set()
         self._active_subagent_tasks = 0
         self._daemon_session_map: dict[str, str] = {}
         # A2 fix: futures keyed by daemon request_id so the LLM loop can
@@ -710,6 +737,61 @@ class ToolRunner:
         # the session rather than outliving a disconnect the user can no
         # longer see.
         self.plan_mode.clear_session(session_id)
+        self._reap_session_background_jobs(session_id)
+
+    def _reap_session_background_jobs(self, session_id: str) -> None:
+        """Kill background shell jobs the disconnected session started.
+
+        ``coding_tools__bash`` with ``run_in_background`` detaches a real
+        process. Without this the job stays alive after the user is gone,
+        bounded only by its wall-clock timeout and the atexit reaper, so a
+        long-running job kept burning CPU with nobody able to read its
+        output or kill it: ``kill_bash`` is scoped to the owning session,
+        which no longer exists.
+
+        Sync method calling an async teardown, so the work is scheduled on
+        the running loop when there is one and run to completion when
+        there is not (CLI teardown, tests). Best effort throughout: a
+        disconnect must never raise.
+        """
+        try:
+            skills = getattr(self._orch, "skills", None)
+            impl = skills.get_skill("coding_tools") if skills else None
+        except Exception:
+            logger.debug("background-job reaper: registry unavailable", exc_info=True)
+            return
+        clear = getattr(impl, "clear_session", None)
+        if not callable(clear):
+            return
+
+        async def _run() -> None:
+            try:
+                killed = await clear(session_id)
+                if killed:
+                    logger.info(
+                        "session %s disconnected: killed %d background job(s)",
+                        session_id, killed,
+                    )
+            except Exception:
+                logger.warning(
+                    "background-job reaper failed for session %s",
+                    session_id, exc_info=True,
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                asyncio.run(_run())
+            except Exception:
+                logger.debug("background-job reaper (sync path) failed", exc_info=True)
+            return
+        # Held in a set with a discard callback: the loop keeps only a weak
+        # reference to a bare task, so a fire-and-forget one can be
+        # garbage-collected mid-kill (see CLAUDE.md, background tasks).
+        task = loop.create_task(_run())
+        self._reaper_tasks.add(task)
+        task.add_done_callback(self._reaper_tasks.discard)
 
     # ─────────────────────────────────────────────
     # Daemon Command Execution
@@ -1567,10 +1649,21 @@ class ToolRunner:
         tool_calls_executed = 0
         iterations_used = 0
 
+        # A subagent runs its own isolated transcript, so it needs its own
+        # screenshot side table. Registering under ``sub_session_id`` keeps
+        # it out of the parent's table (and out of the parent's prune
+        # accounting) while reusing the parent orchestrator's provider-aware
+        # delivery + batch-prune logic.
         for i in range(max_iterations):
             iterations_used = i + 1
+            sub_messages = [
+                {"role": "system", "content": system_prompt}, *history,
+            ]
+            orch._note_agent_round(sub_session_id)
+            orch._maybe_prune_tool_images(sub_session_id)
+            sub_messages = orch._materialize_tool_images(sub_session_id, sub_messages)
             response = await orch.llm.chat(
-                messages=[{"role": "system", "content": system_prompt}, *history],
+                messages=sub_messages,
                 tools=tools if tools else None,
             )
             text_content, tool_calls = orch.llm.extract_response(response)
@@ -1601,16 +1694,19 @@ class ToolRunner:
                             surface=self._resolve_surface_for_session(parent_session_id),
                         )
                     tool_calls_executed += 1
+                    sub_call_id = tc.get("id") or str(uuid4())[:8]
                     history.append({
                         "role": "tool",
-                        "tool_call_id": tc.get("id", str(uuid4())[:8]),
+                        "tool_call_id": sub_call_id,
                         "name": tc.get("name", ""),
                         # Subagents read and grep the same filesystem the
                         # parent does, so they get the same per-tool budget
-                        # instead of the old blind [:2000] slice.
-                        "content": serialize_tool_result(
+                        # instead of the old blind [:2000] slice, and the
+                        # same image lift, so a subagent driving the GUI
+                        # can actually see its own screenshots.
+                        "content": orch._serialize_tool_result_for_history(
+                            sub_session_id, sub_call_id,
                             tc.get("name", ""), result_data,
-                            registry=self._orch.skills,
                         ),
                     })
                 continue
