@@ -9,7 +9,7 @@
     "logo_url": "",
     "icon_set": "sf_symbols"
   },
-  "description": "Ask FERAL what it sees through any connected camera \u2014 browser share, iOS CameraPermissionAdapter, W610 glasses, or any HUP daemon that advertises a camera capability. Picks the best camera automatically. Always asks the user for permission before capturing, matching the 'with your permission' contract.",
+  "description": "Ask FERAL what it sees through a connected camera: browser share, iOS CameraPermissionAdapter, W610 glasses, or any HUP daemon that advertises a camera capability. Picks the best camera automatically and always asks the user for permission before capturing. There is no camera on the brain host itself, so with no camera-capable daemon connected the call returns an error naming that: say the camera is not connected rather than describing a scene.",
   "trigger_phrases": [
     "what do i see",
     "what am i looking at",

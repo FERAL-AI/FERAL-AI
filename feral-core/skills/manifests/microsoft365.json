@@ -21,7 +21,6 @@
     "categories": ["communication", "productivity", "files"],
     "auth": {
         "type": "oauth2",
-        "provider": "microsoft",
         "scopes": ["openid", "offline_access", "User.Read", "Mail.Read", "Mail.Send", "Calendars.ReadWrite", "Files.ReadWrite"]
     },
     "endpoints": [
@@ -46,7 +45,7 @@
             "description": "Send an Outlook email. Confirm-tier — outbound mail is irreversible and visible on the recipient side.",
             "params": [
                 {"name": "to", "type": "string", "required": true, "description": "Recipient address"},
-                {"name": "subject", "type": "string", "required": true},
+                {"name": "subject", "type": "string", "required": true, "description": "Subject line."},
                 {"name": "body", "type": "string", "required": true, "description": "Plain-text body"}
             ],
             "returns_description": "{message_id}",
@@ -74,12 +73,12 @@
             "url": "",
             "description": "Create a calendar event. Confirm-tier — meeting invites notify other people.",
             "params": [
-                {"name": "subject", "type": "string", "required": true},
+                {"name": "subject", "type": "string", "required": true, "description": "Event title, which Microsoft Graph calls 'subject'."},
                 {"name": "start", "type": "string", "required": true, "description": "ISO-8601 start time"},
                 {"name": "end", "type": "string", "required": true, "description": "ISO-8601 end time"},
                 {"name": "attendees", "type": "array", "required": false, "items": {"type": "string"}, "description": "Attendee email list"},
                 {"name": "body", "type": "string", "required": false, "description": "Description / agenda"},
-                {"name": "location", "type": "string", "required": false}
+                {"name": "location", "type": "string", "required": false, "description": "Free-text location, e.g. 'Room 4' or a meeting URL."}
             ],
             "returns_description": "{event_id, web_link}",
             "safety_tier": "confirm",
@@ -106,7 +105,7 @@
             "url": "",
             "description": "Search OneDrive files by name/content.",
             "params": [
-                {"name": "query", "type": "string", "required": true},
+                {"name": "query", "type": "string", "required": true, "description": "Text to match against OneDrive file names and contents."},
                 {"name": "max_results", "type": "integer", "required": false, "description": "Max results (default 25)"}
             ],
             "returns_description": "{files: [...]}",

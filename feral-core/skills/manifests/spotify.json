@@ -9,7 +9,7 @@
     "logo_url": "",
     "icon_set": "sf_symbols"
   },
-  "description": "Control Spotify playback (play/pause, skip forward/back, queue, set volume, play playlist), search the catalog, and list the user's playlists. Backend: SpotifyIntegration (Spotify Web API via OAuth2 PKCE).",
+  "description": "Control Spotify playback (play/pause, skip forward/back, queue, set volume, play playlist), search the catalog, and list the user's playlists. Backend: SpotifyIntegration (Spotify Web API via OAuth2 PKCE). Every playback endpoint acts on whatever device Spotify currently calls ACTIVE, which is a device the user has played something on recently. With no active device Spotify refuses the request, and several endpoints here report success anyway (each one says so), so verify with spotify_music__now_playing before telling the user that playback changed. With no Spotify account connected every endpoint returns 'Not connected'.",
   "trigger_phrases": [
     "play music",
     "play some music",
@@ -56,7 +56,7 @@
       "id": "play_pause",
       "method": "PYTHON",
       "url": "python://spotify_music/play_pause",
-      "description": "Toggle Spotify playback on the user's active device (pause if playing, play if paused).",
+      "description": "Toggle Spotify playback on the user's active device (pause if playing, play if paused). Reads player state first, so with no active device it correctly returns 'No active device' rather than a false success.",
       "params": [],
       "returns_description": "{action: 'playing' | 'paused'}",
       "ui_hint": null
@@ -65,7 +65,7 @@
       "id": "pause",
       "method": "PYTHON",
       "url": "python://spotify_music/pause",
-      "description": "Pause Spotify playback on the user's active device.",
+      "description": "Pause Spotify playback on the user's active device. This endpoint does NOT check Spotify's reply: when there is no active device Spotify answers 404 NO_ACTIVE_DEVICE and this still returns success=true. Do not tell the user it worked on the strength of this result; call spotify_music__now_playing and report what that says.",
       "params": [],
       "returns_description": "{action: 'paused'}",
       "ui_hint": null
@@ -74,7 +74,7 @@
       "id": "next_track",
       "method": "PYTHON",
       "url": "python://spotify_music/next_track",
-      "description": "Skip to the next track on the user's active Spotify device.",
+      "description": "Skip to the next track on the user's active Spotify device. This endpoint does NOT check Spotify's reply: when there is no active device Spotify answers 404 NO_ACTIVE_DEVICE and this still returns success=true. Do not tell the user it worked on the strength of this result; call spotify_music__now_playing and report what that says.",
       "params": [],
       "returns_description": "{action: 'skipped_to_next'}",
       "ui_hint": null
@@ -83,7 +83,7 @@
       "id": "previous_track",
       "method": "PYTHON",
       "url": "python://spotify_music/previous_track",
-      "description": "Go back to the previous track on the user's active Spotify device.",
+      "description": "Go back to the previous track on the user's active Spotify device. This endpoint does NOT check Spotify's reply: when there is no active device Spotify answers 404 NO_ACTIVE_DEVICE and this still returns success=true. Do not tell the user it worked on the strength of this result; call spotify_music__now_playing and report what that says.",
       "params": [],
       "returns_description": "{action: 'skipped_to_previous'}",
       "ui_hint": null
@@ -130,7 +130,7 @@
       "id": "queue_track",
       "method": "PYTHON",
       "url": "python://spotify_music/queue_track",
-      "description": "Add a track to the user's Spotify play queue by Spotify URI.",
+      "description": "Add a track to the user's Spotify play queue by Spotify URI. Checks Spotify's reply, so a failure here is reported as a failure.",
       "params": [
         {
           "name": "uri",
@@ -164,7 +164,7 @@
       "id": "play_playlist",
       "method": "PYTHON",
       "url": "python://spotify_music/play_playlist",
-      "description": "Start playback of a Spotify playlist (or any context URI such as an album) on the user's active device.",
+      "description": "Start playback of a Spotify playlist (or any context URI such as an album) on the user's active device. This endpoint does NOT check Spotify's reply: when there is no active device Spotify answers 404 NO_ACTIVE_DEVICE and this still returns success=true. Do not tell the user it worked on the strength of this result; call spotify_music__now_playing and report what that says.",
       "params": [
         {
           "name": "uri",
@@ -180,7 +180,7 @@
       "id": "set_volume",
       "method": "PYTHON",
       "url": "python://spotify_music/set_volume",
-      "description": "Set the playback volume (0-100) on the user's active Spotify device.",
+      "description": "Set the playback volume (0-100) on the user's active Spotify device. This endpoint does NOT check Spotify's reply: when there is no active device Spotify answers 404 NO_ACTIVE_DEVICE and this still returns success=true. Do not tell the user it worked on the strength of this result; call spotify_music__now_playing and report what that says.",
       "params": [
         {
           "name": "volume_percent",

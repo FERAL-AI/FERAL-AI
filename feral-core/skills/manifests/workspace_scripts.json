@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "FERAL's never-say-no escape hatch. Writes ad-hoc Python/Node/bash scripts to the user's ~/.feral/workspace/scripts/ folder, executes them in the Docker sandbox (or host with explicit consent), and keeps a reusable catalog. Use this whenever no existing skill fits the user's request — you can still deliver the result by generating a tiny script on the fly. A persistent workspace-scoped exec with reuse.",
+    "description": "FERAL's escape hatch for tasks no other skill covers: writes ad-hoc Python/Node/bash scripts to the user's ~/.feral/workspace/scripts/ folder, executes them in the Docker sandbox, and keeps a reusable catalog. The Docker sandbox is MANDATORY and there is no fallback: SkillExecutor refuses every endpoint of this skill with HTTP 503 when Docker is not installed or not healthy, which is the default on macOS, and that refusal covers list_catalog and delete too even though they run no code. Before offering this skill, confirm Docker is running; when it is not, say so and use coding_tools__bash inside a granted folder instead of promising a script. Use this whenever no existing skill fits the user's request, you can still deliver the result by generating a tiny script on the fly. A persistent workspace-scoped exec with reuse.",
     "trigger_phrases": [
         "write a script",
         "quick script",
@@ -29,7 +29,7 @@
             "id": "run",
             "method": "CUSTOM",
             "url": "",
-            "description": "Write code to ~/.feral/workspace/scripts/<uuid>.<ext> and execute it in the sandbox. Supports language in {python, bash, node}. Persistent — the script stays for reuse. On success, a catalog entry is recorded so future turns can reference it by name. Use this when no specialized skill fits but the task is expressible as a short program.",
+            "description": "Write code to ~/.feral/workspace/scripts/<uuid>.<ext> and execute it in the Docker sandbox. Refused with HTTP 503 when the Docker sandbox is unavailable; there is no host execution path for this endpoint. Supports language in {python, bash, node}. Persistent, the script stays for reuse. On success, a catalog entry is recorded so future turns can reference it by name. Use this when no specialized skill fits but the task is expressible as a short program.",
             "params": [
                 {"name": "language", "type": "string", "required": true, "enum": ["python", "bash", "node"], "description": "Language for the script."},
                 {"name": "code", "type": "string", "required": true, "description": "Complete source code. For python, print() your answer. For bash/node, echo / console.log."},
@@ -45,7 +45,7 @@
             "read_only_hint": true,
             "method": "CUSTOM",
             "url": "",
-            "description": "List previously-saved scripts that succeeded. Each entry has id, name, language, path, args_schema (if provided). Use this before writing a new script — a previous one may already do the job.",
+            "description": "List previously-saved scripts that succeeded. This reads a JSON file and runs no code, but it is still refused with HTTP 503 when the Docker sandbox is unavailable, because the sandbox requirement is enforced per skill rather than per endpoint. Each entry has id, name, language, path, args_schema (if provided). Use this before writing a new script, a previous one may already do the job.",
             "params": [],
             "returns_description": "{scripts: [{id, name, language, path, created_at, last_run, runs}]}",
             "ui_hint": "list"
@@ -54,7 +54,7 @@
             "id": "rerun",
             "method": "CUSTOM",
             "url": "",
-            "description": "Re-run a previously-saved script by id, optionally overriding args.",
+            "description": "Re-run a previously-saved script by id, optionally overriding args. Refused with HTTP 503 when the Docker sandbox is unavailable.",
             "params": [
                 {"name": "script_id", "type": "string", "required": true, "description": "Catalog id of the script."},
                 {"name": "args", "type": "string", "required": false, "description": "Optional stringified JSON args forwarded as FERAL_ARGS."},
@@ -67,7 +67,7 @@
             "id": "delete",
             "method": "CUSTOM",
             "url": "",
-            "description": "Delete a saved script and its catalog entry.",
+            "description": "Delete a saved script and its catalog entry. Runs no code, but is still refused with HTTP 503 when the Docker sandbox is unavailable.",
             "params": [
                 {"name": "script_id", "type": "string", "required": true, "description": "Catalog id of the script to delete."}
             ],

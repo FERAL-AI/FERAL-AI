@@ -120,12 +120,55 @@ class SpotifyIntegration:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    # Spotify answers a player command that cannot be carried out with an
+    # HTTP error and a machine-readable reason, most often 404
+    # NO_ACTIVE_DEVICE (nothing is playing anywhere) or 403
+    # PREMIUM_REQUIRED. ``pause``, ``next_track``, ``previous_track``,
+    # ``play_playlist`` and ``set_volume`` used to fire the request and
+    # return {"success": True} without ever reading the response, so the
+    # brain told the user it had paused their music when nothing had
+    # happened. ``play_pause`` and ``queue_track`` in this same class
+    # always checked; this is the missing half.
+    @staticmethod
+    def _player_error(resp, action: str) -> Optional[dict]:
+        """``None`` when the command was carried out, else a failure envelope."""
+        if resp is None:
+            return {"success": False, "error": f"No response from Spotify for {action}."}
+        code = getattr(resp, "status_code", None)
+        if code is not None and 200 <= code < 300:
+            return None
+        reason = ""
+        message = ""
+        try:
+            err = (resp.json() or {}).get("error") or {}
+            reason = str(err.get("reason") or "")
+            message = str(err.get("message") or "")
+        except Exception:
+            pass
+        if reason == "NO_ACTIVE_DEVICE" or code == 404:
+            return {
+                "success": False,
+                "error": (
+                    f"Cannot {action}: Spotify has no active device. Start playback "
+                    "on a phone, desktop app or speaker first, then try again."
+                ),
+            }
+        if reason == "PREMIUM_REQUIRED" or code == 403:
+            return {"success": False, "error": f"Cannot {action}: Spotify Premium is required."}
+        if code == 401:
+            return {"success": False, "error": f"Cannot {action}: the Spotify token is expired or invalid."}
+        detail = message or reason or f"HTTP {code}"
+        return {"success": False, "error": f"Cannot {action}: {detail}"}
+
     async def pause(self, **kwargs) -> dict:
         headers = await self._headers()
         if not headers:
             return {"success": False, "error": "Not connected"}
         try:
-            await self._http.put("/me/player/pause", headers=headers)
+            resp = await self._http.put("/me/player/pause", headers=headers)
+            failure = self._player_error(resp, "pause")
+            if failure:
+                return failure
             return {"success": True, "data": {"action": "paused"}}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -135,7 +178,10 @@ class SpotifyIntegration:
         if not headers:
             return {"success": False, "error": "Not connected"}
         try:
-            await self._http.post("/me/player/next", headers=headers)
+            resp = await self._http.post("/me/player/next", headers=headers)
+            failure = self._player_error(resp, "skip to the next track")
+            if failure:
+                return failure
             return {"success": True, "data": {"action": "skipped_to_next"}}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -145,7 +191,10 @@ class SpotifyIntegration:
         if not headers:
             return {"success": False, "error": "Not connected"}
         try:
-            await self._http.post("/me/player/previous", headers=headers)
+            resp = await self._http.post("/me/player/previous", headers=headers)
+            failure = self._player_error(resp, "skip to the previous track")
+            if failure:
+                return failure
             return {"success": True, "data": {"action": "skipped_to_previous"}}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -208,11 +257,14 @@ class SpotifyIntegration:
         if not headers:
             return {"success": False, "error": "Not connected"}
         try:
-            await self._http.put(
+            resp = await self._http.put(
                 "/me/player/play",
                 json={"context_uri": uri},
                 headers=headers,
             )
+            failure = self._player_error(resp, "play that playlist")
+            if failure:
+                return failure
             return {"success": True, "data": {"playing_playlist": uri}}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -222,11 +274,14 @@ class SpotifyIntegration:
         if not headers:
             return {"success": False, "error": "Not connected"}
         try:
-            await self._http.put(
+            resp = await self._http.put(
                 "/me/player/volume",
                 params={"volume_percent": max(0, min(100, volume_percent))},
                 headers=headers,
             )
+            failure = self._player_error(resp, "set the volume")
+            if failure:
+                return failure
             return {"success": True, "data": {"volume": volume_percent}}
         except Exception as e:
             return {"success": False, "error": str(e)}

@@ -418,6 +418,37 @@ class SkillExecutor:
         # Session identity comes from the ToolCallContext contextvar, so
         # no signature changes and no caller has to cooperate. The
         # ToolRunner gates stay where they are as defence in depth.
+        # Manifest-declared defaults, applied at the same chokepoint and for
+        # the same reason as the gate below.
+        #
+        # ``registry._manifest_to_tools`` copies ``param.default`` into the
+        # JSON schema the model reads, so the model correctly omits a param
+        # whose default is already right. Nothing then put that default into
+        # the args, so the skill received an absent param and answered as if
+        # the caller had said nothing. Measured on the shipped manifests:
+        # 89 optional params across 19 skills declared a default, and 89 of
+        # them arrived missing. The reachable case was
+        # ``desktop_control__list_running_apps``, whose ``script`` param is
+        # optional with a working AppleScript default and which returned
+        # ``{"success": false, "status_code": 400, "error": "No AppleScript
+        # provided in `script`."}`` on the empty-args call the schema invites.
+        #
+        # ``ToolDispatchValidator.validate`` already did this and handed its
+        # ``fixed_args`` back, but only ``ToolRunner`` calls the validator.
+        # The other six production callers of this method
+        # (``agents/multi_agent.py``, ``agents/direct_execution.py``,
+        # ``mcp/server.py``, ``voice/realtime_proxy.py``,
+        # ``voice/gemini_realtime.py`` and ``ToolRunner``'s own retry lane)
+        # arrive here directly, exactly like the gate bypass documented
+        # below. Filling here covers every dispatch lane
+        # (python impl / wasm / WS_EXECUTE / daemon:// / HTTP) because they
+        # all funnel through ``_execute_inner``.
+        #
+        # Done BEFORE the gate so plan mode and the approval gate judge the
+        # arguments the skill will actually run with, and before the audit
+        # row is written for the same reason.
+        args = self._apply_param_defaults(args, skill, endpoint)
+
         _refusal = self._gate(tool_name, args)
         if _refusal is not None:
             return _refusal
@@ -444,6 +475,65 @@ class SkillExecutor:
             # The live store's last row is 2026-05-21 while the brain ran
             # to 2026-08-07 and voice executed 33 tool calls in between.
             await self._record_audit(tool_name, args, _result, _elapsed_ms)
+
+    @staticmethod
+    def _apply_param_defaults(
+        args: Optional[dict], skill: SkillManifest, endpoint: SkillEndpoint,
+    ) -> dict:
+        """Return ``args`` with manifest defaults filled in for absent params.
+
+        Rules, in the order they matter:
+
+        * Only a param that is ABSENT from ``args`` is filled. A value the
+          caller supplied is never overwritten, including a falsy one:
+          ``""``, ``0`` and ``False`` are legitimate things a caller may
+          mean, and ``if not args.get(name)`` would quietly replace all
+          three with the manifest's idea of a default.
+        * The value is type-coerced to the param's declared JSON type
+          before it is injected. ``EndpointParam.default`` is typed
+          ``Optional[str]``, so every default in every manifest is a
+          *string* on disk even when the param declares ``integer`` or
+          ``boolean``. Injecting ``"7"`` where the skill expects ``7``, or
+          the always-truthy string ``"false"`` where it expects ``False``,
+          would trade one contract mismatch for a worse one.
+        * A default that cannot be coerced to its declared type is NOT
+          injected, and says so in the log. The skill's own internal
+          fallback is a better answer than a wrong-typed argument, and the
+          manifest is what needs fixing. ``tests/test_manifest_param_defaults.py``
+          fails the build if any shipped manifest reaches this branch.
+
+        The coercion and the type table are imported from
+        ``agents.tool_dispatch_validator`` rather than restated here, so the
+        validator lane (``ToolRunner``) and this chokepoint can never drift
+        into filling the same param with two different values. The import is
+        function-local because ``skills`` is imported during brain boot well
+        before ``agents``, and a module-level edge from ``skills`` to
+        ``agents`` would invert that order for every consumer of the
+        executor, including the CLI and offline tooling.
+        """
+        filled = dict(args or {})
+        params = getattr(endpoint, "params", None) or []
+        if not params:
+            return filled
+
+        from agents.tool_dispatch_validator import JSON_TYPE_CHECKS, _coerce_default
+
+        for param in params:
+            if param.default is None or param.name in filled:
+                continue
+            value = _coerce_default(param)
+            checker = JSON_TYPE_CHECKS.get(param.type)
+            if checker is not None and not checker(value):
+                logger.warning(
+                    "Manifest default for %s__%s.%s is %r, which is not a "
+                    "valid '%s'; leaving the parameter unset rather than "
+                    "passing a wrong-typed value.",
+                    getattr(skill, "skill_id", "?"), endpoint.id, param.name,
+                    param.default, param.type,
+                )
+                continue
+            filled[param.name] = value
+        return filled
 
     async def _record_audit(
         self, tool_name: str, args: dict, result: dict, latency_ms: float,
@@ -739,8 +829,19 @@ class SkillExecutor:
             "error": f"Blocked by sandbox policy: {reason}.",
         }
 
-    async def _execute_local_daemon(self, path: str, command: str) -> dict:
+    @staticmethod
+    async def _execute_local_daemon(path: str, command: str) -> dict:
         """Execute daemon:// URLs as local shell or AppleScript commands.
+
+        Static because it touches no instance state and because
+        ``skills/impl/desktop_control.py`` reuses it verbatim. That skill
+        has a Python backing implementation (for the structured
+        ``open_url`` endpoint), and a Python backing implementation
+        claims *every* endpoint of its skill, so its script/command
+        endpoints have to reach this exact code rather than a second
+        copy of it. Copying the validate-then-exec sequence is how the
+        ``daemon://local/applescript`` hole got there in the first
+        place: two sibling paths, one of them validated.
 
         Shell execution is gated by ``SandboxPolicy.validate_shell_command``:
         argv[0] must be on the daemon shell allowlist, shell metacharacters

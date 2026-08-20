@@ -9,7 +9,7 @@
         "logo_url": "https://github.githubassets.com/favicons/favicon-dark.png",
         "icon_set": "sf_symbols"
     },
-    "description": "Interact with GitHub repositories: view repos, issues, pull requests, and user profiles.",
+    "description": "Interact with GitHub over the REST API: list repositories, issues and pull requests, create an issue, read the signed-in user's profile, and read notifications. Every endpoint here is authenticated: the executor injects a personal access token stored in the vault under the skill id 'github_api'. With no token stored the request still goes out, unauthenticated, and GitHub answers 401 on the /user endpoints and shows only public data elsewhere. If a call comes back 401, tell the user to add a GitHub token in Settings rather than retrying.",
     "trigger_phrases": [
         "my github repos",
         "show my repositories",
@@ -20,13 +20,21 @@
         "star a repo",
         "github profile"
     ],
-    "categories": ["developer", "productivity", "code"],
+    "categories": [
+        "developer",
+        "productivity",
+        "code"
+    ],
     "auth": {
         "type": "bearer",
         "api_key_header": null,
         "authorize_url": null,
         "token_url": null,
-        "scopes": ["repo", "user", "notifications"]
+        "scopes": [
+            "repo",
+            "user",
+            "notifications"
+        ]
     },
     "endpoints": [
         {
@@ -36,8 +44,26 @@
             "url": "https://api.github.com/user/repos",
             "description": "List the authenticated user's repositories. Returns repo name, description, stars, language, and last updated.",
             "params": [
-                {"name": "sort", "type": "string", "required": false, "default": "updated", "description": "Sort by: created, updated, pushed, full_name", "enum": ["created", "updated", "pushed", "full_name"]},
-                {"name": "per_page", "type": "number", "required": false, "default": "10", "description": "Number of repos to return"}
+                {
+                    "name": "sort",
+                    "type": "string",
+                    "required": false,
+                    "default": "updated",
+                    "description": "Sort by: created, updated, pushed, full_name",
+                    "enum": [
+                        "created",
+                        "updated",
+                        "pushed",
+                        "full_name"
+                    ]
+                },
+                {
+                    "name": "per_page",
+                    "type": "integer",
+                    "required": false,
+                    "default": "10",
+                    "description": "Number of repos to return"
+                }
             ],
             "returns_description": "Array of {name, full_name, description, stargazers_count, language, updated_at, html_url}",
             "ui_hint": "list"
@@ -49,9 +75,30 @@
             "url": "https://api.github.com/repos/{owner}/{repo}/issues",
             "description": "List issues for a specific repository. Returns issue title, state, labels, and author.",
             "params": [
-                {"name": "owner", "type": "string", "required": true, "description": "Repository owner username"},
-                {"name": "repo", "type": "string", "required": true, "description": "Repository name"},
-                {"name": "state", "type": "string", "required": false, "default": "open", "description": "Filter by state", "enum": ["open", "closed", "all"]}
+                {
+                    "name": "owner",
+                    "type": "string",
+                    "required": true,
+                    "description": "Repository owner username"
+                },
+                {
+                    "name": "repo",
+                    "type": "string",
+                    "required": true,
+                    "description": "Repository name"
+                },
+                {
+                    "name": "state",
+                    "type": "string",
+                    "required": false,
+                    "default": "open",
+                    "description": "Filter by state",
+                    "enum": [
+                        "open",
+                        "closed",
+                        "all"
+                    ]
+                }
             ],
             "returns_description": "Array of {title, number, state, labels, user, created_at, body}",
             "ui_hint": "list"
@@ -63,9 +110,30 @@
             "url": "https://api.github.com/repos/{owner}/{repo}/pulls",
             "description": "List pull requests for a repository. Returns PR title, state, author, and review status.",
             "params": [
-                {"name": "owner", "type": "string", "required": true, "description": "Repository owner"},
-                {"name": "repo", "type": "string", "required": true, "description": "Repository name"},
-                {"name": "state", "type": "string", "required": false, "default": "open", "description": "Filter by state", "enum": ["open", "closed", "all"]}
+                {
+                    "name": "owner",
+                    "type": "string",
+                    "required": true,
+                    "description": "Repository owner"
+                },
+                {
+                    "name": "repo",
+                    "type": "string",
+                    "required": true,
+                    "description": "Repository name"
+                },
+                {
+                    "name": "state",
+                    "type": "string",
+                    "required": false,
+                    "default": "open",
+                    "description": "Filter by state",
+                    "enum": [
+                        "open",
+                        "closed",
+                        "all"
+                    ]
+                }
             ],
             "returns_description": "Array of {title, number, state, user, created_at, head, base}",
             "ui_hint": "list"
@@ -76,10 +144,30 @@
             "url": "https://api.github.com/repos/{owner}/{repo}/issues",
             "description": "Create a new issue in a repository.",
             "params": [
-                {"name": "owner", "type": "string", "required": true, "description": "Repository owner"},
-                {"name": "repo", "type": "string", "required": true, "description": "Repository name"},
-                {"name": "title", "type": "string", "required": true, "description": "Issue title"},
-                {"name": "body", "type": "string", "required": false, "description": "Issue body/description"}
+                {
+                    "name": "owner",
+                    "type": "string",
+                    "required": true,
+                    "description": "Repository owner"
+                },
+                {
+                    "name": "repo",
+                    "type": "string",
+                    "required": true,
+                    "description": "Repository name"
+                },
+                {
+                    "name": "title",
+                    "type": "string",
+                    "required": true,
+                    "description": "Issue title"
+                },
+                {
+                    "name": "body",
+                    "type": "string",
+                    "required": false,
+                    "description": "Issue body/description"
+                }
             ],
             "returns_description": "{number, title, html_url, state}",
             "ui_hint": "detail_card"
@@ -99,7 +187,13 @@
             "url": "https://api.github.com/notifications",
             "description": "Get the user's GitHub notifications.",
             "params": [
-                {"name": "all", "type": "boolean", "required": false, "default": "false", "description": "Show all notifications including read"}
+                {
+                    "name": "all",
+                    "type": "boolean",
+                    "required": false,
+                    "default": "false",
+                    "description": "Show all notifications including read"
+                }
             ],
             "returns_description": "Array of {subject, reason, updated_at, repository}",
             "ui_hint": "list"
@@ -108,7 +202,9 @@
     "flows": [],
     "crons": [],
     "triggers": [],
-    "permissions": [],
+    "permissions": [
+        "network"
+    ],
     "requires_daemon": false,
     "max_calls_per_hour": 5000
 }

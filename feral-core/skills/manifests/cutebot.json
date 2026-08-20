@@ -64,19 +64,19 @@
       "id": "drive",
       "method": "PYTHON",
       "url": "python://cutebot/drive",
-      "description": "Manually drive the QtBot/CuteBot desk robot wheels. Set left and right motor speeds from -100 to 100 (negative = reverse). Dangerous \u2014 requires confirmation; speeds above 80 are denied. Firmware auto-reverts to autonomous mode after 1.5s without drive commands, so drive is a transient pulse: the result reports post-action telemetry and a 'stopped' state afterwards is normal, not a failure.",
+      "description": "Manually drive the QtBot/CuteBot desk robot wheels. Set left and right motor speeds from -80 to 80 (negative = reverse). Two separate limits apply and they are not the same number: a magnitude above 80 is REFUSED outright by the safety policy before the command leaves the brain, and anything above the adapter's configured wheel-speed ceiling (40 by default) is silently CLAMPED down rather than refused, so a value of 60 makes the robot move at 40. Read left and right back from the result to see what was actually sent. Dangerous, so it requires confirmation. Firmware auto-reverts to autonomous mode after 1.5s without drive commands, so drive is a transient pulse: the result reports post-action telemetry and a 'stopped' state afterwards is normal, not a failure.",
       "params": [
         {
           "name": "left",
           "type": "integer",
           "required": true,
-          "description": "Left wheel speed from -100 to 100."
+          "description": "Left wheel speed from -80 to 80. Above 80 in magnitude the whole call is refused; above the adapter ceiling (40 by default) it is clamped down without an error."
         },
         {
           "name": "right",
           "type": "integer",
           "required": true,
-          "description": "Right wheel speed from -100 to 100."
+          "description": "Right wheel speed from -80 to 80. Above 80 in magnitude the whole call is refused; above the adapter ceiling (40 by default) it is clamped down without an error."
         }
       ],
       "returns_description": "{ok, command, left, right, verified, transient, telemetry}",

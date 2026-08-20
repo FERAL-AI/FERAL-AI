@@ -22,7 +22,6 @@
     "categories": ["productivity", "notes"],
     "auth": {
         "type": "oauth2",
-        "provider": "notion",
         "scopes": []
     },
     "endpoints": [
@@ -73,7 +72,7 @@
             "url": "",
             "description": "Update an existing page's properties. Confirm-tier — mutates Notion content.",
             "params": [
-                {"name": "page_id", "type": "string", "required": true},
+                {"name": "page_id", "type": "string", "required": true, "description": "Notion page id of the page to update."},
                 {"name": "properties", "type": "object", "required": true, "description": "Notion properties dict"}
             ],
             "returns_description": "{page_id, last_edited_time}",
@@ -87,7 +86,7 @@
             "url": "",
             "description": "Query a Notion database with optional filter + sort.",
             "params": [
-                {"name": "database_id", "type": "string", "required": true},
+                {"name": "database_id", "type": "string", "required": true, "description": "Notion database id to query."},
                 {"name": "filter", "type": "object", "required": false, "description": "Notion filter object"},
                 {"name": "sorts", "type": "array", "required": false, "items": {"type": "object"}, "description": "Notion sort list"}
             ],
@@ -102,7 +101,7 @@
             "url": "",
             "description": "Insert a row into a Notion database. Confirm-tier — adds persistent content.",
             "params": [
-                {"name": "database_id", "type": "string", "required": true},
+                {"name": "database_id", "type": "string", "required": true, "description": "Notion database id to insert the row into."},
                 {"name": "properties", "type": "object", "required": true, "description": "Property values keyed by column name"}
             ],
             "returns_description": "{page_id, url}",

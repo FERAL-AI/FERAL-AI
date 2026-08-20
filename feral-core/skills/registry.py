@@ -503,8 +503,27 @@ class SkillRegistry:
                     prop["items"] = param.items
                 if param.enum:
                     prop["enum"] = param.enum
-                if param.default:
-                    prop["default"] = param.default
+                # ``is not None``, not truthiness. A declared default of
+                # ``""``, ``0`` or ``false`` is a real default, and
+                # ``if param.default:`` dropped it from the schema
+                # entirely, eight shipped params (all empty-string
+                # defaults, e.g. calendar_google__create_event.description
+                # and smart_home_hue__get_entities.domain) were affected,
+                # and the model was shown an optional param with no stated
+                # default at all.
+                #
+                # Coerced for the same reason ``_schema_hint_for_endpoint``
+                # coerces: ``EndpointParam.default`` is ``Optional[str]``,
+                # so an ``integer`` param's default reached the model as
+                # ``"7"`` and a ``boolean`` param's as the always-truthy
+                # string ``"false"``. 59 of the 89 shipped defaults declare
+                # a non-string type. ``SkillExecutor._apply_param_defaults``
+                # injects the same coerced value at dispatch, so the
+                # advertised contract and the executed one now agree.
+                if param.default is not None:
+                    from agents.tool_dispatch_validator import _coerce_default
+
+                    prop["default"] = _coerce_default(param)
                 properties[param.name] = prop
                 if param.required:
                     required.append(param.name)

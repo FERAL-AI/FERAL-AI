@@ -21,7 +21,6 @@
     "categories": ["people", "communication"],
     "auth": {
         "type": "oauth2",
-        "provider": "google",
         "scopes": ["https://www.googleapis.com/auth/contacts.readonly"]
     },
     "endpoints": [

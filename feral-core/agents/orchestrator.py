@@ -39,7 +39,17 @@ from models.skill_manifest import SkillManifest
 from memory.execution_audit import claimed_by_caller, status_of as audit_status_of
 from skills.registry import SkillRegistry
 from skills.executor import SkillExecutor
-from skills.result_budget import serialize_tool_result
+from skills.result_budget import (
+    serialize_tool_result,
+    serialize_tool_result_with_images,
+)
+from agents.multimodal_blocks import (
+    IMAGE_DELIVERY_NONE,
+    image_delivery_mode,
+    materialize_tool_result_images,
+    prune_tool_result_images,
+    should_prune_images,
+)
 from agents.llm_provider import LLMProvider
 from agents import llm_router
 from agents.genui_generator import GenUIGenerator
@@ -123,6 +133,21 @@ class Orchestrator:
         # single canonical shell + filesystem surface.
         "coding_tools",
         "desktop_control",
+        # ``gui_computer_use`` is the canonical synthetic mouse/keyboard
+        # surface and the ONLY one carrying ``screenshot``,
+        # ``window_list`` and ``window_focus``. It was missing from this
+        # list while ``desktop_automation``, an eight-endpoint
+        # compatibility shim that delegates every call straight back to
+        # ``gui_computer_use`` (skills/impl/desktop_automation.py), was
+        # in it. Same shape as the ``computer_use`` problem noted above:
+        # the two manifests shared nine byte-identical trigger phrases
+        # ("click on", "type text", "move mouse", …), which produced a
+        # 20.0/20.0 scoring tie on every realistic phrasing, so the model
+        # was shown two indistinguishable ``type_text`` tools and the
+        # canonical one was the one that could fall out of the top-5.
+        # The shim keeps its endpoint ids (persona files and older
+        # callers hardcode them) but no longer competes for routing.
+        "gui_computer_use",
         "desktop_automation",
         "screen_capture",
         "system_settings",
@@ -202,6 +227,25 @@ class Orchestrator:
         # ordering. Different sessions still run fully parallel — only
         # turns on the same session are serialised.
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # Image-bearing tool results (screenshots) travel OUT OF BAND.
+        #
+        # ``conversation_history`` stays pure text and provider-agnostic:
+        # the base64 blob is never written into a history row, so the
+        # transcript can be replayed on any provider, handed to the
+        # memory compactor, or persisted without carrying megabytes of
+        # image. The images live here, keyed by ``tool_call_id``, and are
+        # spliced back in -- in the shape the SELECTED provider accepts --
+        # only at the moment a chat request is built
+        # (``_materialize_tool_images``).
+        #
+        #   _tool_result_images[session_id][tool_call_id] =
+        #       {"images": [ToolResultImage.to_dict(), ...],
+        #        "pruned": bool, "tool_name": str}
+        #   _tool_image_order[session_id] = [tool_call_id, ...]  (append order)
+        #   _tool_image_rounds[session_id] = agent rounds since session start
+        self._tool_result_images: dict[str, dict[str, dict]] = {}
+        self._tool_image_order: dict[str, list[str]] = {}
+        self._tool_image_rounds: dict[str, int] = {}
         # Per-session stack of in-flight turn records. See the
         # "Turn write-back" block below. Stacked because the stream
         # path can delegate to the non-stream path mid-turn.
@@ -2228,6 +2272,160 @@ class Orchestrator:
             logger.debug("budget_exceeded follow-up text failed", exc_info=True)
 
     # ─────────────────────────────────────────────
+    # Image-bearing tool results (screenshots)
+    # ─────────────────────────────────────────────
+
+    # Ceiling on how many tool_call_id entries the per-session image side
+    # table remembers (live images plus "an image used to be here"
+    # tombstones). Live images are bounded much more tightly by the batch
+    # pruner; this only stops the tombstone list growing forever.
+    _TOOL_IMAGE_ORDER_MAX = 500
+
+    def _image_delivery_mode(self) -> str:
+        """Which wire shape can carry a tool-result image right now.
+
+        Derived from the LIVE provider, not from a constant: capability
+        is per-model for several providers (an Ollama text model, a
+        non-vision OpenRouter route, DeepSeek's text-only chat models),
+        and ``LLMProvider._vision_support_status`` is the one place that
+        knows. Anything we cannot positively confirm resolves to
+        ``IMAGE_DELIVERY_NONE`` -- no image on the wire, and the model is
+        told in words that one existed.
+        """
+        provider = str(getattr(self.llm, "provider", "") or "")
+        vision_ok = True
+        status = getattr(self.llm, "_vision_support_status", None)
+        if callable(status):
+            try:
+                vision_ok = bool(status()[0])
+            except Exception:
+                logger.debug("vision support probe failed", exc_info=True)
+                vision_ok = False
+        return image_delivery_mode(provider, vision_supported=vision_ok)
+
+    def _images_allowed(self) -> bool:
+        return self._image_delivery_mode() != IMAGE_DELIVERY_NONE
+
+    def _serialize_tool_result_for_history(
+        self, session_id: str, tool_call_id: str, tool_name: str, result_data: Any,
+    ) -> str:
+        """Budget the text half of a tool result and stash any image.
+
+        Returns the string that goes into the ``role:"tool"`` history row.
+        Any image found in the result is lifted out BEFORE the text budget
+        runs, so a 400 000-char screenshot no longer consumes (and blow
+        past) a 2 000-char budget.
+        """
+        allow = self._images_allowed()
+        try:
+            content, images = serialize_tool_result_with_images(
+                tool_name, result_data, registry=self.skills, allow_images=allow,
+            )
+        except Exception:
+            logger.warning(
+                "image-aware tool-result serialization failed for %s; "
+                "falling back to text-only", tool_name, exc_info=True,
+            )
+            return serialize_tool_result(tool_name, result_data, registry=self.skills)
+        if images and tool_call_id:
+            self._record_tool_images(session_id, tool_call_id, tool_name, images)
+        return content
+
+    def _record_tool_images(
+        self, session_id: str, tool_call_id: str, tool_name: str, images: list,
+    ) -> None:
+        table = self._tool_result_images.setdefault(session_id, {})
+        order = self._tool_image_order.setdefault(session_id, [])
+        if tool_call_id not in table:
+            order.append(tool_call_id)
+        table[tool_call_id] = {
+            "images": [img.to_dict() for img in images],
+            "pruned": False,
+            "tool_name": tool_name,
+        }
+        # Pruned entries are tiny (they only carry the "there was an image
+        # here" marker) but they are not free, and a long-lived session can
+        # accumulate thousands. Drop the oldest tombstones once the order
+        # list gets long; the live images are bounded separately by
+        # ``_maybe_prune_tool_images``.
+        if len(order) > self._TOOL_IMAGE_ORDER_MAX:
+            for stale in order[: len(order) - self._TOOL_IMAGE_ORDER_MAX]:
+                if table.get(stale, {}).get("pruned"):
+                    table.pop(stale, None)
+            self._tool_image_order[session_id] = [
+                call_id for call_id in order if call_id in table
+            ]
+
+    def _materialize_tool_images(
+        self, session_id: str, messages: list[dict],
+    ) -> list[dict]:
+        """Splice stashed tool-result images into an outgoing request.
+
+        Called immediately before every chat/stream call. The history the
+        orchestrator keeps is never mutated: this returns a per-request
+        view, the same discipline ``_compact_context`` uses.
+        """
+        table = self._tool_result_images.get(session_id)
+        if not table:
+            return messages
+        try:
+            return materialize_tool_result_images(
+                messages, table, self._image_delivery_mode(),
+            )
+        except Exception:
+            logger.warning(
+                "tool-result image materialization failed; sending text only",
+                exc_info=True,
+            )
+            return messages
+
+    def _maybe_prune_tool_images(self, session_id: str) -> int:
+        """Batch-prune old screenshots from the side table.
+
+        Source for the policy (read, not guessed): Anthropic's computer-use
+        tool documentation, "Manage screenshot history for prompt caching"
+        -- screenshots cost roughly 1000-1800 input tokens each, and the
+        documented recommendation is to keep the last three and prune in
+        BATCHES (every ~25 turns) rather than one per turn, because
+        dropping one every turn changes the cached prefix every turn and
+        invalidates the prompt cache.
+
+        Returns the number of tool results whose image was dropped.
+        """
+        table = self._tool_result_images.get(session_id)
+        if not table:
+            return 0
+        order = self._tool_image_order.setdefault(session_id, [])
+        rounds = self._tool_image_rounds.get(session_id, 0)
+        live = sum(
+            1 for entry in table.values()
+            if isinstance(entry, dict) and not entry.get("pruned") and entry.get("images")
+        )
+        if not should_prune_images(round_counter=rounds, live_images=live):
+            return 0
+        pruned = prune_tool_result_images(table, order)
+        if pruned:
+            logger.info(
+                "Pruned %d old tool-result image(s) from session %s "
+                "(round %d, %d live before prune)",
+                len(pruned), session_id, rounds, live,
+            )
+        return len(pruned)
+
+    def _note_agent_round(self, session_id: str) -> None:
+        """Advance the per-session agent-round counter used by the batch
+        pruner. One round = one LLM call inside the tool loop, which is
+        the unit Anthropic's guidance counts."""
+        self._tool_image_rounds[session_id] = (
+            self._tool_image_rounds.get(session_id, 0) + 1
+        )
+
+    def _forget_tool_images(self, session_id: str) -> None:
+        self._tool_result_images.pop(session_id, None)
+        self._tool_image_order.pop(session_id, None)
+        self._tool_image_rounds.pop(session_id, None)
+
+    # ─────────────────────────────────────────────
     # Vision context attach (Lane 08 WS4 — S5 prereq)
     # ─────────────────────────────────────────────
 
@@ -2824,6 +3022,13 @@ class Orchestrator:
                 {"role": "system", "content": effective_system_prompt},
                 *history,
             ]
+            # Screenshot lifecycle, in the order the guidance requires:
+            # count the round, batch-prune when a batch boundary is due,
+            # then splice the surviving images into THIS request in the
+            # active provider's shape. The stored history stays text-only.
+            self._note_agent_round(session_id)
+            self._maybe_prune_tool_images(session_id)
+            messages = self._materialize_tool_images(session_id, messages)
 
             try:
                 model_name = getattr(self.llm, 'model_name', 'llm')
@@ -3051,8 +3256,15 @@ class Orchestrator:
                         # slice that cut mid-token, so the model was
                         # routinely handed JSON that does not parse, with
                         # nothing saying anything had been removed.
-                        "content": serialize_tool_result(
-                            tc["name"], result_data, registry=self.skills,
+                        #
+                        # An image in the result (screenshot) is lifted out
+                        # BEFORE this budget runs and stashed for delivery
+                        # as a real image block; only the text half is
+                        # budgeted. Without that, a 400k-char screenshot
+                        # came back as 1405 chars of truncated base64 and
+                        # every vision path in FERAL was dead.
+                        "content": self._serialize_tool_result_for_history(
+                            session_id, tc["id"], tc["name"], result_data,
                         ),
                     })
                     # A tool waiting on the operator's approval is not a
@@ -3371,6 +3583,10 @@ class Orchestrator:
                 )
                 pending_retry_addition = None
             messages = [{"role": "system", "content": effective_system_prompt}, *history]
+            # Same screenshot lifecycle as the non-streaming loop.
+            self._note_agent_round(session_id)
+            self._maybe_prune_tool_images(session_id)
+            messages = self._materialize_tool_images(session_id, messages)
             stream_id = str(uuid4())[:8]
             accumulated_text = ""
             streamed_text = False
@@ -3656,14 +3872,15 @@ class Orchestrator:
                             result_summary=json.dumps(result_data)[:300],
                             latency_ms=latency_ms,
                         )
+                    stream_tool_call_id = tc.get("id") or str(uuid4())[:8]
                     history.append({
                         "role": "tool",
-                        "tool_call_id": tc.get("id", str(uuid4())[:8]),
+                        "tool_call_id": stream_tool_call_id,
                         "name": tc["name"],
-                        # Same per-tool budget as the non-streaming path;
-                        # see the comment there.
-                        "content": serialize_tool_result(
-                            tc["name"], result_data, registry=self.skills,
+                        # Same per-tool budget and same image lift as the
+                        # non-streaming path; see the comment there.
+                        "content": self._serialize_tool_result_for_history(
+                            session_id, stream_tool_call_id, tc["name"], result_data,
                         ),
                     })
                     guard_level = GUARD_OK if stream_tool_pending else budget.observe_tool(
@@ -3798,6 +4015,9 @@ class Orchestrator:
             # grow the lock dict without bound.
             self._session_locks.pop(sid, None)
             self._session_surfaces.pop(sid, None)
+            # The image side table holds whole base64 payloads; evicting
+            # the transcript without it would leak megabytes per session.
+            self._forget_tool_images(sid)
 
     async def on_session_disconnect(self, session_id: str):
         """Called when a client disconnects. Summarize and learn."""
@@ -3811,6 +4031,7 @@ class Orchestrator:
         self._last_proactive_check.pop(session_id, None)
         self._session_locks.pop(session_id, None)
         self._session_surfaces.pop(session_id, None)
+        self._forget_tool_images(session_id)
         self.tool_runner.clear_session(session_id)
 
     # ─────────────────────────────────────────────
@@ -4046,11 +4267,74 @@ class Orchestrator:
         re.I,
     )
 
+    # "Is anything running on this machine?", process / activity
+    # introspection.
+    #
+    # The capability exists and works: ``coding_tools__bash`` running
+    # ``pgrep -fl claude`` passes the shell policy and answers the
+    # question. Routing never offered it. Measured on the shipped
+    # catalog before this regex existed:
+    #
+    #   "is claude working on something right now" -> confident_lead,
+    #        top5 = macos_ax, desktop_control, external_agent,
+    #               screen_capture, messaging_channels  (no coding_tools)
+    #   "is claude still going"      -> ambiguous, no coding_tools
+    #   "what's my machine doing"    -> ambiguous, no coding_tools
+    #   "check if claude is busy"    -> ambiguous, no coding_tools
+    #   "what's using my cpu"        -> ambiguous, no coding_tools
+    #   "did claude finish yet"      -> ambiguous, no coding_tools
+    #   "what is my mac doing right now" -> trigger_strong on WEB_SEARCH
+    #
+    # That last one is the dangerous shape: a high-confidence WRONG
+    # match returns early and suppresses both the LLM disambiguation and
+    # the action fallback, so the better answer is never considered.
+    #
+    # A regex tier is the right mechanism rather than new trigger
+    # phrases: it runs before the keyword scorer, so it also displaces
+    # the wrong strong match, which trigger phrases on their own cannot
+    # do (they would merely tie at 20.0 and lose the ordering coin flip).
+    #
+    # Placed AFTER the memory/calendar/reminder/health/vision shortcuts
+    # so "how did I sleep" and friends keep their existing owners.
+    _R_PROCESS_QUERY = re.compile(
+        r"("
+        # "is claude code still running", "anything running right now",
+        # "what processes are running", "show me running processes"
+        r"\b(?:is|are|anything|something|what|what's|whats|which|show|list)\b"
+        r"[^.?!]{0,40}\brunning\b|"
+        # "list processes" / "show me all processes"
+        r"\b(?:list|show|kill)\s+(?:me\s+)?(?:the\s+|all\s+)?process(?:es)?\b|"
+        # "is claude still going", "is claude working on something",
+        # "check if claude is busy". The lookahead keeps "are you busy"
+        # and "is it still going" out: those are about the assistant or
+        # an unnamed referent, not about a process on the machine.
+        r"\b(?:is|are)\s+(?!you\b|i\b|it\b|we\b|they\b|there\b|that\b|this\b)"
+        r"(?:\w+\s+){0,3}(?:still\s+)?(?:going|busy|working\s+on)\b|"
+        # "did claude finish yet"
+        r"\bdid\s+(?!i\b|you\b|we\b)(?:\w+\s+){0,2}finish(?:ed)?\b|"
+        # "what's my machine doing", "what is my mac doing right now"
+        r"\bwhat(?:'s|s|\s+is)\s+(?:my\s+|this\s+|the\s+)?"
+        r"(?:mac|macbook|machine|computer|laptop|system)\s+doing\b|"
+        # "what's using my cpu", "what's eating all my memory"
+        r"\b(?:using|eating|hogging|taking)\s+(?:up\s+)?"
+        r"(?:my\s+|all\s+(?:my|the)\s+)?(?:cpu|memory|ram)\b"
+        r")",
+        re.I,
+    )
+
+    # Skills that can actually answer a process-activity question, most
+    # capable first. ``coding_tools__bash`` is the general answer (ps,
+    # pgrep, top); ``desktop_control__list_running_apps`` is the better
+    # one for "what apps do I have open" and rides along via the keyword
+    # ranking below.
+    _PROCESS_QUERY_SKILLS = ("coding_tools",)
+
     def _heuristic_route(self, text: str, session_id: str = "") -> tuple[list["SkillManifest"], str]:
         """Try to pick relevant skills without an LLM call.
 
         Returns ``(skills, reason)`` where ``reason`` is one of
-        ``"empty"``, ``"prefix"``, ``"regex:<name>"``,
+        ``"empty"``, ``"prefix"``, ``"regex:<name>"`` (including
+        ``"regex:process_query"``),
         ``"trigger_strong"``, ``"confident_lead"``,
         ``"action_fallback"``, ``"small_catalog"``, ``"carry:routine"``,
         or ``"ambiguous"`` (the only value that triggers an LLM
@@ -4139,6 +4423,24 @@ class Orchestrator:
         if self._query_is_robot_lights(stripped, session_id):
             if "cutebot" in self.skills.skills:
                 return ([self.skills.skills["cutebot"]], "regex:robot_lights")
+
+        # 2.7 "Is anything running on this machine?", see
+        # ``_R_PROCESS_QUERY``. Hoist the skill that can answer it, then
+        # keep the keyword ranking behind it so a phrasing about apps
+        # ("what apps are running") still surfaces
+        # ``desktop_control__list_running_apps`` and a phrasing about a
+        # background job still surfaces ``background_task``.
+        if self._R_PROCESS_QUERY.search(stripped):
+            hoisted = [
+                self.skills.skills[sid]
+                for sid in self._PROCESS_QUERY_SKILLS
+                if sid in self.skills.skills
+            ]
+            if hoisted:
+                hoisted_ids = {s.skill_id for s in hoisted}
+                ranked = self.skills.find_skills_for_query(stripped, top_k=5)
+                result = hoisted + [s for s in ranked if s.skill_id not in hoisted_ids]
+                return (result[:5], "regex:process_query")
 
         # 3. Catalog ≤ 5 — registry's keyword ranking is always
         # enough; LLM routing would be more expensive than just

@@ -23,7 +23,6 @@
     "categories": ["communication", "productivity"],
     "auth": {
         "type": "oauth2",
-        "provider": "google",
         "scopes": [
             "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/gmail.send",
@@ -102,9 +101,9 @@
             "url": "",
             "description": "Create a draft email without sending it. Drafts are stored on the provider and visible in the user's drafts folder.",
             "params": [
-                {"name": "to", "type": "string", "required": true},
-                {"name": "subject", "type": "string", "required": true},
-                {"name": "body", "type": "string", "required": true}
+                {"name": "to", "type": "string", "required": true, "description": "Recipient address (single)."},
+                {"name": "subject", "type": "string", "required": true, "description": "Subject line."},
+                {"name": "body", "type": "string", "required": true, "description": "Plain-text body."}
             ],
             "returns_description": "{draft_id, source}",
             "safety_tier": "safe",

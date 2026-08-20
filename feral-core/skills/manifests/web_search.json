@@ -9,7 +9,7 @@
     "logo_url": "",
     "icon_set": "sf_symbols"
   },
-  "description": "Search the web using Tavily AI search. Get comprehensive results with AI-powered summaries.",
+  "description": "Search the web. Runs a provider chain in order: Tavily, Brave, Exa, Perplexity, Google CSE, SearXNG (each included only when its key or URL is configured), and finally DuckDuckGo, which needs no key. Because DuckDuckGo is always in the chain this skill works on a fresh install with no credentials at all, so never tell the user web search is unavailable for want of an API key. The result names which provider answered in provider_used.",
   "trigger_phrases": [
     "search for",
     "google",
@@ -36,16 +36,45 @@
       "id": "web_search",
       "method": "POST",
       "url": "https://api.tavily.com/search",
-      "description": "Search the web and get AI-summarized results with sources. Backed by Python implementation \u2014 this manifest is for documentation; actual execution uses skills/impl/web_search.py.",
+      "description": "Search the web and return ranked result links with snippets. This endpoint returns SOURCES, not a written answer: read the snippets and answer yourself, or call web_search__instant_answer when a provider's own one-line answer would help. The url on this endpoint is documentation only; execution goes to skills/impl/web_search.py, so no HTTP request is ever made to api.tavily.com from this manifest.",
       "params": [
         {
           "name": "query",
           "type": "string",
           "required": true,
-          "description": "Search query"
+          "description": "Search query."
+        },
+        {
+          "name": "max_results",
+          "type": "integer",
+          "required": false,
+          "description": "How many results to return. Clamped to 1-20; the default is 5."
         }
       ],
-      "returns_description": "AI-generated answer plus array of {title, url, content} results",
+      "returns_description": "{results: [{title, url, snippet, score}], provider_used}. There is no 'answer' field and no 'content' field on this endpoint.",
+      "ui_hint": "list",
+      "emit_result_preview": true
+    },
+    {
+      "id": "instant_answer",
+      "method": "POST",
+      "url": "https://api.tavily.com/search",
+      "description": "Search the web and also ask the provider for a one-line direct answer, for questions with a single factual answer ('who is the CEO of X', 'when did Y happen'). The answer comes from Tavily when a Tavily key is configured and otherwise from DuckDuckGo's instant-answer box; when neither produces one the call still succeeds and returns results with no 'answer' field, so check for it rather than assuming it.",
+      "params": [
+        {
+          "name": "query",
+          "type": "string",
+          "required": true,
+          "description": "Search query."
+        },
+        {
+          "name": "max_results",
+          "type": "integer",
+          "required": false,
+          "description": "How many supporting results to return. Clamped to 1-20; the default is 5."
+        }
+      ],
+      "returns_description": "{results: [{title, url, snippet, score}], answer?: string}. 'answer' is absent when no provider supplied one.",
       "ui_hint": "list",
       "emit_result_preview": true
     }

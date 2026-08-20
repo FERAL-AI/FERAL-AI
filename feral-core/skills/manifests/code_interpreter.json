@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Execute Python/Node code and return outputs plus generated artifacts (CSV, images, files).",
+    "description": "Execute Python/Node code and return outputs plus generated artifacts (CSV, images, files). Runs only inside the Docker sandbox: SkillExecutor refuses every endpoint with HTTP 503 when Docker is not installed or not healthy, which is the default on macOS, and a workspace grant does not substitute for it. Check that Docker is running before promising a result; when it is not, reach for coding_tools__bash inside a granted folder instead.",
     "trigger_phrases": [
         "run this python code",
         "execute code",
@@ -26,7 +26,7 @@
             "id": "run_python",
             "method": "PYTHON",
             "url": "",
-            "description": "Execute Python code in an isolated run directory and capture generated artifacts.",
+            "description": "Execute Python code in the Docker sandbox and capture generated artifacts. Refused with HTTP 503 when the Docker sandbox is unavailable; the code never runs on the host.",
             "params": [
                 {
                     "name": "code",
@@ -48,7 +48,7 @@
             "id": "run_node",
             "method": "PYTHON",
             "url": "",
-            "description": "Execute Node.js code in an isolated run directory and capture generated artifacts.",
+            "description": "Execute Node.js code in the Docker sandbox and capture generated artifacts. Refused with HTTP 503 when the Docker sandbox is unavailable; the code never runs on the host.",
             "params": [
                 {
                     "name": "code",

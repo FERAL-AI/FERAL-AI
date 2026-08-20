@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Send chat messages via Telegram, Slack, or Discord and read recent activity. Backend: MessagingHub (channels.base bridges; bot tokens loaded from FERAL_TELEGRAM_BOT_TOKEN / FERAL_SLACK_BOT_TOKEN / FERAL_DISCORD_BOT_TOKEN).",
+    "description": "Send chat messages via Telegram, Slack or Discord and read recent activity. Backend: MessagingHub (channels.base bridges; bot tokens loaded from FERAL_TELEGRAM_BOT_TOKEN / FERAL_SLACK_BOT_TOKEN / FERAL_DISCORD_BOT_TOKEN). The three send endpoints here do not check what the provider replied and report success=true even when the message was rejected, so prefer messaging_channels__send, which reads the provider's reply and reports a real failure. The read endpoints on this skill (get_updates, list_channels, read_channel_history) do check, and are the right tool for reading. With no bot token configured for a platform its endpoints return 'bot token not configured'.",
     "trigger_phrases": [
         "send a message",
         "message them",
@@ -33,7 +33,7 @@
             "id": "telegram_send",
             "method": "PYTHON",
             "url": "python://messaging_sms/telegram_send",
-            "description": "Send a Telegram message to a chat using the configured FERAL bot. Provide the numeric chat id or @channelname.",
+            "description": "Send a Telegram message to a chat using the configured FERAL bot. Provide the numeric chat id or @channelname. WARNING: this endpoint swallows the provider's reply and returns success=true whether or not the message was delivered (a bad chat id, a channel the bot is not in, and a revoked token all look identical to it). Use messaging_channels__send instead when you need to tell the user whether it actually went.",
             "params": [
                 {"name": "chat_id", "type": "string", "required": true, "description": "Telegram chat id (numeric for users/groups, '@channelname' for public channels)."},
                 {"name": "text", "type": "string", "required": true, "description": "Message body. Supports plain text up to 4096 characters."}
@@ -57,7 +57,7 @@
             "id": "slack_send",
             "method": "PYTHON",
             "url": "python://messaging_sms/slack_send",
-            "description": "Post a message to a Slack channel or DM as the FERAL bot user. Provide the channel id (e.g. C123ABC) or '#channel-name'.",
+            "description": "Post a message to a Slack channel or DM as the FERAL bot user. Provide the channel id (e.g. C123ABC) or '#channel-name'. WARNING: this endpoint swallows the provider's reply and returns success=true whether or not the message was delivered (a bad chat id, a channel the bot is not in, and a revoked token all look identical to it). Use messaging_channels__send instead when you need to tell the user whether it actually went.",
             "params": [
                 {"name": "channel", "type": "string", "required": true, "description": "Slack channel id ('C…') or '#channel-name'."},
                 {"name": "text", "type": "string", "required": true, "description": "Message body (Slack mrkdwn supported)."}
@@ -117,7 +117,7 @@
             "id": "discord_send",
             "method": "PYTHON",
             "url": "python://messaging_sms/discord_send",
-            "description": "Send a Discord message to a channel as the FERAL bot.",
+            "description": "Send a Discord message to a channel as the FERAL bot. WARNING: this endpoint swallows the provider's reply and returns success=true whether or not the message was delivered (a bad chat id, a channel the bot is not in, and a revoked token all look identical to it). Use messaging_channels__send instead when you need to tell the user whether it actually went.",
             "params": [
                 {"name": "channel_id", "type": "string", "required": true, "description": "Discord channel id (snowflake)."},
                 {"name": "text", "type": "string", "required": true, "description": "Message body (max 2000 chars)."}
