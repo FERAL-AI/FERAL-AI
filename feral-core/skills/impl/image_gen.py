@@ -197,6 +197,15 @@ class ImageGenSkill(BaseSkill):
             "status_code": 200,
             "data": {
                 "b64": result.b64,
+                # Same bytes under the name the tool-result image pipeline
+                # recognises (agents/multimodal_blocks.TOOL_RESULT_IMAGE_FIELDS).
+                # Under "b64" alone the generated image was not extracted as an
+                # image block, so it was stringified into the text result and
+                # clamped: the model never saw the picture it had just made.
+                # "b64" is kept because callers and stored results use it.
+                "image_b64": result.b64,
+                # Always None: every provider requests b64_json, so the
+                # Images API returns no URL. Declared so the shape is stable.
                 "url": result.url or None,
                 "revised_prompt": result.revised_prompt,
                 "provider": result.provider,

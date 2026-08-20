@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import json
 
-from agents.multimodal_blocks import translate_content_for_anthropic
+from agents.multimodal_blocks import (
+    to_anthropic_blocks,
+    translate_content_for_anthropic,
+)
 
 
 _ANTHROPIC_THINKING_RESPONSE_ROOM = 1024  # mirrors AnthropicProvider.chat
@@ -56,14 +59,31 @@ def _convert_messages_for_anthropic(messages: list[dict]) -> tuple[str, list[dic
                     "Anthropic request build: tool-result message missing "
                     "'tool_call_id'; cannot convert to tool_result block"
                 )
-            result_text = content if isinstance(content, str) else json.dumps(content)
+            # A tool result may now be a LIST of OpenAI-shape content
+            # blocks rather than a plain string: that is how an
+            # image-bearing tool result (a screenshot) reaches this
+            # translator. Anthropic accepts an ``image`` block inside the
+            # ``tool_result`` content array -- see the computer-use tool
+            # docs, "Implement proper screenshot handling":
+            #   {"type": "tool_result", "tool_use_id": "...",
+            #    "content": [{"type": "image", "source": {...}}]}
+            # so translate the blocks rather than ``json.dumps``-ing them
+            # (which is what used to happen, and which would have shipped
+            # the whole base64 blob back into the text as an escaped JSON
+            # string).
+            if isinstance(content, list):
+                result_content: object = to_anthropic_blocks(content)
+            elif isinstance(content, str):
+                result_content = content
+            else:
+                result_content = json.dumps(content)
             out.append({
                 "role": "user",
                 "content": [
                     {
                         "type": "tool_result",
                         "tool_use_id": str(tool_call_id),
-                        "content": result_text,
+                        "content": result_content,
                     }
                 ],
             })

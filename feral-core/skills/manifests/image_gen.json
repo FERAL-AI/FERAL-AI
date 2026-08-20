@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Generate an image from a text description. Returns a URL to the generated image. Requires an OpenAI API key; the skill reports a missing key rather than failing silently.",
+    "description": "Generate an image from a text description with OpenAI DALL-E 3. Needs an OpenAI key, read from the vault entry for 'image_gen' or from the OPENAI_API_KEY environment variable; with neither present every call fails with 'No image generation providers configured (set OPENAI_API_KEY)' and no image is produced. There is no keyless fallback provider.",
     "trigger_phrases": [
         "generate an image",
         "generate image",
@@ -24,16 +24,14 @@
     ],
     "categories": ["creative", "media"],
     "auth": {
-        "type": "api_key",
-        "key_name": "OPENAI_API_KEY",
-        "required": true
+        "type": "api_key"
     },
     "endpoints": [
         {
             "id": "generate",
             "method": "POST",
             "url": "skill://image_gen/generate",
-            "description": "Generate an image from a text prompt and return its URL.",
+            "description": "Generate an image from a text prompt. The image comes back as base64 PNG bytes in 'b64'. The 'url' field is always null: the provider is asked for b64_json, so no hosted URL is ever produced. Do not tell the user you have a link.",
             "params": [
                 {
                     "name": "prompt",
@@ -45,21 +43,22 @@
                     "name": "size",
                     "type": "string",
                     "required": false,
-                    "description": "Image size, e.g. 1024x1024, 1792x1024, 1024x1792. Defaults to 1024x1024."
+                    "description": "Image size. Only 1024x1024, 1792x1024 and 1024x1792 exist; any other value is silently replaced with 1024x1024 rather than refused. Defaults to 1024x1024."
                 },
                 {
                     "name": "style",
                     "type": "string",
                     "required": false,
-                    "description": "vivid or natural. Defaults to vivid."
+                    "description": "vivid or natural. Any other value is silently replaced with vivid. Defaults to vivid."
                 },
                 {
                     "name": "n",
                     "type": "integer",
                     "required": false,
-                    "description": "Number of images. Accepted but currently generates one; reserved for providers that support batching."
+                    "description": "Accepted and then ignored: DALL-E 3 generates exactly one image per call, so this never changes the result. Reserved for providers that support batching."
                 }
-            ]
+            ],
+            "returns_description": "{b64: base64 PNG bytes, url: always null, revised_prompt: the prompt DALL-E actually rendered, provider, size}"
         }
     ],
     "flows": [],
