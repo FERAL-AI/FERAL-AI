@@ -2677,3 +2677,119 @@
   padding: 2px 8px;
 }
 .v2-approval-actions { display: flex; gap: 6px; }
+
+/* ── Checkpoints (undo a turn) ─────────────────────────────── */
+/* The destructive path is deliberately harder to reach than the safe
+   one: "Undo this turn" is always available, and the force button only
+   appears after the brain has refused and named the files at risk. */
+.v2-cp-note, .v2-cp-error, .v2-cp-drift, .v2-cp-done {
+  font-size: var(--v2-size-xs);
+  border-radius: var(--v2-radius-sm);
+  padding: 6px 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.v2-cp-note { color: var(--v2-text-secondary); background: var(--v2-fill-subtle); margin-bottom: 10px; }
+.v2-cp-error, .v2-cp-drift { color: var(--v2-state-warn); background: var(--v2-state-warn-soft); }
+.v2-cp-done { color: var(--v2-text-secondary); background: var(--v2-fill-subtle); }
+.v2-cp-muted { font-size: var(--v2-size-xs); color: var(--v2-text-tertiary); }
+
+.v2-cp-list { list-style: none; padding: 0; margin: 12px 0 0; display: flex; flex-direction: column; gap: 6px; }
+.v2-cp-turn { border-radius: var(--v2-radius-md); background: var(--v2-surface-0); overflow: hidden; }
+.v2-cp-turn-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  background: none;
+  border: 0;
+  color: var(--v2-text-primary);
+  font: inherit;
+  font-size: var(--v2-size-sm);
+  cursor: pointer;
+  text-align: left;
+}
+.v2-cp-turn-head:hover { background: var(--v2-fill-subtle); }
+.v2-cp-caret { transition: transform 120ms ease; flex: none; }
+.v2-cp-caret.is-open { transform: rotate(90deg); }
+.v2-cp-turn-files { flex: 1; }
+.v2-cp-turn-when { color: var(--v2-text-tertiary); font-variant-numeric: tabular-nums; font-size: var(--v2-size-xs); }
+
+.v2-cp-detail { display: flex; flex-direction: column; gap: 8px; padding: 0 10px 10px 10px; }
+.v2-cp-files { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 3px; }
+.v2-cp-file {
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-secondary);
+  overflow-wrap: anywhere;
+}
+.v2-cp-file[data-status="drifted"] { color: var(--v2-state-warn); }
+.v2-cp-actions { display: flex; gap: 6px; }
+.v2-cp-refusal {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-state-error-soft);
+}
+.v2-cp-refusal-head { margin: 0; font-size: var(--v2-size-xs); color: var(--v2-state-error); }
+.v2-btn--danger { color: var(--v2-text-inverse); background: var(--v2-state-error); border-color: transparent; }
+.v2-btn--danger:hover:not(:disabled) { filter: brightness(1.08); }
+
+/* ── Folder grants ─────────────────────────────────────────────── */
+/* The mode is shown as an icon plus words, not a colour alone: the
+   difference between a folder FERAL can read and one it can rewrite is
+   the most consequential thing on this page. */
+.v2-grants-error {
+  font-size: var(--v2-size-xs);
+  color: var(--v2-state-warn);
+  background: var(--v2-state-warn-soft);
+  border-radius: var(--v2-radius-sm);
+  padding: 6px 10px;
+  margin: 8px 0;
+}
+.v2-grants-add { display: flex; gap: 6px; margin: 10px 0; flex-wrap: wrap; }
+.v2-grants-add .v2-input { flex: 1; min-width: 180px; }
+.v2-grants-mode { flex: none; width: auto; }
+
+.v2-grants-list { list-style: none; padding: 0; margin: 12px 0 0; display: flex; flex-direction: column; gap: 4px; }
+.v2-grant {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-surface-0);
+}
+.v2-grant-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  font-size: var(--v2-size-xs);
+  padding: 2px 8px;
+  border-radius: var(--v2-radius-pill);
+  background: var(--v2-fill-subtle);
+  color: var(--v2-text-secondary);
+}
+.v2-grant-mode[data-write="yes"] { color: var(--v2-state-warn); background: var(--v2-state-warn-soft); }
+.v2-grant-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.v2-grant-when { flex: none; font-size: var(--v2-size-xs); color: var(--v2-text-tertiary); }
+@media (max-width: 640px) {
+  .v2-grant { flex-wrap: wrap; }
+  .v2-grant-path { flex-basis: 100%; order: 3; }
+}

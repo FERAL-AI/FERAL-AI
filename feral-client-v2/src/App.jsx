@@ -35,6 +35,8 @@ import AppsPanel from './pages/phone/AppsPanel';
 import SettingsPanel from './pages/phone/SettingsPanel';
 import Oversight from './pages/Oversight';
 import Approvals from './pages/Approvals';
+import Checkpoints from './pages/Checkpoints';
+import Grants from './pages/Grants';
 
 export default function App() {
   return (
@@ -77,6 +79,8 @@ export default function App() {
         <Route path="/glass-brain" element={<GlassBrain />} />
         <Route path="/oversight" element={<Oversight />} />
         <Route path="/approvals" element={<Approvals />} />
+        <Route path="/checkpoints" element={<Checkpoints />} />
+        <Route path="/grants" element={<Grants />} />
         <Route path="/timeline" element={<Timeline />} />
         <Route path="/flows" element={<Flows />} />
         <Route path="/intents" element={<Intents />} />

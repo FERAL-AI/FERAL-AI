@@ -4,7 +4,8 @@ import { useNavigate } from 'react-router-dom';
 import {
   Hammer, Wrench, Database, BookOpen, Users, UserCircle2,
   HeartPulse, Crosshair, Clock, BrainCircuit, Globe, MapPin, Store,
-  Search, X, Plug, Shield, BrainCog, ShieldAlert } from 'lucide-react';
+  Search, X, Plug, Shield, BrainCog, ShieldAlert, Undo2, FolderLock,
+} from 'lucide-react';
 import { useResource } from '../hooks/useResource';
 import { deviceCounts } from './DeviceTopology';
 
@@ -18,6 +19,8 @@ import { deviceCounts } from './DeviceTopology';
 
 const HUB_ITEMS = [
   { to: '/approvals', label: 'Needs you', Icon: ShieldAlert, desc: 'Tool calls blocked on your decision' },
+  { to: '/checkpoints', label: 'Undo', Icon: Undo2, desc: 'Put back files a turn wrote' },
+  { to: '/grants', label: 'Folders', Icon: FolderLock, desc: 'Which folders FERAL can use' },
   { to: '/forge', label: 'Forge', Icon: Hammer, desc: 'Tool Genesis drafts + promote' },
   { to: '/skills', label: 'Skills', Icon: Wrench, desc: 'Loaded skills + hot-reload' },
   { to: '/memory', label: 'Memory', Icon: Database, desc: 'Notes, episodes, execution log' },

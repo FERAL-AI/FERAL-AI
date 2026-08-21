@@ -32,7 +32,7 @@ const PRIMARY_ITEMS = [
 // highlights itself. `/memory/context` needs its own entry because
 // the check is exact-pathname, not prefix.
 const HUB_ROUTES = new Set([
-  '/approvals',
+  '/approvals', '/checkpoints', '/grants',
   '/forge', '/skills', '/memory', '/memory/context', '/wiki', '/agents',
   '/identity', '/health', '/intents', '/timeline', '/glass-brain',
   '/marketplace', '/webhooks', '/geofences',
