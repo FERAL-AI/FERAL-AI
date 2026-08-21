@@ -253,7 +253,7 @@ export default function ConsciousnessMindMap() {
             key={`ring-${kind}`}
             cx={cx} cy={cy} r={r}
             fill="none"
-            stroke="var(--v2-border-subtle)"
+            stroke="var(--v2-hairline)"
             strokeDasharray="4 6"
             strokeOpacity={0.3}
           />
@@ -265,7 +265,7 @@ export default function ConsciousnessMindMap() {
             key={edge.id}
             x1={edge.from.x} y1={edge.from.y}
             x2={edge.to.x} y2={edge.to.y}
-            stroke={edge.faint ? 'var(--v2-border-subtle)' : 'var(--v2-accent)'}
+            stroke={edge.faint ? 'var(--v2-hairline)' : 'var(--v2-accent)'}
             strokeOpacity={edge.faint ? 0.25 : 0.55}
             strokeWidth={edge.faint ? 1 : 1.5}
           />
