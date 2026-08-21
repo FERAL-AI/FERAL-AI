@@ -3,8 +3,8 @@ import { FeralSocket, wireSocketGlobalErrors } from '../lib/feralSocket';
 
 /**
  * Single shared FeralSocket instance for the whole v2 app. Components call
- * `socket.subscribe(fn)` to receive every message; Ambient, LiveOps, Chat,
- * Forge all share the same connection.
+ * `socket.subscribe(fn)` to receive every message; Chat, Forge, Home and
+ * Devices all share the same connection.
  *
  * The `sendUiEvent` helper bound below is the contract SDUI trees use
  * to fire a user action back at the brain. v1 used to hard-code

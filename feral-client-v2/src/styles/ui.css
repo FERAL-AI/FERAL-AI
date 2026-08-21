@@ -300,52 +300,13 @@
   background-image: radial-gradient(rgba(255, 255, 255, 0.9) 1px, transparent 1px);
   background-size: 3px 3px;
 }
-.v2-ambient-ops {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  transition: opacity var(--v2-dur-slow) var(--v2-ease-out);
-}
 .v2-ambient.is-expanded .v2-ambient-field { opacity: 0.45; filter: blur(48px); }
-.v2-ambient.is-expanded .v2-ambient-ops { opacity: 1; }
 
 .v2-ambient--cool .v2-ambient-field { filter: blur(32px) hue-rotate(-6deg); }
 .v2-ambient--warm .v2-ambient-field { filter: blur(32px) hue-rotate(10deg); }
 
-/* ── LiveOps ────────────────────────────────────────────────── */
-.v2-liveops {
-  position: absolute;
-  inset: auto 0 var(--v2-dock-height) 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 16px 28px;
-  margin: 0;
-  list-style: none;
-  font-family: var(--v2-font-mono);
-  font-size: var(--v2-size-xs);
-  color: var(--v2-text-tertiary);
-  opacity: 0.6;
-  transition: opacity var(--v2-dur-base) var(--v2-ease-out);
-}
-.v2-liveops.is-active { opacity: 1; }
-.v2-liveops-row { display: flex; align-items: center; gap: 8px; }
-.v2-liveops-tag {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: var(--v2-radius-xs);
-  border: 1px solid var(--v2-hairline);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-.v2-liveops-tag--skill { color: var(--v2-accent-text); border-color: var(--v2-accent-soft); }
-.v2-liveops-tag--tool { color: var(--v2-text-primary); }
-.v2-liveops-tag--mem { color: var(--v2-state-live); border-color: var(--v2-state-live-soft); }
-.v2-liveops-tag--node { color: var(--v2-state-warn); border-color: var(--v2-state-warn-soft); }
-.v2-liveops-tag--chan { color: var(--v2-text-secondary); }
-.v2-liveops-tag--forge { color: var(--v2-accent-text); }
-.v2-liveops-tag--alert { color: var(--v2-state-error); border-color: var(--v2-state-error-soft); }
+/* The .v2-liveops* rules were deleted in 2026.8.12 along with their only
+ * consumer, shell/LiveOpsStream.jsx. */
 
 /* ── Orb ─────────────────────────────────────────────────────── */
 .v2-orb {
