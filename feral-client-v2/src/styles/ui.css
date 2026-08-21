@@ -1372,7 +1372,12 @@
    is legible from the dock without opening anything.
 
    Keyframes are the mockup's: breathe 52% -> 78%, ring rotating. */
-.v2-dock-btn { position: relative; overflow: hidden; isolation: isolate; }
+/* No overflow: hidden here. Two things deliberately live OUTSIDE the
+   tile's box: the hover tooltip, which floats above it at
+   bottom: calc(100% + 8px), and the busy ring at inset: -3px. Clipping
+   the tile hid both, so hovering a dock icon told you nothing about
+   what it was. The fill is kept inside by its own radius instead. */
+.v2-dock-btn { position: relative; isolation: isolate; }
 /* Raise the icon above the fill, and stop it shrinking. It is a flex
    item with the default flex-shrink: 1, so anything else competing for
    width in the tile collapses it to 0. */
@@ -1397,6 +1402,9 @@
      height at all. `top` has no such dependency. */
   top: 100%;
   z-index: 1;
+  /* Matches the tile so the fill stays within its rounded corners
+     without the tile having to clip its own children. */
+  border-radius: inherit;
   background: var(--v2-accent-soft);
   transition: top 400ms var(--v2-ease-out);
   pointer-events: none;

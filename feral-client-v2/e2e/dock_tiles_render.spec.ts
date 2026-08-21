@@ -75,6 +75,70 @@ test('the hover label stays a floating tooltip, not a flex sibling', async ({ pa
   expect(info.aboveTile).toBe(true);
 });
 
+test('hovering a tile names it', async ({ page }) => {
+  // The tooltip is the only thing that tells you what an icon-only dock
+  // tile is. It lives OUTSIDE the tile box (bottom: calc(100% + 8px)),
+  // so an overflow: hidden on the tile clips it and hovering tells you
+  // nothing. That shipped.
+  await page.goto('/console');
+  const tile = page.locator('.v2-dock-btn').nth(2);
+  const label = tile.locator('.v2-dock-label');
+
+  await expect(label).toHaveCSS('opacity', '0');
+  await tile.hover();
+  await expect(label).toHaveCSS('opacity', '1');
+  await expect(label).toBeVisible();
+  await expect(label).not.toHaveText('');
+
+  // Painted, not merely opaque behind a clip. An elementFromPoint hit
+  // test is the wrong instrument here: a tooltip sets
+  // pointer-events: none, so the point resolves to whatever is behind
+  // it and the check fails on a perfectly visible label. What actually
+  // matters is that it has real size, sits on screen, and that no
+  // ancestor clips it away.
+  const seen = await page.evaluate(() => {
+    const l = document.querySelectorAll('.v2-dock-btn')[2].querySelector('.v2-dock-label') as HTMLElement;
+    const b = l.getBoundingClientRect();
+    let clippedBy = '';
+    for (let n = l.parentElement; n; n = n.parentElement) {
+      const o = getComputedStyle(n).overflow;
+      if (o === 'hidden' || o === 'clip') {
+        const nb = n.getBoundingClientRect();
+        if (b.top < nb.top || b.bottom > nb.bottom || b.left < nb.left || b.right > nb.right) {
+          clippedBy = n.className || n.tagName;
+          break;
+        }
+      }
+    }
+    return {
+      w: b.width, h: b.height,
+      onScreen: b.top >= 0 && b.left >= 0 && b.bottom <= innerHeight && b.right <= innerWidth,
+      clippedBy,
+    };
+  });
+  expect(seen.w).toBeGreaterThan(20);
+  expect(seen.h).toBeGreaterThan(8);
+  expect(seen.onScreen).toBe(true);
+  expect(seen.clippedBy, `the hover label is clipped by .${seen.clippedBy}`).toBe('');
+});
+
+test('the busy ring is not clipped away', async ({ page }) => {
+  // The ring sits at inset: -3px, outside the tile, for the same reason.
+  await page.goto('/console');
+  const visible = await page.evaluate(() => {
+    const tile = document.querySelectorAll('.v2-dock-btn')[0] as HTMLElement;
+    tile.setAttribute('data-state', 'busy');
+    const ring = tile.querySelector('.v2-dock-ring')!;
+    const r = ring.getBoundingClientRect(), t = tile.getBoundingClientRect();
+    const grew = r.width > t.width && r.height > t.height;
+    const clipped = getComputedStyle(tile).overflow === 'hidden';
+    tile.setAttribute('data-state', '');
+    return { grew, clipped };
+  });
+  expect(visible.clipped).toBe(false);
+  expect(visible.grew).toBe(true);
+});
+
 test('the live-state fill never covers the icon', async ({ page }) => {
   await page.goto('/console');
   const covered = await page.evaluate(() => {
