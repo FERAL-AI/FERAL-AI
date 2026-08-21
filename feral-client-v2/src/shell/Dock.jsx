@@ -7,7 +7,7 @@ import {
 import HubLauncher from '../components/HubLauncher';
 
 /**
- * Bottom dock — seven primary items + a Hub button that opens a popup with
+ * Bottom dock: seven primary items + a Hub button that opens a popup with
  * the fifteen secondary destinations. One clean row, always.
  */
 const PRIMARY_ITEMS = [
@@ -32,6 +32,7 @@ const PRIMARY_ITEMS = [
 // highlights itself. `/memory/context` needs its own entry because
 // the check is exact-pathname, not prefix.
 const HUB_ROUTES = new Set([
+  '/approvals',
   '/forge', '/skills', '/memory', '/memory/context', '/wiki', '/agents',
   '/identity', '/health', '/intents', '/timeline', '/glass-brain',
   '/marketplace', '/webhooks', '/geofences',

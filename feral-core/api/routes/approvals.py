@@ -44,6 +44,12 @@ async def list_pending_approvals(session_id: str = "", limit: int = 100):
                 "safety_level": str(row.get("safety_level", "") or ""),
                 "created_at": float(row.get("created_at", 0.0) or 0.0),
                 "status": "pending",
+                # ToolRunner records this on every pending row specifically
+                # so a renderer can answer "why are we asking?" without
+                # re-running the resolver, and this projection was dropping
+                # it, which made the field unreachable over HTTP for the
+                # one client that would use it.
+                "policy_sources": row.get("policy_sources") or {},
             }
             for row in rows
         ],

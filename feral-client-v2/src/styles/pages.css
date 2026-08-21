@@ -397,9 +397,9 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid var(--v2-border);
+  border: 1px solid var(--v2-hairline);
   border-radius: var(--v2-radius-pill);
-  background: var(--v2-surface);
+  background: var(--v2-surface-1);
   color: var(--v2-text-tertiary);
   font: inherit;
   font-size: var(--v2-size-xs);
@@ -414,9 +414,9 @@
   gap: 6px;
   margin-top: 8px;
   padding: 8px;
-  border: 1px solid var(--v2-border);
+  border: 1px solid var(--v2-hairline);
   border-radius: var(--v2-radius-md);
-  background: var(--v2-surface);
+  background: var(--v2-surface-1);
 }
 .v2-chat-trace-row {
   display: flex;
@@ -940,14 +940,14 @@
 }
 .v2-mindmap-label {
   fill: var(--v2-text-secondary);
-  font-family: var(--v2-font-sans);
+  font-family: var(--v2-font-system);
   font-size: 10px;
   pointer-events: none;
 }
 .v2-mindmap-tooltip {
   position: absolute; top: 12px; right: 12px;
   background: var(--v2-surface-2);
-  border: 1px solid var(--v2-border-subtle);
+  border: 1px solid var(--v2-hairline);
   border-radius: var(--v2-radius-sm);
   padding: 10px 12px;
   max-width: 280px;
@@ -2619,3 +2619,61 @@
 .v2-mindmap-svg g[role="button"]:focus-visible {
   outline-offset: 1px;
 }
+
+/* ── Approvals ─────────────────────────────────────────────── */
+/* Blocked tool calls from every surface. A row is something the
+   operator has to decide on, so severity is encoded in form (the left
+   stripe) as well as in the text, and the two actions are always in
+   the same place regardless of how long the tool line runs. */
+.v2-approvals-error {
+  font-size: var(--v2-size-xs);
+  color: var(--v2-state-warn);
+  background: var(--v2-state-warn-soft);
+  border-radius: var(--v2-radius-sm);
+  padding: 6px 10px;
+  margin-bottom: 10px;
+}
+.v2-approvals-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.v2-approval {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--v2-radius-md);
+  background: var(--v2-surface-0);
+  border-left: 2px solid var(--v2-hairline);
+}
+/* critical and deny are the two levels that can do damage that is not
+   trivially undone, so they get the error colour. confirm is routine. */
+.v2-approval[data-level="critical"],
+.v2-approval[data-level="deny"] { border-left-color: var(--v2-state-error); }
+.v2-approval[data-level="confirm"] { border-left-color: var(--v2-state-warn); }
+
+.v2-approval-head { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.v2-approval-tool {
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-sm);
+  color: var(--v2-text-primary);
+  overflow-wrap: anywhere;
+}
+.v2-approval-meta {
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.v2-approval-why { display: flex; flex-wrap: wrap; gap: 4px; }
+.v2-approval-source {
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-secondary);
+  background: var(--v2-fill-subtle);
+  border-radius: var(--v2-radius-pill);
+  padding: 2px 8px;
+}
+.v2-approval-actions { display: flex; gap: 6px; }
