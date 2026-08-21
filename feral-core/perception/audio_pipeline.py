@@ -299,6 +299,64 @@ def _pcm16_to_wav(audio_bytes: bytes, sample_rate: int) -> bytes:
     return output.getvalue()
 
 
+def _split_wav_into_playable_chunks(wav_bytes: bytes, chunk_bytes: int) -> list[bytes]:
+    """Cut a WAV into pieces that each decode on their own.
+
+    A WAV is a RIFF header followed by raw samples, so slicing the file
+    at a byte offset produces one playable piece and a tail of headerless
+    noise. Every consumer decodes a ``tts_chunk`` on its own
+    (``RealtimeVoiceEngine.handleTtsChunk`` calls ``decodeAudioData``
+    per frame), so the tail is not merely unplayable, it raises.
+
+    Measured in Chrome on a 3 second Piper reply cut at 32KB:
+
+        chunk 0  32768 bytes  ok, 0.742s
+        chunk 1  32768 bytes  EncodingError
+        chunk 2  32768 bytes  EncodingError
+        chunk 3  32768 bytes  EncodingError
+        chunk 4   1272 bytes  EncodingError
+
+    The user heard 0.74 seconds of a 3 second answer and the client
+    raised four playback errors. MP3 survived the same treatment, which
+    is why only the local Piper path was affected and why it went
+    unnoticed: cloud TTS returns MP3, whose frames are self-describing.
+
+    Each piece is re-wrapped in its own header here, so the wire format
+    and every existing client stay exactly as they are.
+    """
+    if not wav_bytes:
+        return []
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as src:
+            channels = src.getnchannels()
+            width = src.getsampwidth()
+            rate = src.getframerate()
+            pcm = src.readframes(src.getnframes())
+    except (wave.Error, EOFError):
+        # Not a WAV we can parse. Hand it back whole rather than
+        # shredding it: one oversized chunk still plays.
+        logger.warning("TTS audio is not a readable WAV; sending it unsliced")
+        return [wav_bytes]
+
+    if channels != 1 or width != 2:
+        # `_pcm16_to_wav` only writes mono 16-bit, so re-wrapping
+        # anything else would mislabel the samples and play noise.
+        logger.warning(
+            "TTS WAV is %dch/%dbit, not mono 16-bit; sending it unsliced",
+            channels, width * 8,
+        )
+        return [wav_bytes]
+
+    frame = channels * width
+    # Cut on a frame boundary, or a chunk starts half a sample in and
+    # every following sample is byte-swapped into noise.
+    step = max(frame, (chunk_bytes // frame) * frame)
+    return [
+        _pcm16_to_wav(pcm[i:i + step], rate)
+        for i in range(0, len(pcm), step)
+    ] or [_pcm16_to_wav(b"", rate)]
+
+
 # ---------------------------------------------------------------------------
 #  Main pipeline
 # ---------------------------------------------------------------------------
@@ -614,17 +672,19 @@ class AudioPipeline:
                 None, self._local_tts.synthesize, text[:4096]
             )
 
-            chunk_size = 32 * 1024
-            chunks = []
-            for i in range(0, len(wav_bytes), chunk_size):
-                segment = wav_bytes[i:i + chunk_size]
-                is_final = (i + chunk_size) >= len(wav_bytes)
-                chunks.append({
-                    "chunk_index": len(chunks),
+            # Each piece carries its own RIFF header, because the client
+            # decodes every chunk independently. See
+            # `_split_wav_into_playable_chunks`.
+            segments = _split_wav_into_playable_chunks(wav_bytes, 32 * 1024)
+            chunks = [
+                {
+                    "chunk_index": index,
                     "encoding": "wav",
                     "data_b64": base64.b64encode(segment).decode("ascii"),
-                    "is_final": is_final,
-                })
+                    "is_final": index == len(segments) - 1,
+                }
+                for index, segment in enumerate(segments)
+            ]
 
             logger.info("Local TTS synthesized: %d bytes, %d chunks", len(wav_bytes), len(chunks))
             return chunks
