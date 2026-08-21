@@ -1,5 +1,5 @@
 /*
- * feral-client-v2 — design tokens.
+ * feral-client-v2 design tokens.
  *
  * Thesis: macOS-Tahoe translucent. Neutral grayscale + ONE restrained accent.
  * No cyan/amber/purple washes. Color appears only on real system state
@@ -7,161 +7,286 @@
  *
  * Every v2 component must read colors via var(--…). Hardcoding a hex in a
  * component is a bug; fix it at the token layer.
+ *
+ * ── Structure: two layers, and only one of them holds colour ──────
+ *
+ * LAYER 1, the palette (--p-*). Every literal colour in this client lives
+ * here and nowhere else. 20 theme slots plus 5 theme-independent
+ * constants. Retheming the client means editing these values; nothing
+ * below needs to be touched, which is the whole point of the split.
+ *
+ * LAYER 2, the semantics (--v2-*). Every one of these derives from a
+ * palette slot, either as a direct alias or composed with an alpha.
+ * A hex or an rgba() literal below the palette layer is a bug.
+ *
+ * ── The three theme states ────────────────────────────────────────
+ *
+ *   1. bare  :root                                       light
+ *   2. @media (prefers-color-scheme: dark), guarded       dark
+ *      :root:not([data-theme="light"]):not(.v2-light)
+ *   3. :root[data-theme="dark"], :root.v2-dark            dark
+ *
+ * All three are complete: each redeclares every theme-varying token.
+ * A token declared inside the media block only is the classic failure
+ * here, because it silently vanishes in the un-stamped state. State 3
+ * exists so an explicit toggle wins over the system preference in BOTH
+ * directions, and the :not() guards on state 2 are what let an explicit
+ * *light* choice win on a dark system.
+ *
+ * Both spellings of the toggle are honoured. The client stamps the
+ * classes (src/hooks/useTheme.js, src/main.jsx); [data-theme] is the
+ * portable form and is accepted everywhere the class is.
  */
 
+/* ══════════════════════════════════════════════════════════════════
+ * LAYER 1, PALETTE. The only literal colours in this file.
+ * ════════════════════════════════════════════════════════════════ */
+
+/* Theme-independent palette constants.
+ *
+ * --p-white / --p-black are the two channels every alpha wash is built
+ * from. They are stored as bare "R G B" triplets, not hexes, so the
+ * semantic layer can compose an arbitrary alpha with rgb(… / a). CSS
+ * cannot take an arbitrary alpha of an existing hex, and that is the
+ * single reason raw rgba() literals kept reappearing in this file.
+ *
+ * --p-immersive-* is a locked blackout used by the phone voice
+ * fullscreen in every theme: it is meant to feel like the room lights
+ * went down, so it cannot follow the theme. Neutral charcoal core
+ * falling to near-black at the edges; the literal it replaced carried a
+ * blue tint the thesis does not allow. */
 :root {
-  color-scheme: dark light;
+  --p-white: 255 255 255;
+  --p-black: 0 0 0;
+  --p-immersive-core: #14141A;
+  --p-immersive-edge: #06060A;
+  --p-immersive-pane: 16 16 20;
+}
 
-  /* ── Base + surfaces (dark by default) ───────────────────────── */
-  /* Base is charcoal, not near-black. A pitch-black base leaves the
-   * frosted panels with nothing to blur through and everything reads as
-   * solid flat dark. This gives the glass actual contrast to refract. */
-  --v2-bg-base: #16161C;
-  --v2-bg-deep: #0B0B10;
+/* ── Palette: LIGHT (state 1, bare :root) ─────────────────────────
+ *
+ * macOS Sonoma / Tahoe translucent-white. The ground is warm gray so
+ * frosted panels read as real glass, not flat white cards, and all four
+ * panes are plain white laid over it at rising alpha.
+ *
+ * --p-text-lo was #8E8E96, which measured 2.93:1 on the light shell
+ * ground #F2F3F8, well under WCAG AA, on body-text classes
+ * (.v2-device-meta, .v2-p--tiny, .v2-btn--ghost and the rest listed at
+ * the dark palette below). #6B6B73 measures 4.77:1 there. Light-mode
+ * glass composites *towards white* (--v2-surface-0 over the ground
+ * resolves to ~#F5F6F9), so #F2F3F8 is the conservative end of the
+ * range, not the average.
+ *
+ * The state colours are used as *text* by .v2-chip--live, .v2-chip--loose,
+ * .v2-chip--warn, .v2-chip--strict and the liveops tags, so they carry
+ * the 4.5:1 obligation too. Measured on #F2F3F8:
+ *   live  #1F9D48 3.17:1  ->  #177636 5.15:1
+ *   warn  #B98900 2.85:1  ->  #8B6700 4.69:1
+ *   error #D70015 4.86:1  (already AA, unchanged)
+ * Both raises are the same hue scaled darker, so the palette reads the
+ * same; they also serve as the .v2-dot--live / --warn fills, where a
+ * darker value is strictly more visible on a light surface.
+ *
+ * --p-accent-text needs no split from --p-accent here: #0066CC on the
+ * light ground is 6.55:1. In dark mode it does, see below. */
+:root {
+  color-scheme: light dark;
 
-  /* Surface alphas sit between 0.38 and 0.72. Over the lighter base the
-   * panes read as visibly translucent. Anything above 0.80 kills the
-   * macOS-Tahoe feel. */
-  --v2-surface-0: rgba(22, 22, 26, 0.38);
-  --v2-surface-1: rgba(28, 28, 34, 0.48);
-  --v2-surface-2: rgba(38, 38, 46, 0.58);
-  --v2-surface-elev: rgba(52, 52, 62, 0.72);
+  --p-base: #ECEEF3;
+  --p-deep: #DEE0E6;
 
-  --v2-hairline: rgba(255, 255, 255, 0.10);
-  --v2-hairline-strong: rgba(255, 255, 255, 0.18);
-  --v2-hairline-focus: rgba(255, 255, 255, 0.28);
+  --p-shell-hi: #F2F3F8;
+  --p-shell-mid: #E8EAF0;
+  --p-shell-lo: #DEE0E6;
 
-  /* Wash fills. Distinct from --v2-surface-*: a surface is a panel body
-   * with its own base tint, a fill is a thin tint laid over whatever is
-   * already behind it (chips, bubbles, inputs, icon buttons, list rows).
-   * These flip to black alphas in light mode; the raw white alphas that
-   * used to be typed inline vanished on a light background. */
-  --v2-fill-subtle: rgba(255, 255, 255, 0.03);
-  --v2-fill: rgba(255, 255, 255, 0.06);
-  --v2-fill-strong: rgba(255, 255, 255, 0.10);
-  --v2-fill-heavy: rgba(255, 255, 255, 0.14);
+  --p-pane-0: 255 255 255;
+  --p-pane-1: 255 255 255;
+  --p-pane-2: 255 255 255;
+  --p-pane-3: 255 255 255;
 
-  /* Scrim sits behind a modal and dims the whole app. Well is the
-   * opposite direction: a recessed inset (segmented-control track, code
-   * block, PIN field) that reads as carved into the surface. */
-  --v2-scrim: rgba(0, 0, 0, 0.45);
-  --v2-well: rgba(0, 0, 0, 0.28);
+  /* The hairline + wash-fill channel. Black on light, white on dark.
+   * The raw white alphas that used to be typed inline vanished on a
+   * light background; deriving both from one slot is what stops that. */
+  --p-line: 0 0 0;
 
-  /* Ambient field spots. ui.css has always referenced these three; they
-   * were never defined, so only the inline fallbacks ever rendered and
-   * light mode got white-on-white spots. Defined here so the field is
-   * theme-aware like everything else. */
-  --v2-ambient-spot-a: rgba(255, 255, 255, 0.10);
-  --v2-ambient-spot-b: rgba(255, 255, 255, 0.06);
-  --v2-ambient-base: rgba(0, 0, 0, 0.18);
+  --p-text-hi: #0B0B0D;
+  --p-text-mid: #4C4C55;
+  --p-text-lo: #6B6B73;
+  --p-text-inverse: #FFFFFF;
 
-  /* Neutral glass highlight — mimics how real glass catches light without
-   * introducing any color hue. Zero tint, just a top-down fade. */
-  --v2-glass-tint:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0) 60%);
+  --p-accent: 0 102 204;
+  --p-accent-deep: #004C99;
+  --p-accent-text: #0066CC;
 
-  /* Shell ambient — a broad soft top-light + a dimmer bottom-right fall
-   * over a vertical-gradient base. Pure grayscale but bright enough that
-   * translucent surfaces show actual depth through the blur. */
-  --v2-shell-ambient:
-    radial-gradient(ellipse 90% 60% at 50% -10%, rgba(255, 255, 255, 0.18), transparent 60%),
-    radial-gradient(ellipse 70% 60% at 80% 110%, rgba(255, 255, 255, 0.08), transparent 60%),
-    linear-gradient(180deg, #1F1F27, #13131A 60%, #0F0F15 100%),
-    var(--v2-bg-base);
+  --p-live: 23 118 54;
+  --p-warn: 139 103 0;
+  --p-error: 215 0 21;
+}
 
-  /* ── Text ramps ──────────────────────────────────────────────── */
-  /*
-   * --v2-text-tertiary is a body-text colour, not a decoration: it dresses
-   * .v2-device-meta, .v2-flow-status, .v2-channel-state, .v2-timeline-time,
-   * .v2-event-body, .v2-stat-label, .v2-chip--muted, .v2-p--tiny (11px) and
-   * every .v2-btn--ghost label. It therefore has to clear WCAG AA 4.5:1,
-   * and #6E6E76 did not: measured against the effective dark glass
-   * background #1F1F27 it was 3.24:1, and against the elevated surface
-   * (--v2-surface-elev composited over the base, #2E2E38) only 2.66:1.
-   *
-   * #96969E measured against every dark background in this file:
-   *   #1F1F27 shell base   5.57:1
-   *   #1C1C22 surface-0    5.78:1
-   *   #1E1E25 surface-1    5.64:1
-   *   #23232B surface-2    5.31:1
-   *   #2E2E38 surface-elev 4.57:1   <- worst case, still AA
-   *
-   * That deliberately narrows the secondary/tertiary lightness step
-   * (secondary is 6.37:1 on the base, tertiary now 5.57:1). On a charcoal
-   * base you cannot have both a very quiet grey and AA; hierarchy here is
-   * carried by size, weight and tracking as much as by lightness.
-   */
-  --v2-text-primary: #F5F5F7;
-  --v2-text-secondary: #A1A1A8;
-  --v2-text-tertiary: #96969E;
-  --v2-text-inverse: #0B0B0D;
+/* ── Palette: DARK (state 2, system preference) ───────────────────
+ *
+ * The ground is charcoal, not near-black. A pitch-black ground leaves
+ * the frosted panels with nothing to blur through and everything reads
+ * as solid flat dark. Charcoal gives the glass actual contrast to
+ * refract.
+ *
+ * --p-text-lo is a body-text colour, not a decoration: it dresses
+ * .v2-device-meta, .v2-flow-status, .v2-channel-state, .v2-timeline-time,
+ * .v2-event-body, .v2-stat-label, .v2-chip--muted, .v2-p--tiny (11px)
+ * and every .v2-btn--ghost label. It therefore has to clear WCAG AA
+ * 4.5:1, and #6E6E76 did not: measured against the effective dark glass
+ * background #1F1F27 it was 3.24:1, and against the elevated surface
+ * (--v2-surface-elev composited over the ground, #2E2E38) only 2.66:1.
+ *
+ * #96969E measured against every dark background in this file:
+ *   #1F1F27 shell ground  5.57:1
+ *   #1C1C22 surface-0     5.78:1
+ *   #1E1E25 surface-1     5.64:1
+ *   #23232B surface-2     5.31:1
+ *   #2E2E38 surface-elev  4.57:1   <- worst case, still AA
+ *
+ * That deliberately narrows the secondary/tertiary lightness step
+ * (secondary is 6.37:1 on the ground, tertiary 5.57:1). On a charcoal
+ * ground you cannot have both a very quiet grey and AA; hierarchy here
+ * is carried by size, weight and tracking as much as by lightness.
+ *
+ * --p-accent-text is the accent as TEXT, which is a different problem
+ * from the accent as a fill. #0A84FF measures 4.49:1 on the shell
+ * ground, one hundredth under AA, and only 3.68:1 on --v2-surface-elev,
+ * which is where most of these labels actually sit. A chip on a raised
+ * card was the worst case and the easiest to miss, because checking the
+ * accent against the page background alone says "borderline" rather
+ * than "failing". #3D9BFF clears AA on the worst dark surface: 5.71 on
+ * the ground, 4.69 on elevated. Deliberately a separate slot rather
+ * than moving --p-accent, because the accent is overwhelmingly used as
+ * a FILL behind white text, where 4.49 against the page is irrelevant
+ * and lightening it would wash out every primary button in the client.
+ * Same hue, same family, one step brighter.
+ *
+ * --p-accent-deep is the far stop of the primary-CTA gradient: a
+ * single-hue ramp, the accent falling to a deeper shade of itself. It
+ * replaced an accent-to-indigo (#5E5CE6) gradient that put a purple
+ * cast on the phone CTAs, which the neutral + one-accent thesis at the
+ * top of this file rules out. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not(.v2-light) {
+    color-scheme: dark;
 
+    --p-base: #16161C;
+    --p-deep: #0B0B10;
+
+    --p-shell-hi: #1F1F27;
+    --p-shell-mid: #13131A;
+    --p-shell-lo: #0F0F15;
+
+    --p-pane-0: 22 22 26;
+    --p-pane-1: 28 28 34;
+    --p-pane-2: 38 38 46;
+    --p-pane-3: 52 52 62;
+
+    --p-line: 255 255 255;
+
+    --p-text-hi: #F5F5F7;
+    --p-text-mid: #A1A1A8;
+    --p-text-lo: #96969E;
+    --p-text-inverse: #0B0B0D;
+
+    --p-accent: 10 132 255;
+    --p-accent-deep: #0060DF;
+    --p-accent-text: #3D9BFF;
+
+    --p-live: 48 209 88;
+    --p-warn: 255 214 10;
+    --p-error: 255 69 58;
+  }
+}
+
+/* ── Palette: DARK (state 3, explicit toggle) ─────────────────────
+ * Byte-identical to state 2. It exists so a user who chose dark keeps
+ * dark on a light system; state 2 alone only follows the OS. */
+:root[data-theme="dark"],
+:root.v2-dark {
+  color-scheme: dark;
+
+  --p-base: #16161C;
+  --p-deep: #0B0B10;
+
+  --p-shell-hi: #1F1F27;
+  --p-shell-mid: #13131A;
+  --p-shell-lo: #0F0F15;
+
+  --p-pane-0: 22 22 26;
+  --p-pane-1: 28 28 34;
+  --p-pane-2: 38 38 46;
+  --p-pane-3: 52 52 62;
+
+  --p-line: 255 255 255;
+
+  --p-text-hi: #F5F5F7;
+  --p-text-mid: #A1A1A8;
+  --p-text-lo: #96969E;
+  --p-text-inverse: #0B0B0D;
+
+  --p-accent: 10 132 255;
+  --p-accent-deep: #0060DF;
+  --p-accent-text: #3D9BFF;
+
+  --p-live: 48 209 88;
+  --p-warn: 255 214 10;
+  --p-error: 255 69 58;
+}
+
+/* An explicit light choice on a dark system gets the light palette from
+ * the bare :root above (the :not() guards keep state 2 off it), but
+ * color-scheme is listed as "light dark" there and would still resolve
+ * to dark for UA-rendered scrollbars and form controls. Pin it. */
+:root[data-theme="light"],
+:root.v2-light {
+  color-scheme: light;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * LAYER 2, SEMANTICS. Every value below derives from the palette.
+ * No hex, no rgba() literal, no named colour past this line.
+ * ════════════════════════════════════════════════════════════════ */
+
+/* ── Semantics that do not vary by theme ──────────────────────────
+ * Either they are not colours at all, or they are deliberately locked:
+ * white on a saturated blue fill is correct in both themes, and the
+ * immersive surface is a blackout by definition. */
+:root {
   /* Foreground for anything sitting ON a filled accent or filled state
    * colour: primary buttons, badges, the send button, an app tile's
-   * initial. NOT --v2-text-inverse, which is near-black in dark mode and
-   * would put black text on a blue button. Both accent values are
+   * initial. NOT --v2-text-inverse, which is near-black in dark mode
+   * and would put black text on a blue button. Both accent values are
    * saturated enough that white is the correct foreground in either
    * theme, so this one does not flip. */
-  --v2-on-accent: #FFFFFF;
+  --v2-on-accent: rgb(var(--p-white));
 
-  /* ── Accent (interactive only) ───────────────────────────────── */
-  --v2-accent: #0A84FF;
-  --v2-accent-soft: rgba(10, 132, 255, 0.18);
-  --v2-accent-ring: rgba(10, 132, 255, 0.35);
+  /* Neutral glass highlight, mimics how real glass catches light
+   * without introducing any color hue. Zero tint, just a top-down fade,
+   * and correct over a white pane as well as a charcoal one. */
+  --v2-glass-tint:
+    linear-gradient(180deg, rgb(var(--p-white) / 0.06), rgb(var(--p-white) / 0) 60%);
 
-  /* The accent as TEXT, which is a different problem from the accent as a
-   * fill. #0A84FF measures 4.49:1 on the shell base, one hundredth under
-   * AA, and only 3.68:1 on --v2-surface-elev, which is where most of these
-   * labels actually sit. A chip on a raised card was the worst case and
-   * the easiest to miss, because checking the accent against the page
-   * background alone says "borderline" rather than "failing".
-   *
-   * Lightened to clear AA on the worst dark surface: 5.71 on the base,
-   * 4.69 on elevated. Deliberately a separate token rather than moving
-   * --v2-accent, because the accent is overwhelmingly used as a FILL
-   * behind white text, where 4.49 against the page is irrelevant and
-   * lightening it would wash out every primary button in the client.
-   * Same hue, same family, one step brighter.
-   *
-   * Light mode needs no split: #0066CC on the light base is 6.55:1, so
-   * --v2-accent-text is simply the accent there.
-   */
-  --v2-accent-text: #3D9BFF;
+  /* Immersive (locked dark, ignores theme). */
+  --v2-bg-immersive:
+    radial-gradient(circle at 50% 30%, var(--p-immersive-core) 0%, var(--p-immersive-edge) 100%);
+  --v2-surface-immersive: rgb(var(--p-immersive-pane) / 0.94);
+  --v2-on-immersive: rgb(var(--p-white));
 
-  /* Primary-CTA fill. A single-hue ramp: the accent falling to a deeper
-   * shade of itself. Replaces an accent-to-indigo (#5E5CE6) gradient that
-   * put a purple cast on the phone CTAs, which the neutral + one-accent
-   * thesis at the top of this file rules out. */
-  --v2-accent-gradient: linear-gradient(135deg, #0A84FF 0%, #0060DF 100%);
+  /* No compatibility aliases here on purpose. --v2-border,
+   * --v2-border-subtle, --v2-surface and --v2-font-sans were referenced
+   * with no fallback and declared nowhere, which drew no border at all,
+   * rendered a transparent background, left the mind-map edges unpainted
+   * and dropped .v2-mindmap-label off the system font stack. Commit
+   * 268fa7c1f fixed that at the other end, by pointing every consumer at
+   * a token that exists. Declaring them here as well would leave four
+   * tokens nothing reads, which the "declares nothing that no one reads"
+   * guard below correctly refuses. */
 
-  /* ── Semantic state (never decorative) ───────────────────────── */
-  --v2-state-live: #30D158;
-  --v2-state-live-soft: rgba(48, 209, 88, 0.18);
-  --v2-state-warn: #FFD60A;
-  --v2-state-warn-soft: rgba(255, 214, 10, 0.18);
-  --v2-state-error: #FF453A;
-  --v2-state-error-soft: rgba(255, 69, 58, 0.18);
-
-  /* Channel triplets for the palette. CSS cannot take an arbitrary alpha
-   * of an existing hex token, which is the single reason raw rgba()
-   * literals kept reappearing for glows, tints, rings and pill fills.
-   * Compose those as rgb(var(--v2-accent-rgb) / 0.4) instead of retyping
-   * the channels and drifting off-hue. Keep each triplet in sync with the
-   * hex above it, including in the light-theme block. */
-  --v2-accent-rgb: 10 132 255;
-  --v2-state-live-rgb: 48 209 88;
-  --v2-state-warn-rgb: 255 214 10;
-  --v2-state-error-rgb: 255 69 58;
-
-  /* ── Immersive (locked dark, ignores theme) ──────────────────── */
-  /* The phone voice fullscreen is a blackout surface in every theme: it
-   * is meant to feel like the room lights went down. It therefore cannot
-   * use --v2-bg-base / --v2-text-primary, which flip to light. Neutral
-   * charcoal core falling to near-black at the edges; the previous
-   * literal carried a blue tint the thesis does not allow. */
-  --v2-bg-immersive: radial-gradient(circle at 50% 30%, #14141A 0%, #06060A 100%);
-  --v2-surface-immersive: rgba(16, 16, 20, 0.94);
-  --v2-on-immersive: #FFFFFF;
+  /* Focus ring. Derives from the accent ring, which does flip. */
+  --v2-shadow-focus: 0 0 0 3px var(--v2-accent-ring);
 
   /* ── Vibrancy / blur ─────────────────────────────────────────── */
   --v2-blur-sm: saturate(1.6) blur(24px);
@@ -196,158 +321,241 @@
   --v2-radius-lg: 20px;
   --v2-radius-pill: 9999px;
 
-  /* ── Shadows (subtle, physical) ──────────────────────────────── */
-  --v2-shadow-glass:
-    0 0 0 1px var(--v2-hairline),
-    0 12px 36px rgba(0, 0, 0, 0.45),
-    0 1px 0 rgba(255, 255, 255, 0.04) inset;
-  --v2-shadow-glass-soft:
-    0 0 0 1px var(--v2-hairline),
-    0 6px 20px rgba(0, 0, 0, 0.30);
-  --v2-shadow-focus: 0 0 0 3px var(--v2-accent-ring);
-
+  /* ── Layout ──────────────────────────────────────────────────── */
   --v2-dock-height: 72px;
   --v2-menubar-height: 36px;
 }
 
-:root.v2-light {
-  /* macOS Sonoma / Tahoe translucent-white. Base is warm gray so frosted
-   * panels read as real glass, not flat white cards. */
-  --v2-bg-base: #ECEEF3;
-  --v2-bg-deep: #DEE0E6;
+/* ── Semantics: LIGHT (state 1, bare :root) ───────────────────────
+ *
+ * The alpha ladders are why this block is restated per theme rather
+ * than derived once: the hues come from the palette, but light glass
+ * needs more of itself to read as a pane (0.48 -> 0.88) than dark glass
+ * does (0.38 -> 0.72), and the black hairlines need slightly less alpha
+ * than the white ones. The numbers are the theme; the colours are not
+ * in here at all.
+ *
+ * Surface alphas sit between 0.48 and 0.88 here. Over the lighter
+ * ground the panes still read as visibly translucent.
+ *
+ * Wash fills are distinct from --v2-surface-*: a surface is a panel
+ * body with its own base tint, a fill is a thin tint laid over whatever
+ * is already behind it (chips, bubbles, inputs, icon buttons, list
+ * rows).
+ *
+ * Scrim sits behind a modal and dims the whole app. Well is the
+ * opposite direction: a recessed inset (segmented-control track, code
+ * block, PIN field) that reads as carved into the surface.
+ *
+ * The ambient spots were referenced by ui.css long before they were
+ * defined anywhere, so only the inline fallbacks ever rendered and
+ * light mode got white-on-white spots. */
+:root {
+  --v2-bg-base: var(--p-base);
+  --v2-bg-deep: var(--p-deep);
 
-  --v2-surface-0: rgba(255, 255, 255, 0.48);
-  --v2-surface-1: rgba(255, 255, 255, 0.62);
-  --v2-surface-2: rgba(255, 255, 255, 0.75);
-  --v2-surface-elev: rgba(255, 255, 255, 0.88);
+  --v2-surface-0: rgb(var(--p-pane-0) / 0.48);
+  --v2-surface-1: rgb(var(--p-pane-1) / 0.62);
+  --v2-surface-2: rgb(var(--p-pane-2) / 0.75);
+  --v2-surface-elev: rgb(var(--p-pane-3) / 0.88);
 
-  --v2-hairline: rgba(0, 0, 0, 0.08);
-  --v2-hairline-strong: rgba(0, 0, 0, 0.14);
-  --v2-hairline-focus: rgba(0, 0, 0, 0.24);
+  --v2-hairline: rgb(var(--p-line) / 0.08);
+  --v2-hairline-strong: rgb(var(--p-line) / 0.14);
+  --v2-hairline-focus: rgb(var(--p-line) / 0.24);
 
-  --v2-fill-subtle: rgba(0, 0, 0, 0.03);
-  --v2-fill: rgba(0, 0, 0, 0.05);
-  --v2-fill-strong: rgba(0, 0, 0, 0.08);
-  --v2-fill-heavy: rgba(0, 0, 0, 0.12);
+  --v2-fill-subtle: rgb(var(--p-line) / 0.03);
+  --v2-fill: rgb(var(--p-line) / 0.05);
+  --v2-fill-strong: rgb(var(--p-line) / 0.08);
+  --v2-fill-heavy: rgb(var(--p-line) / 0.12);
 
-  --v2-scrim: rgba(0, 0, 0, 0.32);
-  --v2-well: rgba(0, 0, 0, 0.06);
+  --v2-scrim: rgb(var(--p-black) / 0.32);
+  --v2-well: rgb(var(--p-black) / 0.06);
 
-  --v2-ambient-spot-a: rgba(255, 255, 255, 0.55);
-  --v2-ambient-spot-b: rgba(255, 255, 255, 0.30);
-  --v2-ambient-base: rgba(0, 0, 0, 0.05);
+  --v2-ambient-spot-a: rgb(var(--p-white) / 0.55);
+  --v2-ambient-spot-b: rgb(var(--p-white) / 0.30);
+  --v2-ambient-base: rgb(var(--p-black) / 0.05);
 
+  /* Shell ambient: a broad soft top-light plus a dimmer bottom-right
+   * fall over a vertical-gradient ground. On light the bottom fall is a
+   * shadow rather than a highlight, so it takes the black channel. */
   --v2-shell-ambient:
-    radial-gradient(ellipse 90% 60% at 50% -10%, rgba(255, 255, 255, 0.6), transparent 60%),
-    radial-gradient(ellipse 70% 60% at 80% 110%, rgba(0, 0, 0, 0.04), transparent 60%),
-    linear-gradient(180deg, #F2F3F8, #E8EAF0 60%, #DEE0E6 100%),
+    radial-gradient(ellipse 90% 60% at 50% -10%, rgb(var(--p-white) / 0.6), transparent 60%),
+    radial-gradient(ellipse 70% 60% at 80% 110%, rgb(var(--p-black) / 0.04), transparent 60%),
+    linear-gradient(180deg, var(--p-shell-hi), var(--p-shell-mid) 60%, var(--p-shell-lo) 100%),
     var(--v2-bg-base);
 
-  --v2-text-primary: #0B0B0D;
-  --v2-text-secondary: #4C4C55;
-  /* Was #8E8E96: 2.93:1 on the light shell background #F2F3F8, well under
-   * AA, on the same body-text classes listed in the dark block above.
-   * #6B6B73 measures 4.77:1 there. Light-mode glass composites *towards
-   * white* (--v2-surface-0 over the base resolves to ~#F5F6F9), so
-   * #F2F3F8 is the conservative end of the range, not the average. */
-  --v2-text-tertiary: #6B6B73;
-  --v2-text-inverse: #FFFFFF;
+  --v2-text-primary: var(--p-text-hi);
+  --v2-text-secondary: var(--p-text-mid);
+  --v2-text-tertiary: var(--p-text-lo);
+  --v2-text-inverse: var(--p-text-inverse);
 
-  --v2-accent: #0066CC;
-  --v2-accent-soft: rgba(0, 102, 204, 0.12);
-  --v2-accent-ring: rgba(0, 102, 204, 0.28);
-  /* 6.55:1 on the light base, so no split is needed here. */
-  --v2-accent-text: #0066CC;
-  --v2-accent-gradient: linear-gradient(135deg, #0066CC 0%, #004C99 100%);
+  --v2-accent: rgb(var(--p-accent));
+  --v2-accent-soft: rgb(var(--p-accent) / 0.12);
+  --v2-accent-ring: rgb(var(--p-accent) / 0.28);
+  --v2-accent-text: var(--p-accent-text);
+  --v2-accent-gradient:
+    linear-gradient(135deg, rgb(var(--p-accent)) 0%, var(--p-accent-deep) 100%);
 
-  /* The light-mode state colours are used as *text* by .v2-chip--live,
-   * .v2-chip--loose, .v2-chip--warn, .v2-chip--strict and the liveops
-   * tags, so they carry the 4.5:1 obligation too. Measured on #F2F3F8:
-   *   live  #1F9D48 3.17:1  ->  #177636 5.15:1
-   *   warn  #B98900 2.85:1  ->  #8B6700 4.69:1
-   *   error #D70015 4.86:1  (already AA, unchanged)
-   * Both are the same hue scaled darker, so the palette reads the same;
-   * they also serve as the .v2-dot--live / --warn fills, where a darker
-   * value is strictly more visible on a light surface. */
-  --v2-state-live: #177636;
-  --v2-state-live-soft: rgba(23, 118, 54, 0.14);
-  --v2-state-warn: #8B6700;
-  --v2-state-warn-soft: rgba(139, 103, 0, 0.14);
-  --v2-state-error: #D70015;
-  --v2-state-error-soft: rgba(215, 0, 21, 0.14);
+  --v2-state-live: rgb(var(--p-live));
+  --v2-state-live-soft: rgb(var(--p-live) / 0.14);
+  --v2-state-warn: rgb(var(--p-warn));
+  --v2-state-warn-soft: rgb(var(--p-warn) / 0.14);
+  --v2-state-error: rgb(var(--p-error));
+  --v2-state-error-soft: rgb(var(--p-error) / 0.14);
 
-  --v2-accent-rgb: 0 102 204;
-  --v2-state-live-rgb: 23 118 54;
-  --v2-state-warn-rgb: 139 103 0;
-  --v2-state-error-rgb: 215 0 21;
-
-  /* --v2-on-accent, --v2-bg-immersive, --v2-surface-immersive and
-   * --v2-on-immersive are deliberately not overridden here: white on a
-   * saturated blue fill is correct in both themes, and the immersive
-   * surface is a blackout by definition. */
+  /* Channel triplets, re-exported so a component can compose its own
+   * alpha: rgb(var(--v2-accent-rgb) / 0.4). They cannot drift off the
+   * hex above them any more, because both now come from one palette
+   * slot instead of being hand-kept in sync. */
+  --v2-accent-rgb: var(--p-accent);
+  --v2-state-live-rgb: var(--p-live);
+  --v2-state-warn-rgb: var(--p-warn);
+  --v2-state-error-rgb: var(--p-error);
 
   --v2-shadow-glass:
     0 0 0 1px var(--v2-hairline),
-    0 10px 28px rgba(0, 0, 0, 0.12),
-    0 1px 0 rgba(255, 255, 255, 0.6) inset;
+    0 10px 28px rgb(var(--p-black) / 0.12),
+    0 1px 0 rgb(var(--p-white) / 0.6) inset;
   --v2-shadow-glass-soft:
     0 0 0 1px var(--v2-hairline),
-    0 4px 14px rgba(0, 0, 0, 0.08);
+    0 4px 14px rgb(var(--p-black) / 0.08);
 }
 
-@media (prefers-color-scheme: light) {
-  :root:not(.v2-dark) {
-    --v2-bg-base: #ECEEF3;
-    --v2-bg-deep: #DEE0E6;
-    --v2-surface-0: rgba(255, 255, 255, 0.48);
-    --v2-surface-1: rgba(255, 255, 255, 0.62);
-    --v2-surface-2: rgba(255, 255, 255, 0.75);
-    --v2-surface-elev: rgba(255, 255, 255, 0.88);
-    --v2-hairline: rgba(0, 0, 0, 0.08);
-    --v2-hairline-strong: rgba(0, 0, 0, 0.14);
-    --v2-hairline-focus: rgba(0, 0, 0, 0.24);
-    --v2-fill-subtle: rgba(0, 0, 0, 0.03);
-    --v2-fill: rgba(0, 0, 0, 0.05);
-    --v2-fill-strong: rgba(0, 0, 0, 0.08);
-    --v2-fill-heavy: rgba(0, 0, 0, 0.12);
-    --v2-scrim: rgba(0, 0, 0, 0.32);
-    --v2-well: rgba(0, 0, 0, 0.06);
-    --v2-ambient-spot-a: rgba(255, 255, 255, 0.55);
-    --v2-ambient-spot-b: rgba(255, 255, 255, 0.30);
-    --v2-ambient-base: rgba(0, 0, 0, 0.05);
+/* ── Semantics: DARK (state 2, system preference) ─────────────────
+ * Surface alphas sit between 0.38 and 0.72. Over the charcoal ground
+ * the panes read as visibly translucent; anything above 0.80 kills the
+ * macOS-Tahoe feel. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not(.v2-light) {
+    --v2-bg-base: var(--p-base);
+    --v2-bg-deep: var(--p-deep);
+
+    --v2-surface-0: rgb(var(--p-pane-0) / 0.38);
+    --v2-surface-1: rgb(var(--p-pane-1) / 0.48);
+    --v2-surface-2: rgb(var(--p-pane-2) / 0.58);
+    --v2-surface-elev: rgb(var(--p-pane-3) / 0.72);
+
+    --v2-hairline: rgb(var(--p-line) / 0.10);
+    --v2-hairline-strong: rgb(var(--p-line) / 0.18);
+    --v2-hairline-focus: rgb(var(--p-line) / 0.28);
+
+    --v2-fill-subtle: rgb(var(--p-line) / 0.03);
+    --v2-fill: rgb(var(--p-line) / 0.06);
+    --v2-fill-strong: rgb(var(--p-line) / 0.10);
+    --v2-fill-heavy: rgb(var(--p-line) / 0.14);
+
+    --v2-scrim: rgb(var(--p-black) / 0.45);
+    --v2-well: rgb(var(--p-black) / 0.28);
+
+    --v2-ambient-spot-a: rgb(var(--p-white) / 0.10);
+    --v2-ambient-spot-b: rgb(var(--p-white) / 0.06);
+    --v2-ambient-base: rgb(var(--p-black) / 0.18);
+
     --v2-shell-ambient:
-      radial-gradient(ellipse 90% 60% at 50% -10%, rgba(255, 255, 255, 0.6), transparent 60%),
-      radial-gradient(ellipse 70% 60% at 80% 110%, rgba(0, 0, 0, 0.04), transparent 60%),
-      linear-gradient(180deg, #F2F3F8, #E8EAF0 60%, #DEE0E6 100%),
+      radial-gradient(ellipse 90% 60% at 50% -10%, rgb(var(--p-white) / 0.18), transparent 60%),
+      radial-gradient(ellipse 70% 60% at 80% 110%, rgb(var(--p-white) / 0.08), transparent 60%),
+      linear-gradient(180deg, var(--p-shell-hi), var(--p-shell-mid) 60%, var(--p-shell-lo) 100%),
       var(--v2-bg-base);
-    --v2-text-primary: #0B0B0D;
-    --v2-text-secondary: #4C4C55;
-    --v2-text-tertiary: #6B6B73;
-    --v2-text-inverse: #FFFFFF;
-    --v2-accent: #0066CC;
-    --v2-accent-soft: rgba(0, 102, 204, 0.12);
-    --v2-accent-ring: rgba(0, 102, 204, 0.28);
-  /* 6.55:1 on the light base, so no split is needed here. */
-  --v2-accent-text: #0066CC;
-    --v2-accent-gradient: linear-gradient(135deg, #0066CC 0%, #004C99 100%);
-    --v2-state-live: #177636;
-    --v2-state-live-soft: rgba(23, 118, 54, 0.14);
-    --v2-state-warn: #8B6700;
-    --v2-state-warn-soft: rgba(139, 103, 0, 0.14);
-    --v2-state-error: #D70015;
-    --v2-state-error-soft: rgba(215, 0, 21, 0.14);
-    --v2-accent-rgb: 0 102 204;
-    --v2-state-live-rgb: 23 118 54;
-    --v2-state-warn-rgb: 139 103 0;
-    --v2-state-error-rgb: 215 0 21;
+
+    --v2-text-primary: var(--p-text-hi);
+    --v2-text-secondary: var(--p-text-mid);
+    --v2-text-tertiary: var(--p-text-lo);
+    --v2-text-inverse: var(--p-text-inverse);
+
+    --v2-accent: rgb(var(--p-accent));
+    --v2-accent-soft: rgb(var(--p-accent) / 0.18);
+    --v2-accent-ring: rgb(var(--p-accent) / 0.35);
+    --v2-accent-text: var(--p-accent-text);
+    --v2-accent-gradient:
+      linear-gradient(135deg, rgb(var(--p-accent)) 0%, var(--p-accent-deep) 100%);
+
+    --v2-state-live: rgb(var(--p-live));
+    --v2-state-live-soft: rgb(var(--p-live) / 0.18);
+    --v2-state-warn: rgb(var(--p-warn));
+    --v2-state-warn-soft: rgb(var(--p-warn) / 0.18);
+    --v2-state-error: rgb(var(--p-error));
+    --v2-state-error-soft: rgb(var(--p-error) / 0.18);
+
+    --v2-accent-rgb: var(--p-accent);
+    --v2-state-live-rgb: var(--p-live);
+    --v2-state-warn-rgb: var(--p-warn);
+    --v2-state-error-rgb: var(--p-error);
+
     --v2-shadow-glass:
       0 0 0 1px var(--v2-hairline),
-      0 10px 28px rgba(0, 0, 0, 0.12),
-      0 1px 0 rgba(255, 255, 255, 0.6) inset;
+      0 12px 36px rgb(var(--p-black) / 0.45),
+      0 1px 0 rgb(var(--p-white) / 0.04) inset;
     --v2-shadow-glass-soft:
       0 0 0 1px var(--v2-hairline),
-      0 4px 14px rgba(0, 0, 0, 0.08);
+      0 6px 20px rgb(var(--p-black) / 0.30);
   }
+}
+
+/* ── Semantics: DARK (state 3, explicit toggle) ───────────────────
+ * Byte-identical to state 2, for the same reason the palette is. */
+:root[data-theme="dark"],
+:root.v2-dark {
+  --v2-bg-base: var(--p-base);
+  --v2-bg-deep: var(--p-deep);
+
+  --v2-surface-0: rgb(var(--p-pane-0) / 0.38);
+  --v2-surface-1: rgb(var(--p-pane-1) / 0.48);
+  --v2-surface-2: rgb(var(--p-pane-2) / 0.58);
+  --v2-surface-elev: rgb(var(--p-pane-3) / 0.72);
+
+  --v2-hairline: rgb(var(--p-line) / 0.10);
+  --v2-hairline-strong: rgb(var(--p-line) / 0.18);
+  --v2-hairline-focus: rgb(var(--p-line) / 0.28);
+
+  --v2-fill-subtle: rgb(var(--p-line) / 0.03);
+  --v2-fill: rgb(var(--p-line) / 0.06);
+  --v2-fill-strong: rgb(var(--p-line) / 0.10);
+  --v2-fill-heavy: rgb(var(--p-line) / 0.14);
+
+  --v2-scrim: rgb(var(--p-black) / 0.45);
+  --v2-well: rgb(var(--p-black) / 0.28);
+
+  --v2-ambient-spot-a: rgb(var(--p-white) / 0.10);
+  --v2-ambient-spot-b: rgb(var(--p-white) / 0.06);
+  --v2-ambient-base: rgb(var(--p-black) / 0.18);
+
+  --v2-shell-ambient:
+    radial-gradient(ellipse 90% 60% at 50% -10%, rgb(var(--p-white) / 0.18), transparent 60%),
+    radial-gradient(ellipse 70% 60% at 80% 110%, rgb(var(--p-white) / 0.08), transparent 60%),
+    linear-gradient(180deg, var(--p-shell-hi), var(--p-shell-mid) 60%, var(--p-shell-lo) 100%),
+    var(--v2-bg-base);
+
+  --v2-text-primary: var(--p-text-hi);
+  --v2-text-secondary: var(--p-text-mid);
+  --v2-text-tertiary: var(--p-text-lo);
+  --v2-text-inverse: var(--p-text-inverse);
+
+  --v2-accent: rgb(var(--p-accent));
+  --v2-accent-soft: rgb(var(--p-accent) / 0.18);
+  --v2-accent-ring: rgb(var(--p-accent) / 0.35);
+  --v2-accent-text: var(--p-accent-text);
+  --v2-accent-gradient:
+    linear-gradient(135deg, rgb(var(--p-accent)) 0%, var(--p-accent-deep) 100%);
+
+  --v2-state-live: rgb(var(--p-live));
+  --v2-state-live-soft: rgb(var(--p-live) / 0.18);
+  --v2-state-warn: rgb(var(--p-warn));
+  --v2-state-warn-soft: rgb(var(--p-warn) / 0.18);
+  --v2-state-error: rgb(var(--p-error));
+  --v2-state-error-soft: rgb(var(--p-error) / 0.18);
+
+  --v2-accent-rgb: var(--p-accent);
+  --v2-state-live-rgb: var(--p-live);
+  --v2-state-warn-rgb: var(--p-warn);
+  --v2-state-error-rgb: var(--p-error);
+
+  --v2-shadow-glass:
+    0 0 0 1px var(--v2-hairline),
+    0 12px 36px rgb(var(--p-black) / 0.45),
+    0 1px 0 rgb(var(--p-white) / 0.04) inset;
+  --v2-shadow-glass-soft:
+    0 0 0 1px var(--v2-hairline),
+    0 6px 20px rgb(var(--p-black) / 0.30);
 }
 
 @media (prefers-reduced-motion: reduce) {
