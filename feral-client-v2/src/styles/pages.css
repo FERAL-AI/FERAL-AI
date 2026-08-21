@@ -2948,3 +2948,60 @@
   padding: 5px 9px;
 }
 .v2-jobs-tally { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 10px; }
+
+/* ── Voice as a composer lane ──────────────────────────────────
+   The approved design replaces the text field in place while voice is
+   live: a pill bordered in the run colour, a level meter, and mute and
+   end as separate controls. It does not cover the page. */
+.v2-vlane {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 34px;
+  padding: 0 5px 0 10px;
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-surface-0);
+  border: 1px solid var(--v2-accent);
+}
+.v2-vlane.is-muted { border-color: var(--v2-hairline-strong); }
+.v2-vlane-meter { display: flex; align-items: center; gap: 2px; height: 15px; width: 40px; flex: none; }
+.v2-vlane-meter i {
+  flex: 1;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--v2-accent);
+  opacity: 0.22;
+  transition: opacity 120ms ease;
+}
+.v2-vlane-meter i[data-on="yes"] { opacity: 1; }
+.v2-vlane.is-muted .v2-vlane-meter i { background: var(--v2-text-tertiary); }
+.v2-vlane-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-secondary);
+  overflow: hidden;
+}
+.v2-vlane-caption {
+  font-style: normal;
+  color: var(--v2-text-tertiary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v2-vlane-err { flex: none; font-size: var(--v2-size-xs); color: var(--v2-state-error); }
+.v2-vlane-btn {
+  flex: none;
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  border-radius: var(--v2-radius-xs);
+  border: 1px solid var(--v2-hairline);
+  background: none;
+  color: var(--v2-text-secondary);
+  cursor: pointer;
+}
+.v2-vlane-btn:hover { color: var(--v2-text-primary); border-color: var(--v2-hairline-strong); }
+.v2-vlane-btn--end { color: var(--v2-state-error); }

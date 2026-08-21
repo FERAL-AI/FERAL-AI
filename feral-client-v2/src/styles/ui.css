@@ -426,15 +426,16 @@
 /* v2026.5.30 — dim/disable shell only when the operator explicitly
    expands voice to fullscreen. The docked variant is non-blocking
    so the chat composer and dock stay interactive while voice runs. */
-.v2-shell.is-voice-mode:has(.v2-voice-overlay--fullscreen.is-visible) .v2-shell-main {
-  filter: brightness(0.4) saturate(0.8);
-  transition: filter var(--v2-dur-slow) var(--v2-ease-out);
-}
-.v2-shell.is-voice-mode:has(.v2-voice-overlay--fullscreen.is-visible) .v2-dock {
-  opacity: 0.35;
-  transition: opacity var(--v2-dur-slow) var(--v2-ease-out);
-  pointer-events: none;
-}
+/* The fullscreen voice takeover is gone. It dimmed the page to
+   brightness(0.4) and made the dock non-interactive, so starting voice
+   hid the machine at exactly the moment you might want to watch it.
+   Voice now lives in the composer as a lane (.v2-vlane), which is what
+   the approved design specifies. These rules are kept as a no-op record
+   rather than silently deleted, because the selectors they used are the
+   thing a reader would search for.
+
+   .v2-shell.is-voice-mode ... .v2-shell-main  had filter: brightness(0.4)
+   .v2-shell.is-voice-mode ... .v2-dock        had pointer-events: none  */
 .v2-shell .v2-shell-main { transition: filter var(--v2-dur-slow) var(--v2-ease-out); }
 
 /* Shared base for both variants. */

@@ -18,6 +18,7 @@ import { useChatThread } from '../shell/Shell';
 import { useVoice } from '../shell/VoiceContext';
 import MarkdownMessage from '../lib/markdown.jsx';
 import BudgetExceededBanner from '../components/BudgetExceededBanner';
+import VoiceLane from '../components/VoiceLane';
 import { ToolCallList } from '../components/ToolCallCard';
 import ReasoningSection from '../components/ReasoningSection';
 import TimelineCard from '../components/TimelineCard';
@@ -99,6 +100,9 @@ export default function Chat() {
   const messages = thread?.messages || localMessages;
   const setMessages = thread?.setMessages || setLocalMessages;
   const [input, setInput] = useState('');
+  // Mute is separate from end, per the design: muting is recoverable,
+  // ending the session is not.
+  const [voiceMuted, setVoiceMuted] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [streamingText, setStreamingText] = useState('');
   const [streamingReasoning, setStreamingReasoning] = useState('');
@@ -1228,27 +1232,40 @@ export default function Chat() {
           style={{ display: 'none' }}
           aria-hidden="true"
         />
-        <input
-          ref={composerInputRef}
-          className="v2-chat-input"
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onPaste={onPaste}
-          placeholder={!chatReady ? 'Loading conversation…' : state === 'open' ? 'Ask FERAL…' : 'Reconnecting…'}
-          disabled={state !== 'open' || !chatReady}
-        />
+        {voice?.active ? (
+          // The approved design replaces the field in place while voice
+          // is live, rather than covering the page with an overlay.
+          <VoiceLane
+            voice={voice}
+            muted={voiceMuted}
+            onMute={() => setVoiceMuted((m) => !m)}
+            onEnd={voice.stop}
+          />
+        ) : (
+          <input
+            ref={composerInputRef}
+            className="v2-chat-input"
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onPaste={onPaste}
+            placeholder={!chatReady ? 'Loading conversation…' : state === 'open' ? 'Ask FERAL…' : 'Reconnecting…'}
+            disabled={state !== 'open' || !chatReady}
+          />
+        )}
+        {!voice?.active && (
         <button
           type="button"
-          className={`v2-chat-mic${voice?.active ? ' v2-chat-mic--active' : ''}`}
+          className="v2-chat-mic"
           onClick={onMicClick}
           aria-label={voice?.active ? 'Stop voice mode' : 'Start voice mode'}
           aria-pressed={!!voice?.active}
           disabled={state !== 'open' || !chatReady}
           title={voice?.active ? `Voice active (${voice.provider || 'realtime'})` : 'Hold a conversation by voice'}
         >
-          {voice?.active ? <MicOff size={18} aria-hidden="true" /> : <Mic size={18} aria-hidden="true" />}
+          <Mic size={18} aria-hidden="true" />
         </button>
+        )}
         <button type="submit" className="v2-chat-send" disabled={!input.trim() || state !== 'open' || !chatReady} aria-label="Send">Send</button>
       </Glass>
 
