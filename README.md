@@ -296,5 +296,5 @@ Apache License 2.0 — see [`LICENSE`](LICENSE). Attribution requirements live i
   reconcile live pytest / vitest counts. Not for human eyes — please leave
   it in place and do not edit by hand.
 -->
-<!-- sync-versions:test-counts pytest=8145 vitest=843 -->
+<!-- sync-versions:test-counts pytest=9814 vitest=1136 -->
 <!-- /sync-versions:test-counts -->
