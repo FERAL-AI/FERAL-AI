@@ -163,12 +163,22 @@ describe('useVoiceMode brain-frame dispatch', () => {
         },
       });
     });
+    // The diagnosis fields (`cause` / `summary` / `recommendation`),
+    // `privacy_downgrade` and `muted` are carried too. This frame sets
+    // none of them, so they arrive as their empty values rather than
+    // being dropped from the shape entirely, which is what let the
+    // overlay fall back to a five-entry `reason` lookup table.
     expect(result.current.voiceStatus).toEqual({
       state: 'degraded',
       reason: 'openai_realtime_quota',
       provider: 'openai',
       fallbackProvider: 'whisper',
       detail: 'You exceeded your current quota',
+      cause: '',
+      summary: '',
+      recommendation: '',
+      privacyDowngrade: false,
+      muted: false,
     });
   });
 

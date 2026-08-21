@@ -67,6 +67,21 @@ SURFACE_LOCAL_FIRST: frozenset[str] = frozenset({
     "desktop", "server", "rpi", "browser_node", "web", "laptop",
 })
 
+def _dx():
+    """``voice.diagnostics``, imported lazily.
+
+    Every other reference in this module imports it inside the function
+    that needs it, because ``diagnostics`` reaches into
+    ``security/probe.py`` and importing it at module scope pulls that
+    whole tree into any narrow unit test that only wanted the router.
+    This keeps that property while giving the open-failure paths one
+    short spelling.
+    """
+    from voice import diagnostics
+
+    return diagnostics
+
+
 # ``_try_chained_morph`` abort tags. Only the credential one changes
 # what the caller emits; the rest are plain "couldn't morph, use the
 # legacy degrade".
@@ -1435,15 +1450,30 @@ class VoiceRouter:
         *,
         reason: str,
         detail: str = "",
+        provider: str = "",
+        cause: str = "",
+        summary: str = "",
+        recommendation: str = "",
+        privacy_downgrade: bool = False,
     ) -> None:
-        """Emit ``voice_status state=unavailable`` — called when even
-        the fallback TTS path failed (e.g. no API key, network down)."""
+        """Emit ``voice_status state=unavailable``, called when even
+        the fallback TTS path failed (e.g. no API key, network down).
+
+        ``cause`` / ``summary`` / ``recommendation`` are the human
+        explanation from ``voice/diagnostics.py``. They are optional
+        because several callers only know a machine tag, and an empty
+        string is honest where a manufactured sentence would not be.
+        """
         meta = {
             "state": "unavailable",
             "reason": reason,
-            "provider": "",
+            "provider": provider,
             "fallback_provider": "",
             "detail": detail,
+            "cause": cause,
+            "summary": summary,
+            "recommendation": recommendation,
+            "privacy_downgrade": privacy_downgrade,
         }
         self._session_degraded[session_id] = meta
         logger.error(
@@ -1789,9 +1819,35 @@ class VoiceRouter:
             await self._emit_voice_status(
                 session_id, self._current_status_meta(session_id),
             )
+        # A new attempt supersedes the last one's verdict, and it has to
+        # be dropped here rather than on success: `_report_open_failure`
+        # refuses to overwrite a status set closer to the failure, which
+        # is right within one attempt and wrong across two. Left in
+        # place, a session that failed once and then succeeded keeps the
+        # unavailable meta for as long as it lives, and the next mute
+        # toggle republishes it (`_current_status_meta`) over a working
+        # session. Emitted after the mute frame above so that frame
+        # still reports the state the session was actually in.
+        self._session_degraded.pop(session_id, None)
         if mode == "openai_realtime":
             if not self._realtime or not self._realtime.available:
                 logger.warning("openai_realtime requested but proxy unavailable")
+                await self._report_open_failure(
+                    session_id,
+                    reason="openai_realtime_unavailable",
+                    provider="openai",
+                    cause=(
+                        _dx().CAUSE_NO_API_KEY if self._realtime
+                        else _dx().CAUSE_UNKNOWN
+                    ),
+                    summary=(
+                        "OpenAI Realtime has no API key, so the voice "
+                        "session could not be opened."
+                        if self._realtime else
+                        "This brain has no OpenAI Realtime proxy wired in, "
+                        "so mode openai_realtime cannot be opened."
+                    ),
+                )
                 return None
             node_id = opts.get("node_id", f"webclient_{session_id[:8]}")
             model = opts.get("model") or _settings_realtime_model()
@@ -1816,6 +1872,16 @@ class VoiceRouter:
                 input_sample_rate=input_sample_rate,
                 language_hint=language_hint,
             )
+            if rs is None:
+                rs = await self._recover_or_report(
+                    session_id,
+                    reason="openai_realtime_start_failed",
+                    provider="openai",
+                    summary=(
+                        "OpenAI Realtime refused the connection, and no "
+                        "fallback recovered the session."
+                    ),
+                )
             return rs
         if mode == "chained":
             node_id = opts.get("node_id", "")
@@ -1826,10 +1892,42 @@ class VoiceRouter:
                     "supports_realtime": False,
                     "skip_wake": True,
                 })
-            return await self.open_chained_session(session_id, opts)
+            session = await self.open_chained_session(session_id, opts)
+            if session is None:
+                # ``open_chained_session`` refuses through
+                # ``_construct_provider``, which has already emitted a
+                # voice_status naming the engine that could not be
+                # built. ``_report_open_failure`` will not overwrite it.
+                await self._report_open_failure(
+                    session_id,
+                    reason="chained_open_failed",
+                    provider="chained",
+                    cause=_dx().CAUSE_UNKNOWN,
+                    summary=(
+                        "The chained STT/LLM/TTS pipeline could not be "
+                        "opened for this session."
+                    ),
+                )
+            return session
         if mode == "gemini_live":
             if not self._gemini or not self._gemini.available:
                 logger.warning("gemini_live requested but proxy unavailable")
+                await self._report_open_failure(
+                    session_id,
+                    reason="gemini_live_unavailable",
+                    provider="gemini",
+                    cause=(
+                        _dx().CAUSE_NO_API_KEY if self._gemini
+                        else _dx().CAUSE_UNKNOWN
+                    ),
+                    summary=(
+                        "Gemini Live has no API key, so the voice session "
+                        "could not be opened."
+                        if self._gemini else
+                        "This brain has no Gemini Live proxy wired in, so "
+                        "mode gemini_live cannot be opened."
+                    ),
+                )
                 return None
             node_id = opts.get("node_id", f"webclient_{session_id[:8]}")
             self.register_voice_config(node_id, {
@@ -1840,9 +1938,116 @@ class VoiceRouter:
                 "language_hint": opts.get("language_hint", ""),
                 "skip_wake": True,
             })
-            return await self._gemini.start_session(session_id, node_id)
-        logger.debug("open_session: mode=%s not recognised", mode)
+            gs = await self._gemini.start_session(session_id, node_id)
+            if gs is None:
+                gs = await self._recover_or_report(
+                    session_id,
+                    reason="gemini_live_start_failed",
+                    provider="gemini",
+                    summary=(
+                        "Gemini Live refused the connection, and no "
+                        "fallback recovered the session."
+                    ),
+                )
+            return gs
+        logger.warning("open_session: mode=%s not recognised", mode)
+        await self._report_open_failure(
+            session_id,
+            reason="unknown_voice_mode",
+            provider="",
+            cause=_dx().CAUSE_UNKNOWN,
+            summary=(
+                f"Voice mode {mode!r} is not one this brain implements, so "
+                "no session was opened."
+            ),
+        )
         return None
+
+    async def _recover_or_report(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        provider: str,
+        summary: str = "",
+    ):
+        """Resolve what a ``start_session`` that returned None left behind.
+
+        A realtime proxy reports a failed connect by returning ``None``
+        AND calling ``handle_realtime_failure``, which may have morphed
+        the session onto the chained pipeline. In that case voice IS
+        live, on a different provider, and the caller must not be told
+        the open failed. Returns the recovered handle when there is
+        one; otherwise reports the failure and returns ``None``.
+        """
+        recovered = None
+        if self._session_voice_mode.get(session_id) == "chained":
+            chained = getattr(self, "_chained", None)
+            getter = getattr(chained, "get_session", None) if chained else None
+            if callable(getter):
+                try:
+                    recovered = getter(session_id)
+                except Exception:
+                    logger.debug(
+                        "chained get_session probe failed for %s",
+                        session_id[:8], exc_info=True,
+                    )
+        if recovered is not None:
+            logger.info(
+                "Voice open for session=%s failed on %s but recovered on "
+                "the chained pipeline", session_id[:8], provider,
+            )
+            return recovered
+        await self._report_open_failure(
+            session_id,
+            reason=reason,
+            provider=provider,
+            cause=_dx().CAUSE_UNKNOWN,
+            summary=summary,
+        )
+        return None
+
+    async def _report_open_failure(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        provider: str = "",
+        cause: str = "",
+        summary: str = "",
+        detail: str = "",
+    ) -> None:
+        """Say out loud that a voice session did not open.
+
+        ``open_session`` reported every non-crash failure by returning
+        ``None`` and, on most paths, logging at debug. Nothing reached
+        the client, so a phone that asked for voice sat on "listening"
+        against a session that does not exist. Every ``return None`` in
+        ``open_session`` now routes through here.
+
+        A session that already carries a degraded or unavailable status
+        keeps it: those were produced closer to the failure and name
+        the actual engine, and replacing them with this generic one
+        would lose information.
+        """
+        existing = self._session_degraded.get(session_id)
+        if existing and existing.get("state") in ("degraded", "unavailable"):
+            logger.debug(
+                "open failure for %s already reported as %s",
+                session_id[:8], existing.get("reason"),
+            )
+            return
+        await self.emit_unavailable(
+            session_id,
+            reason=reason,
+            detail=detail or summary,
+            provider=provider,
+            cause=cause or _dx().CAUSE_UNKNOWN,
+            summary=summary,
+            recommendation=_dx().recommendation_for(
+                cause or _dx().CAUSE_UNKNOWN, provider,
+            ),
+        )
 
     # Chained-pipeline helpers (Subagent B)
 

@@ -825,6 +825,23 @@ must be resent.
 }
 ```
 
+A `voice_session_start` the brain could not honour is answered with an
+`error` frame, code `1099`, name `voice_session_failed`, naming the
+stream and the voice mode. There is no positive ack: silence means the
+session opened. A daemon that renders a listening state on send MUST
+leave it on this frame, because no audio will ever arrive on that
+stream. The brain also emits `voice_status` with `state: "unavailable"`
+for the failures it can name, carrying `cause` / `summary` /
+`recommendation` (see `VoiceStatusPayload` in
+`feral-core/models/protocol.py`), but that frame is best-effort
+diagnosis while the error frame is the contract.
+
+The brain used to record the start as allowed and send nothing when the
+voice backend refused to open, because the only refusal it noticed was
+an exception and the router reports every other failure by returning
+nothing. The phone had no way to tell an open session from one that
+never existed.
+
 `voice_interrupt`:
 
 ```json

@@ -81,9 +81,19 @@ registerProcessor('${WORKLET_NAME}', PCMCaptureProcessor);
 
 
 export class RealtimeVoiceEngine {
+  /**
+   * @param wsOrFactory Prefer a RESOLVER, `() => socket.ws`. A raw
+   *   WebSocket is frozen at construction: the shared FeralSocket
+   *   replaces `socket.ws` whenever it rebinds to another chat thread
+   *   (`FeralSocket.setSession`) or reconnects, and an engine holding
+   *   the old object can never find its way back to the live one. It
+   *   spends its whole reconnect budget re-examining a closed socket
+   *   and then reports `degraded`.
+   */
   constructor(wsOrFactory, callbacks = {}) {
     this._wsFactory = typeof wsOrFactory === 'function' ? wsOrFactory : null;
-    this._ws = typeof wsOrFactory === 'function' ? null : wsOrFactory;
+    this._rawWs = typeof wsOrFactory === 'function' ? null : wsOrFactory;
+    this._ws = null;
     this._audioCtx = null;
     this._stream = null;
     this._workletNode = null;
@@ -103,20 +113,46 @@ export class RealtimeVoiceEngine {
     this._reconnectAttempts = 0;
     this._reconnectTimer = null;
     this._degraded = false;
+    // True between the first assistant audio frame of a reply and its
+    // `is_final`. The frames always carried it; nothing read it, so no
+    // surface on the desktop knew when FERAL was talking.
+    this._assistantSpeaking = false;
+    // Last `chunk_index` seen on the fallback TTS stream, so an
+    // out-of-order or duplicated chunk is reported rather than
+    // scheduled as if it were the next one.
+    this._lastTtsChunkIndex = -1;
 
     this.onTranscript = callbacks.onTranscript || null;
     this.onToolCall = callbacks.onToolCall || null;
     this.onSpeechStarted = callbacks.onSpeechStarted || null;
     this.onError = callbacks.onError || null;
     this.onVADChange = callbacks.onVADChange || null;
+    this.onAssistantSpeaking = callbacks.onAssistantSpeaking || null;
     this.onStateChange = callbacks.onStateChange || null; // 'active' | 'reconnecting' | 'degraded' | 'off'
+
+    // Bind a raw socket through the same path a resolved one takes, so
+    // the close and error listeners exist for both forms. They used to
+    // be registered a second time inside `start()` for this case only.
+    if (this._rawWs) this._setWs(this._rawWs);
   }
 
   get active() { return this._active; }
   get speaking() { return this._isSpeaking; }
   get degraded() { return this._degraded; }
+  get assistantSpeaking() { return this._assistantSpeaking; }
+
+  /** Publish an assistant-audio transition once, on change only. */
+  _setAssistantSpeaking(next) {
+    if (this._assistantSpeaking === next) return;
+    this._assistantSpeaking = next;
+    if (this.onAssistantSpeaking) this.onAssistantSpeaking(next);
+  }
 
   _setWs(ws) {
+    // A resolver can legitimately answer "no socket right now" while
+    // the shared FeralSocket is between connections. Binding null here
+    // used to throw out of `start()` on the addEventListener below.
+    if (!ws) return;
     this._ws = ws;
     this._reconnectAttempts = 0;
     if (this._degraded) {
@@ -124,6 +160,11 @@ export class RealtimeVoiceEngine {
       if (this.onStateChange) this.onStateChange('active');
     }
 
+    // Every real WebSocket has this. A caller that passes a
+    // send-only stub gets a working audio path and no reconnect
+    // wiring, which is the honest outcome: there is no close event to
+    // listen for.
+    if (typeof ws.addEventListener !== 'function') return;
     ws.addEventListener('close', () => {
       if (this._active) this._attemptReconnect();
     });
@@ -191,6 +232,8 @@ export class RealtimeVoiceEngine {
     this._micMuted = false;
     this._degraded = false;
     this._reconnectAttempts = 0;
+    this._assistantSpeaking = false;
+    this._lastTtsChunkIndex = -1;
 
     if (!this._ws && this._wsFactory) {
       this._setWs(await this._wsFactory());
@@ -199,11 +242,10 @@ export class RealtimeVoiceEngine {
     this._sendVoiceConfig();
     if (this.onStateChange) this.onStateChange('active');
 
-    if (this._ws) {
-      this._ws.addEventListener('close', () => {
-        if (this._active) this._attemptReconnect();
-      });
-    }
+    // `_setWs` already registered the close and error listeners. Adding
+    // a second pair here meant every drop called `_attemptReconnect`
+    // twice, and the second call was only ever absorbed by the
+    // `_reconnectTimer` guard.
 
     this._stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -298,6 +340,8 @@ export class RealtimeVoiceEngine {
   stop() {
     this._active = false;
     this._isSpeaking = false;
+    this._setAssistantSpeaking(false);
+    this._lastTtsChunkIndex = -1;
 
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
@@ -340,8 +384,19 @@ export class RealtimeVoiceEngine {
   }
 
   handleAudioResponse(payload) {
-    if (!payload.data_b64 || payload.is_final) return;
+    // `is_final` marks the end of the assistant's turn and carries no
+    // audio (see `GeminiRealtimeSession`, which sends `("", True)`).
+    // The early return was right about the audio and wrong to throw the
+    // signal away with it: on the realtime path this frame is the only
+    // notice the client gets that FERAL stopped talking, which is what
+    // left the orb showing one mode for a whole session.
+    if (payload.is_final) {
+      this._setAssistantSpeaking(false);
+      return;
+    }
+    if (!payload.data_b64) return;
     if (!this._playbackCtx) return;
+    this._setAssistantSpeaking(true);
 
     try {
       const pcm16 = this._base64ToPCM16(payload.data_b64);
@@ -357,7 +412,24 @@ export class RealtimeVoiceEngine {
 
   handleTranscript(payload) {
     if (this.onTranscript) {
-      this.onTranscript(payload.text, payload.is_partial, payload.role || 'assistant');
+      // Fourth argument is metadata the payload carries and every
+      // caller used to drop: `confidence` is the STT provider's own
+      // score (unnormalised across the 16 backends the brain routes,
+      // so it is passed through and never rescaled), and the ordering
+      // fields let a caller replace a partial in place instead of
+      // appending a second bubble.
+      this.onTranscript(
+        payload.text,
+        payload.is_partial,
+        payload.role || 'assistant',
+        {
+          confidence: typeof payload.confidence === 'number'
+            ? payload.confidence
+            : null,
+          itemId: payload.item_id || null,
+          seq: typeof payload.seq === 'number' ? payload.seq : null,
+        },
+      );
     }
   }
 
@@ -386,6 +458,10 @@ export class RealtimeVoiceEngine {
       try { source.stop(); } catch { /* already ended */ }
     }
     this._activeSources.clear();
+    // The reply that was playing has been cut. Anything tracking who
+    // is talking has to hear about it here as well as on `is_final`,
+    // because a barge-in means that `is_final` is never coming.
+    this._setAssistantSpeaking(false);
     if (this._playbackCtx && this._playbackCtx.state === 'suspended') {
       // Same gesture-handoff issue described in `start()`.
       this._playbackCtx.resume().catch(() => {});
@@ -424,7 +500,36 @@ export class RealtimeVoiceEngine {
    * mix realtime + fallback frames cleanly.
    */
   async handleTtsChunk(payload) {
-    if (!payload || !payload.data_b64) return;
+    if (!payload) return;
+    // `chunk_index` and `is_final` shipped on every one of these frames
+    // and neither was read. The index is the only way to notice that
+    // the stream arrived out of order or repeated a chunk, which on
+    // this path is audible (a syllable played twice, or the wrong way
+    // round) with nothing in the UI saying why. The final flag is the
+    // end of the assistant's turn.
+    const index = typeof payload.chunk_index === 'number'
+      ? payload.chunk_index
+      : null;
+    if (index !== null) {
+      if (index <= this._lastTtsChunkIndex) {
+        if (this.onError) {
+          this.onError(
+            'playback',
+            `Out-of-order TTS chunk ${index} after ${this._lastTtsChunkIndex}`,
+          );
+        }
+      }
+      this._lastTtsChunkIndex = Math.max(this._lastTtsChunkIndex, index);
+    }
+    if (payload.is_final) {
+      this._lastTtsChunkIndex = -1;
+      if (!payload.data_b64) {
+        this._setAssistantSpeaking(false);
+        return;
+      }
+    }
+    if (!payload.data_b64) return;
+    this._setAssistantSpeaking(true);
     if (!this._playbackCtx) {
       this._playbackCtx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
       if (this._playbackCtx.state === 'suspended') {
@@ -449,6 +554,14 @@ export class RealtimeVoiceEngine {
       });
 
       this._schedule(audioBuffer);
+      if (payload.is_final) {
+        // The last chunk is on the timeline. It has not finished
+        // sounding yet, and nothing here can know when it will without
+        // tracking playback, so this is reported as "the reply is
+        // complete", not "the speaker is silent". Approximating the
+        // latter with a timer would be a fabricated measurement.
+        this._setAssistantSpeaking(false);
+      }
     } catch (e) {
       if (this.onError) this.onError('playback', e?.message || String(e));
     }

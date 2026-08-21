@@ -12,7 +12,9 @@ import dataclasses
 import os
 import logging
 import sys
+import time
 import uuid
+from collections import deque
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -77,6 +79,9 @@ class SkillExecutor:
         self._blind_vault = None
         self._pending_results: dict[str, asyncio.Future] = {}
         self._wasm_sandbox = None
+        # skill_id -> admission times, for `max_calls_per_hour`. Held per
+        # executor instance, so an embedder or a test gets its own budget.
+        self._skill_call_times: dict[str, deque] = {}
         # -A14: prefer narrow facade over a direct ``api.state`` import so
         # tests can inject and so global-state coupling shrinks.
         self._sandbox_port: SandboxPort = sandbox_port or default_sandbox_port()
@@ -402,6 +407,86 @@ class SkillExecutor:
                 return refusal
         return None
 
+    #: Width of the `max_calls_per_hour` window, in seconds.
+    RATE_WINDOW_S = 3600.0
+
+    def _rate_limit(self, tool_name: str, skill: SkillManifest) -> Optional[dict]:
+        """Enforce the manifest's ``max_calls_per_hour``.
+
+        The field has been in ``SkillManifest`` and in 39 of the 41
+        shipped manifests since the schema was written, with per-skill
+        values somebody clearly thought about (image_gen 30/hour,
+        notion 600, github 5000, coding_tools 10000), and nothing in
+        the runtime ever read it. An agent loop calling a paid endpoint
+        was bounded by nothing.
+
+        Enforced here for the same reason the plan-mode and approval
+        gates are: this method is the one place every dispatch lane
+        arrives at. Counted per skill (not per endpoint), which is what
+        the field says, and over a rolling window rather than a
+        clock-hour bucket, so a burst cannot straddle the boundary and
+        spend two budgets in two minutes.
+
+        A limit of 0 or less means unlimited. Refused calls do not
+        consume budget; only admitted ones do.
+
+        Only an EXPLICIT declaration is enforced. ``SkillManifest``
+        defaults the field to 1000, and two shipped manifests
+        (``cutebot``, ``robot_action``) declare nothing, so treating
+        the default as a limit would invent a cap of 1000 motor
+        commands an hour for the two authors who never opted in. A
+        pydantic default is not a decision anybody made.
+        """
+        fields_set = getattr(skill, "model_fields_set", None)
+        if isinstance(fields_set, (set, frozenset)):
+            if "max_calls_per_hour" not in fields_set:
+                return None
+        try:
+            limit = int(getattr(skill, "max_calls_per_hour", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if limit <= 0:
+            return None
+
+        skill_id = getattr(skill, "skill_id", "") or ""
+        now = time.time()
+        window = self._skill_call_times.setdefault(skill_id, deque())
+        cutoff = now - self.RATE_WINDOW_S
+        while window and window[0] < cutoff:
+            window.popleft()
+
+        if len(window) >= limit:
+            retry_after = max(1, int(window[0] + self.RATE_WINDOW_S - now) + 1)
+            logger.warning(
+                "rate limit reached for skill %s: %d calls in the last hour "
+                "(manifest max_calls_per_hour=%d), refusing %s",
+                skill_id, len(window), limit, tool_name,
+            )
+            try:
+                from observability.metrics import increment
+
+                increment(
+                    "feral.skill.rate_limited_total",
+                    attributes={"skill": skill_id},
+                )
+            except Exception:  # instrumentation must never break dispatch
+                logger.debug("rate-limit metric failed", exc_info=True)
+            return {
+                "success": False,
+                "status_code": 429,
+                "data": None,
+                "error": (
+                    f"Rate limit reached for skill '{skill_id}': its manifest "
+                    f"allows {limit} calls per hour and {len(window)} have "
+                    f"been made in the last hour. Retry in {retry_after}s, or "
+                    f"raise max_calls_per_hour in the manifest."
+                ),
+                "retry_after_seconds": retry_after,
+            }
+
+        window.append(now)
+        return None
+
     _ungated_warned: set = set()
 
     @classmethod
@@ -492,6 +577,13 @@ class SkillExecutor:
         args = self._apply_param_defaults(args, skill, endpoint)
 
         _refusal = self._gate(tool_name, args)
+        if _refusal is not None:
+            return _refusal
+
+        # After the gates, so a call the user was never going to be
+        # allowed to make does not spend budget, and before dispatch,
+        # so a refused call costs the vendor nothing.
+        _refusal = self._rate_limit(tool_name, skill)
         if _refusal is not None:
             return _refusal
 

@@ -292,7 +292,24 @@ class FlowStep(BaseModel):
 
 
 class SkillFlow(BaseModel):
-    """A multi-step orchestration (e.g., search → select → order → confirm)."""
+    """A multi-step orchestration (e.g., search → select → order → confirm).
+
+    Two readers, and it is worth knowing which is which:
+
+    * ``SkillRegistry._flow_to_taskflow_steps`` translates a flow into
+      TaskFlow ``skill.invoke`` steps, reachable only from a
+      ``CronDefinition`` that names this flow's id in ``flow_id``. That
+      is the only path that EXECUTES a flow.
+    * ``self_introspection.describe_skill`` reports the flow to the
+      model as a recipe, so a flow with no cron is still useful: the
+      model can follow the sequence itself, one gated tool call at a
+      time.
+
+    ``FlowStep.condition`` / ``then_endpoint_id`` are read by neither.
+    Branching is not translated (see the docstring on
+    ``_flow_to_taskflow_steps``), so a flow that relies on it will run
+    its steps unconditionally on the cron path.
+    """
     id: str
     description: str
     steps: list[FlowStep] = []
@@ -307,7 +324,28 @@ class CronDefinition(BaseModel):
 
 
 class TriggerDefinition(BaseModel):
-    """An event-driven reaction."""
+    """An event-driven reaction.
+
+    ``condition`` is evaluated by
+    ``ProactiveEngine._evaluate_manifest_triggers``, which then NOTIFIES
+    and stops.
+
+    ``action_flow_id`` and ``action_endpoint_id`` are named in the
+    notification and are deliberately NOT dispatched. That is not an
+    oversight to be tidied up later. Before the evaluator existed,
+    ``skills/registry.py`` turned each trigger into a routine polling
+    every minute with the condition parked in a payload nobody read, so
+    the action ran unconditionally: 4,766 runs each on two routines,
+    one of them a Telegram send gated on a stress reading that was
+    never checked. Wiring the action back up is a change that has to go
+    through the cron/surface safety pre-flight in ``api/server.py``, not
+    a field default.
+
+    A declared id must still name a flow or endpoint that exists in the
+    same manifest; ``tests/test_manifest_declarations_have_readers.py``
+    fails the build otherwise, because a field nothing dispatches is
+    the easiest one in the schema to get wrong unnoticed.
+    """
     id: str
     condition: str  # e.g. "biometric.heart_rate_bpm > 150"
     action_flow_id: Optional[str] = None
@@ -358,7 +396,13 @@ class SkillManifest(BaseModel):
     # Runtime enforcement lives in `skills/executor.py`.
     requires_sandbox: bool = False
     
-    # Rate limits
+    # Rate limits. Enforced by ``SkillExecutor._rate_limit`` at the same
+    # dispatch chokepoint as the plan-mode and approval gates: a rolling
+    # one-hour window, counted per skill, refusing with status 429 and a
+    # retry-after rather than calling the vendor. 0 or less means
+    # unlimited. It was declared in 39 of the 41 shipped manifests, with
+    # tuned per-skill values, and read by nothing at all until the
+    # limiter landed.
     max_calls_per_hour: int = 1000
 
     # Default result budget tier for every endpoint in this skill; see
