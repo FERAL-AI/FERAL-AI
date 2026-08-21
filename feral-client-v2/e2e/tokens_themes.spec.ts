@@ -45,6 +45,10 @@ const SEMANTIC_NAMES = [
 ].sort();
 
 /** The subset that paints a flat colour, so it can be read back as rgb(). */
+// --v2-surface, --v2-border and --v2-border-subtle are deliberately
+// absent. They were referenced with no fallback and declared nowhere;
+// commit 268fa7c1f fixed that by pointing every consumer at a token
+// that exists, so declaring them would leave tokens nothing reads.
 const COLOR_NAMES = [
   '--v2-bg-base',
   '--v2-bg-deep',
@@ -52,12 +56,9 @@ const COLOR_NAMES = [
   '--v2-surface-1',
   '--v2-surface-2',
   '--v2-surface-elev',
-  '--v2-surface',
   '--v2-hairline',
   '--v2-hairline-strong',
   '--v2-hairline-focus',
-  '--v2-border',
-  '--v2-border-subtle',
   '--v2-fill-subtle',
   '--v2-fill',
   '--v2-fill-strong',

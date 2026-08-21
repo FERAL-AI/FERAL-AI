@@ -275,18 +275,15 @@
   --v2-surface-immersive: rgb(var(--p-immersive-pane) / 0.94);
   --v2-on-immersive: rgb(var(--p-white));
 
-  /* Compatibility aliases. pages.css and ConsciousnessMindMap.jsx have
-   * always referenced these four names with no fallback, and they were
-   * defined nowhere: `border: 1px solid var(--v2-border)` fell back to
-   * the initial value and drew no border at all, `background:
-   * var(--v2-surface)` rendered transparent, the mind-map edges had no
-   * stroke, and .v2-mindmap-label fell off the system font stack. They
-   * alias semantic tokens rather than the palette, so they stay
-   * theme-correct in all three states without being restated. */
-  --v2-surface: var(--v2-surface-1);
-  --v2-border: var(--v2-hairline-strong);
-  --v2-border-subtle: var(--v2-hairline);
-  --v2-font-sans: var(--v2-font-system);
+  /* No compatibility aliases here on purpose. --v2-border,
+   * --v2-border-subtle, --v2-surface and --v2-font-sans were referenced
+   * with no fallback and declared nowhere, which drew no border at all,
+   * rendered a transparent background, left the mind-map edges unpainted
+   * and dropped .v2-mindmap-label off the system font stack. Commit
+   * 268fa7c1f fixed that at the other end, by pointing every consumer at
+   * a token that exists. Declaring them here as well would leave four
+   * tokens nothing reads, which the "declares nothing that no one reads"
+   * guard below correctly refuses. */
 
   /* Focus ring. Derives from the accent ring, which does flip. */
   --v2-shadow-focus: 0 0 0 3px var(--v2-accent-ring);
