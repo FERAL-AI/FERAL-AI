@@ -1089,6 +1089,30 @@ class MemoryStore:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC)")
 
+            # W3: thread management columns.
+            #
+            # ``title_custom`` is the fix for a rename that survived zero
+            # autosaves. ``conversation_save`` derives a title from the
+            # first user message whenever the caller passes none, and the
+            # v2 client's 450ms autosave passes the SAME derived title on
+            # every keystroke-settled change. The upsert then wrote it
+            # over whatever the user had renamed the thread to, so the
+            # rename was gone within half a second. Measured before the
+            # fix on a throwaway store: save(title="My renamed thread")
+            # then save() with no title left the row reading "hello
+            # number 1 about pytest" again.
+            #
+            # A flag rather than a heuristic, because the derived title
+            # and a user-typed title are byte-identical when the user
+            # renames a thread to its own first message. Only the
+            # explicit rename path sets it.
+            self._add_column_if_missing(conn, "conversations", "title_custom", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column_if_missing(conn, "conversations", "pinned", "INTEGER NOT NULL DEFAULT 0")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversations_pinned "
+                "ON conversations(pinned DESC, updated_at DESC)"
+            )
+
             # ─────────────────────────────────────────────────────────────
             # v2026.5.34 (PR 2 — feat/memory-v2-truth) schema additions.
             # Idempotent ALTER TABLE statements: SQLite raises
@@ -1297,20 +1321,85 @@ class MemoryStore:
 
         conn = await self._conn()
         try:
+            # ``title`` here is always derived or caller-supplied on the
+            # AUTOSAVE path. A thread the user renamed carries
+            # ``title_custom = 1`` and keeps its own title: the upsert
+            # must not clobber it. Use ``conversation_rename`` to change
+            # a renamed thread's title.
             await conn.execute("""
                 INSERT INTO conversations (id, title, preview, messages_json, message_count, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
-                    title = excluded.title,
+                    title = CASE WHEN conversations.title_custom = 1
+                                 THEN conversations.title
+                                 ELSE excluded.title END,
                     preview = excluded.preview,
                     messages_json = excluded.messages_json,
                     message_count = excluded.message_count,
                     updated_at = excluded.updated_at
             """, (conversation_id, title, preview, json.dumps(messages[-500:]), len(messages), now, now))
             await conn.commit()
+            # Report the title the row actually holds, not the one we
+            # asked for. Returning the requested title would let the
+            # client believe an autosave had renamed a pinned-title
+            # thread and repaint the list with a name the store rejected.
+            async with conn.execute(
+                "SELECT title, title_custom, pinned FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ) as cur:
+                row = await cur.fetchone()
         finally:
             await self._release(conn)
-        return {"id": conversation_id, "title": title, "message_count": len(messages), "updated_at": now}
+        effective_title = row[0] if row else title
+        return {
+            "id": conversation_id,
+            "title": effective_title,
+            "title_custom": bool(row[1]) if row else False,
+            "pinned": bool(row[2]) if row else False,
+            "preview": preview,
+            "message_count": len(messages),
+            "updated_at": now,
+        }
+
+    async def conversation_rename(self, conversation_id: str, title: str) -> dict | None:
+        """Set a user-chosen title and mark it as sticky.
+
+        Marks ``title_custom`` so no later ``conversation_save`` derives
+        a title over the top of it. ``updated_at`` is deliberately left
+        alone: renaming a thread is not activity in it, and bumping the
+        timestamp would jump the thread to the top of a
+        recently-updated list the user did not touch.
+        """
+        clean = (title or "").strip()[:200]
+        if not clean:
+            return None
+        conn = await self._conn()
+        try:
+            cur = await conn.execute(
+                "UPDATE conversations SET title = ?, title_custom = 1 WHERE id = ?",
+                (clean, conversation_id),
+            )
+            await conn.commit()
+            if not cur.rowcount:
+                return None
+        finally:
+            await self._release(conn)
+        return await self.conversation_get(conversation_id)
+
+    async def conversation_set_pinned(self, conversation_id: str, pinned: bool) -> dict | None:
+        """Pin or unpin a thread. Pinned threads sort first in the list."""
+        conn = await self._conn()
+        try:
+            cur = await conn.execute(
+                "UPDATE conversations SET pinned = ? WHERE id = ?",
+                (1 if pinned else 0, conversation_id),
+            )
+            await conn.commit()
+            if not cur.rowcount:
+                return None
+        finally:
+            await self._release(conn)
+        return await self.conversation_get(conversation_id)
 
     async def conversation_append(
         self,
@@ -1344,28 +1433,106 @@ class MemoryStore:
             conversation_id, messages, title=title or existing.get("title", ""),
         )
 
-    async def conversation_list(self, limit: int = 50) -> list[dict]:
-        """List recent conversations (metadata only)."""
+    # Hard ceiling on one page of conversation metadata. A caller asking
+    # for more gets this; ``conversation_page`` reports the real total
+    # alongside so a UI can page rather than silently lose rows past the
+    # cut, which is what "fetch with no limit" used to do at 50.
+    CONVERSATION_PAGE_MAX = 200
+
+    @staticmethod
+    def _conversation_search_clause(query: str) -> tuple[str, list]:
+        """Build the WHERE fragment for a thread search.
+
+        Matches title, preview and the stored message blob so searching
+        for a word the user said three turns in finds the thread. The
+        blob scan is a LIKE over ``messages_json``: this is a
+        single-user local store where the table is a few thousand rows
+        at most, and ``conversations`` has no FTS index to lean on.
+        """
+        needle = (query or "").strip()
+        if not needle:
+            return "", []
+        # Escape the LIKE metacharacters so a literal '%' typed into the
+        # search box matches a '%' and not "everything".
+        escaped = (
+            needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        like = f"%{escaped}%"
+        return (
+            " WHERE (title LIKE ? ESCAPE '\\'"
+            " OR preview LIKE ? ESCAPE '\\'"
+            " OR messages_json LIKE ? ESCAPE '\\')",
+            [like, like, like],
+        )
+
+    async def conversation_page(
+        self,
+        *,
+        limit: int = 25,
+        offset: int = 0,
+        query: str = "",
+    ) -> dict:
+        """One page of conversation metadata plus the unfiltered total.
+
+        Returns ``{"items": [...], "total": int, "limit": int,
+        "offset": int, "has_more": bool}``. ``total`` is the count of
+        rows MATCHING the query, so a client can render "51 threads"
+        and page through all of them instead of stopping at whatever
+        the first request happened to return.
+
+        Pinned threads sort first, then most-recently-updated.
+        """
+        limit = max(1, min(int(limit or 25), self.CONVERSATION_PAGE_MAX))
+        offset = max(0, int(offset or 0))
+        where, params = self._conversation_search_clause(query)
         conn = await self._conn()
         try:
             async with conn.execute(
-                "SELECT id, title, preview, message_count, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT ?",
-                (min(limit, 200),),
+                f"SELECT COUNT(*) FROM conversations{where}", params,
+            ) as cur:
+                total_row = await cur.fetchone()
+            async with conn.execute(
+                "SELECT id, title, preview, message_count, created_at, updated_at, pinned, title_custom "
+                f"FROM conversations{where} ORDER BY pinned DESC, updated_at DESC LIMIT ? OFFSET ?",
+                [*params, limit, offset],
             ) as cur:
                 rows = await cur.fetchall()
         finally:
             await self._release(conn)
-        return [
-            {"id": r[0], "title": r[1], "preview": r[2], "message_count": r[3], "created_at": r[4], "updated_at": r[5]}
-            for r in rows
-        ]
+        total = int(total_row[0]) if total_row else 0
+        return {
+            "items": [self._conversation_row(r) for r in rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(rows) < total,
+        }
+
+    @staticmethod
+    def _conversation_row(r) -> dict:
+        return {
+            "id": r[0],
+            "title": r[1],
+            "preview": r[2],
+            "message_count": r[3],
+            "created_at": r[4],
+            "updated_at": r[5],
+            "pinned": bool(r[6]),
+            "title_custom": bool(r[7]),
+        }
+
+    async def conversation_list(self, limit: int = 50) -> list[dict]:
+        """List recent conversations (metadata only)."""
+        page = await self.conversation_page(limit=limit, offset=0)
+        return page["items"]
 
     async def conversation_get(self, conversation_id: str) -> dict | None:
         """Load a full conversation with messages."""
         conn = await self._conn()
         try:
             async with conn.execute(
-                "SELECT id, title, preview, messages_json, message_count, created_at, updated_at FROM conversations WHERE id = ?",
+                "SELECT id, title, preview, messages_json, message_count, created_at, updated_at, "
+                "pinned, title_custom FROM conversations WHERE id = ?",
                 (conversation_id,),
             ) as cur:
                 row = await cur.fetchone()
@@ -1377,6 +1544,7 @@ class MemoryStore:
             "id": row[0], "title": row[1], "preview": row[2],
             "messages": json.loads(row[3]) if row[3] else [],
             "message_count": row[4], "created_at": row[5], "updated_at": row[6],
+            "pinned": bool(row[7]), "title_custom": bool(row[8]),
         }
 
     async def conversation_delete(self, conversation_id: str) -> bool:

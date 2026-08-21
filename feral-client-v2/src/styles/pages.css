@@ -1215,6 +1215,87 @@
   .v2-chat-pane { top: auto; bottom: 120px; right: 12px; left: 12px; width: auto; }
 }
 
+/* ── Threads pane (search / rename / pin / paging) ─────────── */
+/* Wider than the snapshot pane: each row now carries a preview line
+   and a message count as well as a title, and four controls. */
+.v2-chat-pane--threads { width: 380px; }
+@media (max-width: 960px) {
+  .v2-chat-pane--threads { width: auto; }
+}
+.v2-thread-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--v2-hairline);
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-surface-0);
+  color: var(--v2-text-tertiary);
+}
+.v2-thread-search:focus-within { box-shadow: var(--v2-shadow-focus); border-color: var(--v2-accent); }
+.v2-thread-search__input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 6px 0;
+}
+.v2-thread-search__input:focus { box-shadow: none; border-color: transparent; }
+/* Safari renders a native clear affordance that collides with the row. */
+.v2-thread-search__input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+.v2-thread-count {
+  margin-left: auto;
+  align-self: center;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.v2-thread-group-label {
+  font-size: var(--v2-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--v2-text-tertiary);
+  margin-top: 2px;
+}
+.v2-thread-row { border-left: 2px solid transparent; }
+.v2-thread-row[data-pinned='true'] { border-left-color: var(--v2-accent); }
+.v2-thread-row .v2-flow-card-head { gap: 2px; }
+/* Four icon controls have to fit beside a title in a 380px pane, so the
+   row's ghost buttons drop the default 7px/14px padding. */
+.v2-thread-row .v2-btn--ghost { padding: 5px 6px; flex-shrink: 0; }
+/* `.v2-btn.is-active` has no rule of its own anywhere in the sheet, so
+   the pinned state is declared here rather than assumed. */
+.v2-thread-row .v2-btn--ghost.is-active {
+  color: var(--v2-accent-text);
+  background: var(--v2-accent-soft);
+}
+.v2-thread-row .v2-flow-card-title {
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v2-thread-rename { flex: 1; min-width: 0; padding: 3px 6px; }
+.v2-thread-preview {
+  margin-top: 4px;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.v2-thread-error {
+  font-size: var(--v2-size-xs);
+  color: var(--v2-state-error);
+  padding: 4px 6px;
+  border: 1px solid var(--v2-state-error);
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-state-error-soft);
+}
+.v2-thread-more { justify-content: center; width: 100%; }
+
 /* Providers (Settings → Providers) */
 .v2-providers { display: flex; flex-direction: column; gap: 14px; }
 .v2-providers-current {
