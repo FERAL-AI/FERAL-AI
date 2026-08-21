@@ -1,8 +1,11 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import Ambient from './Ambient';
 import Menubar from './Menubar';
 import Dock from './Dock';
+import CommandPalette from './CommandPalette';
+import { PaletteProvider } from './PaletteContext';
+import { ChatThreadContext, useChatThread } from './ChatThreadContext';
 import { VoiceProvider, useVoice } from './VoiceContext';
 import VoiceOverlay from './VoiceOverlay';
 import PerceptionShare from '../components/PerceptionShare';
@@ -16,7 +19,6 @@ const DEFAULT_GREETING = {
   role: 'assistant',
   text: 'FERAL v2 is listening. What do you need?',
 };
-const ChatThreadContext = createContext(null);
 
 function newMessageId() {
   return `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -111,14 +113,24 @@ function deriveConversationTitle(messages) {
   return firstUser.text.trim().slice(0, 80);
 }
 
-export function useChatThread() {
-  return useContext(ChatThreadContext);
-}
+// Re-exported from its own module (see ChatThreadContext.js) so
+// CommandPalette can read the thread without an import cycle back
+// through Shell. Every existing `import { useChatThread } from
+// '../shell/Shell'` keeps resolving.
+export { useChatThread };
 
 /**
  * Shell is the v2 chrome: ambient background + minimal top menubar + bottom
  * dock. Pages render in the Outlet between them. The VoiceProvider lifts
  * voice state so Menubar + VoiceOverlay agree on one mode.
+ *
+ * Navigation is exactly two mechanisms. The Dock pins eight destinations;
+ * the CommandPalette indexes every destination, every Settings section,
+ * and the shell's verbs. Both read `shell/navigation.js`, and the palette
+ * is opened from three places (the Dock button, the Menubar search field,
+ * Cmd-K) that all drive one piece of state living here. It used to live
+ * inside Dock.jsx, which meant the Menubar could not open it and any
+ * second trigger would have had its own copy.
  *
  * PerceptionShare.FloatingChip is mounted at the Shell level so the
  * "Sharing camera" indicator is visible no matter which route the user
@@ -145,6 +157,36 @@ function ShellFrame() {
   // separate histories instead of all funnelling into primary.
   const [primarySessionId, setPrimarySessionId] = useState('');
   const [primaryConversationId, setPrimaryConversationId] = useState('');
+  // The palette's Ask row parks the typed query here and navigates to
+  // /chat; the composer picks it up and clears it. Shell state rather
+  // than a query param because the text is a user's prose and does not
+  // belong in a URL, and rather than a DOM event because the composer
+  // may not be mounted yet at the moment the palette fires.
+  const [askDraft, setAskDraft] = useState('');
+  const clearAskDraft = useCallback(() => setAskDraft(''), []);
+
+  // Palette open/close, owned here so the Dock button, the Menubar
+  // search field and Cmd-K all drive the same dialog.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const openPalette = useCallback(() => setPaletteOpen(true), []);
+  const closePalette = useCallback(() => setPaletteOpen(false), []);
+  const togglePalette = useCallback(() => setPaletteOpen((prev) => !prev), []);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        togglePalette();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [togglePalette]);
+
+  const palette = useMemo(
+    () => ({ open: paletteOpen, openPalette, closePalette, togglePalette }),
+    [paletteOpen, openPalette, closePalette, togglePalette],
+  );
 
   const setMessages = useCallback((next) => {
     setMessagesState((prev) => {
@@ -333,6 +375,9 @@ function ShellFrame() {
     isPrimaryThread,
     activeSessionToken,
     activeSessionId,
+    askDraft,
+    setAskDraft,
+    clearAskDraft,
   }), [
     conversationId,
     ensureConversation,
@@ -346,22 +391,27 @@ function ShellFrame() {
     isPrimaryThread,
     activeSessionToken,
     activeSessionId,
+    askDraft,
+    clearAskDraft,
   ]);
 
   return (
     <ChatThreadContext.Provider value={chatThread}>
-      <div className={`v2-shell${voice.active ? ' is-voice-mode' : ''}`}>
-        <Ambient />
-        <Menubar />
-        <main className="v2-shell-main">
-          <Outlet />
-        </main>
-        <Dock />
-        <VoiceOverlay />
-        <ProactiveToast />
-        <ErrorToast />
-        <PerceptionShare.FloatingChip />
-      </div>
+      <PaletteProvider value={palette}>
+        <div className={`v2-shell${voice.active ? ' is-voice-mode' : ''}`}>
+          <Ambient />
+          <Menubar />
+          <main className="v2-shell-main">
+            <Outlet />
+          </main>
+          <Dock />
+          <CommandPalette open={paletteOpen} onClose={closePalette} />
+          <VoiceOverlay />
+          <ProactiveToast />
+          <ErrorToast />
+          <PerceptionShare.FloatingChip />
+        </div>
+      </PaletteProvider>
     </ChatThreadContext.Provider>
   );
 }

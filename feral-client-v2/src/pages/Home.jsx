@@ -400,7 +400,7 @@ export default function Home() {
     }
   };
 
-  // One derivation, shared with GlassBrain and HubLauncher. See the
+  // One derivation, shared with GlassBrain and CommandPalette. See the
   // doc comment on `deviceCounts` in components/DeviceTopology.jsx for
   // why `device_count`/`online_count` are the same live-only number
   // and why the honest total is `online + paired_offline`. The three

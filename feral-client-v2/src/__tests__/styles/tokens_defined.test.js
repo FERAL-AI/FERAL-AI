@@ -47,6 +47,7 @@ import {
 } from '../_helpers/tokens';
 
 const SRC_DIR = path.resolve(__dirname, '../..');
+const STYLES_DIR = path.join(SRC_DIR, 'styles');
 const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '');
 
 function walk(dir, out = []) {
@@ -81,9 +82,24 @@ describe('every referenced token is declared (D1)', () => {
     expect(REFERENCED.size).toBeGreaterThan(60);
   });
 
-  it('no production file reads a --v2-* that tokens.css never declares', () => {
+  it('no production file reads a --v2-* that nothing declares', () => {
+    // A token may also be declared locally by the component that owns
+    // it, scoped to its own selector, which is a legitimate pattern:
+    // .v2-tool-card sets --v2-tool-tone per outcome and the glyph, rail
+    // and status word all read it. Those are not global design tokens
+    // and do not belong in tokens.css, so a declaration anywhere under
+    // styles/ counts. What must never happen is a reference that no
+    // sheet declares at all, which renders as the property's initial
+    // value with no warning.
+    const scoped = new Set();
+    for (const file of fs.readdirSync(STYLES_DIR)) {
+      if (!file.endsWith('.css') || file === 'tokens.css') continue;
+      const text = fs.readFileSync(path.join(STYLES_DIR, file), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '');
+      for (const m of text.matchAll(/(--v2-[\w-]+)\s*:/g)) scoped.add(m[1]);
+    }
     const missing = [...REFERENCED.entries()]
-      .filter(([name]) => !DECLARED.includes(name))
+      .filter(([name]) => !DECLARED.includes(name) && !scoped.has(name))
       .map(([name, files]) => `${name} (${[...files].join(', ')})`);
     expect(
       missing,
