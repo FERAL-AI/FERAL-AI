@@ -57,9 +57,26 @@ def applied_migrations() -> set[str]:
 
 
 def pending_migrations() -> list[str]:
-    """Names not yet applied, oldest first."""
+    """Names not yet applied, oldest first.
+
+    A RECURRING migration is excluded. It is a sweep that runs on every
+    boot by design, so counting it as outstanding work would leave
+    `feral migrate --pending` permanently non-empty and doctor
+    permanently yellow, which trains people to ignore both.
+    """
     done = applied_migrations()
-    return [name for name, _ in _discover() if name not in done]
+    out = []
+    for name, path in _discover():
+        if name in done:
+            continue
+        try:
+            if getattr(_load(name, path), "RECURRING", False):
+                continue
+        except Exception:
+            # Unloadable is genuinely outstanding: report it.
+            pass
+        out.append(name)
+    return out
 
 
 def _mark_applied(name: str) -> None:
@@ -102,7 +119,18 @@ def run_pending(dry_run: bool = False) -> list[MigrationResult]:
                 continue
             outcome = migrate()
             detail, changed = _normalise(outcome)
-            _mark_applied(name)
+            # A RECURRING migration is a standing sweep, not a one-time
+            # step, and must never be marked applied.
+            #
+            # The credential sweep is the case that forced this. It runs
+            # before state.init(), and the file it removes is created
+            # LATER IN THE SAME BOOT, lazily, when the vault first
+            # unlocks. So on a fresh install it found nothing, was marked
+            # applied, and could never run again. Measured across four
+            # boots: the plaintext credentials stayed on disk and doctor
+            # reported "Migrations up to date" over them.
+            if not getattr(module, "RECURRING", False):
+                _mark_applied(name)
             results.append(MigrationResult(name, True, detail, changed=changed))
             if changed:
                 logger.info("migration %s: %s", name, detail)

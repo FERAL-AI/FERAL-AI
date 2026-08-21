@@ -65,6 +65,15 @@ def _vault_has(vault, key: str) -> bool:
         return False
 
 
+# This is a sweep, not a one-time step, so the runner never marks it
+# applied. It runs before state.init(), and the file it deletes is
+# written LATER IN THE SAME BOOT by BlindVault._migrate_from_plaintext,
+# lazily, at first unlock. Marked applied on a fresh install it would
+# find nothing, be recorded as done, and never run again, leaving the
+# plaintext credentials it exists to remove on disk forever.
+RECURRING = True
+
+
 def migrate():
     path = _backup_path()
     if not path.exists():

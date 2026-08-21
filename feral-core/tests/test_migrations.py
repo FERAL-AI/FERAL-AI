@@ -257,3 +257,85 @@ class TestMigrationsRunAtBoot:
         source = inspect.getsource(server.startup)
         block = source[source.index("run_pending") - 400:source.index("await state.init()")]
         assert "except Exception" in block, "the migration pass at boot is not guarded"
+
+
+class TestARecurringSweepIsNeverMarkedApplied:
+    """The credential sweep could never run, on the exact install it targets.
+
+    Migrations run before `state.init()`. The file this one deletes,
+    `credentials.json.bak.legacy`, is written LATER IN THE SAME BOOT by
+    `BlindVault._migrate_from_plaintext`, lazily, at first unlock. So on
+    a fresh install the sweep found nothing, the runner marked it
+    applied, and it never ran again. Measured across four boots: the
+    plaintext credentials stayed on disk while `feral doctor` reported
+    "Migrations up to date" over them.
+
+    A sweep is not a one-time step. `RECURRING = True` says so, and the
+    runner must never write a marker for one.
+    """
+
+    def _sweep(self, tmp_path, recurring: bool):
+        mig = tmp_path / "migrations"
+        mig.mkdir(exist_ok=True)
+        (mig / "1700000000_sweep.py").write_text(
+            ("RECURRING = True\n" if recurring else "")
+            + "CALLS = []\n"
+            + "def migrate():\n"
+            + "    CALLS.append(1)\n"
+            + "    return 'nothing to do', False\n"
+        )
+        return mig
+
+    def test_a_recurring_sweep_runs_on_every_boot(self, tmp_path, monkeypatch):
+        import migrations.runner as runner
+
+        mig = self._sweep(tmp_path, recurring=True)
+        monkeypatch.setattr(runner, "migrations_dir", lambda: mig)
+        monkeypatch.setattr(runner, "state_dir", lambda: tmp_path / "state")
+
+        runs = [len(runner.run_pending()) for _ in range(4)]
+        assert runs == [1, 1, 1, 1], (
+            f"a recurring sweep ran {runs} times across four boots; it must "
+            "get its chance on every one"
+        )
+
+    def test_a_recurring_sweep_leaves_no_marker(self, tmp_path, monkeypatch):
+        import migrations.runner as runner
+
+        mig = self._sweep(tmp_path, recurring=True)
+        monkeypatch.setattr(runner, "migrations_dir", lambda: mig)
+        monkeypatch.setattr(runner, "state_dir", lambda: tmp_path / "state")
+        runner.run_pending()
+        assert runner.applied_migrations() == set()
+
+    def test_a_recurring_sweep_is_not_reported_as_outstanding_work(self, tmp_path, monkeypatch):
+        """Otherwise --pending is never empty and doctor is never green."""
+        import migrations.runner as runner
+
+        mig = self._sweep(tmp_path, recurring=True)
+        monkeypatch.setattr(runner, "migrations_dir", lambda: mig)
+        monkeypatch.setattr(runner, "state_dir", lambda: tmp_path / "state")
+        runner.run_pending()
+        assert runner.pending_migrations() == []
+
+    def test_an_ordinary_migration_still_runs_exactly_once(self, tmp_path, monkeypatch):
+        """The change must not turn every migration into a sweep."""
+        import migrations.runner as runner
+
+        mig = self._sweep(tmp_path, recurring=False)
+        monkeypatch.setattr(runner, "migrations_dir", lambda: mig)
+        monkeypatch.setattr(runner, "state_dir", lambda: tmp_path / "state")
+
+        runs = [len(runner.run_pending()) for _ in range(3)]
+        assert runs == [1, 0, 0]
+        assert runner.applied_migrations() == {"1700000000_sweep"}
+
+    def test_the_credential_sweep_declares_itself_recurring(self):
+        """The shipped one, not a fixture: this is the whole point."""
+        from migrations.runner import _discover, _load
+
+        for name, path in _discover():
+            if "retire_legacy_credentials_backup" in name:
+                assert getattr(_load(name, path), "RECURRING", False) is True
+                return
+        raise AssertionError("the credential sweep is no longer in migrations/")
