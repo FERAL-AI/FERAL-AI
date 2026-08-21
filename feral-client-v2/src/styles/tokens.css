@@ -396,6 +396,15 @@
   --v2-accent-gradient:
     linear-gradient(135deg, rgb(var(--p-accent)) 0%, var(--p-accent-deep) 100%);
 
+  /* Light-mode state colours double as *text* on .v2-chip--live,
+   * --loose, --warn and --strict, so they carry the 4.5:1 obligation,
+   * and as the .v2-dot--live / --warn fills. Measured on #F2F3F8:
+   *   live  #1F9D48 3.17:1  ->  #177636 5.15:1
+   *   warn  #B98900 2.85:1  ->  #8B6700 4.69:1
+   *   error #D70015 4.86:1  (already AA, unchanged)
+   * Those corrected values live in --p-live / --p-warn / --p-error in
+   * the palette layer above, so they are written once and stay the only
+   * literal colours in the client. */
   --v2-state-live: rgb(var(--p-live));
   --v2-state-live-soft: rgb(var(--p-live) / 0.14);
   --v2-state-warn: rgb(var(--p-warn));

@@ -13,23 +13,12 @@
 # dedicated PR (per Dependabot's default group behaviour).
 version: 2
 updates:
-# /feral-client (the superseded v1 client) is deliberately NOT listed.
-#
-# It is not being developed: v2 is the default UI, and since the
-# fail-closed change in api/server.py the brain only serves v1 when
-# someone sets FERAL_SERVE_LEGACY_WEBUI=1. Weekly minor/patch PRs against
-# a client nobody is changing are pure review load.
-#
-# This does NOT stop security coverage, and the distinction matters.
-# Dependabot ALERTS are driven by the repository dependency graph, not by
-# this file, so a new advisory against anything in feral-client's
-# lockfile still raises an alert exactly as before. What stops is the
-# routine version-bump PR. Security stays, noise goes.
-#
-# The consequence to accept: v1's dependencies now drift until an
-# advisory forces a manual bump. That is the intended trade for a
-# component in maintenance, and it is revisited if v1 is ever revived or
-# removed outright.
+# /feral-client (the superseded v1 client) used to be excluded here with a
+# note saying the exclusion would be revisited "if v1 is ever revived or
+# removed outright". It was removed outright in 2026.8.12: the directory,
+# its package-lock.json and its CI job are gone, so there is no longer an
+# npm ecosystem at that path for Dependabot to skip, and no lockfile left
+# to raise an advisory against.
 
   - package-ecosystem: npm
     directory: /feral-client-v2

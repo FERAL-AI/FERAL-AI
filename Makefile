@@ -256,14 +256,12 @@ dev-brain: dev-python
 # skipped rather than fatal when npx is unavailable, because a contributor who
 # only touches Python should not be blocked on a 92MB download.
 dev-deps:
-	@for dir in feral-client-v2 feral-client; do \
-		if [ -d "$$dir" ] && command -v npm >/dev/null 2>&1; then \
-			echo "  [deps] $$dir"; \
-			(cd "$$dir" && npm install) || exit 1; \
-		else \
-			echo "  [skip] $$dir npm install (npm not found or directory missing)"; \
-		fi; \
-	done
+	@if [ -d feral-client-v2 ] && command -v npm >/dev/null 2>&1; then \
+		echo "  [deps] feral-client-v2"; \
+		(cd feral-client-v2 && npm install) || exit 1; \
+	else \
+		echo "  [skip] feral-client-v2 npm install (npm not found or directory missing)"; \
+	fi
 	@if [ -d feral-client-v2 ] && command -v npx >/dev/null 2>&1; then \
 		echo "  [deps] playwright chromium"; \
 		(cd feral-client-v2 && npx playwright install chromium) \
@@ -305,7 +303,7 @@ serve:
 	$(FERAL) serve
 
 client:
-	cd feral-client && npm run dev
+	cd feral-client-v2 && npm run dev
 
 # ── Docker (semi-manual tier) ────────────────────────────────
 
@@ -316,9 +314,8 @@ docker:
 	fi
 	docker compose up -d --build
 	@echo ""
-	@echo "  Brain:    http://localhost:9090"
-	@echo "  Client:   http://localhost:3000"
-	@echo "  Registry: http://localhost:8080"
+	@echo "  Brain + dashboard: http://localhost:9090"
+	@echo "  Registry:          http://localhost:8080"
 
 docker-down:
 	docker compose down
@@ -405,11 +402,25 @@ lint:
 doctor:
 	$(FERAL) doctor
 
+# Builds the v2 dashboard into feral-core/webui_v2/, which is the tree the
+# brain actually serves. This target used to run scripts/build_webui.sh,
+# which built the v1 client into feral-core/webui/, while every message
+# that recommends `make bundle-webui` (api/server.py:4898, 4905, 4969,
+# 5009, 5037 and desktop/scripts/stage_bundle.sh:103) is about a missing
+# webui_v2/. Running it therefore never fixed the thing it was suggested
+# for. With feral-client/ deleted the v1 build script is gone too, so the
+# target now does what its callers already claim it does.
 bundle-webui:
-	bash scripts/build_webui.sh
+	bash scripts/build_webui_v2.sh
 
+# `rm -rf feral-core/webui` used to be the first line here. That directory
+# is 15 TRACKED files: the built v1 dashboard the brain still serves as an
+# opt-in fallback (api/server.py:4869-4900, FERAL_SERVE_LEGACY_WEBUI=1,
+# covered by tests/test_webui_legacy_fallback.py). Deleting it left the
+# working tree dirty, and now that feral-client/ is gone there is no
+# longer any script that can rebuild it. `make clean` removes build
+# artifacts; it must not delete committed files.
 clean:
-	rm -rf feral-core/webui
 	rm -rf feral-core/*.egg-info
 	rm -rf feral-core/__pycache__
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
@@ -453,6 +464,6 @@ help:
 	@echo ""
 	@echo "  Utilities:"
 	@echo "    make doctor        check system health"
-	@echo "    make bundle-webui  build client into feral-core/webui/"
+	@echo "    make bundle-webui  build v2 client into feral-core/webui_v2/"
 	@echo "    make clean         remove build artifacts"
 	@echo ""

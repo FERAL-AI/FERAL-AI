@@ -105,15 +105,18 @@ fi
 
 # Step 6: Open browser
 echo ""
-info "Client is at http://localhost:3000"
+# The dashboard used to be a separate nginx container on :3000 built from
+# feral-client/ (the v1 client). That directory and its compose service
+# were removed in 2026.8.12; the brain serves the v2 dashboard itself.
+info "Dashboard is at http://localhost:9090"
 echo ""
 
 if command -v open &>/dev/null; then
-  open "http://localhost:3000"
+  open "http://localhost:9090"
 elif command -v xdg-open &>/dev/null; then
-  xdg-open "http://localhost:3000"
+  xdg-open "http://localhost:9090"
 else
-  echo -e "  ${DIM}Open http://localhost:3000 in your browser${NC}"
+  echo -e "  ${DIM}Open http://localhost:9090 in your browser${NC}"
 fi
 
 echo -e "  ${BOLD}Done!${NC} FERAL is running."

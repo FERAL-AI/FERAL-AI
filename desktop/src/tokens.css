@@ -275,8 +275,8 @@
   --v2-accent-gradient: linear-gradient(135deg, #0066CC 0%, #004C99 100%);
 
   /* The light-mode state colours are used as *text* by .v2-chip--live,
-   * .v2-chip--loose, .v2-chip--warn, .v2-chip--strict and the liveops
-   * tags, so they carry the 4.5:1 obligation too. Measured on #F2F3F8:
+   * .v2-chip--loose, .v2-chip--warn and .v2-chip--strict, so they carry
+   * the 4.5:1 obligation too. Measured on #F2F3F8:
    *   live  #1F9D48 3.17:1  ->  #177636 5.15:1
    *   warn  #B98900 2.85:1  ->  #8B6700 4.69:1
    *   error #D70015 4.86:1  (already AA, unchanged)

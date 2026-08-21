@@ -207,7 +207,7 @@ Railway, Heroku-style).
 
 ## Publishing a bundle (client side)
 
-Use the `feral` CLI from `ASOS/feral-client`:
+Use the `feral` CLI from `ASOS/feral-core`:
 
 ```bash
 feral login                     # opens GitHub OAuth, stores publisher_token locally
