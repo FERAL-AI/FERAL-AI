@@ -2947,8 +2947,21 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     },
                 )
 
+                # `open_session` reports a crash by raising and EVERY
+                # other failure by returning None: an unavailable
+                # realtime proxy, an unrecognised mode, a chained
+                # pipeline whose STT or TTS provider would not
+                # construct. This block used to catch only the crash,
+                # so a None fell through to the "allowed" record below.
+                # The audit row then said a session had opened, the
+                # node was told nothing, and the phone orb sat on
+                # "listening" against a session that did not exist.
+                # Both outcomes are now failures, and both are visible
+                # on both sides.
+                voice_session = None
+                open_error = ""
                 try:
-                    await state.voice_router.open_session(
+                    voice_session = await state.voice_router.open_session(
                         session_id=session_id,
                         mode=selected_mode,
                         provider_opts={
@@ -2963,14 +2976,38 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         "voice_router.open_session failed for mode=%s: %s",
                         selected_mode, exc,
                     )
+                    open_error = str(exc)[:200] or exc.__class__.__name__
+
+                if voice_session is None:
+                    open_error = open_error or (
+                        f"the {selected_mode} backend did not open a session"
+                    )
+                    logger.warning(
+                        "voice_session_start refused for node=%s mode=%s: %s",
+                        node_id, selected_mode, open_error,
+                    )
                     _record_phone_envelope(
                         "error",
                         "voice_session_start",
                         detail={
+                            "reason": "open_session_failed",
                             "mode": selected_mode,
-                            "error": str(exc)[:200],
+                            "stream_id": stream_id,
+                            "session_id": session_id,
+                            "error": open_error,
                         },
                         payload_for_hash=payload_dict,
+                    )
+                    # The router emits `voice_status` for the failures
+                    # it can name. This frame is the one the node can
+                    # always act on, whatever went wrong, so the orb
+                    # leaves "listening" instead of waiting forever.
+                    await _send_protocol_error(
+                        ws,
+                        1099,
+                        f"voice_session_start failed for stream {session_id} "
+                        f"(mode={selected_mode}): {open_error}",
+                        name="voice_session_failed",
                     )
                     continue
 

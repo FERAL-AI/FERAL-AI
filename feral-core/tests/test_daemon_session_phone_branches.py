@@ -163,9 +163,17 @@ def test_voice_session_start_registers_voice_session():
     mock.voice_router = MagicMock()
     # PR #61 wire-up: daemon_session now awaits
     # voice_router.open_session(mode=...) to dispatch to the selected
-    # voice backend. MagicMock's default return isn't awaitable, so
-    # explicitly stub it as AsyncMock returning None.
-    mock.voice_router.open_session = AsyncMock(return_value=None)
+    # voice backend. MagicMock's default return isn't awaitable, so it
+    # has to be stubbed explicitly.
+    #
+    # It used to be stubbed as returning None, which is what the real
+    # router returns on EVERY failure. This test therefore asserted
+    # that a session that never opened is recorded as "allowed", and
+    # stayed green over the defect for as long as it existed. A
+    # successful open returns a session handle, so this stub returns
+    # one; the failure path is pinned in
+    # tests/test_voice_session_start_open_failure.py.
+    mock.voice_router.open_session = AsyncMock(return_value=MagicMock())
 
     with _node_client(mock) as client:
         with client.websocket_connect(f"/v1/node?api_key={_TEST_NODE_KEY}") as ws:
