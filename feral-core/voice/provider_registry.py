@@ -126,16 +126,27 @@ def is_local_provider(kind: str, name: str) -> bool:
 
     Reads the class's own ``is_local`` flag rather than a name list, so
     a community provider that sets the flag is treated correctly
-    without a change here.
+    without a change here. Falls back to the pre-import name sets below,
+    which is the answer the router needs before any provider class has
+    been constructed.
+
+    The name is canonicalised first: the registry keys are
+    ``faster_whisper`` while the spelling an operator is told to use is
+    ``faster-whisper``, and a raw ``registry.get(name)`` misses on that.
     """
+    canon = canonical_provider(kind, name)
     if kind == "stt":
         from voice.stt_providers import _PROVIDER_REGISTRY as registry
+        fallback = LOCAL_STT_PROVIDERS
     elif kind == "tts":
         from voice.tts_providers import _PROVIDER_REGISTRY as registry
+        fallback = LOCAL_TTS_PROVIDERS
     else:
         return False
-    cls = registry.get(name)
-    return bool(getattr(cls, "is_local", False))
+    cls = registry.get(canon)
+    if cls is not None:
+        return bool(getattr(cls, "is_local", False))
+    return canon in fallback
 
 
 #: Names that are local engines even before their module is imported.
@@ -143,6 +154,46 @@ def is_local_provider(kind: str, name: str) -> bool:
 #: all, and that decision happens before any provider is constructed.
 LOCAL_STT_PROVIDERS = frozenset({"whispercpp", "faster_whisper"})
 LOCAL_TTS_PROVIDERS = frozenset({"macos_say", "piper"})
+
+# One engine, several spellings, and they were not all understood in the
+# same place. This module spells it `faster_whisper`;
+# `perception/audio_pipeline.py` spells it `faster-whisper`, and so does
+# the documented `FERAL_STT_PROVIDER` value that an operator actually
+# types. `requires_credential` compared the raw string, so the spelling
+# a user is told to use answered "needs an API key", which made
+# `voice.router._is_local_provider('stt', 'faster-whisper')` False and
+# turned off the privacy refusal that exists to stop a local-only
+# session falling back to a cloud service. Someone who explicitly chose
+# local STT could have their audio sent to a cloud provider with no
+# warning.
+#
+# Aliases resolve to the canonical id; hyphens and underscores are the
+# same character for this purpose.
+_PROVIDER_ALIASES = {
+    "stt": {
+        "local": "faster_whisper",
+        "whisper_local": "faster_whisper",
+        "faster_whisper": "faster_whisper",
+        "whispercpp": "whispercpp",
+        "whisper_cpp": "whispercpp",
+    },
+    "tts": {
+        "local": "piper",
+        "piper": "piper",
+        "macos_say": "macos_say",
+        "say": "macos_say",
+    },
+}
+
+
+def canonical_provider(kind: str, name: str) -> str:
+    """Resolve a provider spelling to the id this module uses.
+
+    Unknown names come back normalised but otherwise untouched, so a
+    cloud provider is never accidentally rewritten into a local one.
+    """
+    normalised = (name or "").strip().lower().replace("-", "_")
+    return _PROVIDER_ALIASES.get(kind, {}).get(normalised, normalised)
 
 
 def requires_credential(kind: str, name: str) -> bool:
@@ -153,8 +204,6 @@ def requires_credential(kind: str, name: str) -> bool:
     did not recognise, so choosing a local STT aborted the session
     demanding a ``DEEPGRAM_API_KEY`` that nothing would ever use.
     """
-    if kind == "stt":
-        return name not in LOCAL_STT_PROVIDERS
-    if kind == "tts":
-        return name not in LOCAL_TTS_PROVIDERS
+    if kind in ("stt", "tts"):
+        return not is_local_provider(kind, name)
     return True
