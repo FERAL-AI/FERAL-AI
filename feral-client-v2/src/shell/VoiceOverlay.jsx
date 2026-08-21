@@ -9,6 +9,24 @@ const PROVIDER_LABEL = {
   'local-whisper': 'Local Whisper + Piper',
 };
 
+// The chained pipeline's VoiceState enum
+// (feral-core/voice/chained_pipeline.py) mapped onto orb modes. Every
+// value here is a mode Orb.jsx actually styles; an unlisted phase falls
+// through to the session-state mapping rather than silently rendering
+// as idle.
+export const PHASE_MODE = {
+  listening: 'listening',
+  processing: 'thinking',
+  speaking: 'speaking',
+  error: 'alerting',
+};
+
+export const PHASE_TEXT = {
+  listening: 'Listening. Speak naturally.',
+  processing: 'Thinking…',
+  speaking: 'Speaking…',
+};
+
 /**
  * VoiceOverlay — desktop voice surface.
  *
@@ -68,20 +86,30 @@ export default function VoiceOverlay() {
     if (!visible) setVariant('docked');
   }, [visible]);
 
+  // The brain's per-turn phase wins when it reports one. Only the
+  // chained pipeline sends `voice_state`; on the realtime path this is
+  // null and the session state below drives the orb, as before.
+  //
+  // `active` used to map to `speaking`, so an open session animated as
+  // if FERAL were talking the entire time it was waiting for the user,
+  // and the `listening` orb mode was never reachable from anywhere.
   const mode =
-    voice.state === 'starting' ? 'thinking' :
-    voice.state === 'reconnecting' ? 'thinking' :
-    voice.state === 'degraded' ? 'alerting' :
-    voice.state === 'active' ? 'speaking' :
-    'idle';
+    PHASE_MODE[voice.phase] ||
+    (voice.state === 'starting' ? 'thinking' :
+     voice.state === 'reconnecting' ? 'thinking' :
+     voice.state === 'degraded' ? 'alerting' :
+     voice.state === 'active' ? 'listening' :
+     'idle');
 
   const providerLabel = PROVIDER_LABEL[voice.provider] || voice.provider || 'Voice';
   const statusText =
-    voice.state === 'starting' ? 'Opening channel…' :
-    voice.state === 'active' ? 'Listening — speak naturally.' :
-    voice.state === 'reconnecting' ? 'Reconnecting…' :
-    voice.state === 'degraded' ? 'Brain socket down — voice paused.' :
-    '';
+    (voice.phase === 'error' && (voice.phaseError || 'Voice failed.')) ||
+    PHASE_TEXT[voice.phase] ||
+    (voice.state === 'starting' ? 'Opening channel…' :
+     voice.state === 'active' ? 'Listening. Speak naturally.' :
+     voice.state === 'reconnecting' ? 'Reconnecting…' :
+     voice.state === 'degraded' ? 'Brain socket down, voice paused.' :
+     '');
 
   const isFullscreen = variant === 'fullscreen';
 

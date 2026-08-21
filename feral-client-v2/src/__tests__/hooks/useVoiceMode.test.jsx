@@ -216,3 +216,75 @@ describe('useVoiceMode brain-frame dispatch', () => {
     expect(fakeSocket.listeners.size).toBe(0);
   });
 });
+
+describe('voice_state (the chained pipeline per-turn phase)', () => {
+  /**
+   * `voice_state` fell through to `default: break;`. Nothing threw and
+   * nothing warned; the desktop UI simply never moved during a chained
+   * session, and a pipeline error was swallowed entirely.
+   *
+   * These drive the real hook with the exact frame
+   * `voice/chained_pipeline.py:_set_state` emits.
+   */
+  it('publishes each phase the pipeline reports', () => {
+    const { result } = renderHook(() => useVoiceMode());
+    for (const phase of ['listening', 'processing', 'speaking']) {
+      act(() => {
+        fakeSocket._dispatch({
+          type: 'voice_state',
+          payload: { state: phase, mode: 'chained' },
+        });
+      });
+      expect(result.current.phase).toBe(phase);
+      expect(result.current.phaseError).toBe('');
+    }
+  });
+
+  it('surfaces the error text rather than dropping it', () => {
+    const { result } = renderHook(() => useVoiceMode());
+    act(() => {
+      fakeSocket._dispatch({
+        type: 'voice_state',
+        payload: { state: 'error', mode: 'chained', error: 'piper voice missing' },
+      });
+    });
+    expect(result.current.phase).toBe('error');
+    expect(result.current.phaseError).toBe('piper voice missing');
+  });
+
+  it('still says something when an error arrives with no text', () => {
+    const { result } = renderHook(() => useVoiceMode());
+    act(() => {
+      fakeSocket._dispatch({ type: 'voice_state', payload: { state: 'error' } });
+    });
+    expect(result.current.phaseError).toBeTruthy();
+  });
+
+  it('clears the error once the pipeline recovers', () => {
+    const { result } = renderHook(() => useVoiceMode());
+    act(() => {
+      fakeSocket._dispatch({ type: 'voice_state', payload: { state: 'error', error: 'x' } });
+    });
+    act(() => {
+      fakeSocket._dispatch({ type: 'voice_state', payload: { state: 'listening' } });
+    });
+    expect(result.current.phase).toBe('listening');
+    expect(result.current.phaseError).toBe('');
+  });
+
+  it('starts with no phase, so the realtime path is unaffected', () => {
+    // Only the chained pipeline sends this frame. On realtime the phase
+    // stays null and the session-state mapping drives the orb, exactly
+    // as it did before.
+    const { result } = renderHook(() => useVoiceMode());
+    expect(result.current.phase).toBe(null);
+  });
+
+  it('does not choke on a frame with no payload', () => {
+    const { result } = renderHook(() => useVoiceMode());
+    act(() => {
+      fakeSocket._dispatch({ type: 'voice_state' });
+    });
+    expect(result.current.phase).toBe(null);
+  });
+});

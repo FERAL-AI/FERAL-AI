@@ -27,6 +27,12 @@ export function useVoiceMode() {
   // insufficient_quota) so clients can render a banner instead of
   // going mute. Shape mirrors `feral-core/models/protocol.py:VoiceStatusPayload`.
   const [voiceStatus, setVoiceStatus] = useState(null);
+  // Per-turn phase from the brain's `voice_state` frame: idle,
+  // listening, processing, speaking or error. Null while nothing has
+  // reported one, which is the realtime path, where the engine drives
+  // the phase locally instead.
+  const [phase, setPhase] = useState(null);
+  const [phaseError, setPhaseError] = useState('');
 
   useEffect(() => {
     (async () => {
@@ -76,6 +82,24 @@ export function useVoiceMode() {
           // never populated and VoiceOverlay's caption stayed empty.
           if (engine?.handleTranscript) engine.handleTranscript(msg.payload || {});
           break;
+        case 'voice_state': {
+          // The per-turn conversational phase, which is a different
+          // question from `voice_status` (provider health) and from
+          // `state` (is a session open at all).
+          //
+          // On the realtime path RealtimeVoiceEngine drives the phase
+          // locally. On the chained path nothing does: this frame is
+          // the only source, and it was falling through to `default`
+          // and being dropped. The consequence was that a chained
+          // session showed "Listening" for its whole duration, while
+          // FERAL was thinking and then speaking, and a pipeline error
+          // never reached the screen at all.
+          const payload = msg.payload || {};
+          const next = String(payload.state || '');
+          setPhase(next || null);
+          setPhaseError(next === 'error' ? (payload.error || 'Voice failed.') : '');
+          break;
+        }
         case 'voice_status': {
           const payload = msg.payload || {};
           if ((payload.state || 'available') === 'available') {
@@ -105,6 +129,10 @@ export function useVoiceMode() {
     }
     setState('starting');
     setTranscript('');
+    // A phase left over from the last session would show the new one
+    // as "speaking" before a word has been said.
+    setPhase(null);
+    setPhaseError('');
     try {
       const engine = new RealtimeVoiceEngine(socket.ws, {
         onStateChange: (s) => setState(s === 'active' ? 'active' : s),
@@ -133,6 +161,8 @@ export function useVoiceMode() {
       engineRef.current = null;
     }
     setState('ended');
+    setPhase(null);
+    setPhaseError('');
     setTimeout(() => setState('off'), 220);
   }, []);
 
@@ -147,6 +177,8 @@ export function useVoiceMode() {
     setProvider,
     transcript,
     voiceStatus,
+    phase,
+    phaseError,
     active: state === 'active' || state === 'starting' || state === 'reconnecting',
     start,
     stop,
