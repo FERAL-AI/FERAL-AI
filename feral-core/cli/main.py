@@ -86,6 +86,10 @@ from config.runtime import (
 #   * ``tests/test_cli_no_phantom_commands.py`` (docs↔CLI parity)
 # Update both lists when adding a new top-level command.
 PURE_LOCAL_SUBCOMMANDS = frozenset({
+    # `migrate` reads and rewrites files under ~/.feral and talks to the
+    # OS keychain through the vault. No socket: verified by running it
+    # under a connect spy, which recorded none.
+    "migrate",
     "doctor", "setup", "key", "grant", "access", "pair",
     "voice", "models", "integrations", "checkpoints",
     "install-service", "uninstall-service",
@@ -1526,6 +1530,46 @@ def _check_configured_ollama_model(_pass, _info, _warn, _fail) -> None:
     )
 
 
+def cmd_migrate(pending_only: bool = False) -> int:
+    """Apply outstanding ~/.feral shape changes, or list them.
+
+    Exit codes follow omarchy's `--pending`: 0 when there is something to
+    report, 1 when there is not, so a shell can branch on it.
+    """
+    from migrations import pending_migrations, run_pending
+
+    if pending_only:
+        names = pending_migrations()
+        if not names:
+            print("No pending migrations.")
+            return 1
+        for name in names:
+            print(name)
+        return 0
+
+    results = run_pending()
+    if not results:
+        print("No pending migrations.")
+        return 0
+
+    failed = 0
+    for r in results:
+        if not r.ok:
+            failed += 1
+            print(f"  FAILED   {r.name}: {r.detail}")
+        elif r.changed:
+            print(f"  applied  {r.name}: {r.detail}")
+        else:
+            print(f"  no-op    {r.name}: {r.detail}")
+
+    if failed:
+        # Not an error state worth a non-zero exit on its own: a migration
+        # that cannot run today runs tomorrow, and the marker is absent so
+        # it will be retried. Say so plainly instead.
+        print(f"\n{failed} migration(s) deferred and will be retried on the next run.")
+    return 0
+
+
 def cmd_doctor():
     """Run comprehensive diagnostics and report what's working."""
     try:
@@ -1657,6 +1701,31 @@ def cmd_doctor():
     # rides in the detail line instead, for the one reason that survived
     # measurement, which is resident memory on a large store.
     try:
+        # Outstanding migrations. An install carrying pending shape
+        # changes is not broken, but it is not finished either, and until
+        # this row existed there was no way to know either way.
+        try:
+            from migrations import pending_migrations as _pending_migrations
+            _pending = _pending_migrations()
+            if _pending:
+                # _info, not _warn. The brain applies these itself at boot,
+                # so this is "will happen", not "you must do something",
+                # which is exactly the tier _info was added for. Warning
+                # here also broke the rule that a clean install shows no
+                # warnings on first boot: a fresh home has every migration
+                # outstanding and none of them has anything to do.
+                _info(
+                    "Migrations",
+                    f"{len(_pending)} will be applied on the next brain start: "
+                    + ", ".join(_pending[:3])
+                    + (" ..." if len(_pending) > 3 else "")
+                    + ". Run `feral migrate` to apply them now.",
+                )
+            else:
+                _pass("Migrations", "up to date")
+        except Exception as _mig_exc:
+            _info("Migrations", f"could not be checked: {_mig_exc}")
+
         # Free space. Nothing in the brain checked this before, and a full
         # volume presents as a slow machine rather than as an error: the
         # memory store, the embedding queue, screen captures and background
@@ -3561,6 +3630,9 @@ def _main():
 
     # feral doctor
     sub.add_parser("doctor", help="Run diagnostics — check deps, keys, brain health")
+    _migrate = sub.add_parser("migrate", help="Apply outstanding ~/.feral shape changes")
+    _migrate.add_argument("--pending", action="store_true",
+                          help="List what is outstanding without applying anything")
 
     # feral status / devices / skills / identity
     sub.add_parser("status", help="Show system health")
@@ -3835,6 +3907,8 @@ def _main():
         )
     elif args.subcommand == "doctor":
         cmd_doctor()
+    elif args.subcommand == "migrate":
+        sys.exit(cmd_migrate(pending_only=bool(getattr(args, "pending", False))))
     elif args.subcommand == "status":
         cmd_status()
     elif args.subcommand == "devices":

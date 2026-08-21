@@ -1299,6 +1299,22 @@ async def refresh_provider_catalog_once(catalog, consecutive_failures: int) -> i
 async def startup():
     check_local_bypass_safety()
 
+    # Apply outstanding ~/.feral shape changes before anything reads from
+    # it. Runs before state.init() on purpose: a migration exists to make
+    # the store safe to open, so applying it afterwards is too late.
+    # Never fatal. A migration that cannot run leaves no marker and is
+    # retried on the next boot, and a brain that refuses to start because
+    # of one is worse than the shape change it was fixing.
+    try:
+        from migrations import run_pending as _run_migrations
+        for _mig in _run_migrations():
+            if not _mig.ok:
+                logger.warning("migration %s deferred: %s", _mig.name, _mig.detail)
+            elif _mig.changed:
+                logger.info("migration %s: %s", _mig.name, _mig.detail)
+    except Exception:
+        logger.warning("migration pass failed; continuing boot", exc_info=True)
+
     await state.init()
     if state.memory:
         state.memory.start_background_tasks()
