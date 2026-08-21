@@ -20,11 +20,14 @@ Environment variables:
 """
 
 from __future__ import annotations
+import array
 import asyncio
 import base64
 import io
 import logging
+import math
 import os
+import sys
 import time
 import wave
 from typing import Optional
@@ -425,7 +428,12 @@ class AudioPipeline:
         completed = buf.flush() if buf.vad_triggered() else b""
 
         buf.append(chunk_bytes, encoding, sample_rate)
-        if is_final:
+        # The packet-gap check above only fires when a client stops
+        # sending. Every real client streams continuously, so these two
+        # are what actually end an utterance in practice: the audio went
+        # quiet, or it has run long enough that waiting for a pause is no
+        # longer reasonable.
+        if is_final or buf.speech_ended() or buf.overflowing():
             completed += buf.flush()
 
         if not completed or len(completed) < 1000:
@@ -690,8 +698,92 @@ class AudioPipeline:
 #  Audio buffer / VAD
 # ---------------------------------------------------------------------------
 
+# A speaker who never pauses still has to be transcribed. Beyond this
+# much buffered audio the utterance is cut and sent regardless of what
+# the VAD thinks, so a continuous stream always makes progress.
+MAX_UTTERANCE_SEC = 12.0
+
+# RMS below this (on PCM16, whose full scale is 32768) counts as silence.
+# Room tone on a laptop mic sits well under 300; speech is thousands.
+SILENCE_RMS = 300.0
+
+# Silence this long ends an utterance. Shorter than the packet-gap
+# threshold because this measures real silence, not a stalled network.
+SILENCE_END_SEC = 0.8
+
+# Below this much *voiced* audio there is nothing worth sending to STT.
+MIN_VOICED_BYTES = 4000
+
+# Fallback bytes-per-second for compressed encodings, so a duration
+# ceiling still exists for them. Opus at a voice bitrate is roughly
+# 4 KB/s; being wrong here only shifts when the backstop cuts, and the
+# backstop is far better than never cutting at all.
+_ASSUMED_COMPRESSED_BPS = 4000
+
+
+def _is_pcm16(encoding: str) -> bool:
+    return (encoding or "").lower() in ("pcm16", "pcm", "linear16")
+
+
+def _chunk_duration_sec(chunk: bytes, encoding: str, sample_rate: int) -> float:
+    """How much wall-clock audio a chunk holds.
+
+    Exact for PCM16, where it is just bytes over (rate * 2 bytes per
+    mono sample). Estimated for anything compressed, which is only used
+    to decide when to cut an over-long utterance.
+    """
+    if not chunk:
+        return 0.0
+    if _is_pcm16(encoding):
+        rate = int(sample_rate or 16000) or 16000
+        return len(chunk) / float(rate * 2)
+    return len(chunk) / float(_ASSUMED_COMPRESSED_BPS)
+
+
+def _is_silent(chunk: bytes, encoding: str) -> bool:
+    """True when a PCM16 chunk is quiet enough to count as silence.
+
+    Compressed audio always answers False: its bytes are not samples, so
+    any RMS computed over them is noise. Those encodings fall back to
+    the packet-gap boundary and the duration ceiling.
+    """
+    if not _is_pcm16(encoding) or len(chunk) < 2:
+        return False
+    samples = array.array("h")
+    # An odd trailing byte is not a whole sample; drop it rather than
+    # letting frombytes raise on the length check.
+    samples.frombytes(chunk[: len(chunk) - (len(chunk) % 2)])
+    if not samples:
+        return False
+    if sys.byteorder == "big":
+        samples.byteswap()
+    total = 0
+    for s in samples:
+        total += s * s
+    return math.sqrt(total / len(samples)) < SILENCE_RMS
+
+
 class AudioBuffer:
-    """Per-session audio chunk accumulator with simple energy-based VAD."""
+    """Per-session audio chunk accumulator with energy-based VAD.
+
+    Two independent boundaries end an utterance, because they catch two
+    different clients:
+
+    * a **packet gap**, for a device that stops sending when the user
+      stops talking, and
+    * **silence in the audio**, for a client that streams continuously.
+
+    Only the first existed, and the docstring called it "energy-based"
+    while no energy was ever computed. Every real client streams
+    continuously at 100ms (BrowserNode, voiceRealtime and
+    usePerceptionShare all send ``pcm16`` back to back), so
+    ``_last_chunk_time`` was refreshed before the gap could ever elapse
+    and the only thing that flushed the buffer was ``is_final``. A HUP
+    ``audio_frame`` has no ``is_final`` field at all, so on the device
+    path nothing was transcribed, ever. Measured before this change: 50
+    chunks, 5.0s of audio, 0 calls to ``_transcribe``, 160,000 bytes
+    still resident.
+    """
 
     def __init__(self, session_id: str):
         self.session_id = session_id
@@ -701,6 +793,9 @@ class AudioBuffer:
         self._last_chunk_time = time.time()
         self._silence_threshold_sec = 1.5
         self._total_bytes = 0
+        self._duration_sec = 0.0
+        self._silent_run_sec = 0.0
+        self._voiced_bytes = 0
 
     def append(self, chunk: bytes, encoding: str, sample_rate: int):
         self._chunks.append(chunk)
@@ -708,6 +803,44 @@ class AudioBuffer:
         self._sample_rate = sample_rate
         self._last_chunk_time = time.time()
         self._total_bytes += len(chunk)
+
+        secs = _chunk_duration_sec(chunk, encoding, sample_rate)
+        self._duration_sec += secs
+        if _is_silent(chunk, encoding):
+            self._silent_run_sec += secs
+        else:
+            self._silent_run_sec = 0.0
+            self._voiced_bytes += len(chunk)
+
+    @property
+    def duration_sec(self) -> float:
+        """Seconds of audio held. Exact for PCM16, estimated otherwise."""
+        return self._duration_sec
+
+    @property
+    def voiced_bytes(self) -> int:
+        return self._voiced_bytes
+
+    def speech_ended(self) -> bool:
+        """True when the audio itself has gone quiet after real speech.
+
+        Unlike :meth:`vad_triggered` this reads the samples, so it fires
+        on a continuously streaming client. It deliberately requires
+        voiced audio first, or a silent room would flush an empty buffer
+        into STT every second.
+        """
+        return (
+            self._silent_run_sec >= SILENCE_END_SEC
+            and self._voiced_bytes >= MIN_VOICED_BYTES
+        )
+
+    def overflowing(self) -> bool:
+        """True when the utterance has run long enough to cut it.
+
+        The backstop for someone who does not pause, and for any encoding
+        whose silence cannot be measured.
+        """
+        return self._duration_sec >= MAX_UTTERANCE_SEC
 
     @property
     def pending_bytes(self) -> int:
@@ -732,4 +865,7 @@ class AudioBuffer:
         audio = b"".join(self._chunks)
         self._chunks.clear()
         self._total_bytes = 0
+        self._duration_sec = 0.0
+        self._silent_run_sec = 0.0
+        self._voiced_bytes = 0
         return audio
