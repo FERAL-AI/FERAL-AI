@@ -3,6 +3,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { Command } from 'lucide-react';
 import { DOCK_ITEMS, isPaletteOnlyPath } from './navigation';
 import { useCommandPalette } from './PaletteContext';
+import { useMachineVitals } from '../hooks/useMachineVitals';
 
 /**
  * Bottom dock — the eight pinned destinations plus the palette button.
@@ -21,6 +22,22 @@ import { useCommandPalette } from './PaletteContext';
 export default function Dock() {
   const location = useLocation();
   const { open, togglePalette } = useCommandPalette();
+  const vitals = useMachineVitals();
+
+  // The design's dock does more than magnify: "Jobs breathes with a fill
+  // and a ring while something runs". A tile reports the state of what
+  // it leads to, so you can see the machine working without opening
+  // anything. Only two tiles have a live state to report.
+  const tileState = (to) => {
+    if (to === '/jobs' && vitals.running > 0) return 'busy';
+    if (to === '/approvals' && vitals.needs > 0) return 'needs';
+    return '';
+  };
+  const tileCount = (to) => {
+    if (to === '/jobs') return vitals.running;
+    if (to === '/approvals') return vitals.needs;
+    return 0;
+  };
 
   const paletteActive = isPaletteOnlyPath(location.pathname);
 
@@ -35,10 +52,16 @@ export default function Dock() {
               className={({ isActive }) =>
                 `v2-dock-btn${isActive ? ' is-active' : ''}`
               }
-              title={label}
+              data-state={tileState(to)}
+              title={tileCount(to) > 0 ? `${label} (${tileCount(to)})` : label}
             >
+              <span className="v2-dock-ring" aria-hidden="true" />
+              <span className="v2-dock-fill" aria-hidden="true" />
               <Icon size={20} aria-hidden="true" />
               <span className="v2-dock-label">{label}</span>
+              {tileCount(to) > 0 && (
+                <span className="v2-dock-count" aria-hidden="true">{tileCount(to)}</span>
+              )}
             </NavLink>
           </li>
         ))}

@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Mic, MicOff, Sun, Moon } from 'lucide-react';
-import { apiJson } from '../lib/api';
 import { useTheme } from '../hooks/useTheme';
+import { useMachineVitals } from '../hooks/useMachineVitals';
 import { useVoice } from './VoiceContext';
 
 /**
@@ -21,8 +21,6 @@ import { useVoice } from './VoiceContext';
  * what is true rather than what was intended: this codebase's dominant
  * defect class is a surface that claims success while doing nothing.
  */
-
-const POLL_MS = 5000;
 
 /** 12400 -> "12.4k". Tokens run large and the bar is narrow. */
 export function compact(n) {
@@ -44,44 +42,8 @@ export default function SystemBar({ onOpenPalette }) {
   const navigate = useNavigate();
   const { theme, toggle: toggleTheme } = useTheme();
   const voice = useVoice();
-  const [v, setV] = useState({
-    shells: 0, needs: 0, tokens: 0, devices: 0, cost: 0, autonomy: '',
-  });
-  const timer = useRef(null);
-
-  const load = useCallback(async () => {
-    const [jobs, approvals, dash] = await Promise.allSettled([
-      apiJson('/api/jobs?limit=60'),
-      apiJson('/api/approvals'),
-      apiJson('/api/dashboard'),
-    ]);
-    setV((prev) => {
-      const next = { ...prev };
-      if (jobs.status === 'fulfilled') {
-        const items = Array.isArray(jobs.value?.items) ? jobs.value.items : [];
-        next.shells = items.filter(
-          (i) => i.kind === 'background_bash' && i.status === 'running',
-        ).length;
-      }
-      if (approvals.status === 'fulfilled') {
-        next.needs = Number(approvals.value?.count || 0);
-      }
-      if (dash.status === 'fulfilled') {
-        const d = dash.value || {};
-        next.devices = Number(d.online_count ?? d.device_count ?? 0);
-        next.tokens = Number(d.memory?.tokens ?? d.tokens_used ?? 0);
-        next.cost = Number(d.cost_today ?? d.spend_today ?? 0);
-        next.autonomy = String(d.autonomy || d.health?.autonomy_mode || '');
-      }
-      return next;
-    });
-  }, []);
-
-  useEffect(() => {
-    load();
-    timer.current = setInterval(load, POLL_MS);
-    return () => clearInterval(timer.current);
-  }, [load]);
+  // One shared poller, not a second copy of the same three requests.
+  const v = useMachineVitals();
 
   // Only render a vital that has something to say. A bar of zeroes is
   // noise, and the design's bar is sparse for that reason.

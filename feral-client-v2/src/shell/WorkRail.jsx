@@ -52,6 +52,16 @@ export function elapsed(startedAt, now = Date.now() / 1000) {
   return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
 }
 
+/** A timeline row's one-line label, from the shape the brain sends. */
+export function recentTitle(entry) {
+  const t = String(entry?.title || '').trim();
+  if (t) return t.slice(0, 38);
+  // `type` is the only other field guaranteed present, and it reads as
+  // an identifier, so make it legible rather than printing memory_error.
+  const kind = String(entry?.type || 'activity').replace(/_/g, ' ');
+  return kind.charAt(0).toUpperCase() + kind.slice(1);
+}
+
 export default function WorkRail() {
   const navigate = useNavigate();
   const [needs, setNeeds] = useState([]);
@@ -77,7 +87,11 @@ export default function WorkRail() {
       setRunning(items.filter((i) => i.status === 'running' || i.status === 'connected'));
     }
     if (t.status === 'fulfilled') {
-      const rows = t.value?.events || t.value?.items || t.value?.entries || [];
+      // Verified against the running brain: GET /api/timeline answers
+      // {count, days, entries}, and a row is
+      // {type, timestamp, title, content, metadata}. The id lives under
+      // metadata, not at the top level.
+      const rows = t.value?.entries;
       setRecent(Array.isArray(rows) ? rows.slice(0, 5) : []);
     }
   }, []);
@@ -174,12 +188,14 @@ export default function WorkRail() {
         {recent.length === 0 && <p className="v2-rail-quiet">Nothing yet.</p>}
         {recent.map((e, i) => (
           <button
-            key={e.id || e.event_id || i}
+            key={e?.metadata?.id || `${e?.timestamp || ''}-${i}`}
             type="button"
             className="v2-rail-recent"
             onClick={() => navigate('/timeline')}
+            title={e?.content || e?.title || ''}
           >
-            {String(e.title || e.summary || e.type || e.event_type || 'activity').slice(0, 44)}
+            <span className="v2-rail-recent-t">{recentTitle(e)}</span>
+            {e?.timestamp ? <span className="v2-rail-recent-w">{elapsed(e.timestamp)}</span> : null}
           </button>
         ))}
       </section>

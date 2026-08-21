@@ -1362,3 +1362,79 @@
   --v2-menubar-height: 0px;
   --v2-sysbar-height: 34px;
 }
+.v2-rail-recent { display: flex; align-items: baseline; gap: 6px; width: 100%; }
+.v2-rail-recent-t { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v2-rail-recent-w { flex: none; font-variant-numeric: tabular-nums; opacity: 0.7; }
+
+/* ── Dock tiles that report live state ─────────────────────────
+   The design: "Jobs breathes with a fill and a ring while something
+   runs." A tile reports the state of what it leads to, so the machine
+   is legible from the dock without opening anything.
+
+   Keyframes are the mockup's: breathe 52% -> 78%, ring rotating. */
+.v2-dock-btn { position: relative; overflow: hidden; isolation: isolate; }
+.v2-dock-btn > svg, .v2-dock-label { position: relative; z-index: 2; }
+
+.v2-dock-fill {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  /* Anchored by `top`, not `height`. A percentage height on an
+     absolutely positioned child resolves against a containing block
+     with a DEFINITE height; .v2-dock-btn is a flex item sized by its
+     content, so `height: 100%` computed to auto and, with only `bottom`
+     set, collapsed to the content height of an empty span: 0px.
+     Measured in Chrome, the needs fill had the right colour and no
+     height at all. `top` has no such dependency. */
+  top: 100%;
+  z-index: 1;
+  background: var(--v2-accent-soft);
+  transition: top 400ms var(--v2-ease-out);
+  pointer-events: none;
+}
+.v2-dock-ring {
+  position: absolute;
+  inset: -3px;
+  border-radius: 15px;
+  border: 1.5px solid transparent;
+  z-index: 0;
+  pointer-events: none;
+}
+.v2-dock-btn[data-state="busy"] .v2-dock-fill {
+  top: 38%;
+  animation: v2-dock-breathe 2.4s var(--v2-ease-out) infinite;
+}
+.v2-dock-btn[data-state="busy"] .v2-dock-ring {
+  border-color: var(--v2-accent);
+  opacity: 0.5;
+  animation: v2-dock-spin 2.2s linear infinite;
+}
+.v2-dock-btn[data-state="needs"] .v2-dock-fill {
+  top: 0;
+  background: var(--v2-state-warn-soft);
+}
+.v2-dock-count {
+  position: absolute;
+  top: 2px; right: 4px;
+  z-index: 2;
+  min-width: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  background: var(--v2-state-warn);
+  color: var(--v2-text-inverse);
+}
+.v2-dock-btn[data-state="busy"] .v2-dock-count { background: var(--v2-accent); }
+
+/* The mockup's 52% -> 78% fill, expressed as the top edge. */
+@keyframes v2-dock-breathe { 0%, 100% { top: 48%; } 50% { top: 22%; } }
+@keyframes v2-dock-spin { to { transform: rotate(360deg); } }
+
+/* An animated dock is a distraction for anyone who asked for stillness.
+   The state still reads: the fill and the ring stay, they just hold. */
+@media (prefers-reduced-motion: reduce) {
+  .v2-dock-btn[data-state="busy"] .v2-dock-fill,
+  .v2-dock-btn[data-state="busy"] .v2-dock-ring { animation: none; }
+}
