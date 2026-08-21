@@ -409,6 +409,21 @@ class TestDoctorSeverityAllowlist:
 # ── 3. Behaviour test (end-to-end run of cmd_doctor) ──────────────────
 
 
+def _config_override_env_names() -> set[str]:
+    """Every env var ``ConfigLoader._apply_env_overrides`` maps to a setting.
+
+    The mapping is a dict local to that method, so it cannot be
+    imported. Reading the names out of the source keeps this in step
+    with it; a stale hand-written copy is what would let this rot.
+    ``FERAL_HOME`` is deliberately excluded: the fixture sets it.
+    """
+    src = CLI_MAIN_PATH.parent.parent / "config" / "loader.py"
+    names = set(re.findall(r'"([A-Z][A-Z0-9_]*)":\s*\(', src.read_text()))
+    names.discard("FERAL_HOME")
+    return names
+
+
+
 @pytest.fixture
 def doctor_clean_env(monkeypatch, tmp_path):
     """A FERAL_HOME with no memory DB, no USER.md, no workspace grants,
@@ -429,6 +444,29 @@ def doctor_clean_env(monkeypatch, tmp_path):
         "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
         "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY",
     ):
+        monkeypatch.delenv(k, raising=False)
+
+    # And every config override, because a fresh install has none of
+    # those either. Setting FERAL_HOME alone does not make the process
+    # look fresh: ``ConfigLoader`` publishes the merged settings back
+    # into ``os.environ`` by design (``export_as_env``), and env beats
+    # settings.json, so any earlier test that wrote a setting leaves it
+    # overriding this fixture's empty home for the rest of the session.
+    #
+    # Measured in the full suite: ``FERAL_TTS_PROVIDER`` survived as
+    # "piper", so doctor reported
+    #
+    #     Local TTS (piper)  selected as your TTS provider but no voice
+    #     is downloaded, so voice replies produce no audio
+    #
+    # against a home that had never selected anything. The test failed
+    # in the full run and passed alone, which is the signature of
+    # exactly this. It reproduces on an untouched tree.
+    #
+    # The names are read out of the loader's own override table rather
+    # than restated here, so adding an override there cannot silently
+    # drift from this list.
+    for k in _config_override_env_names():
         monkeypatch.delenv(k, raising=False)
 
     # Ollama probe — return a fake "running" so the LLM-credentials
