@@ -496,7 +496,23 @@
    inset:0, no focus trap. */
 .v2-voice-overlay--docked {
   right: 20px;
-  bottom: 20px;
+  /* Sits in the dock strip, which is the only space it fits in.
+     Measured at 1680x878: the composer ends at y=786 and the dock
+     starts at y=806, so there are 20px of clear space and the pill is
+     74.5px tall. It cannot be moved out of the way; it can only be
+     stopped from growing into the composer.
+
+     Anchored to the bottom, so height grows upward. With bottom:20px
+     its top sat 4.8px under the composer, and a single line of status
+     text took that to -0.9px. Six lines reached within 0.1px of the
+     Send button.
+
+     bottom + max-height is now the whole budget: the top edge can
+     never rise above (viewport - 8 - 84) = the composer's bottom edge,
+     whatever the status text says. */
+  bottom: 8px;
+  max-height: calc(var(--v2-dock-height) + 12px);
+  overflow: hidden;
   left: auto;
   top: auto;
   flex-direction: row;
