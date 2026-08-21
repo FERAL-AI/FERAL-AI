@@ -1819,6 +1819,16 @@ class VoiceRouter:
             await self._emit_voice_status(
                 session_id, self._current_status_meta(session_id),
             )
+        # A new attempt supersedes the last one's verdict, and it has to
+        # be dropped here rather than on success: `_report_open_failure`
+        # refuses to overwrite a status set closer to the failure, which
+        # is right within one attempt and wrong across two. Left in
+        # place, a session that failed once and then succeeded keeps the
+        # unavailable meta for as long as it lives, and the next mute
+        # toggle republishes it (`_current_status_meta`) over a working
+        # session. Emitted after the mute frame above so that frame
+        # still reports the state the session was actually in.
+        self._session_degraded.pop(session_id, None)
         if mode == "openai_realtime":
             if not self._realtime or not self._realtime.available:
                 logger.warning("openai_realtime requested but proxy unavailable")

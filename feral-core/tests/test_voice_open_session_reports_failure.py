@@ -125,19 +125,46 @@ async def test_realtime_start_failure_that_morphed_returns_the_live_session():
 
 
 @pytest.mark.asyncio
+async def test_a_later_success_clears_the_earlier_failure():
+    """A retry that works must not inherit the last attempt's verdict.
+
+    ``_session_degraded`` is what ``_current_status_meta`` republishes
+    on every mute toggle, so a stale unavailable entry would fly the
+    failure banner over a session that is working.
+    """
+    proxy = MagicMock(available=True)
+    proxy.start_session = AsyncMock(return_value=None)
+    router, send = _router(realtime_proxy=proxy)
+
+    assert await router.open_session("sess-g", "openai_realtime") is None
+    assert router.is_session_degraded("sess-g") is True
+
+    handle = MagicMock()
+    proxy.start_session = AsyncMock(return_value=handle)
+    assert await router.open_session("sess-g", "openai_realtime") is handle
+
+    assert router.is_session_degraded("sess-g") is False
+    assert router._current_status_meta("sess-g")["state"] == "available"
+
+
+@pytest.mark.asyncio
 async def test_open_failure_does_not_overwrite_a_more_specific_status():
     """``_construct_provider`` names the engine; keep that, not a generic tag."""
     router, send = _router()
     router._chained = MagicMock()
     router._chained.get_session = MagicMock(return_value=None)
-    router.open_chained_session = AsyncMock(return_value=None)
-    router._session_degraded["sess-f"] = {
-        "state": "unavailable",
-        "reason": "local_stt_unavailable",
-        "provider": "",
-        "fallback_provider": "",
-        "detail": "faster_whisper: weights missing",
-    }
+
+    async def _refuse(session_id, opts=None):
+        # What `_construct_provider` does when a local engine cannot be
+        # built: names the engine and the reason, then returns None.
+        await router.emit_unavailable(
+            session_id,
+            reason="local_stt_unavailable",
+            detail="faster_whisper: weights missing",
+        )
+        return None
+
+    router.open_chained_session = AsyncMock(side_effect=_refuse)
 
     result = await router.open_session("sess-f", "chained")
 
