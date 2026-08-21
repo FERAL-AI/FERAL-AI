@@ -897,3 +897,85 @@
   text-decoration: line-through;
 }
 .v2-todo--in_progress .v2-todo__text { font-weight: 600; }
+
+/* ── Tool cards, to the approved instrument-panel design ───────
+   The mockup's tool row is a three-column grid, mono throughout, dense:
+   a 19px glyph, the tool name and its main argument sharing the middle
+   on one baseline, and the duration hard right on tabular figures.
+
+   Grid rather than flex is what makes a column of these line up: with
+   flex the name and duration sat at whatever x the previous row's text
+   happened to end at, so a stack of calls read as ragged. */
+.v2-tool-card__head {
+  display: grid;
+  grid-template-columns: 19px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  padding: 7px 10px;
+  min-height: 28px;
+  font-size: 11.5px;
+}
+.v2-tool-card__icon {
+  width: 19px;
+  height: 19px;
+  display: grid;
+  place-items: center;
+}
+.v2-tool-card__label {
+  font-family: var(--v2-font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--v2-text-primary);
+}
+/* Name and argument share the middle column on one baseline. */
+.v2-tool-card__head > .v2-tool-card__label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.v2-tool-card__summary {
+  font-family: var(--v2-font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--v2-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.v2-tool-card__lat {
+  margin-left: 0;
+  font-family: var(--v2-font-mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  color: var(--v2-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Body: a caption strip over the payload, on the page ground so it
+   reads as output rather than as more chrome. */
+.v2-tool-card__body { border-top: 1px solid var(--v2-hairline); background: var(--v2-bg-base); }
+.v2-tool-card__cap {
+  font-family: var(--v2-font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--v2-hairline);
+}
+.v2-tool-card__pre {
+  font-family: var(--v2-font-mono);
+  font-size: 10.5px;
+  line-height: 1.7;
+  padding: 8px 10px;
+  color: var(--v2-text-secondary);
+  overflow-x: auto;
+  letter-spacing: 0;
+}
+/* An accessibility tree is the one payload with real structure, so the
+   node id and the role are coloured and the label is left plain. */
+.v2-tool-card__ax { color: var(--v2-text-primary); font-weight: 500; }
+.v2-tool-card__role { color: var(--v2-accent); }
