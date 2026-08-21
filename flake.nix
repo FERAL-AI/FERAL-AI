@@ -44,11 +44,15 @@
           packages = rec {
             feral-brain = feralPythonPackage;
 
+            # Repointed at feral-client-v2 when feral-client/ (v1) was
+            # deleted in 2026.8.12. The attribute and app names are kept
+            # so `nix run .#client` and `nix build .#feral-client` do not
+            # break for anyone who has them in a script.
             feral-client = pkgs.writeShellApplication {
               name = "feral-client";
               runtimeInputs = [ node ];
               text = ''
-                cd ${self}/feral-client
+                cd ${self}/feral-client-v2
                 if [ ! -d node_modules ]; then
                   echo "node_modules not found. Run: npm install"
                   exit 1
@@ -107,7 +111,7 @@
               export FERAL_PUBLIC_BASE_URL="${FERAL_PUBLIC_BASE_URL:-http://localhost:$FERAL_PORT}"
               echo "FERAL dev shell ready"
               echo "Run brain: cd feral-core && python -m cli.main serve"
-              echo "Run client: cd feral-client && npm install && npm run dev"
+              echo "Run client: cd feral-client-v2 && npm install && npm run dev"
             '';
           };
         }))

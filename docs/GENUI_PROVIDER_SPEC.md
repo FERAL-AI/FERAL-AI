@@ -233,6 +233,6 @@ Response includes both the hydrated `payload` and the original `layout` for comp
 ## Implementation Reference
 
 - Engine: `feral-core/genui/generator.py` (`GenUIEngine`, `ServiceProvider`, `ServiceProviderRegistry`)
-- Client renderer: `feral-client/src/components/SduiRenderer.jsx`
+- Client renderer: `feral-client-v2/src/ui/SduiRenderer.jsx`
 - Tests: `feral-core/tests/test_genui.py`
 - Cache directory: `~/.feral/genui_surfaces/`

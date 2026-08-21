@@ -30,7 +30,13 @@ logger = logging.getLogger("feral.self_model")
 
 
 # ---------------------------------------------------------------------------
-# UI routes. Keep in sync with feral-client/src/main.jsx.
+# UI routes. Keep in sync with feral-client-v2/src/App.jsx (this used to
+# name feral-client/src/main.jsx, the v1 router, which was deleted in
+# 2026.8.12). NOTE: the list below has drifted from the v2 router and is
+# left as-is here deliberately, because changing what the brain tells the
+# model about its own surfaces is a behaviour change, not a rename.
+# Known drift as of this edit: "/ambient" is a redirect to "/" in v2, and
+# "/taskflows" does not exist there (the route is "/flows").
 # ---------------------------------------------------------------------------
 
 UI_ROUTES: list[tuple[str, str]] = [

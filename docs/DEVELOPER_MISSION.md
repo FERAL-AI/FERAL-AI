@@ -105,11 +105,11 @@ Pick a lane and start building.
 |:-----|:------|:-------------|
 | Runtime / Orchestrator | Agent loop, LLM routing, TaskFlows, sessions, security | `feral-core/agents/`, `feral-core/api/server.py` |
 | Memory / Knowledge | 4-tier store, wiki, ingest, sync | `feral-core/memory/` |
-| GenUI / Surfaces | SDUI engine, provider contracts, surface caching, renderer | `feral-core/genui/`, `feral-client/src/components/` |
+| GenUI / Surfaces | SDUI engine, provider contracts, surface caching, renderer | `feral-core/genui/`, `feral-client-v2/src/ui/` |
 | Hardware / Daemons | Node protocol, daemon SDKs, device profiles, edge bridges | `feral-core/hardware/`, `feral-nodes/` |
 | Voice / Perception | Realtime voice, wake word, vision, sensor fusion | `feral-core/voice/`, `feral-core/perception/` |
 | Nix / Packaging | Flake, NixOS modules, reproducible builds | `flake.nix` |
-| Frontend / Shell | Web UI, dashboard, desktop app, mobile bridges | `feral-client/`, `desktop/` |
+| Frontend / Shell | Web UI, dashboard, desktop app, mobile bridges | `feral-client-v2/`, `desktop/` |
 
 See [`../CONTRIBUTING.md`](../CONTRIBUTING.md) for development setup and PR guidelines.
 

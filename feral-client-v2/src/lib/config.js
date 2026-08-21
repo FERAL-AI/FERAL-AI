@@ -1,10 +1,10 @@
 /**
  * Brain API/WS endpoints for feral-client-v2.
  *
- * Mirrors feral-client/src/config.js exactly so v1 and v2 hit the same Brain
- * when served from the same origin. Keeping this as a local copy (rather than
- * importing from sibling v1) avoids cross-package imports and keeps each
- * client independently buildable.
+ * Originally a copy of feral-client/src/config.js, kept byte-identical so v1
+ * and v2 resolved the same Brain when served from the same origin. v1 was
+ * deleted in 2026.8.12, so this is now the only copy and nothing constrains
+ * it to match a sibling.
  */
 
 const rawBase = (import.meta.env.VITE_BRAIN_BASE_URL || '').trim();

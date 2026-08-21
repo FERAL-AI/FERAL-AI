@@ -55,7 +55,8 @@ export function useVoiceMode() {
   // wired the shared FeralSocket to dispatch incoming brain frames
   // into the engine — `handleAudioResponse`, `handleSpeechStarted`,
   // and the new `handleTtsChunk` had ZERO callers. v1 wired this in
-  // `feral-client/src/hooks/useFeralSession.js`; the port to v2 was
+  // its `src/hooks/useFeralSession.js` (feral-client/ was deleted in
+  // 2026.8.12); the port to v2 was
   // missed. Without this subscription the desktop voice path stayed
   // silent for both healthy realtime AND the new whisper fallback.
   // Also tracks `voice_status` so the VoiceOverlay banner renders.
