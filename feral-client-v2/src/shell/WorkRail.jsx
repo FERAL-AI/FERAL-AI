@@ -68,6 +68,10 @@ export default function WorkRail() {
   const [running, setRunning] = useState([]);
   const [recent, setRecent] = useState([]);
   const [busy, setBusy] = useState('');
+  // Keyed by request_id. A failed decision used to leave the row in
+  // place with no message anywhere on screen, which reads exactly like
+  // a click that missed.
+  const [failed, setFailed] = useState({});
   const timer = useRef(null);
 
   const load = useCallback(async () => {
@@ -104,15 +108,24 @@ export default function WorkRail() {
 
   const decide = useCallback(async (requestId, approved) => {
     setBusy(requestId);
+    setFailed((f) => { const n = { ...f }; delete n[requestId]; return n; });
     try {
       await apiFetch(
         `/api/approvals/${encodeURIComponent(requestId)}/${approved ? 'approve' : 'reject'}`,
         { method: 'POST', silent: true, body: JSON.stringify({}) },
       );
       setNeeds((rows) => rows.filter((r) => r.request_id !== requestId));
-    } catch {
-      // The row stays. The Needs you page reports the reason in full;
-      // silently dropping it here would claim a decision that did not land.
+    } catch (e) {
+      // The row stays, which is right: dropping it would claim a
+      // decision that did not land. What was missing is that nothing
+      // said so. `silent: true` suppresses the global error surface, so
+      // a 404 produced a row that simply did not go away and zero error
+      // text anywhere in the DOM. The reason belongs on the row that
+      // failed, not on another page the user has no reason to open.
+      setFailed((f) => ({
+        ...f,
+        [requestId]: e?.message || 'That did not go through.',
+      }));
     } finally {
       setBusy('');
       load();
@@ -138,6 +151,11 @@ export default function WorkRail() {
               {n.tool_name}
             </button>
             <p className="v2-rail-sub">{subtitleOf(n)}</p>
+            {failed[n.request_id] && (
+              <p className="v2-rail-failed" role="alert">
+                {failed[n.request_id]}
+              </p>
+            )}
             <div className="v2-rail-verbs">
               <button
                 type="button"

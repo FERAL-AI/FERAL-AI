@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Orb from '../ui/Orb';
+import useFocusTrap from '../ui/useFocusTrap';
 import Glass from '../ui/Glass';
 import { useVoice } from './VoiceContext';
 
@@ -194,9 +195,49 @@ export default function VoiceOverlay() {
     && voice.transcriptConfidence < 0.6;
 
   const isFullscreen = variant === 'fullscreen';
+  const dialogRef = useRef(null);
+  const minimize = useCallback(() => setVariant('docked'), []);
+
+  /*
+   * Expand is a real feature: it is the presentation and screen-share
+   * layout, and it is only ever reached by clicking Expand. What it was
+   * not allowed to be is inescapable.
+   *
+   * Fullscreen is `inset: 0` at z-index 200 over a scrim, so it covers
+   * the dock completely. The dock still computes `pointer-events: auto`
+   * underneath, which is why a check of the computed style says the
+   * dock is fine while a real click on a tile times out. And the
+   * element declared `role="dialog" aria-modal="true"` with no Escape
+   * handler and no focus containment, so the two things that attribute
+   * promises were both untrue: the page behind was not inert, and there
+   * was no keyboard way out of a surface covering the whole viewport.
+   *
+   * Escape now minimizes back to the docked pill, which is what returns
+   * the dock, and the shared trap from ui/useFocusTrap keeps Tab inside
+   * the dialog for as long as it claims to be modal. Scroll stays
+   * unlocked: the page behind is covered, not replaced, and locking it
+   * makes minimizing jump the reader's position.
+   */
+  useFocusTrap(isFullscreen && visible, () => dialogRef.current, {
+    lockScroll: false,
+    focusOnOpen: 'container',
+  });
+
+  useEffect(() => {
+    if (!isFullscreen || !visible) return undefined;
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); minimize(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isFullscreen, visible, minimize]);
 
   return (
     <div
+      ref={dialogRef}
+      // -1 so the trap can put focus on the container to announce it,
+      // without adding a Tab stop when the overlay is only a pill.
+      tabIndex={isFullscreen ? -1 : undefined}
       className={
         `v2-voice-overlay v2-voice-overlay--${variant}` +
         (visible ? ' is-visible' : '')
@@ -256,7 +297,7 @@ export default function VoiceOverlay() {
           type="button"
           className="v2-btn"
           aria-label={isFullscreen ? 'Minimize voice' : 'Expand voice'}
-          onClick={() => setVariant(isFullscreen ? 'docked' : 'fullscreen')}
+          onClick={() => (isFullscreen ? minimize() : setVariant('fullscreen'))}
         >
           {isFullscreen ? 'Minimize' : 'Expand'}
         </button>

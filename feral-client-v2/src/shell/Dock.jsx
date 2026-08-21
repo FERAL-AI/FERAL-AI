@@ -7,7 +7,7 @@ import { useMachineVitals } from '../hooks/useMachineVitals';
 import DockStack, { HOLD_MS, isStackable } from './DockStack';
 
 /**
- * Bottom dock — the eight pinned destinations plus the palette button.
+ * Bottom dock: the eight pinned destinations plus the palette button.
  * One clean row, always.
  *
  * The eight tiles and the membership test for the palette button both

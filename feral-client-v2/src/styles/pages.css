@@ -3011,3 +3011,16 @@
 }
 .v2-vlane-btn:hover { color: var(--v2-text-primary); border-color: var(--v2-hairline-strong); }
 .v2-vlane-btn--end { color: var(--v2-state-error); }
+
+/* Checkpoint turn identity. Undo is irreversible, so the row has to say
+   which turn it is undoing: "1 file" plus a timestamp identifies nothing
+   when two turns land in the same second. */
+.v2-cp-turn-id,
+.v2-cp-turn-session {
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+  white-space: nowrap;
+}
+.v2-cp-turn-session { opacity: 0.75; }
+.v2-cp-turn-writes { color: var(--v2-text-tertiary); }

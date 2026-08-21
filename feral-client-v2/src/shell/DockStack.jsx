@@ -62,6 +62,10 @@ export default function DockStack({ to, onClose }) {
   const navigate = useNavigate();
   const [rows, setRows] = useState(null);
   const [busy, setBusy] = useState('');
+  // Same defect as the work rail had: `silent: true` plus a bare catch
+  // meant a failed verb left the row sitting there with no explanation
+  // anywhere, which is indistinguishable from a click that missed.
+  const [failed, setFailed] = useState({});
   const ref = useRef(null);
   const meta = STACKABLE[to];
 
@@ -92,6 +96,7 @@ export default function DockStack({ to, onClose }) {
 
   const act = useCallback(async (row) => {
     setBusy(row.id);
+    setFailed((f) => { const n = { ...f }; delete n[row.id]; return n; });
     try {
       if (to === '/approvals') {
         await apiFetch(`/api/approvals/${encodeURIComponent(row.id)}/approve`, {
@@ -102,9 +107,10 @@ export default function DockStack({ to, onClose }) {
         await apiFetch(path, { method, silent: true });
       }
       setRows((r) => (r || []).filter((x) => x.id !== row.id));
-    } catch {
-      // Leave the row. The full surface reports the reason; dropping it
-      // here would claim an action that did not land.
+    } catch (e) {
+      // Leave the row (dropping it would claim an action that did not
+      // land) and say why, on the row itself.
+      setFailed((f) => ({ ...f, [row.id]: e?.message || 'That did not go through.' }));
     } finally {
       setBusy('');
     }
@@ -125,7 +131,7 @@ export default function DockStack({ to, onClose }) {
       )}
 
       {(rows || []).map((r) => (
-        <div key={r.id} className="v2-stack-row">
+        <div key={r.id} className="v2-stack-row" data-failed={failed[r.id] ? 'yes' : 'no'}>
           <span className="v2-stack-dot" aria-hidden="true" />
           <button
             type="button"
@@ -147,6 +153,9 @@ export default function DockStack({ to, onClose }) {
             </button>
           ) : (
             <span className="v2-stack-verb v2-stack-verb--none">no verb</span>
+          )}
+          {failed[r.id] && (
+            <p className="v2-stack-failed" role="alert">{failed[r.id]}</p>
           )}
         </div>
       ))}

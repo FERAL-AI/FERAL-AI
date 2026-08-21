@@ -38,7 +38,7 @@ afterEach(() => {
   vi.resetModules();
 });
 
-describe('Ambient — no event overlay', () => {
+describe('Ambient, no event overlay', () => {
   for (const dev of [false, true]) {
     it(`renders no LiveOps strip when import.meta.env.DEV is ${dev}`, async () => {
       vi.stubEnv('DEV', dev);

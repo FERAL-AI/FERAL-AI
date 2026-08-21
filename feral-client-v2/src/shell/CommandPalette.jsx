@@ -13,7 +13,7 @@ import { useChatThread } from './ChatThreadContext';
 import { GO_ITEMS, matchesQuery } from './navigation';
 
 /**
- * CommandPalette — the second of the two navigation mechanisms, and the
+ * CommandPalette: the second of the two navigation mechanisms, and the
  * only search surface in the shell.
  *
  * It replaces HubLauncher, which was a grid of fifteen tiles that

@@ -329,3 +329,77 @@ test.describe('Shell navigation', () => {
     }
   });
 });
+
+/**
+ * Every control in the system bar is a real target.
+ *
+ * WCAG 2.2 SC 2.5.8 (AA) puts the floor at 24x24 CSS px. Measured
+ * before the rule that fixed it, identically at 1512px and 375px
+ * because none of these has a width-dependent rule, so a phone got the
+ * same targets a mouse did:
+ *
+ *   .v2-sysbar-brand   51.5 x 14.8
+ *   .v2-sysbar-vital     21 x 20.8   (and 32.6 x 20.8, 39.3 x 20.8)
+ *   .v2-sysbar-cmd     27.3 x 20.8
+ *   .v2-sysbar-icon      25 x 21     (theme and voice toggles)
+ *
+ * Six of six under the floor. jsdom has no layout, so the 1110 vitest
+ * tests cannot see a control's height at all.
+ */
+for (const width of [1512, 375]) {
+  test(`system bar controls meet the 24px target floor at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 860 });
+    await page.goto('/console');
+    await expect(page.locator('.v2-sysbar')).toBeVisible();
+
+    const small = await page.evaluate(() => {
+      const out: string[] = [];
+      for (const el of document.querySelectorAll('.v2-sysbar button')) {
+        const b = el.getBoundingClientRect();
+        if (b.width === 0 && b.height === 0) continue;   // not rendered
+        if (b.width < 24 || b.height < 24) {
+          out.push(`${el.className} ${b.width.toFixed(1)}x${b.height.toFixed(1)}`);
+        }
+      }
+      return out;
+    });
+
+    expect(small, `system bar controls under 24x24: ${small.join(' | ')}`).toEqual([]);
+  });
+}
+
+/**
+ * Nothing inside the hidden voice overlay may take focus.
+ *
+ * `VoiceOverlay` is rendered on every route and is always in the DOM.
+ * With no session it carries `aria-hidden="true"`, `opacity: 0` and
+ * `pointer-events: none`, and none of those three removes an element
+ * from the tab order. Its two buttons kept `tabIndex 0`, so tabbing off
+ * the end of the dock landed on "Expand voice" and then "End voice",
+ * both belonging to a session that did not exist, and both inside an
+ * aria-hidden subtree, which is the one place focus must never land.
+ *
+ * A keyboard user hit two dead stops on every single route.
+ */
+test('the hidden voice overlay takes no focus', async ({ page }) => {
+  await page.goto('/console');
+  await expect(page.locator('.v2-dock')).toBeVisible();
+
+  // Confirm the premise: no session, so the overlay is hidden.
+  await expect(page.locator('.v2-voice-overlay')).toHaveAttribute('aria-hidden', 'true');
+
+  const landed: string[] = [];
+  for (let i = 0; i < 60; i += 1) {
+    await page.keyboard.press('Tab');
+    const hit = await page.evaluate(() => {
+      const el = document.activeElement;
+      if (!el || el === document.body) return null;
+      return el.closest('.v2-voice-overlay')
+        ? (el.getAttribute('aria-label') || el.textContent || '').trim()
+        : null;
+    });
+    if (hit) landed.push(hit);
+  }
+
+  expect(landed, `focus entered the hidden voice overlay: ${landed.join(', ')}`).toEqual([]);
+});

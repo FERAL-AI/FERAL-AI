@@ -54,6 +54,16 @@ export function isDriftRefusal(result) {
   return Boolean(result?.refused) && result?.error_code === 'revert_refused_drift';
 }
 
+/** Last 8 characters of an id, which is what distinguishes two turns.
+ *
+ * Turn ids share a long common prefix, so the leading characters are
+ * the part that carries no information. */
+export function shortId(id) {
+  const s = String(id || '');
+  if (!s) return '';
+  return s.length <= 10 ? s : `…${s.slice(-8)}`;
+}
+
 export function formatWhen(ts) {
   const n = Number(ts || 0);
   if (!n || !Number.isFinite(n)) return '';
@@ -193,8 +203,31 @@ export default function Checkpoints() {
                     />
                     <span className="v2-cp-turn-files">
                       {t.files === 1 ? '1 file' : `${t.files} files`}
+                      {t.writes > t.files && (
+                        <span className="v2-cp-turn-writes">
+                          {` (${t.writes} writes)`}
+                        </span>
+                      )}
                     </span>
                     <span className="v2-cp-turn-when">{formatWhen(t.started_at)}</span>
+                    {/* Undo is destructive and irreversible, and the two
+                        things rendered above it identify nothing: "1 file"
+                        describes most turns, and two turns in the same
+                        second render an identical timestamp. Both turn_id
+                        and session_id were already in the payload and
+                        thrown away, so on a busy minute you picked which
+                        turn to revert blind. */}
+                    <span
+                      className="v2-cp-turn-id"
+                      title={`turn ${t.turn_id}`}
+                    >
+                      {shortId(t.turn_id)}
+                    </span>
+                    {t.session_id && (
+                      <span className="v2-cp-turn-session" title={`session ${t.session_id}`}>
+                        {shortId(t.session_id)}
+                      </span>
+                    )}
                   </button>
 
                   {open && (

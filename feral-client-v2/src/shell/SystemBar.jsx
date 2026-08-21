@@ -4,6 +4,7 @@ import { Mic, MicOff, Sun, Moon } from 'lucide-react';
 import { useTheme } from '../hooks/useTheme';
 import { useMachineVitals } from '../hooks/useMachineVitals';
 import { useVoice } from './VoiceContext';
+import { useCommandPalette } from './PaletteContext';
 
 /**
  * The system bar: real vitals, each one clickable.
@@ -42,6 +43,10 @@ export default function SystemBar({ onOpenPalette }) {
   const navigate = useNavigate();
   const { theme, toggle: toggleTheme } = useTheme();
   const voice = useVoice();
+  // The dock's palette button announces its open state and this one did
+  // not, so the same dialog had two triggers that described themselves
+  // differently to a screen reader.
+  const { open: paletteOpen } = useCommandPalette();
   // One shared poller, not a second copy of the same three requests.
   const v = useMachineVitals();
 
@@ -114,6 +119,8 @@ export default function SystemBar({ onOpenPalette }) {
         type="button"
         className="v2-sysbar-cmd"
         onClick={onOpenPalette}
+        aria-pressed={paletteOpen}
+        aria-haspopup="dialog"
         title="Search, run a command, or ask (⌘K)"
         aria-label="Open the command palette"
       >

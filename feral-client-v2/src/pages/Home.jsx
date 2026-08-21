@@ -96,6 +96,38 @@ export function jobKindLabel(kind) {
   return JOB_KIND_LABELS[kind] || kind;
 }
 
+/**
+ * The per-channel map out of GET /api/channels, and nothing else.
+ *
+ * `ChannelManager.stats()` returns an envelope that also spreads the
+ * per-channel rows to the top level:
+ *
+ *     {active_channels: [...], channel_count: N, details: {...}, ...rows}
+ *
+ * The old expression ended `|| c.value || {}`, so when neither
+ * `status_by_channel` nor `channels` was present it fell through to the
+ * whole envelope and `Object.entries` walked the envelope's own fields.
+ * With no channels configured those three ARE the only keys, so the
+ * Channels card rendered three rows reading `Active_channels off`,
+ * `Channel_count off` and `Details off` instead of the empty state, and
+ * with channels configured it rendered them alongside the real ones.
+ *
+ * `details` is the canonical map. The last branch keeps the flattened
+ * shape working for a brain that predates it, but filters the envelope
+ * keys out by shape: a channel row is an object, and the envelope's
+ * fields are an array and a number.
+ */
+export function channelMap(payload) {
+  const p = payload || {};
+  const named = p.status_by_channel || p.details || p.channels;
+  if (named && typeof named === 'object') return named;
+  return Object.fromEntries(
+    Object.entries(p).filter(([, v]) => (
+      v && typeof v === 'object' && !Array.isArray(v)
+    )),
+  );
+}
+
 export default function Home() {
   const somatic = useSomatic();
   const [time, setTime] = useState(new Date());
@@ -229,7 +261,7 @@ export default function Home() {
       // widget so anything downstream that reads it still works.
       setFlows(items.filter((it) => it.kind === 'taskflow'));
     }
-    if (c.status === 'fulfilled') setChannels(c.value?.status_by_channel || c.value?.channels || c.value || {});
+    if (c.status === 'fulfilled') setChannels(channelMap(c.value));
     if (b.status === 'fulfilled') setBriefing(b.value);
     if (n.status === 'fulfilled') setNextEvent(n.value);
     if (w.status === 'fulfilled') setWindDown(w.value);

@@ -445,13 +445,33 @@
   display: flex;
   pointer-events: none;
   opacity: 0;
+  /* The overlay is always in the DOM, and with no session it is
+     aria-hidden="true", opacity 0 and pointer-events none. None of that
+     takes an element out of the tab order: its two buttons kept
+     tabIndex 0, so tabbing past the dock landed on "Expand voice" and
+     then "End voice" for a session that did not exist. Worse, they sat
+     inside an aria-hidden subtree, which is the one place focus must
+     never go.
+
+     visibility does remove them, and it is the only one of these four
+     properties that does. It is transitioned at 0s with a delay equal
+     to the fade, so the pill still fades out over the full duration and
+     only becomes untabbable once it has finished disappearing. */
+  visibility: hidden;
   transition:
     opacity var(--v2-dur-slow) var(--v2-ease-out),
-    transform var(--v2-dur-slow) var(--v2-ease-out);
+    transform var(--v2-dur-slow) var(--v2-ease-out),
+    visibility 0s linear var(--v2-dur-slow);
 }
 .v2-voice-overlay.is-visible {
   opacity: 1;
   pointer-events: auto;
+  visibility: visible;
+  /* Appearing is immediate; only the disappearance is delayed. */
+  transition:
+    opacity var(--v2-dur-slow) var(--v2-ease-out),
+    transform var(--v2-dur-slow) var(--v2-ease-out),
+    visibility 0s linear 0s;
 }
 
 /* Docked variant — compact strip pinned bottom-right. No backdrop, no
@@ -471,8 +491,8 @@
 
      bottom + max-height is now the whole budget: the top edge can
      never rise above (viewport - 8 - 84) = the composer's bottom edge,
-     whatever the status text says. */
-  bottom: 8px;
+     whatever the status text says. Its bottom is set below, above the
+     dock rather than inside the dock strip. */
   max-height: calc(var(--v2-dock-height) + 12px);
   overflow: hidden;
   left: auto;
@@ -491,6 +511,49 @@
 }
 .v2-voice-overlay--docked.is-visible {
   transform: translateY(0) scale(1);
+}
+
+/* The pill no longer sits beside the dock, because it never fitted
+   there on most screens. Both boxes are fixed width: the dock is 405px
+   centred, the pill 436px anchored right: 20px. The pill's left edge is
+   at (W - 456) and the dock's right edge at (W/2 + 202.5), so they
+   clear each other only above W = 1317. Measured across the range,
+   overlap in px of the dock covered:
+
+     1920..1366   0        1200   58        768  274
+           1280  18        1024  146        375  347 (the whole dock)
+
+   Under 640px the pill's own children covered every one of the nine
+   tiles, and the parent's pointer-events: none bought nothing because
+   the children set it back to auto. The rule this replaces claimed the
+   docked pill was "non-blocking so the chat composer and dock stay
+   interactive"; that held at 1680, the one width it and its e2e guard
+   were measured at.
+
+   So the pill sits above the dock at every width instead, and the shell
+   reserves the strip it occupies while voice is running, which lifts
+   the composer out of its way. No breakpoint: a width-dependent fix for
+   a width-dependent bug just relocates it. */
+.v2-voice-overlay--docked {
+  bottom: calc(var(--v2-dock-height) + 8px);
+}
+
+/* Shell.jsx puts is-voice-mode on the shell for exactly as long as a
+   session runs, so the space is given back the moment voice ends. 84px
+   is the pill's max-height (--v2-dock-height + 12) and 8px is the gap
+   above the dock. */
+/* `bottom` here was inert and I shipped it that way for one build:
+   `.v2-shell-body .v2-shell-main` sets `position: static` (the body
+   took the absolute positioning so main could be an ordinary flex
+   child), and an inset on a static box does nothing at all. Main is a
+   scroll container with `padding: 20px 24px`, so the strip has to be
+   reserved as padding.
+
+   84px is the pill's max-height (--v2-dock-height + 12) and 8px is the
+   gap above the dock; 20px is main's own bottom padding, which this
+   replaces rather than adds to. */
+.v2-shell.is-voice-mode .v2-shell-main {
+  padding-bottom: 112px;
 }
 .v2-voice-overlay--docked .v2-voice-orb { flex: 0 0 auto; }
 .v2-voice-overlay--docked .v2-voice-meta {
@@ -1357,6 +1420,23 @@
 .v2-sysbar-icon:hover { background: var(--v2-fill-subtle); color: var(--v2-text-primary); }
 .v2-sysbar-icon[data-on="yes"] { color: var(--v2-state-live); }
 
+/* Every control in this bar is a real target, not a label.
+   Measured before this rule: the brand 51.5x14.8, the vitals 21x20.8,
+   the palette button 27.3x20.8 and the theme and voice toggles 25x21.
+   All six are under the 24x24 WCAG 2.2 SC 2.5.8 minimum, and none of
+   them has a width-dependent rule, so a phone got the same 20px targets
+   a mouse did. The bar is 34px tall, so 24px fits inside it with five
+   pixels to spare above and below: the bar does not change height and
+   nothing here moves. */
+.v2-sysbar-brand,
+.v2-sysbar-vital,
+.v2-sysbar-cmd,
+.v2-sysbar-autonomy,
+.v2-sysbar-icon {
+  min-height: 24px;
+  min-width: 24px;
+}
+
 /* The shell no longer reserves a strip for the retired menubar. */
 .v2-shell {
   --v2-menubar-height: 0px;
@@ -1463,6 +1543,15 @@
    above the dock, 340px capped, rows on a 16px / content / verb grid. */
 .v2-stack {
   position: absolute;
+  /* The dock bar spans the full width and is transparent, so it sets
+     pointer-events: none and .v2-dock-list turns it back on. The stack
+     is a sibling of that list, not a child, so it inherited none: the
+     panel painted at full opacity with correct geometry and every
+     button in it was inert. elementFromPoint at the Open button's
+     centre returned main.v2-shell-main, the page behind. A feature
+     whose whole claim is "you act from the stack without navigating
+     anywhere" did nothing at all. */
+  pointer-events: auto;
   bottom: calc(100% + 10px);
   left: 50%;
   transform: translateX(-50%);
@@ -1550,3 +1639,19 @@
    out of fixed positioning and moved it to the top of the viewport,
    where it then overlapped the open command palette. An e2e that
    asserts the palette never covers the Dock caught it. */
+
+/* A verb that did not land has to say so where it was clicked. Both the
+   rail and the dock stack call the brain with `silent: true`, which
+   suppresses the global error surface on purpose (a transient poll
+   failure must not throw a banner over the shell). The cost was that a
+   404 on approve left the row in place with zero error text anywhere in
+   the DOM, which looks exactly like a click that missed. */
+.v2-rail-failed,
+.v2-stack-failed {
+  margin: 4px 0 0;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-state-warn);
+  line-height: 1.35;
+}
+.v2-stack-failed { flex: 1 1 100%; padding: 0 4px 4px; }
+.v2-stack-row[data-failed="yes"] { flex-wrap: wrap; }

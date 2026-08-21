@@ -51,8 +51,13 @@ test.describe('docked voice overlay', () => {
         const composer = document.querySelector('.v2-chat-composer');
         if (!ov || !composer) return null;
 
-        // Show it the way a live voice session does.
+        // Show it the way a live voice session does. Shell.jsx puts
+        // is-voice-mode on the shell for exactly as long as the session
+        // runs, and the strip the pill sits in is reserved by that
+        // class, so a test that sets only is-visible measures a state
+        // the app never enters.
         ov.classList.add('is-visible');
+        document.querySelector('.v2-shell')?.classList.add('is-voice-mode');
 
         const meta = ov.querySelector('.v2-voice-meta');
         meta?.querySelectorAll('.v2-voice-status').forEach((e) => e.remove());
@@ -104,32 +109,93 @@ test.describe('docked voice overlay', () => {
     expect(stuffed!.micCovered, 'Mic button is under the voice overlay').toBe(false);
   });
 
-  test('does not cover the dock it sits over', async ({ page }) => {
-    await page.route('**/api/dashboard*', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ health: { status: 'ok', skills: { count: 0 } } }),
+  /* This ran at one viewport, 1680x878, which is the single width where
+     the docked pill happens to clear the dock. The pill is right: 20px
+     with max-width calc(100vw - 40px), so below roughly 600px it spans
+     the whole strip and lands squarely on the centred dock. Measured on
+     the code this loop was added to catch:
+
+        768px   6 of 9 tiles unreachable, 67.7% of the dock covered
+        430px   9 of 9,                   100%
+        375px   9 of 9,                    96.5%
+
+     A geometry guard that tests one viewport is testing one number. */
+  for (const width of [1920, 1680, 1280, 1024, 768, 640, 430, 375]) {
+    test(`does not cover the dock it sits over at ${width}px`, async ({ page }) => {
+      await page.route('**/api/dashboard*', async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ health: { status: 'ok', skills: { count: 0 } } }),
+        });
       });
-    });
-    await page.setViewportSize({ width: 1680, height: 878 });
-    await page.goto('/chat');
-    await expect(page.locator('.v2-dock')).toBeVisible();
+      await page.setViewportSize({ width, height: 878 });
+      await page.goto('/chat');
+      await expect(page.locator('.v2-dock')).toBeVisible();
 
-    const blocked = await page.evaluate(() => {
-      const ov = document.querySelector('.v2-voice-overlay');
-      ov?.classList.add('is-visible');
-      return [...document.querySelectorAll('.v2-dock a, .v2-dock button')]
-        .filter((el) => {
-          const b = el.getBoundingClientRect();
-          const hit = document.elementFromPoint(
-            b.left + b.width / 2, b.top + b.height / 2,
-          );
-          return !(hit === el || el.contains(hit as Node));
-        })
-        .map((el) => (el.textContent || '').trim() || el.getAttribute('aria-label'));
-    });
+      const blocked = await page.evaluate(() => {
+        const ov = document.querySelector('.v2-voice-overlay');
+        ov?.classList.add('is-visible');
+        document.querySelector('.v2-shell')?.classList.add('is-voice-mode');
+        // The pill fades and slides in. Measuring mid-transition reads
+        // the old position, which is how a covered dock can look clear.
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            resolve([...document.querySelectorAll('.v2-dock a, .v2-dock button')]
+              .filter((el) => {
+                const b = el.getBoundingClientRect();
+                const hit = document.elementFromPoint(
+                  b.left + b.width / 2, b.top + b.height / 2,
+                );
+                return !(hit === el || el.contains(hit as Node));
+              })
+              .map((el) => (el.textContent || '').trim() || el.getAttribute('aria-label')));
+          }, 600);
+        });
+      });
 
-    expect(blocked, `dock items under the voice overlay: ${blocked.join(', ')}`).toEqual([]);
-  });
+      expect(blocked, `dock items under the voice overlay at ${width}px: ${(blocked as string[]).join(', ')}`).toEqual([]);
+    });
+  }
+
+  /* The composer invariant had the same shape of hole as the dock one:
+     asserted once, at 1680. Both are now swept, because the pill moved
+     and "it cleared the composer at the width I checked" is exactly the
+     claim that was wrong the first time. */
+  for (const width of [1920, 1280, 768, 430, 375]) {
+    test(`clears the chat composer at ${width}px`, async ({ page }) => {
+      await page.route('**/api/**', r => r.fulfill({
+        status: 200, contentType: 'application/json', body: '{}',
+      }));
+      await page.setViewportSize({ width, height: 878 });
+      await page.goto('/chat');
+      await expect(page.locator('.v2-chat-composer')).toBeVisible();
+
+      const m = await page.evaluate(() => new Promise((resolve) => {
+        document.querySelector('.v2-voice-overlay')?.classList.add('is-visible');
+        document.querySelector('.v2-shell')?.classList.add('is-voice-mode');
+        setTimeout(() => {
+          const ov = document.querySelector('.v2-voice-overlay')!.getBoundingClientRect();
+          const c = document.querySelector('.v2-chat-composer')!.getBoundingClientRect();
+          const covered = (sel: string) => {
+            const el = document.querySelector(sel);
+            if (!el) return false;
+            const b = el.getBoundingClientRect();
+            const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+            return !(hit === el || el.contains(hit as Node));
+          };
+          resolve({
+            clearance: ov.top - c.bottom,
+            send: covered('.v2-chat-send'),
+            mic: covered('.v2-chat-mic'),
+          });
+        }, 700);
+      })) as { clearance: number; send: boolean; mic: boolean };
+
+      expect(m.clearance, `pill overlaps the composer by ${(-m.clearance).toFixed(1)}px`)
+        .toBeGreaterThan(MIN_CLEARANCE);
+      expect(m.send, 'Send is under the voice pill').toBe(false);
+      expect(m.mic, 'the composer mic is under the voice pill').toBe(false);
+    });
+  }
 });

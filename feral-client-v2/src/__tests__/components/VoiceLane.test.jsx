@@ -78,15 +78,80 @@ describe('mute and end are separate controls', () => {
   });
 });
 
+/*
+ * What used to be here were two greps over ui.css looking for the two
+ * exact selectors the takeover was originally written with:
+ *
+ *   /is-voice-mode[^{]*\.v2-shell-main\s*\{[^}]*filter:\s*brightness/
+ *   /is-voice-mode[^{]*\.v2-dock\s*\{[^}]*pointer-events:\s*none/
+ *
+ * Both rules had already been deleted from the stylesheet, so both
+ * assertions were `expect(css).not.toMatch(<something absent>)` and
+ * could never fail for any reason. They passed on every run while the
+ * behaviour they were named after came back through a different door:
+ * Expand still produced role="dialog" aria-modal="true" at inset: 0 and
+ * z-index 200 over a scrim, covering the whole viewport, and a real
+ * click on a dock tile timed out underneath it.
+ *
+ * That is CLAUDE.md trap 3 exactly. A test pinned to the shape of one
+ * old fix tests that one fix, not the property. These test the property:
+ * the takeover is reachable only on purpose, and it is always escapable.
+ */
 describe('the page is never taken away', () => {
-  const css = fs.readFileSync(UI_CSS, 'utf8');
+  const overlay = () => document.querySelector('.v2-voice-overlay');
 
-  it('nothing dims the main area when voice is on', () => {
-    // filter: brightness(0.4) on .v2-shell-main was the takeover.
-    expect(css).not.toMatch(/is-voice-mode[^{]*\.v2-shell-main\s*\{[^}]*filter:\s*brightness/);
+  const renderOverlay = async (voice = {}) => {
+    vi.resetModules();
+    vi.doMock('../../shell/VoiceContext', () => ({
+      useVoice: () => ({ active: true, state: 'active', stop: () => {}, ...voice }),
+      VoiceProvider: ({ children }) => children,
+    }));
+    const { default: VoiceOverlay } = await import('../../shell/VoiceOverlay');
+    render(<VoiceOverlay />);
+  };
+
+  it('starts docked, so voice never takes the viewport unbidden', async () => {
+    await renderOverlay();
+    expect(overlay().getAttribute('data-variant')).toBe('docked');
+    // A pill is not a dialog and must not claim the page is inert.
+    expect(overlay().getAttribute('role')).toBe('region');
+    expect(overlay().getAttribute('aria-modal')).toBeNull();
   });
 
-  it('the dock stays interactive when voice is on', () => {
-    expect(css).not.toMatch(/is-voice-mode[^{]*\.v2-dock\s*\{[^}]*pointer-events:\s*none/);
+  it('reaches fullscreen only by clicking Expand', async () => {
+    await renderOverlay();
+    fireEvent.click(screen.getByLabelText('Expand voice'));
+    expect(overlay().getAttribute('data-variant')).toBe('fullscreen');
+    expect(overlay().getAttribute('aria-modal')).toBe('true');
+  });
+
+  it('Escape leaves fullscreen, so the dock is never unreachable', async () => {
+    await renderOverlay();
+    fireEvent.click(screen.getByLabelText('Expand voice'));
+    expect(overlay().getAttribute('data-variant')).toBe('fullscreen');
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(
+      overlay().getAttribute('data-variant'),
+      'fullscreen covers the dock at inset: 0 and declared itself modal '
+      + 'with no keyboard way out',
+    ).toBe('docked');
+  });
+
+  it('Minimize leaves fullscreen too', async () => {
+    await renderOverlay();
+    fireEvent.click(screen.getByLabelText('Expand voice'));
+    fireEvent.click(screen.getByLabelText('Minimize voice'));
+    expect(overlay().getAttribute('data-variant')).toBe('docked');
+  });
+
+  it('ending a session drops fullscreen, so the next start is not a takeover', async () => {
+    await renderOverlay();
+    fireEvent.click(screen.getByLabelText('Expand voice'));
+    expect(overlay().getAttribute('data-variant')).toBe('fullscreen');
+    // The component resets to docked whenever it goes inactive.
+    expect(fs.readFileSync(
+      path.resolve(__dirname, '../../shell/VoiceOverlay.jsx'), 'utf8',
+    )).toMatch(/if \(!visible\) setVariant\('docked'\)/);
   });
 });

@@ -69,6 +69,18 @@
  * frosted panels read as real glass, not flat white cards, and all four
  * panes are plain white laid over it at rising alpha.
  *
+ * --p-text-lo was later measured AGAINST THE REAL COMPOSITED GROUND
+ * rather than a nominal one, in a browser, on the elements that
+ * actually use it. #696E76 resolves to rgb(105,110,118) on the panel
+ * ground rgb(241,239,235) and lands at 4.46:1: under AA by four
+ * hundredths, on .v2-empty-state-hint, .v2-btn--ghost, .v2-jobs-count
+ * and the rest. The tuning below was correct arithmetic against the
+ * wrong number: it used the nominal #F2F3F8, and light glass
+ * composites toward white, so the panel a reader sees is lighter than
+ * the shell ground the sums assumed. #676C74 measures 4.60:1 on that
+ * real ground. Dark needs no change: #9AA2AA measures 5.25:1 on the
+ * real dark panel rgb(41,47,52), not the 4.46 a nominal #333940 gives.
+ *
  * --p-text-lo was #8E8E96, which measured 2.93:1 on the light shell
  * ground #F2F3F8, well under WCAG AA, on body-text classes
  * (.v2-device-meta, .v2-p--tiny, .v2-btn--ghost and the rest listed at
@@ -111,7 +123,7 @@
 
   --p-text-hi: #22262B;
   --p-text-mid: #5A6068;
-  --p-text-lo: #696E76;
+  --p-text-lo: #676C74;
   --p-text-inverse: #FFFFFF;
 
   --p-accent: 47 109 168;
