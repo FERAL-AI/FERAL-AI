@@ -15,6 +15,7 @@ write, and a sleeping Mac cannot finish a build.
 
 from __future__ import annotations
 
+import atexit
 import logging
 import shutil
 import subprocess
@@ -97,6 +98,14 @@ def check_disk(path: Path | str | None = None) -> DiskStatus:
     return DiskStatus(path, usage.total, free, level, detail)
 
 
+# Ceiling for a single sleep assertion, in seconds. Mirrors
+# ``coding_tools.BACKGROUND_MAX_TIMEOUT``: the longest a background job
+# may run is the longest the machine can legitimately be held awake for
+# one. Not imported from there, because preflight is loaded during boot
+# and must not pull the skill layer in.
+MAX_ASSERTION_SECONDS = 86_400
+
+
 class StayAwake:
     """Keep the machine awake while a long operation runs.
 
@@ -128,8 +137,18 @@ class StayAwake:
             if not cls.supported():
                 return False
             try:
+                # `-t` is a dead-man's switch, not the intended lifetime:
+                # release() ends the assertion long before it fires. It
+                # exists because `caffeinate` is a child process that
+                # outlives a SIGKILLed parent, and atexit does not run on
+                # SIGKILL. Without a ceiling, one `kill -9` on the brain
+                # leaves the machine unable to idle-sleep forever, with
+                # nothing on screen explaining why. The ceiling matches
+                # BACKGROUND_MAX_TIMEOUT, the longest a background job is
+                # allowed to run, so it can never cut a legitimate job
+                # short.
                 cls._proc = subprocess.Popen(
-                    ["caffeinate", "-i"],
+                    ["caffeinate", "-i", "-t", str(MAX_ASSERTION_SECONDS)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
@@ -160,6 +179,33 @@ class StayAwake:
                 logger.info("released the sleep assertion")
 
     @classmethod
+    def release_all(cls) -> None:
+        """End the assertion regardless of how many references are out.
+
+        Registered with :mod:`atexit`. ``release()`` is reference counted
+        and correctly does nothing while work is still outstanding, which
+        is exactly wrong at interpreter shutdown: the caffeinate child
+        outlives its parent, so a brain that exits with a job still
+        registered leaves an assertion nobody owns and no process can
+        find. ``coding_tools`` already reaps its background process
+        groups this way; the sleep assertion was the piece that got
+        missed.
+        """
+        with cls._lock:
+            cls._depth = 0
+            proc, cls._proc = cls._proc, None
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    @classmethod
     def held(cls) -> bool:
         with cls._lock:
             return cls._proc is not None and cls._proc.poll() is None
@@ -178,3 +224,6 @@ class StayAwake:
 
     def __exit__(self, *exc) -> None:
         self.release()
+
+
+atexit.register(StayAwake.release_all)

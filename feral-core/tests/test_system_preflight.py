@@ -14,8 +14,11 @@ for itself.
 
 from __future__ import annotations
 
+import os
 import shutil
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +29,26 @@ from system.preflight import (
     StayAwake,
     check_disk,
 )
+
+
+def _pid_alive(pid: int) -> bool:
+    """Ask the OS, not FERAL's bookkeeping."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _caffeinate_argv(pid: int) -> list[str]:
+    """The real argv of a running caffeinate, straight from ps."""
+    out = subprocess.run(
+        ["ps", "-o", "command=", "-p", str(pid)],
+        capture_output=True, text=True, timeout=10,
+    )
+    return out.stdout.strip().split()
 
 
 class TestDisk:
@@ -137,3 +160,97 @@ class TestBackgroundJobsAreWiredToIt:
         assert "_stay_awake_release()" in finally_block, (
             "the release must sit in finally, or a cancelled watcher leaks the assertion"
         )
+
+
+class TestTheAssertionCannotOutliveTheBrain:
+    """`caffeinate` is a child process, so it survives its parent.
+
+    A sleep assertion nobody owns is invisible and effectively permanent:
+    the user's Mac simply stops idle-sleeping and nothing on screen says
+    why. `coding_tools` already registers an atexit reaper for its
+    background process groups; the sleep assertion had none, so a brain
+    that exited with a job still registered left one behind.
+    """
+
+    def test_release_all_ends_the_assertion_whatever_the_depth(self):
+        StayAwake.release_all()
+        StayAwake.acquire("one")
+        StayAwake.acquire("two")
+        assert StayAwake.depth() == 2
+        # release() is correct to do nothing here; that is exactly why it
+        # is the wrong thing to call at interpreter shutdown.
+        StayAwake.release()
+        assert StayAwake.depth() == 1
+        StayAwake.release_all()
+        assert StayAwake.depth() == 0
+        assert not StayAwake.held()
+
+    def test_release_all_is_safe_when_nothing_is_held(self):
+        StayAwake.release_all()
+        StayAwake.release_all()
+        assert not StayAwake.held()
+
+    def test_it_is_registered_with_atexit(self):
+        """Structural, because atexit cannot be triggered in-process."""
+        import inspect
+
+        from system import preflight
+
+        source = inspect.getsource(preflight)
+        assert "atexit.register(StayAwake.release_all)" in source
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="caffeinate is macOS only")
+    def test_a_child_interpreter_leaves_no_caffeinate_behind(self):
+        """The real thing: acquire in a subprocess, let it exit, check the OS.
+
+        Asserting on FERAL's own bookkeeping would pass even while a real
+        `caffeinate` kept running, which is the whole failure mode.
+        """
+        import subprocess as sp
+        import sys as _sys
+        import textwrap
+        import time as _time
+
+        script = textwrap.dedent(
+            """
+            import sys
+            sys.path.insert(0, %r)
+            from system.preflight import StayAwake
+            StayAwake.acquire("leak-test")
+            assert StayAwake.held()
+            print(StayAwake._proc.pid, flush=True)
+            # Exit WITHOUT releasing. atexit must do it for us.
+            """
+        ) % str(Path(__file__).resolve().parents[1])
+
+        out = sp.run(
+            [_sys.executable, "-c", script], capture_output=True, text=True, timeout=30,
+        )
+        assert out.returncode == 0, out.stderr
+        pid = int(out.stdout.strip().splitlines()[-1])
+
+        for _ in range(30):  # up to 3s for the child to be reaped
+            if not _pid_alive(pid):
+                break
+            _time.sleep(0.1)
+        assert not _pid_alive(pid), (
+            f"caffeinate pid {pid} outlived the interpreter that started it; "
+            "the machine would never idle-sleep again and nothing can find it"
+        )
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="caffeinate is macOS only")
+    def test_the_assertion_carries_a_dead_mans_ceiling(self):
+        """atexit does not run on SIGKILL, so the child needs its own limit."""
+        StayAwake.release_all()
+        StayAwake.acquire("ceiling")
+        try:
+            assert StayAwake.held()
+            cmd = _caffeinate_argv(StayAwake._proc.pid)
+            assert "-t" in cmd, f"no ceiling on the assertion: {cmd}"
+            ceiling = int(cmd[cmd.index("-t") + 1])
+            # Must not be short enough to cut a legitimate background job
+            # short, and must not be unbounded.
+            assert ceiling >= 3_600
+            assert ceiling <= 86_400
+        finally:
+            StayAwake.release_all()
