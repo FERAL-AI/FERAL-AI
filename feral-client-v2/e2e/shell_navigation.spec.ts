@@ -215,13 +215,14 @@ test.describe('Shell navigation', () => {
     expect(blank, `routes that render nothing on a hard load: ${blank.join(', ')}`).toEqual([]);
   });
   /**
-   * PRE-EXISTING, and outside this lane's files. Recorded here with a
-   * reproduction rather than left as prose, so that whoever fixes it
-   * gets told: this test is annotated `test.fail()`, so the moment the
-   * bundle stops breaking it, the suite goes red and the annotation has
-   * to come off.
+   * FIXED. This was recorded as a `test.fail()` reproduction by the lane
+   * that found it, on the reasoning that the suite would go red the
+   * moment someone fixed the bundle and the annotation would have to
+   * come off. That is exactly what happened, so it is a normal
+   * assertion now.
    *
-   * `vite.config.js` sets `base: './'`, and its comment claims relative
+   * `vite.config.js` used to set `base: './'`, with a comment claiming
+   * relative
    * asset refs "work at both mount points". They work at the two mount
    * ROOTS. They do not work at any route one level deeper: index.html
    * asks for `./assets/index-<hash>.js`, which the browser resolves
@@ -236,14 +237,17 @@ test.describe('Shell navigation', () => {
    * It bites `/memory/context`, which has been a shipped navigation
    * destination since before the palette, plus `/apps/publish`,
    * `/apps/:app_id`, `/pair/:device_id/*` and `/setup/legacy`. In-app
-   * navigation to all of them is fine; a bookmark, a refresh, or a link
-   * someone pastes is a white screen.
+   * navigation to all of them was fine; a bookmark, a refresh, or a link
+   * someone pasted was a white screen.
+   *
+   * The base is '/' now, which resolves identically from every route and
+   * from every mount point, so the /v2/ alias the relative base existed
+   * for is unaffected. Verified against a running brain: all four routes
+   * request /assets/index-<hash>.js and receive text/javascript, and a
+   * hard load of /memory/context boots the app instead of rendering 0
+   * characters into an empty #root.
    */
-  test('known gap: a hard load of /memory/context renders the shell', async ({ page }) => {
-    // Scoped to THIS test only. Called at the top of the body rather
-    // than at describe level, where it would silently invert every
-    // test after it.
-    test.fail();
+  test('a hard load of /memory/context renders the shell', async ({ page }) => {
     await stubApi(page);
     await page.goto('/memory/context');
     await expect(page.locator('.v2-dock')).toBeVisible({ timeout: 3000 });
