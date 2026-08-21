@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ShieldCheck, Terminal, Bot, MessageSquare, Activity } from 'lucide-react';
 import { apiJson, apiFetch } from '../lib/api';
 
 /**
@@ -60,6 +61,22 @@ export function recentTitle(entry) {
   // an identifier, so make it legible rather than printing memory_error.
   const kind = String(entry?.type || 'activity').replace(/_/g, ' ');
   return kind.charAt(0).toUpperCase() + kind.slice(1);
+}
+
+/**
+ * The glyph for a running job, from the kind the brain reports.
+ *
+ * The design gives every rail row an icon, and it is not decoration:
+ * the rail mixes shell commands with sub-agents, and at a glance the
+ * icon is what separates "a build is running" from "an agent is part
+ * way through seven steps". Text alone makes them one undifferentiated
+ * list.
+ */
+export function iconForJob(kind) {
+  const k = String(kind || '');
+  if (k === 'background_bash' || k.includes('shell') || k.includes('bash')) return Terminal;
+  if (k.includes('agent') || k.includes('subagent') || k.includes('task')) return Bot;
+  return Activity;
 }
 
 export default function WorkRail() {
@@ -148,7 +165,8 @@ export default function WorkRail() {
               onClick={() => navigate('/approvals')}
               title={n.tool_name}
             >
-              {n.tool_name}
+              <ShieldCheck size={13} aria-hidden="true" className="v2-rail-ic" />
+              <span className="v2-rail-title-t">{n.tool_name}</span>
             </button>
             <p className="v2-rail-sub">{subtitleOf(n)}</p>
             {failed[n.request_id] && (
@@ -184,7 +202,9 @@ export default function WorkRail() {
           {running.length > 0 && <span className="v2-rail-n">{running.length}</span>}
         </header>
         {running.length === 0 && <p className="v2-rail-quiet">Idle.</p>}
-        {running.map((r) => (
+        {running.map((r) => {
+          const Icon = iconForJob(r.kind);
+          return (
           <article key={r.id} className="v2-rail-card">
             <button
               type="button"
@@ -192,13 +212,15 @@ export default function WorkRail() {
               onClick={() => navigate('/jobs')}
               title={r.name}
             >
-              {r.name}
+              <Icon size={13} aria-hidden="true" className="v2-rail-ic" />
+              <span className="v2-rail-title-t">{r.name}</span>
             </button>
             <p className="v2-rail-sub">
               {[r.context_session_id, elapsed(r.started_at)].filter(Boolean).join(' · ')}
             </p>
           </article>
-        ))}
+          );
+        })}
       </section>
 
       <section className="v2-rail-sect">
@@ -212,6 +234,7 @@ export default function WorkRail() {
             onClick={() => navigate('/timeline')}
             title={e?.content || e?.title || ''}
           >
+            <MessageSquare size={12} aria-hidden="true" className="v2-rail-ic" />
             <span className="v2-rail-recent-t">{recentTitle(e)}</span>
             {e?.timestamp ? <span className="v2-rail-recent-w">{elapsed(e.timestamp)}</span> : null}
           </button>

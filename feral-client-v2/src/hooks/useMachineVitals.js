@@ -25,8 +25,12 @@ const EMPTY = {
   shells: 0,       // backgrounded shell commands specifically
   needs: 0,        // tool calls blocked on a decision
   devices: 0,
-  tokens: 0,
+  episodes: 0,     // what the memory vital counts
+  skills: 0,
   cost: 0,
+  budgetOn: false, // is a daily cap configured at all
+  budget: 0,
+  costKnown: false,
   autonomy: '',
   reachable: true, // false once every source has failed
 };
@@ -53,9 +57,21 @@ async function poll() {
   if (d.status === 'fulfilled') {
     const v = d.value || {};
     next.devices = Number(v.online_count ?? v.device_count ?? 0);
-    next.tokens = Number(v.memory?.tokens ?? v.tokens_used ?? 0);
-    next.cost = Number(v.cost_today ?? v.spend_today ?? 0);
-    next.autonomy = String(v.autonomy || v.health?.autonomy_mode || '');
+    // Episodes, not tokens. The design's 12.4k is labelled
+    // "episodes . 4 months" in its own popover; reading it as a token
+    // count was a misreading, and `memory.tokens` does not exist on
+    // this endpoint, so the vital was always 0 and always hidden.
+    next.episodes = Number(v.memory?.episodes ?? 0);
+    next.skills = Number(v.skills_count ?? 0);
+    // `cost_today` / `spend_today` never existed either. The real
+    // number is the LLM provider's budget snapshot, which had no HTTP
+    // surface at all until it was added to this payload.
+    const b = v.budget || {};
+    next.costKnown = Object.keys(b).length > 0;
+    next.cost = Number(b.daily_spend_usd ?? 0);
+    next.budget = Number(b.daily_budget_usd ?? 0);
+    next.budgetOn = Boolean(b.enabled);
+    next.autonomy = String(v.autonomy || '');
   }
   // Only a total failure means unreachable. One slow endpoint must not
   // make the shell claim the brain is down.

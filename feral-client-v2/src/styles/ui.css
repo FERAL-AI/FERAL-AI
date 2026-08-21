@@ -1655,3 +1655,208 @@
 }
 .v2-stack-failed { flex: 1 1 100%; padding: 0 4px 4px; }
 .v2-stack-row[data-failed="yes"] { flex-wrap: wrap; }
+
+/* ── System bar extras, one per vital ───────────────────────────────
+   The design's bar is an instrument panel, not a status line: every
+   extra is a control that opens a popover you act from. Ported from
+   the mockup's .ext / .pop rules onto this client's tokens. */
+.v2-sysbar-space { flex: 1 1 auto; }
+
+/* The conic mark from the design, a ring rather than a filled dot. */
+.v2-sysbar-mark {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  flex: none;
+  position: relative;
+  background: conic-gradient(
+    from 140deg,
+    var(--v2-state-live), var(--v2-accent), var(--v2-state-warn), var(--v2-state-live)
+  );
+}
+.v2-sysbar-mark::after {
+  content: "";
+  position: absolute;
+  inset: 3.5px;
+  border-radius: 50%;
+  background: var(--v2-surface-1);
+}
+
+.v2-ext {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;      /* WCAG 2.2 SC 2.5.8, same floor as the rest */
+  min-width: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--v2-radius-sm);
+  background: none;
+  cursor: pointer;
+  color: var(--v2-text-secondary);
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  font-variant-numeric: tabular-nums;
+  transition: background var(--v2-dur-fast) var(--v2-ease-out);
+}
+.v2-ext:hover,
+.v2-ext[aria-expanded="true"] {
+  background: var(--v2-fill-subtle);
+  color: var(--v2-text-primary);
+}
+.v2-ext > svg { flex: none; }
+.v2-ext-word { color: var(--v2-text-tertiary); }
+.v2-ext-label { color: inherit; }
+
+.v2-ext-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.v2-ext-dot--ok { background: var(--v2-state-live); }
+.v2-ext-dot--run { background: var(--v2-accent); animation: v2-ext-blink 1.6s infinite; }
+@keyframes v2-ext-blink { 50% { opacity: 0.3; } }
+
+/* The count is a filled pill, which is what makes "2 waiting on you"
+   readable at a glance instead of another number in a row of numbers. */
+.v2-ext-count {
+  background: var(--v2-state-warn);
+  color: var(--v2-surface-1);
+  border-radius: 7px;
+  padding: 0 5px;
+  font-size: 9px;
+  line-height: 14px;
+  min-width: 14px;
+  text-align: center;
+  flex: none;
+}
+
+/* Only animates while something is running. An idle machine gets a
+   still bar rather than a fake heartbeat. */
+.v2-spark { display: flex; align-items: flex-end; gap: 1.5px; height: 11px; width: 26px; flex: none; }
+.v2-spark i {
+  flex: 1;
+  display: block;
+  height: 25%;
+  border-radius: 0.5px;
+  background: var(--v2-hairline-strong);
+}
+.v2-spark.is-live i { animation: v2-spark-bounce 1.9s var(--v2-ease-out) infinite; }
+.v2-spark.is-live i:nth-child(2) { animation-delay: 0.2s; }
+.v2-spark.is-live i:nth-child(3) { animation-delay: 0.4s; }
+.v2-spark.is-live i:nth-child(4) { animation-delay: 0.6s; }
+.v2-spark.is-live i:nth-child(5) { animation-delay: 0.8s; }
+@keyframes v2-spark-bounce {
+  0%, 100% { height: 25%; background: var(--v2-hairline-strong); }
+  45% { height: 100%; background: var(--v2-accent); }
+}
+
+/* ── The popover behind a vital ─────────────────────────────────── */
+.v2-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 8px;
+  width: min(300px, calc(100vw - 24px));
+  z-index: 60;
+  background: var(--v2-surface-elev);
+  border: 1px solid var(--v2-hairline-strong);
+  border-radius: var(--v2-radius-md);
+  box-shadow: var(--v2-shadow-glass);
+  overflow: hidden;
+  -webkit-backdrop-filter: var(--v2-blur-md);
+  backdrop-filter: var(--v2-blur-md);
+  text-align: left;
+}
+.v2-pop-h {
+  font-family: var(--v2-font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+  padding: 9px 12px 6px;
+  border-bottom: 1px solid var(--v2-hairline);
+}
+.v2-pop-r {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--v2-hairline);
+  background: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+button.v2-pop-r { cursor: pointer; }
+button.v2-pop-r:hover { background: var(--v2-fill-subtle); }
+.v2-pop-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.v2-pop-t {
+  font-size: var(--v2-size-sm);
+  color: var(--v2-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v2-pop-s {
+  font-family: var(--v2-font-mono);
+  font-size: 9.5px;
+  color: var(--v2-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v2-pop-v {
+  flex: none;
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+button.v2-pop-v {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid currentColor;
+  border-radius: var(--v2-radius-sm);
+  background: none;
+  cursor: pointer;
+}
+button.v2-pop-v:disabled { opacity: 0.5; cursor: default; }
+.v2-pop-v--warn { color: var(--v2-state-warn); }
+.v2-pop-v--err { color: var(--v2-state-error); }
+.v2-pop-v.is-current { color: var(--v2-state-live); }
+.v2-pop-quiet, .v2-pop-failed {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+}
+.v2-pop-failed { color: var(--v2-state-warn); }
+.v2-pop-all {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  padding: 7px 12px;
+  border: 0;
+  border-top: 1px solid var(--v2-hairline);
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-secondary);
+}
+.v2-pop-all:hover { background: var(--v2-fill-subtle); color: var(--v2-text-primary); }
+
+/* The bar is the popover's containing block, so it must not clip. */
+.v2-sysbar { position: relative; overflow: visible; }
+
+@media (prefers-reduced-motion: reduce) {
+  .v2-spark.is-live i { animation: none; height: 60%; }
+  .v2-ext-dot--run { animation: none; opacity: 1; }
+}
+
+/* Rail row glyphs. The design puts one on every row, and it carries
+   information: it is what separates a shell command from a sub-agent
+   at a glance, in a list that mixes them. */
+.v2-rail-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.v2-rail-title-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v2-rail-ic { flex: none; color: var(--v2-text-tertiary); }
+.v2-rail-card--needs .v2-rail-ic { color: var(--v2-state-warn); }

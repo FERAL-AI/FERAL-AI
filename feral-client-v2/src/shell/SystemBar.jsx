@@ -1,125 +1,147 @@
-import React from 'react';
+import React, { useCallback, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Mic, MicOff, Sun, Moon } from 'lucide-react';
+import {
+  Mic, MicOff, Sun, Moon, PanelLeft, Terminal, ShieldCheck,
+  Database, Smartphone, CircleDollarSign,
+} from 'lucide-react';
 import { useTheme } from '../hooks/useTheme';
 import { useMachineVitals } from '../hooks/useMachineVitals';
 import { useVoice } from './VoiceContext';
-import { useCommandPalette } from './PaletteContext';
+import VitalPopover, { compact, money } from './VitalPopover';
 
 /**
- * The system bar: real vitals, each one clickable.
+ * The system bar: menu-bar extras, one per vital, each opening a popover.
  *
- * The approved design puts these across the top and says every one is a
- * control, not a readout: "Click the vitals in the bar." A number you
- * cannot act on is decoration, so each cell navigates to the surface
- * that explains it.
+ * The approved design's bar is an instrument panel. Every extra is a
+ * control: "Click the vitals in the bar." Its own note says each one
+ * opens a popover whose rows you act from, which is the same argument
+ * the rail and the dock stacks make.
  *
- * What shipped before this was a search box in the same place. Search is
- * still there, on the palette, where it belongs.
+ * Two things were wrong with what shipped.
  *
- * Every value is read from a live endpoint. Nothing here is derived from
- * configuration, because the whole point of a vitals bar is to report
- * what is true rather than what was intended: this codebase's dominant
- * defect class is a surface that claims success while doing nothing.
+ * The bar navigated instead of opening anything, so a number was a link
+ * and never a control. And four of the seven vitals were wired to fields
+ * that DO NOT EXIST on `/api/dashboard`: `cost_today`, `spend_today`,
+ * `tokens_used` and `autonomy` are all absent from that payload, so cost
+ * and autonomy read 0 and empty forever and were hidden by the
+ * render-if-non-zero rule. The bar looked sparse because it was reading
+ * nothing, not because the machine was idle.
+ *
+ * The memory vital was a misreading too. The design's `12.4k` is
+ * labelled "episodes" in its own popover; it was implemented as a token
+ * count, and `memory.tokens` does not exist either.
+ *
+ * Those numbers now come from real sources: the budget from the LLM
+ * provider's own snapshot and the tier from the live ToolRunner, both
+ * added to the dashboard payload, and episodes from `memory.episodes`.
  */
 
-/** 12400 -> "12.4k". Tokens run large and the bar is narrow. */
-export function compact(n) {
-  const v = Number(n || 0);
-  if (!Number.isFinite(v) || v <= 0) return '0';
-  if (v < 1000) return String(Math.round(v));
-  if (v < 1_000_000) return `${(v / 1000).toFixed(v < 10_000 ? 1 : 0)}k`;
-  return `${(v / 1_000_000).toFixed(1)}M`;
+/** A vital renders only when the brain can actually answer it. */
+export function visibleVitals(v) {
+  return [
+    // The brain itself. The sparkline animates only while something is
+    // running, so an idle machine has a still bar rather than a fake
+    // heartbeat.
+    { k: 'brain', title: 'Brain', spark: true, live: v.running > 0 },
+    {
+      k: 'jobs', title: 'Running', Icon: Terminal, label: String(v.running || 0),
+      dot: v.running > 0 ? 'run' : '',
+      aria: `${v.running} running`,
+    },
+    {
+      k: 'needs', title: 'Needs you', Icon: ShieldCheck,
+      count: v.needs > 0 ? String(v.needs) : '',
+      aria: `${v.needs} waiting on you`,
+    },
+    v.episodes > 0 && {
+      k: 'mem', title: 'Memory', Icon: Database, label: compact(v.episodes),
+      aria: `${v.episodes} episodes remembered`,
+    },
+    {
+      k: 'dev', title: 'Devices', Icon: Smartphone, label: String(v.devices || 0),
+      dot: v.devices > 0 ? 'ok' : '',
+      aria: `${v.devices} devices online`,
+    },
+    // Shown whenever the brain reported a budget at all, including
+    // $0.00. A cost of zero is information; a missing reading is not,
+    // and the two used to look identical.
+    v.costKnown && {
+      k: 'cost', title: 'Today', Icon: CircleDollarSign, label: money(v.cost),
+      aria: `${money(v.cost)} spent today`,
+    },
+    v.autonomy && {
+      k: 'autonomy', title: 'Autonomy', label: v.autonomy, word: 'autonomy',
+      aria: `Autonomy is ${v.autonomy}`,
+    },
+  ].filter(Boolean);
 }
 
-/** Cost as the design renders it: $1.84, and never a bare 0. */
-export function money(n) {
-  const v = Number(n || 0);
-  if (!Number.isFinite(v) || v <= 0) return '$0.00';
-  return `$${v.toFixed(2)}`;
-}
-
-export default function SystemBar({ onOpenPalette }) {
+export default function SystemBar({ onOpenPalette, railOpen, onToggleRail }) {
   const navigate = useNavigate();
   const { theme, toggle: toggleTheme } = useTheme();
   const voice = useVoice();
-  // The dock's palette button announces its open state and this one did
-  // not, so the same dialog had two triggers that described themselves
-  // differently to a screen reader.
-  const { open: paletteOpen } = useCommandPalette();
-  // One shared poller, not a second copy of the same three requests.
   const v = useMachineVitals();
+  const [open, setOpen] = useState('');
 
-  // Only render a vital that has something to say. A bar of zeroes is
-  // noise, and the design's bar is sparse for that reason.
-  const cells = [
-    {
-      key: 'shells', glyph: '>_', value: String(v.shells),
-      label: `${v.shells} shell job${v.shells === 1 ? '' : 's'} running`, to: '/jobs',
-    },
-    {
-      key: 'needs', glyph: '!', value: String(v.needs),
-      tone: v.needs > 0 ? 'warn' : 'plain',
-      label: `${v.needs} waiting on you`, to: '/approvals',
-    },
-    v.tokens > 0 && {
-      key: 'tokens', glyph: '', value: compact(v.tokens),
-      label: 'tokens in memory', to: '/memory',
-    },
-    {
-      key: 'devices', glyph: '', value: String(v.devices),
-      label: `${v.devices} device${v.devices === 1 ? '' : 's'} online`, to: '/devices',
-    },
-    v.cost > 0 && {
-      key: 'cost', glyph: '', value: money(v.cost),
-      label: 'spent today', to: '/health',
-    },
-  ].filter(Boolean);
+  const toggle = useCallback((k) => setOpen((cur) => (cur === k ? '' : k)), []);
+  const vitals = visibleVitals(v);
+  const current = vitals.find((x) => x.k === open);
 
   return (
     <header className="v2-sysbar" role="banner">
+      <button
+        type="button"
+        className="v2-sysbar-icon"
+        onClick={onToggleRail}
+        aria-pressed={!railOpen}
+        title={railOpen ? 'Collapse the rail (B)' : 'Show the rail (B)'}
+        aria-label={railOpen ? 'Collapse the rail' : 'Show the rail'}
+      >
+        <PanelLeft size={13} aria-hidden="true" />
+      </button>
+
       <button
         type="button"
         className="v2-sysbar-brand"
         onClick={() => navigate('/console')}
         title="Console"
       >
-        <span className="v2-sysbar-dot" aria-hidden="true" />
+        <span className="v2-sysbar-mark" aria-hidden="true" />
         FERAL
       </button>
 
+      <div className="v2-sysbar-space" />
+
       <div className="v2-sysbar-vitals">
-        {cells.map((c) => (
+        {vitals.map(({ k, title, Icon, label, count, dot, spark, live, word, aria }) => (
           <button
-            key={c.key}
+            key={k}
             type="button"
-            className="v2-sysbar-vital"
-            data-tone={c.tone || 'plain'}
-            onClick={() => navigate(c.to)}
-            title={c.label}
-            aria-label={c.label}
+            className="v2-ext"
+            aria-expanded={open === k}
+            aria-haspopup="dialog"
+            onClick={() => toggle(k)}
+            title={aria || title}
+            aria-label={aria || title}
           >
-            {c.glyph && <span className="v2-sysbar-glyph" aria-hidden="true">{c.glyph}</span>}
-            {c.value}
+            {spark && (
+              <span className={`v2-spark${live ? ' is-live' : ''}`} aria-hidden="true">
+                <i /><i /><i /><i /><i />
+              </span>
+            )}
+            {dot && <span className={`v2-ext-dot v2-ext-dot--${dot}`} aria-hidden="true" />}
+            {Icon && <Icon size={13} aria-hidden="true" />}
+            {word && <span className="v2-ext-word">{word}</span>}
+            {label && <span className="v2-ext-label">{label}</span>}
+            {count && <span className="v2-ext-count">{count}</span>}
           </button>
         ))}
-        {v.autonomy && (
-          <button
-            type="button"
-            className="v2-sysbar-autonomy"
-            onClick={() => navigate('/oversight')}
-            title="Autonomy mode. Click for the supervisor and the kill switch."
-          >
-            autonomy <strong>{v.autonomy}</strong>
-          </button>
-        )}
       </div>
 
       <button
         type="button"
         className="v2-sysbar-cmd"
         onClick={onOpenPalette}
-        aria-pressed={paletteOpen}
         aria-haspopup="dialog"
         title="Search, run a command, or ask (⌘K)"
         aria-label="Open the command palette"
@@ -145,8 +167,7 @@ export default function SystemBar({ onOpenPalette }) {
         data-on={voice.active ? 'yes' : 'no'}
         // A toggle has to say it is a toggle. The retired Menubar set
         // this and the replacement dropped it, which is a real loss for
-        // anyone on a screen reader: the button announced as a plain
-        // action with no on/off state.
+        // anyone on a screen reader.
         aria-pressed={voice.active}
         onClick={voice.toggle}
         title={voice.active ? 'End voice session' : 'Start voice session'}
@@ -154,6 +175,15 @@ export default function SystemBar({ onOpenPalette }) {
       >
         {voice.active ? <Mic size={13} aria-hidden="true" /> : <MicOff size={13} aria-hidden="true" />}
       </button>
+
+      {current && (
+        <VitalPopover
+          kind={current.k}
+          title={current.title}
+          vitals={v}
+          onClose={() => setOpen('')}
+        />
+      )}
     </header>
   );
 }

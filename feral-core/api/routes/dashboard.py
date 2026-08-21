@@ -454,10 +454,50 @@ async def _get_dashboard_data() -> dict:
         "wake_word_enabled": state.wake_word.enabled if state.wake_word else False,
         "taskflows": state.taskflows.stats() if state.taskflows else {},
         "boot": boot_data,
+        # What today has cost, and the tier that decides what runs
+        # without asking. Both are real state the operator acts on and
+        # neither had any HTTP surface: the budget lived only on
+        # LLMProvider._budget_snapshot() and autonomy only on
+        # GET /api/autonomy, so the dashboard's cost and autonomy
+        # readouts had nothing to read and rendered as absent forever.
+        #
+        # Carried on the existing dashboard poll rather than as two more
+        # endpoints, because the shell already polls this one and the
+        # numbers are wanted together.
+        "budget": _budget_status(),
+        "autonomy": _autonomy_mode(),
         "demo": is_demo,
         "is_demo_mode": getattr(state, "_demo", None) is not None,
         "somatic": somatic_state,
     }
+
+
+def _budget_status() -> dict:
+    """Today's spend against the cap, or an empty dict if unknowable.
+
+    Empty rather than zeros on failure: a bar that reports $0.00 when it
+    simply could not read the number is worse than one that shows
+    nothing, because $0.00 is a claim.
+    """
+    try:
+        provider = getattr(getattr(state, "orchestrator", None), "llm", None)
+        snapshot = getattr(provider, "_budget_snapshot", None)
+        if callable(snapshot):
+            return dict(snapshot() or {})
+    except Exception:
+        logger.debug("dashboard: budget snapshot unavailable", exc_info=True)
+    return {}
+
+
+def _autonomy_mode() -> str:
+    """The live tier from the ToolRunner, which is the thing that gates."""
+    try:
+        orch = getattr(state, "orchestrator", None)
+        runner = getattr(orch, "tool_runner", None)
+        mode = getattr(runner, "autonomy_mode", "")
+        return str(mode or "")
+    except Exception:
+        return ""
 
 
 @router.get("/api/dashboard")

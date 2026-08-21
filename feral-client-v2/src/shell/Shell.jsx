@@ -396,6 +396,25 @@ function ShellFrame() {
     clearAskDraft,
   ]);
 
+  // The design's rail collapses, and says so in its own instructions:
+  // "Press B to collapse the rail." It is the only way to give the page
+  // the full width on a laptop, and there was no control for it at all.
+  const [railOpen, setRailOpen] = useState(true);
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'b' && e.key !== 'B') return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // Never while the operator is typing: b is a letter first.
+      const el = document.activeElement;
+      const tag = (el?.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || el?.isContentEditable) return;
+      e.preventDefault();
+      setRailOpen((r) => !r);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   return (
     <ChatThreadContext.Provider value={chatThread}>
       <PaletteProvider value={palette}>
@@ -406,9 +425,13 @@ function ShellFrame() {
               page in the middle. Menubar stays for the theme and voice
               controls it owns; the search field it used to carry has
               moved to the palette, which is where search belongs. */}
-          <SystemBar onOpenPalette={openPalette} />
-          <div className="v2-shell-body">
-            <WorkRail />
+          <SystemBar
+            onOpenPalette={openPalette}
+            railOpen={railOpen}
+            onToggleRail={() => setRailOpen((r) => !r)}
+          />
+          <div className={`v2-shell-body${railOpen ? '' : ' is-rail-collapsed'}`}>
+            {railOpen && <WorkRail />}
             <main className="v2-shell-main">
               <Outlet />
             </main>
