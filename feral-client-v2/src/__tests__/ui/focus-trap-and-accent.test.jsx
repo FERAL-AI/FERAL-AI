@@ -13,12 +13,8 @@ import { MemoryRouter } from 'react-router-dom';
 import fs from 'node:fs';
 import path from 'node:path';
 
-<<<<<<< HEAD
-import HubLauncher from '../../components/HubLauncher';
-import { colorIn, contrast, resolveIn, toHex } from '../_helpers/tokens';
-=======
 import CommandPalette from '../../shell/CommandPalette';
->>>>>>> 96add3a49 (shell: replace the Hub popup with a command palette, off one nav index)
+import { colorIn, contrast, resolveIn, toHex } from '../_helpers/tokens';
 
 /**
  * Token values come from the cascade resolver rather than from counting
