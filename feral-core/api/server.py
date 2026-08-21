@@ -18,7 +18,7 @@ from collections.abc import Awaitable  # noqa: F401 — used by quoted return an
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Request
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, HTMLResponse, FileResponse, RedirectResponse
@@ -55,8 +55,10 @@ from security.session_auth import (
 )
 from security.device_pairing import DevicePairingStore  # used in type hint
 
+from api.routes.dashboard import health as _dashboard_health_json
 from api.routes.dashboard import router as dashboard_router
 from api.routes.config import router as config_router
+from api.routes.skills import list_skills as _skills_list_json
 from api.routes.skills import router as skills_router
 from api.routes.tools import router as tools_router
 from api.routes.memory import router as memory_router
@@ -656,6 +658,91 @@ app.add_middleware(APIKeyMiddleware)
 # ─────────────────────────────────────────────
 # Include Route Modules
 # ─────────────────────────────────────────────
+
+# ── Two API paths that are also SPA route names ─────────────────────
+#
+# `GET /skills` (api/routes/skills.py) and `GET /health`
+# (api/routes/dashboard.py) are mounted without the `/api` prefix, and
+# the v2 dashboard has a `/skills` page and a `/health` page. FastAPI
+# matches a registered route before the SPA catch-all at the bottom of
+# this module, so the API won both.
+#
+# Clicking Skills in the dock worked, because that is client-side
+# routing and never touches the server. Reloading the page, bookmarking
+# it, or opening a shared link did not: the browser got
+# `application/json` and rendered 33KB of skill manifests with zero
+# anchor elements on the page, so there was no way back except editing
+# the URL by hand. These are the only two collisions in the route table.
+#
+# Neither path can simply move. `/health` is the Docker HEALTHCHECK and
+# the load-balancer probe; `/skills` is a published alias (the client
+# itself uses `/api/skills/*`). So the request decides: a browser
+# navigating to the URL gets the dashboard, and every programmatic
+# client gets exactly the JSON it got before.
+#
+# Registered here, ahead of both routers, because FastAPI resolves in
+# registration order and these must be reached first.
+
+
+def _is_document_navigation(request: Request) -> bool:
+    """True when the caller is asking for a page rather than data.
+
+    `Sec-Fetch-Dest: document` is the direct answer and is trusted on
+    its own. It is not *required*, though, and requiring it was wrong:
+    this app registers a service worker, and `sw.js` handles the
+    navigation by calling `fetch(req)` itself (the network-first branch).
+    Chromium rewrites the fetch metadata on that reissued request, so
+    the brain sees `sec-fetch-dest: empty` for what is unambiguously a
+    page load. Measured: with the service worker blocked, `/health`
+    served `text/html` and the dashboard rendered; with it active and
+    the same rule, the identical navigation got `application/json` and
+    a blank page. A signal a service worker can erase cannot be the
+    gate.
+
+    So the fallback is the `Accept` header, which survives intact: the
+    caller has to *name* `text/html`. That is what separates the two
+    populations here, and it separates them on the side that matters:
+
+    * curl and wget send `*/*` and never match. That is the Docker
+      HEALTHCHECK and the load-balancer probe, and serving them a page
+      would take the container down.
+    * `fetch()` and XHR default to `*/*` too, so the dashboard's own
+      calls are unaffected.
+    * A browser typing, reloading, bookmarking or following a link
+      sends `text/html,application/xhtml+xml,...` every time.
+    """
+    if request.headers.get("sec-fetch-dest", "") == "document":
+        return True
+    return "text/html" in request.headers.get("accept", "")
+
+
+async def _spa_document_if_navigation(request: Request):
+    """The dashboard for a navigation, or None to fall through to JSON.
+
+    Delegates to the catch-all rather than re-resolving the bundle, so
+    the v1 legacy banner, the not-built fallback page and the bundle
+    directory logic stay in one place.
+    """
+    if not _is_document_navigation(request):
+        return None
+    return await serve_webui_or_fallback("")
+
+
+@app.get("/skills", include_in_schema=False)
+async def skills_page_or_json(request: Request, response: Response):
+    doc = await _spa_document_if_navigation(request)
+    if doc is not None:
+        return doc
+    return await _skills_list_json(response)
+
+
+@app.get("/health", include_in_schema=False)
+async def health_page_or_json(request: Request):
+    doc = await _spa_document_if_navigation(request)
+    if doc is not None:
+        return doc
+    return await _dashboard_health_json()
+
 
 app.include_router(dashboard_router)
 app.include_router(config_router)
