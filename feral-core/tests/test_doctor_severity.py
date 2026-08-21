@@ -58,6 +58,14 @@ CLI_MAIN_PATH = Path(__file__).resolve().parent.parent / "cli" / "main.py"
 #     use ``_info`` and do NOT add a label here.
 
 ALLOWED_FAIL_LABELS: set[str] = {
+    # Under 512 MiB free on the volume holding ~/.feral. Red rather than
+    # yellow because at that point writes actually start failing: the
+    # memory store, the embedding queue, screen captures and background
+    # job output all grow on every turn and none of them ask permission.
+    # A full disk otherwise presents as "the machine got slow", which is
+    # what happened on the author's Mac at 99% used with nothing in the
+    # brain noticing or saying so.
+    "Disk space",
     # Python version below the supported floor (3.11).
     "Python version",
     # The interpreter's SQLite was built without FTS5. MemoryStore and
@@ -149,6 +157,11 @@ ALLOWED_FAIL_LABELS: set[str] = {
 }
 
 ALLOWED_WARN_LABELS: set[str] = {
+    # Under 2 GiB free. Yellow because nothing is broken yet, but the
+    # store grows on every turn, so this is the last point at which the
+    # operator can act without losing work. The same label is also in
+    # ALLOWED_FAIL_LABELS: it escalates to red below 512 MiB.
+    "Disk space",
     # The FTS5 / loadable-extension probes themselves raised. Yellow and
     # not red on purpose: this is "doctor could not determine the answer",
     # which is a different statement from "the feature is missing". The

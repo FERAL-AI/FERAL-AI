@@ -1657,6 +1657,27 @@ def cmd_doctor():
     # rides in the detail line instead, for the one reason that survived
     # measurement, which is resident memory on a large store.
     try:
+        # Free space. Nothing in the brain checked this before, and a full
+        # volume presents as a slow machine rather than as an error: the
+        # memory store, the embedding queue, screen captures and background
+        # job output all grow without asking permission. Lifted from
+        # omarchy, whose update refuses to start below a floor.
+        try:
+            from system.preflight import check_disk as _check_disk
+            _disk = _check_disk()
+            if _disk.level == "critical":
+                _fail("Disk space", _disk.detail,
+                      fix="Free space on the volume holding ~/.feral before running anything long.")
+            elif _disk.level == "low":
+                _warn("Disk space", _disk.detail,
+                      fix="Free space soon; the memory store grows on every turn.")
+            elif _disk.level == "unknown":
+                _info("Disk space", _disk.detail)
+            else:
+                _pass("Disk space", _disk.detail)
+        except Exception as _disk_exc:
+            _info("Disk space", f"could not be measured: {_disk_exc}")
+
         from memory.sqlite_features import (
             FTS5_REMEDY as _FTS5_REMEDY,
             LOADABLE_EXTENSIONS_REMEDY as _LOADEXT_REMEDY,

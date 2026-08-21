@@ -120,6 +120,23 @@ def _paginate(lines: "list[str]", head_limit: int, offset: int) -> "tuple[list[s
 # ``process/supervisor/buffer.py`` and ``adapters/child.py``) so every
 # future caller gets them too.
 
+def _stay_awake_acquire(reason: str = "") -> None:
+    """Best effort. A machine that will not hold an assertion still runs."""
+    try:
+        from system.preflight import StayAwake
+        StayAwake.acquire(reason)
+    except Exception:
+        logger.debug("could not inhibit sleep for %s", reason, exc_info=True)
+
+
+def _stay_awake_release() -> None:
+    try:
+        from system.preflight import StayAwake
+        StayAwake.release()
+    except Exception:
+        logger.debug("could not release the sleep assertion", exc_info=True)
+
+
 _LIVE_BACKGROUND_PGIDS: "dict[str, int]" = {}
 
 
@@ -1077,6 +1094,12 @@ class CodingToolsSkill(BaseSkill):
             started_at=time.monotonic(),
         )
         self._bg_jobs[job_id] = job
+        # Hold the machine awake for the life of the job. A detached build
+        # or test run dies when the Mac sleeps, and the failure surfaces as
+        # a truncated log with no cause: the process is simply gone. The
+        # assertion is reference counted, so N concurrent jobs share one
+        # and the last to finish releases it.
+        _stay_awake_acquire(f"background job {job_id}")
         try:
             _LIVE_BACKGROUND_PGIDS[job_id] = os.getpgid(handle.pid)
         except (OSError, ProcessLookupError):
@@ -1133,6 +1156,10 @@ class CodingToolsSkill(BaseSkill):
             logger.debug("watcher for %s ended abnormally", job_id, exc_info=True)
         finally:
             _LIVE_BACKGROUND_PGIDS.pop(job_id, None)
+            # Paired with the acquire in the start path. In `finally` so a
+            # crashed or cancelled watcher still drops its reference; a
+            # leaked assertion keeps the machine awake indefinitely.
+            _stay_awake_release()
 
     def _lookup_job(self, args: dict, endpoint: str) -> "tuple[_BackgroundJob | None, dict | None]":
         """Resolve ``job_id`` for the calling session, or build the error."""
