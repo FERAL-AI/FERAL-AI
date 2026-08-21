@@ -22,6 +22,16 @@ MAX_CHARS = 200_000
 MAX_PAGES = 1000
 
 
+#: Returned for a scanned page when OCR is not installed.
+#:
+#: The manifest quotes this literal twice and instructs the model to
+#: report it verbatim rather than guess at the page contents, so it is a
+#: contract, not a log line. It lives here as one constant because it
+#: previously existed as two divergent copies: the implementation
+#: returned an em dash and the manifest promised an ASCII hyphen.
+OCR_UNAVAILABLE = "[OCR not available - install pytesseract]"
+
+
 def _get_fitz():
     try:
         import fitz  # PyMuPDF
@@ -280,15 +290,32 @@ class PDFReaderSkill(BaseSkill):
 
     @staticmethod
     def _ocr_page(page: Any) -> str:
-        """OCR a page that has no extractable text."""
+        """OCR a page that has no extractable text.
+
+        The first attempt is a plain text extraction, because a page can
+        reach here with a text layer the structured parser did not like.
+        It only counts when it returns something: ``get_text`` answers
+        ``''`` for a scanned page rather than raising, so returning its
+        result unconditionally meant the OCR branch below was
+        unreachable for the exact case this method exists to handle.
+
+        Measured on a PDF page drawn with shapes and no text layer:
+        ``get_text`` returned ``''`` and ``_ocr_page`` returned ``''``.
+        pytesseract was never called even when installed, and the
+        documented "OCR not available" literal was never produced. The
+        model received a blank page and, per the manifest's own warning,
+        was left to guess at its contents.
+        """
         fitz = _get_fitz()
         try:
-            return page.get_text(
+            text = page.get_text(
                 "text",
                 flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_DEHYPHENATE,
             )
         except Exception:
-            pass
+            text = ""
+        if text and text.strip():
+            return text
 
         try:
             import pytesseract
@@ -298,7 +325,20 @@ class PDFReaderSkill(BaseSkill):
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             return pytesseract.image_to_string(img)
         except ImportError:
-            return "[OCR not available — install pytesseract]"
+            return OCR_UNAVAILABLE
+        except Exception:
+            # pytesseract imports fine without the tesseract binary and
+            # raises TesseractNotFoundError only when asked to run. The
+            # manifest names both requirements, so both failures report
+            # the same thing rather than surfacing a stack trace as page
+            # content.
+            logger.warning("OCR failed for a scanned page", exc_info=True)
+            # ASCII hyphen, not an em dash. The manifest documents this
+            # exact literal twice and tells the model to report it
+            # verbatim instead of guessing at the page contents, so the
+            # two strings have to be byte-identical. They were not: this
+            # returned U+2014 while the manifest promised '-'.
+            return OCR_UNAVAILABLE
 
     # ── metadata extraction ───────────────────────────────────────
 
