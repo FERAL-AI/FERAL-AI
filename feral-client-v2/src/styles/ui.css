@@ -1373,7 +1373,17 @@
 
    Keyframes are the mockup's: breathe 52% -> 78%, ring rotating. */
 .v2-dock-btn { position: relative; overflow: hidden; isolation: isolate; }
-.v2-dock-btn > svg, .v2-dock-label { position: relative; z-index: 2; }
+/* Raise the icon above the fill, and stop it shrinking. It is a flex
+   item with the default flex-shrink: 1, so anything else competing for
+   width in the tile collapses it to 0. */
+.v2-dock-btn > svg { position: relative; z-index: 2; flex: none; }
+/* z-index ONLY. .v2-dock-label is position: absolute on purpose: it is
+   the hover tooltip that floats above the tile
+   (bottom: calc(100% + 8px)). Overriding it to relative put it into the
+   flex flow, where it took width from the icon and squeezed the 20px
+   glyph to 0, and then overflow: hidden clipped both. Every tile in the
+   dock rendered as an empty square. */
+.v2-dock-label { z-index: 2; }
 
 .v2-dock-fill {
   position: absolute;
