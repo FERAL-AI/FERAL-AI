@@ -1089,7 +1089,7 @@ class MemoryStore:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC)")
 
-            # W3 — thread management columns.
+            # W3: thread management columns.
             #
             # ``title_custom`` is the fix for a rename that survived zero
             # autosaves. ``conversation_save`` derives a title from the
