@@ -551,6 +551,48 @@
   font-size: var(--v2-size-md);
   color: var(--v2-text-primary);
 }
+/* Partial captions are still forming: the STT provider will replace the
+   text, so it is rendered as provisional rather than as something the
+   user said. `is_partial` reached the client on every transcript frame
+   and nothing had ever read it. */
+.v2-voice-caption[data-partial="true"] { opacity: 0.65; font-style: italic; }
+.v2-voice-caption-note {
+  display: block;
+  margin-top: 6px;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-secondary);
+}
+/* The banner had no rules at all, which was survivable while it held a
+   headline and one line. It now carries the brain's diagnosis
+   (summary, recommendation, cause), and without a column these run
+   together into a single unreadable line. */
+.v2-voice-status-banner { max-width: min(520px, 84vw); }
+.v2-voice-status-banner__row { display: flex; gap: 10px; align-items: flex-start; }
+.v2-voice-status-banner__icon {
+  flex: none;
+  width: 18px; height: 18px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: var(--v2-state-error);
+  color: var(--v2-bg-base);
+  font-size: var(--v2-size-xs);
+  font-weight: 700;
+}
+.v2-voice-status-banner__text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--v2-size-sm);
+  color: var(--v2-text-primary);
+  text-align: left;
+}
+.v2-voice-status-banner__fix { color: var(--v2-text-secondary); }
+.v2-voice-status-banner__muted { color: var(--v2-state-error); }
+.v2-voice-status-banner__cause {
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
 .v2-voice-endbar { display: inline-flex; }
 
 /* ── Modal ───────────────────────────────────────────────────── */
