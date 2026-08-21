@@ -30,8 +30,8 @@ Version `2026.8.8`. Public beta. Single-user local deployment is the only suppor
 make dev                                  # build pinned .venv, install feral-core[all,dev] + client deps
 make test                                 # both suites: test-py + test-client
 make test-py                              # cd feral-core && python -m pytest tests/ -q --no-cov  (~6 min)
-make test-client                          # cd feral-client-v2 && npm test  (123 files / 843 tests)
-make e2e                                  # cd feral-client-v2 && npm run e2e  (13 playwright specs)
+make test-client                          # cd feral-client-v2 && npm test  (126 files / 901 tests)
+make e2e                                  # cd feral-client-v2 && npm run e2e  (6 playwright spec files / 22 tests)
 make lint                                 # ruff, the exact ruleset CI gates on
 make serve                                # feral serve
 make doctor                               # feral doctor — reports real runtime state
