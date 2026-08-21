@@ -213,10 +213,32 @@ class SkillExecutor:
 
     @staticmethod
     def _is_sandbox_required(skill: SkillManifest, endpoint: SkillEndpoint) -> bool:
+        """Does *this endpoint* have to run in a sandbox?
+
+        Checked most specific first. The hardcoded skill-id set is a
+        floor for manifests that say nothing, and it deliberately stops
+        applying once an author has marked which endpoints need the
+        sandbox: otherwise the fallback would silently override the
+        per-endpoint declaration it exists to be a stand-in for.
+
+        The distinction is not academic. `workspace_scripts` declared
+        the requirement at skill level, so `list_catalog` (reads a JSON
+        file, runs no code) and `delete` (removes a catalog entry, runs
+        no code) were refused with 503 whenever Docker was not running.
+        An operator without Docker could not list or delete their own
+        saved scripts, and both manifest entries documented that as
+        expected behaviour.
+        """
         if bool(getattr(endpoint, "requires_sandbox", False)):
             return True
         if bool(getattr(skill, "requires_sandbox", False)):
             return True
+        if any(
+            bool(getattr(ep, "requires_sandbox", False))
+            for ep in (getattr(skill, "endpoints", None) or [])
+        ):
+            # The author marked specific endpoints; this is not one.
+            return False
         return str(getattr(skill, "skill_id", "") or "") in SANDBOX_REQUIRED_SKILL_IDS
 
     def _sandbox_requirement_status(
