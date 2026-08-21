@@ -540,8 +540,31 @@ class AudioPipeline:
         # are what actually end an utterance in practice: the audio went
         # quiet, or it has run long enough that waiting for a pause is no
         # longer reasonable.
-        if is_final or buf.speech_ended() or buf.overflowing():
+        if is_final or buf.speech_ended():
             completed += buf.flush()
+        elif buf.overflowing():
+            # The ceiling exists so a speaker who never pauses still gets
+            # transcribed. It must not turn an open mic in a quiet room
+            # into a paid STT call every twelve seconds.
+            #
+            # `speech_ended` has always required voiced audio first, and
+            # its docstring says why. `overflowing` did not, and the two
+            # were ORed, so silence took the ceiling instead: measured on
+            # 60s of digital silence, four calls of 387,200 bytes each
+            # with zero non-zero samples. On the default provider that is
+            # roughly 297 Whisper requests an hour, and Whisper
+            # hallucinates words on silence ("Thank you."), which
+            # voice/router feeds to the orchestrator as a user turn. The
+            # brain answers a room that said nothing.
+            #
+            # Where we can see the samples and none is speech, drop it.
+            # Where we cannot (compressed audio), the ceiling still
+            # fires, because an unmeasurable buffer that grows forever is
+            # the worse failure.
+            if buf.is_measurably_silent():
+                buf.discard()
+            else:
+                completed += buf.flush()
 
         if not completed or len(completed) < 1000:
             return None
@@ -950,6 +973,19 @@ class AudioBuffer:
         whose silence cannot be measured.
         """
         return self._duration_sec >= MAX_UTTERANCE_SEC
+
+    def is_measurably_silent(self) -> bool:
+        """True when we can see the samples AND none of them is speech.
+
+        Only answerable for PCM16. Compressed bytes are not samples, so
+        an Opus buffer is never "measurably" anything and the ceiling
+        stays its only backstop.
+        """
+        return _is_pcm16(self._encoding) and self._voiced_bytes < MIN_VOICED_BYTES
+
+    def discard(self) -> None:
+        """Drop the buffer without handing it to anyone."""
+        self.flush()
 
     @property
     def pending_bytes(self) -> int:

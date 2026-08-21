@@ -156,15 +156,58 @@ class TestTheBackstop:
 
 class TestItDoesNotOverfire:
     def test_a_silent_room_never_reaches_stt(self):
-        """Flushing silence would bill an STT call per second of nothing."""
+        """Flushing silence would bill an STT call per second of nothing.
+
+        This ran for 6.0s, which is HALF of MAX_UTTERANCE_SEC, imported
+        at the top of this same file. It therefore stopped just before
+        the boundary that actually broke the contract it is named after,
+        and passed while a quiet room produced an STT call every 12
+        seconds forever. The window is derived from the ceiling now, so
+        it cannot drift back under it.
+        """
         r = _Recorder()
+        chunks = int(MAX_UTTERANCE_SEC * 10 * 5)   # five ceilings' worth
 
         async def scenario():
-            for _ in range(60):      # 6s of pure silence
+            for _ in range(chunks):
                 await r.send(silence())
 
         _run(scenario())
-        assert r.calls == [], f"silence was sent to STT {len(r.calls)} times"
+        assert r.calls == [], (
+            f"{chunks / 10:.0f}s of silence was sent to STT {len(r.calls)} "
+            f"times ({r.calls} bytes). The ceiling must not ship a buffer "
+            "with no speech in it."
+        )
+
+    def test_the_ceiling_still_cuts_an_unbroken_speaker(self):
+        """The guard above must not disarm the backstop it sits next to."""
+        r = _Recorder()
+
+        async def scenario():
+            for _ in range(int(MAX_UTTERANCE_SEC * 10 * 1.5)):
+                await r.send(speech())
+
+        _run(scenario())
+        assert len(r.calls) >= 1, "the ceiling stopped cutting long speech"
+
+    def test_compressed_audio_still_gets_cut_at_the_ceiling(self):
+        """Opus bytes are not samples, so silence is unmeasurable there.
+
+        For those the ceiling is the only backstop that exists, and an
+        unmeasurable buffer growing forever is the worse failure, so it
+        keeps firing even though the payload might be silence.
+        """
+        r = _Recorder()
+
+        async def scenario():
+            for i in range(300):
+                await r.pipeline.process_audio_chunk(
+                    "opus-s", base64.b64encode(b"\x00" * 4000).decode(), i, False,
+                    encoding="opus", sample_rate=RATE,
+                )
+
+        _run(scenario())
+        assert len(r.calls) >= 1
 
     def test_a_short_blip_is_not_an_utterance(self):
         buf = AudioBuffer("s")
