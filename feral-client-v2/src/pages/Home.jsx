@@ -70,6 +70,32 @@ const SKILL_GLYPH = {
   workspace_scripts: 'sh',
 };
 
+/**
+ * Human names for the job kinds /api/jobs returns.
+ *
+ * The pane rendered `j.kind` straight through, so the chip read
+ * "tool_genesis" and, once backgrounded shell commands were added to the
+ * aggregator, "background_bash". Those are the brain's internal source
+ * names, not words anyone reading a dashboard is looking for.
+ *
+ * An unknown kind falls back to the raw value rather than being hidden,
+ * because a new source appearing unlabelled is a much smaller problem
+ * than a new source silently not rendering.
+ */
+export const JOB_KIND_LABELS = {
+  taskflow: 'TaskFlow',
+  routine: 'Routine',
+  specialist: 'Specialist',
+  tool_genesis: 'New tool',
+  daemon: 'Device',
+  background_bash: 'Shell job',
+};
+
+export function jobKindLabel(kind) {
+  if (!kind) return 'Job';
+  return JOB_KIND_LABELS[kind] || kind;
+}
+
 export default function Home() {
   const somatic = useSomatic();
   const [time, setTime] = useState(new Date());
@@ -956,7 +982,7 @@ export default function Home() {
           )}
         >
           <p className="v2-p v2-p--muted">
-            Everything FERAL is working on — TaskFlows, scheduled routines, specialists on standby, Tool Genesis drafts, and live HUP daemons.
+            Everything FERAL is working on: TaskFlows, scheduled routines, specialists on standby, new tools being drafted, background shell jobs, and live devices.
           </p>
           {jobs.length === 0 ? (
             <EmptyState title="Idle" hint="No active jobs. Schedule a routine or start a TaskFlow to see activity here." />
@@ -967,10 +993,10 @@ export default function Home() {
                   <StatusDot
                     tone={j.status === 'running' ? 'live' : j.status === 'failed' || j.status === 'error' ? 'error' : j.status === 'paused' ? 'warn' : 'neutral'}
                     pulse={j.status === 'running' || j.status === 'connected'}
-                    label={`${j.kind || 'Job'} ${j.name || ''}: ${j.status || 'unknown'}`}
+                    label={`${jobKindLabel(j.kind)} ${j.name || ''}: ${j.status || 'unknown'}`}
                   />
                   <div className="v2-flow-title">
-                    <span className="v2-chip v2-chip--muted" style={{ marginRight: 6 }}>{j.kind}</span>
+                    <span className="v2-chip v2-chip--muted" style={{ marginRight: 6 }}>{jobKindLabel(j.kind)}</span>
                     {j.name}
                   </div>
                   <div className="v2-flow-status">
@@ -984,7 +1010,7 @@ export default function Home() {
           {Object.keys(jobCounts).length > 0 && (
             <div className="v2-device-caps" style={{ marginTop: 10 }}>
               {Object.entries(jobCounts).map(([kind, count]) => (
-                <span key={kind} className="v2-chip v2-chip--muted">{kind}: {count}</span>
+                <span key={kind} className="v2-chip v2-chip--muted">{jobKindLabel(kind)}: {count}</span>
               ))}
             </div>
           )}

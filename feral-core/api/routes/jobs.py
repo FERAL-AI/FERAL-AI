@@ -6,6 +6,7 @@ Today FERAL's in-flight operational state lives in many places:
 * ``state.agent_mitosis.list_specialists()`` — permanent sub-agents
 * ``state.tool_genesis.get_pending_skills()`` — Tool Genesis drafts
 * ``state.daemons`` — live HUP daemons (already at /api/devices/connected)
+* ``coding_tools._bg_jobs``: backgrounded shell commands
 
 Nothing merges them. The v2 UI has to hit five endpoints and reconcile
 them manually — or, as today, show only TaskFlows and miss the rest.
@@ -228,6 +229,73 @@ def _daemon_jobs() -> list[dict]:
     return out
 
 
+def _background_bash_jobs() -> list[dict]:
+    """Backgrounded shell commands started by ``coding_tools__bash``.
+
+    These were absent from this aggregator entirely, which is the worst
+    omission of the five: a background job is the one kind of work here
+    that holds a real OS process, keeps the machine awake through a
+    ``StayAwake`` assertion, and survives the turn that started it. A
+    build or test run kicked off from chat was therefore invisible to
+    every surface, and the only way to see or stop one was to ask the
+    model to call ``coding_tools__bash_output`` again.
+    """
+    try:
+        from skills.impl import get_implementation
+    except Exception:
+        return []
+    skill = get_implementation("coding_tools")
+    jobs = getattr(skill, "_bg_jobs", None)
+    if not jobs:
+        return []
+
+    out: list[dict] = []
+    try:
+        # `_BackgroundJob.started_at` is `time.monotonic()`, because the
+        # pruner measures job age with it. Every other source here reports
+        # wall-clock epoch, and the combiner sorts on that, so handing the
+        # monotonic value through unconverted would park every background
+        # job at the bottom of the list for the life of the process.
+        now_wall = time.time()
+        now_mono = time.monotonic()
+        for job_id, job in list(jobs.items()):
+            # Only work that is still happening. The store deliberately
+            # keeps finished jobs around so `bash_output` can still be
+            # read (BG_FINISHED_TTL_SEC / BG_FINISHED_RETENTION), but
+            # this endpoint answers "what is the brain doing right now"
+            # and every other source here reports active entities only.
+            # Listing completed jobs made an idle brain report work in
+            # progress for the whole retention window.
+            if job.finished:
+                continue
+            started_wall = now_wall - max(0.0, now_mono - float(job.started_at))
+            out.append({
+                "id": job_id,
+                "kind": "background_bash",
+                "name": (job.command or "")[:120],
+                "status": "running",
+                "started_at": started_wall,
+                # A shell command reports no fraction of itself, and a
+                # fake one reads as progress that has stalled.
+                "progress": None,
+                "context_session_id": job.session_id or None,
+                # Killing one is a tool call, not a route. Naming a route
+                # that does not exist is worse than admitting there is none.
+                "cancellable_via": None,
+                "detail": {
+                    "pid": job.pid,
+                    "cwd": job.cwd,
+                    "timeout_sec": job.timeout_sec,
+                    "exit_code": job.exit_code(),
+                    "kill_reason": job.kill_reason(),
+                },
+            })
+    except Exception as exc:
+        logger.warning("background bash aggregator failed: %s", exc)
+        raise
+    return out
+
+
 @router.get("/api/jobs")
 async def list_jobs(
     kind: Optional[str] = None,
@@ -236,7 +304,8 @@ async def list_jobs(
     """Return the union of active operational entities across FERAL.
 
     Optional filter:
-      * ``kind`` — one of taskflow, routine, specialist, tool_genesis, daemon
+      * ``kind``: one of taskflow, routine, specialist, tool_genesis,
+        daemon, background_bash
       * ``limit`` — cap the returned count (default 100)
     """
     aggregators = {
@@ -245,6 +314,7 @@ async def list_jobs(
         "specialist": _specialist_jobs,
         "tool_genesis": _tool_genesis_jobs,
         "daemon": _daemon_jobs,
+        "background_bash": _background_bash_jobs,
     }
     items: list[dict] = []
     counts: dict[str, int] = {}
