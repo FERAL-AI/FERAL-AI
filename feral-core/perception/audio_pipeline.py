@@ -199,39 +199,88 @@ class _LocalTTS:
 #  Capability auto-detection
 # ---------------------------------------------------------------------------
 
+#: Voices `feral voice` knows how to fetch. Presence is checked, not assumed.
+_KNOWN_PIPER_VOICES = ("en_US-lessac-medium", "en_US-amy-low", "en_GB-alan-medium")
+
+
 def detect_local_audio_capabilities() -> dict:
-    """Probe which local audio backends are importable.
+    """Probe whether local audio backends can actually run.
 
     Returns a dict suitable for ``feral doctor`` reporting::
 
         {
-            "local_stt": True/False,
-            "local_tts": True/False,
-            "stt_models": ["tiny", "base", ...],
-            "tts_voices": ["en_US-lessac-medium", ...],
+            "local_stt": True/False,      # importable AND a model on disk
+            "local_tts": True/False,      # importable AND a voice on disk
+            "stt_models": [...],          # models you may CHOOSE
+            "tts_voices": [...],          # voices you may CHOOSE
+            "stt_models_present": [...],  # models actually on disk
+            "tts_voices_present": [...],  # voices actually on disk
+            "stt_importable": True/False,
+            "tts_importable": True/False,
         }
+
+    ``stt_models`` stays the selectable list, because
+    ``/api/audio/providers/stt/faster-whisper/models`` is a picker: a
+    fresh install has nothing downloaded, and a picker that lists only
+    what is present would be empty with no way to choose something to
+    fetch. ``*_present`` is the separate question doctor asks.
+
+    ``local_stt`` used to be set by ``import faster_whisper`` alone, and
+    ``stt_models`` returned the list of *valid model names* rather than
+    the ones present. ``tts_voices`` was three hard-coded strings. So on
+    a machine with the packages installed and no weights downloaded,
+    which is what `pip install feral-ai[stt]` leaves behind, doctor
+    reported local STT and TTS as available and listed models that were
+    not on disk. The transcribe path then failed at first use with
+    "model not downloaded", having been told twice that it would work.
+
+    The two facts are kept separate rather than collapsed, because
+    "install the package" and "fetch the weights" are different fixes
+    and the operator needs to know which one they are missing.
     """
     result: dict = {
         "local_stt": False,
         "local_tts": False,
         "stt_models": [],
         "tts_voices": [],
+        "stt_models_present": [],
+        "tts_voices_present": [],
+        "stt_importable": False,
+        "tts_importable": False,
     }
 
     try:
         import faster_whisper  # noqa: F401
-        result["local_stt"] = True
+        result["stt_importable"] = True
         result["stt_models"] = list(_VALID_LOCAL_STT_MODELS)
     except ImportError:
         pass
 
     try:
         import piper  # noqa: F401
-        result["local_tts"] = True
-        result["tts_voices"] = ["en_US-lessac-medium", "en_US-amy-low", "en_GB-alan-medium"]
+        result["tts_importable"] = True
+        result["tts_voices"] = list(_KNOWN_PIPER_VOICES)
     except ImportError:
         pass
 
+    # Presence is a filesystem question and must never make the probe
+    # raise: doctor calls this to describe a broken machine.
+    try:
+        from voice.local_models import faster_whisper_model_present, piper_voice_present
+
+        if result["stt_importable"]:
+            result["stt_models_present"] = [
+                m for m in _VALID_LOCAL_STT_MODELS if faster_whisper_model_present(m)
+            ]
+        if result["tts_importable"]:
+            result["tts_voices_present"] = [
+                v for v in _KNOWN_PIPER_VOICES if piper_voice_present(v)
+            ]
+    except Exception:
+        logger.debug("local model presence probe failed", exc_info=True)
+
+    result["local_stt"] = bool(result["stt_models_present"])
+    result["local_tts"] = bool(result["tts_voices_present"])
     return result
 
 

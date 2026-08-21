@@ -1570,6 +1570,32 @@ def cmd_migrate(pending_only: bool = False) -> int:
     return 0
 
 
+def _local_voice_selected() -> tuple[bool, bool]:
+    """Has the operator actually chosen local STT / TTS engines?
+
+    Doctor needs this to tell two states apart that look identical from
+    the filesystem: `pip install 'feral-ai[stt]'` with no weights yet,
+    which is the normal shape of a fresh install and must not turn a
+    clean boot yellow, and "the engine you selected cannot run", which
+    is a real degradation the operator needs to see.
+
+    Never raises and answers False on any doubt, because a doctor that
+    crashes describing a broken machine is worse than one that
+    under-reports.
+    """
+    try:
+        from config.loader import load_settings
+        from voice.provider_registry import is_local_provider
+
+        audio = (load_settings().get("audio") or {})
+        return (
+            is_local_provider("stt", str(audio.get("stt_provider") or "")),
+            is_local_provider("tts", str(audio.get("tts_provider") or "")),
+        )
+    except Exception:
+        return (False, False)
+
+
 def cmd_doctor():
     """Run comprehensive diagnostics and report what's working."""
     try:
@@ -2683,22 +2709,58 @@ def cmd_doctor():
     try:
         from perception.audio_pipeline import detect_local_audio_capabilities
         caps = detect_local_audio_capabilities()
+        # Installed and downloaded are different states with different
+        # fixes, and this used to print the *selectable* model list on
+        # the pass line, so a machine with the package and no weights
+        # was reported as "models: tiny, base, small, medium, large"
+        # while transcription failed at first use with "not downloaded".
+        # Only models actually on disk are named here now.
+        # Whether a missing model is a warning depends on whether the
+        # operator actually selected a local engine. Installed-but-not-
+        # downloaded is the normal state of `pip install feral-ai[stt]`
+        # and must stay `_info`, or a clean install boots yellow and
+        # breaks the v2026.5.36 doctor-honesty contract. It becomes a
+        # real degradation only once the configured provider is the one
+        # that cannot run, which is the same condition audio_pipeline
+        # already logs at startup.
+        _chose_local_stt, _chose_local_tts = _local_voice_selected()
+
         if caps["local_stt"]:
-            _pass("Local STT (faster-whisper)", f"models: {', '.join(caps['stt_models'])}")
+            _pass("Local STT (faster-whisper)",
+                  f"models on disk: {', '.join(caps['stt_models_present'])}")
+        elif caps.get("stt_importable") and _chose_local_stt:
+            _warn("Local STT (faster-whisper)",
+                  "selected as your STT provider but no model is downloaded, so "
+                  "voice turns produce no transcript; fetch one with "
+                  "`python -m voice.local_models fetch-faster-whisper base`")
+        elif caps.get("stt_importable"):
+            _info("Local STT (faster-whisper)",
+                  "installed, no model downloaded yet (fetch with "
+                  "`python -m voice.local_models fetch-faster-whisper base`)")
         else:
-            # v2026.5.36 — was `_warn`. Local STT is explicitly an
+            # v2026.5.36: was `_warn`. Local STT is explicitly an
             # opt-in extra (`pip install 'feral-ai[stt]'`). Cloud STT
             # via OpenAI / Google works without it. Not installing it
             # is a deliberate choice, not a problem.
             _info("Local STT (faster-whisper)",
-                  "not installed — cloud STT only (install via `pip install 'feral-ai[stt]'`)")
+                  "not installed, cloud STT only (install via `pip install 'feral-ai[stt]'`)")
         if caps["local_tts"]:
-            _pass("Local TTS (piper)", f"voices: {', '.join(caps['tts_voices'])}")
+            _pass("Local TTS (piper)",
+                  f"voices on disk: {', '.join(caps['tts_voices_present'])}")
+        elif caps.get("tts_importable") and _chose_local_tts:
+            _warn("Local TTS (piper)",
+                  "selected as your TTS provider but no voice is downloaded, so "
+                  "voice replies produce no audio; fetch one with "
+                  "`python -m voice.local_models fetch-piper en_US-lessac-medium`")
+        elif caps.get("tts_importable"):
+            _info("Local TTS (piper)",
+                  "installed, no voice downloaded yet (fetch with "
+                  "`python -m voice.local_models fetch-piper en_US-lessac-medium`)")
         else:
-            # v2026.5.36 — was `_warn`. Symmetric demote with the STT
+            # v2026.5.36: was `_warn`. Symmetric demote with the STT
             # case above: Piper is opt-in via `[tts]`.
             _info("Local TTS (piper)",
-                  "not installed — cloud TTS only (install via `pip install 'feral-ai[tts]'`)")
+                  "not installed, cloud TTS only (install via `pip install 'feral-ai[tts]'`)")
     except Exception as exc:
         _warn("Local Audio", f"detection failed: {exc}")
 
