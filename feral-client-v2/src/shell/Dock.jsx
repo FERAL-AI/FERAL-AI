@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { Command } from 'lucide-react';
 import { DOCK_ITEMS, isPaletteOnlyPath } from './navigation';
 import { useCommandPalette } from './PaletteContext';
 import { useMachineVitals } from '../hooks/useMachineVitals';
+import DockStack, { HOLD_MS, isStackable } from './DockStack';
 
 /**
  * Bottom dock — the eight pinned destinations plus the palette button.
@@ -33,6 +34,42 @@ export default function Dock() {
     if (to === '/approvals' && vitals.needs > 0) return 'needs';
     return '';
   };
+  // Press and hold, or right-click, fans a tile's contents out above the
+  // dock. The hold has to cancel the click that would otherwise follow
+  // it, or holding a tile both opens the stack and navigates away from
+  // the page you wanted to act on.
+  const [stack, setStack] = useState('');
+  const holdRef = useRef(null);
+  const heldRef = useRef(false);
+
+  const startHold = useCallback((to) => {
+    if (!isStackable(to)) return;
+    heldRef.current = false;
+    clearTimeout(holdRef.current);
+    holdRef.current = setTimeout(() => {
+      heldRef.current = true;
+      setStack(to);
+    }, HOLD_MS);
+  }, []);
+
+  const endHold = useCallback(() => { clearTimeout(holdRef.current); }, []);
+
+  const onTileClick = useCallback((e) => {
+    if (heldRef.current) {
+      e.preventDefault();
+      e.stopPropagation();
+      heldRef.current = false;
+    }
+  }, []);
+
+  const onTileContextMenu = useCallback((e, to) => {
+    if (!isStackable(to)) return;
+    // Also the keyboard context-menu key, which is the only way to reach
+    // a stack without a pointer.
+    e.preventDefault();
+    setStack(to);
+  }, []);
+
   const tileCount = (to) => {
     if (to === '/jobs') return vitals.running;
     if (to === '/approvals') return vitals.needs;
@@ -43,6 +80,7 @@ export default function Dock() {
 
   return (
     <nav className="v2-dock" role="navigation" aria-label="Primary">
+      {stack && <DockStack to={stack} onClose={() => setStack('')} />}
       <ul className="v2-dock-list">
         {DOCK_ITEMS.map(({ to, label, Icon }) => (
           <li key={to} className="v2-dock-item">
@@ -53,6 +91,12 @@ export default function Dock() {
                 `v2-dock-btn${isActive ? ' is-active' : ''}`
               }
               data-state={tileState(to)}
+              onPointerDown={() => startHold(to)}
+              onPointerUp={endHold}
+              onPointerLeave={endHold}
+              onClick={onTileClick}
+              onContextMenu={(e) => onTileContextMenu(e, to)}
+              aria-haspopup={isStackable(to) ? 'dialog' : undefined}
               title={tileCount(to) > 0 ? `${label} (${tileCount(to)})` : label}
             >
               <span className="v2-dock-ring" aria-hidden="true" />

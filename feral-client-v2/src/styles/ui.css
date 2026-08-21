@@ -1438,3 +1438,97 @@
   .v2-dock-btn[data-state="busy"] .v2-dock-fill,
   .v2-dock-btn[data-state="busy"] .v2-dock-ring { animation: none; }
 }
+
+/* ── Dock stacks ───────────────────────────────────────────────
+   A tile's contents fanned out above the dock, with the verb on each
+   row, so you act without navigating. The design's geometry: centred
+   above the dock, 340px capped, rows on a 16px / content / verb grid. */
+.v2-stack {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(340px, 92vw);
+  z-index: 60;
+  background: var(--v2-surface-elev);
+  border: 1px solid var(--v2-hairline-strong);
+  border-radius: var(--v2-radius-md);
+  box-shadow: var(--v2-shadow-glass);
+  overflow: hidden;
+  -webkit-backdrop-filter: var(--v2-blur-md);
+  backdrop-filter: var(--v2-blur-md);
+}
+.v2-stack-head {
+  font-family: var(--v2-font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+  padding: 9px 12px 6px;
+  border-bottom: 1px solid var(--v2-hairline);
+}
+.v2-stack-quiet {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+}
+.v2-stack-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--v2-hairline);
+}
+.v2-stack-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--v2-accent);
+  justify-self: center;
+}
+.v2-stack-title {
+  display: flex; flex-direction: column; gap: 1px;
+  min-width: 0; text-align: left;
+  background: none; border: 0; padding: 0; cursor: pointer; font: inherit;
+}
+.v2-stack-t {
+  font-size: 12.5px;
+  color: var(--v2-text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v2-stack-s {
+  font-family: var(--v2-font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0;
+  color: var(--v2-text-tertiary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v2-stack-verb {
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: var(--v2-radius-xs);
+  border: 1px solid var(--v2-hairline);
+  background: none;
+  color: var(--v2-text-secondary);
+  cursor: pointer;
+}
+.v2-stack-verb:hover:not(:disabled) { color: var(--v2-text-primary); border-color: var(--v2-hairline-strong); }
+.v2-stack-verb:disabled { opacity: 0.5; cursor: default; }
+.v2-stack-verb--none { border: 0; color: var(--v2-text-tertiary); cursor: default; }
+.v2-stack-all {
+  display: block; width: 100%;
+  padding: 8px 12px;
+  background: none; border: 0; cursor: pointer;
+  font: inherit; font-size: var(--v2-size-xs);
+  color: var(--v2-text-secondary);
+  text-align: left;
+}
+.v2-stack-all:hover { background: var(--v2-fill-subtle); color: var(--v2-text-primary); }
+
+/* No position override here. .v2-dock is already position: fixed, which
+   is a containing block for an absolutely positioned child, so the
+   stack anchors to it as-is. Setting position: relative took the dock
+   out of fixed positioning and moved it to the top of the viewport,
+   where it then overlapped the open command palette. An e2e that
+   asserts the palette never covers the Dock caught it. */
