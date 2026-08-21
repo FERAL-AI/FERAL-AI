@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import logging
+import re
 import time
 import sqlite3
 from dataclasses import dataclass, field
@@ -72,7 +73,16 @@ class IntentCompiler:
             return
         conn = sqlite3.connect(self._db_path)
         try:
-            rows = conn.execute("SELECT * FROM intent_plans WHERE status = 'active'").fetchall()
+            # Not "WHERE status = 'active'". get_completed_today reads
+            # self._plans, so filtering completed plans out at load meant
+            # the wind-down recap (api/routes/ambient.py:304) returned
+            # nothing after any restart: the work was done, the record
+            # existed on disk, and it was never read back.
+            rows = conn.execute(
+                "SELECT * FROM intent_plans "
+                "WHERE status IN ('active', 'completed') "
+                "ORDER BY created_at DESC"
+            ).fetchall()
             for r in rows:
                 actions = json.loads(r[8]) if r[8] else []
                 plan = ExecutionPlan(
@@ -185,6 +195,135 @@ class IntentCompiler:
         self._save_plan(plan)
         return plan
 
+    @staticmethod
+    def _normalize_intent(text: str) -> str:
+        """Comparison key for dedupe. Case, punctuation and filler removed.
+
+        The same promise extracted from two overlapping recordings, or
+        from a resent transcript, must not create two plans: the briefing
+        shows three actions and duplicates burn the slots.
+        """
+        t = (text or "").strip().lower()
+        t = re.sub(r"^(i(?:'| a)?m going to|i will|i'll|i need to|i should|remember to)\s+", "", t)
+        t = re.sub(r"[^a-z0-9\s]+", " ", t)
+        return re.sub(r"\s+", " ", t).strip()
+
+    # Words that carry no identity, so a query is matched on what it is
+    # about rather than on how it was phrased.
+    _STOPWORDS = frozenset({
+        "a", "an", "the", "to", "for", "of", "and", "or", "in", "on", "at",
+        "by", "with", "my", "me", "i", "im", "ill", "is", "it", "that",
+        "this", "be", "will", "send", "get", "do", "done", "finish",
+    })
+
+    @classmethod
+    def _content_words(cls, text: str) -> set[str]:
+        return {
+            w for w in cls._normalize_intent(text).split()
+            if w and w not in cls._STOPWORDS
+        }
+
+    def find_active_commitment(self, text: str) -> Optional[ExecutionPlan]:
+        """An active plan whose intent means the same thing, or None."""
+        key = self._normalize_intent(text)
+        if not key:
+            return None
+        for plan in self._plans.values():
+            if plan.status == "active" and self._normalize_intent(plan.intent) == key:
+                return plan
+        return None
+
+    def add_commitment(
+        self,
+        *,
+        text: str,
+        due_iso: Optional[str] = None,
+        source: str = "",
+    ) -> Optional[ExecutionPlan]:
+        """Record a promise verbatim, with no LLM decomposition.
+
+        ``compile_intent`` is the only other creation path and it prompts
+        the model to "break down this goal into 5-10 micro-actions", so
+        ``agenda[0]["action"]`` becomes an invented sub-step rather than
+        the thing the user actually said. A commitment lifted from speech
+        must survive to the briefing word for word, so this builds the
+        single MicroAction directly.
+
+        ``scheduled_time`` is left None deliberately. get_today_actions
+        skips an action whose scheduled_time is a different day, so
+        setting a future due date HIDES the promise until that morning.
+        None means it appears every day until completed, which is the
+        behaviour a promise wants. ``due_iso`` is kept in the goal text
+        so the user still sees the deadline.
+
+        Returns the existing plan when this promise is already active, so
+        a resent transcript or two overlapping recordings cannot create
+        two plans. Returns None only when ``text`` is empty.
+        """
+        text = (text or "").strip()
+        if not text:
+            return None
+
+        existing = self.find_active_commitment(text)
+        if existing is not None:
+            logger.info("commitment already active, not duplicating: %r", text[:80])
+            return existing
+
+        goal = text
+        if due_iso:
+            goal = f"{text} (due {due_iso})"
+        if source:
+            goal = f"{goal} [from {source}]"
+
+        plan = ExecutionPlan(
+            intent=text,
+            goal_description=goal,
+            micro_actions=[MicroAction(description=text, tool_hint="manual")],
+        )
+        self._plans[plan.plan_id] = plan
+        self._save_plan(plan)
+        logger.info("commitment recorded: %r (plan %s)", text[:80], plan.plan_id)
+        return plan
+
+    def complete_commitment(self, query: str) -> Optional[dict]:
+        """Mark a commitment done by its text rather than by id.
+
+        The user says "done" in words, not with a plan_id. Matches on the
+        normalized intent first, then on a substring, so "sdk to noah"
+        finds "send Noah the SDK by Friday".
+        """
+        query = (query or "").strip()
+        if not query:
+            return None
+
+        target = self.find_active_commitment(query)
+        if target is None:
+            # Substring matching does not survive real phrasing: "sdk to
+            # noah" is not a substring of "send noah the sdk by friday".
+            # Match on the content words instead, and require every one
+            # of them, so a vague query matches nothing rather than
+            # completing the wrong promise. Ambiguity is also a refusal:
+            # marking the wrong commitment done loses it silently.
+            wanted = self._content_words(query)
+            if not wanted:
+                return None
+            matches = [
+                p for p in self._plans.values()
+                if p.status == "active" and wanted <= self._content_words(p.intent)
+            ]
+            if len(matches) != 1:
+                return None
+            target = matches[0]
+
+        for action in target.micro_actions:
+            if not action.completed:
+                self.complete_action(target.plan_id, action.action_id, result="done")
+                break
+        else:
+            target.status = "completed"
+            self._save_plan(target)
+        return {"plan_id": target.plan_id, "intent": target.intent, "status": target.status}
+
     def complete_action(self, plan_id: str, action_id: str, result: str = "") -> bool:
         plan = self._plans.get(plan_id)
         if not plan:
@@ -267,8 +406,16 @@ class IntentCompiler:
                     "tool_hint": action.tool_hint,
                     "difficulty": action.difficulty,
                     "progress": plan.progress,
+                    "created_at": plan.created_at,
                 })
                 break  # one action per plan per day
+        # Newest first. The briefing truncates to three
+        # (api/routes/ambient.py:103) and this iterated dict insertion
+        # order, which is plan load order, which is oldest first with no
+        # ORDER BY. So with three active plans a promise recorded today
+        # could never reach a brief. A promise made out loud is the one
+        # most likely to have been forgotten, so recency wins the slots.
+        actions.sort(key=lambda a: a.get("created_at", 0.0), reverse=True)
         return actions
 
     def list_plans(self) -> list[dict]:

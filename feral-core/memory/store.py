@@ -1547,9 +1547,22 @@ class MemoryStore:
         location: str = "",
         participants: list[str] | None = None,
         importance: float = 0.5,
+        created_at: float | None = None,
     ) -> dict:
         eid = str(uuid4())[:12]
-        now = time.time()
+        # ``created_at`` is when the thing HAPPENED, which is not always
+        # when it was written. An ambient transcript queues on the phone
+        # while the brain is off and normally arrives hours or days late;
+        # timeline recall filters on created_at and nothing else
+        # (skills/impl/timeline_fusion.py:192), so without this a
+        # conversation from yesterday does not appear when the user asks
+        # about yesterday.
+        #
+        # Safe for CRDT ordering: the HLC that drives last-write-wins is
+        # minted from the local clock in SyncEngine._build_operation
+        # (memory/sync.py:644) and never reads this value, so backdating
+        # moves the datum without reordering the write.
+        now = created_at if created_at is not None else time.time()
         emotions = emotions or []
         participants = participants or []
 

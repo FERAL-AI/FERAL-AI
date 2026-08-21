@@ -1305,6 +1305,11 @@ async def startup():
     if state.cron_service:
         state.cron_service.start(execute_routine_job)
 
+    # Ambient transcripts that were stored and acked but never
+    # summarized, because the brain went down mid-processing. The phone
+    # discarded them on the ack, so our copy is the only one left.
+    state.register_background_task(asyncio.ensure_future(_resume_ambient_backlog()))
+
     async def _state_heartbeat():
         """Push dashboard/system state to all WS clients every 10s."""
         while True:
@@ -3340,6 +3345,17 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         payload_for_hash=payload_dict,
                     )
 
+            elif msg.type == "ambient_transcript":
+                # A finished conversation the phone recorded and
+                # transcribed on device, drained from its queue once the
+                # brain became reachable. Everything downstream is
+                # in-process: the REST route a phone would otherwise POST
+                # to is not on the phone-bearer allowlist.
+                await _handle_ambient_transcript(
+                    ws, node_id, paired_device_id, raw,
+                    record_envelope=_record_phone_envelope,
+                )
+
             elif msg.type == "audio_chunk" and node_id:
                 payload_dict = raw.get("payload", {})
                 audio_b64 = payload_dict.get("data_b64", "")
@@ -4148,6 +4164,322 @@ async def _handle_device_announce(node_id, frame_payload: dict) -> None:
             "device=%s: %s",
             node_id, payload.get("device_id", "?"), exc,
         )
+
+
+AMBIENT_TRANSCRIPT_MAX_CHARS = 400_000
+
+
+async def _resume_ambient_backlog() -> None:
+    """Finish transcripts stored before an unclean shutdown.
+
+    This is the half of the durability contract the ack depends on. The
+    brain acks once the text is on disk so the phone can drop it, which
+    is only safe if an interrupted summarization is retried from our
+    copy rather than waiting for a resend that will never come.
+    """
+    try:
+        pending = await asyncio.to_thread(_ambient_pending)
+    except Exception:
+        logger.debug("ambient: backlog scan failed", exc_info=True)
+        return
+    if not pending:
+        return
+    logger.info("ambient: resuming %d unprocessed transcript(s)", len(pending))
+    for row in pending:
+        try:
+            await _process_ambient_transcript(
+                row["transcript_id"], row["session_id"], row["payload"],
+            )
+        except Exception:
+            logger.debug("ambient: backlog item failed", exc_info=True)
+
+
+def _ambient_db_path():
+    """Where received transcripts live until they are processed."""
+    from config.loader import feral_home
+    return feral_home() / "ambient_transcripts.db"
+
+
+def _ambient_store(
+    transcript_id: str,
+    *,
+    node_id: str,
+    device_id: str,
+    session_id: str,
+    payload: dict,
+) -> bool:
+    """Persist the raw transcript. Returns True if this id is new.
+
+    This is both the idempotency gate and the durable record, and it has
+    to run BEFORE episode_save: episode_save mints a fresh uuid4 per call
+    and has no dedupe, so a resent transcript without this gate writes a
+    second episode. (The Jaccard suppression in memory/store.py is
+    read-path only and writes nothing; it is not idempotency.)
+
+    Storing the TEXT here, not just the id, is what makes the ack honest.
+    The phone discards a transcript once acked, so if the brain acked on
+    receipt and then died before summarizing, the conversation would be
+    gone from both sides. ``processed_at`` stays NULL until the summary
+    lands, and _ambient_pending() sweeps the unprocessed rows at boot.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    with _sqlite3.connect(str(_ambient_db_path())) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ambient_transcripts (
+                transcript_id TEXT PRIMARY KEY,
+                received_at REAL NOT NULL,
+                node_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                processed_at REAL,
+                episode_id TEXT
+            )
+            """
+        )
+        existing = conn.execute(
+            "SELECT 1 FROM ambient_transcripts WHERE transcript_id = ?",
+            (transcript_id,),
+        ).fetchone()
+        if existing:
+            return False
+        conn.execute(
+            """
+            INSERT INTO ambient_transcripts
+            (transcript_id, received_at, node_id, device_id, session_id, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                transcript_id, time.time(), node_id, device_id, session_id,
+                _json.dumps(payload, sort_keys=True, default=str),
+            ),
+        )
+        conn.commit()
+    return True
+
+
+def _ambient_mark_processed(transcript_id: str, episode_id: str) -> None:
+    import sqlite3 as _sqlite3
+    try:
+        with _sqlite3.connect(str(_ambient_db_path())) as conn:
+            conn.execute(
+                "UPDATE ambient_transcripts SET processed_at = ?, episode_id = ? "
+                "WHERE transcript_id = ?",
+                (time.time(), episode_id, transcript_id),
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.warning("ambient: could not mark %s processed: %s", transcript_id, exc)
+
+
+def _ambient_pending(limit: int = 50) -> list[dict]:
+    """Transcripts stored but never summarized, oldest first.
+
+    A brain that died mid-drain acked these and the phone will not send
+    them again, so this is the only remaining copy.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+    try:
+        with _sqlite3.connect(str(_ambient_db_path())) as conn:
+            rows = conn.execute(
+                "SELECT transcript_id, session_id, payload_json FROM ambient_transcripts "
+                "WHERE processed_at IS NULL ORDER BY received_at ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    except Exception:
+        return []
+    out = []
+    for tid, sid, payload_json in rows:
+        try:
+            out.append({"transcript_id": tid, "session_id": sid,
+                        "payload": _json.loads(payload_json)})
+        except Exception:
+            continue
+    return out
+
+
+async def _handle_ambient_transcript(
+    ws, node_id, paired_device_id, raw: dict, record_envelope=None,
+) -> None:
+    """Ingest one finished ambient conversation from the phone.
+
+    Everything downstream is in-process: the REST alternative is blocked
+    because the phone bearer is path-allowlisted and /api/intents/compile
+    is not on it, so a phone holding a bearer gets a 401 creating a
+    commitment.
+
+    ``record_envelope`` is ``daemon_session``'s ``_record_phone_envelope``
+    closure, passed in because it closes over the authenticated identity
+    of this socket and cannot be reached from module scope.
+
+    Order matters. Store, ack, then summarize in the background. Acking
+    before the summary means the phone stops resending as soon as the
+    text is durable, which is the correct contract: summarization can be
+    retried from our copy, but a transcript the phone has dropped and we
+    never stored cannot be recovered by anyone.
+    """
+    payload = _unwrap_hup_frame(raw.get("payload", {}) or {})
+
+    if not node_id:
+        await _send_protocol_error(
+            ws, 1003, "ambient_transcript requires an identified node",
+            name="ambient_no_node",
+        )
+        return
+
+    text = str(payload.get("text") or "")
+    if not text.strip():
+        await _send_protocol_error(
+            ws, 1003, "ambient_transcript.text is empty", name="ambient_empty",
+        )
+        return
+
+    if len(text) > AMBIENT_TRANSCRIPT_MAX_CHARS:
+        # Deliberately does not close the socket: the phone is draining a
+        # queue and one oversized item must not cost it the connection.
+        await _send_frame_too_large(
+            ws,
+            f"ambient_transcript.text is {len(text)} chars, over the "
+            f"{AMBIENT_TRANSCRIPT_MAX_CHARS} cap",
+        )
+        return
+
+    transcript_id = str(payload.get("transcript_id") or uuid4())
+    device_id = payload.get("device_id") or node_id or str(paired_device_id or "")
+    session_id = (
+        str(payload.get("session_id") or "").strip()
+        or getattr(state, "primary_session_id", "")
+        or f"phone-{node_id}"
+    )
+    try:
+        state.bind_session_to_daemon(session_id, node_id)
+    except Exception:
+        logger.debug("ambient: session bind failed", exc_info=True)
+
+    try:
+        is_new = await asyncio.to_thread(
+            _ambient_store, transcript_id,
+            node_id=node_id, device_id=device_id,
+            session_id=session_id, payload=payload,
+        )
+    except Exception as exc:
+        logger.warning("ambient: persist failed for %s: %s", transcript_id, exc)
+        if record_envelope is not None:
+            record_envelope(
+                "error", "ambient_transcript",
+                detail={"reason": "sqlite_persist_failed", "error": str(exc)[:200]},
+                payload_for_hash=payload,
+            )
+        # No ack: the phone must keep this and try again.
+        await _send_protocol_error(
+            ws, 1011, "could not store transcript", name="ambient_persist_failed",
+        )
+        return
+
+    await ws.send_json({
+        "hup_version": HUP_VERSION,
+        "type": "ambient_transcript_ack",
+        "ts": time.time(),
+        "payload": {
+            "transcript_id": transcript_id,
+            "duplicate": not is_new,
+            "accepted": True,
+            "detail": "" if is_new else "already received",
+        },
+    })
+
+    if record_envelope is not None:
+        record_envelope(
+            "allowed", "ambient_transcript",
+            detail={
+                "transcript_id": transcript_id, "device_id": device_id,
+                "chars": len(text), "duplicate": not is_new,
+                "source": payload.get("source", "unknown"),
+            },
+            payload_for_hash=payload,
+        )
+
+    if not is_new:
+        return
+
+    state.register_background_task(
+        asyncio.ensure_future(
+            _process_ambient_transcript(transcript_id, session_id, payload)
+        )
+    )
+
+
+async def _process_ambient_transcript(
+    transcript_id: str, session_id: str, payload: dict,
+) -> None:
+    """Summarize, store the episode, record the promises. Never raises.
+
+    Runs detached from the frame handler, so a slow model does not hold
+    the websocket open, and a failure leaves processed_at NULL for the
+    boot sweep rather than losing the conversation.
+    """
+    from agents.ambient_transcript import (
+        build_episode_fields,
+        summarize_transcript,
+    )
+
+    try:
+        text = str(payload.get("text") or "")
+        started_at = payload.get("started_at")
+        started_at = float(started_at) if started_at is not None else None
+        speakers = [str(x) for x in (payload.get("speakers") or [])]
+        source = str(payload.get("source") or "unknown")
+
+        llm = getattr(getattr(state, "orchestrator", None), "llm", None)
+        outcome = await summarize_transcript(
+            text, llm=llm, started_at=started_at,
+            speakers=speakers, source=f"ambient:{source}",
+        )
+
+        episode_id = ""
+        memory = getattr(state, "memory", None)
+        if memory is not None:
+            fields = build_episode_fields(
+                outcome, started_at=started_at, source=source, speakers=speakers,
+            )
+            saved = await memory.episode_save(session_id=session_id, **fields)
+            episode_id = str((saved or {}).get("id") or "")
+
+            # People and relations go through the one extractor rather
+            # than a second entity prompt; that consolidation was
+            # deliberate (agents/learner.py:120-133).
+            kg = getattr(memory, "knowledge_graph", None) or getattr(state, "knowledge_graph", None)
+            if kg is not None and outcome.people:
+                try:
+                    await kg.extract_and_store(outcome.detail[:8000], source="ambient_conversation")
+                except Exception:
+                    logger.debug("ambient: kg extraction failed", exc_info=True)
+
+        compiler = getattr(state, "intent_compiler", None)
+        if compiler is not None:
+            for commitment in outcome.commitments:
+                try:
+                    compiler.add_commitment(
+                        text=commitment["text"],
+                        due_iso=commitment.get("due_iso") or None,
+                        source="ambient conversation",
+                    )
+                except Exception:
+                    logger.debug("ambient: add_commitment failed", exc_info=True)
+
+        await asyncio.to_thread(_ambient_mark_processed, transcript_id, episode_id)
+        logger.info(
+            "ambient transcript %s processed: episode=%s commitments=%d degraded=%s",
+            transcript_id, episode_id or "none",
+            len(outcome.commitments), outcome.degraded or "no",
+        )
+    except Exception:
+        # processed_at stays NULL, so the boot sweep retries it.
+        logger.exception("ambient: processing failed for %s", transcript_id)
 
 
 async def _handle_subdevice_status(

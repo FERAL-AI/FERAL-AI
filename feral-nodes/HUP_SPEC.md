@@ -46,7 +46,7 @@ If you can terminate TLS and speak JSON over WebSocket, you can speak HUP.
 
 | Version | Status | Additions |
 |---|---|---|
-| `v1.3.0` | Stable | Phone-as-peer envelopes (§5.9): `chat_request`, `chat_response`, `voice_session_start`, `voice_interrupt`, `genui_push`, `genui_event`, `peripheral_bridge_register`, `backchannel_request`. Strict Pydantic-v2 schemas: literal-typed `chat_request.reply_mode` + `chat_request.channel`, required `session_id` on `voice_session_start`, required `stream_id` + `channels` on `audio_chunk`. Smart-glasses vision streaming via `glasses_frame` (§5.4.3) + per-device circular buffer in `feral-core/perception/glasses_buffer.py`. Hardware peripheral memory via `device_announce` (§5.4.4) routed through `feral-core/hardware/mesh.py` into the knowledge graph. |
+| `v1.3.0` | Stable | Phone-as-peer envelopes (§5.9): `chat_request`, `chat_response`, `voice_session_start`, `voice_interrupt`, `genui_push`, `genui_event`, `peripheral_bridge_register`, `backchannel_request`, `ambient_transcript` + `ambient_transcript_ack`. Strict Pydantic-v2 schemas: literal-typed `chat_request.reply_mode` + `chat_request.channel`, required `session_id` on `voice_session_start`, required `stream_id` + `channels` on `audio_chunk`. Smart-glasses vision streaming via `glasses_frame` (§5.4.3) + per-device circular buffer in `feral-core/perception/glasses_buffer.py`. Hardware peripheral memory via `device_announce` (§5.4.4) routed through `feral-core/hardware/mesh.py` into the knowledge graph. |
 | `v1.2.0` | Stable | Canonical `node_ack`, `node_heartbeat`, `hup_action_request`, `hup_action_response`, and `node_bye` handling (§5.2-§5.8). |
 
 ---
@@ -703,6 +703,71 @@ existing `/v1/node` transport and authentication model. Directionality:
 - `genui_event` (phone → brain)
 - `peripheral_bridge_register` (phone → brain)
 - `backchannel_request` (phone → brain)
+- `ambient_transcript` (phone → brain)
+- `ambient_transcript_ack` (brain → phone)
+
+`ambient_transcript` (phone → brain):
+
+A conversation the phone recorded and transcribed on device. The glasses
+are the microphone; the phone is the recorder and the only thing that
+talks to the brain, so `source` is provenance and never a route.
+
+The phone queues transcripts while the brain is off, so one normally
+arrives hours or days after the conversation happened. `started_at` is
+the real capture time and the brain stores the episode against it;
+without it, asking about "yesterday" would not find a conversation from
+yesterday that was ingested this morning.
+
+`transcript_id` is the replay key. A client that omits it gets one
+minted, but a client that queues MUST send a stable id, because that is
+what makes a resend after a lost ack cost nothing.
+
+```json
+{
+  "hup_version": "1.3.0",
+  "type": "ambient_transcript",
+  "ts": 1755720000.0,
+  "payload": {
+    "transcript_id": "7f1c2a9e-...",
+    "text": "full transcript text, unbounded",
+    "session_id": "",
+    "device_id": "theora-iphone-1",
+    "started_at": 1755633600.0,
+    "ended_at": 1755635400.0,
+    "source": "glasses_mic",
+    "language": "en-US",
+    "speakers": ["Noah"]
+  }
+}
+```
+
+`ambient_transcript_ack` (brain → phone):
+
+Sent once the transcript is durably stored, NOT once it has been
+summarized. Summarization runs in the background and is retried from the
+brain's own copy if it is interrupted; a phone that waited for the
+summary would hold its queue open across every brain restart.
+
+The phone may drop its copy on `accepted: true`. `duplicate: true` means
+the brain already had this `transcript_id`, which is the expected answer
+to a resend after a lost ack, and is not an error.
+
+An error frame instead of an ack means the transcript was NOT stored and
+must be resent.
+
+```json
+{
+  "hup_version": "1.3.0",
+  "type": "ambient_transcript_ack",
+  "ts": 1755720000.5,
+  "payload": {
+    "transcript_id": "7f1c2a9e-...",
+    "duplicate": false,
+    "accepted": true,
+    "detail": ""
+  }
+}
+```
 
 `chat_request`:
 

@@ -451,6 +451,60 @@ class BackchannelRequestPayload(BaseModel):
     status: str = Field(default="pending", max_length=64)
 
 
+class AmbientTranscriptAckPayload(BaseModel):
+    """Brain-to-client confirmation that a transcript is durably stored.
+
+    Required, not optional. The phone queues transcripts while the brain
+    is off and has no other signal to stop resending; today only
+    chat_request gets a response, and location_update, backchannel_request
+    and every media frame are answered with silence.
+
+    The ack is sent once the raw text is on disk, NOT once summarization
+    has finished. Summarization runs in the background and can fail or be
+    interrupted; acking on its completion would mean a brain restarted
+    mid-drain loses transcripts the phone has already discarded.
+    ``duplicate`` tells the phone the brain had already seen this id, so a
+    lost ack costs a resend and never a second episode.
+    """
+
+    transcript_id: str = Field(..., max_length=MAX_ID_LEN)
+    duplicate: bool = False
+    accepted: bool = True
+    detail: str = Field(default="", max_length=MAX_NAME_LEN)
+
+
+class AmbientTranscriptPayload(BaseModel):
+    """A finished ambient conversation transcribed on the phone.
+
+    The glasses are the microphone, the phone is the recorder, and the
+    phone is the only thing that talks to the brain. ``source`` is
+    provenance, never a transport and never somewhere to route an action.
+
+    Named ``ambient_transcript`` and not ``transcript`` because that key
+    is already bound to the brain-to-client TranscriptPayload; reusing it
+    would silently reinterpret every outbound frame.
+
+    ``started_at`` is the REAL capture time, not ingestion time. The
+    phone queues while the brain is off, so a transcript normally lands
+    hours or days after the conversation, and timeline recall filters on
+    created_at alone.
+
+    ``text`` is unbounded per the convention above: prose fields carry
+    meaning that a structural cap would silently destroy.
+    """
+
+    transcript_id: str = Field(default_factory=lambda: str(uuid4()), max_length=MAX_ID_LEN)
+    text: str
+    session_id: str = Field(default="", max_length=MAX_SESSION_ID_LEN)
+    node_id: str = Field(default="", max_length=MAX_ID_LEN)
+    device_id: str = Field(default="", max_length=MAX_ID_LEN)
+    started_at: Optional[float] = Field(default=None, ge=0.0)
+    ended_at: Optional[float] = Field(default=None, ge=0.0)
+    source: Literal["phone_mic", "glasses_mic", "theora_eye", "unknown"] = "phone_mic"
+    language: str = Field(default="en-US", max_length=64)
+    speakers: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+
+
 # ─────────────────────────────────────────────
 # Payload Models — Brain → Client
 # ─────────────────────────────────────────────
@@ -1260,9 +1314,14 @@ MESSAGE_TYPES = {
     "location_update": LocationUpdatePayload,
     "peripheral_bridge_register": PeripheralBridgeRegisterPayload,
     "backchannel_request": BackchannelRequestPayload,
+    # Ambient conversation captured by the glasses mic, transcribed on
+    # the phone, queued there while the brain is off. NOT "transcript":
+    # that key is the brain-to-client TranscriptPayload below.
+    "ambient_transcript": AmbientTranscriptPayload,
 
     # Brain → Client
     "transcript": TranscriptPayload,
+    "ambient_transcript_ack": AmbientTranscriptAckPayload,
     "sdui": SDUIPayload,
     "sdui_patch": SDUIPatchPayload,
     "tts_chunk": TTSChunkPayload,

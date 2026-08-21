@@ -79,6 +79,78 @@ class FeralWorkflowsSkill(BaseSkill):
     def __init__(self) -> None:
         super().__init__(skill_id="feral_workflows")
 
+    @staticmethod
+    def _intent_compiler():
+        from api.state import state
+        return getattr(state, "intent_compiler", None)
+
+    def _list_commitments(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Everything the user has promised and not yet done.
+
+        The briefing shows at most three (api/routes/ambient.py:103), so
+        this is the only way to see the rest, and the count makes the
+        truncation visible instead of silent.
+        """
+        compiler = self._intent_compiler()
+        if compiler is None:
+            return {"success": False, "status_code": 503, "data": None,
+                    "error": "Intent compiler is not available."}
+        include_done = bool(args.get("include_completed"))
+        rows = []
+        for plan in compiler.list_plans():
+            if plan["status"] != "active" and not include_done:
+                continue
+            rows.append({
+                "commitment": plan["intent"],
+                "status": plan["status"],
+                "created": plan["created"],
+                "plan_id": plan["plan_id"],
+            })
+        rows.sort(key=lambda r: r["created"], reverse=True)
+        return {
+            "success": True, "status_code": 200,
+            "data": {"commitments": rows, "count": len(rows)},
+            "error": None,
+        }
+
+    def _complete_commitment(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Mark a promise done by describing it, not by id.
+
+        Refuses an ambiguous match rather than guessing: completing the
+        wrong commitment removes it from every surface silently, which
+        is worse than asking again.
+        """
+        compiler = self._intent_compiler()
+        if compiler is None:
+            return {"success": False, "status_code": 503, "data": None,
+                    "error": "Intent compiler is not available."}
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return {"success": False, "status_code": 400, "data": None,
+                    "error": "`text` is required: describe the commitment to complete."}
+        result = compiler.complete_commitment(text)
+        if result is None:
+            active = [p["intent"] for p in compiler.list_plans() if p["status"] == "active"]
+            return {
+                "success": False, "status_code": 404, "data": {"active": active[:10]},
+                "error": (
+                    f"No single active commitment matches {text!r}. "
+                    "Say more of the wording, or pick one of the active ones."
+                ),
+            }
+        return {"success": True, "status_code": 200, "data": result, "error": None}
+
+    # Endpoints that need the TaskFlow runtime, and the full set this skill
+    # answers. Kept as data so the 404 message can name what IS available and
+    # so a declared-but-unrouted endpoint is impossible to add silently.
+    TASKFLOW_ENDPOINTS = frozenset({
+        "create", "list", "get", "cancel", "instantiate_pack",
+    })
+    LOCAL_ENDPOINTS = frozenset({
+        "todo_write", "list_commitments", "complete_commitment",
+    })
+    ALL_ENDPOINTS = TASKFLOW_ENDPOINTS | LOCAL_ENDPOINTS
+
     async def execute(self, endpoint_id: str, args: Dict[str, Any], vault: Dict[str, str]) -> Dict[str, Any]:
         del vault
         # Handled BEFORE the TaskFlow-runtime check on purpose. The todo
@@ -86,6 +158,34 @@ class FeralWorkflowsSkill(BaseSkill):
         # not 503 on an install where the runtime is absent.
         if endpoint_id == "todo_write":
             return self._todo_write(args)
+
+        # Commitments live on IntentCompiler, not in the TaskFlow
+        # runtime, so like todo_write they are handled before the
+        # runtime check and must not 503 when it is absent. They are
+        # here rather than on a new top-level skill because the router
+        # already reaches this manifest for "what am I meant to be
+        # doing" phrasings, and one more skill competing on those
+        # phrases costs more than it buys.
+        if endpoint_id == "list_commitments":
+            return self._list_commitments(args)
+        if endpoint_id == "complete_commitment":
+            return self._complete_commitment(args)
+
+        # Validate the endpoint name BEFORE the runtime check. Otherwise a
+        # typo returns 503 "TaskFlow runtime is not available", which blames
+        # a subsystem for a caller error and sends whoever is debugging it
+        # looking at Docker. On macOS, where the runtime is absent by
+        # default, every unknown endpoint reported the wrong cause.
+        if endpoint_id not in self.TASKFLOW_ENDPOINTS:
+            return {
+                "success": False,
+                "status_code": 404,
+                "data": None,
+                "error": (
+                    f"Unknown endpoint: {endpoint_id}. This skill exposes: "
+                    + ", ".join(sorted(self.ALL_ENDPOINTS))
+                ),
+            }
 
         taskflows = _get_taskflows()
         if taskflows is None:
