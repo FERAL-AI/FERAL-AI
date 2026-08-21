@@ -158,9 +158,12 @@ describe('token coherence', () => {
   });
 
   it('the dark tertiary measurement quoted in tokens.css is the real one', () => {
-    // tokens.css cites #96969E on #1F1F27 at 5.57:1. Recompute it rather
-    // than trusting the prose.
-    expect(hexOf('darkMedia', '--v2-text-tertiary')).toBe('#96969E');
-    expect(contrast(parseHex('#96969E'), DARK_SHELL)).toBeCloseTo(5.57, 1);
+    // tokens.css cites #9AA2AA. Recompute rather than trusting the
+    // prose. The value moved when the instrument-panel palette was
+    // ported: that design specifies #767E86, which is 2.83:1 on the
+    // elevated dark surface, so the hue was kept and the lightness
+    // raised to the nearest shade that clears AA.
+    expect(hexOf('darkMedia', '--v2-text-tertiary')).toBe('#9AA2AA');
+    expect(contrast(parseHex('#9AA2AA'), DARK_SHELL)).toBeCloseTo(6.33, 1);
   });
 });

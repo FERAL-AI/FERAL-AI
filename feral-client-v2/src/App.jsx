@@ -37,6 +37,8 @@ import Oversight from './pages/Oversight';
 import Approvals from './pages/Approvals';
 import Checkpoints from './pages/Checkpoints';
 import Grants from './pages/Grants';
+import Console from './pages/Console';
+import Jobs from './pages/Jobs';
 
 export default function App() {
   return (
@@ -81,6 +83,8 @@ export default function App() {
         <Route path="/approvals" element={<Approvals />} />
         <Route path="/checkpoints" element={<Checkpoints />} />
         <Route path="/grants" element={<Grants />} />
+        <Route path="/console" element={<Console />} />
+        <Route path="/jobs" element={<Jobs />} />
         <Route path="/timeline" element={<Timeline />} />
         <Route path="/flows" element={<Flows />} />
         <Route path="/intents" element={<Intents />} />

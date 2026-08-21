@@ -15,7 +15,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { screen, fireEvent, waitFor } from '@testing-library/react';
 import { renderV2 } from '../_helpers/renderV2';
 import CommandPalette from '../../shell/CommandPalette';
-import { DOCK_PATHS } from '../../shell/navigation';
+import { DOCK_ITEMS, DOCK_PATHS } from '../../shell/navigation';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -46,22 +46,19 @@ describe('CommandPalette rendering', () => {
 
 describe('the palette can find the Dock primaries', () => {
   // One test per Dock destination. The old Hub failed seven of these.
-  const queries = {
-    '/': 'Home',
-    '/chat': 'Chat',
-    '/flows': 'Flows',
-    '/devices': 'Devices',
-    '/apps': 'Apps',
-    '/canvas': 'Canvas',
-    '/oversight': 'Oversight',
-    '/settings': 'Settings',
-  };
+  //
+  // The query comes from DOCK_ITEMS itself rather than a hardcoded
+  // path -> label map. That map went stale the moment the Dock's
+  // composition changed to the approved design's eight, and every case
+  // then asserted on `undefined`. Deriving it is the same rule the
+  // navigation index follows: restate nothing you can read.
+  const labelFor = Object.fromEntries(DOCK_ITEMS.map((d) => [d.to, d.label]));
 
   for (const to of DOCK_PATHS) {
-    it(`matches "${queries[to]}" for ${to}`, () => {
+    it(`matches "${labelFor[to]}" for ${to}`, () => {
       const { container, unmount } = renderV2(<CommandPalette open onClose={() => {}} />);
-      type(container, queries[to]);
-      expect(labels(container)).toContain(queries[to]);
+      type(container, labelFor[to]);
+      expect(labels(container)).toContain(labelFor[to]);
       unmount();
     });
   }

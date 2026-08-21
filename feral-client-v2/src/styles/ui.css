@@ -1167,3 +1167,197 @@
   .v2-cmdk-backdrop { padding-top: calc(var(--v2-menubar-height) + 12px); }
   .v2-cmdk-foot { display: none; }
 }
+
+/* ── Instrument shell: system bar + work rail ──────────────────
+   The approved design's frame. Vitals across the top, the machine's
+   live work down the left, the page in the middle. Colours come from
+   the semantic layer so both themes follow; the design's own palette
+   (warm neutrals in light, #1C1F23 ground in dark, muted run/ok/warn)
+   is being ported into tokens.css separately. */
+
+/* The body owns the space between the system bar and the dock, and
+   lays the rail beside the page. .v2-shell-main was absolutely
+   positioned against --v2-menubar-height; with the Menubar retired that
+   height went to 0 and main covered the system bar, which made the
+   palette button unclickable (an e2e hit test caught it: the element at
+   the button's centre was .v2-shell-main). The body takes the absolute
+   positioning; main becomes an ordinary flex child. */
+.v2-shell-body {
+  position: absolute;
+  inset: var(--v2-sysbar-height) 0 var(--v2-dock-height) 0;
+  display: flex;
+  min-height: 0;
+  gap: 0;
+  z-index: 1;
+}
+.v2-shell-body .v2-shell-main {
+  position: static;
+  inset: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+}
+
+/* System bar */
+.v2-sysbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  height: 34px;
+  flex: none;
+  background: var(--v2-surface-1);
+  border-bottom: 1px solid var(--v2-hairline);
+  font-size: var(--v2-size-xs);
+}
+.v2-sysbar-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--v2-text-primary);
+  font: inherit;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.v2-sysbar-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--v2-state-live);
+}
+.v2-sysbar-vitals {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.v2-sysbar-vital,
+.v2-sysbar-autonomy,
+.v2-sysbar-cmd {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: 0;
+  border-radius: var(--v2-radius-sm);
+  padding: 3px 7px;
+  cursor: pointer;
+  color: var(--v2-text-secondary);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.v2-sysbar-vital:hover,
+.v2-sysbar-autonomy:hover,
+.v2-sysbar-cmd:hover { background: var(--v2-fill-subtle); color: var(--v2-text-primary); }
+.v2-sysbar-vital[data-tone="warn"] { color: var(--v2-state-warn); }
+.v2-sysbar-glyph { font-family: var(--v2-font-mono); opacity: 0.75; }
+.v2-sysbar-autonomy strong { color: var(--v2-text-primary); font-weight: 600; }
+.v2-sysbar-cmd { font-family: var(--v2-font-mono); }
+
+/* Work rail */
+.v2-rail {
+  flex: 0 0 232px;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 12px 10px 20px;
+  border-right: 1px solid var(--v2-hairline);
+  background: var(--v2-surface-0);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.v2-rail-sect { display: flex; flex-direction: column; gap: 6px; }
+.v2-rail-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+}
+.v2-rail-n {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--v2-text-secondary);
+}
+.v2-rail-quiet { margin: 0; font-size: var(--v2-size-xs); color: var(--v2-text-tertiary); }
+
+.v2-rail-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-surface-1);
+  border-left: 2px solid transparent;
+}
+/* Attention gets the warm edge the design uses, and only attention. */
+.v2-rail-card--needs {
+  border-left-color: var(--v2-state-warn);
+  background: var(--v2-state-warn-soft);
+}
+.v2-rail-title {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font: inherit;
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-primary);
+  text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v2-rail-title:hover { text-decoration: underline; }
+.v2-rail-sub {
+  margin: 0;
+  font-size: 11px;
+  color: var(--v2-text-tertiary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v2-rail-verbs { display: flex; gap: 5px; margin-top: 3px; }
+.v2-rail-verb {
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--v2-radius-xs);
+  border: 1px solid var(--v2-hairline);
+  background: none;
+  color: var(--v2-text-secondary);
+  cursor: pointer;
+}
+.v2-rail-verb:hover:not(:disabled) { color: var(--v2-text-primary); border-color: var(--v2-hairline-strong); }
+.v2-rail-verb:disabled { opacity: 0.5; cursor: default; }
+.v2-rail-recent {
+  background: none; border: 0; padding: 3px 0; cursor: pointer;
+  font: inherit; font-size: 11px;
+  color: var(--v2-text-tertiary);
+  text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v2-rail-recent:hover { color: var(--v2-text-secondary); }
+
+@media (max-width: 900px) {
+  .v2-rail { display: none; }
+}
+
+/* Theme + voice, folded in from the retired Menubar. */
+.v2-sysbar-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 0;
+  border-radius: var(--v2-radius-sm);
+  padding: 4px 6px;
+  cursor: pointer;
+  color: var(--v2-text-tertiary);
+}
+.v2-sysbar-icon:hover { background: var(--v2-fill-subtle); color: var(--v2-text-primary); }
+.v2-sysbar-icon[data-on="yes"] { color: var(--v2-state-live); }
+
+/* The shell no longer reserves a strip for the retired menubar. */
+.v2-shell {
+  --v2-menubar-height: 0px;
+  --v2-sysbar-height: 34px;
+}

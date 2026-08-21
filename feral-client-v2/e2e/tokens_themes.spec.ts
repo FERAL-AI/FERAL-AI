@@ -44,6 +44,11 @@ const SEMANTIC_NAMES = [
   ),
 ].sort();
 
+// The expected values below are the approved instrument-panel palette
+// from scratchpad/design/instrument-panel.html, ported into tokens.css.
+// They were the previous product palette until that port; a diff here
+// means the palette moved, which is worth failing on either way.
+
 /** The subset that paints a flat colour, so it can be read back as rgb(). */
 // --v2-surface, --v2-border and --v2-border-subtle are deliberately
 // absent. They were referenced with no fallback and declared nowhere;
@@ -151,12 +156,12 @@ test.describe('token themes, measured in Chromium', () => {
     const m = await measure(page, null, SEMANTIC_NAMES, COLOR_NAMES);
     expectAllDeclared(m);
     expect(m.colorScheme).toBe('light dark');
-    expect(m.painted['--v2-bg-base']).toBe('rgb(236, 238, 243)');
-    expect(m.painted['--v2-text-primary']).toBe('rgb(11, 11, 13)');
+    expect(m.painted['--v2-bg-base']).toBe('rgb(246, 245, 242)');
+    expect(m.painted['--v2-text-primary']).toBe('rgb(34, 38, 43)');
     expect(m.painted['--v2-surface-0']).toBe('rgba(255, 255, 255, 0.48)');
-    expect(m.painted['--v2-hairline']).toBe('rgba(0, 0, 0, 0.08)');
-    expect(m.painted['--v2-accent']).toBe('rgb(0, 102, 204)');
-    expect(m.painted['--v2-state-live']).toBe('rgb(23, 118, 54)');
+    expect(m.painted['--v2-hairline']).toBe('rgba(34, 38, 43, 0.08)');
+    expect(m.painted['--v2-accent']).toBe('rgb(47, 109, 168)');
+    expect(m.painted['--v2-state-live']).toBe('rgb(60, 123, 80)');
   });
 
   test.describe('system dark', () => {
@@ -167,12 +172,12 @@ test.describe('token themes, measured in Chromium', () => {
       const m = await measure(page, null, SEMANTIC_NAMES, COLOR_NAMES);
       expectAllDeclared(m);
       expect(m.colorScheme).toBe('dark');
-      expect(m.painted['--v2-bg-base']).toBe('rgb(22, 22, 28)');
-      expect(m.painted['--v2-text-primary']).toBe('rgb(245, 245, 247)');
-      expect(m.painted['--v2-surface-0']).toBe('rgba(22, 22, 26, 0.38)');
-      expect(m.painted['--v2-hairline']).toBe('rgba(255, 255, 255, 0.1)');
-      expect(m.painted['--v2-accent']).toBe('rgb(10, 132, 255)');
-      expect(m.painted['--v2-state-live']).toBe('rgb(48, 209, 88)');
+      expect(m.painted['--v2-bg-base']).toBe('rgb(28, 31, 35)');
+      expect(m.painted['--v2-text-primary']).toBe('rgb(229, 232, 235)');
+      expect(m.painted['--v2-surface-0']).toBe('rgba(34, 38, 42, 0.38)');
+      expect(m.painted['--v2-hairline']).toBe('rgba(229, 232, 235, 0.1)');
+      expect(m.painted['--v2-accent']).toBe('rgb(127, 176, 222)');
+      expect(m.painted['--v2-state-live']).toBe('rgb(127, 181, 138)');
     });
 
     test('an explicit light choice beats a dark system preference', async ({ page }) => {
@@ -182,9 +187,9 @@ test.describe('token themes, measured in Chromium', () => {
       for (const m of [attr, cls]) {
         expectAllDeclared(m);
         expect(m.colorScheme).toBe('light');
-        expect(m.painted['--v2-bg-base']).toBe('rgb(236, 238, 243)');
-        expect(m.painted['--v2-text-primary']).toBe('rgb(11, 11, 13)');
-        expect(m.painted['--v2-hairline']).toBe('rgba(0, 0, 0, 0.08)');
+        expect(m.painted['--v2-bg-base']).toBe('rgb(246, 245, 242)');
+        expect(m.painted['--v2-text-primary']).toBe('rgb(34, 38, 43)');
+        expect(m.painted['--v2-hairline']).toBe('rgba(34, 38, 43, 0.08)');
       }
       expect(cls.painted).toEqual(attr.painted);
     });
@@ -197,11 +202,11 @@ test.describe('token themes, measured in Chromium', () => {
     for (const m of [attr, cls]) {
       expectAllDeclared(m);
       expect(m.colorScheme).toBe('dark');
-      expect(m.painted['--v2-bg-base']).toBe('rgb(22, 22, 28)');
-      expect(m.painted['--v2-text-primary']).toBe('rgb(245, 245, 247)');
-      expect(m.painted['--v2-surface-0']).toBe('rgba(22, 22, 26, 0.38)');
-      expect(m.painted['--v2-hairline']).toBe('rgba(255, 255, 255, 0.1)');
-      expect(m.painted['--v2-accent']).toBe('rgb(10, 132, 255)');
+      expect(m.painted['--v2-bg-base']).toBe('rgb(28, 31, 35)');
+      expect(m.painted['--v2-text-primary']).toBe('rgb(229, 232, 235)');
+      expect(m.painted['--v2-surface-0']).toBe('rgba(34, 38, 42, 0.38)');
+      expect(m.painted['--v2-hairline']).toBe('rgba(229, 232, 235, 0.1)');
+      expect(m.painted['--v2-accent']).toBe('rgb(127, 176, 222)');
     }
     expect(cls.painted).toEqual(attr.painted);
   });

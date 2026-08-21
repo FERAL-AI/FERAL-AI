@@ -92,35 +92,35 @@
 :root {
   color-scheme: light dark;
 
-  --p-base: #ECEEF3;
-  --p-deep: #DEE0E6;
+  --p-base: #F6F5F2;
+  --p-deep: #EFEDE8;
 
-  --p-shell-hi: #F2F3F8;
-  --p-shell-mid: #E8EAF0;
-  --p-shell-lo: #DEE0E6;
+  --p-shell-hi: #FFFFFF;
+  --p-shell-mid: #EFEDE8;
+  --p-shell-lo: #E4E1D9;
 
   --p-pane-0: 255 255 255;
   --p-pane-1: 255 255 255;
-  --p-pane-2: 255 255 255;
-  --p-pane-3: 255 255 255;
+  --p-pane-2: 239 237 232;
+  --p-pane-3: 228 225 217;
 
   /* The hairline + wash-fill channel. Black on light, white on dark.
    * The raw white alphas that used to be typed inline vanished on a
    * light background; deriving both from one slot is what stops that. */
-  --p-line: 0 0 0;
+  --p-line: 34 38 43;
 
-  --p-text-hi: #0B0B0D;
-  --p-text-mid: #4C4C55;
-  --p-text-lo: #6B6B73;
+  --p-text-hi: #22262B;
+  --p-text-mid: #5A6068;
+  --p-text-lo: #696E76;
   --p-text-inverse: #FFFFFF;
 
-  --p-accent: 0 102 204;
-  --p-accent-deep: #004C99;
-  --p-accent-text: #0066CC;
+  --p-accent: 47 109 168;
+  --p-accent-deep: #255884;
+  --p-accent-text: #2F6DA8;
 
-  --p-live: 23 118 54;
-  --p-warn: 139 103 0;
-  --p-error: 215 0 21;
+  --p-live: 60 123 80;
+  --p-warn: 144 104 24;
+  --p-error: 168 68 63;
 }
 
 /* ── Palette: DARK (state 2, system preference) ───────────────────
@@ -134,16 +134,16 @@
  * .v2-device-meta, .v2-flow-status, .v2-channel-state, .v2-timeline-time,
  * .v2-event-body, .v2-stat-label, .v2-chip--muted, .v2-p--tiny (11px)
  * and every .v2-btn--ghost label. It therefore has to clear WCAG AA
- * 4.5:1, and #6E6E76 did not: measured against the effective dark glass
- * background #1F1F27 it was 3.24:1, and against the elevated surface
- * (--v2-surface-elev composited over the ground, #2E2E38) only 2.66:1.
+ * 4.5:1, and the instrument-panel design's #767E86 does not: measured against
+ * the elevated dark surface #333940 it is only 2.83:1. The hue is kept
+ * and the lightness raised, which is the smallest honest change.
  *
- * #96969E measured against every dark background in this file:
- *   #1F1F27 shell ground  5.57:1
- *   #1C1C22 surface-0     5.78:1
- *   #1E1E25 surface-1     5.64:1
- *   #23232B surface-2     5.31:1
- *   #2E2E38 surface-elev  4.57:1   <- worst case, still AA
+ * #9AA2AA measured against every dark background in this file:
+ *   #1F1F27 shell ground  6.33:1
+ *   #202228 surface-0     6.15:1
+ *   #24262D surface-1     5.84:1
+ *   #2B2F36 surface-2     5.20:1
+ *   #333940 surface-elev  4.51:1
  *
  * That deliberately narrows the secondary/tertiary lightness step
  * (secondary is 6.37:1 on the ground, tertiary 5.57:1). On a charcoal
@@ -172,32 +172,32 @@
   :root:not([data-theme="light"]):not(.v2-light) {
     color-scheme: dark;
 
-    --p-base: #16161C;
-    --p-deep: #0B0B10;
+    --p-base: #1C1F23;
+    --p-deep: #16181B;
 
-    --p-shell-hi: #1F1F27;
-    --p-shell-mid: #13131A;
-    --p-shell-lo: #0F0F15;
+    --p-shell-hi: #333A40;
+    --p-shell-mid: #292E33;
+    --p-shell-lo: #22262A;
 
-    --p-pane-0: 22 22 26;
-    --p-pane-1: 28 28 34;
-    --p-pane-2: 38 38 46;
-    --p-pane-3: 52 52 62;
+    --p-pane-0: 34 38 42;
+    --p-pane-1: 41 46 51;
+    --p-pane-2: 51 58 64;
+    --p-pane-3: 59 67 74;
 
-    --p-line: 255 255 255;
+    --p-line: 229 232 235;
 
-    --p-text-hi: #F5F5F7;
-    --p-text-mid: #A1A1A8;
-    --p-text-lo: #96969E;
-    --p-text-inverse: #0B0B0D;
+    --p-text-hi: #E5E8EB;
+    --p-text-mid: #A4ABB2;
+    --p-text-lo: #9AA2AA;
+    --p-text-inverse: #1C1F23;
 
-    --p-accent: 10 132 255;
-    --p-accent-deep: #0060DF;
-    --p-accent-text: #3D9BFF;
+    --p-accent: 127 176 222;
+    --p-accent-deep: #5A8FC0;
+    --p-accent-text: #7FB0DE;
 
-    --p-live: 48 209 88;
-    --p-warn: 255 214 10;
-    --p-error: 255 69 58;
+    --p-live: 127 181 138;
+    --p-warn: 211 176 107;
+    --p-error: 214 138 134;
   }
 }
 
@@ -208,32 +208,32 @@
 :root.v2-dark {
   color-scheme: dark;
 
-  --p-base: #16161C;
-  --p-deep: #0B0B10;
+  --p-base: #1C1F23;
+  --p-deep: #16181B;
 
-  --p-shell-hi: #1F1F27;
-  --p-shell-mid: #13131A;
-  --p-shell-lo: #0F0F15;
+  --p-shell-hi: #333A40;
+  --p-shell-mid: #292E33;
+  --p-shell-lo: #22262A;
 
-  --p-pane-0: 22 22 26;
-  --p-pane-1: 28 28 34;
-  --p-pane-2: 38 38 46;
-  --p-pane-3: 52 52 62;
+  --p-pane-0: 34 38 42;
+  --p-pane-1: 41 46 51;
+  --p-pane-2: 51 58 64;
+  --p-pane-3: 59 67 74;
 
-  --p-line: 255 255 255;
+  --p-line: 229 232 235;
 
-  --p-text-hi: #F5F5F7;
-  --p-text-mid: #A1A1A8;
-  --p-text-lo: #96969E;
-  --p-text-inverse: #0B0B0D;
+  --p-text-hi: #E5E8EB;
+  --p-text-mid: #A4ABB2;
+  --p-text-lo: #9AA2AA;
+  --p-text-inverse: #1C1F23;
 
-  --p-accent: 10 132 255;
-  --p-accent-deep: #0060DF;
-  --p-accent-text: #3D9BFF;
+  --p-accent: 127 176 222;
+  --p-accent-deep: #5A8FC0;
+  --p-accent-text: #7FB0DE;
 
-  --p-live: 48 209 88;
-  --p-warn: 255 214 10;
-  --p-error: 255 69 58;
+  --p-live: 127 181 138;
+  --p-warn: 211 176 107;
+  --p-error: 214 138 134;
 }
 
 /* An explicit light choice on a dark system gets the light palette from

@@ -29,12 +29,20 @@ describe('--v2-accent-text clears AA where the accent did not', () => {
   const SHELL_BASE = '#1F1F27';
   const SURFACE_ELEV = '#2E2E38';
 
-  it('the plain accent really was failing, which is why a second token exists', () => {
-    const accent = hexIn('darkMedia', '--v2-accent');
-    // Not a regression guard on the accent: it documents WHY the split
-    // exists, so nobody later "simplifies" it back to one token.
-    expect(contrast(accent, SHELL_BASE)).toBeLessThan(4.5);
-    expect(contrast(accent, SURFACE_ELEV)).toBeLessThan(4.5);
+  it('whichever token is used for accent TEXT clears AA', () => {
+    // This used to assert that the plain --v2-accent FAILS AA, as the
+    // documented reason a second token exists. That is a fragile shape:
+    // it requires a defect to persist. Porting the instrument-panel
+    // palette made the dark accent #7FB0DE, which clears AA at 7.14:1
+    // on the shell base, and the test failed for the good reason.
+    //
+    // The invariant worth holding is the one a reader actually depends
+    // on: text painted with the accent-text token is legible on every
+    // dark surface. Whether the plain accent happens to clear it too is
+    // a property of the current palette, not a contract.
+    const accentText = hexIn('darkMedia', '--v2-accent-text');
+    expect(contrast(accentText, SHELL_BASE)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(accentText, SURFACE_ELEV)).toBeGreaterThanOrEqual(4.5);
   });
 
   it('meets AA on the shell base and on the worst dark surface', () => {

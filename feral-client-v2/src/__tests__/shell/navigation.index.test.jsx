@@ -136,20 +136,33 @@ describe('the palette indexes what the Dock pins', () => {
     // set-membership test says `/apps/publish` has no tile, the palette
     // button lights too, and the Dock shows two active controls, which
     // tells the operator they are in two places at once.
-    expect(dockPathFor('/apps/publish')).toBe('/apps');
-    expect(dockPathFor('/apps')).toBe('/apps');
-    expect(isPaletteOnlyPath('/apps/publish')).toBe(false);
+    // Asserted against whatever the Dock actually pins, so this keeps
+    // testing the NavLink descendant rule when the Dock's composition
+    // changes. It used to hardcode /apps, which the approved design
+    // moved to the palette.
+    const pinned = DOCK_PATHS.find((d) => d !== '/');
+    expect(dockPathFor(pinned)).toBe(pinned);
+    expect(dockPathFor(`${pinned}/child`)).toBe(pinned);
+    expect(isPaletteOnlyPath(`${pinned}/child`)).toBe(false);
     // `/` is exact-match only, mirroring `end` on its NavLink. Without
-    // that, every route in the app would light Home.
-    expect(dockPathFor('/')).toBe('/');
-    expect(dockPathFor('/wiki')).toBe('');
+    // that, every route in the app would light whatever pins it. It is
+    // only a Dock path when the Dock pins it, which it no longer does.
+    expect(dockPathFor('/')).toBe(DOCK_PATHS.includes('/') ? '/' : '');
+    const notPinned = DESTINATIONS.map((d) => d.to)
+      .find((t) => t !== '/' && !DOCK_PATHS.includes(t));
+    expect(dockPathFor(notPinned)).toBe('');
   });
 
   it('reports palette-only membership for a route with no tile, and not for one with a tile', () => {
-    expect(isPaletteOnlyPath('/memory/context')).toBe(true);
+    // /memory/context is a descendant of the pinned /memory tile now,
+    // so it lights Memory, not the palette. That is the NavLink rule.
+    expect(isPaletteOnlyPath('/memory/context')).toBe(false);
     expect(isPaletteOnlyPath('/glass-brain')).toBe(true);
-    expect(isPaletteOnlyPath('/oversight')).toBe(false);
-    expect(isPaletteOnlyPath('/devices')).toBe(false);
+    // Derived from the Dock rather than named, for the same reason.
+    for (const to of DOCK_PATHS) expect(isPaletteOnlyPath(to)).toBe(false);
+    const paletteOnly = DESTINATIONS.map((d) => d.to)
+      .find((t) => t !== '/' && !DOCK_PATHS.some((d) => t === d || t.startsWith(`${d}/`)));
+    expect(isPaletteOnlyPath(paletteOnly)).toBe(true);
     // An unknown path is nobody's: the Dock stays unlit rather than
     // claiming a route it does not own.
     expect(isPaletteOnlyPath('/not-a-route')).toBe(false);
@@ -172,23 +185,42 @@ describe('every destination lights exactly one Dock control', () => {
   }
 
   it('lights the destination tile itself for a Dock route', () => {
-    const { container } = renderV2(<Dock />, { route: '/oversight' });
-    expect(lit(container)).toEqual(['Oversight']);
+    const to = DOCK_PATHS.find((d) => d !== '/');
+    const label = DOCK_ITEMS.find((d) => d.to === to).label;
+    const { container } = renderV2(<Dock />, { route: to });
+    expect(lit(container)).toEqual([label]);
   });
 
   it('lights the Command tile for a palette-only route', () => {
-    const { container } = renderV2(<Dock />, { route: '/memory/context' });
+    // Chosen from the index rather than named: it must be a route no
+    // Dock tile owns, including as a descendant. /memory/context used
+    // to qualify and no longer does, because /memory is pinned now.
+    const to = DESTINATIONS.map((d) => d.to)
+      .find((t) => t !== '/' && !DOCK_PATHS.some((d) => t === d || t.startsWith(`${d}/`)));
+    const { container } = renderV2(<Dock />, { route: to });
     expect(lit(container)).toEqual(['Command']);
   });
 
-  it('keeps the kill switch pinned to the Dock', () => {
-    // /oversight holds the supervisor audit trail and the kill switch.
-    // It was once reachable only from a button inside the Glass Brain
-    // page header.
+  it('keeps the safety surfaces one click away', () => {
+    // This used to require /oversight to hold a Dock tile, on the
+    // argument that a safety control you have to remember a path to is
+    // one you will not find while something is going wrong. That
+    // argument is still right; the approved design answers it
+    // differently.
+    //
+    // The design pins "Needs you", which is where a blocked tool call
+    // actually waits, and moves Oversight (the audit trail and kill
+    // switch) into the palette's eighteen. Needs you is the surface you
+    // touch during an incident; Oversight is the one you read after.
+    //
+    // So the invariant is now: the blocking surface is pinned, and the
+    // kill switch is still reachable by name rather than buried inside
+    // another page's header.
     const { container } = renderV2(<Dock />);
-    const oversight = [...container.querySelectorAll('.v2-dock-btn')]
-      .find((el) => el.querySelector('.v2-dock-label')?.textContent === 'Oversight');
-    expect(oversight?.getAttribute('href')).toBe('/oversight');
+    const labels = [...container.querySelectorAll('.v2-dock-label')]
+      .map((el) => el.textContent);
+    expect(labels).toContain('Needs you');
+    expect(DESTINATIONS.map((d) => d.to)).toContain('/oversight');
   });
 });
 

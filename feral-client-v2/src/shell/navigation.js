@@ -3,7 +3,7 @@ import {
   Settings as SettingsIcon, AppWindow, Shield,
   Hammer, Wrench, Database, BookOpen, Users, UserCircle2,
   HeartPulse, Crosshair, Clock, BrainCircuit, Globe, MapPin, Store,
-  BrainCog, Upload, ShieldAlert, Undo2, FolderLock,
+  BrainCog, Upload, ShieldAlert, Undo2, FolderLock, Gauge, Activity,
 } from 'lucide-react';
 
 /**
@@ -39,6 +39,12 @@ import {
  */
 export const DESTINATIONS = [
   // Core loop
+  // Console is the default landing view, and the design's headline is
+  // why: "the default view is the machine, not a transcript. Chat is
+  // one place you go." Home stays reachable by name for anyone who
+  // wants the briefing.
+  { to: '/console', label: 'Console', Icon: Gauge, desc: 'What the machine is doing right now', group: 'Core' },
+  { to: '/jobs', label: 'Jobs', Icon: Activity, desc: 'Everything running, across all six sources', group: 'Core' },
   { to: '/', label: 'Home', Icon: LayoutDashboard, desc: 'Overview, resume where you left off', group: 'Core' },
   { to: '/chat', label: 'Chat', Icon: MessageSquare, desc: 'Talk to the brain', group: 'Core' },
   { to: '/canvas', label: 'Canvas', Icon: SquareStack, desc: 'Gen-UI surfaces the brain drew', group: 'Core' },
@@ -92,8 +98,18 @@ export const DESTINATIONS = [
  * `DESTINATIONS`; the guard test enforces that, because a Dock path
  * with no destination entry is a tile the palette cannot find.
  */
+// The eight the approved design pins, verbatim: "Console, Chat, Needs
+// you, Jobs, Skills, Memory, Devices, Settings. Chosen because you
+// return to them, not because they are important."
+//
+// The previous eight (Home, Chat, Flows, Devices, Apps, Canvas,
+// Oversight, Settings) were picked on importance, which is exactly the
+// selection rule the design rejects: Oversight matters enormously and
+// you visit it twice a year, so it belongs in the palette, while Needs
+// you blocks work every day and had no tile at all.
 export const DOCK_PATHS = [
-  '/', '/chat', '/flows', '/devices', '/apps', '/canvas', '/oversight', '/settings',
+  '/console', '/chat', '/approvals', '/jobs',
+  '/skills', '/memory', '/devices', '/settings',
 ];
 
 const byPath = new Map(DESTINATIONS.map((d) => [d.to, d]));
@@ -135,7 +151,14 @@ export const PALETTE_ONLY = DESTINATIONS.filter((d) => !dockPathFor(d.to));
  */
 export function dockPathFor(pathname) {
   if (!pathname) return '';
-  if (pathname === '/') return '/';
+  // `/` is exact-match only: every path starts with it, so prefix
+  // matching would make it claim the whole app. It is still only a Dock
+  // path when the Dock actually pins it. This used to return '/'
+  // unconditionally, which was true while Home held a tile; once the
+  // approved design replaced it with Console, `/` claimed a tile that
+  // does not exist AND reported itself as not palette-only, so arriving
+  // on Home lit nothing at all.
+  if (pathname === '/') return dockPathSet.has('/') ? '/' : '';
   let best = '';
   for (const to of DOCK_PATHS) {
     if (to === '/') continue;

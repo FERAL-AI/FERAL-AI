@@ -19,7 +19,7 @@
  *   2. No shell chrome overlaps the chat composer.
  *   3. No route scrolls the page sideways, down to a 375px viewport.
  *   4. The open palette never covers the Dock.
- *   5. The Menubar trigger opens the same dialog Cmd-K does, and
+ *   5. The system bar trigger opens the same dialog Cmd-K does, and
  *      survives a narrow viewport.
  *   6. The Ask row lands the typed query in the chat composer.
  */
@@ -273,7 +273,7 @@ test.describe('Shell navigation', () => {
     expect(dialog.bottom).toBeLessThanOrEqual(vp.height + 1);
   });
 
-  test('the Menubar trigger opens the same dialog, and survives a 375px viewport', async ({ page }) => {
+  test('the system bar trigger opens the same dialog, and survives a 375px viewport', async ({ page }) => {
     await stubApi(page);
     await page.goto('/');
 
@@ -289,10 +289,14 @@ test.describe('Shell navigation', () => {
     // it would leave Cmd-K as the only way in, and a phone has no
     // Cmd-K.
     await expect(trigger).toBeVisible();
-    const [menubar] = await rects(page, '.v2-menubar');
-    const [triggerRect] = await rects(page, '.v2-menubar-search');
-    expect(triggerRect.right).toBeLessThanOrEqual(menubar.right + 1);
-    expect(triggerRect.left).toBeGreaterThanOrEqual(menubar.left - 1);
+    // The Menubar was retired when the instrument-panel design's single
+    // system bar took its place; the palette trigger moved there with
+    // the theme and voice controls. The invariant is unchanged: the
+    // control stays inside its bar at a phone width.
+    const [bar] = await rects(page, '.v2-sysbar');
+    const [triggerRect] = await rects(page, '.v2-sysbar-cmd');
+    expect(triggerRect.right).toBeLessThanOrEqual(bar.right + 1);
+    expect(triggerRect.left).toBeGreaterThanOrEqual(bar.left - 1);
   });
 
   test('the Ask row hands the typed query to the chat composer', async ({ page }) => {

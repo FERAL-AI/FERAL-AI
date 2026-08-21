@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import Ambient from './Ambient';
-import Menubar from './Menubar';
 import Dock from './Dock';
+import SystemBar from './SystemBar';
+import WorkRail from './WorkRail';
 import CommandPalette from './CommandPalette';
 import { PaletteProvider } from './PaletteContext';
 import { ChatThreadContext, useChatThread } from './ChatThreadContext';
@@ -400,10 +401,18 @@ function ShellFrame() {
       <PaletteProvider value={palette}>
         <div className={`v2-shell${voice.active ? ' is-voice-mode' : ''}`}>
           <Ambient />
-          <Menubar />
-          <main className="v2-shell-main">
-            <Outlet />
-          </main>
+          {/* The approved design leads with the machine, not a page:
+              vitals across the top, the work rail down the left, the
+              page in the middle. Menubar stays for the theme and voice
+              controls it owns; the search field it used to carry has
+              moved to the palette, which is where search belongs. */}
+          <SystemBar onOpenPalette={openPalette} />
+          <div className="v2-shell-body">
+            <WorkRail />
+            <main className="v2-shell-main">
+              <Outlet />
+            </main>
+          </div>
           <Dock />
           <CommandPalette open={paletteOpen} onClose={closePalette} />
           <VoiceOverlay />
