@@ -27,6 +27,8 @@ from starlette.routing import compile_path
 from version import VERSION as __version__
 from models.protocol import (
     HUP_VERSION,
+    MAX_DIGEST_REQUEST_ITEMS,
+    MAX_ID_LEN,
     VIDEO_FRAME_MAX_BYTES,
     FeralMessage,
     TextCommandPayload,
@@ -3496,6 +3498,14 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     record_envelope=_record_phone_envelope,
                 )
 
+            elif msg.type == "ambient_digest_request":
+                # The pull leg. Registering the type in MESSAGE_TYPES
+                # alone is a no-op: without this branch the frame
+                # validates and then falls through to the terminal else.
+                await _handle_ambient_digest_request(
+                    ws, node_id, paired_device_id, raw,
+                )
+
             elif msg.type == "audio_chunk" and node_id:
                 payload_dict = raw.get("payload", {})
                 audio_b64 = payload_dict.get("data_b64", "")
@@ -4340,6 +4350,49 @@ def _ambient_db_path():
     return feral_home() / "ambient_transcripts.db"
 
 
+def _ambient_ensure_schema(conn) -> None:
+    """Create the table if absent, then add columns absent from an old one.
+
+    ``CREATE TABLE IF NOT EXISTS`` is a no-op against a database that
+    already has the table, so a new column in the DDL above reaches a
+    fresh install and never reaches an existing one. Every column added
+    after the first release therefore needs the additive form: ask
+    ``PRAGMA table_info`` what is actually there and ``ALTER TABLE`` for
+    what is not. SQLite has no ``ADD COLUMN IF NOT EXISTS``.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ambient_transcripts (
+            transcript_id TEXT PRIMARY KEY,
+            received_at REAL NOT NULL,
+            node_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            processed_at REAL,
+            episode_id TEXT
+        )
+        """
+    )
+    have = {row[1] for row in conn.execute("PRAGMA table_info(ambient_transcripts)")}
+    # The serialised TranscriptOutcome, including injection_flags. The
+    # flags are kept here and never sent to a phone.
+    if "digest_json" not in have:
+        conn.execute("ALTER TABLE ambient_transcripts ADD COLUMN digest_json TEXT")
+    # The AUTHENTICATED identity of the socket that delivered this
+    # transcript, from _verify_credential. Not the payload's device_id,
+    # which the phone supplies and can therefore say anything it likes.
+    #
+    # This exists because transcript_id is client-supplied too
+    # (``payload.get("transcript_id") or uuid4()``), so a digest lookup
+    # keyed on the id alone would let any paired node read back the
+    # summary, people and commitments of a conversation recorded by a
+    # different device on the same brain. That is the recorded contents
+    # of someone else's conversation.
+    if "owner_key" not in have:
+        conn.execute("ALTER TABLE ambient_transcripts ADD COLUMN owner_key TEXT")
+
+
 def _ambient_store(
     transcript_id: str,
     *,
@@ -4347,6 +4400,7 @@ def _ambient_store(
     device_id: str,
     session_id: str,
     payload: dict,
+    owner_key: str = "",
 ) -> bool:
     """Persist the raw transcript. Returns True if this id is new.
 
@@ -4366,20 +4420,7 @@ def _ambient_store(
     import sqlite3 as _sqlite3
 
     with _sqlite3.connect(str(_ambient_db_path())) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ambient_transcripts (
-                transcript_id TEXT PRIMARY KEY,
-                received_at REAL NOT NULL,
-                node_id TEXT NOT NULL,
-                device_id TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                processed_at REAL,
-                episode_id TEXT
-            )
-            """
-        )
+        _ambient_ensure_schema(conn)
         existing = conn.execute(
             "SELECT 1 FROM ambient_transcripts WHERE transcript_id = ?",
             (transcript_id,),
@@ -4389,30 +4430,153 @@ def _ambient_store(
         conn.execute(
             """
             INSERT INTO ambient_transcripts
-            (transcript_id, received_at, node_id, device_id, session_id, payload_json)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (transcript_id, received_at, node_id, device_id, session_id,
+             payload_json, owner_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 transcript_id, time.time(), node_id, device_id, session_id,
                 _json.dumps(payload, sort_keys=True, default=str),
+                owner_key or "",
             ),
         )
         conn.commit()
     return True
 
 
-def _ambient_mark_processed(transcript_id: str, episode_id: str) -> None:
+def _ambient_mark_processed(
+    transcript_id: str, episode_id: str, digest_json: str = "",
+) -> None:
+    """Record the outcome on the success path.
+
+    ``digest_json`` is the serialised ``TranscriptOutcome``. Persisting
+    it here rather than deriving it later is the difference between the
+    phone being able to read a summary at all and having to reconstruct
+    one by parsing prose back out of the episode's headline and lead,
+    which is not a contract worth having.
+    """
     import sqlite3 as _sqlite3
     try:
         with _sqlite3.connect(str(_ambient_db_path())) as conn:
+            _ambient_ensure_schema(conn)
             conn.execute(
-                "UPDATE ambient_transcripts SET processed_at = ?, episode_id = ? "
+                "UPDATE ambient_transcripts "
+                "SET processed_at = ?, episode_id = ?, digest_json = ? "
                 "WHERE transcript_id = ?",
-                (time.time(), episode_id, transcript_id),
+                (time.time(), episode_id, digest_json or "", transcript_id),
             )
             conn.commit()
     except Exception as exc:
         logger.warning("ambient: could not mark %s processed: %s", transcript_id, exc)
+
+
+def _ambient_digest_rows(
+    transcript_ids: list[str], *, owner_key: str, node_id: str,
+) -> dict[str, dict]:
+    """The stored rows for these ids THAT THIS CALLER OWNS, by id.
+
+    Scoped on the authenticated ``owner_key``, never on the id alone.
+    See ``_ambient_ensure_schema`` for why that matters.
+
+    Rows written before ``owner_key`` existed carry NULL, and those fall
+    back to matching the socket's ``node_id``. Without that fallback
+    every transcript stored before this change would answer ``unknown``
+    on the first connect after upgrading, and the phone treats
+    ``unknown`` as "the brain lost it" and resends. The upgrade would
+    look exactly like data loss and re-upload every recording.
+    """
+    import sqlite3 as _sqlite3
+    if not transcript_ids:
+        return {}
+    out: dict[str, dict] = {}
+    marks = ",".join("?" for _ in transcript_ids)
+    try:
+        with _sqlite3.connect(str(_ambient_db_path())) as conn:
+            _ambient_ensure_schema(conn)
+            conn.row_factory = _sqlite3.Row
+            rows = conn.execute(
+                f"SELECT transcript_id, processed_at, episode_id, digest_json "
+                f"FROM ambient_transcripts "
+                f"WHERE transcript_id IN ({marks}) "
+                f"AND (owner_key = ? OR ((owner_key IS NULL OR owner_key = '') "
+                f"AND node_id = ?))",
+                (*transcript_ids, owner_key or "", node_id or ""),
+            ).fetchall()
+            for row in rows:
+                out[str(row["transcript_id"])] = dict(row)
+    except Exception as exc:
+        logger.warning("ambient: digest lookup failed: %s", exc)
+    return out
+
+
+def _ambient_digest_frame(
+    transcript_id: str,
+    row: dict | None,
+    *,
+    include_detail: bool,
+    remaining: int = 0,
+) -> dict:
+    """One ``ambient_digest`` payload, from a stored row or the lack of one.
+
+    ``injection_flags`` is dropped here rather than at the storage
+    layer: it is worth having in the brain's logs and is never worth
+    putting in front of a person, because it describes the transcript,
+    not the people in it.
+    """
+    import json as _json
+
+    # Every status returns the SAME key set. Two reasons. A phone
+    # parsing raw JSON gets one shape and never a missing key, and
+    # "another device owns this" becomes structurally identical to
+    # "nobody owns this" rather than identical only by luck: a sparse
+    # frame would let a caller distinguish them by which keys came back,
+    # which is the fact this is scoped to withhold.
+    frame = {
+        "transcript_id": transcript_id,
+        "status": "unknown",
+        "summary": "",
+        "detail": "",
+        "people": [],
+        "topics": [],
+        "commitments": [],
+        "degraded": [],
+        "episode_id": "",
+        "processed_at": None,
+        "remaining": remaining,
+    }
+
+    if row is None:
+        return frame
+
+    if not row.get("processed_at"):
+        # Stored but not summarized: the task is still running, or it
+        # failed and the boot sweep will retry from our copy. Saying
+        # `unknown` here would tell the phone to resend a transcript we
+        # are holding, on every connect until the summary lands.
+        frame["status"] = "pending"
+        return frame
+
+    digest = {}
+    if row.get("digest_json"):
+        try:
+            digest = _json.loads(row["digest_json"]) or {}
+        except Exception:
+            logger.debug("ambient: unreadable digest_json for %s", transcript_id)
+            digest = {}
+
+    frame.update({
+        "status": "ready",
+        "summary": str(digest.get("summary") or ""),
+        # Up to 20,000 chars, and the reason include_detail defaults off.
+        "detail": str(digest.get("detail") or "") if include_detail else "",
+        "people": [str(x) for x in (digest.get("people") or [])],
+        "topics": [str(x) for x in (digest.get("topics") or [])],
+        "commitments": [c for c in (digest.get("commitments") or []) if isinstance(c, dict)],
+        "degraded": [str(x) for x in (digest.get("degraded") or [])],
+        "episode_id": str(row.get("episode_id") or ""),
+        "processed_at": row.get("processed_at"),
+    })
+    return frame
 
 
 def _ambient_pending(limit: int = 50) -> list[dict]:
@@ -4505,6 +4669,9 @@ async def _handle_ambient_transcript(
             _ambient_store, transcript_id,
             node_id=node_id, device_id=device_id,
             session_id=session_id, payload=payload,
+            # The authenticated identity, not payload["device_id"].
+            # Digest reads are scoped on this.
+            owner_key=str(paired_device_id or ""),
         )
     except Exception as exc:
         logger.warning("ambient: persist failed for %s: %s", transcript_id, exc)
@@ -4553,6 +4720,122 @@ async def _handle_ambient_transcript(
     )
 
 
+async def _handle_ambient_digest_request(
+    ws, node_id, paired_device_id, raw: dict,
+) -> None:
+    """Answer the phone's "what did you make of these?" on connect.
+
+    One ``ambient_digest`` per requested id, in request order, each
+    carrying ``remaining`` so a phone that has been away for a week can
+    say it is fetching and show progress rather than appearing to hang
+    while forty frames arrive.
+
+    Scoped on the AUTHENTICATED identity. An id this caller does not own
+    answers ``unknown``, which is the same answer it gets for an id
+    nobody owns, and deliberately so: distinguishing "someone else has
+    this" from "nobody has this" would confirm the existence of another
+    device's recording to anyone who asked.
+    """
+    payload = _unwrap_hup_frame(raw.get("payload", {}) or {})
+
+    if not node_id:
+        await _send_protocol_error(
+            ws, 1003, "ambient_digest_request requires an identified node",
+            name="ambient_digest_no_node",
+        )
+        return
+
+    raw_ids = payload.get("transcript_ids") or []
+    if not isinstance(raw_ids, list):
+        await _send_protocol_error(
+            ws, 1003, "ambient_digest_request.transcript_ids must be a list",
+            name="ambient_digest_bad_ids",
+        )
+        return
+
+    # Bound the work here rather than trusting the sender to have
+    # bounded it. Deduplicated first, so a phone repeating one id cannot
+    # spend the budget on it.
+    seen: set[str] = set()
+    ids: list[str] = []
+    for item in raw_ids:
+        tid = str(item or "").strip()[:MAX_ID_LEN]
+        if tid and tid not in seen:
+            seen.add(tid)
+            ids.append(tid)
+        if len(ids) >= MAX_DIGEST_REQUEST_ITEMS:
+            break
+    if not ids:
+        return
+
+    include_detail = bool(payload.get("include_detail"))
+    rows = await asyncio.to_thread(
+        _ambient_digest_rows, ids,
+        owner_key=str(paired_device_id or ""), node_id=str(node_id or ""),
+    )
+
+    for i, tid in enumerate(ids):
+        frame = _ambient_digest_frame(
+            tid, rows.get(tid),
+            include_detail=include_detail,
+            remaining=len(ids) - i - 1,
+        )
+        try:
+            await ws.send_json({"type": "ambient_digest", "payload": frame})
+        except Exception:
+            # The socket went away mid-drain. The rest is not lost: the
+            # phone asks again on its next connect for anything it still
+            # has no digest for.
+            logger.debug("ambient: digest send aborted at %s", tid, exc_info=True)
+            return
+
+    logger.info(
+        "ambient: answered digest request for %d id(s) from node %s (detail=%s)",
+        len(ids), node_id, include_detail,
+    )
+
+
+async def _ambient_push_digest(transcript_id: str) -> None:
+    """Send the finished digest to the node that recorded it, if present.
+
+    Never raises: this runs at the tail of a detached background task
+    whose whole contract is that a failure leaves ``processed_at`` set
+    and costs nothing. A phone that misses this pulls the same frame.
+    """
+    import sqlite3 as _sqlite3
+    try:
+        def _read():
+            with _sqlite3.connect(str(_ambient_db_path())) as conn:
+                _ambient_ensure_schema(conn)
+                conn.row_factory = _sqlite3.Row
+                row = conn.execute(
+                    "SELECT transcript_id, node_id, processed_at, episode_id, "
+                    "digest_json FROM ambient_transcripts WHERE transcript_id = ?",
+                    (transcript_id,),
+                ).fetchone()
+                return dict(row) if row else None
+
+        row = await asyncio.to_thread(_read)
+        if not row:
+            return
+        node_id = str(row.get("node_id") or "")
+        if not node_id or node_id not in getattr(state, "daemons", {}):
+            return
+
+        # The push is a single digest and the phone is here, so it gets
+        # the detail: the size argument for withholding it is about a
+        # reconnect burst, which this is not.
+        payload = _ambient_digest_frame(
+            transcript_id, row, include_detail=True, remaining=0,
+        )
+        await state._send_dict_to_node(node_id, {
+            "type": "ambient_digest", "payload": payload,
+        })
+        logger.info("ambient: pushed digest for %s to node %s", transcript_id, node_id)
+    except Exception:
+        logger.debug("ambient: digest push failed for %s", transcript_id, exc_info=True)
+
+
 async def _process_ambient_transcript(
     transcript_id: str, session_id: str, payload: dict,
 ) -> None:
@@ -4562,6 +4845,9 @@ async def _process_ambient_transcript(
     the websocket open, and a failure leaves processed_at NULL for the
     boot sweep rather than losing the conversation.
     """
+    import json as _json
+    from dataclasses import asdict
+
     from agents.ambient_transcript import (
         build_episode_fields,
         summarize_transcript,
@@ -4611,12 +4897,33 @@ async def _process_ambient_transcript(
                 except Exception:
                     logger.debug("ambient: add_commitment failed", exc_info=True)
 
-        await asyncio.to_thread(_ambient_mark_processed, transcript_id, episode_id)
+        # The structured outcome, kept whole. Storing the episode fields
+        # instead would be lossy in exactly the way that matters: the
+        # episode is shaped for FTS and for the model's context block,
+        # so summary is headline[:500] with the date and participants
+        # forced into prose.
+        digest_json = _json.dumps(asdict(outcome), default=str)
+        await asyncio.to_thread(
+            _ambient_mark_processed, transcript_id, episode_id, digest_json,
+        )
         logger.info(
             "ambient transcript %s processed: episode=%s commitments=%d degraded=%s",
             transcript_id, episode_id or "none",
             len(outcome.commitments), outcome.degraded or "no",
         )
+
+        # Push leg. Summarization finishes seconds to minutes after the
+        # ack, so the phone is usually gone by now and this is
+        # best-effort by nature; ambient_digest_request is what makes
+        # the digest reliably reachable. Pushing anyway matters for the
+        # case the pull leg handles worst: a recording made while the
+        # brain is up and the phone stays connected would otherwise show
+        # no summary until the next reconnect.
+        #
+        # node_id is not a parameter of this function, so it comes off
+        # the row. On the boot sweep the original socket is long gone
+        # and this simply finds nobody, which is the correct outcome.
+        await _ambient_push_digest(transcript_id)
     except Exception:
         # processed_at stays NULL, so the boot sweep retries it.
         logger.exception("ambient: processing failed for %s", transcript_id)

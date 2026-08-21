@@ -53,6 +53,16 @@ MAX_TOKEN_LEN = 4096
 #: Capability / sensor / tag style lists. Generous by design: the point is to
 #: refuse a million-element list, not to guess how many sensors a node has.
 MAX_LIST_ITEMS = 512
+#: How many transcript ids one ``ambient_digest_request`` may carry.
+#:
+#: Deliberately NOT MAX_LIST_ITEMS. The reply is one ``ambient_digest``
+#: frame per id, and each can carry a ``detail`` of up to 20,000 chars
+#: (``agents/ambient_transcript.py`` caps it there), so 512 ids is a ~10MB
+#: burst across 512 frames at the exact moment a phone reconnects, which
+#: is when it is most likely to be on cellular. 64 keeps the worst case
+#: near 1.3MB and a phone with more than that simply asks again; the
+#: reply carries ``remaining`` so it knows to.
+MAX_DIGEST_REQUEST_ITEMS = 64
 #: Filesystem path fields. Linux PATH_MAX is 4096.
 MAX_PATH_LEN = 4096
 #: Pixel dimension ceiling, mirroring the node SDK's ``width`` / ``height``.
@@ -471,6 +481,90 @@ class AmbientTranscriptAckPayload(BaseModel):
     duplicate: bool = False
     accepted: bool = True
     detail: str = Field(default="", max_length=MAX_NAME_LEN)
+
+
+class AmbientDigestRequestPayload(BaseModel):
+    """Phone asking for the summaries of transcripts it has already sent.
+
+    Summarization is a background task that finishes seconds to minutes
+    after the ack, by which time the phone is usually gone, so it cannot
+    learn the outcome by staying connected. This is the pull leg: on
+    connect the phone names the ids it has synced but holds no digest
+    for. The push leg (an unsolicited ``ambient_digest`` at the end of
+    processing) covers the case where it is still here.
+
+    ``include_detail`` is off by default and that default is the whole
+    point. The bulk case is a reconnect after days away, where the phone
+    wants enough to render a list; ``detail`` is up to 20,000 characters
+    of the conversation and is what makes that burst expensive. It asks
+    for detail when a card is opened, one id at a time.
+    """
+
+    transcript_ids: list[str] = Field(
+        default_factory=list, max_length=MAX_DIGEST_REQUEST_ITEMS,
+    )
+    include_detail: bool = False
+
+
+class AmbientDigestPayload(BaseModel):
+    """What the brain made of one recorded conversation.
+
+    Sent two ways, deliberately as ONE type so the phone has a single
+    inbound handler: unsolicited when processing finishes with the node
+    still connected, and as the reply to ``ambient_digest_request``.
+
+    This is the stored ``TranscriptOutcome``, not the episode fields.
+    The episode is shaped for FTS and for the model's context block,
+    which forces names and dates into prose and caps ``summary`` at 500;
+    on a phone card that renders as a duplicated date and a truncated
+    sentence.
+
+    ``injection_flags`` is deliberately NOT here. It is stored with the
+    digest because it is a useful signal in the brain's own logs, but
+    shipping it to a UI invites rendering a scare banner over something
+    a colleague happened to say in a meeting.
+
+    The three statuses each carry information the phone acts on:
+
+    ``ready``    summarized, fields populated.
+    ``pending``  the brain HAS the transcript but has not finished with
+                 it. Either the background task is still running or it
+                 failed and the boot sweep will retry from our copy. The
+                 phone shows the transcript with no summary and asks
+                 again on the next connect.
+    ``unknown``  no row the requester owns. This closes a real hole: the
+                 phone drops its copy on ``accepted: true``, so if the
+                 brain's database were restored from an older backup
+                 both sides would silently believe the conversation was
+                 safe. ``unknown`` is how the phone finds out, and its
+                 response is to resend the transcript.
+
+    THE INVARIANT ``unknown`` DEPENDS ON: nothing deletes from
+    ``ambient_transcripts``. It is verified today and there is a test
+    pinning it. If retention is ever added, ``unknown`` starts also
+    meaning "expired", and a phone that treats it as "lost" will resend
+    every aged-out recording forever. Add a distinct status then; do not
+    widen this one.
+    """
+
+    transcript_id: str = Field(..., max_length=MAX_ID_LEN)
+    status: Literal["ready", "pending", "unknown"] = "ready"
+    summary: str = ""
+    detail: str = ""
+    people: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    topics: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    commitments: list[dict] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    degraded: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    episode_id: str = Field(default="", max_length=MAX_ID_LEN)
+    processed_at: Optional[float] = Field(default=None, ge=0.0)
+    #: How many more digests answer the request this one belongs to.
+    #:
+    #: A phone reconnecting after a week has something to wait for, and
+    #: without this it cannot tell "your last digest" from "the first of
+    #: forty" until the frames stop arriving. It lets the phone say it is
+    #: fetching and show progress instead of appearing to hang. Zero on
+    #: an unsolicited push, which is always a single digest.
+    remaining: int = Field(default=0, ge=0)
 
 
 class AmbientTranscriptPayload(BaseModel):
@@ -1318,10 +1412,19 @@ MESSAGE_TYPES = {
     # the phone, queued there while the brain is off. NOT "transcript":
     # that key is the brain-to-client TranscriptPayload below.
     "ambient_transcript": AmbientTranscriptPayload,
+    # The pull leg of the digest return path. The phone names the
+    # transcripts it has synced but holds no summary for; the brain
+    # answers one ambient_digest per id. See AmbientDigestRequestPayload.
+    "ambient_digest_request": AmbientDigestRequestPayload,
 
     # Brain → Client
     "transcript": TranscriptPayload,
     "ambient_transcript_ack": AmbientTranscriptAckPayload,
+    # Brain → Client, both unsolicited on completion and as the reply to
+    # ambient_digest_request. One type for both so the phone has one
+    # inbound handler. First frame pair in this feature where one goes
+    # each way; HUP_SPEC 5.9 notes the direction of each.
+    "ambient_digest": AmbientDigestPayload,
     "sdui": SDUIPayload,
     "sdui_patch": SDUIPatchPayload,
     "tts_chunk": TTSChunkPayload,
