@@ -86,16 +86,34 @@ class SkillExecutor:
         self._sandbox_port = port
 
     def load_vault_from_env(self):
-        """Load API keys from environment variables."""
+        """Load API keys from environment variables.
+
+        The skill id is lower-cased, because ``_get_key`` resolves it
+        with an exact-case dict lookup and every skill id in the tree is
+        lower-case. Environment variables are conventionally upper-case,
+        and shells, systemd units and CI runners routinely upper-case
+        them, so ``FERAL_KEY_WEB_SEARCH`` was landing in the vault under
+        ``WEB_SEARCH`` where nothing ever looked. The operator had set
+        the key and the skill still reported that it had none.
+
+        ``config/loader.py`` already lower-cases the same pattern, so
+        the two halves of the system disagreed about what one variable
+        meant.
+        """
         for key, value in os.environ.items():
             if key.startswith("FERAL_KEY_"):
-                skill_id = key[len("FERAL_KEY_"):]
+                skill_id = key[len("FERAL_KEY_"):].lower()
+                if not skill_id:
+                    continue
                 self._vault[skill_id] = value
                 logger.info(f"Vault: loaded key for skill '{skill_id}'")
 
     def set_key(self, skill_id: str, key: str):
         """Manually set an API key for a skill (process memory only)."""
-        self._vault[skill_id] = key
+        # Same normalisation as load_vault_from_env, so a caller that
+        # passes a differently-cased id cannot write an entry that
+        # _get_key will never find.
+        self._vault[(skill_id or "").strip().lower()] = key
 
     def store_key(self, skill_id: str, key: str) -> bool:
         """Persist a skill API key and make it usable immediately.
@@ -283,7 +301,9 @@ class SkillExecutor:
             else:
                 if key:
                     return key
-        return self._vault.get(skill_id)
+        # The in-process cache is keyed by lower-cased skill id (see
+        # load_vault_from_env), so read it the same way.
+        return self._vault.get(skill_id.lower())
 
     def _gate(self, tool_name: str, args: dict) -> Optional[dict]:
         """Plan mode and approval, enforced where they cannot be skipped.
