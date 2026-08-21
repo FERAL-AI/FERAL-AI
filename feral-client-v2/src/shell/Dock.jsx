@@ -1,106 +1,61 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import {
-  MessageSquare, ListChecks, Cpu, LayoutDashboard, SquareStack,
-  Settings as SettingsIcon, LayoutGrid, AppWindow, Shield,
-} from 'lucide-react';
-import HubLauncher from '../components/HubLauncher';
+import { Command } from 'lucide-react';
+import { DOCK_ITEMS, isPaletteOnlyPath } from './navigation';
+import { useCommandPalette } from './PaletteContext';
 
 /**
- * Bottom dock: seven primary items + a Hub button that opens a popup with
- * the fifteen secondary destinations. One clean row, always.
+ * Bottom dock — the eight pinned destinations plus the palette button.
+ * One clean row, always.
+ *
+ * The eight tiles and the membership test for the palette button both
+ * come out of `shell/navigation.js`. They used to be two hand-written
+ * lists in two files: `PRIMARY_ITEMS` here and a `HUB_ROUTES` Set that
+ * restated, by hand, which routes lived behind the popup. Adding a
+ * destination to the popup and forgetting the Set left the whole Dock
+ * unlit on arrival, which is a user staring at a navigation bar that
+ * has stopped telling them where they are. `isPaletteOnlyPath` derives
+ * that membership from the same list the palette renders, so the two
+ * cannot drift apart.
  */
-const PRIMARY_ITEMS = [
-  { to: '/', label: 'Home', Icon: LayoutDashboard },
-  { to: '/chat', label: 'Chat', Icon: MessageSquare },
-  { to: '/flows', label: 'Flows', Icon: ListChecks },
-  { to: '/devices', label: 'Devices', Icon: Cpu },
-  { to: '/apps', label: 'Apps', Icon: AppWindow },
-  { to: '/canvas', label: 'Canvas', Icon: SquareStack },
-  // /oversight holds the supervisor audit trail and the kill switch.
-  // It used to be reachable from exactly one place: a button in the
-  // Glass Brain page header, itself a Hub entry. A safety control the
-  // operator has to remember a path to is a safety control they will
-  // not find while something is going wrong, so it is primary now.
-  { to: '/oversight', label: 'Oversight', Icon: Shield },
-];
-
-// Routes that live behind the Hub popup. Membership drives the Hub
-// button's active highlight, so anything the Hub can navigate to
-// belongs here or the Dock goes blank on arrival. `/oversight` is
-// deliberately absent: it has its own primary NavLink above, which
-// highlights itself. `/memory/context` needs its own entry because
-// the check is exact-pathname, not prefix.
-const HUB_ROUTES = new Set([
-  '/approvals', '/checkpoints', '/grants',
-  '/forge', '/skills', '/memory', '/memory/context', '/wiki', '/agents',
-  '/identity', '/health', '/intents', '/timeline', '/glass-brain',
-  '/marketplace', '/webhooks', '/geofences',
-]);
-
 export default function Dock() {
   const location = useLocation();
-  const [hubOpen, setHubOpen] = useState(false);
+  const { open, togglePalette } = useCommandPalette();
 
-  useEffect(() => {
-    const onKey = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        setHubOpen((prev) => !prev);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-
-  const hubActive = HUB_ROUTES.has(location.pathname);
+  const paletteActive = isPaletteOnlyPath(location.pathname);
 
   return (
-    <>
-      <nav className="v2-dock" role="navigation" aria-label="Primary">
-        <ul className="v2-dock-list">
-          {PRIMARY_ITEMS.map(({ to, label, Icon }) => (
-            <li key={to} className="v2-dock-item">
-              <NavLink
-                to={to}
-                end={to === '/'}
-                className={({ isActive }) =>
-                  `v2-dock-btn${isActive ? ' is-active' : ''}`
-                }
-                title={label}
-              >
-                <Icon size={20} aria-hidden="true" />
-                <span className="v2-dock-label">{label}</span>
-              </NavLink>
-            </li>
-          ))}
-          <li className="v2-dock-item v2-dock-item--divider">
-            <button
-              type="button"
-              className={`v2-dock-btn${hubActive || hubOpen ? ' is-active' : ''}`}
-              onClick={() => setHubOpen((prev) => !prev)}
-              aria-pressed={hubOpen}
-              title="Hub (⌘K)"
-            >
-              <LayoutGrid size={20} aria-hidden="true" />
-              <span className="v2-dock-label">Hub</span>
-            </button>
-          </li>
-          <li className="v2-dock-item">
+    <nav className="v2-dock" role="navigation" aria-label="Primary">
+      <ul className="v2-dock-list">
+        {DOCK_ITEMS.map(({ to, label, Icon }) => (
+          <li key={to} className="v2-dock-item">
             <NavLink
-              to="/settings"
+              to={to}
+              end={to === '/'}
               className={({ isActive }) =>
                 `v2-dock-btn${isActive ? ' is-active' : ''}`
               }
-              title="Settings"
+              title={label}
             >
-              <SettingsIcon size={20} aria-hidden="true" />
-              <span className="v2-dock-label">Settings</span>
+              <Icon size={20} aria-hidden="true" />
+              <span className="v2-dock-label">{label}</span>
             </NavLink>
           </li>
-        </ul>
-      </nav>
-      <HubLauncher open={hubOpen} onClose={() => setHubOpen(false)} />
-    </>
+        ))}
+        <li className="v2-dock-item v2-dock-item--divider">
+          <button
+            type="button"
+            className={`v2-dock-btn${paletteActive || open ? ' is-active' : ''}`}
+            onClick={togglePalette}
+            aria-pressed={open}
+            aria-haspopup="dialog"
+            title="Command palette (⌘K)"
+          >
+            <Command size={20} aria-hidden="true" />
+            <span className="v2-dock-label">Command</span>
+          </button>
+        </li>
+      </ul>
+    </nav>
   );
 }

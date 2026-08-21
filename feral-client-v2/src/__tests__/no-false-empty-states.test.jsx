@@ -37,7 +37,7 @@ import Health from '../pages/Health';
 import Devices from '../pages/Devices';
 import Skills from '../pages/Skills';
 import GlassBrain from '../pages/GlassBrain';
-import HubLauncher from '../components/HubLauncher';
+import CommandPalette from '../shell/CommandPalette';
 import ConsciousnessMindMap from '../components/ConsciousnessMindMap';
 
 // ── Failure fixtures ────────────────────────────────────────────
@@ -236,24 +236,24 @@ describe('Skills: failed fetch', () => {
   });
 });
 
-// ── HubLauncher ─────────────────────────────────────────────────
+// ── CommandPalette ──────────────────────────────────────────────
 // The comment in the file records that this exact CTA lying was a
 // previous audit finding. The failure path reintroduced it.
 
-describe('HubLauncher: failed fetch', () => {
+describe('CommandPalette: failed fetch', () => {
   it('shows neither pair CTA when the device counts could not be read', async () => {
-    const { container } = renderFailing(<HubLauncher open onClose={() => {}} />);
+    const { container } = renderFailing(<CommandPalette open onClose={() => {}} />);
     // Let the failing probe settle before asserting.
     await waitFor(() => {
-      expect(container.querySelector('.v2-hub-grid')).not.toBeNull();
+      expect(container.querySelector('.v2-cmdk-list')).not.toBeNull();
     });
     await Promise.resolve();
     expectNoAffirmativeNegative(container);
-    expect(container.querySelector('.v2-hub-cta')).toBeNull();
+    expect(container.querySelector('.v2-cmdk-cta')).toBeNull();
   });
 
   it('still shows the pair CTA when the brain really reports zero paired', async () => {
-    const { container } = renderEmptyOk(<HubLauncher open onClose={() => {}} />, {
+    const { container } = renderEmptyOk(<CommandPalette open onClose={() => {}} />, {
       body: { paired_count: 0, online_count: 0, device_count: 0 },
     });
     await waitFor(() => {

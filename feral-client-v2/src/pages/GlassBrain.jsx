@@ -101,7 +101,7 @@ export default function GlassBrain() {
       // is `len(state.daemons)`, currently-online nodes only, so
       // this tile read "Devices 0" while Home, two clicks away, read
       // "0/3" off the same payload. One derivation now, shared with
-      // Home and HubLauncher; see `deviceCounts` in
+      // Home and CommandPalette; see `deviceCounts` in
       // components/DeviceTopology.jsx.
       {
         icon: Radio,

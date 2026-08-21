@@ -116,11 +116,11 @@ function finiteNumber(v) {
 
 /**
  * The single device-count derivation for every surface that reads
- * `/api/dashboard`. Home, GlassBrain and HubLauncher each grew their
+ * `/api/dashboard`. Home, GlassBrain and CommandPalette each grew their
  * own fallback chain and disagreed: Home read
  * `online_count`/`paired_count`, GlassBrain read the legacy
  * `device_count` under a bare "Devices" label (so it showed `0` while
- * Home showed `0/3`), and HubLauncher had a third chain again.
+ * Home showed `0/3`), and CommandPalette had a third chain again.
  *
  * What the brain actually returns (`feral-core/api/routes/dashboard.py`
  * `_get_dashboard_data`, the `return {...}` at the end):

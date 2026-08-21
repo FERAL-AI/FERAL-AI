@@ -141,6 +141,7 @@ export default function Chat() {
   // to retry. Cleared on the next successful send.
   const [sendError, setSendError] = useState('');
   const fileInputRef = useRef(null);
+  const composerInputRef = useRef(null);
 
   const bottomRef = useRef(null);
   const logRef = useRef(null);
@@ -154,6 +155,22 @@ export default function Chat() {
   // socket chatter) or a turn that silently died and must surface.
   const turnActiveRef = useRef(false);
   const chatReady = thread?.ready ?? true;
+
+  // The command palette's Ask row parks the typed query on the shell
+  // thread and navigates here. Pick it up, put it in the composer and
+  // clear it, so the query survives the navigation but does not come
+  // back the next time the user visits /chat. Deliberately not sent
+  // automatically: the palette is where you type fast, and a palette
+  // that fires a message at the brain on Enter is a palette that sends
+  // half-finished questions.
+  const askDraft = thread?.askDraft || '';
+  const clearAskDraft = thread?.clearAskDraft;
+  useEffect(() => {
+    if (!askDraft) return;
+    setInput(askDraft);
+    clearAskDraft?.();
+    composerInputRef.current?.focus();
+  }, [askDraft, clearAskDraft]);
 
   // On mount, pull paused thoughts from the consciousness store so the
   // user can re-thread any half-formed sentence the agent was in the
@@ -1212,6 +1229,7 @@ export default function Chat() {
           aria-hidden="true"
         />
         <input
+          ref={composerInputRef}
           className="v2-chat-input"
           type="text"
           value={input}

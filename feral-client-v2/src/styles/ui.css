@@ -889,3 +889,281 @@
   box-shadow: var(--v2-shadow-focus);
 }
 .v2-code-editor[readonly] { color: var(--v2-text-secondary); background: var(--v2-surface-0); opacity: 0.8; }
+
+/* ── Menubar search (command palette trigger) ────────────────── */
+/*
+ * The menubar carried a comment promising a command palette "later"
+ * and, in the meantime, navigated nothing at all: a brand mark and two
+ * toggles. This is the palette's discoverable trigger. It looks like a
+ * search field and behaves like a button, because the real field lives
+ * inside the dialog and two fields for one query is a query typed into
+ * the wrong one.
+ *
+ * `min-width: 0` on the flex child plus `text-overflow: ellipsis` on
+ * the label is what keeps the menubar from being the thing that widens
+ * the document: a fixed-width trigger between two fixed-width groups
+ * pushes the row past 100vw on a narrow viewport, and the whole page
+ * then scrolls sideways.
+ */
+.v2-menubar-search {
+  flex: 0 1 340px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 8px 0 10px;
+  margin: 0 12px;
+  background: var(--v2-surface-0);
+  border: 1px solid var(--v2-hairline);
+  border-radius: var(--v2-radius-pill);
+  color: var(--v2-text-tertiary);
+  font: inherit;
+  font-size: var(--v2-size-xs);
+  cursor: pointer;
+  transition:
+    background var(--v2-dur-fast) var(--v2-ease-out),
+    color var(--v2-dur-fast) var(--v2-ease-out),
+    border-color var(--v2-dur-fast) var(--v2-ease-out);
+}
+.v2-menubar-search:hover {
+  color: var(--v2-text-secondary);
+  background: var(--v2-surface-1);
+  border-color: var(--v2-hairline-strong);
+}
+.v2-menubar-search:focus-visible {
+  outline: none;
+  box-shadow: var(--v2-shadow-focus);
+  border-color: var(--v2-accent);
+}
+.v2-menubar-search-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v2-menubar-search-kbd {
+  flex: none;
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  line-height: 1;
+  padding: 2px 5px;
+  color: var(--v2-text-tertiary);
+  background: var(--v2-fill-subtle);
+  border: 1px solid var(--v2-hairline);
+  border-radius: var(--v2-radius-xs);
+}
+@media (max-width: 860px) {
+  /* Below this the two toggles and the brand already fill the bar. The
+     trigger collapses to its icon rather than being dropped: losing it
+     would leave Cmd-K as the only way in for a pointer user. */
+  .v2-menubar-search { flex: none; margin: 0 8px; padding: 0 8px; }
+  .v2-menubar-search-text,
+  .v2-menubar-search-kbd { display: none; }
+}
+
+/* ── Command palette ─────────────────────────────────────────── */
+/*
+ * Top-anchored, not bottom-anchored. Its predecessor sat on top of the
+ * dock with `align-items: flex-end`, which put a 680px dialog directly
+ * over the chat composer; the palette is opened most often to leave the
+ * page you are on, and covering the thing you were typing into to do it
+ * is the wrong trade. Anchoring at 10vh also means the dialog and the
+ * dock never share a pixel, so the dock stays visible as context.
+ *
+ * z-index sits at --z-toast: this is a modal, and it must come out over
+ * the dock (--z-dock) and over a proactive toast that happens to be on
+ * screen when the operator hits Cmd-K.
+ */
+.v2-cmdk-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-toast);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: max(10vh, calc(var(--v2-menubar-height) + 16px)) 16px calc(var(--v2-dock-height) + 20px);
+  background: var(--v2-scrim);
+  -webkit-backdrop-filter: var(--v2-blur-sm);
+  backdrop-filter: var(--v2-blur-sm);
+  animation: v2ModalBackdropIn var(--v2-dur-base) var(--v2-ease-out);
+}
+.v2-cmdk {
+  width: 100%;
+  max-width: 640px;
+  /* Bounded by what is left between the two paddings above, so a long
+     result list scrolls inside .v2-cmdk-list and the dialog itself
+     never grows past the dock. */
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--v2-surface-elev);
+  background-image: var(--v2-glass-tint);
+  -webkit-backdrop-filter: var(--v2-blur-lg);
+  backdrop-filter: var(--v2-blur-lg);
+  border: 1px solid var(--v2-hairline-strong);
+  border-radius: var(--v2-radius-lg);
+  box-shadow: var(--v2-shadow-glass);
+  animation: v2ModalIn var(--v2-dur-base) var(--v2-ease-out);
+}
+/* The dialog carries tabIndex={-1} so the focus trap can park focus on
+   it. It is a container, not a control, so it gets the soft ring rather
+   than the full accent outline a control earns. `outline: none` with
+   nothing in its place is what the a11y stylesheet guard fails on, and
+   it is exactly how the predecessor's search field ended up being the
+   one unmarked focus position in the app. */
+.v2-cmdk:focus-visible {
+  outline: none;
+  box-shadow: var(--v2-shadow-glass), var(--v2-shadow-focus);
+}
+
+.v2-cmdk-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--v2-hairline);
+  color: var(--v2-text-tertiary);
+}
+.v2-cmdk-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  color: var(--v2-text-primary);
+  font: inherit;
+  font-size: var(--v2-size-md);
+}
+.v2-cmdk-search::placeholder { color: var(--v2-text-tertiary); }
+/* The palette focuses this field on open, so it is a keyboard user's
+   first focus position in the dialog. It must be marked. */
+.v2-cmdk-search:focus-visible {
+  outline: 2px solid var(--v2-accent);
+  outline-offset: -2px;
+  border-radius: var(--v2-radius-xs);
+}
+/* Chrome draws its own clear affordance on type=search; it collides
+   with the explicit close button two elements to the right. */
+.v2-cmdk-search::-webkit-search-cancel-button { appearance: none; }
+
+.v2-cmdk-cta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  text-align: left;
+  background: var(--v2-accent-soft);
+  border: none;
+  border-bottom: 1px solid var(--v2-hairline);
+  color: var(--v2-accent-text);
+  font: inherit;
+  cursor: pointer;
+}
+.v2-cmdk-cta:hover { background: var(--v2-accent); color: var(--v2-text-inverse); }
+.v2-cmdk-cta:focus-visible { outline: none; box-shadow: var(--v2-shadow-focus); }
+.v2-cmdk-cta-title { font-size: var(--v2-size-sm); font-weight: 600; }
+.v2-cmdk-cta-hint { font-size: var(--v2-size-xs); color: var(--v2-text-secondary); margin-top: 2px; }
+.v2-cmdk-cta:hover .v2-cmdk-cta-hint { color: var(--v2-text-inverse); opacity: 0.85; }
+
+.v2-cmdk-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+}
+.v2-cmdk-group + .v2-cmdk-group { margin-top: 6px; }
+.v2-cmdk-group-label {
+  padding: 6px 10px 4px;
+  font-size: var(--v2-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+}
+.v2-cmdk-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--v2-radius-sm);
+  color: var(--v2-text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.v2-cmdk-row.is-cursor {
+  background: var(--v2-accent-soft);
+  color: var(--v2-accent-text);
+}
+.v2-cmdk-row:focus-visible { outline: none; box-shadow: var(--v2-shadow-focus); }
+.v2-cmdk-row-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--v2-text-secondary);
+}
+.v2-cmdk-row.is-cursor .v2-cmdk-row-icon { color: var(--v2-accent-text); }
+.v2-cmdk-row-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.v2-cmdk-row-label {
+  font-size: var(--v2-size-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v2-cmdk-row-desc {
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v2-cmdk-row.is-cursor .v2-cmdk-row-desc { color: var(--v2-text-secondary); }
+.v2-cmdk-row-enter { flex: none; color: var(--v2-accent-text); opacity: 0.7; }
+.v2-cmdk-empty {
+  padding: 18px 12px;
+  text-align: center;
+  font-size: var(--v2-size-sm);
+  color: var(--v2-text-tertiary);
+}
+
+.v2-cmdk-foot {
+  flex: none;
+  display: flex;
+  gap: 14px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--v2-hairline);
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+}
+.v2-cmdk-foot kbd {
+  font-family: var(--v2-font-mono);
+  padding: 1px 4px;
+  margin-right: 3px;
+  border: 1px solid var(--v2-hairline);
+  border-radius: var(--v2-radius-xs);
+  background: var(--v2-fill-subtle);
+}
+@media (max-width: 640px) {
+  .v2-cmdk-backdrop { padding-top: calc(var(--v2-menubar-height) + 12px); }
+  .v2-cmdk-foot { display: none; }
+}

@@ -1,7 +1,7 @@
 /**
  * The four items left open by the accessibility pass.
  *
- * Two are behavioural (HubLauncher had no focus trap, Pair rendered a dot
+ * Two are behavioural (the palette's predecessor had no focus trap, Pair rendered a dot
  * animating a keyframe that does not exist), one is a measurement
  * (--v2-accent as text was under AA), and the fourth is recorded as a known
  * limit rather than a fix.
@@ -13,8 +13,12 @@ import { MemoryRouter } from 'react-router-dom';
 import fs from 'node:fs';
 import path from 'node:path';
 
+<<<<<<< HEAD
 import HubLauncher from '../../components/HubLauncher';
 import { colorIn, contrast, resolveIn, toHex } from '../_helpers/tokens';
+=======
+import CommandPalette from '../../shell/CommandPalette';
+>>>>>>> 96add3a49 (shell: replace the Hub popup with a command palette, off one nav index)
 
 /**
  * Token values come from the cascade resolver rather than from counting
@@ -121,17 +125,17 @@ describe('no stylesheet animates a keyframe that does not exist', () => {
   });
 });
 
-describe('HubLauncher contains focus, as aria-modal promises', () => {
-  const renderHub = () => render(
+describe('CommandPalette contains focus, as aria-modal promises', () => {
+  const renderPalette = () => render(
     <MemoryRouter>
       <button type="button" data-testid="outside">outside</button>
-      <HubLauncher open onClose={() => {}} />
+      <CommandPalette open onClose={() => {}} />
     </MemoryRouter>,
   );
 
   it('keeps Tab inside the dialog', () => {
-    renderHub();
-    const dialog = screen.getByRole('dialog', { name: /hub launcher/i });
+    renderPalette();
+    const dialog = screen.getByRole('dialog', { name: /command palette/i });
     const focusables = dialog.querySelectorAll(
       'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
     );
@@ -147,8 +151,8 @@ describe('HubLauncher contains focus, as aria-modal promises', () => {
   });
 
   it('pulls focus back when it is outside the dialog', () => {
-    renderHub();
-    const dialog = screen.getByRole('dialog', { name: /hub launcher/i });
+    renderPalette();
+    const dialog = screen.getByRole('dialog', { name: /command palette/i });
 
     screen.getByTestId('outside').focus();
     fireEvent.keyDown(window, { key: 'Tab' });
@@ -157,8 +161,8 @@ describe('HubLauncher contains focus, as aria-modal promises', () => {
   });
 
   it('wraps backwards from the first item to the last', () => {
-    renderHub();
-    const dialog = screen.getByRole('dialog', { name: /hub launcher/i });
+    renderPalette();
+    const dialog = screen.getByRole('dialog', { name: /command palette/i });
     const focusables = dialog.querySelectorAll(
       'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
     );
