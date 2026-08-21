@@ -499,6 +499,13 @@ export default function Chat() {
           {
             key,
             label,
+            // Carried so the card can pick a skill-family glyph.
+            // `ToolResultPayload` has no skill_id/endpoint_id at all
+            // (models/protocol.py), only `tool`, so the result branch
+            // below relies on `tool` and the `skill__endpoint` split.
+            tool: p.tool || p.name || '',
+            skill_id: p.skill_id || '',
+            endpoint_id: p.endpoint_id || '',
             args_preview: argsPreview,
             success: null,
             error: '',
@@ -519,6 +526,9 @@ export default function Chat() {
         const result = {
           key,
           label,
+          tool: p.tool || p.name || '',
+          skill_id: p.skill_id || '',
+          endpoint_id: p.endpoint_id || '',
           args_preview: '',
           result_preview: p.result_preview
             || (p.result != null ? p.result : null)

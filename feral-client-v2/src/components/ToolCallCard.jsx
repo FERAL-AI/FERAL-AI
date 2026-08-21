@@ -30,13 +30,36 @@
  * live elapsed counter so a hung tool is visible rather than silent.
  */
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
-import { ChevronRight, CheckCircle2, XCircle, Loader2, ShieldAlert } from 'lucide-react';
+import {
+  Bot,
+  Braces,
+  CalendarClock,
+  ChevronRight,
+  Cpu,
+  Eye,
+  FileText,
+  Globe,
+  HeartPulse,
+  Image as ImageIcon,
+  ListChecks,
+  Loader2,
+  MessageSquare,
+  MousePointerClick,
+  Search,
+  Settings2,
+  ShieldAlert,
+  Wrench,
+} from 'lucide-react';
 import Glass from '../ui/Glass';
 import ToolResultView from './ToolResultView';
+import { TOOL_FAMILIES, toolFamily } from '../lib/toolDisplay';
 import {
+  REFUSAL_CODES,
   formatArgs,
   formatDuration,
   guessLanguageFromPath,
+  isRefusal,
+  shouldOpenByDefault,
   summariseArgs,
   summariseGroup,
   tryParseJson,
@@ -45,26 +68,40 @@ import {
 const TICK_MS = 500;
 
 /**
- * Tool results the brain declined rather than attempted.
+ * Glyph per skill family, not per outcome.
  *
- * A refusal is not a failure. The tool never ran, nothing was written,
- * and there is nothing to retry until the user changes something. Both
- * used to render as a red ✕ "failed", which reads as a malfunction and
- * hides the one thing the user needs to know: FERAL held a boundary on
- * purpose. Keyed off `error_code` rather than matching the prose,
- * because the prose is user-facing copy and will change.
- *
- * Populated by `_emit_tool_result` in agents/orchestrator.py.
+ * Every key here is a family id from `lib/toolDisplay.TOOL_FAMILIES`,
+ * and `__tests__/lib/toolDisplay.families.test.js` asserts the two
+ * agree, so a family added there without a glyph here is a failing
+ * test rather than a blank square.
  */
-export const REFUSAL_CODES = Object.freeze({
-  plan_mode_blocked: 'blocked by plan mode',
-  policy_denied: 'blocked by policy',
-  pending_approval: 'waiting for your approval',
+export const FAMILY_ICONS = Object.freeze({
+  search: Search,
+  browser: Globe,
+  code: Braces,
+  computer: MousePointerClick,
+  vision: Eye,
+  comms: MessageSquare,
+  schedule: CalendarClock,
+  tasks: ListChecks,
+  notes: FileText,
+  media: ImageIcon,
+  hardware: Cpu,
+  health: HeartPulse,
+  system: Settings2,
+  tool: Wrench,
 });
 
-export function isRefusal(trace) {
-  return Object.hasOwn(REFUSAL_CODES, String(trace?.error_code || ''));
-}
+/** Group headers are not one skill, so they get a neutral agent glyph. */
+const GROUP_ICON = Bot;
+
+/**
+ * Refusal vocabulary. Defined in `lib/toolResult.js` so the group
+ * summary can count refusals apart from failures without importing a
+ * React component; re-exported here because this module has been the
+ * public surface for it.
+ */
+export { REFUSAL_CODES, isRefusal };
 
 function statusOf(trace) {
   // Checked before `success`, since a refusal also carries success:false.
@@ -74,17 +111,40 @@ function statusOf(trace) {
   return 'running';
 }
 
-function StatusIcon({ status }) {
-  if (status === 'ok') {
-    return <CheckCircle2 size={13} aria-hidden="true" className="v2-tool-card__icon v2-tool-card__icon--ok" />;
+const STATUS_WORDS = Object.freeze({
+  ok: 'succeeded',
+  failed: 'failed',
+  refused: 'was refused',
+  running: 'is running',
+});
+
+/**
+ * The head glyph.
+ *
+ * Outcome no longer lives here: it is carried by the card's tone (one
+ * consistent treatment per outcome, see `.v2-tool-card--*` in
+ * pages.css) plus the status word. A refusal keeps its shield, because
+ * "FERAL declined this on purpose" is a claim about the SYSTEM rather
+ * than about the tool and there is no family glyph that can say it. A
+ * running call keeps its spinner, because motion is the only honest
+ * way to render "not finished yet".
+ */
+function ToolGlyph({ status, family }) {
+  if (status === 'running') {
+    return <Loader2 size={13} aria-hidden="true" className="v2-tool-card__icon v2-spin" />;
   }
   if (status === 'refused') {
     return <ShieldAlert size={13} aria-hidden="true" className="v2-tool-card__icon v2-tool-card__icon--refused" />;
   }
-  if (status === 'failed') {
-    return <XCircle size={13} aria-hidden="true" className="v2-tool-card__icon v2-tool-card__icon--error" />;
-  }
-  return <Loader2 size={13} aria-hidden="true" className="v2-tool-card__icon v2-spin" />;
+  const Icon = FAMILY_ICONS[family] || FAMILY_ICONS.tool;
+  return (
+    <Icon
+      size={13}
+      aria-hidden="true"
+      className="v2-tool-card__icon"
+      data-family={family}
+    />
+  );
 }
 
 /**
@@ -116,16 +176,35 @@ function languageHint(trace) {
   return guessLanguageFromPath(path);
 }
 
-export default function ToolCallCard({ trace, defaultOpen = false }) {
-  const [open, setOpen] = useState(!!defaultOpen);
+export default function ToolCallCard({ trace, defaultOpen, grouped = false }) {
   const bodyId = useId();
   const status = statusOf(trace);
   const running = status === 'running';
+  const refused = status === 'refused';
   const elapsed = useElapsed(trace?.started_at, running);
 
   const argsText = useMemo(() => formatArgs(trace?.args_preview), [trace?.args_preview]);
   const argsSummary = useMemo(() => summariseArgs(trace?.args_preview), [trace?.args_preview]);
   const language = useMemo(() => languageHint(trace), [trace]);
+  const family = useMemo(() => toolFamily(trace || {}), [trace]);
+
+  // Whether this card wants to be open, recomputed as the call settles.
+  const wantsOpen = useMemo(
+    () => (defaultOpen === undefined
+      ? shouldOpenByDefault(trace, { grouped, refused, language })
+      : !!defaultOpen),
+    [trace, grouped, refused, language, defaultOpen],
+  );
+
+  const [open, setOpen] = useState(wantsOpen);
+  // A card mounts while the call is still running, so `wantsOpen` is
+  // false on first paint and only becomes true when the result lands.
+  // Adopt it then, but never after the user has touched the control:
+  // a card the reader deliberately closed must stay closed.
+  const touched = useRef(false);
+  useEffect(() => {
+    if (!touched.current) setOpen(wantsOpen);
+  }, [wantsOpen]);
 
   if (!trace) return null;
 
@@ -134,9 +213,14 @@ export default function ToolCallCard({ trace, defaultOpen = false }) {
     ? formatDuration(elapsed)
     : formatDuration(trace.latency_ms);
   const error = trace.error || '';
-  const refused = status === 'refused';
   const refusalLabel = REFUSAL_CODES[String(trace.error_code || '')] || 'refused';
   const hasResult = trace.result_preview != null && trace.result_preview !== '';
+  const statusText = running ? 'running' : refused ? refusalLabel : status === 'failed' ? 'failed' : 'done';
+  // The glyph says which family; the tone says the outcome. Neither is
+  // readable by a screen reader, so the accessible name carries both.
+  const headLabel = `${label}${argsSummary ? ` ${argsSummary}` : ''}, `
+    + `${TOOL_FAMILIES[family] || 'Tool'}, ${STATUS_WORDS[status] || status}`
+    + `${duration ? ` in ${duration}` : ''}`;
 
   return (
     <Glass
@@ -146,24 +230,33 @@ export default function ToolCallCard({ trace, defaultOpen = false }) {
       className={`v2-tool-card v2-tool-card--${status}`}
       data-testid="tool-call-card"
       data-status={status}
+      data-family={family}
     >
       <button
         type="button"
         className="v2-tool-card__head"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => { touched.current = true; setOpen((v) => !v); }}
         aria-expanded={open}
         aria-controls={bodyId}
+        aria-label={headLabel}
       >
         <ChevronRight size={13} className={`v2-tool-card__chev${open ? ' is-open' : ''}`} aria-hidden="true" />
-        <StatusIcon status={status} />
+        <ToolGlyph status={status} family={family} />
         <span className="v2-tool-card__label">{label}</span>
-        {argsSummary && (
-          <span className="v2-tool-card__summary" title={argsSummary}>{argsSummary}</span>
-        )}
-        <span className="v2-tool-card__status-text">
-          {running ? 'running' : status === 'refused' ? refusalLabel : status === 'failed' ? 'failed' : ''}
+        {/* Rendered even when empty: it is the flex spacer that holds
+            the status word and the duration in their columns. Omitting
+            it collapsed a no-argument call to "Grab DONE 90ms" while
+            its neighbours right-aligned. */}
+        <span className="v2-tool-card__summary" title={argsSummary || undefined}>{argsSummary}</span>
+        <span className="v2-tool-card__status-text" data-testid="tool-card-status">
+          {statusText}
         </span>
-        {duration && <span className="v2-tool-card__lat">{duration}</span>}
+        {/* Duration lives on the head so a slow call is visible without
+            expanding anything. Absent (rather than "0ms") when the brain
+            reported no latency and the card never saw the call start. */}
+        {duration && (
+          <span className="v2-tool-card__lat" data-testid="tool-card-duration">{duration}</span>
+        )}
       </button>
 
       <div id={bodyId} className="v2-tool-card__body" hidden={!open}>
@@ -239,6 +332,8 @@ export function ToolCallList({ traces, label = 'Tool calls' }) {
   if (summary.running) parts.push(`${summary.running} running`);
   if (summary.ok) parts.push(`${summary.ok} succeeded`);
   if (summary.failed) parts.push(`${summary.failed} failed`);
+  // Never folded into "failed": nothing ran and nothing broke.
+  if (summary.refused) parts.push(`${summary.refused} refused`);
   const total = formatDuration(summary.totalMs);
 
   return (
@@ -255,16 +350,18 @@ export function ToolCallList({ traces, label = 'Tool calls' }) {
         aria-controls={groupId}
       >
         <ChevronRight size={13} className={`v2-tool-card__chev${open ? ' is-open' : ''}`} aria-hidden="true" />
-        <StatusIcon status={summary.status} />
+        {summary.status === 'running'
+          ? <Loader2 size={13} aria-hidden="true" className="v2-tool-card__icon v2-spin" />
+          : <GROUP_ICON size={13} aria-hidden="true" className="v2-tool-card__icon" />}
         <span className="v2-tool-group__label">
           {list.length} {label.toLowerCase()}
         </span>
         <span className="v2-tool-group__meta">{parts.join(' · ')}</span>
-        {total && <span className="v2-tool-card__lat">{total}</span>}
+        {total && <span className="v2-tool-card__lat" data-testid="tool-group-duration">{total}</span>}
       </button>
       <div id={groupId} className="v2-tool-card-stack" hidden={!open}>
         {open && list.map((t, i) => (
-          <ToolCallCard key={t.key || `${t.label || 'tool'}-${i}`} trace={t} />
+          <ToolCallCard key={t.key || `${t.label || 'tool'}-${i}`} trace={t} grouped />
         ))}
       </div>
     </div>
