@@ -5,6 +5,7 @@ import Pane from '../ui/Pane';
 import { apiJson } from '../lib/api';
 import { jobKindLabel } from './Home';
 import { elapsed } from '../shell/WorkRail';
+import { useMachineVitals } from '../hooks/useMachineVitals';
 
 /**
  * Console: the machine, not a transcript.
@@ -41,21 +42,25 @@ export function sourceRows(counts, degraded) {
 export default function Console() {
   const [jobs, setJobs] = useState({ items: [], counts_by_kind: {}, degraded: {} });
   const [approvals, setApprovals] = useState([]);
-  const [health, setHealth] = useState(null);
+  const vitals = useMachineVitals();
   const [error, setError] = useState('');
   const timer = useRef(null);
 
   const load = useCallback(async () => {
-    const [j, a, d] = await Promise.allSettled([
+    // /api/dashboard is no longer fetched here. Its only use was the
+    // `health` key for the brain figure, which is the health-readings
+    // summary and not liveness, and the shared vitals poller already
+    // requests that endpoint on the same 4s cadence. Two components
+    // polling the same URL for one field is the duplication the vitals
+    // hook exists to remove.
+    const [j, a] = await Promise.allSettled([
       apiJson('/api/jobs?limit=60'),
       apiJson('/api/approvals'),
-      apiJson('/api/dashboard'),
     ]);
     if (j.status === 'fulfilled') setJobs(j.value || {});
     if (a.status === 'fulfilled') setApprovals(a.value?.approvals || []);
-    if (d.status === 'fulfilled') setHealth(d.value?.health || null);
     setError(
-      [j, a, d].every((r) => r.status === 'rejected') ? 'could not reach the brain' : '',
+      [j, a].every((r) => r.status === 'rejected') ? 'could not reach the brain' : '',
     );
   }, []);
 
@@ -84,8 +89,21 @@ export default function Console() {
               <span className="v2-console-n">{approvals.length}</span>
               <span className="v2-console-lbl">need you</span>
             </Link>
-            <Link to="/health" className="v2-console-figure">
-              <span className="v2-console-n">{health?.status === 'ok' ? 'ok' : (health?.status || '?')}</span>
+            {/* This read `health` off /api/dashboard, which is
+                `latest_health`: the health-READINGS summary, and `{}` on
+                any brain with no sensor data. So `health.status` was
+                undefined and the figure rendered a bare "?" next to two
+                real numbers, which says nothing and looks broken.
+                Liveness is a different question and the shell already
+                answers it: `reachable` from the shared vitals poller,
+                the same signal the brand light uses, so the two cannot
+                disagree. */}
+            <Link
+              to="/health"
+              className="v2-console-figure"
+              data-tone={vitals.reachable ? 'plain' : 'warn'}
+            >
+              <span className="v2-console-n">{vitals.reachable ? 'ok' : 'down'}</span>
               <span className="v2-console-lbl">brain</span>
             </Link>
           </div>

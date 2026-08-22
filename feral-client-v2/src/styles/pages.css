@@ -3289,3 +3289,34 @@
 }
 .v2-cp-turn-session { opacity: 0.75; }
 .v2-cp-turn-writes { color: var(--v2-text-tertiary); }
+
+/* A stoppable job gets a real control. This was a span reading
+   "stoppable": the cancel route was computed and then rendered as a
+   label, so the page listing everything the brain is doing offered no
+   verb, and the one thing on each row looked like a checkbox that did
+   nothing. */
+.v2-job-cancel--btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--v2-state-error);
+  border-radius: var(--v2-radius-xs);
+  background: none;
+  color: var(--v2-state-error);
+  font: inherit;
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  cursor: pointer;
+}
+.v2-job-cancel--btn:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--v2-state-error) 12%, transparent);
+}
+.v2-job-cancel--btn:disabled { opacity: 0.55; cursor: default; }
+.v2-job-failed {
+  flex: 1 1 100%;
+  margin: 4px 0 0;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-state-warn);
+}

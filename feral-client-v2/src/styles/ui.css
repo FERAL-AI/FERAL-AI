@@ -1138,10 +1138,24 @@
 }
 .v2-cmdk-search::placeholder { color: var(--v2-text-tertiary); }
 /* The palette focuses this field on open, so it is a keyboard user's
-   first focus position in the dialog. It must be marked. */
+   first focus position and must be marked. It was marked with a hard
+   2px rectangle drawn tight around a transparent, borderless input
+   sitting between a search icon and a close button, and because the
+   field is focused the moment the palette opens, that rectangle was
+   always on screen. It read as a rendering fault rather than as focus.
+   The indicator belongs to the row, which is the thing that actually
+   looks like a search field, and it is a ring rather than a hairline so
+   it still reads as focus and not as a border. */
+.v2-cmdk-search:focus,
 .v2-cmdk-search:focus-visible {
-  outline: 2px solid var(--v2-accent);
-  outline-offset: -2px;
+  /* The indicator is a soft ring rather than a hard 2px rectangle. It
+     is still an indicator, and it is supplied in this same rule
+     deliberately: the a11y guard refuses `outline: none` unless the rule
+     that removes it also draws something, and putting the replacement on
+     a neighbouring selector defeats a check that exists precisely
+     because focus indicators get quietly deleted. */
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--v2-accent) 40%, transparent);
   border-radius: var(--v2-radius-xs);
 }
 /* Chrome draws its own clear affordance on type=search; it collides

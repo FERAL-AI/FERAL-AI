@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, Square } from 'lucide-react';
 import Pane from '../ui/Pane';
 import EmptyState from '../ui/EmptyState';
-import { apiJson } from '../lib/api';
+import { apiJson, apiFetch } from '../lib/api';
 import { jobKindLabel } from './Home';
 
 /**
@@ -46,6 +46,10 @@ export default function Jobs() {
   const [degraded, setDegraded] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [stopping, setStopping] = useState('');
+  // Keyed by job id. A stop that did not land has to say so on the row
+  // it was clicked on; `silent: true` suppresses the global surface.
+  const [failed, setFailed] = useState({});
   const timer = useRef(null);
 
   const load = useCallback(async () => {
@@ -66,6 +70,29 @@ export default function Jobs() {
     load();
     timer.current = setInterval(load, POLL_MS);
     return () => clearInterval(timer.current);
+  }, [load]);
+
+  const stop = useCallback(async (job) => {
+    const route = cancelRouteOf(job);
+    if (!route) return;
+    setStopping(job.id);
+    setFailed((f) => { const n = { ...f }; delete n[job.id]; return n; });
+    try {
+      await apiFetch(route.path, {
+        method: route.method,
+        silent: true,
+        ...(route.method === 'POST' ? { body: JSON.stringify({}) } : {}),
+      });
+      // Reload rather than dropping the row optimistically: the brain
+      // decides whether a job is actually gone, and a row that vanishes
+      // from a click that failed is the claim this codebase keeps
+      // making by accident.
+      await load();
+    } catch (e) {
+      setFailed((f) => ({ ...f, [job.id]: e?.message || 'That did not stop it.' }));
+    } finally {
+      setStopping('');
+    }
   }, [load]);
 
   const running = items.filter((i) => i.status === 'running' || i.status === 'connected');
@@ -115,12 +142,38 @@ export default function Jobs() {
                     {typeof j.progress === 'number' && ` · ${Math.round(j.progress * 100)}%`}
                     {ran && ` · ${ran}`}
                   </span>
+                  {/* This was a <span> reading "stoppable": the route
+                      to stop the job was computed and then rendered as
+                      a LABEL. So the page listing everything the brain
+                      is doing offered no verb at all, and the one
+                      affordance on each row looked like a checkbox that
+                      did nothing when clicked. */}
                   {cancel ? (
-                    <span className="v2-job-cancel" title={j.cancellable_via}>
-                      <Square size={11} aria-hidden="true" /> stoppable
-                    </span>
+                    <button
+                      type="button"
+                      className="v2-job-cancel v2-job-cancel--btn"
+                      title={`Stop this job (${j.cancellable_via})`}
+                      // The visible word is "stop", which out of context
+                      // names nothing: a screen reader on a list of six
+                      // jobs hears "stop" six times. The label says
+                      // which one.
+                      aria-label={`Stop ${j.name || jobKindLabel(j.kind)}`}
+                      disabled={stopping === j.id}
+                      onClick={() => stop(j)}
+                    >
+                      <Square size={11} aria-hidden="true" />
+                      {stopping === j.id ? 'stopping' : 'stop'}
+                    </button>
                   ) : (
-                    <span className="v2-job-cancel v2-job-cancel--none">not stoppable here</span>
+                    <span
+                      className="v2-job-cancel v2-job-cancel--none"
+                      title="The brain does not name a route that can stop this one."
+                    >
+                      not stoppable here
+                    </span>
+                  )}
+                  {failed[j.id] && (
+                    <p className="v2-job-failed" role="alert">{failed[j.id]}</p>
                   )}
                 </li>
               );
