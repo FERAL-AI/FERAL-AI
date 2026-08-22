@@ -70,10 +70,25 @@ def _fail(msg: str) -> "None":
     sys.exit(1)
 
 
-#: ``<script src="./assets/x.js">`` and ``<link href="./assets/x.css">``
-#: as emitted by Vite. Anchored on ``assets/`` so a favicon or manifest
+#: ``<script src="/assets/x.js">`` and ``<link href="/assets/x.css">`` as
+#: emitted by Vite. Anchored on ``assets/`` so a favicon or manifest
 #: reference cannot stand in for the bundle entry points.
-_ASSET_REF = re.compile(r'(?:src|href)="((?:\./)?assets/[^"]+\.(?:js|css))"')
+#:
+#: Both the absolute and the relative form are accepted, and that is not
+#: tidiness. This pattern used to require the relative form only, because
+#: ``vite.config.js`` set ``base: './'``. That base was changed to ``'/'``
+#: to fix a real defect (a relative ref resolves against the current
+#: URL's directory, so a hard load of ``/memory/context`` asked for
+#: ``/memory/assets/index-<hash>.js``, got index.html back from the SPA
+#: fallback at status 200, and executed HTML as JavaScript: a blank page
+#: on every depth-2 route). This script was not updated with it, so the
+#: gate rejected a correctly built bundle with "declares no assets/*.js
+#: or assets/*.css entry point" while reporting "bundle OK (1 js / 1 css)"
+#: two lines later, and the release could not be published at all.
+#:
+#: Accepting both means the gate keeps working whichever base a future
+#: build uses, instead of encoding one of them as an assumption.
+_ASSET_REF = re.compile(r'(?:src|href)="((?:\./|/)?assets/[^"]+\.(?:js|css))"')
 
 #: Substrings that only ever appear on a page the brain serves *instead*
 #: of the bundle. ``api/server.py`` renders ``_PACKAGING_FAULT_HTML`` when
@@ -96,7 +111,14 @@ def _bundle_asset_refs(index_html: str) -> list[str]:
     """
     seen: list[str] = []
     for ref in _ASSET_REF.findall(index_html):
-        rel = ref[2:] if ref.startswith("./") else ref
+        # Strip whichever prefix the configured vite base produced.
+        # Deliberately not str.lstrip: that takes a character SET, so
+        # lstrip("./") would also eat a leading "." of a real filename.
+        rel = ref
+        for prefix in ("./", "/"):
+            if rel.startswith(prefix):
+                rel = rel[len(prefix):]
+                break
         if rel not in seen:
             seen.append(rel)
     return seen
