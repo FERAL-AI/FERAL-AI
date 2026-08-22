@@ -28,6 +28,8 @@ import struct
 import zlib
 from pathlib import Path
 
+import shutil
+
 import pytest
 
 from security.sandbox_policy import SandboxPolicy
@@ -459,7 +461,29 @@ def engine(request, monkeypatch):
 
     The fallback is reached by making ``rg`` unresolvable, which is what
     a machine without ripgrep looks like from inside the tool.
+
+    The ripgrep leg needs ripgrep, and this used to assume it. On a
+    machine without it the tool correctly fell back and the leg failed
+    on ``assert 'python-fallback' == 'ripgrep'``, which reads as a code
+    defect and is an absent binary. CI had never installed ripgrep, so
+    that is exactly what it reported, and because the push-to-main job
+    runs pytest with ``-x`` it halted the entire matrix at 24%.
+
+    Skipping is right for a contributor who does not have ripgrep. It is
+    NOT right for CI, where a silent skip would mean going green having
+    tested only the fallback, which is not the engine real installs use.
+    So CI sets FERAL_REQUIRE_RIPGREP and the skip becomes a failure
+    there.
     """
+    if request.param == "ripgrep" and shutil.which("rg") is None:
+        if os.environ.get("FERAL_REQUIRE_RIPGREP"):
+            pytest.fail(
+                "ripgrep is not on PATH, so the ripgrep engine cannot be "
+                "tested. FERAL_REQUIRE_RIPGREP is set, which means this "
+                "environment is supposed to have it: install ripgrep "
+                "rather than letting this leg skip."
+            )
+        pytest.skip("ripgrep is not installed, so only the fallback is testable")
     if request.param == "python-fallback":
         monkeypatch.setenv("PATH", "/nonexistent")
     return request.param

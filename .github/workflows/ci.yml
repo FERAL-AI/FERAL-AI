@@ -213,6 +213,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install ripgrep
+        # coding_tools' grep has two engines: ripgrep when `rg` resolves
+        # on PATH, and a python fallback when it does not. The parity
+        # suite runs the same assertions through both, and the runner
+        # has never had ripgrep, so the ripgrep leg silently produced
+        # the fallback and failed on `assert 'python-fallback' ==
+        # 'ripgrep'`. That single failure halted the whole matrix,
+        # because this job runs pytest with -x.
+        #
+        # Installing it is the fix rather than skipping the leg: ripgrep
+        # is the engine almost every real install uses, so a CI that
+        # cannot exercise it is not testing the common path. The suite
+        # also refuses to skip that leg here, see FERAL_REQUIRE_RIPGREP
+        # below.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+        working-directory: .
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -267,6 +284,12 @@ jobs:
         # whose benchmarks legitimately take minutes. thread method for
         # the same reason as the fast lane: signal-based interruption
         # fights asyncio's own signal handling on Linux runners.
+        env:
+          # The ripgrep leg of the grep parity suite must RUN here, not
+          # skip. Without this a runner that lost ripgrep would go green
+          # while testing only the fallback, which is the quieter
+          # version of the failure this pins.
+          FERAL_REQUIRE_RIPGREP: '1'
         run: pytest tests/ -p no:randomly -x -v --tb=short --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=50 --timeout=300 --timeout-method=thread
 
       - name: Upload coverage
