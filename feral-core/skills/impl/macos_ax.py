@@ -993,17 +993,31 @@ class MacOSAccessibilitySkill(BaseSkill):
     # ── reading ───────────────────────────────────────────────────
 
     def _snapshot(self, args: dict) -> dict:
-        app_name = _s(args, "app")
-        app, reason = _resolve_app(app_name or None)
-        if app is None:
-            return _fail(reason, status=404)
-
+        # Argument validation runs BEFORE the app lookup, because it is
+        # the only part of this that does not depend on the host. The
+        # lookup reaches the AX API, which raises _Unsupported anywhere
+        # that is not macOS with pyobjc, and that surfaces as 501.
+        #
+        # With the old order a bad `filter` was reported as "macos_ax is
+        # macOS-only" on any non-Mac, which tells the caller nothing
+        # about the thing they actually got wrong, and made every
+        # validation test in this surface unrunnable off a Mac: CI is
+        # Linux, so `assert 501 == 400` is what it reported.
+        #
+        # It is also better on a Mac. When the filter and the app are
+        # both wrong, "filter must be 'interactive' or 'all'" is the
+        # more useful of the two answers.
         filter_mode = _s(args, "filter", "interactive").lower()
         if filter_mode not in ("interactive", "all"):
             return _fail(
                 f"`filter` must be 'interactive' or 'all', got {filter_mode!r}.",
                 status=400,
             )
+
+        app_name = _s(args, "app")
+        app, reason = _resolve_app(app_name or None)
+        if app is None:
+            return _fail(reason, status=404)
         max_nodes = _i(args, "max_nodes", DEFAULT_MAX_NODES, 1, MAX_MAX_NODES)
         offset = max(0, _i(args, "offset", 0, 0, 10 ** 6))
         max_depth = _i(args, "max_depth", DEFAULT_MAX_DEPTH, 1, HARD_MAX_DEPTH)
