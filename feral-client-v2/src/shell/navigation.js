@@ -107,8 +107,16 @@ export const DESTINATIONS = [
 // selection rule the design rejects: Oversight matters enormously and
 // you visit it twice a year, so it belongs in the palette, while Needs
 // you blocks work every day and had no tile at all.
+//
+// Home is back, and first. Dropping it followed the design's selection
+// rule correctly and still got the result wrong: Home is the overview
+// the whole v2 UI was built around (briefing, skills, in-flight work,
+// suggestions, hardware, consciousness, channels, LLM, digital twin),
+// and with no tile the only route to it was the palette. A destination
+// people return to constantly, reachable only by remembering a keyboard
+// shortcut, is exactly what a dock is for.
 export const DOCK_PATHS = [
-  '/console', '/chat', '/approvals', '/jobs',
+  '/', '/console', '/chat', '/approvals', '/jobs',
   '/skills', '/memory', '/devices', '/settings',
 ];
 
