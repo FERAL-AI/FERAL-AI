@@ -458,6 +458,12 @@ function routineStatus(r) {
   // Backend returns `enabled`. Some older builds (and our test
   // fixtures) also surface `paused`. Treat them as mutually
   // exclusive: enabled=true and paused=false both mean "armed".
+  //
+  // `disabled_reason` is set only when the BRAIN turned the routine off,
+  // never when the user paused it. Labelling that "paused" tells the user
+  // he did something he did not do, and hides the one fact he needs: a
+  // routine he set up is off, and there is a stated reason for it.
+  if (r.disabled_reason) return { paused: true, tone: 'warn', label: 'turned off' };
   if (r.enabled === false) return { paused: true, tone: 'warn', label: 'paused' };
   if (r.paused === true) return { paused: true, tone: 'warn', label: 'paused' };
   return { paused: false, tone: 'live', label: 'armed' };
@@ -516,6 +522,11 @@ function RoutinesTab({ skills, skillsError }) {
                   <div className="v2-flow-card-title">{r.description || r.name || r.id}</div>
                   <div className="v2-flow-card-status">{r.cron_expr || r.cron || '—'}</div>
                 </div>
+                {r.disabled_reason && (
+                  <div className="v2-setting-hint" data-testid="v2-routine-disabled-reason">
+                    {r.disabled_reason}
+                  </div>
+                )}
                 <div className="v2-flow-card-actions">
                   {st.paused
                     ? <button type="button" className="v2-btn" onClick={() => action(r.id, 'resume')}><Play size={12} /> Resume</button>

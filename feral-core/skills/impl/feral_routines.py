@@ -101,6 +101,10 @@ def _job_to_dict(job) -> dict:
         "run_count": job.run_count,
         "recurring": getattr(job, "recurring", True),
         "tz_name": getattr(job, "tz_name", "UTC"),
+        # Why the runtime turned this routine off, empty when the user did it
+        # or when it is still on. Carried here so that asking FERAL why a
+        # routine stopped gets the answer, instead of "it is disabled".
+        "disabled_reason": getattr(job, "disabled_reason", ""),
     }
 
 
