@@ -144,3 +144,47 @@ def test_health_still_reports_what_it_always_did(client):
     body = client.get("/health", headers=CURL).json()
     assert body["status"] == "ok"
     assert "version" in body
+
+
+class TestOneUrlTwoRepresentationsNeedsVary:
+    """The shim served both a page and JSON from one URL and said nothing.
+
+    Content negotiation without `Vary` is worse than no negotiation,
+    because a cache is entitled to treat the two representations as
+    interchangeable. Measured in Chrome against a running brain, on the
+    shipped 2026.8.13:
+
+        navigate to /skills            -> text/html   (correct)
+        then the SPA's fetch("/skills") -> text/html   (the cached page)
+
+    so the Skills page rendered "Could not reach the brain to load the
+    skill list: Unexpected token '<'". A second page that had never
+    navigated to /skills got the HTML too, because the cached
+    representation is shared. With the HTTP cache disabled the same
+    fetch correctly returned JSON, which is what pinned it on caching
+    rather than on the branch logic.
+
+    `Accept` and `Sec-Fetch-Dest` are precisely the inputs
+    `_is_document_navigation` reads, so they are precisely what must be
+    varied on.
+    """
+
+    @pytest.mark.parametrize("path", ["/skills", "/health"])
+    @pytest.mark.parametrize("headers,expect", [
+        (BROWSER, "text/html"),
+        (CURL, "json"),
+        (SPA_FETCH, "json"),
+    ])
+    def test_every_answer_declares_what_it_varied_on(
+        self, client, path, headers, expect,
+    ):
+        r = client.get(path, headers=headers)
+        assert expect in r.headers["content-type"]
+        vary = r.headers.get("vary", "")
+        assert "Accept" in vary, (
+            f"{path} negotiates on Accept but does not declare Vary, so a "
+            "cache may serve the page to a fetch and the JSON to a browser"
+        )
+        assert "Sec-Fetch-Dest" in vary, (
+            f"{path} also branches on Sec-Fetch-Dest and must vary on it"
+        )
