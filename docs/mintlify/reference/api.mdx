@@ -75,22 +75,49 @@ curl http://localhost:9090/api/skills
 
 ### Example: Semantic search
 
+Runs `MemoryStore.search_all`: episodes and notes through FTS5 plus vector
+cosine, knowledge triples, and knowledge-graph entities, merged by score.
+`q` and `query` are both accepted. An empty query is a 400, never an empty
+result set.
+
 ```bash
 curl "http://localhost:9090/api/memory/search?q=last+time+I+went+running&limit=5"
 ```
 
 ```json
 {
+  "query": "last time I went running",
+  "count": 2,
+  "tiers": { "episode": 1, "note": 1 },
+  "degradations": [],
+  "degraded": false,
   "results": [
     {
+      "tier": "episode",
+      "score": 0.94,
       "id": "ep_2026_0410_morning",
-      "timestamp": "2026-04-10T07:15:00Z",
       "summary": "Morning 5K run in Prospect Park. Avg HR 145 bpm, pace 5:20/km.",
-      "relevance": 0.94
+      "relevance_score": 0.94
+    },
+    {
+      "tier": "note",
+      "score": 0.61,
+      "id": "n_18f2",
+      "content": "New running shoes break in around 40km.",
+      "relevance_score": 0.61
     }
   ]
 }
 ```
+
+`degradations` is the point of the payload as much as `results`. Each tier is
+isolated, so one that raises does not take out the three that answered; the
+failure is named here instead of silently shrinking the result set. A caller
+must not read `count: 0` as "the store knows nothing" while `degraded` is
+true.
+
+`/internal/memory/search` remains as the notes-only legacy surface and also
+accepts either spelling of the query parameter.
 
 ## Identity
 
@@ -121,7 +148,7 @@ curl -X POST http://localhost:9090/api/identity/twin/ask \
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/devices/connected` | List all connected devices with types and metrics |
+| `GET` | `/api/devices/connected` | Live daemons (`devices[]`) plus nodes the brain knows about that are not reporting (`offline[]`). Merges `state.daemons` with the session-handoff registry rather than letting either shadow the other. Both lists empty means nothing has ever paired. |
 | `GET` | `/api/devices/paired` | List paired devices (claimed by default; `include_unclaimed=true` optional) |
 | `POST` | `/api/devices/pair` | Mint daemon/browser pairing token |
 | `GET` | `/api/devices/pair/url` | Mint one-time pair URL payload |
@@ -146,9 +173,14 @@ curl -X POST http://localhost:9090/api/identity/twin/ask \
 | `POST` | `/api/hardware/execute` | Execute a HUP action on a device (`device_id`, `capability_id`, `action_type`, `parameters`, optional `confirmed`) |
 | `GET` | `/api/hardware/context` | LLM-facing hardware context string (capabilities summary) |
 | `GET` | `/api/hardware/stats` | Device registry statistics |
-| `GET` | `/api/hardware/mesh` | Hardware mesh state (connected nodes, announced peripherals) |
+| `GET` | `/api/hardware/mesh` | Hardware mesh state (connected nodes, announced peripherals). Every `nodes[]` row carries `online: true` — the list only contains nodes holding an open socket, and saying so beats leaving clients to infer it from the row's presence. |
 | `GET` | `/api/hardware/fleet` | **Unified fleet view** — full manifests with derived safety tiers, last verification (honesty loop) state, mesh nodes, announced devices, and registry stats. Intended for companion-app device cards without per-device UI code. |
-| `POST` | `/api/hardware/invoke` | Invoke a capability on a mesh node by `node_id` |
+| `POST` | `/api/hardware/invoke` | Invoke a capability on a mesh node. Body is `{node_id, command, params}`; `{device_id, method, args}` is accepted as a legacy alias. An empty `node_id` or `command` is a 400, not a "Node not connected" naming no node. |
+
+`GET /api/hardware/device/{device_id}` answers **404** for an unknown id and
+**503** when there is no registry. Both used to be `200 {"error": ...}`, which
+asserts that the body *is* the device: a client that stores the response as its
+detail state replaced the row it already had with an error object.
 
 ## Access Mode & Remote Reachability
 

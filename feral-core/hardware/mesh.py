@@ -390,8 +390,18 @@ class HardwareMesh:
 
     @property
     def connected_nodes(self) -> list[dict]:
+        """Nodes holding an open HUP socket right now.
+
+        ``online`` is stated explicitly rather than left for the reader to
+        infer from the row's presence. The filter below is already
+        ``nid in self._daemons``, so every row returned here IS attached,
+        but the v2 Devices page renders its status dot from ``n.online``
+        and an absent key is falsy: three live daemons rendered as three
+        grey "offline" dots on the HUP mesh pane. Saying it on the wire
+        costs one key and removes the inference.
+        """
         return [
-            {"node_id": nid, **meta}
+            {"node_id": nid, **meta, "online": True}
             for nid, meta in self._node_metadata.items()
             if nid in self._daemons
         ]

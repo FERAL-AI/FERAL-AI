@@ -211,21 +211,110 @@ function SaveMemoryModal({ onClose, onSaved }) {
   );
 }
 
+const TIER_LABEL = {
+  episode: 'Episode',
+  note: 'Note',
+  knowledge: 'Knowledge',
+  entity: 'Entity',
+};
+
+const TIER_ORDER = ['episode', 'note', 'knowledge', 'entity'];
+
+/**
+ * The text a result row is actually about, in the order the tiers
+ * populate it. Episodes carry `summary` + `detail`, notes carry
+ * `content`, knowledge rows are a subject/predicate/object triple that
+ * `search_all` pre-renders into `summary`, entities carry a name.
+ * `JSON.stringify(row)` is the last resort and never the first answer.
+ */
+function resultBody(r) {
+  if (typeof r?.content === 'string' && r.content) return r.content;
+  if (typeof r?.summary === 'string' && r.summary) return r.summary;
+  if (typeof r?.text === 'string' && r.text) return r.text;
+  if (r?.subject && r?.predicate) return `${r.subject} ${r.predicate} ${r.object ?? ''}`.trim();
+  if (typeof r?.name === 'string' && r.name) return r.name;
+  return JSON.stringify(r).slice(0, 200);
+}
+
+/** Secondary context under the body: whatever this tier can prove. */
+function resultContext(r) {
+  const bits = [];
+  if (Array.isArray(r?.tags)) bits.push(...r.tags.map((t) => `#${t}`));
+  if (r?.importance && r.importance !== 'normal') bits.push(r.importance);
+  if (typeof r?.mentions === 'number') bits.push(`${r.mentions} mention${r.mentions === 1 ? '' : 's'}`);
+  if (r?.type && r.tier === 'entity') bits.push(r.type);
+  const ts = r?.created_at ?? r?.start_time ?? r?.timestamp;
+  if (typeof ts === 'number' && ts > 0) {
+    bits.push(new Date(ts * 1000).toLocaleString());
+  }
+  return bits;
+}
+
+/**
+ * Memory search, against the brain's real hybrid recall.
+ *
+ * This tab used to GET `/internal/memory/search?q=<term>`. That route
+ * declares its parameter as `query`, not `q`, so FastAPI bound `query`
+ * to "" and the handler's `if not query: return []` fired on every
+ * search this page has ever run. Measured against a live brain holding
+ * two notes that both matched: `?q=quokka` returned `[]` and
+ * `?query=quokka` returned both notes with scores. An empty result set
+ * reads as "nothing matched", so the page rendered "No results" and the
+ * store looked empty rather than un-queried. It also only ever searched
+ * the notes tier, and rendered `r.score`, a key the notes route does not
+ * return (it returns `relevance_score`), so the score chip was dead too.
+ *
+ * It now calls `/api/memory/search`, which runs `MemoryStore.search_all`
+ * over all four tiers (episodes and notes via FTS5 + vector hybrid,
+ * knowledge triples, and knowledge-graph entities) and reports the
+ * per-tier degradations `search_all` records. A tier that failed is
+ * named on screen, so a partial answer can never be read as an empty
+ * store.
+ */
+/**
+ * Below this cosine score a vector hit is a nearest neighbour, not an
+ * answer. It matters because the vector leg ALWAYS returns its top-k:
+ * measured on this brain, the nonsense query "zzzznotathing" came back
+ * with ten rows scoring 0.39-0.42, while "Perth" scored 0.835 against a
+ * note that really says Perth. Without the distinction, a user checking
+ * whether recall works reads ten rows and concludes it does.
+ */
+const WEAK_SCORE = 0.5;
+
 function SearchTab() {
   const [q, setQ] = useState('');
   // The submitted query, not the input. A search that failed used to
   // land in the same `results = []` as a search that genuinely matched
   // nothing, and the page said "No results" for both.
   const [query, setQuery] = useState('');
+  const [tierFilter, setTierFilter] = useState('all');
   const {
-    data: hits, error, loading, refresh,
+    data: payload, error, loading, refresh,
   } = useResource(
-    query ? `/internal/memory/search?q=${encodeURIComponent(query)}` : null,
-    { select: (d) => asList(d, 'results', 'memories') },
+    query ? `/api/memory/search?q=${encodeURIComponent(query)}&limit=50` : null,
   );
+  // What actually answered: which embedding provider produced the query
+  // vector and which index served it. Named so a weak result set can be
+  // attributed rather than guessed at.
+  const { data: engine } = useResource('/internal/memory/stats', { silent: true });
+  const obs = engine?.observability || null;
 
-  const results = hits || [];
-  const busy = !!query && loading && !hits;
+  const allResults = Array.isArray(payload?.results) ? payload.results : [];
+  const degradations = Array.isArray(payload?.degradations) ? payload.degradations : [];
+  const tiers = payload?.tiers || {};
+  const busy = !!query && loading && !payload;
+
+  const results = tierFilter === 'all'
+    ? allResults
+    : allResults.filter((r) => (r.tier || 'unknown') === tierFilter);
+
+  const scoreOf = (r) => (typeof r.score === 'number'
+    ? r.score
+    : (typeof r.relevance_score === 'number' ? r.relevance_score : null));
+  const strongCount = allResults.filter((r) => {
+    const s = scoreOf(r);
+    return s == null || s >= WEAK_SCORE;
+  }).length;
 
   const go = (e) => {
     e.preventDefault();
@@ -237,13 +326,68 @@ function SearchTab() {
   };
 
   return (
-    <Pane title="Semantic search">
+    <Pane
+      title={payload
+        ? `Search — ${strongCount} strong of ${payload.count} hit${payload.count === 1 ? '' : 's'} across ${Object.keys(tiers).length} tier${Object.keys(tiers).length === 1 ? '' : 's'}`
+        : 'Search'}
+    >
+      <p className="v2-p v2-p--muted">
+        Hybrid recall over every tier at once: episodes and notes through FTS5 plus
+        vector cosine, knowledge triples, and knowledge-graph entities. Ranked by the
+        brain, not re-sorted here. The vector leg always returns its nearest
+        neighbours, so a score below {WEAK_SCORE.toFixed(2)} is marked weak rather
+        than presented as a match.
+      </p>
+      {obs && (
+        <p className="v2-p v2-p--tiny v2-p--muted" data-testid="memory-search-engine">
+          {`Answered by: ${obs.embedding_provider || 'no embedding provider'} embeddings over ${obs.active_vector_store || 'unknown index'}`}
+          {obs.chunk_count != null ? ` · ${obs.chunk_count} embedded chunk${obs.chunk_count === 1 ? '' : 's'}` : ''}
+          {!obs.embedding_provider ? ' · no semantic leg, this is keyword search only' : ''}
+        </p>
+      )}
       <form onSubmit={go} className="v2-twin-form">
-        <input className="v2-input v2-twin-input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="What do I know about…" />
-        <button type="submit" className="v2-btn v2-btn--primary" disabled={busy || !q.trim()}>
+        <input
+          className="v2-input v2-twin-input"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="What do I know about…"
+          data-testid="memory-search-input"
+        />
+        <button type="submit" className="v2-btn v2-btn--primary" disabled={busy || !q.trim()} data-testid="memory-search-submit">
           <Search size={13} /> {busy ? 'Searching…' : 'Search'}
         </button>
       </form>
+
+      {/* A tier that raised is NOT a tier that matched nothing. The
+          brain distinguishes them; so does this. */}
+      {degradations.length > 0 && (
+        <div className="v2-chip v2-chip--warn" role="status" data-testid="memory-search-degraded" style={{ marginTop: 10 }}>
+          {`Incomplete: ${degradations.map((d) => `${d.tier} tier failed (${d.error})`).join('; ')}. These results are partial, not empty.`}
+        </div>
+      )}
+
+      {payload && allResults.length > 0 && (
+        <div className="v2-device-caps" style={{ marginTop: 10 }} data-testid="memory-search-facets">
+          <button
+            type="button"
+            className={`v2-btn v2-btn--ghost${tierFilter === 'all' ? ' is-active' : ''}`}
+            onClick={() => setTierFilter('all')}
+          >
+            All ({allResults.length})
+          </button>
+          {TIER_ORDER.filter((t) => tiers[t]).map((t) => (
+            <button
+              key={t}
+              type="button"
+              className={`v2-btn v2-btn--ghost${tierFilter === t ? ' is-active' : ''}`}
+              onClick={() => setTierFilter(t)}
+            >
+              {TIER_LABEL[t] || t} ({tiers[t]})
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Unlike a polling surface, stale rows here answer a DIFFERENT
           question than the one on screen, so a failed search hides the
           previous search's hits instead of leaving them to be misread
@@ -257,15 +401,42 @@ function SearchTab() {
       )}
       {!error && (
         <ul className="v2-mem-list" style={{ marginTop: 12 }}>
-          {results.map((r, i) => (
-            <li key={r.id || i}>
-              <Glass level={0} radius="md" padding="md">
-                <div className="v2-mem-content">{r.content || r.text || JSON.stringify(r).slice(0, 200)}</div>
-                {r.score != null && <div className="v2-mem-meta"><span className="v2-chip">score {(r.score).toFixed(3)}</span></div>}
-              </Glass>
-            </li>
-          ))}
-          {!busy && hits && results.length === 0 && <EmptyState title="No results" />}
+          {results.map((r, i) => {
+            const context = resultContext(r);
+            const score = typeof r.score === 'number'
+              ? r.score
+              : (typeof r.relevance_score === 'number' ? r.relevance_score : null);
+            return (
+              <li key={`${r.tier || 't'}-${r.id || i}`}>
+                <Glass level={0} radius="md" padding="md">
+                  <div className="v2-mem-meta" style={{ marginBottom: 6 }}>
+                    <span className="v2-chip" data-testid="memory-search-tier">{TIER_LABEL[r.tier] || r.tier || 'result'}</span>
+                    {score != null && <span className="v2-chip v2-chip--muted">score {score.toFixed(3)}</span>}
+                    {score != null && score < WEAK_SCORE && (
+                      <span className="v2-chip v2-chip--warn" data-testid="memory-search-weak" title="Below the weak-match floor. The vector leg returns its nearest neighbours for any input, so this is proximity, not a match.">
+                        weak
+                      </span>
+                    )}
+                  </div>
+                  <div className="v2-mem-content">{resultBody(r)}</div>
+                  {r.detail && <div className="v2-p v2-p--tiny v2-p--muted" style={{ marginTop: 4 }}>{String(r.detail).slice(0, 400)}</div>}
+                  {context.length > 0 && (
+                    <div className="v2-mem-meta">
+                      {context.map((c, ci) => <span key={ci} className="v2-chip v2-chip--muted">{c}</span>)}
+                    </div>
+                  )}
+                </Glass>
+              </li>
+            );
+          })}
+          {!busy && payload && results.length === 0 && (
+            <EmptyState
+              title={tierFilter === 'all' ? 'No results' : `No ${TIER_LABEL[tierFilter] || tierFilter} results`}
+              hint={degradations.length > 0
+                ? 'Some tiers failed to answer, so this is not proof the brain knows nothing.'
+                : 'Every tier answered and none of them matched.'}
+            />
+          )}
         </ul>
       )}
     </Pane>

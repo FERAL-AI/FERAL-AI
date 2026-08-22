@@ -574,36 +574,58 @@ async def connected_devices():
     Empty ``devices`` AND empty ``offline`` means "nothing has ever
     paired".
     """
-    if state.session_handoff:
-        active = state.session_handoff.get_active_devices() or []
-        # Trust the session_handoff view when it exists but sanity-check
-        # the 'type' field isn't a hardcoded "phone" default and attach
-        # the sub-device tree from our truth store.
-        cleaned = []
-        for d in active:
-            if isinstance(d, dict):
-                # If the upstream handoff code returned an opaque type we
-                # prefer, keep it; otherwise fall back to our inference.
-                nid = d.get("node_id", "")
-                if not d.get("type") or d.get("type") == "phone":
-                    ws = state.daemons.get(nid)
-                    if ws is not None:
-                        d = {**d, "type": _infer_node_type(nid, ws)}
-            cleaned.append(d)
-        view = build_device_view(
-            live_nodes=[d for d in cleaned if isinstance(d, dict)],
-            subdevice_rows=_all_subdevice_rows(),
-        )
-        # Preserve any non-dict rows the handoff manager returned rather
-        # than dropping them: this endpoint has never validated that
-        # shape and silently losing a row would be a new defect.
-        view["devices"].extend(d for d in cleaned if not isinstance(d, dict))
-        return view
+    # `state.daemons` is the ONLY structure the /v1/node handler writes on
+    # `node_register` (api/server.py `state.daemons[node_id] = ws`).
+    # `SessionHandoffManager.register_device` is called from exactly one
+    # place in the brain (api/state.py, the messaging-channel bridge), so
+    # its registry never contains a HUP daemon.
+    #
+    # This branch used to *replace* the daemon-derived list with the
+    # handoff registry whenever `state.session_handoff` was set, which it
+    # always is after boot. Measured against a live brain holding three
+    # registered daemons (a phone, a wearable and a pair of glasses, all
+    # visible in /api/hardware/mesh, /api/hardware/devices and
+    # /api/hardware/fleet), this endpoint answered `{"devices": [],
+    # "offline": []}`. Per this function's own contract that reads as
+    # "nothing has ever paired", so the v2 Devices page rendered no Live
+    # pane at all and the topology drew "Awaiting node".
+    #
+    # Both sources are now merged, keyed by node_id, with the daemon view
+    # winning on conflict because it is the one backed by an open socket.
+    live_by_id: dict[str, dict] = {}
+    extra_rows: list = []
 
-    return build_device_view(
-        live_nodes=[_describe_device(nid, ws) for nid, ws in state.daemons.items()],
+    for nid, ws in state.daemons.items():
+        live_by_id[nid] = _describe_device(nid, ws)
+
+    if state.session_handoff:
+        for d in state.session_handoff.get_active_devices() or []:
+            if not isinstance(d, dict):
+                # Preserve any non-dict row the handoff manager returned
+                # rather than dropping it: this endpoint has never
+                # validated that shape and silently losing a row would be
+                # a new defect.
+                extra_rows.append(d)
+                continue
+            nid = d.get("node_id", "")
+            if nid and nid in live_by_id:
+                # The daemon row already describes this node from its own
+                # node_register payload. Keep it.
+                continue
+            # Sanity-check the 'type' field isn't a hardcoded "phone"
+            # default and attach the sub-device tree from our truth store.
+            if not d.get("type") or d.get("type") == "phone":
+                ws = state.daemons.get(nid)
+                if ws is not None:
+                    d = {**d, "type": _infer_node_type(nid, ws)}
+            live_by_id[nid or d.get("session_id", "")] = d
+
+    view = build_device_view(
+        live_nodes=list(live_by_id.values()),
         subdevice_rows=_all_subdevice_rows(),
     )
+    view["devices"].extend(extra_rows)
+    return view
 
 
 @router.get("/api/devices/{node_id}/subdevices")
