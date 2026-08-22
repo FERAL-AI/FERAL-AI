@@ -95,9 +95,20 @@ describe('AppSurface sandbox + CSP', () => {
     expect(csp).toContain("default-src 'none'");
     expect(csp).toContain("connect-src 'none'");
     expect(csp).toContain("script-src 'unsafe-inline'");
-    expect(csp).toContain("frame-ancestors 'self'");
     expect(csp).toContain("base-uri 'none'");
     expect(csp).toContain("form-action 'none'");
+    // This used to assert `frame-ancestors 'self'` was PRESENT, which
+    // pinned a directive the browser discards: frame-ancestors only
+    // works as an HTTP header, and Chromium logs "The Content Security
+    // Policy directive 'frame-ancestors' is ignored when delivered via
+    // a <meta> element" every time a surface opens. Found by opening
+    // /apps against a live brain and reading the console. Asserting it
+    // was in the string proved the string, not the policy.
+    //
+    // What actually withholds embedding here is the sandbox attribute
+    // checked in the test above: allow-scripts without
+    // allow-same-origin puts the surface in an opaque origin.
+    expect(csp).not.toContain('frame-ancestors');
  // No wildcard outbound network ever.
     expect(csp).not.toMatch(/connect-src[^;]*\*/);
   });

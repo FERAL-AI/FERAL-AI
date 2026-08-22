@@ -22,6 +22,7 @@
  * `/api/*` is stubbed; the broader e2e program runs against a real brain.
  */
 import { test, expect, Route } from '@playwright/test';
+import { animationsSettled, boxesInOneFrame } from './settled';
 
 // Runs on the config's default `chromium` project. It used to pin
 // `channel: 'chrome'` with the note "drive real Chrome, not bundled
@@ -123,6 +124,13 @@ test.describe('Marketplace install consent', () => {
 
     const dialog = page.getByRole('dialog');
     await expect(dialog).toBeVisible();
+    // `.v2-modal` opens with `animation: v2ModalIn 180ms`, scale 0.96 to
+    // 1 and translateY 8px to 0. Every measurement below has to be of
+    // the settled layout, and `toBeVisible()` resolves on the first
+    // frame of that animation, not the last. See ./settled.ts for the
+    // numbers: this is what made the row-overlap assertion below fail
+    // intermittently in full runs and pass in isolation.
+    await animationsSettled(dialog);
     const dialogBox = (await dialog.boundingBox())!;
     const viewport = page.viewportSize()!;
 
@@ -141,12 +149,13 @@ test.describe('Marketplace install consent', () => {
     // Every permission row is on screen and none of them overlap.
     const rows = page.getByTestId('v2-install-permissions').locator('li');
     await expect(rows).toHaveCount(5);
-    const boxes: { x: number; y: number; width: number; height: number }[] = [];
-    for (let i = 0; i < 5; i += 1) {
-      const row = rows.nth(i);
-      await expect(row).toBeVisible();
-      boxes.push((await row.boundingBox())!);
-    }
+    for (let i = 0; i < 5; i += 1) await expect(rows.nth(i)).toBeVisible();
+    // Read together, in one frame. Five separate `boundingBox()` calls
+    // are five separate round trips, so relating row i to row i-1
+    // across them compares two different moments, and on a loaded
+    // machine those moments are tens of milliseconds apart.
+    const boxes = await boxesInOneFrame(page, '[data-testid="v2-install-permissions"] li');
+    expect(boxes).toHaveLength(5);
     const sigBox = (await sig.boundingBox())!;
     for (const b of boxes) {
       expect(b.height).toBeGreaterThan(20);
@@ -219,6 +228,10 @@ test.describe('Marketplace install consent', () => {
 
     const dialog = page.getByRole('dialog');
     await expect(dialog).toBeVisible();
+    // Same open animation as above, and the hazard runs the other way
+    // here: mid-animation the sheet is at scale 0.96, so a footer that
+    // really does hang below the fold measures as fitting.
+    await animationsSettled(dialog);
     const dialogBox = (await dialog.boundingBox())!;
     expect(dialogBox.y + dialogBox.height).toBeLessThanOrEqual(600);
 

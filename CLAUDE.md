@@ -32,6 +32,7 @@ make test                                 # both suites: test-py + test-client
 make test-py                              # cd feral-core && python -m pytest tests/ -q --no-cov  (~6 min)
 make test-client                          # cd feral-client-v2 && npm test  (138 files / 1067 tests)
 make e2e                                  # cd feral-client-v2 && npm run e2e  (7 spec files / 30 tests)
+make e2e-real-brain                       # the same browser against a LIVE brain, nothing stubbed
 make lint                                 # ruff, the exact ruleset CI gates on
 make serve                                # feral serve
 make doctor                               # feral doctor — reports real runtime state
@@ -44,6 +45,8 @@ make doctor                               # feral doctor — reports real runtim
 `make test` **does** run both suites. It used to run only the Python side, so changing a page and running `make test` gave a green result that had not executed one line of the change.
 
 `make e2e` needs the Playwright browser, which `npm install` does not fetch. `make dev-deps` downloads chromium; the target fails loudly rather than silently if it is missing, and builds `dist/` for you if it is absent.
+
+`make e2e` runs against `vite preview` with `**/api/**` stubbed per-spec. That server answers `index.html` for **any** path at status 200 and hosts no API, so four defect classes are structurally invisible to it: a route the brain does not serve, a JSON fetch answered with HTML (how the Skills page shipped broken), a `/api/*` path the client calls that no router registers, and a control that reports success while its request failed. `make e2e-real-brain` is the other half: it boots a brain on a throwaway `FERAL_HOME`, bundles the client into `feral-core/webui_v2` so the brain serves the code under test, then runs `e2e/real_brain_pages.spec.ts` and `e2e/real_brain_controls.spec.ts` against it with **nothing stubbed**. Those two specs skip themselves unless `FERAL_E2E_REAL_BRAIN=1` and `FERAL_E2E_URL` are both set, so `make e2e` and the required CI gate are unaffected. In CI they run from the opt-in `.github/workflows/v2-real-brain-e2e.yml` (manual dispatch, the `real-brain-e2e` PR label, or nightly). The control walk clicks by blocklist, so it **mutates** the brain it points at; never aim it at `~/.feral`.
 
 CI equivalents (what actually gates a PR):
 

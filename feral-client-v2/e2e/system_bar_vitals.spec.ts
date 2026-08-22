@@ -13,6 +13,7 @@
  *    risk and invisible without layout.
  */
 import { test, expect } from '@playwright/test';
+import { animationsSettled } from './settled';
 
 const DASHBOARD = {
   device_count: 3, online_count: 3, skills_count: 42, llm_available: true,
@@ -180,6 +181,13 @@ test('the brand light is green when the brain answers and red when it does not',
   await page.route('**/api/**', (r) => r.abort());
   await expect(mark).toHaveAttribute('data-up', 'no', { timeout: 15000 });
 
+  // `.v2-sysbar-mark` carries `transition: background 120ms`. Measured
+  // from inside the page, the colour IN the frame `data-up` flips is
+  // still byte-identical to the green sampled above, so reading it
+  // straight after the attribute assertion compares green to green
+  // whenever the poll happens to catch the flip early. Wait for the
+  // transition the page is actually running. See ./settled.ts.
+  await animationsSettled(mark);
   const red = await mark.evaluate((el) => getComputedStyle(el).backgroundColor);
   expect(red, 'the light looks identical up and down').not.toBe(green);
 
