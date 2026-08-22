@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Sun, Moon, Briefcase, Cloud, CloudRain, Snowflake, Zap, RefreshCw, Plug,
@@ -128,10 +128,77 @@ export function channelMap(payload) {
   );
 }
 
+/**
+ * Tone + label for one channel row out of GET /api/channels.
+ *
+ * The row `ChannelManager.stats` builds (channels/base.py:1849-1877) is
+ * exactly:
+ *
+ *     {running, connected, known_chats, degraded, failure_count,
+ *      degraded_reason?, access_configured, allowed_sender_count,
+ *      allowed_chat_count, pairing_window_open, pending_senders,
+ *      bot_username?}
+ *
+ * There is no `enabled` key, and there never has been. The old
+ * expression was `connected ? 'connected' : enabled ? 'starting' :
+ * 'off'`, so the middle branch was unreachable and every channel that
+ * was not fully connected collapsed onto the single word "off" with a
+ * grey dot.
+ *
+ * That is a status lie in two directions. A channel mid-start
+ * (`running: true, connected: false`) reads as off. A channel that
+ * crashed into the degraded state, carrying a `degraded_reason` the
+ * brain went to the trouble of recording, ALSO reads as off, the
+ * identical rendering to a channel the operator never configured. The
+ * one row on this page whose job is to say "your Telegram bridge is
+ * broken" said "you don't have one".
+ *
+ * Verified empirically by driving the real `ChannelManager.stats`
+ * property with a channel in each state rather than reading the source
+ * and hoping.
+ */
+export function channelState(info) {
+  const row = info && typeof info === 'object' ? info : {};
+  if (row.degraded === true) {
+    return {
+      tone: 'error',
+      label: 'degraded',
+      reason: String(row.degraded_reason || '') || 'The brain reported this channel as degraded.',
+    };
+  }
+  if (row.connected === true) return { tone: 'live', label: 'connected', reason: '' };
+  if (row.running === true) {
+    return {
+      tone: 'warn',
+      label: 'starting',
+      reason: 'Started, but the channel has not reported a connection yet.',
+    };
+  }
+  return { tone: 'off', label: 'off', reason: '' };
+}
+
 export default function Home() {
   const somatic = useSomatic();
   const [time, setTime] = useState(new Date());
   const [mode, setMode] = useState(autoModeFromHour(new Date().getHours()));
+  // True once the operator has picked a tab by hand.
+  //
+  // `refresh` runs every 15s and used to apply `snapshot.suggested_mode`
+  // unconditionally, so a tab the user clicked was silently swapped back
+  // to whatever the clock suggested within one tick. Measured against a
+  // live brain at 23:27 local: clicking "Briefing" made it active, and
+  // 18 seconds later the active tab read "Wind-Down" again with no
+  // further input. The tabs were effectively unusable outside the
+  // window where the clock already agreed with the user.
+  //
+  // A ref rather than state because `refresh` is a `useCallback([])` and
+  // must keep a stable identity across ticks (a state dep here would
+  // loop with the useEffect that schedules it).
+  const modePinnedRef = useRef(false);
+  const pickMode = useCallback((id) => {
+    modePinnedRef.current = true;
+    setMode(id);
+  }, []);
   // AUDIT-r14 finding 03 dedup: Home no longer owns a `/api/dashboard`
   // poll. It subscribes to the shared useSystemHealth store (mirrored
   // into local state for the legacy render path) so that the Shell
@@ -267,7 +334,11 @@ export default function Home() {
     if (w.status === 'fulfilled') setWindDown(w.value);
     if (snap.status === 'fulfilled') {
       setSnapshot(snap.value);
-      if (snap.value?.suggested_mode) setMode(snap.value.suggested_mode);
+      // Only steer the tab while the operator has not chosen one. See
+      // `modePinnedRef` above.
+      if (snap.value?.suggested_mode && !modePinnedRef.current) {
+        setMode(snap.value.suggested_mode);
+      }
     }
     if (healthRes.status === 'fulfilled') {
       // /health returns `{ "status": "ok", ... }`; anything else is
@@ -443,15 +514,46 @@ export default function Home() {
   const pairedCount = counts.total ?? 0;
   const pairedOfflineCount = counts.offline ?? 0;
   const skillCount = dashboard?.skills_count ?? skills.length;
-  const hr = Math.round(dashboard?.health?.heart_rate || somatic.heartRate || 0);
+  // `/api/dashboard.health` is the brain's `latest_health` dict, and it
+  // encodes freshness in the KEY, not in the value: a sample inside the
+  // 120s live window lands on `heart_rate`, an older one lands on
+  // `heart_rate_stale`, and `heart_rate_fresh` says which happened
+  // (api/routes/dashboard.py:326-348).
+  //
+  // This tile read only `heart_rate`, so on a stale reading it fell
+  // through to `somatic.heartRate`, which is `dashboard.somatic
+  // .heart_rate`, the SomaticVector's own bpm, carrying no freshness
+  // gate at all. The number then rendered bare, with the `via <source>`
+  // attribution underneath it (that field IS set on the stale branch),
+  // so a forty-minute-old wristband sample was presented exactly like a
+  // live one. DeviceTopology's `liveBadges` on the same payload already
+  // refuses to badge an unfresh reading; the two surfaces disagreed.
+  const health = dashboard?.health || {};
+  const hrReported = health.heart_rate ?? health.heart_rate_stale ?? null;
+  const hr = Math.round(hrReported ?? somatic.heartRate ?? 0);
+  // Stale only when the brain reported a value AND told us it is not
+  // fresh. An absent `heart_rate_fresh` (older brain build) is not
+  // evidence of staleness, so we do not claim it.
+  const hrStale = hrReported != null && health.heart_rate_fresh === false;
   // Surface the wearable source under the bpm so the demo viewer can
   // tell at a glance whether the live tile is reading from the W300
-  // glasses, the Veepoo wristband, or a HealthKit mirror. Brain
-  // ships `heart_rate_source` next to `heart_rate` in the canonical
-  // `_latest_live_wearable_snapshot` payload (Fix #6), so this
-  // label only appears when there's a fresh live reading.
-  const hrSource = (dashboard?.health?.heart_rate_source || '').trim();
-  const cog = Math.round(((dashboard?.health?.cognitive_load ?? somatic.cognitiveLoad) || 0) * 100);
+  // glasses, the Veepoo wristband, or a HealthKit mirror. Only shown
+  // alongside a value the brain itself reported: attributing the
+  // SomaticVector fallback to a named wearable would be a claim we
+  // cannot back.
+  const hrSource = hrReported != null
+    ? (health.heart_rate_source || '').trim()
+    : '';
+  // `cognitive_load` is NOT a key of `latest_health`. Nothing in
+  // api/routes/dashboard.py ever writes one there. The brain ships it
+  // on `dashboard.somatic.cognitive_load` (dashboard.py:372), which is
+  // exactly what `useSomaticHealth` reads. The old
+  // `dashboard?.health?.cognitive_load ?? somatic.cognitiveLoad` was a
+  // read of a field that does not exist, silently saved by its own
+  // fallback. Read the real field.
+  const cog = Math.round(
+    ((dashboard?.somatic?.cognitive_load ?? somatic.cognitiveLoad) || 0) * 100,
+  );
   const sessionCount = dashboard?.session_count ?? 0;
   // Read from the live mirror first (real-time WS deltas) and fall
   // back to the polled dashboard payload only if the WS hasn't
@@ -543,8 +645,30 @@ export default function Home() {
   }
   const overflow = Math.max(skills.length - pinnedSkills.length, 0);
 
+  const nonZeroJobCounts = Object.entries(jobCounts)
+    .filter(([, count]) => Number(count) > 0);
+
   const weather = briefing?.weather;
   const Weather = weather && (WEATHER_ICON[weather.condition] || Sun);
+  const hasBriefingContent = Boolean(
+    briefing?.sleep
+    || weather
+    || briefing?.agenda?.length > 0
+    || briefing?.goals?.length > 0,
+  );
+  // Only the sections this page actually renders. The brain also reports
+  // `vip_emails:not_implemented` on every single request (EmailWatcher
+  // has no VIP recall anywhere in the tree, ambient.py:134-137), and
+  // Home renders no VIP mail section, so echoing it here would put a
+  // permanent red chip on every install for a pane that does not exist.
+  const BRIEFING_SECTIONS = ['sleep', 'agenda', 'goals', 'weather'];
+  const briefingDegraded = (Array.isArray(briefing?.degraded) ? briefing.degraded : [])
+    .filter((d) => BRIEFING_SECTIONS.includes(String(d).split(':')[0]));
+  // Same contract for wind-down: `/api/ambient/wind_down` names the
+  // sections whose lookup raised, and an evening whose recap lookup
+  // failed must not read as "you finished nothing today".
+  const windDownDegraded = (Array.isArray(windDown?.degraded) ? windDown.degraded : [])
+    .filter(Boolean);
 
   return (
     <div className="v2-page v2-page--stack v2-home" data-testid="v2-marker">
@@ -556,7 +680,7 @@ export default function Home() {
               <button
                 key={id}
                 type="button"
-                onClick={() => setMode(id)}
+                onClick={() => pickMode(id)}
                 className={`v2-tab${mode === id ? ' is-active' : ''}`}
                 aria-pressed={mode === id}
               >
@@ -580,12 +704,28 @@ export default function Home() {
                 {' · '}
                 {time.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
               </div>
-              {nextEvent?.event && (
+              {nextEvent?.event ? (
                 <div className="v2-home-next">
                   <Sparkles size={12} aria-hidden="true" />
                   Next: <strong>{nextEvent.event.title || nextEvent.event.summary}</strong>
                 </div>
-              )}
+              ) : nextEvent?.degraded ? (
+                // `/api/ambient/next_event` answers `{event: null,
+                // degraded: "<Type>: <msg>"}` when the calendar lookup
+                // RAISED, and `{event: null, hint: ...}` when there is
+                // simply no calendar. Both used to render as nothing at
+                // all, so a calendar that is connected and erroring
+                // looked exactly like a quiet day.
+                <div
+                  className="v2-home-next"
+                  data-testid="v2-home-next-event-degraded"
+                  style={{ color: 'var(--v2-state-warn)' }}
+                  title={nextEvent.hint || undefined}
+                >
+                  <Sparkles size={12} aria-hidden="true" />
+                  Calendar unavailable: {nextEvent.degraded}
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -701,13 +841,30 @@ export default function Home() {
               </Glass>
             )}
             <Glass level={0} radius="md" padding="sm"><div className="v2-stat-label">Heart rate</div>
-              <div className="v2-stat-value">{hr > 0 ? `${hr}` : '—'}</div>
-              {hr > 0 && hrSource ? (
+              <div
+                className="v2-stat-value"
+                data-testid="v2-home-hr-stat"
+                title={hrStale ? 'Last known reading. The wearable sample is older than the 120s live window.' : undefined}
+              >
+                {hr > 0 && hrStale ? (
+                  <StatusDot tone="warn" label={`Heart rate ${hr}, last known, not current`} />
+                ) : null}
+                {hr > 0 ? ` ${hr}` : '—'}
+              </div>
+              {hr > 0 && (hrSource || hrStale) ? (
                 <div
                   className="v2-stat-sub"
-                  style={{ fontSize: '0.7em', opacity: 0.6, marginTop: '0.15em' }}
+                  data-testid="v2-home-hr-sub"
+                  style={{
+                    fontSize: '0.7em',
+                    opacity: 0.6,
+                    marginTop: '0.15em',
+                    color: hrStale ? 'var(--v2-state-warn)' : undefined,
+                  }}
                 >
-                  via {hrSource}
+                  {hrStale ? 'last known' : null}
+                  {hrStale && hrSource ? ' · ' : null}
+                  {hrSource ? `via ${hrSource}` : null}
                 </div>
               ) : null}
             </Glass>
@@ -831,7 +988,45 @@ export default function Home() {
         </div>
       </Pane>
 
-      {mode === 'briefing' && (briefing?.sleep || weather || briefing?.agenda?.length > 0 || briefing?.goals?.length > 0) && (
+      {/*
+        * Briefing mode. The gate used to be
+        *   mode === 'briefing' && (sleep || weather || agenda || goals)
+        * so on any brain where all four are empty (which is every fresh
+        * install, and every install with no wearable baseline, no
+        * calendar and no OPENWEATHER_API_KEY) clicking "Briefing"
+        * rendered literally nothing. Measured against a live brain: the
+        * page contained zero `.v2-home-grid` nodes in briefing mode, so
+        * the tab was visually indistinguishable from a dead button.
+        *
+        * Worse, `/api/ambient/briefing` reports which of its four
+        * sections FAILED in `degraded[]` (api/routes/ambient.py:66),
+        * and none of it reached the screen: a briefing whose sleep,
+        * agenda and goals lookups all raised looked exactly like a
+        * quiet morning.
+        */}
+      {mode === 'briefing' && (briefingDegraded.length > 0 || !hasBriefingContent) && (
+        <Pane title="Briefing">
+          {briefingDegraded.length > 0 && (
+            <div
+              className="v2-chip v2-chip--error"
+              data-testid="v2-home-briefing-degraded"
+            >
+              Briefing incomplete: {briefingDegraded.join(', ')} could not be read.
+            </div>
+          )}
+          {!hasBriefingContent && (
+            <EmptyState
+              title={briefingDegraded.length > 0
+                ? 'Briefing could not be assembled'
+                : 'Nothing to brief yet'}
+              hint={briefingDegraded.length > 0
+                ? 'The sections above failed to load. Check the brain log.'
+                : 'Sleep needs a wearable baseline, agenda needs a connected calendar, weather needs OPENWEATHER_API_KEY, and goals need an active intent plan.'}
+            />
+          )}
+        </Pane>
+      )}
+      {mode === 'briefing' && hasBriefingContent && (
         <div className="v2-home-grid">
           {briefing?.sleep && (
             <Glass level={1} radius="md" padding="md">
@@ -887,9 +1082,30 @@ export default function Home() {
               <div className="v2-p v2-p--muted">Quiet. Nothing queued.</div>
             ) : (
               <ul className="v2-ambient-list">
+                {/*
+                  * `/api/jobs` items are
+                  * {id, kind, name, status, started_at, progress,
+                  *  context_session_id, cancellable_via, detail}:
+                  * every one of the six aggregator sources builds that
+                  * shape (api/routes/jobs.py). There is no
+                  * `description` key anywhere in it, so this row read a
+                  * field the brain never sends and dropped the job's
+                  * name entirely. Measured against a live brain with
+                  * one real routine queued, the row rendered
+                  * "routine · scheduled" while "Right now" showed the
+                  * same job as "Routine · Audit probe routine for Home
+                  * page · scheduled". Same payload, two panes, and only
+                  * one of them told you WHICH job.
+                  *
+                  * `jobKindLabel` for the same reason it exists in
+                  * "Right now": the raw kinds are the brain's internal
+                  * source names ("tool_genesis", "background_bash").
+                  */}
                 {jobs.slice(0, 6).map((j) => (
                   <li key={j.id || j.job_id}>
-                    <strong>{j.kind || 'job'}</strong>{j.description ? ` · ${j.description}` : ''}{j.status ? ` · ${j.status}` : ''}
+                    <strong>{jobKindLabel(j.kind)}</strong>
+                    {j.name || j.description ? ` · ${j.name || j.description}` : ''}
+                    {j.status ? ` · ${j.status}` : ''}
                   </li>
                 ))}
               </ul>
@@ -914,6 +1130,15 @@ export default function Home() {
               </ul>
             </Glass>
           )}
+        </div>
+      )}
+
+      {mode === 'wind_down' && windDownDegraded.length > 0 && (
+        <div
+          className="v2-chip v2-chip--error"
+          data-testid="v2-home-winddown-degraded"
+        >
+          Wind-down incomplete: {windDownDegraded.join(', ')} could not be read.
         </div>
       )}
 
@@ -964,18 +1189,26 @@ export default function Home() {
             />
           )}
           <div className="v2-channel-list">
-            {Object.entries(channels).map(([name, info]) => (
-              <Glass key={name} level={0} radius="sm" padding="sm" className="v2-channel-row">
-                <StatusDot
-                  tone={info?.connected ? 'live' : 'off'}
-                  label={`${name} ${info?.connected ? 'connected' : info?.enabled ? 'starting' : 'off'}`}
-                />
-                <span className="v2-channel-name">{name}</span>
-                <span className="v2-channel-state">
-                  {info?.connected ? 'connected' : info?.enabled ? 'starting' : 'off'}
-                </span>
-              </Glass>
-            ))}
+            {Object.entries(channels).map(([name, info]) => {
+              const st = channelState(info);
+              return (
+                <Glass key={name} level={0} radius="sm" padding="sm" className="v2-channel-row">
+                  <StatusDot
+                    tone={st.tone}
+                    pulse={st.tone === 'live'}
+                    label={`${name} ${st.label}`}
+                  />
+                  <span className="v2-channel-name">{name}</span>
+                  <span
+                    className="v2-channel-state"
+                    data-testid={`v2-home-channel-${name}`}
+                    title={st.reason || undefined}
+                  >
+                    {st.label}
+                  </span>
+                </Glass>
+              );
+            })}
           </div>
         </Pane>
 
@@ -1039,9 +1272,18 @@ export default function Home() {
               ))}
             </div>
           )}
-          {Object.keys(jobCounts).length > 0 && (
+          {/*
+            * `counts_by_kind` always carries all six aggregator sources,
+            * zeros included, so this row rendered "TaskFlow: 0 ·
+            * Routine: 0 · Specialist: 0 · New tool: 0 · Device: 0 ·
+            * Shell job: 0" directly beneath the "Idle, no active jobs"
+            * empty state on every quiet brain. Six chips restating what
+            * the empty state just said. Show only the kinds that have
+            * something in them.
+            */}
+          {nonZeroJobCounts.length > 0 && (
             <div className="v2-device-caps" style={{ marginTop: 10 }}>
-              {Object.entries(jobCounts).map(([kind, count]) => (
+              {nonZeroJobCounts.map(([kind, count]) => (
                 <span key={kind} className="v2-chip v2-chip--muted">{jobKindLabel(kind)}: {count}</span>
               ))}
             </div>
