@@ -32,7 +32,9 @@ const EMPTY = {
   budget: 0,
   costKnown: false,
   autonomy: '',
-  reachable: true, // false once every source has failed
+  uptime: 0,        // seconds this brain process has been up
+  llmAvailable: false,
+  reachable: true,  // false once every source has failed
 };
 
 let snapshot = { ...EMPTY };
@@ -72,6 +74,8 @@ async function poll() {
     next.budget = Number(b.daily_budget_usd ?? 0);
     next.budgetOn = Boolean(b.enabled);
     next.autonomy = String(v.autonomy || '');
+    next.uptime = Number(v.uptime_s ?? 0);
+    next.llmAvailable = Boolean(v.llm_available);
   }
   // Only a total failure means unreachable. One slow endpoint must not
   // make the shell claim the brain is down.

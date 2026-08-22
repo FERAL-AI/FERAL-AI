@@ -465,6 +465,9 @@ async def _get_dashboard_data() -> dict:
         # endpoints, because the shell already polls this one and the
         # numbers are wanted together.
         "budget": _budget_status(),
+        # Seconds this process has been up. The Brain readout had no
+        # uptime to show because nothing recorded a start time.
+        "uptime_s": max(0.0, time.time() - getattr(state, "started_at", time.time())),
         "autonomy": _autonomy_mode(),
         "demo": is_demo,
         "is_demo_mode": getattr(state, "_demo", None) is not None,

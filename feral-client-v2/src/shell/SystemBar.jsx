@@ -104,9 +104,22 @@ export default function SystemBar({ onOpenPalette, railOpen, onToggleRail }) {
         type="button"
         className="v2-sysbar-brand"
         onClick={() => navigate('/console')}
-        title="Console"
+        title={v.reachable ? 'Brain is online. Open the console.' : 'Brain is not responding'}
       >
-        <span className="v2-sysbar-mark" aria-hidden="true" />
+        {/* Green when the brain is answering, red when it is not.
+            This was a conic gradient ring, which is the design's mark
+            but says nothing: a dot next to a product name is read as a
+            status light, and green/red is the convention people already
+            know. It reports `reachable`, which is false only once every
+            source has failed, so one slow endpoint does not turn it red. */}
+        <span
+          className="v2-sysbar-mark"
+          data-up={v.reachable ? 'yes' : 'no'}
+          aria-hidden="true"
+        />
+        <span className="v2-sr-only">
+          {v.reachable ? 'Brain is online' : 'Brain is not responding'}
+        </span>
         FERAL
       </button>
 
