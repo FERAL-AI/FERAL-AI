@@ -155,3 +155,75 @@ describe('the page is never taken away', () => {
     )).toMatch(/if \(!visible\) setVariant\('docked'\)/);
   });
 });
+
+describe('one session, one way to end it', () => {
+  it('the overlay drops its End when a lane is on screen', async () => {
+    // Three ways to stop a session were visible at once: this overlay's
+    // "End voice", the composer lane's end button, and the system bar's
+    // global toggle. The lane's sits directly under the field you are
+    // looking at, so the overlay's is the redundant one.
+    vi.resetModules();
+    vi.doMock('../../shell/VoiceContext', () => ({
+      useVoice: () => ({
+        active: true, state: 'active', stop: () => {}, laneMounted: true,
+      }),
+      useRegisterVoiceLane: () => {},
+      VoiceProvider: ({ children }) => children,
+    }));
+    const { default: VoiceOverlay } = await import('../../shell/VoiceOverlay');
+    render(<VoiceOverlay />);
+
+    expect(screen.queryByText('End voice')).toBeNull();
+    // Expand is a different action with no lane equivalent, so it stays.
+    expect(screen.getByLabelText('Expand voice')).toBeInTheDocument();
+  });
+
+  it('keeps its End on every surface that has no lane', async () => {
+    // The lane renders only in the chat composer. The overlay is the
+    // only voice surface on every other route, so suppressing this
+    // unconditionally would leave those with no way out at all.
+    vi.resetModules();
+    vi.doMock('../../shell/VoiceContext', () => ({
+      useVoice: () => ({
+        active: true, state: 'active', stop: () => {}, laneMounted: false,
+      }),
+      useRegisterVoiceLane: () => {},
+      VoiceProvider: ({ children }) => children,
+    }));
+    const { default: VoiceOverlay } = await import('../../shell/VoiceOverlay');
+    render(<VoiceOverlay />);
+
+    expect(screen.getByText('End voice')).toBeInTheDocument();
+  });
+
+  it('keeps its End in fullscreen even with a lane, because the lane is covered', async () => {
+    vi.resetModules();
+    vi.doMock('../../shell/VoiceContext', () => ({
+      useVoice: () => ({
+        active: true, state: 'active', stop: () => {}, laneMounted: true,
+      }),
+      useRegisterVoiceLane: () => {},
+      VoiceProvider: ({ children }) => children,
+    }));
+    const { default: VoiceOverlay } = await import('../../shell/VoiceOverlay');
+    render(<VoiceOverlay />);
+
+    fireEvent.click(screen.getByLabelText('Expand voice'));
+    expect(screen.getByText('End voice')).toBeInTheDocument();
+  });
+
+  it('renders standalone, with no Router', async () => {
+    // The first version read useLocation().pathname to decide this,
+    // which is a different question that happens to correlate, and it
+    // made the overlay unrenderable outside a Router: eight standalone
+    // tests failed at once. The dependency is the lane, not the URL.
+    vi.resetModules();
+    vi.doMock('../../shell/VoiceContext', () => ({
+      useVoice: () => ({ active: true, state: 'active', stop: () => {} }),
+      useRegisterVoiceLane: () => {},
+      VoiceProvider: ({ children }) => children,
+    }));
+    const { default: VoiceOverlay } = await import('../../shell/VoiceOverlay');
+    expect(() => render(<VoiceOverlay />)).not.toThrow();
+  });
+});

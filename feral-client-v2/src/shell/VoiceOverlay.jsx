@@ -195,6 +195,16 @@ export default function VoiceOverlay() {
     && voice.transcriptConfidence < 0.6;
 
   const isFullscreen = variant === 'fullscreen';
+  // The composer's voice lane carries its own mute and end. When one is
+  // mounted, this overlay must not offer a second End beside it.
+  //
+  // Asked of the lane through VoiceContext rather than inferred from
+  // the route: "is there a lane" is the actual question, and reading
+  // the URL instead made this component unrenderable outside a Router.
+  //
+  // Fullscreen is the exception. The lane is covered by it, so the
+  // overlay has to keep its own way out.
+  const laneOwnsEnd = !isFullscreen && Boolean(voice.laneMounted);
   const dialogRef = useRef(null);
   const minimize = useCallback(() => setVariant('docked'), []);
 
@@ -301,6 +311,19 @@ export default function VoiceOverlay() {
         >
           {isFullscreen ? 'Minimize' : 'Expand'}
         </button>
+        {/* Not on /chat. The composer's voice lane owns mute and end
+            there, and its End sits directly under the text field you
+            are looking at, so a second one here made three ways to stop
+            a session visible at once: this, the lane's, and the system
+            bar's global toggle.
+
+            The lane renders ONLY on /chat, and this overlay is the only
+            voice surface on the other 27 routes, so it cannot simply be
+            deleted. Suppressing the duplicate where the lane exists
+            removes the confusion without taking the control away
+            anywhere it is the only one. Expand stays on every route:
+            it is a different action and the lane has no equivalent. */}
+        {!laneOwnsEnd && (
         <button
           type="button"
           className="v2-btn v2-btn--primary"
@@ -308,6 +331,7 @@ export default function VoiceOverlay() {
         >
           End voice
         </button>
+        )}
       </Glass>
     </div>
   );

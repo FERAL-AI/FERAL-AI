@@ -1,5 +1,6 @@
 import React from 'react';
 import { Mic, MicOff, Square } from 'lucide-react';
+import { useRegisterVoiceLane } from '../shell/VoiceContext';
 
 /**
  * Voice as a lane in the composer, not a takeover.
@@ -42,6 +43,13 @@ export function laneLabel({ phase, muted, state }) {
 export default function VoiceLane({ voice, level = 0, muted = false, onMute, onEnd }) {
   const label = laneLabel({ phase: voice?.phase, muted, state: voice?.state });
   const bars = meterBars(level);
+
+  // Tell the shell a lane is on screen, so the docked overlay does not
+  // put a second "End voice" next to this one. Registered from here
+  // rather than inferred from the route, because this component is the
+  // only thing that knows whether a lane exists, and reading the URL
+  // instead coupled the overlay to a Router it does not need.
+  useRegisterVoiceLane(true);
 
   return (
     <div
