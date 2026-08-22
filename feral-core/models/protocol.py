@@ -12,7 +12,7 @@ from typing import Optional, Literal, Any
 from uuid import uuid4
 from time import time
 
-HUP_VERSION = "1.3.0"
+HUP_VERSION = "1.4.0"
 
 
 # ─────────────────────────────────────────────
@@ -294,6 +294,20 @@ class ChatResponsePayload(BaseModel):
     channel: Literal["chat", "vision_ask"] = "chat"
     reply_to: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
     error: Optional[str] = None
+    somatic: Optional["SomaticStatePayload"] = None
+    """The behavioural policy in force for THIS reply, or None.
+
+    Present so a client can attribute the shape of an answer to the
+    state that produced it, on the same frame as the answer. The
+    unsolicited ``somatic_state`` frame reports the policy when it
+    changes; this reports the policy that was actually applied to a
+    given turn, which is the thing you can point at on camera.
+
+    None when no somatic engine is attached or no biometric reading has
+    ever landed. Deliberately not an empty object: "the agent is not
+    adapting" and "the agent is adapting to a neutral state" are
+    different claims and a UI should be able to tell them apart.
+    """
 
 
 class VoiceSessionStartPayload(BaseModel):
@@ -566,6 +580,75 @@ class AmbientDigestPayload(BaseModel):
     #: an unsolicited push, which is always a single digest.
     remaining: int = Field(default=0, ge=0)
 
+    physiological_note: str = Field(default="", max_length=1000)
+    """What the body did during this conversation, or "".
+
+    A separate field rather than a sentence folded into ``summary`` so a
+    client can render it distinctly, or suppress it entirely, and so a
+    reader can always tell which part of the record is what people said
+    and which part is what a heart rate did.
+
+    Guaranteed never to describe an emotional state, and never derived
+    from a movement-confounded moment: confounded moments are dropped
+    before the model sees them, and the sentence it returns is checked
+    again afterwards. See agents/ambient_transcript.usable_moments and
+    sanitise_physiological_note.
+    """
+
+    moments_considered: int = Field(default=0, ge=0)
+    """Moments that survived the confound and confidence filters.
+
+    Lets a client distinguish "no physiological signal was measured"
+    from "signal was measured and said nothing worth reporting", which
+    an empty note alone cannot.
+    """
+
+
+class AmbientMomentPayload(BaseModel):
+    """One point in a recorded conversation where the body reacted.
+
+    Detected on the phone, which holds the raw heart-rate series aligned
+    to the audio. The brain never computes these; it reasons over them,
+    and the summary is the only place they surface.
+
+    ``confounded`` IS THE MOST IMPORTANT FIELD IN THIS MODEL. It means
+    movement explains the rise: the wearer stood up, walked, climbed
+    stairs. A confounded moment is a fact about physics, not about
+    feeling, and a summary that narrates it as an emotional response
+    ("his heart rate spiked when the investor update came up") is
+    fabricating an inner state from a flight of stairs. That is the
+    difference between a health product and a liability, so the
+    prohibition is enforced in the prompt AND independently after the
+    model returns, rather than trusted to either alone.
+
+    ``segment_index`` INDEXES THE PHONE'S OWN SEGMENTATION, not the
+    brain's. ``agents/ambient_transcript.py`` chunks the transcript into
+    6000-character map segments and labels them ``[segment N]``; those
+    are a different partition of the same conversation and the two
+    numberings do not correspond. Nothing may join on the bare index.
+    ``quote`` and ``t_offset_s`` are how a moment is actually placed in
+    the text, and a moment carrying neither is reported to the model as
+    an unanchored session-level observation.
+    """
+
+    segment_index: int = Field(default=0, ge=0)
+    """Index into the PHONE's segmentation. See the class docstring."""
+
+    delta_bpm: float = Field(default=0.0, ge=-300.0, le=300.0)
+    """Heart-rate deviation from ``baseline_hr``, signed."""
+
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    """The phone's confidence that this is a real reaction, 0-1."""
+
+    confounded: bool = False
+    """Movement explains the rise. NEVER describe as an emotional response."""
+
+    quote: str = Field(default="", max_length=1000)
+    """Optional. The spoken words at this moment, for anchoring."""
+
+    t_offset_s: Optional[float] = Field(default=None, ge=0.0)
+    """Optional. Seconds from ``started_at``, for anchoring."""
+
 
 class AmbientTranscriptPayload(BaseModel):
     """A finished ambient conversation transcribed on the phone.
@@ -598,10 +681,97 @@ class AmbientTranscriptPayload(BaseModel):
     language: str = Field(default="en-US", max_length=64)
     speakers: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
 
+    # ── Physiology alongside the words ──────────────────────────────
+    #
+    # All optional. A phone that computes none of this sends none of it
+    # and the transcript is summarized exactly as before.
+    moments: list["AmbientMomentPayload"] = Field(
+        default_factory=list, max_length=MAX_LIST_ITEMS,
+    )
+    """Points in the conversation where the body reacted.
+
+    Computed on the phone, which is the only side that has the raw
+    heart-rate series aligned to the audio. The brain does not detect
+    these; it reasons over them.
+    """
+
+    baseline_hr: Optional[float] = Field(default=None, ge=0.0, le=300.0)
+    """Session-level resting heart rate the deltas are measured against.
+
+    Without it a delta is uninterpretable: +12 bpm off a baseline of 55
+    is a different event from +12 off 95.
+    """
+
+    respiratory_bpm: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    """Session-level respiration rate, breaths per minute."""
+
 
 # ─────────────────────────────────────────────
 # Payload Models — Brain → Client
 # ─────────────────────────────────────────────
+
+class SomaticStatePayload(BaseModel):
+    """The body state the agent is currently acting on, and what it did
+    about it.
+
+    This exists because the behavioural policy was applied invisibly.
+    The agent read the somatic vector, shortened its answers, went quiet
+    and restricted its own tools, and none of that was observable from
+    outside: a shorter reply is indistinguishable from a reply that
+    happened to be short. Anything a system changes about itself in
+    response to the user's body has to be inspectable, both to prove it
+    is working and to let the user disagree with it.
+
+    Two halves, deliberately in one frame. ``cognitive_load`` and the
+    vitals are the INPUT; ``tone``, ``suppress_non_urgent`` and
+    ``tool_restrictions`` are the OUTPUT the policy derived from it.
+    Shipping only the second half gives a UI no way to explain itself,
+    and only the first gives it nothing to show.
+
+    ``stale`` is not decoration. A somatic vector persists in memory
+    after the wearable disconnects, so a policy can go on being applied
+    from a reading taken hours ago. A client must not present a stale
+    frame as the wearer's current state.
+    """
+
+    session_id: str = Field(default="", max_length=MAX_SESSION_ID_LEN)
+
+    # Input: what the body is doing.
+    cognitive_load: float = Field(default=0.0, ge=0.0, le=1.0)
+    stress_level: float = Field(default=0.0, ge=0.0, le=1.0)
+    fatigue_level: float = Field(default=0.0, ge=0.0, le=1.0)
+    heart_rate: float = Field(default=0.0, ge=0.0)
+    hrv_ms: float = Field(default=0.0, ge=0.0)
+    spo2_pct: float = Field(default=0.0, ge=0.0)
+    activity_level: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    # Output: what the agent is doing about it.
+    tone: str = Field(default="normal", max_length=MAX_NAME_LEN)
+    proactive_level: str = Field(default="normal", max_length=MAX_NAME_LEN)
+    suppress_non_urgent: bool = False
+    max_response_tokens: Optional[int] = Field(default=None, ge=0)
+    tool_restrictions: list[str] = Field(
+        default_factory=list, max_length=MAX_LIST_ITEMS,
+    )
+
+    # Provenance.
+    updated_at: float = Field(default=0.0, ge=0.0)
+    age_s: float = Field(default=0.0, ge=0.0)
+    stale: bool = False
+    has_biometrics: bool = False
+    reason: str = Field(default="", max_length=MAX_NAME_LEN)
+    """Why this frame was sent: "biometrics", "poll" or "chat_turn"."""
+
+
+# ChatResponsePayload.somatic is annotated with this class by name,
+# hundreds of lines before it exists. `from __future__ import
+# annotations` makes every annotation in this module a string, so
+# pydantic cannot resolve that reference at class-creation time and
+# leaves the model incomplete: constructing one raises
+# PydanticUserError about an undefined annotation. Rebuilding here, at
+# the first point where the name is bound, completes it.
+ChatResponsePayload.model_rebuild()
+
 
 class TranscriptPayload(BaseModel):
     """Speech-to-text result.
@@ -1419,6 +1589,12 @@ MESSAGE_TYPES = {
 
     # Brain → Client
     "transcript": TranscriptPayload,
+    # The behavioural policy the agent is currently applying, plus the
+    # body state it derived from. Unsolicited: pushed when biometrics
+    # move the policy, so a client can render what the agent is doing
+    # about the wearer's state instead of inferring it from reply
+    # length. See SomaticStatePayload.
+    "somatic_state": SomaticStatePayload,
     "ambient_transcript_ack": AmbientTranscriptAckPayload,
     # Brain → Client, both unsolicited on completion and as the reply to
     # ambient_digest_request. One type for both so the phone has one

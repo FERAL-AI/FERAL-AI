@@ -317,6 +317,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install ripgrep
+        # The push-to-main matrix job installs ripgrep and this lane did
+        # not, so the two lanes were testing different grep engines. The
+        # PR gate ran only the python fallback, where
+        # test_a_ripgrep_failure_is_not_reported_as_an_empty_success
+        # asserts 400 for the invalid pattern `foo(` and the fallback
+        # answers 500. Reproduced locally by stripping `rg` from PATH:
+        # passes with it, fails without, same 500 vs 400.
+        #
+        # Installing it here rather than relaxing the assertion, for the
+        # same reason the matrix job gives: ripgrep is the engine almost
+        # every real install uses, so a lane that cannot exercise it is
+        # not testing the common path.
+        #
+        # The underlying parity defect is real and is NOT fixed by this:
+        # the fallback returns 500 where ripgrep returns 400 for an
+        # unparseable pattern, in a suite named for parity. Worth its own
+        # change.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+        working-directory: .
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

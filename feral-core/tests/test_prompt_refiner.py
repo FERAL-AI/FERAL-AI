@@ -28,8 +28,10 @@ from agents.prompt_refiner import (
     _RefinerCache,
     _device_target_keyword,
     _is_control_token,
+    infer_device_target,
     refine,
 )
+from security.dangerous_tools import is_tool_allowed, resolve_surface_from_context
 
 
 # ───────────────────────── wire contract ──────────────────────────
@@ -109,6 +111,72 @@ async def test_fast_path_short_text_skips_llm(monkeypatch):
 )
 def test_device_target_keyword_extraction(text, expected):
     assert _device_target_keyword(text) == expected
+
+
+# ─────────────── device routing is the brain's job ────────────────
+#
+# Reported from the Theora iOS client on 2026-08-22: it was sending
+# `device_target` itself, having reimplemented these keyword rules,
+# because the brain's copy sat behind FERAL_PROMPT_REFINER and that
+# flag is off by default. Two copies of a security-routing rule in two
+# languages is a drift bug with a permission boundary attached.
+
+
+def test_infer_device_target_is_not_behind_the_refiner_flag(monkeypatch):
+    """The whole point. `refine` returns an identity envelope with the
+    flag off and infers nothing; this must still answer."""
+    monkeypatch.delenv("FERAL_PROMPT_REFINER", raising=False)
+    assert infer_device_target("open my Mac browser to youtube") == "brain"
+    assert infer_device_target("call mom on my phone") == "phone"
+    assert infer_device_target("via the glasses, snap a photo") == "glasses"
+
+
+def test_infer_device_target_says_nothing_when_the_text_says_nothing():
+    """A wrong guess is worse than no guess: None leaves the caller on
+    its source→surface default rather than moving the boundary."""
+    assert infer_device_target("just remind me later") is None
+    assert infer_device_target("") is None
+
+
+@pytest.mark.asyncio
+async def test_refine_with_flag_off_still_infers_nothing(monkeypatch):
+    """Pins the gap this exists to close, so nobody 'simplifies' the
+    inference back inside `refine`."""
+    monkeypatch.delenv("FERAL_PROMPT_REFINER", raising=False)
+    r = await refine("open my Mac browser to youtube", llm=None)
+    assert r.device_target is None
+    assert infer_device_target("open my Mac browser to youtube") == "brain"
+
+
+def test_inferred_brain_target_unlocks_the_mac_from_a_phone():
+    """The end of the chain: what the inference actually buys.
+
+    Without a device_target, source "phone_surface" resolves to
+    http_api, where desktop_control__shell_command is denied. That deny
+    was the "iOS chat says it has no access to my Mac" complaint.
+    """
+    text = "run the build script on my Mac"
+    without = resolve_surface_from_context({"source": "phone_surface"})
+    assert without == "http_api"
+    assert not is_tool_allowed("desktop_control__shell_command", without)
+
+    with_target = resolve_surface_from_context({
+        "source": "phone_surface",
+        "device_target": infer_device_target(text),
+    })
+    assert with_target == "brain_host"
+    assert is_tool_allowed("desktop_control__shell_command", with_target)
+
+
+def test_inference_cannot_widen_the_web_client():
+    """The same call site runs on the WebUI chat path, so this is the
+    check that it can only ever narrow: websocket's deny list is a
+    subset of both surfaces the inference can select."""
+    from security.dangerous_tools import SURFACE_DENY_LISTS
+
+    websocket = SURFACE_DENY_LISTS["websocket"]
+    assert websocket <= SURFACE_DENY_LISTS["brain_host"]
+    assert websocket <= SURFACE_DENY_LISTS["phone_actuator"]
 
 
 # ───────────────────────── feature flag ──────────────────────────

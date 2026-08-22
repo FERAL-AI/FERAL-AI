@@ -11,7 +11,7 @@ public enum FeralNodeSDKInfo {
     /// `audio_chunk`. Adds `glasses_frame` (§5.4.3) for smart-glasses
     /// vision streaming under a per-device circular buffer in
     /// `feral-core/perception/glasses_buffer.py`.
-    public static let hupVersion = "1.3.0"
+    public static let hupVersion = "1.4.0"
 }
 
 // MARK: - Schema-correct enums for phone-as-peer envelopes

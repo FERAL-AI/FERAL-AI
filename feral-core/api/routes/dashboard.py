@@ -120,11 +120,24 @@ async def context_live():
     if hasattr(state, 'somatic_engine') and state.somatic_engine and state.sessions:
         for sid in state.sessions:
             vec = state.somatic_engine.get_vector(sid)
-            somatic = {
-                "cognitive_load": vec.cognitive_load,
-                "activity_level": vec.activity_level,
-                "circadian_phase": vec.circadian_phase,
-            }
+            # This used to report the vector alone: cognitive_load,
+            # activity, circadian phase. That is the INPUT to the
+            # behavioural policy and none of the OUTPUT, so a dashboard
+            # could show a load figure while the thing the load actually
+            # did (shorter answers, suppressed proactive messages,
+            # restricted tools) stayed invisible. state_frame carries
+            # both halves and is the same shape the phone gets on the
+            # `somatic_state` HUP frame.
+            try:
+                somatic = state.somatic_engine.state_frame(sid, reason="poll")
+            except Exception:
+                somatic = {
+                    "cognitive_load": vec.cognitive_load,
+                    "activity_level": vec.activity_level,
+                    "circadian_phase": vec.circadian_phase,
+                }
+            else:
+                somatic["circadian_phase"] = vec.circadian_phase
             break
 
     hardware_context = ""

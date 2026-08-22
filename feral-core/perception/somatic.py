@@ -12,6 +12,42 @@ from typing import Optional
 
 logger = logging.getLogger("feral.perception.somatic")
 
+# Plausible RMSSD range in milliseconds. `hrv_ms` is the single largest
+# term in cognitive load (weight 0.3, and `1.0 - hrv_ms/100.0`), so a
+# reading on the wrong scale does not degrade the policy, it inverts it:
+# a vendor "HRV index" of 3 on some 0-10 scale reads as 0.97 load and
+# puts the agent into calm/suppress/tool-restricted mode permanently,
+# while the same index at 250 reads as zero load and never leaves it.
+#
+# Bounds are deliberately generous rather than clinical. Resting RMSSD
+# in healthy adults spans roughly 15-100 ms and falls into single digits
+# under strain or with age, so the floor is set below the physiological
+# floor rather than at it: the job here is to catch a wrong SCALE, not
+# to second-guess a real body.
+HRV_MIN_MS = 5.0
+HRV_MAX_MS = 300.0
+
+# Past this, a somatic vector describes a body that was, not a body that
+# is. Matches the 120 s window perception.fusion, the dashboard "current"
+# slot and the proactive freshness gate already use, so "fresh" means one
+# thing across the brain rather than three.
+SOMATIC_STALE_AFTER_S = 120.0
+
+
+def plausible_hrv_ms(value: float) -> bool:
+    """True when ``value`` could be an RMSSD reading in milliseconds.
+
+    Anything else is a unit or scale error at the source and is dropped
+    rather than clamped. Clamping would turn "the phone sent an index"
+    into a confident 5 ms, which is a maximum-stress reading, and the
+    policy would act on it.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    return HRV_MIN_MS <= v <= HRV_MAX_MS
+
 
 @dataclass
 class SomaticVector:
@@ -150,7 +186,20 @@ class SomaticEngine:
         if heart_rate > 0:
             v.heart_rate = heart_rate
         if hrv_ms > 0:
-            v.hrv_ms = hrv_ms
+            # Scale check, not a clamp. See plausible_hrv_ms: a reading
+            # on the wrong scale drives the policy harder than no
+            # reading at all, so an implausible one is dropped and the
+            # previous value stands.
+            if plausible_hrv_ms(hrv_ms):
+                v.hrv_ms = float(hrv_ms)
+            else:
+                logger.warning(
+                    "Rejecting implausible hrv_ms=%r for session=%s: RMSSD in "
+                    "milliseconds is expected to fall in [%.0f, %.0f]. A value "
+                    "outside that is a unit or scale error at the source, and "
+                    "hrv_ms is the largest single term in cognitive load.",
+                    hrv_ms, session_id[:8], HRV_MIN_MS, HRV_MAX_MS,
+                )
         if spo2_pct > 0:
             v.spo2_pct = spo2_pct
         if skin_temp_c > 0:
@@ -164,6 +213,14 @@ class SomaticEngine:
         if last_sleep_quality > 0:
             v.last_sleep_quality = last_sleep_quality
         v.timestamp = time.time()
+        # Circadian phase was only ever set by update_interaction, so a
+        # session fed by a wearable and nothing else kept the field at
+        # its 0.0 default, which reads as MIDNIGHT. Measured: a glasses
+        # stream at 14:00 with HR 78 and SpO2 97 produced
+        # tone="calm", suppress_non_urgent=True from the `hour < 5`
+        # branch, and a spurious 0.3 circadian term in cognitive load.
+        # The clock is available here for the asking, so ask it.
+        self._update_circadian(session_id)
         logger.debug(
             "Biometrics updated session=%s HR=%.0f HRV=%.0f SpO2=%.0f",
             session_id[:8], v.heart_rate, v.hrv_ms, v.spo2_pct,
@@ -303,6 +360,55 @@ class SomaticEngine:
 
         return policy
 
+    def state_frame(self, session_id: str, *, reason: str = "poll") -> dict:
+        """The somatic vector and the policy derived from it, as a dict.
+
+        Shaped for ``models.protocol.SomaticStatePayload``. This is the
+        observable form of a thing that was previously invisible: the
+        agent already shortened its answers, suppressed proactive
+        messages and restricted its own tools from this state, and none
+        of that could be seen from outside.
+
+        Derived from ``get_behavioral_policy``, which is the policy the
+        system prompt is actually built from. ``BehavioralPolicy.from_vector``
+        is a second, DIFFERENT derivation with no production caller (it
+        answers "calm" where this answers "concise"), so reporting that
+        one would show the client a policy the agent is not applying.
+        """
+        v = self.get_vector(session_id)
+        policy = self.get_behavioral_policy(session_id)
+        now = time.time()
+        # timestamp is only written by update_biometrics, so 0.0 means
+        # no wearable reading has ever landed on this session.
+        has_bio = v.timestamp > 0 and (
+            v.heart_rate > 0 or v.hrv_ms > 0 or v.spo2_pct > 0
+        )
+        age = max(0.0, now - v.timestamp) if v.timestamp > 0 else 0.0
+        return {
+            "session_id": session_id,
+            "cognitive_load": round(v.cognitive_load, 4),
+            "stress_level": round(v.stress_level, 4),
+            "fatigue_level": round(v.fatigue_level, 4),
+            "heart_rate": v.heart_rate,
+            "hrv_ms": v.hrv_ms,
+            "spo2_pct": v.spo2_pct,
+            "activity_level": max(0.0, v.activity_level),
+            "tone": policy.tone,
+            "proactive_level": policy.proactive_level,
+            "suppress_non_urgent": policy.suppress_non_urgent,
+            "max_response_tokens": policy.max_response_tokens,
+            "tool_restrictions": list(policy.tool_restrictions),
+            "updated_at": v.timestamp,
+            "age_s": round(age, 3),
+            # A vector outlives the wearable that fed it. Without this a
+            # client would present an hours-old reading as the wearer's
+            # current state, which is the one thing a body-state display
+            # must never do.
+            "stale": bool(has_bio and age > SOMATIC_STALE_AFTER_S),
+            "has_biometrics": bool(has_bio),
+            "reason": reason,
+        }
+
     def build_system_prompt_section(self, session_id: str) -> str:
         """Build the somatic context section for the LLM system prompt."""
         v = self.get_vector(session_id)
@@ -333,32 +439,98 @@ class SomaticEngine:
 
     def update_from_perception_frame(self, session_id: str, sensors: dict):
         """Bridge: extract biometric fields from a perception sensor dict and
-        forward them to the somatic vector."""
-        vitals = sensors.get("vitals", {})
-        hr = vitals.get("ppg_heart_rate") or sensors.get("ppg_heart_rate") or sensors.get("heart_rate_bpm") or 0
-        hrv = vitals.get("hrv_ms") or sensors.get("hrv_ms") or 0
-        spo2 = vitals.get("spo2_pct") or sensors.get("spo2_pct") or 0
-        temp = vitals.get("skin_temperature_c") or 0
-        steps = vitals.get("steps_today") or sensors.get("steps_today") or 0
-        battery = sensors.get("battery_pct") or sensors.get("device", {}).get("battery_pct") or 0
-        sleep_q = sensors.get("last_sleep_quality") or vitals.get("last_sleep_quality") or 0
-        env = sensors.get("environment", {})
-        lux = env.get("ambient_light_lux") or 0
+        forward them to the somatic vector.
 
-        activity_map = {"resting": 0.0, "sedentary": 0.0, "walking": 0.5, "running": 1.0, "stressed": 0.6}
-        inferred = sensors.get("inferred_state", "")
-        activity = activity_map.get(inferred, 0.0)
+        Reads BOTH the nested ``vitals`` shape and the flat one.
+        ``api/server._handle_biometric_device_event`` builds a flat dict
+        (that is its documented contract with the legacy ``telemetry``
+        branch), so any key looked up only under ``vitals`` was
+        unreachable from the glasses. Measured against a live brain
+        before this change, feeding one device_event of each type:
+
+            heart_rate  78    -> arrived
+            spo2        97    -> arrived
+            skin_temp   33.4  -> DROPPED (written flat, read nested)
+            steps       4213  -> DROPPED (written "steps", read "steps_today")
+            hrv         42    -> DROPPED (no ingestion path at all)
+
+        so the vector the LLM saw was "HR:78bpm | SpO2:97%" and nothing
+        else, and cognitive load ran without its largest term.
+        """
+        vitals = sensors.get("vitals", {})
+
+        def _pick(*keys, default=0):
+            """First present, non-None value across vitals then flat."""
+            for source in (vitals, sensors):
+                if not isinstance(source, dict):
+                    continue
+                for key in keys:
+                    value = source.get(key)
+                    if value is not None and value != "":
+                        return value
+            return default
+
+        hr = _pick("ppg_heart_rate", "heart_rate_bpm", "heart_rate")
+        hrv = _pick("hrv_ms", "hrv_rmssd_ms", "rmssd_ms")
+        spo2 = _pick("spo2_pct", "spo2")
+        temp = _pick("skin_temperature_c", "skin_temp_c")
+        steps = _pick("steps_today", "steps")
+        battery = _pick("battery_pct") or sensors.get("device", {}).get("battery_pct") or 0
+        sleep_q = _pick("last_sleep_quality")
+        env = sensors.get("environment", {})
+        lux = env.get("ambient_light_lux") or sensors.get("ambient_light_lux") or 0
+
+        # Activity gates the heart-rate term in cognitive load, which is
+        # what stops a walk upstairs reading as stress. Nothing in this
+        # repo derives it from the accelerometer, so it has to be stated
+        # by the sender: either `inferred_state` (the fusion vocabulary)
+        # or a direct numeric `activity_level`. Absent both it stays 0.0,
+        # meaning "sedentary", and the HR term applies.
+        activity_map = {
+            "resting": 0.0, "sedentary": 0.0, "sitting": 0.0,
+            "walking": 0.5, "active": 0.5,
+            "running": 1.0, "workout": 1.0,
+            "stressed": 0.6,
+        }
+        #
+        # -1.0 means "this frame says nothing about activity, leave it
+        # alone" (update_biometrics writes only when >= 0). A device_event
+        # carries ONE reading, so the sensors dict for a heart_rate frame
+        # has no activity field in it. Defaulting to 0.0 here made every
+        # subsequent frame overwrite a known "walking" back to
+        # "sedentary": measured, an activity=walking frame followed by a
+        # heart_rate frame left activity_level at 0.0, so the HR term
+        # applied anyway and the guard that is supposed to stop a walk
+        # upstairs reading as stress never engaged.
+        inferred = str(sensors.get("inferred_state") or "").lower()
+        explicit = _pick("activity_level", default=None)
+        if isinstance(explicit, (int, float)):
+            activity = max(0.0, min(1.0, float(explicit)))
+        elif inferred:
+            activity = activity_map.get(inferred, 0.0)
+        else:
+            activity = -1.0
+
+        # Coerce defensively. These values come off a device_event
+        # payload that a node composed, so a string or a null where a
+        # number belongs is a wire-level accident, not a reason to raise
+        # out of the frame handler and drop the whole reading.
+        def _num(value, cast=float):
+            try:
+                return cast(value)
+            except (TypeError, ValueError):
+                return cast(0)
 
         self.update_biometrics(
             session_id,
-            heart_rate=float(hr),
-            hrv_ms=float(hrv),
-            spo2_pct=float(spo2),
-            skin_temp_c=float(temp),
+            heart_rate=_num(hr),
+            hrv_ms=_num(hrv),
+            spo2_pct=_num(spo2),
+            skin_temp_c=_num(temp),
             activity_level=activity,
-            steps_today=int(steps),
-            battery_pct=float(battery),
-            last_sleep_quality=float(sleep_q),
+            steps_today=_num(steps, int),
+            battery_pct=_num(battery),
+            last_sleep_quality=_num(sleep_q),
         )
         if lux:
-            self.update_environment(session_id, ambient_light_lux=float(lux))
+            self.update_environment(session_id, ambient_light_lux=_num(lux))
