@@ -226,7 +226,11 @@ export default function ToolCallCard({ trace, defaultOpen, grouped = false }) {
     <Glass
       level={0}
       radius="md"
-      padding="sm"
+      /* The head and the body carry their own padding, exactly as the
+         mockup's `.tbh` / `.tbb` do. Glass padding on top of that
+         double-inset the card and stopped the body's caption strip and
+         its top hairline from reaching the card's edges. */
+      padding="none"
       className={`v2-tool-card v2-tool-card--${status}`}
       data-testid="tool-call-card"
       data-status={status}
@@ -242,21 +246,30 @@ export default function ToolCallCard({ trace, defaultOpen, grouped = false }) {
       >
         <ChevronRight size={13} className={`v2-tool-card__chev${open ? ' is-open' : ''}`} aria-hidden="true" />
         <ToolGlyph status={status} family={family} />
-        <span className="v2-tool-card__label">{label}</span>
-        {/* Rendered even when empty: it is the flex spacer that holds
-            the status word and the duration in their columns. Omitting
-            it collapsed a no-argument call to "Grab DONE 90ms" while
-            its neighbours right-aligned. */}
-        <span className="v2-tool-card__summary" title={argsSummary || undefined}>{argsSummary}</span>
-        <span className="v2-tool-card__status-text" data-testid="tool-card-status">
-          {statusText}
+        {/* Four grid cells, not six loose children. The head is a grid
+            so a stack of calls lines up (chevron, glyph, name, meta);
+            with the six pieces sitting directly in a three-column track
+            they wrapped, which right-aligned every tool NAME into the
+            duration column and squeezed the argument line down to two
+            characters and an ellipsis. Name + argument share one cell on
+            one baseline; status word + duration share the last. */}
+        <span className="v2-tool-card__name">
+          <span className="v2-tool-card__label">{label}</span>
+          {/* Rendered even when empty: it is the spacer that keeps the
+              name hard left while the meta column stays hard right. */}
+          <span className="v2-tool-card__summary" title={argsSummary || undefined}>{argsSummary}</span>
         </span>
-        {/* Duration lives on the head so a slow call is visible without
-            expanding anything. Absent (rather than "0ms") when the brain
-            reported no latency and the card never saw the call start. */}
-        {duration && (
-          <span className="v2-tool-card__lat" data-testid="tool-card-duration">{duration}</span>
-        )}
+        <span className="v2-tool-card__meta">
+          <span className="v2-tool-card__status-text" data-testid="tool-card-status">
+            {statusText}
+          </span>
+          {/* Duration lives on the head so a slow call is visible without
+              expanding anything. Absent (rather than "0ms") when the brain
+              reported no latency and the card never saw the call start. */}
+          {duration && (
+            <span className="v2-tool-card__lat" data-testid="tool-card-duration">{duration}</span>
+          )}
+        </span>
       </button>
 
       <div id={bodyId} className="v2-tool-card__body" hidden={!open}>
@@ -264,13 +277,13 @@ export default function ToolCallCard({ trace, defaultOpen, grouped = false }) {
           <>
             {argsText && (
               <div className="v2-tool-card__row">
-                <div className="v2-tool-card__row-label">args</div>
+                <div className="v2-tool-card__cap">args</div>
                 <pre className="v2-tool-card__pre">{argsText}</pre>
               </div>
             )}
             {refused && (
               <div className="v2-tool-card__row v2-tool-card__row--refused">
-                <div className="v2-tool-card__row-label">refused</div>
+                <div className="v2-tool-card__cap">refused</div>
                 <pre className="v2-tool-card__pre">
                   {error || `This tool was ${refusalLabel}. It did not run.`}
                 </pre>
@@ -278,13 +291,13 @@ export default function ToolCallCard({ trace, defaultOpen, grouped = false }) {
             )}
             {status === 'failed' && (
               <div className="v2-tool-card__row v2-tool-card__row--error">
-                <div className="v2-tool-card__row-label">error</div>
+                <div className="v2-tool-card__cap">error</div>
                 <pre className="v2-tool-card__pre">{error || 'tool failed'}</pre>
               </div>
             )}
             {hasResult && status !== 'failed' && !refused && (
               <div className="v2-tool-card__row">
-                <div className="v2-tool-card__row-label">result</div>
+                <div className="v2-tool-card__cap">result</div>
                 <ToolResultView value={trace.result_preview} language={language} />
               </div>
             )}

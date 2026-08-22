@@ -289,16 +289,110 @@
   overflow-x: hidden;
 }
 .v2-chat-composer { flex-shrink: 0; }
+
+/* ── The conversation's own header ──────────────────────────────
+   Thread switching used to be a 13px clock icon with no label, sitting
+   beside an equally bare floppy disk. Both were invisible in the sense
+   that matters: users did not know they were there. The switcher is now
+   the thread's NAME, which is also the only place in the surface that
+   says which conversation you are in, and it carries a chevron and the
+   word "Threads" so what it opens is not a guess. */
+.v2-chat-pane-hint {
+  margin: 0 0 4px;
+  font-size: var(--v2-size-sm);
+  line-height: 1.5;
+}
+
+/* The <h2> is only a wrapper here; the button inside it does the
+   ellipsising, and a grid/flex child needs this to shrink at all. */
+.v2-chat .v2-pane-title { min-width: 0; }
+.v2-chat-threadpicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  min-width: 0;
+  margin: -4px -8px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--v2-radius-sm);
+  background: transparent;
+  color: var(--v2-text-primary);
+  font: inherit;
+  font-size: var(--v2-size-md);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  transition:
+    background var(--v2-dur-fast) var(--v2-ease-out),
+    border-color var(--v2-dur-fast) var(--v2-ease-out);
+}
+.v2-chat-threadpicker:hover,
+.v2-chat-threadpicker.is-active {
+  background: var(--v2-fill);
+  border-color: var(--v2-hairline-strong);
+}
+.v2-chat-threadpicker:focus-visible { outline: none; box-shadow: var(--v2-shadow-focus); }
+.v2-chat-threadpicker > svg { flex-shrink: 0; color: var(--v2-text-tertiary); }
+.v2-chat-threadpicker__name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.v2-chat-threadpicker__chev {
+  transition: transform var(--v2-dur-fast) var(--v2-ease-out);
+}
+.v2-chat-threadpicker.is-active .v2-chat-threadpicker__chev { transform: rotate(180deg); }
+/* The verb, in the label voice the rest of this design uses for machine
+   metadata. It is what makes the control self-describing at rest. */
+.v2-chat-threadpicker__verb {
+  flex-shrink: 0;
+  font-family: var(--v2-font-mono);
+  font-size: 9px;
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+}
+@media (max-width: 560px) {
+  .v2-chat-threadpicker__verb { display: none; }
+}
 .v2-chat-row {
   display: grid;
   grid-template-columns: 32px minmax(0, 1fr);
   gap: 12px;
   align-items: flex-start;
 }
-.v2-chat-row--user { grid-template-columns: minmax(0, 1fr) 32px; }
-.v2-chat-row--user .v2-chat-role { order: 2; justify-self: end; }
-.v2-chat-row--user .v2-chat-body { order: 1; text-align: right; color: var(--v2-text-primary); }
+/* Both roles read down one column, as in the approved mockup: the
+   speaker is told by the mark and the name, not by which side of the
+   pane the text drifted to. Mirroring the grid for the user turn was
+   the only difference between the two, and with both marks drawn as
+   the same small blue Orb it was not enough to separate them: the eye
+   had to read the words to know who was talking. */
 .v2-chat-role { display: flex; align-items: center; justify-content: center; }
+/* The user's mark: a plain disc, deliberately unbranded, so FERAL's Orb
+   stays the one thing in the log that means FERAL. */
+.v2-chat-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--v2-surface-elev);
+  border: 1px solid var(--v2-hairline-strong);
+}
+/* Who is speaking, said in words. Mono + uppercase micro-caps, the
+   label voice this design uses everywhere for machine-side metadata. */
+.v2-chat-who {
+  display: block;
+  margin-bottom: 4px;
+  font-family: var(--v2-font-mono);
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+}
 .v2-chat-body {
   font-size: var(--v2-size-md);
   line-height: 1.55;
@@ -313,15 +407,17 @@
 }
 .v2-chat-body--thinking { color: var(--v2-text-tertiary); font-style: italic; }
 
-/* User turns get a filled bubble so the eye can find the question
-   without reading; assistant turns stay unfilled full-width prose,
-   which is what every frontier client converged on. */
+/* User turns get an outlined, filled bubble so the eye can find the
+   question without reading; assistant turns stay unfilled full-width
+   prose. With both turns in one column this outline is now carrying
+   real work, so the hairline is the strong one: at 0.08 alpha over the
+   pane it was invisible and the fill alone had to do the job. */
 .v2-chat-bubble {
   display: inline-block;
   max-width: 100%;
   padding: 8px 14px;
   border-radius: var(--v2-radius-lg);
-  border: 1px solid var(--v2-hairline);
+  border: 1px solid var(--v2-hairline-strong);
   background: var(--v2-surface-2);
   text-align: left;
   white-space: pre-wrap;
@@ -334,7 +430,6 @@
   margin-top: 6px;
   justify-content: inherit;
 }
-.v2-chat-row--user .v2-chat-msg-attachments { justify-content: flex-end; }
 
 /* Per-message actions (copy). Revealed on hover/focus so the reading
    column stays clean, but always reachable by keyboard. */
@@ -594,8 +689,11 @@
 @media (max-width: 560px) {
   .v2-chat { gap: 10px; }
   .v2-chat-row { grid-template-columns: 24px minmax(0, 1fr); gap: 8px; }
-  .v2-chat-row--user { grid-template-columns: minmax(0, 1fr) 24px; }
   .v2-tool-card__summary { display: none; }
+  /* The narrow-width tool NAME rule is in markdown.css, not here:
+     index.css imports markdown.css AFTER pages.css, so a same-specificity
+     declaration there wins and `flex-shrink: 0` on the label would beat
+     anything written in this block. */
   .v2-tool-group__meta { display: none; }
   .v2-chat-attachment-chip { max-width: 150px; }
   .v2-toolres__table td { max-width: 180px; }

@@ -66,22 +66,57 @@ function textFromContent(content) {
   return '';
 }
 
+/**
+ * Does this row carry something the chat log renders BESIDES prose?
+ *
+ * A tool trace, a reasoning block, a timeline, a notice, an SDUI tree or
+ * an attachment list is content in its own right. A turn that ran four
+ * tools and answered with an empty string is a real turn, and dropping
+ * it for having no text is how a tool-only turn used to vanish.
+ */
+function isRichMessage(message) {
+  if (!message || typeof message !== 'object') return false;
+  return !!(
+    message.type
+    || (Array.isArray(message.tools) && message.tools.length > 0)
+    || message.timeline
+    || message.reasoning
+    || message.notice
+    || message.sdui
+    || (Array.isArray(message.attachments) && message.attachments.length > 0)
+  );
+}
+
+/**
+ * Coerce a chat row into the shape the log renders: a real id, a role,
+ * and `text` resolved from either `text` or the store's `content`.
+ *
+ * It PRESERVES every other field. It used to project each row down to
+ * `{id, role, text}` (with one hand-written exception for `sdui`), and
+ * because `Chat.setMessages` is this function, every committed assistant
+ * turn lost `tools`, `reasoning`, `timeline`, `model`, `usage`,
+ * `attachments` and `type` the instant it was written. Measured against
+ * the live brain: four `tool_start` / `tool_result` pairs arrived at the
+ * page, rendered as live cards during the turn, and left zero tool cards
+ * in the transcript once the turn committed. The page's own unit tests
+ * could not see it because they render <Chat /> outside this provider,
+ * where the fallback `useState` setter does no normalising at all.
+ *
+ * Projecting DOWN is the bug, so the fix is to stop projecting: spread
+ * the row and override only the three fields this function owns. A new
+ * per-turn field cannot silently go missing again.
+ */
 function normaliseUiMessages(rawMessages) {
   const list = Array.isArray(rawMessages) ? rawMessages : [];
   const mapped = list.map((message) => {
-    const role = message?.role || 'assistant';
-    if (message?.type === 'sdui' && message?.sdui && typeof message.sdui === 'object') {
-      return {
-        id: message.id || newMessageId(),
-        role,
-        type: 'sdui',
-        sdui: message.sdui,
-        screen_id: message.screen_id || null,
-      };
-    }
-    const text = textFromContent(message?.text ?? message?.content);
-    if (!text) return null;
-    return { id: message?.id || newMessageId(), role, text };
+    if (!message || typeof message !== 'object') return null;
+    const role = message.role || 'assistant';
+    const text = textFromContent(message.text ?? message.content);
+    if (!text && !isRichMessage(message)) return null;
+    // `content` is the STORE's field name; the log reads `text`. Drop it
+    // so one row never carries two spellings of the same prose.
+    const { content, ...rest } = message;
+    return { ...rest, id: message.id || newMessageId(), role, text };
   }).filter(Boolean);
 
   if (mapped.length === 0) return cloneGreeting();

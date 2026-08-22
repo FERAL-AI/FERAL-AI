@@ -419,13 +419,10 @@
   gap: 8px;
 }
 .v2-tool-card__body[hidden] { display: none; }
-.v2-tool-card__row { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.v2-tool-card__row-label {
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  font-size: 10px;
-  color: var(--v2-text-tertiary);
-}
+/* No gap: each row is a caption strip sitting directly on its payload,
+   the way the mockup's `.tbcap` sits on `.tree`. A gap here put a seam
+   of card surface between a label and the block it names. */
+.v2-tool-card__row { display: flex; flex-direction: column; gap: 0; min-width: 0; }
 .v2-tool-card__pre {
   margin: 0;
   padding: 6px 8px;
@@ -908,7 +905,7 @@
    happened to end at, so a stack of calls read as ragged. */
 .v2-tool-card__head {
   display: grid;
-  grid-template-columns: 19px minmax(0, 1fr) auto;
+  grid-template-columns: 13px 19px minmax(0, 1fr) auto;
   gap: 9px;
   align-items: center;
   padding: 7px 10px;
@@ -927,13 +924,23 @@
   font-weight: 500;
   letter-spacing: 0;
   color: var(--v2-text-primary);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-/* Name and argument share the middle column on one baseline. */
-.v2-tool-card__head > .v2-tool-card__label {
+/* Name and argument share the third column on one baseline. */
+.v2-tool-card__name {
   display: inline-flex;
   align-items: baseline;
   gap: 8px;
   min-width: 0;
+}
+/* Status word and duration share the last column, so the outcome and
+   the time sit together at the right edge of every row in a stack. */
+.v2-tool-card__meta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
 }
 .v2-tool-card__summary {
   font-family: var(--v2-font-mono);
@@ -956,7 +963,15 @@
 }
 /* Body: a caption strip over the payload, on the page ground so it
    reads as output rather than as more chrome. */
-.v2-tool-card__body { border-top: 1px solid var(--v2-hairline); background: var(--v2-bg-base); }
+.v2-tool-card__body {
+  margin-top: 0;
+  gap: 0;
+  border-top: 1px solid var(--v2-hairline);
+  background: var(--v2-bg-base);
+}
+/* Rows stack flush; the hairline is what separates args from result. */
+.v2-tool-card__row + .v2-tool-card__row { border-top: 1px solid var(--v2-hairline); }
+.v2-tool-card__pending { padding: 8px 10px; }
 .v2-tool-card__cap {
   font-family: var(--v2-font-mono);
   font-size: 9px;
@@ -966,6 +981,10 @@
   padding: 5px 10px;
   border-bottom: 1px solid var(--v2-hairline);
 }
+/* The body already IS the recessed surface, so the payload sits
+   directly on it. A second bordered box inside the strip drew a frame
+   inside a frame, which is what made an expanded card read as clutter
+   rather than as output. */
 .v2-tool-card__pre {
   font-family: var(--v2-font-mono);
   font-size: 10.5px;
@@ -974,8 +993,27 @@
   color: var(--v2-text-secondary);
   overflow-x: auto;
   letter-spacing: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 /* An accessibility tree is the one payload with real structure, so the
    node id and the role are coloured and the label is left plain. */
 .v2-tool-card__ax { color: var(--v2-text-primary); font-weight: 500; }
 .v2-tool-card__role { color: var(--v2-accent); }
+
+/* Narrow viewports. pages.css hides the argument line here, which leaves
+   the tool NAME as the only thing that can give ground, and it does not
+   shrink at full width by design. Let it, or a long label ("Read
+   accessibility tree") runs straight under the status word and the
+   duration. This lives in markdown.css rather than beside the rest of
+   the chat media query because index.css imports this file last, so a
+   rule written there could not beat `flex-shrink: 0` above. */
+@media (max-width: 560px) {
+  .v2-tool-card__label {
+    min-width: 0;
+    flex-shrink: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
