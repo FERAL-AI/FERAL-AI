@@ -58,6 +58,14 @@ CLI_MAIN_PATH = Path(__file__).resolve().parent.parent / "cli" / "main.py"
 #     use ``_info`` and do NOT add a label here.
 
 ALLOWED_FAIL_LABELS: set[str] = {
+    # Under 512 MiB free on the volume holding ~/.feral. Red rather than
+    # yellow because at that point writes actually start failing: the
+    # memory store, the embedding queue, screen captures and background
+    # job output all grow on every turn and none of them ask permission.
+    # A full disk otherwise presents as "the machine got slow", which is
+    # what happened on the author's Mac at 99% used with nothing in the
+    # brain noticing or saying so.
+    "Disk space",
     # Python version below the supported floor (3.11).
     "Python version",
     # The interpreter's SQLite was built without FTS5. MemoryStore and
@@ -149,6 +157,11 @@ ALLOWED_FAIL_LABELS: set[str] = {
 }
 
 ALLOWED_WARN_LABELS: set[str] = {
+    # Under 2 GiB free. Yellow because nothing is broken yet, but the
+    # store grows on every turn, so this is the last point at which the
+    # operator can act without losing work. The same label is also in
+    # ALLOWED_FAIL_LABELS: it escalates to red below 512 MiB.
+    "Disk space",
     # The FTS5 / loadable-extension probes themselves raised. Yellow and
     # not red on purpose: this is "doctor could not determine the answer",
     # which is a different statement from "the feature is missing". The
@@ -228,6 +241,16 @@ ALLOWED_WARN_LABELS: set[str] = {
     # of an existing file, which is a legitimate degradation worth a
     # yellow flag.
     "Local-agent grants",
+    # Local voice engines: two branches each. "installed, no weights
+    # yet" is the ordinary state after `pip install 'feral-ai[stt]'`
+    # and is ``_info``. The ``_warn`` site fires only when the operator
+    # has *selected* that local engine and its model is missing, in
+    # which case voice turns produce no transcript and voice replies
+    # produce no audio. That is a real degradation of a configured
+    # capability, and it is the same condition audio_pipeline already
+    # logs at startup, so doctor saying nothing about it was the gap.
+    "Local STT (faster-whisper)",
+    "Local TTS (piper)",
     # Vector backend probe degradation branches: an unknown backend id
     # in settings.json, or the probe itself raising while trying to
     # verify the configured backend. Either way the operator should see
@@ -361,9 +384,17 @@ class TestDoctorSeverityAllowlist:
         """
         single_emission_demoted = {
             "Chrome (CDP endpoint)",
-            "Local STT (faster-whisper)",
-            "Local TTS (piper)",
         }
+        # ``Local STT`` and ``Local TTS`` left this set when each gained
+        # a second emission site. Installed-with-no-weights is the
+        # normal shape of `pip install 'feral-ai[stt]'` and stays
+        # ``_info``; the new ``_warn`` fires only when that engine is
+        # also the operator's *selected* provider, which means voice
+        # produces no transcript or no audio. A clean install cannot hit
+        # that branch (nothing is selected), so
+        # ``test_fresh_install_has_no_warnings_or_failures`` remains the
+        # authoritative guard, exactly as it is for ``Local-agent
+        # grants`` and ``Memory database``.
         calls = _collect_doctor_severity_calls()
         warn_labels = set(calls["_warn"])
         fail_labels = set(calls["_fail"])
@@ -376,6 +407,21 @@ class TestDoctorSeverityAllowlist:
 
 
 # ── 3. Behaviour test (end-to-end run of cmd_doctor) ──────────────────
+
+
+def _config_override_env_names() -> set[str]:
+    """Every env var ``ConfigLoader._apply_env_overrides`` maps to a setting.
+
+    The mapping is a dict local to that method, so it cannot be
+    imported. Reading the names out of the source keeps this in step
+    with it; a stale hand-written copy is what would let this rot.
+    ``FERAL_HOME`` is deliberately excluded: the fixture sets it.
+    """
+    src = CLI_MAIN_PATH.parent.parent / "config" / "loader.py"
+    names = set(re.findall(r'"([A-Z][A-Z0-9_]*)":\s*\(', src.read_text()))
+    names.discard("FERAL_HOME")
+    return names
+
 
 
 @pytest.fixture
@@ -398,6 +444,29 @@ def doctor_clean_env(monkeypatch, tmp_path):
         "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
         "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY",
     ):
+        monkeypatch.delenv(k, raising=False)
+
+    # And every config override, because a fresh install has none of
+    # those either. Setting FERAL_HOME alone does not make the process
+    # look fresh: ``ConfigLoader`` publishes the merged settings back
+    # into ``os.environ`` by design (``export_as_env``), and env beats
+    # settings.json, so any earlier test that wrote a setting leaves it
+    # overriding this fixture's empty home for the rest of the session.
+    #
+    # Measured in the full suite: ``FERAL_TTS_PROVIDER`` survived as
+    # "piper", so doctor reported
+    #
+    #     Local TTS (piper)  selected as your TTS provider but no voice
+    #     is downloaded, so voice replies produce no audio
+    #
+    # against a home that had never selected anything. The test failed
+    # in the full run and passed alone, which is the signature of
+    # exactly this. It reproduces on an untouched tree.
+    #
+    # The names are read out of the loader's own override table rather
+    # than restated here, so adding an override there cannot silently
+    # drift from this list.
+    for k in _config_override_env_names():
         monkeypatch.delenv(k, raising=False)
 
     # Ollama probe — return a fake "running" so the LLM-credentials
@@ -557,3 +626,85 @@ class TestDoctorSeverity:
             "this means a probe that should be _info is still _warn "
             f"or _fail. Output:\n{plain}"
         )
+
+
+class TestLocalVoiceSeverityDependsOnSelection:
+    """A missing model matters only if you chose that engine.
+
+    Two states look identical on the filesystem: `pip install
+    'feral-ai[stt]'` with no weights yet, which is the normal shape of a
+    fresh install, and "the engine you selected cannot run", which means
+    voice turns produce no transcript. Doctor said nothing about either,
+    and reported the list of *selectable* models as though they were
+    downloaded.
+
+    Warning on both would turn a clean install yellow and break the
+    v2026.5.36 contract. Warning on neither is what shipped, and it left
+    a configured-but-unusable engine invisible until the user spoke.
+    """
+
+    CAPS_NO_WEIGHTS = {
+        "local_stt": False, "local_tts": False,
+        "stt_models": ["tiny", "base", "small"],
+        "tts_voices": ["en_US-lessac-medium"],
+        "stt_models_present": [], "tts_voices_present": [],
+        "stt_importable": True, "tts_importable": True,
+    }
+
+    def _doctor_lines(self, monkeypatch, selected):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        import cli.main as m
+
+        buf = io.StringIO()
+        with patch(
+            "perception.audio_pipeline.detect_local_audio_capabilities",
+            return_value=dict(self.CAPS_NO_WEIGHTS),
+        ), patch.object(m, "_local_voice_selected", return_value=selected):
+            with contextlib.redirect_stdout(buf):
+                try:
+                    m.cmd_doctor()
+                except SystemExit:
+                    pass
+        return [
+            ln.strip() for ln in buf.getvalue().splitlines()
+            if "Local STT" in ln or "Local TTS" in ln
+        ]
+
+    def test_selected_but_missing_is_a_warning(self, monkeypatch):
+        lines = self._doctor_lines(monkeypatch, (True, True))
+        assert lines, "doctor printed no Local Audio rows"
+        assert all("⚠" in ln for ln in lines), lines
+
+    def test_merely_installed_is_not_a_warning(self, monkeypatch):
+        """The fresh-install shape must stay quiet."""
+        lines = self._doctor_lines(monkeypatch, (False, False))
+        assert lines, "doctor printed no Local Audio rows"
+        assert all("ℹ" in ln for ln in lines), lines
+        assert not any("⚠" in ln or "✘" in ln for ln in lines), lines
+
+    def test_the_selection_probe_never_raises(self):
+        """Doctor must describe a broken machine, not crash on one."""
+        from unittest.mock import patch
+
+        import cli.main as m
+
+        with patch("config.loader.load_settings", side_effect=OSError("no disk")):
+            assert m._local_voice_selected() == (False, False)
+
+    def test_the_selection_probe_understands_both_spellings(self, monkeypatch):
+        """`faster-whisper` and `faster_whisper` are the same engine."""
+        from unittest.mock import patch
+
+        import cli.main as m
+
+        for spelling in ("faster-whisper", "faster_whisper", "local"):
+            with patch(
+                "config.loader.load_settings",
+                return_value={"audio": {"stt_provider": spelling, "tts_provider": "openai"}},
+            ):
+                stt, tts = m._local_voice_selected()
+                assert stt is True, f"{spelling!r} not recognised as a local STT pick"
+                assert tts is False

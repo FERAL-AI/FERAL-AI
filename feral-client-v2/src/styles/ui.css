@@ -300,52 +300,13 @@
   background-image: radial-gradient(rgba(255, 255, 255, 0.9) 1px, transparent 1px);
   background-size: 3px 3px;
 }
-.v2-ambient-ops {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  transition: opacity var(--v2-dur-slow) var(--v2-ease-out);
-}
 .v2-ambient.is-expanded .v2-ambient-field { opacity: 0.45; filter: blur(48px); }
-.v2-ambient.is-expanded .v2-ambient-ops { opacity: 1; }
 
 .v2-ambient--cool .v2-ambient-field { filter: blur(32px) hue-rotate(-6deg); }
 .v2-ambient--warm .v2-ambient-field { filter: blur(32px) hue-rotate(10deg); }
 
-/* ── LiveOps ────────────────────────────────────────────────── */
-.v2-liveops {
-  position: absolute;
-  inset: auto 0 var(--v2-dock-height) 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 16px 28px;
-  margin: 0;
-  list-style: none;
-  font-family: var(--v2-font-mono);
-  font-size: var(--v2-size-xs);
-  color: var(--v2-text-tertiary);
-  opacity: 0.6;
-  transition: opacity var(--v2-dur-base) var(--v2-ease-out);
-}
-.v2-liveops.is-active { opacity: 1; }
-.v2-liveops-row { display: flex; align-items: center; gap: 8px; }
-.v2-liveops-tag {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: var(--v2-radius-xs);
-  border: 1px solid var(--v2-hairline);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-.v2-liveops-tag--skill { color: var(--v2-accent-text); border-color: var(--v2-accent-soft); }
-.v2-liveops-tag--tool { color: var(--v2-text-primary); }
-.v2-liveops-tag--mem { color: var(--v2-state-live); border-color: var(--v2-state-live-soft); }
-.v2-liveops-tag--node { color: var(--v2-state-warn); border-color: var(--v2-state-warn-soft); }
-.v2-liveops-tag--chan { color: var(--v2-text-secondary); }
-.v2-liveops-tag--forge { color: var(--v2-accent-text); }
-.v2-liveops-tag--alert { color: var(--v2-state-error); border-color: var(--v2-state-error-soft); }
+/* The .v2-liveops* rules were deleted in 2026.8.12 along with their only
+ * consumer, shell/LiveOpsStream.jsx. */
 
 /* ── Orb ─────────────────────────────────────────────────────── */
 .v2-orb {
@@ -465,15 +426,16 @@
 /* v2026.5.30 — dim/disable shell only when the operator explicitly
    expands voice to fullscreen. The docked variant is non-blocking
    so the chat composer and dock stay interactive while voice runs. */
-.v2-shell.is-voice-mode:has(.v2-voice-overlay--fullscreen.is-visible) .v2-shell-main {
-  filter: brightness(0.4) saturate(0.8);
-  transition: filter var(--v2-dur-slow) var(--v2-ease-out);
-}
-.v2-shell.is-voice-mode:has(.v2-voice-overlay--fullscreen.is-visible) .v2-dock {
-  opacity: 0.35;
-  transition: opacity var(--v2-dur-slow) var(--v2-ease-out);
-  pointer-events: none;
-}
+/* The fullscreen voice takeover is gone. It dimmed the page to
+   brightness(0.4) and made the dock non-interactive, so starting voice
+   hid the machine at exactly the moment you might want to watch it.
+   Voice now lives in the composer as a lane (.v2-vlane), which is what
+   the approved design specifies. These rules are kept as a no-op record
+   rather than silently deleted, because the selectors they used are the
+   thing a reader would search for.
+
+   .v2-shell.is-voice-mode ... .v2-shell-main  had filter: brightness(0.4)
+   .v2-shell.is-voice-mode ... .v2-dock        had pointer-events: none  */
 .v2-shell .v2-shell-main { transition: filter var(--v2-dur-slow) var(--v2-ease-out); }
 
 /* Shared base for both variants. */
@@ -483,20 +445,56 @@
   display: flex;
   pointer-events: none;
   opacity: 0;
+  /* The overlay is always in the DOM, and with no session it is
+     aria-hidden="true", opacity 0 and pointer-events none. None of that
+     takes an element out of the tab order: its two buttons kept
+     tabIndex 0, so tabbing past the dock landed on "Expand voice" and
+     then "End voice" for a session that did not exist. Worse, they sat
+     inside an aria-hidden subtree, which is the one place focus must
+     never go.
+
+     visibility does remove them, and it is the only one of these four
+     properties that does. It is transitioned at 0s with a delay equal
+     to the fade, so the pill still fades out over the full duration and
+     only becomes untabbable once it has finished disappearing. */
+  visibility: hidden;
   transition:
     opacity var(--v2-dur-slow) var(--v2-ease-out),
-    transform var(--v2-dur-slow) var(--v2-ease-out);
+    transform var(--v2-dur-slow) var(--v2-ease-out),
+    visibility 0s linear var(--v2-dur-slow);
 }
 .v2-voice-overlay.is-visible {
   opacity: 1;
   pointer-events: auto;
+  visibility: visible;
+  /* Appearing is immediate; only the disappearance is delayed. */
+  transition:
+    opacity var(--v2-dur-slow) var(--v2-ease-out),
+    transform var(--v2-dur-slow) var(--v2-ease-out),
+    visibility 0s linear 0s;
 }
 
 /* Docked variant — compact strip pinned bottom-right. No backdrop, no
    inset:0, no focus trap. */
 .v2-voice-overlay--docked {
   right: 20px;
-  bottom: 20px;
+  /* Sits in the dock strip, which is the only space it fits in.
+     Measured at 1680x878: the composer ends at y=786 and the dock
+     starts at y=806, so there are 20px of clear space and the pill is
+     74.5px tall. It cannot be moved out of the way; it can only be
+     stopped from growing into the composer.
+
+     Anchored to the bottom, so height grows upward. With bottom:20px
+     its top sat 4.8px under the composer, and a single line of status
+     text took that to -0.9px. Six lines reached within 0.1px of the
+     Send button.
+
+     bottom + max-height is now the whole budget: the top edge can
+     never rise above (viewport - 8 - 84) = the composer's bottom edge,
+     whatever the status text says. Its bottom is set below, above the
+     dock rather than inside the dock strip. */
+  max-height: calc(var(--v2-dock-height) + 12px);
+  overflow: hidden;
   left: auto;
   top: auto;
   flex-direction: row;
@@ -513,6 +511,49 @@
 }
 .v2-voice-overlay--docked.is-visible {
   transform: translateY(0) scale(1);
+}
+
+/* The pill no longer sits beside the dock, because it never fitted
+   there on most screens. Both boxes are fixed width: the dock is 405px
+   centred, the pill 436px anchored right: 20px. The pill's left edge is
+   at (W - 456) and the dock's right edge at (W/2 + 202.5), so they
+   clear each other only above W = 1317. Measured across the range,
+   overlap in px of the dock covered:
+
+     1920..1366   0        1200   58        768  274
+           1280  18        1024  146        375  347 (the whole dock)
+
+   Under 640px the pill's own children covered every one of the nine
+   tiles, and the parent's pointer-events: none bought nothing because
+   the children set it back to auto. The rule this replaces claimed the
+   docked pill was "non-blocking so the chat composer and dock stay
+   interactive"; that held at 1680, the one width it and its e2e guard
+   were measured at.
+
+   So the pill sits above the dock at every width instead, and the shell
+   reserves the strip it occupies while voice is running, which lifts
+   the composer out of its way. No breakpoint: a width-dependent fix for
+   a width-dependent bug just relocates it. */
+.v2-voice-overlay--docked {
+  bottom: calc(var(--v2-dock-height) + 8px);
+}
+
+/* Shell.jsx puts is-voice-mode on the shell for exactly as long as a
+   session runs, so the space is given back the moment voice ends. 84px
+   is the pill's max-height (--v2-dock-height + 12) and 8px is the gap
+   above the dock. */
+/* `bottom` here was inert and I shipped it that way for one build:
+   `.v2-shell-body .v2-shell-main` sets `position: static` (the body
+   took the absolute positioning so main could be an ordinary flex
+   child), and an inset on a static box does nothing at all. Main is a
+   scroll container with `padding: 20px 24px`, so the strip has to be
+   reserved as padding.
+
+   84px is the pill's max-height (--v2-dock-height + 12) and 8px is the
+   gap above the dock; 20px is main's own bottom padding, which this
+   replaces rather than adds to. */
+.v2-shell.is-voice-mode .v2-shell-main {
+  padding-bottom: 112px;
 }
 .v2-voice-overlay--docked .v2-voice-orb { flex: 0 0 auto; }
 .v2-voice-overlay--docked .v2-voice-meta {
@@ -573,6 +614,48 @@
   text-align: center;
   font-size: var(--v2-size-md);
   color: var(--v2-text-primary);
+}
+/* Partial captions are still forming: the STT provider will replace the
+   text, so it is rendered as provisional rather than as something the
+   user said. `is_partial` reached the client on every transcript frame
+   and nothing had ever read it. */
+.v2-voice-caption[data-partial="true"] { opacity: 0.65; font-style: italic; }
+.v2-voice-caption-note {
+  display: block;
+  margin-top: 6px;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-secondary);
+}
+/* The banner had no rules at all, which was survivable while it held a
+   headline and one line. It now carries the brain's diagnosis
+   (summary, recommendation, cause), and without a column these run
+   together into a single unreadable line. */
+.v2-voice-status-banner { max-width: min(520px, 84vw); }
+.v2-voice-status-banner__row { display: flex; gap: 10px; align-items: flex-start; }
+.v2-voice-status-banner__icon {
+  flex: none;
+  width: 18px; height: 18px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: var(--v2-state-error);
+  color: var(--v2-bg-base);
+  font-size: var(--v2-size-xs);
+  font-weight: 700;
+}
+.v2-voice-status-banner__text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--v2-size-sm);
+  color: var(--v2-text-primary);
+  text-align: left;
+}
+.v2-voice-status-banner__fix { color: var(--v2-text-secondary); }
+.v2-voice-status-banner__muted { color: var(--v2-state-error); }
+.v2-voice-status-banner__cause {
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 .v2-voice-endbar { display: inline-flex; }
 
@@ -870,3 +953,910 @@
   box-shadow: var(--v2-shadow-focus);
 }
 .v2-code-editor[readonly] { color: var(--v2-text-secondary); background: var(--v2-surface-0); opacity: 0.8; }
+
+/* ── Menubar search (command palette trigger) ────────────────── */
+/*
+ * The menubar carried a comment promising a command palette "later"
+ * and, in the meantime, navigated nothing at all: a brand mark and two
+ * toggles. This is the palette's discoverable trigger. It looks like a
+ * search field and behaves like a button, because the real field lives
+ * inside the dialog and two fields for one query is a query typed into
+ * the wrong one.
+ *
+ * `min-width: 0` on the flex child plus `text-overflow: ellipsis` on
+ * the label is what keeps the menubar from being the thing that widens
+ * the document: a fixed-width trigger between two fixed-width groups
+ * pushes the row past 100vw on a narrow viewport, and the whole page
+ * then scrolls sideways.
+ */
+.v2-menubar-search {
+  flex: 0 1 340px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 8px 0 10px;
+  margin: 0 12px;
+  background: var(--v2-surface-0);
+  border: 1px solid var(--v2-hairline);
+  border-radius: var(--v2-radius-pill);
+  color: var(--v2-text-tertiary);
+  font: inherit;
+  font-size: var(--v2-size-xs);
+  cursor: pointer;
+  transition:
+    background var(--v2-dur-fast) var(--v2-ease-out),
+    color var(--v2-dur-fast) var(--v2-ease-out),
+    border-color var(--v2-dur-fast) var(--v2-ease-out);
+}
+.v2-menubar-search:hover {
+  color: var(--v2-text-secondary);
+  background: var(--v2-surface-1);
+  border-color: var(--v2-hairline-strong);
+}
+.v2-menubar-search:focus-visible {
+  outline: none;
+  box-shadow: var(--v2-shadow-focus);
+  border-color: var(--v2-accent);
+}
+.v2-menubar-search-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v2-menubar-search-kbd {
+  flex: none;
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  line-height: 1;
+  padding: 2px 5px;
+  color: var(--v2-text-tertiary);
+  background: var(--v2-fill-subtle);
+  border: 1px solid var(--v2-hairline);
+  border-radius: var(--v2-radius-xs);
+}
+@media (max-width: 860px) {
+  /* Below this the two toggles and the brand already fill the bar. The
+     trigger collapses to its icon rather than being dropped: losing it
+     would leave Cmd-K as the only way in for a pointer user. */
+  .v2-menubar-search { flex: none; margin: 0 8px; padding: 0 8px; }
+  .v2-menubar-search-text,
+  .v2-menubar-search-kbd { display: none; }
+}
+
+/* ── Command palette ─────────────────────────────────────────── */
+/*
+ * Top-anchored, not bottom-anchored. Its predecessor sat on top of the
+ * dock with `align-items: flex-end`, which put a 680px dialog directly
+ * over the chat composer; the palette is opened most often to leave the
+ * page you are on, and covering the thing you were typing into to do it
+ * is the wrong trade. Anchoring at 10vh also means the dialog and the
+ * dock never share a pixel, so the dock stays visible as context.
+ *
+ * z-index sits at --z-toast: this is a modal, and it must come out over
+ * the dock (--z-dock) and over a proactive toast that happens to be on
+ * screen when the operator hits Cmd-K.
+ */
+.v2-cmdk-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-toast);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: max(10vh, calc(var(--v2-menubar-height) + 16px)) 16px calc(var(--v2-dock-height) + 20px);
+  background: var(--v2-scrim);
+  -webkit-backdrop-filter: var(--v2-blur-sm);
+  backdrop-filter: var(--v2-blur-sm);
+  animation: v2ModalBackdropIn var(--v2-dur-base) var(--v2-ease-out);
+}
+.v2-cmdk {
+  width: 100%;
+  max-width: 640px;
+  /* Bounded by what is left between the two paddings above, so a long
+     result list scrolls inside .v2-cmdk-list and the dialog itself
+     never grows past the dock. */
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--v2-surface-elev);
+  background-image: var(--v2-glass-tint);
+  -webkit-backdrop-filter: var(--v2-blur-lg);
+  backdrop-filter: var(--v2-blur-lg);
+  border: 1px solid var(--v2-hairline-strong);
+  border-radius: var(--v2-radius-lg);
+  box-shadow: var(--v2-shadow-glass);
+  animation: v2ModalIn var(--v2-dur-base) var(--v2-ease-out);
+}
+/* The dialog carries tabIndex={-1} so the focus trap can park focus on
+   it. It is a container, not a control, so it gets the soft ring rather
+   than the full accent outline a control earns. `outline: none` with
+   nothing in its place is what the a11y stylesheet guard fails on, and
+   it is exactly how the predecessor's search field ended up being the
+   one unmarked focus position in the app. */
+.v2-cmdk:focus-visible {
+  outline: none;
+  box-shadow: var(--v2-shadow-glass), var(--v2-shadow-focus);
+}
+
+.v2-cmdk-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--v2-hairline);
+  color: var(--v2-text-tertiary);
+}
+.v2-cmdk-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  color: var(--v2-text-primary);
+  font: inherit;
+  font-size: var(--v2-size-md);
+}
+.v2-cmdk-search::placeholder { color: var(--v2-text-tertiary); }
+/* The palette focuses this field on open, so it is a keyboard user's
+   first focus position in the dialog. It must be marked. */
+.v2-cmdk-search:focus-visible {
+  outline: 2px solid var(--v2-accent);
+  outline-offset: -2px;
+  border-radius: var(--v2-radius-xs);
+}
+/* Chrome draws its own clear affordance on type=search; it collides
+   with the explicit close button two elements to the right. */
+.v2-cmdk-search::-webkit-search-cancel-button { appearance: none; }
+
+.v2-cmdk-cta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  text-align: left;
+  background: var(--v2-accent-soft);
+  border: none;
+  border-bottom: 1px solid var(--v2-hairline);
+  color: var(--v2-accent-text);
+  font: inherit;
+  cursor: pointer;
+}
+.v2-cmdk-cta:hover { background: var(--v2-accent); color: var(--v2-text-inverse); }
+.v2-cmdk-cta:focus-visible { outline: none; box-shadow: var(--v2-shadow-focus); }
+.v2-cmdk-cta-title { font-size: var(--v2-size-sm); font-weight: 600; }
+.v2-cmdk-cta-hint { font-size: var(--v2-size-xs); color: var(--v2-text-secondary); margin-top: 2px; }
+.v2-cmdk-cta:hover .v2-cmdk-cta-hint { color: var(--v2-text-inverse); opacity: 0.85; }
+
+.v2-cmdk-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+}
+.v2-cmdk-group + .v2-cmdk-group { margin-top: 6px; }
+.v2-cmdk-group-label {
+  padding: 6px 10px 4px;
+  font-size: var(--v2-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+}
+.v2-cmdk-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--v2-radius-sm);
+  color: var(--v2-text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.v2-cmdk-row.is-cursor {
+  background: var(--v2-accent-soft);
+  color: var(--v2-accent-text);
+}
+.v2-cmdk-row:focus-visible { outline: none; box-shadow: var(--v2-shadow-focus); }
+.v2-cmdk-row-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--v2-text-secondary);
+}
+.v2-cmdk-row.is-cursor .v2-cmdk-row-icon { color: var(--v2-accent-text); }
+.v2-cmdk-row-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.v2-cmdk-row-label {
+  font-size: var(--v2-size-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v2-cmdk-row-desc {
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v2-cmdk-row.is-cursor .v2-cmdk-row-desc { color: var(--v2-text-secondary); }
+.v2-cmdk-row-enter { flex: none; color: var(--v2-accent-text); opacity: 0.7; }
+.v2-cmdk-empty {
+  padding: 18px 12px;
+  text-align: center;
+  font-size: var(--v2-size-sm);
+  color: var(--v2-text-tertiary);
+}
+
+.v2-cmdk-foot {
+  flex: none;
+  display: flex;
+  gap: 14px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--v2-hairline);
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+}
+.v2-cmdk-foot kbd {
+  font-family: var(--v2-font-mono);
+  padding: 1px 4px;
+  margin-right: 3px;
+  border: 1px solid var(--v2-hairline);
+  border-radius: var(--v2-radius-xs);
+  background: var(--v2-fill-subtle);
+}
+@media (max-width: 640px) {
+  .v2-cmdk-backdrop { padding-top: calc(var(--v2-menubar-height) + 12px); }
+  .v2-cmdk-foot { display: none; }
+}
+
+/* ── Instrument shell: system bar + work rail ──────────────────
+   The approved design's frame. Vitals across the top, the machine's
+   live work down the left, the page in the middle. Colours come from
+   the semantic layer so both themes follow; the design's own palette
+   (warm neutrals in light, #1C1F23 ground in dark, muted run/ok/warn)
+   is being ported into tokens.css separately. */
+
+/* The body owns the space between the system bar and the dock, and
+   lays the rail beside the page. .v2-shell-main was absolutely
+   positioned against --v2-menubar-height; with the Menubar retired that
+   height went to 0 and main covered the system bar, which made the
+   palette button unclickable (an e2e hit test caught it: the element at
+   the button's centre was .v2-shell-main). The body takes the absolute
+   positioning; main becomes an ordinary flex child. */
+.v2-shell-body {
+  position: absolute;
+  inset: var(--v2-sysbar-height) 0 var(--v2-dock-height) 0;
+  display: flex;
+  min-height: 0;
+  gap: 0;
+  z-index: 1;
+}
+.v2-shell-body .v2-shell-main {
+  position: static;
+  inset: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+}
+
+/* System bar */
+.v2-sysbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  height: 34px;
+  flex: none;
+  background: var(--v2-surface-1);
+  border-bottom: 1px solid var(--v2-hairline);
+  font-size: var(--v2-size-xs);
+}
+.v2-sysbar-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--v2-text-primary);
+  font: inherit;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.v2-sysbar-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--v2-state-live);
+}
+.v2-sysbar-vitals {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.v2-sysbar-vital,
+.v2-sysbar-autonomy,
+.v2-sysbar-cmd {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: 0;
+  border-radius: var(--v2-radius-sm);
+  padding: 3px 7px;
+  cursor: pointer;
+  color: var(--v2-text-secondary);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.v2-sysbar-vital:hover,
+.v2-sysbar-autonomy:hover,
+.v2-sysbar-cmd:hover { background: var(--v2-fill-subtle); color: var(--v2-text-primary); }
+.v2-sysbar-vital[data-tone="warn"] { color: var(--v2-state-warn); }
+.v2-sysbar-glyph { font-family: var(--v2-font-mono); opacity: 0.75; }
+.v2-sysbar-autonomy strong { color: var(--v2-text-primary); font-weight: 600; }
+.v2-sysbar-cmd { font-family: var(--v2-font-mono); }
+
+/* Work rail */
+.v2-rail {
+  flex: 0 0 232px;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 12px 10px 20px;
+  border-right: 1px solid var(--v2-hairline);
+  background: var(--v2-surface-0);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.v2-rail-sect { display: flex; flex-direction: column; gap: 6px; }
+.v2-rail-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+}
+.v2-rail-n {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--v2-text-secondary);
+}
+.v2-rail-quiet { margin: 0; font-size: var(--v2-size-xs); color: var(--v2-text-tertiary); }
+
+.v2-rail-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-surface-1);
+  border-left: 2px solid transparent;
+}
+/* Attention gets the warm edge the design uses, and only attention. */
+.v2-rail-card--needs {
+  border-left-color: var(--v2-state-warn);
+  background: var(--v2-state-warn-soft);
+}
+.v2-rail-title {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font: inherit;
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-primary);
+  text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v2-rail-title:hover { text-decoration: underline; }
+.v2-rail-sub {
+  margin: 0;
+  font-size: 11px;
+  color: var(--v2-text-tertiary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v2-rail-verbs { display: flex; gap: 5px; margin-top: 3px; }
+.v2-rail-verb {
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--v2-radius-xs);
+  border: 1px solid var(--v2-hairline);
+  background: none;
+  color: var(--v2-text-secondary);
+  cursor: pointer;
+}
+.v2-rail-verb:hover:not(:disabled) { color: var(--v2-text-primary); border-color: var(--v2-hairline-strong); }
+.v2-rail-verb:disabled { opacity: 0.5; cursor: default; }
+.v2-rail-recent {
+  background: none; border: 0; padding: 3px 0; cursor: pointer;
+  font: inherit; font-size: 11px;
+  color: var(--v2-text-tertiary);
+  text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v2-rail-recent:hover { color: var(--v2-text-secondary); }
+
+@media (max-width: 900px) {
+  .v2-rail { display: none; }
+}
+
+/* Theme + voice, folded in from the retired Menubar. */
+.v2-sysbar-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 0;
+  border-radius: var(--v2-radius-sm);
+  padding: 4px 6px;
+  cursor: pointer;
+  color: var(--v2-text-tertiary);
+}
+.v2-sysbar-icon:hover { background: var(--v2-fill-subtle); color: var(--v2-text-primary); }
+.v2-sysbar-icon[data-on="yes"] { color: var(--v2-state-live); }
+
+/* Every control in this bar is a real target, not a label.
+   Measured before this rule: the brand 51.5x14.8, the vitals 21x20.8,
+   the palette button 27.3x20.8 and the theme and voice toggles 25x21.
+   All six are under the 24x24 WCAG 2.2 SC 2.5.8 minimum, and none of
+   them has a width-dependent rule, so a phone got the same 20px targets
+   a mouse did. The bar is 34px tall, so 24px fits inside it with five
+   pixels to spare above and below: the bar does not change height and
+   nothing here moves. */
+.v2-sysbar-brand,
+.v2-sysbar-vital,
+.v2-sysbar-cmd,
+.v2-sysbar-autonomy,
+.v2-sysbar-icon {
+  min-height: 24px;
+  min-width: 24px;
+}
+
+/* The shell no longer reserves a strip for the retired menubar. */
+.v2-shell {
+  --v2-menubar-height: 0px;
+  --v2-sysbar-height: 34px;
+}
+.v2-rail-recent { display: flex; align-items: baseline; gap: 6px; width: 100%; }
+.v2-rail-recent-t { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v2-rail-recent-w { flex: none; font-variant-numeric: tabular-nums; opacity: 0.7; }
+
+/* ── Dock tiles that report live state ─────────────────────────
+   The design: "Jobs breathes with a fill and a ring while something
+   runs." A tile reports the state of what it leads to, so the machine
+   is legible from the dock without opening anything.
+
+   Keyframes are the mockup's: breathe 52% -> 78%, ring rotating. */
+/* No overflow: hidden here. Two things deliberately live OUTSIDE the
+   tile's box: the hover tooltip, which floats above it at
+   bottom: calc(100% + 8px), and the busy ring at inset: -3px. Clipping
+   the tile hid both, so hovering a dock icon told you nothing about
+   what it was. The fill is kept inside by its own radius instead. */
+.v2-dock-btn { position: relative; isolation: isolate; }
+/* Raise the icon above the fill, and stop it shrinking. It is a flex
+   item with the default flex-shrink: 1, so anything else competing for
+   width in the tile collapses it to 0. */
+.v2-dock-btn > svg { position: relative; z-index: 2; flex: none; }
+/* z-index ONLY. .v2-dock-label is position: absolute on purpose: it is
+   the hover tooltip that floats above the tile
+   (bottom: calc(100% + 8px)). Overriding it to relative put it into the
+   flex flow, where it took width from the icon and squeezed the 20px
+   glyph to 0, and then overflow: hidden clipped both. Every tile in the
+   dock rendered as an empty square. */
+.v2-dock-label { z-index: 2; }
+
+.v2-dock-fill {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  /* Anchored by `top`, not `height`. A percentage height on an
+     absolutely positioned child resolves against a containing block
+     with a DEFINITE height; .v2-dock-btn is a flex item sized by its
+     content, so `height: 100%` computed to auto and, with only `bottom`
+     set, collapsed to the content height of an empty span: 0px.
+     Measured in Chrome, the needs fill had the right colour and no
+     height at all. `top` has no such dependency. */
+  top: 100%;
+  z-index: 1;
+  /* Matches the tile so the fill stays within its rounded corners
+     without the tile having to clip its own children. */
+  border-radius: inherit;
+  background: var(--v2-accent-soft);
+  transition: top 400ms var(--v2-ease-out);
+  pointer-events: none;
+}
+.v2-dock-ring {
+  position: absolute;
+  inset: -3px;
+  border-radius: 15px;
+  border: 1.5px solid transparent;
+  z-index: 0;
+  pointer-events: none;
+}
+.v2-dock-btn[data-state="busy"] .v2-dock-fill {
+  top: 38%;
+  animation: v2-dock-breathe 2.4s var(--v2-ease-out) infinite;
+}
+.v2-dock-btn[data-state="busy"] .v2-dock-ring {
+  border-color: var(--v2-accent);
+  opacity: 0.5;
+  animation: v2-dock-spin 2.2s linear infinite;
+}
+.v2-dock-btn[data-state="needs"] .v2-dock-fill {
+  top: 0;
+  background: var(--v2-state-warn-soft);
+}
+.v2-dock-count {
+  position: absolute;
+  top: 2px; right: 4px;
+  z-index: 2;
+  min-width: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  background: var(--v2-state-warn);
+  color: var(--v2-text-inverse);
+}
+.v2-dock-btn[data-state="busy"] .v2-dock-count { background: var(--v2-accent); }
+
+/* The mockup's 52% -> 78% fill, expressed as the top edge. */
+@keyframes v2-dock-breathe { 0%, 100% { top: 48%; } 50% { top: 22%; } }
+@keyframes v2-dock-spin { to { transform: rotate(360deg); } }
+
+/* An animated dock is a distraction for anyone who asked for stillness.
+   The state still reads: the fill and the ring stay, they just hold. */
+@media (prefers-reduced-motion: reduce) {
+  .v2-dock-btn[data-state="busy"] .v2-dock-fill,
+  .v2-dock-btn[data-state="busy"] .v2-dock-ring { animation: none; }
+}
+
+/* ── Dock stacks ───────────────────────────────────────────────
+   A tile's contents fanned out above the dock, with the verb on each
+   row, so you act without navigating. The design's geometry: centred
+   above the dock, 340px capped, rows on a 16px / content / verb grid. */
+.v2-stack {
+  position: absolute;
+  /* The dock bar spans the full width and is transparent, so it sets
+     pointer-events: none and .v2-dock-list turns it back on. The stack
+     is a sibling of that list, not a child, so it inherited none: the
+     panel painted at full opacity with correct geometry and every
+     button in it was inert. elementFromPoint at the Open button's
+     centre returned main.v2-shell-main, the page behind. A feature
+     whose whole claim is "you act from the stack without navigating
+     anywhere" did nothing at all. */
+  pointer-events: auto;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(340px, 92vw);
+  z-index: 60;
+  background: var(--v2-surface-elev);
+  border: 1px solid var(--v2-hairline-strong);
+  border-radius: var(--v2-radius-md);
+  box-shadow: var(--v2-shadow-glass);
+  overflow: hidden;
+  -webkit-backdrop-filter: var(--v2-blur-md);
+  backdrop-filter: var(--v2-blur-md);
+}
+.v2-stack-head {
+  font-family: var(--v2-font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+  padding: 9px 12px 6px;
+  border-bottom: 1px solid var(--v2-hairline);
+}
+.v2-stack-quiet {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+}
+.v2-stack-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--v2-hairline);
+}
+.v2-stack-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--v2-accent);
+  justify-self: center;
+}
+.v2-stack-title {
+  display: flex; flex-direction: column; gap: 1px;
+  min-width: 0; text-align: left;
+  background: none; border: 0; padding: 0; cursor: pointer; font: inherit;
+}
+.v2-stack-t {
+  font-size: 12.5px;
+  color: var(--v2-text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v2-stack-s {
+  font-family: var(--v2-font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0;
+  color: var(--v2-text-tertiary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v2-stack-verb {
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: var(--v2-radius-xs);
+  border: 1px solid var(--v2-hairline);
+  background: none;
+  color: var(--v2-text-secondary);
+  cursor: pointer;
+}
+.v2-stack-verb:hover:not(:disabled) { color: var(--v2-text-primary); border-color: var(--v2-hairline-strong); }
+.v2-stack-verb:disabled { opacity: 0.5; cursor: default; }
+.v2-stack-verb--none { border: 0; color: var(--v2-text-tertiary); cursor: default; }
+.v2-stack-all {
+  display: block; width: 100%;
+  padding: 8px 12px;
+  background: none; border: 0; cursor: pointer;
+  font: inherit; font-size: var(--v2-size-xs);
+  color: var(--v2-text-secondary);
+  text-align: left;
+}
+.v2-stack-all:hover { background: var(--v2-fill-subtle); color: var(--v2-text-primary); }
+
+/* No position override here. .v2-dock is already position: fixed, which
+   is a containing block for an absolutely positioned child, so the
+   stack anchors to it as-is. Setting position: relative took the dock
+   out of fixed positioning and moved it to the top of the viewport,
+   where it then overlapped the open command palette. An e2e that
+   asserts the palette never covers the Dock caught it. */
+
+/* A verb that did not land has to say so where it was clicked. Both the
+   rail and the dock stack call the brain with `silent: true`, which
+   suppresses the global error surface on purpose (a transient poll
+   failure must not throw a banner over the shell). The cost was that a
+   404 on approve left the row in place with zero error text anywhere in
+   the DOM, which looks exactly like a click that missed. */
+.v2-rail-failed,
+.v2-stack-failed {
+  margin: 4px 0 0;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-state-warn);
+  line-height: 1.35;
+}
+.v2-stack-failed { flex: 1 1 100%; padding: 0 4px 4px; }
+.v2-stack-row[data-failed="yes"] { flex-wrap: wrap; }
+
+/* ── System bar extras, one per vital ───────────────────────────────
+   The design's bar is an instrument panel, not a status line: every
+   extra is a control that opens a popover you act from. Ported from
+   the mockup's .ext / .pop rules onto this client's tokens. */
+.v2-sysbar-space { flex: 1 1 auto; }
+
+/* The conic mark from the design, a ring rather than a filled dot. */
+.v2-sysbar-mark {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  flex: none;
+  position: relative;
+  background: conic-gradient(
+    from 140deg,
+    var(--v2-state-live), var(--v2-accent), var(--v2-state-warn), var(--v2-state-live)
+  );
+}
+.v2-sysbar-mark::after {
+  content: "";
+  position: absolute;
+  inset: 3.5px;
+  border-radius: 50%;
+  background: var(--v2-surface-1);
+}
+
+.v2-ext {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;      /* WCAG 2.2 SC 2.5.8, same floor as the rest */
+  min-width: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--v2-radius-sm);
+  background: none;
+  cursor: pointer;
+  color: var(--v2-text-secondary);
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  font-variant-numeric: tabular-nums;
+  transition: background var(--v2-dur-fast) var(--v2-ease-out);
+}
+.v2-ext:hover,
+.v2-ext[aria-expanded="true"] {
+  background: var(--v2-fill-subtle);
+  color: var(--v2-text-primary);
+}
+.v2-ext > svg { flex: none; }
+.v2-ext-word { color: var(--v2-text-tertiary); }
+.v2-ext-label { color: inherit; }
+
+.v2-ext-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.v2-ext-dot--ok { background: var(--v2-state-live); }
+.v2-ext-dot--run { background: var(--v2-accent); animation: v2-ext-blink 1.6s infinite; }
+@keyframes v2-ext-blink { 50% { opacity: 0.3; } }
+
+/* The count is a filled pill, which is what makes "2 waiting on you"
+   readable at a glance instead of another number in a row of numbers. */
+.v2-ext-count {
+  background: var(--v2-state-warn);
+  color: var(--v2-surface-1);
+  border-radius: 7px;
+  padding: 0 5px;
+  font-size: 9px;
+  line-height: 14px;
+  min-width: 14px;
+  text-align: center;
+  flex: none;
+}
+
+/* Only animates while something is running. An idle machine gets a
+   still bar rather than a fake heartbeat. */
+.v2-spark { display: flex; align-items: flex-end; gap: 1.5px; height: 11px; width: 26px; flex: none; }
+.v2-spark i {
+  flex: 1;
+  display: block;
+  height: 25%;
+  border-radius: 0.5px;
+  background: var(--v2-hairline-strong);
+}
+.v2-spark.is-live i { animation: v2-spark-bounce 1.9s var(--v2-ease-out) infinite; }
+.v2-spark.is-live i:nth-child(2) { animation-delay: 0.2s; }
+.v2-spark.is-live i:nth-child(3) { animation-delay: 0.4s; }
+.v2-spark.is-live i:nth-child(4) { animation-delay: 0.6s; }
+.v2-spark.is-live i:nth-child(5) { animation-delay: 0.8s; }
+@keyframes v2-spark-bounce {
+  0%, 100% { height: 25%; background: var(--v2-hairline-strong); }
+  45% { height: 100%; background: var(--v2-accent); }
+}
+
+/* ── The popover behind a vital ─────────────────────────────────── */
+.v2-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 8px;
+  width: min(300px, calc(100vw - 24px));
+  z-index: 60;
+  background: var(--v2-surface-elev);
+  border: 1px solid var(--v2-hairline-strong);
+  border-radius: var(--v2-radius-md);
+  box-shadow: var(--v2-shadow-glass);
+  overflow: hidden;
+  -webkit-backdrop-filter: var(--v2-blur-md);
+  backdrop-filter: var(--v2-blur-md);
+  text-align: left;
+}
+.v2-pop-h {
+  font-family: var(--v2-font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+  padding: 9px 12px 6px;
+  border-bottom: 1px solid var(--v2-hairline);
+}
+.v2-pop-r {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--v2-hairline);
+  background: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+button.v2-pop-r { cursor: pointer; }
+button.v2-pop-r:hover { background: var(--v2-fill-subtle); }
+.v2-pop-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.v2-pop-t {
+  font-size: var(--v2-size-sm);
+  color: var(--v2-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v2-pop-s {
+  font-family: var(--v2-font-mono);
+  font-size: 9.5px;
+  color: var(--v2-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v2-pop-v {
+  flex: none;
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+button.v2-pop-v {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid currentColor;
+  border-radius: var(--v2-radius-sm);
+  background: none;
+  cursor: pointer;
+}
+button.v2-pop-v:disabled { opacity: 0.5; cursor: default; }
+.v2-pop-v--warn { color: var(--v2-state-warn); }
+.v2-pop-v--err { color: var(--v2-state-error); }
+.v2-pop-v.is-current { color: var(--v2-state-live); }
+.v2-pop-quiet, .v2-pop-failed {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+}
+.v2-pop-failed { color: var(--v2-state-warn); }
+.v2-pop-all {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  padding: 7px 12px;
+  border: 0;
+  border-top: 1px solid var(--v2-hairline);
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-secondary);
+}
+.v2-pop-all:hover { background: var(--v2-fill-subtle); color: var(--v2-text-primary); }
+
+/* The bar is the popover's containing block, so it must not clip. */
+.v2-sysbar { position: relative; overflow: visible; }
+
+@media (prefers-reduced-motion: reduce) {
+  .v2-spark.is-live i { animation: none; height: 60%; }
+  .v2-ext-dot--run { animation: none; opacity: 1; }
+}
+
+/* Rail row glyphs. The design puts one on every row, and it carries
+   information: it is what separates a shell command from a sub-agent
+   at a glance, in a list that mixes them. */
+.v2-rail-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.v2-rail-title-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v2-rail-ic { flex: none; color: var(--v2-text-tertiary); }
+.v2-rail-card--needs .v2-rail-ic { color: var(--v2-state-warn); }

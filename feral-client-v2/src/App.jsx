@@ -34,19 +34,24 @@ import PeripheralsPanel from './pages/phone/PeripheralsPanel';
 import AppsPanel from './pages/phone/AppsPanel';
 import SettingsPanel from './pages/phone/SettingsPanel';
 import Oversight from './pages/Oversight';
+import Approvals from './pages/Approvals';
+import Checkpoints from './pages/Checkpoints';
+import Grants from './pages/Grants';
+import Console from './pages/Console';
+import Jobs from './pages/Jobs';
 
 export default function App() {
   return (
     <Routes>
       {/* Canonical setup. The legacy /setup/legacy route was removed
-          in 2026.5.8 — the bundled UI's depth-2 SPA routes were broken
+          in 2026.5.8, the bundled UI's depth-2 SPA routes were broken
           due to relative asset paths, so the legacy wizard was a
           blank page in practice. /setup now has a pairing step (see
           PairStep in Setup.jsx). The CLI wizard `feral setup` is
           unaffected. */}
       <Route path="/setup" element={<Setup />} />
       <Route path="/setup/legacy" element={<Navigate to="/setup" replace />} />
-      {/* Unauthenticated browser-node pairing — any phone can land here. */}
+      {/* Unauthenticated browser-node pairing: any phone can land here. */}
       <Route path="/pair" element={<Pair />} />
       <Route path="/pair/:device_id" element={<PairShell />}>
         <Route index element={<Navigate to="chat" replace />} />
@@ -75,6 +80,11 @@ export default function App() {
         <Route path="/canvas" element={<GenUICanvas />} />
         <Route path="/glass-brain" element={<GlassBrain />} />
         <Route path="/oversight" element={<Oversight />} />
+        <Route path="/approvals" element={<Approvals />} />
+        <Route path="/checkpoints" element={<Checkpoints />} />
+        <Route path="/grants" element={<Grants />} />
+        <Route path="/console" element={<Console />} />
+        <Route path="/jobs" element={<Jobs />} />
         <Route path="/timeline" element={<Timeline />} />
         <Route path="/flows" element={<Flows />} />
         <Route path="/intents" element={<Intents />} />

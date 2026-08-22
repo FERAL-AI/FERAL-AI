@@ -56,6 +56,30 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _display_is_asleep() -> bool:
+    """True when the main display is asleep, so a capture is uniformly black.
+
+    A blank screenshot has two very different causes: Screen Recording
+    permission is denied, which is a real defect worth failing on, and
+    the display simply went to sleep, which is not. They are
+    indistinguishable from the pixels alone.
+
+    This matters because `StayAwake` uses `caffeinate -i`, which inhibits
+    idle *system* sleep and deliberately not display sleep, so on a full
+    suite run of several minutes the screen can and does sleep. That is
+    exactly how this test failed once in a full run while passing in
+    isolation and in the run before it.
+
+    Returns False when the probe is unavailable, so an environment
+    without pyobjc keeps the strict assertion rather than skipping.
+    """
+    try:
+        import Quartz
+        return bool(Quartz.CGDisplayIsAsleep(Quartz.CGMainDisplayID()))
+    except Exception:
+        return False
+
+
 # ── 1. window_list honesty ───────────────────────────────────────
 
 
@@ -246,7 +270,15 @@ class TestWindowListOnThisMac:
         assert img.width <= 1920
         # A capture that came back as a uniform rectangle means Screen
         # Recording is denied (macOS hands back wallpaper) or the encode
-        # dropped the frame.
+        # dropped the frame. A sleeping display produces the same uniform
+        # image for a reason that is not a defect, so it is separated out
+        # rather than folded into the assertion.
+        if max(ImageStat.Stat(img).stddev) <= 5 and _display_is_asleep():
+            pytest.skip(
+                "the display is asleep, so every capture is uniformly black; "
+                "caffeinate -i inhibits system sleep but deliberately not "
+                "display sleep"
+            )
         assert max(ImageStat.Stat(img).stddev) > 5
 
     def test_cursor_position_is_real(self):

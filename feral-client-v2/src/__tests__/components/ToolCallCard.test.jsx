@@ -13,7 +13,10 @@ describe('ToolCallCard', () => {
     expect(screen.getByRole('button')).toHaveAttribute('aria-expanded', 'false');
   });
 
-  it('expands on click and renders args + result', () => {
+  it('renders args + result, and the disclosure collapses them again', () => {
+    // A json result is one of the shapes that carries information the
+    // head cannot summarise, so the card opens with it. Clicking the
+    // head is now the way to put it away, not the way to see it.
     render(
       <ToolCallCard trace={{
         key: 'k',
@@ -24,13 +27,17 @@ describe('ToolCallCard', () => {
         latency_ms: 200,
       }} />,
     );
-    fireEvent.click(screen.getByRole('button', { name: /tool/i }));
+    expect(screen.getByRole('button', { name: /tool/i })).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByText('args')).toBeInTheDocument();
     expect(screen.getByText('result')).toBeInTheDocument();
     // Args + JSON results are pretty-printed (2-space indent), not
     // dumped as a single minified line.
     expect(screen.getByText(/"city": "sf"/)).toBeInTheDocument();
     expect(screen.getByText(/"temp_f": 64/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /tool/i }));
+    expect(screen.getByRole('button', { name: /tool/i })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('args')).toBeNull();
   });
 
   describe('refusals are not failures', () => {

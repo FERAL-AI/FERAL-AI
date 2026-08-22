@@ -131,9 +131,25 @@ async def test_about_me_extractor_runs_off_event_loop(tmp_path):
     )
     save_elapsed = time.monotonic() - t0
 
-    assert save_elapsed < 0.15, (
-        f"episode_save returned in {save_elapsed:.3f}s — extractor must "
-        "have run inline (>=200ms slow extractor would block)"
+    # Assert the property, not a stopwatch. `extract_from_text_async`
+    # sets finished_event in a finally, so running inline means awaiting
+    # it to completion, which means the event is set by the time
+    # episode_save returns. Not set therefore proves it did not run
+    # inline, and that holds however slow the machine is.
+    assert not finished_event.is_set(), (
+        f"episode_save waited for the extractor (returned in "
+        f"{save_elapsed:.3f}s with the extractor already finished)"
+    )
+
+    # A wall-clock bound is kept only as a coarse sanity check, well
+    # clear of the extractor's 200ms. The original assertion was
+    # `< 0.15` against that 200ms sleep, which left 50ms of headroom and
+    # made this a load test: it failed once in a full 9,730-test run and
+    # passed in isolation, in its own file, and on re-run of the same
+    # commit in the same deterministic order.
+    assert save_elapsed < 2.0, (
+        f"episode_save took {save_elapsed:.3f}s, far beyond any plausible "
+        "non-blocking path"
     )
 
     # Now wait for the background extractor to finish so the test

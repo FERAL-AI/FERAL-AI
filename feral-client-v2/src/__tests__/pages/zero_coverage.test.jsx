@@ -17,7 +17,6 @@ import Webhooks from '../../pages/Webhooks';
 import Wiki from '../../pages/Wiki';
 import Identity from '../../pages/Identity';
 import Skills from '../../pages/Skills';
-import Dashboard from '../../pages/Dashboard';
 import Health from '../../pages/Health';
 import Memory from '../../pages/Memory';
 
@@ -146,23 +145,11 @@ describe('Skills', () => {
 // The canonical setup is /setup (Setup.jsx, with the new pairing step
 // covered by tests/test_setup_pair_step.test.jsx).
 
-// ── Dashboard (alias for Home) ───────────────────────────────────
-
-describe('Dashboard', () => {
-  it('aliases to Home and renders without crashing', () => {
-    const { container } = renderV2(<Dashboard />, {
-      fetch: (url) => {
-        if (url.includes('/api/dashboard')) {
-          return { device_count: 0, skills_count: 5, session_count: 0, health: {}, somatic: {} };
-        }
-        if (url.includes('/api/skills')) return { skills: [] };
-        if (url.includes('/api/ambient')) return {};
-        return {};
-      },
-    });
-    expect(container.firstChild).toBeInTheDocument();
-  });
-});
+// ── Dashboard/Ambient alias pages were deleted in 2026.8.12. Both were
+// one-line `export { default } from './Home'` re-exports with zero
+// production importers; App.jsx already routed / to Home directly and
+// redirected /ambient to /. Home itself is covered by
+// pages/Home.test.jsx and pages/Home.stale-offline.test.jsx.
 
 // ── Health ───────────────────────────────────────────────────────
 

@@ -284,6 +284,53 @@ export function detectResultShape(value, opts = {}) {
   return { kind: 'text', data: String(value), language: '' };
 }
 
+/**
+ * Result shapes whose whole content is destroyed by collapsing.
+ *
+ * `detectResultShape` classifies into seven kinds and every one of them
+ * used to render behind a closed disclosure, so a screenshot, a row
+ * list and a diff were each a single grey line reading "Use computer".
+ * The card head can summarise ARGUMENTS (`summariseArgs`) but it has no
+ * way to summarise a result, so a collapsed card of these kinds shows
+ * the user nothing at all about what came back.
+ *
+ * `empty` is excluded because there is nothing to show. `text` is
+ * excluded because it is the shape for stdout and one-word statuses:
+ * expanding those by default is what turns a fan-out of parallel calls
+ * into a wall. It stays one click away.
+ */
+export const SELF_EXPANDING_RESULT_KINDS = Object.freeze(
+  new Set(['image', 'table', 'code', 'markdown', 'json']),
+);
+
+/**
+ * Should this card render open on first paint?
+ *
+ * @param {object} trace       assembled tool trace (see ToolCallCard)
+ * @param {object} opts
+ * @param {boolean} opts.grouped  card is inside a multi-call group
+ * @param {boolean} opts.refused  brain declined the call
+ * @param {string}  opts.language highlight hint from the call's args
+ */
+export function shouldOpenByDefault(trace, opts = {}) {
+  if (!trace) return false;
+  // A failure or a refusal IS the information. Both carry their whole
+  // payload in `error`, which the head never shows, so both open even
+  // inside a group.
+  if (opts.refused) return true;
+  if (trace.success === false) return true;
+  // Still running: nothing to show yet, and a card that pops open the
+  // moment a result lands would reflow the transcript under the reader.
+  if (trace.success == null) return false;
+  // Inside a group the group header is already the summary; opening
+  // eight parallel cards at once is the wall this is meant to avoid.
+  if (opts.grouped) return false;
+  const value = trace.result_preview;
+  if (value == null || value === '') return false;
+  const shape = detectResultShape(value, { language: opts.language || '' });
+  return SELF_EXPANDING_RESULT_KINDS.has(shape.kind);
+}
+
 /** Cell → display string. Objects collapse to compact JSON. */
 export function cellText(value) {
   if (value == null) return '';
@@ -297,18 +344,46 @@ export function cellText(value) {
 }
 
 /**
+ * Tool results the brain DECLINED rather than attempted.
+ *
+ * A refusal is not a failure. The tool never ran, nothing was written,
+ * and there is nothing to retry until the user changes something.
+ * Keyed off `error_code` rather than the prose, because the prose is
+ * user-facing copy and will change. Populated by `_emit_tool_result`
+ * in agents/orchestrator.py, declared on `ToolResultPayload.error_code`
+ * in models/protocol.py.
+ */
+export const REFUSAL_CODES = Object.freeze({
+  plan_mode_blocked: 'blocked by plan mode',
+  policy_denied: 'blocked by policy',
+  pending_approval: 'waiting for your approval',
+});
+
+export function isRefusal(trace) {
+  return Object.hasOwn(REFUSAL_CODES, String(trace?.error_code || ''));
+}
+
+/**
  * Aggregate status for a group of tool calls in one turn.
- * `running` wins over `failed` wins over `ok` for the group icon.
+ * Precedence for the group tone: running > failed > refused > ok.
+ *
+ * Refusals are counted apart from failures. A refusal arrives with
+ * `success: false` like a crash does, so counting the two together
+ * made the group head read "2 failed" for one crash and one boundary
+ * FERAL held on purpose, and tinted the whole group with the error
+ * hue. That is the same defect the individual cards had, one level up.
  */
 export function summariseGroup(traces) {
   const list = Array.isArray(traces) ? traces : [];
   let running = 0;
   let failed = 0;
+  let refused = 0;
   let ok = 0;
   let totalMs = 0;
   for (const t of list) {
     if (!t) continue;
-    if (t.success === false) failed += 1;
+    if (isRefusal(t)) refused += 1;
+    else if (t.success === false) failed += 1;
     else if (t.success === true) ok += 1;
     else running += 1;
     totalMs += Number(t.latency_ms) || 0;
@@ -317,8 +392,11 @@ export function summariseGroup(traces) {
     total: list.length,
     running,
     failed,
+    refused,
     ok,
     totalMs,
-    status: running > 0 ? 'running' : failed > 0 ? 'failed' : 'ok',
+    status: running > 0 ? 'running'
+      : failed > 0 ? 'failed'
+        : refused > 0 ? 'refused' : 'ok',
   };
 }

@@ -196,31 +196,18 @@ VERSION_LOCATIONS: tuple[VersionLocation, ...] = (
         replacement="version={version}",
         description="Runtime: line example in build_runtime_line docstring",
     ),
-    # ---- v1 web client fallback strings (not in  ownership but
-    # ----  carry a bare CalVer literal that drifts on every bump).
-    # ----  Folded in here to retire the legacy
-    # ----  ``scripts/bump_version.py`` mirror list — the CI gate
-    # ----  ``test_single_calver_across_all_files`` walks this list,
-    # ----  not bump_version's, after the consolidation in
-    # ----  phase-1/truthfulness-sweep.
-    VersionLocation(
-        path="feral-client/src/components/AppShell.jsx",
-        pattern=_p(rf"'{VERSION_PATTERN}'"),
-        replacement="'{version}'",
-        description="v1 client AppShell version fallback literals",
-    ),
-    VersionLocation(
-        path="feral-client/src/pages/Dashboard.jsx",
-        pattern=_p(rf"'{VERSION_PATTERN}'"),
-        replacement="'{version}'",
-        description="v1 client Dashboard version fallback literal",
-    ),
-    VersionLocation(
-        path="feral-client/src/pages/SetupWizard.jsx",
-        pattern=_p(rf"FERAL v{VERSION_PATTERN}"),
-        replacement="FERAL v{version}",
-        description="v1 client setup wizard footer version label",
-    ),
+    # ---- The three v1 web client fallback strings that used to live here
+    # ----  (feral-client/src/components/AppShell.jsx,
+    # ----  src/pages/Dashboard.jsx and src/pages/SetupWizard.jsx) were
+    # ----  removed in 2026.8.12 together with feral-client/ itself. They
+    # ----  had been folded in from the retired
+    # ----  ``scripts/bump_version.py`` mirror list because they carried a
+    # ----  bare CalVer literal that drifted on every bump. With the v1
+    # ----  client gone there is no such literal left outside v2, whose
+    # ----  version comes from package.json rather than a hard-coded
+    # ----  fallback. The CI gate ``test_single_calver_across_all_files``
+    # ----  walks this list, so dropping the entries and the files in the
+    # ----  same commit keeps ``--check`` at drift 0.
     # ---- Top-level pyproject (not present in every checkout, optional).
     VersionLocation(
         path="pyproject.toml",

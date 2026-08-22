@@ -322,60 +322,6 @@ jobs:
         # feral-core/pyproject.toml, the plugin is OFF by default in CI.
         run: pytest tests/ -p no:randomly -v --tb=short --cov=. --cov-report=term-missing --cov-fail-under=50 --ignore=tests/perf --timeout=60 --timeout-method=thread
 
-  client-build:
-    name: Client — vite build
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    defaults:
-      run:
-        working-directory: feral-client
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: feral-client/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build
-        run: npm run build
-
-      - name: Audit npm dependencies
-        # OPTIONAL, same reasoning as the pip-audit step in brain-tests:
-        # `|| echo` forced exit 0 and made `continue-on-error` unreachable.
-        # WHAT IS LOST when it trips: a high-severity advisory in the npm
-        # tree can still merge; it shows as a red tolerated step rather than
-        # a warning buried in a green log.
-        run: npm audit --audit-level=high
-        continue-on-error: true
-
-      - name: Coverage gate note
-        shell: bash
-        # The numbers used to be hard-coded here as "20/40/18/20" while
-        # vitest.config.js actually enforces 20/18/18/20. The branches figure
-        # was overstated by more than 2x, so the log advertised a gate
-        # stronger than the one that runs. Read them out of the config so the
-        # note cannot drift from the gate it describes.
-        run: |
-          set -euo pipefail
-          node -e '
-            const src = require("fs").readFileSync("vitest.config.js", "utf8");
-            const pick = (k) => {
-              const m = src.match(new RegExp(k + "\\s*:\\s*(\\d+)"));
-              if (!m) { console.error("could not read " + k + " threshold"); process.exit(1); }
-              return m[1];
-            };
-            console.log(`::notice::vitest coverage gate: ${pick("statements")}/${pick("branches")}/${pick("functions")}/${pick("lines")} (stmts/branches/funcs/lines), read live from vitest.config.js.`);
-          '
-          echo "::notice::New pages, hooks, or lib files must ship with a matching smoke test in src/__tests__/ so this gate stays honest."
-
-      - name: Run tests with coverage
-        run: npx vitest run --coverage
-
   client-v2:
     name: Client v2 — vite build + vitest coverage
     runs-on: ubuntu-latest

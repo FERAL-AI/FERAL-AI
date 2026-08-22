@@ -1995,7 +1995,15 @@ class BrainState:
         with boot_subsystem(self._boot_report, "IntentCompiler"):
             from agents.intent_compiler import IntentCompiler
             _intent_db = str(feral_data_home() / "intents.db")
-            self.intent_compiler = IntentCompiler(llm=_shared_llm, db_path=_intent_db)
+            # Without user_timezone the compiler defaults to "UTC"
+            # (agents/intent_compiler.py:39), so every "today"
+            # boundary in the briefing and the wind-down recap was
+            # UTC midnight rather than the operator's.
+            from config.loader import local_timezone_name
+            self.intent_compiler = IntentCompiler(
+                llm=_shared_llm, db_path=_intent_db,
+                user_timezone=local_timezone_name(),
+            )
 
         if self.ideas_engine is not None:
             async def _ideas_daily_brief_loop():

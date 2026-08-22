@@ -1,10 +1,128 @@
 # Changelog
 
-<!-- feral-version: 2026.8.12 -->
+<!-- feral-version: 2026.8.13 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.13] - 2026-08-21 - surfaces that painted correctly and did nothing
+
+The previous release was about capabilities that reported success while
+doing nothing. This one is the same defect class one layer up: interface
+that rendered correctly, passed its tests, and could not be used. Every
+item below was found by driving the real surface, and most of them had a
+green test sitting on top of them the whole time.
+
+### The things that were inert
+
+- **The press-and-hold dock stack could not be clicked.** `DockStack`
+  renders as a sibling of `.v2-dock-list` under `.v2-dock`, which sets
+  `pointer-events: none` for the whole transparent bar and relies on the
+  list to restore it. The stack inherited none. It painted at full
+  opacity with correct geometry and every button was dead;
+  `elementFromPoint` at the panel's centre returned the page behind it,
+  and a real click timed out. Worse than inert: the click fell through
+  to the pane header, tripping the stack's own outside-click handler, so
+  the stack vanished and nothing was approved. The spec asserted
+  `toBeVisible()`, which knows nothing about `pointer-events`.
+
+- **Four of the seven system-bar vitals were wired to fields that do not
+  exist.** `/api/dashboard` has no `cost_today`, `spend_today`,
+  `tokens_used` or `autonomy`. Cost read 0 and autonomy read empty on
+  every install, and the render-if-non-zero rule then hid both, so the
+  bar looked sparse because it was reading nothing rather than because
+  the machine was idle. The budget lived only on
+  `LLMProvider._budget_snapshot()` with no HTTP surface at all; the
+  autonomy tier only on `GET /api/autonomy`. Both now ride the dashboard
+  payload the shell already polls, and each vital opens a popover whose
+  rows are actionable in place.
+
+- **Two guards that could never fail.** `VoiceLane.test.jsx` grepped
+  `ui.css` for two selectors that had already been deleted, so both
+  assertions were `expect(css).not.toMatch(<absent>)`. They passed on
+  every run while the behaviour they were named after came back through
+  a different door: `Expand` still produced a full-viewport
+  `aria-modal="true"` surface with no Escape and no focus containment,
+  under which a real click on a dock tile timed out.
+
+- **`/skills` and `/health` served raw JSON to a browser.** Both are
+  mounted without the `/api` prefix and shadow two of the 28 SPA routes.
+  Reloading `/skills` produced 33KB of JSON with zero anchor elements
+  and no way back but editing the URL. Neither could move (`/health` is
+  the Docker HEALTHCHECK), so the request decides. The repo's own e2e
+  already caught this and had been failing against a real brain the
+  whole time; CI could not see it because CI runs against `vite
+  preview`, which serves index.html for any unknown path.
+
+### Voice
+
+- **A silent room was billed an STT call every 12 seconds.** 60s of
+  digital silence produced 4 calls of 387,200 bytes with zero non-zero
+  samples: `overflowing()` lacked the voiced guard `speech_ended()` has.
+  Whisper hallucinates on silence and the router wraps whatever comes
+  back as a user turn, so the brain answered an empty room on a timer.
+  The test named after that bug ran 6.0s against a 12.0s ceiling.
+
+- **The docked voice pill covered the dock on most screens.** Both boxes
+  are fixed width and clear each other only above 1317px: at 1280 it
+  covered 18px of the dock, at 1024 146px, at 768 274px and 6 of 9 tiles,
+  and at 640 and below the entire dock. The guard tested one viewport,
+  1680, which is where it passes.
+
+- Fullscreen voice declared itself a modal with no keyboard way out.
+  Escape now minimizes, and it uses the shared focus trap.
+
+### Ambient conversations
+
+- **The digest now reaches the phone.** The brain built a full
+  `TranscriptOutcome` and discarded it, so a recording was readable only
+  as its raw transcript. It is persisted and delivered both ways: pushed
+  when summarization finishes with the node connected, pulled on connect
+  for everything missed.
+
+  The pull frame is scoped to the authenticated device. `transcript_id`
+  is client-supplied, so an unscoped lookup would let any paired node
+  read back the summary, people and commitments of a conversation
+  recorded by a different device. A transcript owned by someone else
+  answers `unknown`, exactly as one nobody owns.
+
+  Requests are capped at 64 ids and omit `detail` by default: 512 ids
+  against a 20,000-char detail is a ~10MB burst at the moment a phone
+  reconnects. Each reply carries `remaining`, so a phone returning after
+  a week can report that it is fetching instead of appearing to hang.
+
+### Accessibility
+
+- Every system-bar control was under the 24px WCAG 2.2 target floor,
+  identically at 1512 and 375 since none had a width-dependent rule.
+- Focus landed inside an `aria-hidden` subtree: the voice overlay is
+  always in the DOM, and `aria-hidden` + opacity 0 + `pointer-events:
+  none` do not remove anything from the tab order.
+- Tertiary text measured 4.46:1 against the real composited ground in
+  light mode. The previous tuning was correct arithmetic against a
+  nominal ground colour.
+
+### Also
+
+- The credential sweep could never run: migrations run before
+  `state.init()`, but the plaintext file is written later in the same
+  boot, so it was marked applied having found nothing. Measured four
+  boots later, the plaintext key was still on disk with doctor reporting
+  "up to date".
+- A failed approve from the rail or a stack said nothing at all.
+- `/checkpoints` rendered "1 file" and a timestamp, with `turn_id` and
+  `session_id` in the payload and never shown. Undo is irreversible.
+- The Channels card rendered the response envelope as channels.
+- The `feral doctor` "fresh install" test inherited the previous test's
+  settings, because `ConfigLoader` publishes settings into `os.environ`
+  and env beats a fresh home.
+
+### Tests
+
+pytest 9814, vitest 1136 across 144 files, e2e 65 against `vite preview`
+and 65 against a live brain. The e2e suite had never been green against
+a real server before this release.
 
 ## [2026.8.12] - 2026-08-20 - the surfaces that reported success and did nothing
 

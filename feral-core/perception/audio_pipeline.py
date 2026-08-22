@@ -20,11 +20,14 @@ Environment variables:
 """
 
 from __future__ import annotations
+import array
 import asyncio
 import base64
 import io
 import logging
+import math
 import os
+import sys
 import time
 import wave
 from typing import Optional
@@ -196,39 +199,88 @@ class _LocalTTS:
 #  Capability auto-detection
 # ---------------------------------------------------------------------------
 
+#: Voices `feral voice` knows how to fetch. Presence is checked, not assumed.
+_KNOWN_PIPER_VOICES = ("en_US-lessac-medium", "en_US-amy-low", "en_GB-alan-medium")
+
+
 def detect_local_audio_capabilities() -> dict:
-    """Probe which local audio backends are importable.
+    """Probe whether local audio backends can actually run.
 
     Returns a dict suitable for ``feral doctor`` reporting::
 
         {
-            "local_stt": True/False,
-            "local_tts": True/False,
-            "stt_models": ["tiny", "base", ...],
-            "tts_voices": ["en_US-lessac-medium", ...],
+            "local_stt": True/False,      # importable AND a model on disk
+            "local_tts": True/False,      # importable AND a voice on disk
+            "stt_models": [...],          # models you may CHOOSE
+            "tts_voices": [...],          # voices you may CHOOSE
+            "stt_models_present": [...],  # models actually on disk
+            "tts_voices_present": [...],  # voices actually on disk
+            "stt_importable": True/False,
+            "tts_importable": True/False,
         }
+
+    ``stt_models`` stays the selectable list, because
+    ``/api/audio/providers/stt/faster-whisper/models`` is a picker: a
+    fresh install has nothing downloaded, and a picker that lists only
+    what is present would be empty with no way to choose something to
+    fetch. ``*_present`` is the separate question doctor asks.
+
+    ``local_stt`` used to be set by ``import faster_whisper`` alone, and
+    ``stt_models`` returned the list of *valid model names* rather than
+    the ones present. ``tts_voices`` was three hard-coded strings. So on
+    a machine with the packages installed and no weights downloaded,
+    which is what `pip install feral-ai[stt]` leaves behind, doctor
+    reported local STT and TTS as available and listed models that were
+    not on disk. The transcribe path then failed at first use with
+    "model not downloaded", having been told twice that it would work.
+
+    The two facts are kept separate rather than collapsed, because
+    "install the package" and "fetch the weights" are different fixes
+    and the operator needs to know which one they are missing.
     """
     result: dict = {
         "local_stt": False,
         "local_tts": False,
         "stt_models": [],
         "tts_voices": [],
+        "stt_models_present": [],
+        "tts_voices_present": [],
+        "stt_importable": False,
+        "tts_importable": False,
     }
 
     try:
         import faster_whisper  # noqa: F401
-        result["local_stt"] = True
+        result["stt_importable"] = True
         result["stt_models"] = list(_VALID_LOCAL_STT_MODELS)
     except ImportError:
         pass
 
     try:
         import piper  # noqa: F401
-        result["local_tts"] = True
-        result["tts_voices"] = ["en_US-lessac-medium", "en_US-amy-low", "en_GB-alan-medium"]
+        result["tts_importable"] = True
+        result["tts_voices"] = list(_KNOWN_PIPER_VOICES)
     except ImportError:
         pass
 
+    # Presence is a filesystem question and must never make the probe
+    # raise: doctor calls this to describe a broken machine.
+    try:
+        from voice.local_models import faster_whisper_model_present, piper_voice_present
+
+        if result["stt_importable"]:
+            result["stt_models_present"] = [
+                m for m in _VALID_LOCAL_STT_MODELS if faster_whisper_model_present(m)
+            ]
+        if result["tts_importable"]:
+            result["tts_voices_present"] = [
+                v for v in _KNOWN_PIPER_VOICES if piper_voice_present(v)
+            ]
+    except Exception:
+        logger.debug("local model presence probe failed", exc_info=True)
+
+    result["local_stt"] = bool(result["stt_models_present"])
+    result["local_tts"] = bool(result["tts_voices_present"])
     return result
 
 
@@ -245,6 +297,64 @@ def _pcm16_to_wav(audio_bytes: bytes, sample_rate: int) -> bytes:
         wav_file.setframerate(max(sample_rate, 8000))
         wav_file.writeframes(audio_bytes)
     return output.getvalue()
+
+
+def _split_wav_into_playable_chunks(wav_bytes: bytes, chunk_bytes: int) -> list[bytes]:
+    """Cut a WAV into pieces that each decode on their own.
+
+    A WAV is a RIFF header followed by raw samples, so slicing the file
+    at a byte offset produces one playable piece and a tail of headerless
+    noise. Every consumer decodes a ``tts_chunk`` on its own
+    (``RealtimeVoiceEngine.handleTtsChunk`` calls ``decodeAudioData``
+    per frame), so the tail is not merely unplayable, it raises.
+
+    Measured in Chrome on a 3 second Piper reply cut at 32KB:
+
+        chunk 0  32768 bytes  ok, 0.742s
+        chunk 1  32768 bytes  EncodingError
+        chunk 2  32768 bytes  EncodingError
+        chunk 3  32768 bytes  EncodingError
+        chunk 4   1272 bytes  EncodingError
+
+    The user heard 0.74 seconds of a 3 second answer and the client
+    raised four playback errors. MP3 survived the same treatment, which
+    is why only the local Piper path was affected and why it went
+    unnoticed: cloud TTS returns MP3, whose frames are self-describing.
+
+    Each piece is re-wrapped in its own header here, so the wire format
+    and every existing client stay exactly as they are.
+    """
+    if not wav_bytes:
+        return []
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as src:
+            channels = src.getnchannels()
+            width = src.getsampwidth()
+            rate = src.getframerate()
+            pcm = src.readframes(src.getnframes())
+    except (wave.Error, EOFError):
+        # Not a WAV we can parse. Hand it back whole rather than
+        # shredding it: one oversized chunk still plays.
+        logger.warning("TTS audio is not a readable WAV; sending it unsliced")
+        return [wav_bytes]
+
+    if channels != 1 or width != 2:
+        # `_pcm16_to_wav` only writes mono 16-bit, so re-wrapping
+        # anything else would mislabel the samples and play noise.
+        logger.warning(
+            "TTS WAV is %dch/%dbit, not mono 16-bit; sending it unsliced",
+            channels, width * 8,
+        )
+        return [wav_bytes]
+
+    frame = channels * width
+    # Cut on a frame boundary, or a chunk starts half a sample in and
+    # every following sample is byte-swapped into noise.
+    step = max(frame, (chunk_bytes // frame) * frame)
+    return [
+        _pcm16_to_wav(pcm[i:i + step], rate)
+        for i in range(0, len(pcm), step)
+    ] or [_pcm16_to_wav(b"", rate)]
 
 
 # ---------------------------------------------------------------------------
@@ -425,8 +535,36 @@ class AudioPipeline:
         completed = buf.flush() if buf.vad_triggered() else b""
 
         buf.append(chunk_bytes, encoding, sample_rate)
-        if is_final:
+        # The packet-gap check above only fires when a client stops
+        # sending. Every real client streams continuously, so these two
+        # are what actually end an utterance in practice: the audio went
+        # quiet, or it has run long enough that waiting for a pause is no
+        # longer reasonable.
+        if is_final or buf.speech_ended():
             completed += buf.flush()
+        elif buf.overflowing():
+            # The ceiling exists so a speaker who never pauses still gets
+            # transcribed. It must not turn an open mic in a quiet room
+            # into a paid STT call every twelve seconds.
+            #
+            # `speech_ended` has always required voiced audio first, and
+            # its docstring says why. `overflowing` did not, and the two
+            # were ORed, so silence took the ceiling instead: measured on
+            # 60s of digital silence, four calls of 387,200 bytes each
+            # with zero non-zero samples. On the default provider that is
+            # roughly 297 Whisper requests an hour, and Whisper
+            # hallucinates words on silence ("Thank you."), which
+            # voice/router feeds to the orchestrator as a user turn. The
+            # brain answers a room that said nothing.
+            #
+            # Where we can see the samples and none is speech, drop it.
+            # Where we cannot (compressed audio), the ceiling still
+            # fires, because an unmeasurable buffer that grows forever is
+            # the worse failure.
+            if buf.is_measurably_silent():
+                buf.discard()
+            else:
+                completed += buf.flush()
 
         if not completed or len(completed) < 1000:
             return None
@@ -557,17 +695,19 @@ class AudioPipeline:
                 None, self._local_tts.synthesize, text[:4096]
             )
 
-            chunk_size = 32 * 1024
-            chunks = []
-            for i in range(0, len(wav_bytes), chunk_size):
-                segment = wav_bytes[i:i + chunk_size]
-                is_final = (i + chunk_size) >= len(wav_bytes)
-                chunks.append({
-                    "chunk_index": len(chunks),
+            # Each piece carries its own RIFF header, because the client
+            # decodes every chunk independently. See
+            # `_split_wav_into_playable_chunks`.
+            segments = _split_wav_into_playable_chunks(wav_bytes, 32 * 1024)
+            chunks = [
+                {
+                    "chunk_index": index,
                     "encoding": "wav",
                     "data_b64": base64.b64encode(segment).decode("ascii"),
-                    "is_final": is_final,
-                })
+                    "is_final": index == len(segments) - 1,
+                }
+                for index, segment in enumerate(segments)
+            ]
 
             logger.info("Local TTS synthesized: %d bytes, %d chunks", len(wav_bytes), len(chunks))
             return chunks
@@ -690,8 +830,92 @@ class AudioPipeline:
 #  Audio buffer / VAD
 # ---------------------------------------------------------------------------
 
+# A speaker who never pauses still has to be transcribed. Beyond this
+# much buffered audio the utterance is cut and sent regardless of what
+# the VAD thinks, so a continuous stream always makes progress.
+MAX_UTTERANCE_SEC = 12.0
+
+# RMS below this (on PCM16, whose full scale is 32768) counts as silence.
+# Room tone on a laptop mic sits well under 300; speech is thousands.
+SILENCE_RMS = 300.0
+
+# Silence this long ends an utterance. Shorter than the packet-gap
+# threshold because this measures real silence, not a stalled network.
+SILENCE_END_SEC = 0.8
+
+# Below this much *voiced* audio there is nothing worth sending to STT.
+MIN_VOICED_BYTES = 4000
+
+# Fallback bytes-per-second for compressed encodings, so a duration
+# ceiling still exists for them. Opus at a voice bitrate is roughly
+# 4 KB/s; being wrong here only shifts when the backstop cuts, and the
+# backstop is far better than never cutting at all.
+_ASSUMED_COMPRESSED_BPS = 4000
+
+
+def _is_pcm16(encoding: str) -> bool:
+    return (encoding or "").lower() in ("pcm16", "pcm", "linear16")
+
+
+def _chunk_duration_sec(chunk: bytes, encoding: str, sample_rate: int) -> float:
+    """How much wall-clock audio a chunk holds.
+
+    Exact for PCM16, where it is just bytes over (rate * 2 bytes per
+    mono sample). Estimated for anything compressed, which is only used
+    to decide when to cut an over-long utterance.
+    """
+    if not chunk:
+        return 0.0
+    if _is_pcm16(encoding):
+        rate = int(sample_rate or 16000) or 16000
+        return len(chunk) / float(rate * 2)
+    return len(chunk) / float(_ASSUMED_COMPRESSED_BPS)
+
+
+def _is_silent(chunk: bytes, encoding: str) -> bool:
+    """True when a PCM16 chunk is quiet enough to count as silence.
+
+    Compressed audio always answers False: its bytes are not samples, so
+    any RMS computed over them is noise. Those encodings fall back to
+    the packet-gap boundary and the duration ceiling.
+    """
+    if not _is_pcm16(encoding) or len(chunk) < 2:
+        return False
+    samples = array.array("h")
+    # An odd trailing byte is not a whole sample; drop it rather than
+    # letting frombytes raise on the length check.
+    samples.frombytes(chunk[: len(chunk) - (len(chunk) % 2)])
+    if not samples:
+        return False
+    if sys.byteorder == "big":
+        samples.byteswap()
+    total = 0
+    for s in samples:
+        total += s * s
+    return math.sqrt(total / len(samples)) < SILENCE_RMS
+
+
 class AudioBuffer:
-    """Per-session audio chunk accumulator with simple energy-based VAD."""
+    """Per-session audio chunk accumulator with energy-based VAD.
+
+    Two independent boundaries end an utterance, because they catch two
+    different clients:
+
+    * a **packet gap**, for a device that stops sending when the user
+      stops talking, and
+    * **silence in the audio**, for a client that streams continuously.
+
+    Only the first existed, and the docstring called it "energy-based"
+    while no energy was ever computed. Every real client streams
+    continuously at 100ms (BrowserNode, voiceRealtime and
+    usePerceptionShare all send ``pcm16`` back to back), so
+    ``_last_chunk_time`` was refreshed before the gap could ever elapse
+    and the only thing that flushed the buffer was ``is_final``. A HUP
+    ``audio_frame`` has no ``is_final`` field at all, so on the device
+    path nothing was transcribed, ever. Measured before this change: 50
+    chunks, 5.0s of audio, 0 calls to ``_transcribe``, 160,000 bytes
+    still resident.
+    """
 
     def __init__(self, session_id: str):
         self.session_id = session_id
@@ -701,6 +925,9 @@ class AudioBuffer:
         self._last_chunk_time = time.time()
         self._silence_threshold_sec = 1.5
         self._total_bytes = 0
+        self._duration_sec = 0.0
+        self._silent_run_sec = 0.0
+        self._voiced_bytes = 0
 
     def append(self, chunk: bytes, encoding: str, sample_rate: int):
         self._chunks.append(chunk)
@@ -708,6 +935,57 @@ class AudioBuffer:
         self._sample_rate = sample_rate
         self._last_chunk_time = time.time()
         self._total_bytes += len(chunk)
+
+        secs = _chunk_duration_sec(chunk, encoding, sample_rate)
+        self._duration_sec += secs
+        if _is_silent(chunk, encoding):
+            self._silent_run_sec += secs
+        else:
+            self._silent_run_sec = 0.0
+            self._voiced_bytes += len(chunk)
+
+    @property
+    def duration_sec(self) -> float:
+        """Seconds of audio held. Exact for PCM16, estimated otherwise."""
+        return self._duration_sec
+
+    @property
+    def voiced_bytes(self) -> int:
+        return self._voiced_bytes
+
+    def speech_ended(self) -> bool:
+        """True when the audio itself has gone quiet after real speech.
+
+        Unlike :meth:`vad_triggered` this reads the samples, so it fires
+        on a continuously streaming client. It deliberately requires
+        voiced audio first, or a silent room would flush an empty buffer
+        into STT every second.
+        """
+        return (
+            self._silent_run_sec >= SILENCE_END_SEC
+            and self._voiced_bytes >= MIN_VOICED_BYTES
+        )
+
+    def overflowing(self) -> bool:
+        """True when the utterance has run long enough to cut it.
+
+        The backstop for someone who does not pause, and for any encoding
+        whose silence cannot be measured.
+        """
+        return self._duration_sec >= MAX_UTTERANCE_SEC
+
+    def is_measurably_silent(self) -> bool:
+        """True when we can see the samples AND none of them is speech.
+
+        Only answerable for PCM16. Compressed bytes are not samples, so
+        an Opus buffer is never "measurably" anything and the ceiling
+        stays its only backstop.
+        """
+        return _is_pcm16(self._encoding) and self._voiced_bytes < MIN_VOICED_BYTES
+
+    def discard(self) -> None:
+        """Drop the buffer without handing it to anyone."""
+        self.flush()
 
     @property
     def pending_bytes(self) -> int:
@@ -732,4 +1010,7 @@ class AudioBuffer:
         audio = b"".join(self._chunks)
         self._chunks.clear()
         self._total_bytes = 0
+        self._duration_sec = 0.0
+        self._silent_run_sec = 0.0
+        self._voiced_bytes = 0
         return audio

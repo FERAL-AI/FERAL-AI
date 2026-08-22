@@ -120,6 +120,34 @@ class SelfIntrospectionSkill(BaseSkill):
                     for p in getattr(ep, "params", []) or []
                 ],
             })
+        # Flows are recipes: an ordered list of this skill's own
+        # endpoints that accomplishes one task ("to read a page,
+        # navigate then get_page_text"). Nine are declared across six
+        # shipped manifests, and the only dispatcher that ever looked at
+        # them is the cron ``flow_id`` branch in
+        # ``SkillRegistry._flow_to_taskflow_steps``, which one of the
+        # nine uses. Six were referenced by nothing at all, and nothing
+        # showed them to the model either, so a sequence somebody wrote
+        # down for combining these endpoints was unreachable from every
+        # direction.
+        #
+        # Reporting them here rather than building a second dispatcher
+        # is deliberate: see ``ProactiveEngine._evaluate_manifest_triggers``
+        # for what a new automatic execution path in this area cost the
+        # last time. The model that would have followed the recipe can
+        # now read it and call the endpoints itself, under the same
+        # gates every other tool call goes through.
+        flows = []
+        for flow in getattr(skill, "flows", []) or []:
+            flows.append({
+                "id": getattr(flow, "id", ""),
+                "description": getattr(flow, "description", ""),
+                "steps": [
+                    getattr(s, "endpoint_id", "")
+                    for s in (getattr(flow, "steps", []) or [])
+                    if getattr(s, "endpoint_id", "")
+                ],
+            })
         return {
             "success": True,
             "status_code": 200,
@@ -128,6 +156,11 @@ class SelfIntrospectionSkill(BaseSkill):
                 "name": getattr(getattr(skill, "brand", None), "name", ""),
                 "description": getattr(skill, "description", ""),
                 "endpoints": endpoints,
+                "flows": flows,
+                # The hourly ceiling ``SkillExecutor`` enforces, so the
+                # caller can see the budget it is spending rather than
+                # discovering it as a 429.
+                "max_calls_per_hour": getattr(skill, "max_calls_per_hour", 0),
             },
             "error": None,
         }

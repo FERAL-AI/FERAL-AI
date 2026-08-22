@@ -18,7 +18,7 @@ from collections.abc import Awaitable  # noqa: F401 — used by quoted return an
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Request
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, HTMLResponse, FileResponse, RedirectResponse
@@ -27,6 +27,8 @@ from starlette.routing import compile_path
 from version import VERSION as __version__
 from models.protocol import (
     HUP_VERSION,
+    MAX_DIGEST_REQUEST_ITEMS,
+    MAX_ID_LEN,
     VIDEO_FRAME_MAX_BYTES,
     FeralMessage,
     TextCommandPayload,
@@ -55,8 +57,10 @@ from security.session_auth import (
 )
 from security.device_pairing import DevicePairingStore  # used in type hint
 
+from api.routes.dashboard import health as _dashboard_health_json
 from api.routes.dashboard import router as dashboard_router
 from api.routes.config import router as config_router
+from api.routes.skills import list_skills as _skills_list_json
 from api.routes.skills import router as skills_router
 from api.routes.tools import router as tools_router
 from api.routes.memory import router as memory_router
@@ -656,6 +660,91 @@ app.add_middleware(APIKeyMiddleware)
 # ─────────────────────────────────────────────
 # Include Route Modules
 # ─────────────────────────────────────────────
+
+# ── Two API paths that are also SPA route names ─────────────────────
+#
+# `GET /skills` (api/routes/skills.py) and `GET /health`
+# (api/routes/dashboard.py) are mounted without the `/api` prefix, and
+# the v2 dashboard has a `/skills` page and a `/health` page. FastAPI
+# matches a registered route before the SPA catch-all at the bottom of
+# this module, so the API won both.
+#
+# Clicking Skills in the dock worked, because that is client-side
+# routing and never touches the server. Reloading the page, bookmarking
+# it, or opening a shared link did not: the browser got
+# `application/json` and rendered 33KB of skill manifests with zero
+# anchor elements on the page, so there was no way back except editing
+# the URL by hand. These are the only two collisions in the route table.
+#
+# Neither path can simply move. `/health` is the Docker HEALTHCHECK and
+# the load-balancer probe; `/skills` is a published alias (the client
+# itself uses `/api/skills/*`). So the request decides: a browser
+# navigating to the URL gets the dashboard, and every programmatic
+# client gets exactly the JSON it got before.
+#
+# Registered here, ahead of both routers, because FastAPI resolves in
+# registration order and these must be reached first.
+
+
+def _is_document_navigation(request: Request) -> bool:
+    """True when the caller is asking for a page rather than data.
+
+    `Sec-Fetch-Dest: document` is the direct answer and is trusted on
+    its own. It is not *required*, though, and requiring it was wrong:
+    this app registers a service worker, and `sw.js` handles the
+    navigation by calling `fetch(req)` itself (the network-first branch).
+    Chromium rewrites the fetch metadata on that reissued request, so
+    the brain sees `sec-fetch-dest: empty` for what is unambiguously a
+    page load. Measured: with the service worker blocked, `/health`
+    served `text/html` and the dashboard rendered; with it active and
+    the same rule, the identical navigation got `application/json` and
+    a blank page. A signal a service worker can erase cannot be the
+    gate.
+
+    So the fallback is the `Accept` header, which survives intact: the
+    caller has to *name* `text/html`. That is what separates the two
+    populations here, and it separates them on the side that matters:
+
+    * curl and wget send `*/*` and never match. That is the Docker
+      HEALTHCHECK and the load-balancer probe, and serving them a page
+      would take the container down.
+    * `fetch()` and XHR default to `*/*` too, so the dashboard's own
+      calls are unaffected.
+    * A browser typing, reloading, bookmarking or following a link
+      sends `text/html,application/xhtml+xml,...` every time.
+    """
+    if request.headers.get("sec-fetch-dest", "") == "document":
+        return True
+    return "text/html" in request.headers.get("accept", "")
+
+
+async def _spa_document_if_navigation(request: Request):
+    """The dashboard for a navigation, or None to fall through to JSON.
+
+    Delegates to the catch-all rather than re-resolving the bundle, so
+    the v1 legacy banner, the not-built fallback page and the bundle
+    directory logic stay in one place.
+    """
+    if not _is_document_navigation(request):
+        return None
+    return await serve_webui_or_fallback("")
+
+
+@app.get("/skills", include_in_schema=False)
+async def skills_page_or_json(request: Request, response: Response):
+    doc = await _spa_document_if_navigation(request)
+    if doc is not None:
+        return doc
+    return await _skills_list_json(response)
+
+
+@app.get("/health", include_in_schema=False)
+async def health_page_or_json(request: Request):
+    doc = await _spa_document_if_navigation(request)
+    if doc is not None:
+        return doc
+    return await _dashboard_health_json()
+
 
 app.include_router(dashboard_router)
 app.include_router(config_router)
@@ -1299,11 +1388,32 @@ async def refresh_provider_catalog_once(catalog, consecutive_failures: int) -> i
 async def startup():
     check_local_bypass_safety()
 
+    # Apply outstanding ~/.feral shape changes before anything reads from
+    # it. Runs before state.init() on purpose: a migration exists to make
+    # the store safe to open, so applying it afterwards is too late.
+    # Never fatal. A migration that cannot run leaves no marker and is
+    # retried on the next boot, and a brain that refuses to start because
+    # of one is worse than the shape change it was fixing.
+    try:
+        from migrations import run_pending as _run_migrations
+        for _mig in _run_migrations():
+            if not _mig.ok:
+                logger.warning("migration %s deferred: %s", _mig.name, _mig.detail)
+            elif _mig.changed:
+                logger.info("migration %s: %s", _mig.name, _mig.detail)
+    except Exception:
+        logger.warning("migration pass failed; continuing boot", exc_info=True)
+
     await state.init()
     if state.memory:
         state.memory.start_background_tasks()
     if state.cron_service:
         state.cron_service.start(execute_routine_job)
+
+    # Ambient transcripts that were stored and acked but never
+    # summarized, because the brain went down mid-processing. The phone
+    # discarded them on the ack, so our copy is the only one left.
+    state.register_background_task(asyncio.ensure_future(_resume_ambient_backlog()))
 
     async def _state_heartbeat():
         """Push dashboard/system state to all WS clients every 10s."""
@@ -2926,8 +3036,21 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     },
                 )
 
+                # `open_session` reports a crash by raising and EVERY
+                # other failure by returning None: an unavailable
+                # realtime proxy, an unrecognised mode, a chained
+                # pipeline whose STT or TTS provider would not
+                # construct. This block used to catch only the crash,
+                # so a None fell through to the "allowed" record below.
+                # The audit row then said a session had opened, the
+                # node was told nothing, and the phone orb sat on
+                # "listening" against a session that did not exist.
+                # Both outcomes are now failures, and both are visible
+                # on both sides.
+                voice_session = None
+                open_error = ""
                 try:
-                    await state.voice_router.open_session(
+                    voice_session = await state.voice_router.open_session(
                         session_id=session_id,
                         mode=selected_mode,
                         provider_opts={
@@ -2942,14 +3065,38 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         "voice_router.open_session failed for mode=%s: %s",
                         selected_mode, exc,
                     )
+                    open_error = str(exc)[:200] or exc.__class__.__name__
+
+                if voice_session is None:
+                    open_error = open_error or (
+                        f"the {selected_mode} backend did not open a session"
+                    )
+                    logger.warning(
+                        "voice_session_start refused for node=%s mode=%s: %s",
+                        node_id, selected_mode, open_error,
+                    )
                     _record_phone_envelope(
                         "error",
                         "voice_session_start",
                         detail={
+                            "reason": "open_session_failed",
                             "mode": selected_mode,
-                            "error": str(exc)[:200],
+                            "stream_id": stream_id,
+                            "session_id": session_id,
+                            "error": open_error,
                         },
                         payload_for_hash=payload_dict,
+                    )
+                    # The router emits `voice_status` for the failures
+                    # it can name. This frame is the one the node can
+                    # always act on, whatever went wrong, so the orb
+                    # leaves "listening" instead of waiting forever.
+                    await _send_protocol_error(
+                        ws,
+                        1099,
+                        f"voice_session_start failed for stream {session_id} "
+                        f"(mode={selected_mode}): {open_error}",
+                        name="voice_session_failed",
                     )
                     continue
 
@@ -3339,6 +3486,25 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         detail={"reason": "sqlite_persist_failed", "error": str(exc)[:200]},
                         payload_for_hash=payload_dict,
                     )
+
+            elif msg.type == "ambient_transcript":
+                # A finished conversation the phone recorded and
+                # transcribed on device, drained from its queue once the
+                # brain became reachable. Everything downstream is
+                # in-process: the REST route a phone would otherwise POST
+                # to is not on the phone-bearer allowlist.
+                await _handle_ambient_transcript(
+                    ws, node_id, paired_device_id, raw,
+                    record_envelope=_record_phone_envelope,
+                )
+
+            elif msg.type == "ambient_digest_request":
+                # The pull leg. Registering the type in MESSAGE_TYPES
+                # alone is a no-op: without this branch the frame
+                # validates and then falls through to the terminal else.
+                await _handle_ambient_digest_request(
+                    ws, node_id, paired_device_id, raw,
+                )
 
             elif msg.type == "audio_chunk" and node_id:
                 payload_dict = raw.get("payload", {})
@@ -4148,6 +4314,619 @@ async def _handle_device_announce(node_id, frame_payload: dict) -> None:
             "device=%s: %s",
             node_id, payload.get("device_id", "?"), exc,
         )
+
+
+AMBIENT_TRANSCRIPT_MAX_CHARS = 400_000
+
+
+async def _resume_ambient_backlog() -> None:
+    """Finish transcripts stored before an unclean shutdown.
+
+    This is the half of the durability contract the ack depends on. The
+    brain acks once the text is on disk so the phone can drop it, which
+    is only safe if an interrupted summarization is retried from our
+    copy rather than waiting for a resend that will never come.
+    """
+    try:
+        pending = await asyncio.to_thread(_ambient_pending)
+    except Exception:
+        logger.debug("ambient: backlog scan failed", exc_info=True)
+        return
+    if not pending:
+        return
+    logger.info("ambient: resuming %d unprocessed transcript(s)", len(pending))
+    for row in pending:
+        try:
+            await _process_ambient_transcript(
+                row["transcript_id"], row["session_id"], row["payload"],
+            )
+        except Exception:
+            logger.debug("ambient: backlog item failed", exc_info=True)
+
+
+def _ambient_db_path():
+    """Where received transcripts live until they are processed."""
+    from config.loader import feral_home
+    return feral_home() / "ambient_transcripts.db"
+
+
+def _ambient_ensure_schema(conn) -> None:
+    """Create the table if absent, then add columns absent from an old one.
+
+    ``CREATE TABLE IF NOT EXISTS`` is a no-op against a database that
+    already has the table, so a new column in the DDL above reaches a
+    fresh install and never reaches an existing one. Every column added
+    after the first release therefore needs the additive form: ask
+    ``PRAGMA table_info`` what is actually there and ``ALTER TABLE`` for
+    what is not. SQLite has no ``ADD COLUMN IF NOT EXISTS``.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ambient_transcripts (
+            transcript_id TEXT PRIMARY KEY,
+            received_at REAL NOT NULL,
+            node_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            processed_at REAL,
+            episode_id TEXT
+        )
+        """
+    )
+    have = {row[1] for row in conn.execute("PRAGMA table_info(ambient_transcripts)")}
+    # The serialised TranscriptOutcome, including injection_flags. The
+    # flags are kept here and never sent to a phone.
+    if "digest_json" not in have:
+        conn.execute("ALTER TABLE ambient_transcripts ADD COLUMN digest_json TEXT")
+    # The AUTHENTICATED identity of the socket that delivered this
+    # transcript, from _verify_credential. Not the payload's device_id,
+    # which the phone supplies and can therefore say anything it likes.
+    #
+    # This exists because transcript_id is client-supplied too
+    # (``payload.get("transcript_id") or uuid4()``), so a digest lookup
+    # keyed on the id alone would let any paired node read back the
+    # summary, people and commitments of a conversation recorded by a
+    # different device on the same brain. That is the recorded contents
+    # of someone else's conversation.
+    if "owner_key" not in have:
+        conn.execute("ALTER TABLE ambient_transcripts ADD COLUMN owner_key TEXT")
+
+
+def _ambient_store(
+    transcript_id: str,
+    *,
+    node_id: str,
+    device_id: str,
+    session_id: str,
+    payload: dict,
+    owner_key: str = "",
+) -> bool:
+    """Persist the raw transcript. Returns True if this id is new.
+
+    This is both the idempotency gate and the durable record, and it has
+    to run BEFORE episode_save: episode_save mints a fresh uuid4 per call
+    and has no dedupe, so a resent transcript without this gate writes a
+    second episode. (The Jaccard suppression in memory/store.py is
+    read-path only and writes nothing; it is not idempotency.)
+
+    Storing the TEXT here, not just the id, is what makes the ack honest.
+    The phone discards a transcript once acked, so if the brain acked on
+    receipt and then died before summarizing, the conversation would be
+    gone from both sides. ``processed_at`` stays NULL until the summary
+    lands, and _ambient_pending() sweeps the unprocessed rows at boot.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    with _sqlite3.connect(str(_ambient_db_path())) as conn:
+        _ambient_ensure_schema(conn)
+        existing = conn.execute(
+            "SELECT 1 FROM ambient_transcripts WHERE transcript_id = ?",
+            (transcript_id,),
+        ).fetchone()
+        if existing:
+            return False
+        conn.execute(
+            """
+            INSERT INTO ambient_transcripts
+            (transcript_id, received_at, node_id, device_id, session_id,
+             payload_json, owner_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                transcript_id, time.time(), node_id, device_id, session_id,
+                _json.dumps(payload, sort_keys=True, default=str),
+                owner_key or "",
+            ),
+        )
+        conn.commit()
+    return True
+
+
+def _ambient_mark_processed(
+    transcript_id: str, episode_id: str, digest_json: str = "",
+) -> None:
+    """Record the outcome on the success path.
+
+    ``digest_json`` is the serialised ``TranscriptOutcome``. Persisting
+    it here rather than deriving it later is the difference between the
+    phone being able to read a summary at all and having to reconstruct
+    one by parsing prose back out of the episode's headline and lead,
+    which is not a contract worth having.
+    """
+    import sqlite3 as _sqlite3
+    try:
+        with _sqlite3.connect(str(_ambient_db_path())) as conn:
+            _ambient_ensure_schema(conn)
+            conn.execute(
+                "UPDATE ambient_transcripts "
+                "SET processed_at = ?, episode_id = ?, digest_json = ? "
+                "WHERE transcript_id = ?",
+                (time.time(), episode_id, digest_json or "", transcript_id),
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.warning("ambient: could not mark %s processed: %s", transcript_id, exc)
+
+
+def _ambient_digest_rows(
+    transcript_ids: list[str], *, owner_key: str, node_id: str,
+) -> dict[str, dict]:
+    """The stored rows for these ids THAT THIS CALLER OWNS, by id.
+
+    Scoped on the authenticated ``owner_key``, never on the id alone.
+    See ``_ambient_ensure_schema`` for why that matters.
+
+    Rows written before ``owner_key`` existed carry NULL, and those fall
+    back to matching the socket's ``node_id``. Without that fallback
+    every transcript stored before this change would answer ``unknown``
+    on the first connect after upgrading, and the phone treats
+    ``unknown`` as "the brain lost it" and resends. The upgrade would
+    look exactly like data loss and re-upload every recording.
+    """
+    import sqlite3 as _sqlite3
+    if not transcript_ids:
+        return {}
+    out: dict[str, dict] = {}
+    marks = ",".join("?" for _ in transcript_ids)
+    try:
+        with _sqlite3.connect(str(_ambient_db_path())) as conn:
+            _ambient_ensure_schema(conn)
+            conn.row_factory = _sqlite3.Row
+            rows = conn.execute(
+                f"SELECT transcript_id, processed_at, episode_id, digest_json "
+                f"FROM ambient_transcripts "
+                f"WHERE transcript_id IN ({marks}) "
+                f"AND (owner_key = ? OR ((owner_key IS NULL OR owner_key = '') "
+                f"AND node_id = ?))",
+                (*transcript_ids, owner_key or "", node_id or ""),
+            ).fetchall()
+            for row in rows:
+                out[str(row["transcript_id"])] = dict(row)
+    except Exception as exc:
+        logger.warning("ambient: digest lookup failed: %s", exc)
+    return out
+
+
+def _ambient_digest_frame(
+    transcript_id: str,
+    row: dict | None,
+    *,
+    include_detail: bool,
+    remaining: int = 0,
+) -> dict:
+    """One ``ambient_digest`` payload, from a stored row or the lack of one.
+
+    ``injection_flags`` is dropped here rather than at the storage
+    layer: it is worth having in the brain's logs and is never worth
+    putting in front of a person, because it describes the transcript,
+    not the people in it.
+    """
+    import json as _json
+
+    # Every status returns the SAME key set. Two reasons. A phone
+    # parsing raw JSON gets one shape and never a missing key, and
+    # "another device owns this" becomes structurally identical to
+    # "nobody owns this" rather than identical only by luck: a sparse
+    # frame would let a caller distinguish them by which keys came back,
+    # which is the fact this is scoped to withhold.
+    frame = {
+        "transcript_id": transcript_id,
+        "status": "unknown",
+        "summary": "",
+        "detail": "",
+        "people": [],
+        "topics": [],
+        "commitments": [],
+        "degraded": [],
+        "episode_id": "",
+        "processed_at": None,
+        "remaining": remaining,
+    }
+
+    if row is None:
+        return frame
+
+    if not row.get("processed_at"):
+        # Stored but not summarized: the task is still running, or it
+        # failed and the boot sweep will retry from our copy. Saying
+        # `unknown` here would tell the phone to resend a transcript we
+        # are holding, on every connect until the summary lands.
+        frame["status"] = "pending"
+        return frame
+
+    digest = {}
+    if row.get("digest_json"):
+        try:
+            digest = _json.loads(row["digest_json"]) or {}
+        except Exception:
+            logger.debug("ambient: unreadable digest_json for %s", transcript_id)
+            digest = {}
+
+    frame.update({
+        "status": "ready",
+        "summary": str(digest.get("summary") or ""),
+        # Up to 20,000 chars, and the reason include_detail defaults off.
+        "detail": str(digest.get("detail") or "") if include_detail else "",
+        "people": [str(x) for x in (digest.get("people") or [])],
+        "topics": [str(x) for x in (digest.get("topics") or [])],
+        "commitments": [c for c in (digest.get("commitments") or []) if isinstance(c, dict)],
+        "degraded": [str(x) for x in (digest.get("degraded") or [])],
+        "episode_id": str(row.get("episode_id") or ""),
+        "processed_at": row.get("processed_at"),
+    })
+    return frame
+
+
+def _ambient_pending(limit: int = 50) -> list[dict]:
+    """Transcripts stored but never summarized, oldest first.
+
+    A brain that died mid-drain acked these and the phone will not send
+    them again, so this is the only remaining copy.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+    try:
+        with _sqlite3.connect(str(_ambient_db_path())) as conn:
+            rows = conn.execute(
+                "SELECT transcript_id, session_id, payload_json FROM ambient_transcripts "
+                "WHERE processed_at IS NULL ORDER BY received_at ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    except Exception:
+        return []
+    out = []
+    for tid, sid, payload_json in rows:
+        try:
+            out.append({"transcript_id": tid, "session_id": sid,
+                        "payload": _json.loads(payload_json)})
+        except Exception:
+            continue
+    return out
+
+
+async def _handle_ambient_transcript(
+    ws, node_id, paired_device_id, raw: dict, record_envelope=None,
+) -> None:
+    """Ingest one finished ambient conversation from the phone.
+
+    Everything downstream is in-process: the REST alternative is blocked
+    because the phone bearer is path-allowlisted and /api/intents/compile
+    is not on it, so a phone holding a bearer gets a 401 creating a
+    commitment.
+
+    ``record_envelope`` is ``daemon_session``'s ``_record_phone_envelope``
+    closure, passed in because it closes over the authenticated identity
+    of this socket and cannot be reached from module scope.
+
+    Order matters. Store, ack, then summarize in the background. Acking
+    before the summary means the phone stops resending as soon as the
+    text is durable, which is the correct contract: summarization can be
+    retried from our copy, but a transcript the phone has dropped and we
+    never stored cannot be recovered by anyone.
+    """
+    payload = _unwrap_hup_frame(raw.get("payload", {}) or {})
+
+    if not node_id:
+        await _send_protocol_error(
+            ws, 1003, "ambient_transcript requires an identified node",
+            name="ambient_no_node",
+        )
+        return
+
+    text = str(payload.get("text") or "")
+    if not text.strip():
+        await _send_protocol_error(
+            ws, 1003, "ambient_transcript.text is empty", name="ambient_empty",
+        )
+        return
+
+    if len(text) > AMBIENT_TRANSCRIPT_MAX_CHARS:
+        # Deliberately does not close the socket: the phone is draining a
+        # queue and one oversized item must not cost it the connection.
+        await _send_frame_too_large(
+            ws,
+            f"ambient_transcript.text is {len(text)} chars, over the "
+            f"{AMBIENT_TRANSCRIPT_MAX_CHARS} cap",
+        )
+        return
+
+    transcript_id = str(payload.get("transcript_id") or uuid4())
+    device_id = payload.get("device_id") or node_id or str(paired_device_id or "")
+    session_id = (
+        str(payload.get("session_id") or "").strip()
+        or getattr(state, "primary_session_id", "")
+        or f"phone-{node_id}"
+    )
+    try:
+        state.bind_session_to_daemon(session_id, node_id)
+    except Exception:
+        logger.debug("ambient: session bind failed", exc_info=True)
+
+    try:
+        is_new = await asyncio.to_thread(
+            _ambient_store, transcript_id,
+            node_id=node_id, device_id=device_id,
+            session_id=session_id, payload=payload,
+            # The authenticated identity, not payload["device_id"].
+            # Digest reads are scoped on this.
+            owner_key=str(paired_device_id or ""),
+        )
+    except Exception as exc:
+        logger.warning("ambient: persist failed for %s: %s", transcript_id, exc)
+        if record_envelope is not None:
+            record_envelope(
+                "error", "ambient_transcript",
+                detail={"reason": "sqlite_persist_failed", "error": str(exc)[:200]},
+                payload_for_hash=payload,
+            )
+        # No ack: the phone must keep this and try again.
+        await _send_protocol_error(
+            ws, 1011, "could not store transcript", name="ambient_persist_failed",
+        )
+        return
+
+    await ws.send_json({
+        "hup_version": HUP_VERSION,
+        "type": "ambient_transcript_ack",
+        "ts": time.time(),
+        "payload": {
+            "transcript_id": transcript_id,
+            "duplicate": not is_new,
+            "accepted": True,
+            "detail": "" if is_new else "already received",
+        },
+    })
+
+    if record_envelope is not None:
+        record_envelope(
+            "allowed", "ambient_transcript",
+            detail={
+                "transcript_id": transcript_id, "device_id": device_id,
+                "chars": len(text), "duplicate": not is_new,
+                "source": payload.get("source", "unknown"),
+            },
+            payload_for_hash=payload,
+        )
+
+    if not is_new:
+        return
+
+    state.register_background_task(
+        asyncio.ensure_future(
+            _process_ambient_transcript(transcript_id, session_id, payload)
+        )
+    )
+
+
+async def _handle_ambient_digest_request(
+    ws, node_id, paired_device_id, raw: dict,
+) -> None:
+    """Answer the phone's "what did you make of these?" on connect.
+
+    One ``ambient_digest`` per requested id, in request order, each
+    carrying ``remaining`` so a phone that has been away for a week can
+    say it is fetching and show progress rather than appearing to hang
+    while forty frames arrive.
+
+    Scoped on the AUTHENTICATED identity. An id this caller does not own
+    answers ``unknown``, which is the same answer it gets for an id
+    nobody owns, and deliberately so: distinguishing "someone else has
+    this" from "nobody has this" would confirm the existence of another
+    device's recording to anyone who asked.
+    """
+    payload = _unwrap_hup_frame(raw.get("payload", {}) or {})
+
+    if not node_id:
+        await _send_protocol_error(
+            ws, 1003, "ambient_digest_request requires an identified node",
+            name="ambient_digest_no_node",
+        )
+        return
+
+    raw_ids = payload.get("transcript_ids") or []
+    if not isinstance(raw_ids, list):
+        await _send_protocol_error(
+            ws, 1003, "ambient_digest_request.transcript_ids must be a list",
+            name="ambient_digest_bad_ids",
+        )
+        return
+
+    # Bound the work here rather than trusting the sender to have
+    # bounded it. Deduplicated first, so a phone repeating one id cannot
+    # spend the budget on it.
+    seen: set[str] = set()
+    ids: list[str] = []
+    for item in raw_ids:
+        tid = str(item or "").strip()[:MAX_ID_LEN]
+        if tid and tid not in seen:
+            seen.add(tid)
+            ids.append(tid)
+        if len(ids) >= MAX_DIGEST_REQUEST_ITEMS:
+            break
+    if not ids:
+        return
+
+    include_detail = bool(payload.get("include_detail"))
+    rows = await asyncio.to_thread(
+        _ambient_digest_rows, ids,
+        owner_key=str(paired_device_id or ""), node_id=str(node_id or ""),
+    )
+
+    for i, tid in enumerate(ids):
+        frame = _ambient_digest_frame(
+            tid, rows.get(tid),
+            include_detail=include_detail,
+            remaining=len(ids) - i - 1,
+        )
+        try:
+            await ws.send_json({"type": "ambient_digest", "payload": frame})
+        except Exception:
+            # The socket went away mid-drain. The rest is not lost: the
+            # phone asks again on its next connect for anything it still
+            # has no digest for.
+            logger.debug("ambient: digest send aborted at %s", tid, exc_info=True)
+            return
+
+    logger.info(
+        "ambient: answered digest request for %d id(s) from node %s (detail=%s)",
+        len(ids), node_id, include_detail,
+    )
+
+
+async def _ambient_push_digest(transcript_id: str) -> None:
+    """Send the finished digest to the node that recorded it, if present.
+
+    Never raises: this runs at the tail of a detached background task
+    whose whole contract is that a failure leaves ``processed_at`` set
+    and costs nothing. A phone that misses this pulls the same frame.
+    """
+    import sqlite3 as _sqlite3
+    try:
+        def _read():
+            with _sqlite3.connect(str(_ambient_db_path())) as conn:
+                _ambient_ensure_schema(conn)
+                conn.row_factory = _sqlite3.Row
+                row = conn.execute(
+                    "SELECT transcript_id, node_id, processed_at, episode_id, "
+                    "digest_json FROM ambient_transcripts WHERE transcript_id = ?",
+                    (transcript_id,),
+                ).fetchone()
+                return dict(row) if row else None
+
+        row = await asyncio.to_thread(_read)
+        if not row:
+            return
+        node_id = str(row.get("node_id") or "")
+        if not node_id or node_id not in getattr(state, "daemons", {}):
+            return
+
+        # The push is a single digest and the phone is here, so it gets
+        # the detail: the size argument for withholding it is about a
+        # reconnect burst, which this is not.
+        payload = _ambient_digest_frame(
+            transcript_id, row, include_detail=True, remaining=0,
+        )
+        await state._send_dict_to_node(node_id, {
+            "type": "ambient_digest", "payload": payload,
+        })
+        logger.info("ambient: pushed digest for %s to node %s", transcript_id, node_id)
+    except Exception:
+        logger.debug("ambient: digest push failed for %s", transcript_id, exc_info=True)
+
+
+async def _process_ambient_transcript(
+    transcript_id: str, session_id: str, payload: dict,
+) -> None:
+    """Summarize, store the episode, record the promises. Never raises.
+
+    Runs detached from the frame handler, so a slow model does not hold
+    the websocket open, and a failure leaves processed_at NULL for the
+    boot sweep rather than losing the conversation.
+    """
+    import json as _json
+    from dataclasses import asdict
+
+    from agents.ambient_transcript import (
+        build_episode_fields,
+        summarize_transcript,
+    )
+
+    try:
+        text = str(payload.get("text") or "")
+        started_at = payload.get("started_at")
+        started_at = float(started_at) if started_at is not None else None
+        speakers = [str(x) for x in (payload.get("speakers") or [])]
+        source = str(payload.get("source") or "unknown")
+
+        llm = getattr(getattr(state, "orchestrator", None), "llm", None)
+        outcome = await summarize_transcript(
+            text, llm=llm, started_at=started_at,
+            speakers=speakers, source=f"ambient:{source}",
+        )
+
+        episode_id = ""
+        memory = getattr(state, "memory", None)
+        if memory is not None:
+            fields = build_episode_fields(
+                outcome, started_at=started_at, source=source, speakers=speakers,
+            )
+            saved = await memory.episode_save(session_id=session_id, **fields)
+            episode_id = str((saved or {}).get("id") or "")
+
+            # People and relations go through the one extractor rather
+            # than a second entity prompt; that consolidation was
+            # deliberate (agents/learner.py:120-133).
+            kg = getattr(memory, "knowledge_graph", None) or getattr(state, "knowledge_graph", None)
+            if kg is not None and outcome.people:
+                try:
+                    await kg.extract_and_store(outcome.detail[:8000], source="ambient_conversation")
+                except Exception:
+                    logger.debug("ambient: kg extraction failed", exc_info=True)
+
+        compiler = getattr(state, "intent_compiler", None)
+        if compiler is not None:
+            for commitment in outcome.commitments:
+                try:
+                    compiler.add_commitment(
+                        text=commitment["text"],
+                        due_iso=commitment.get("due_iso") or None,
+                        source="ambient conversation",
+                    )
+                except Exception:
+                    logger.debug("ambient: add_commitment failed", exc_info=True)
+
+        # The structured outcome, kept whole. Storing the episode fields
+        # instead would be lossy in exactly the way that matters: the
+        # episode is shaped for FTS and for the model's context block,
+        # so summary is headline[:500] with the date and participants
+        # forced into prose.
+        digest_json = _json.dumps(asdict(outcome), default=str)
+        await asyncio.to_thread(
+            _ambient_mark_processed, transcript_id, episode_id, digest_json,
+        )
+        logger.info(
+            "ambient transcript %s processed: episode=%s commitments=%d degraded=%s",
+            transcript_id, episode_id or "none",
+            len(outcome.commitments), outcome.degraded or "no",
+        )
+
+        # Push leg. Summarization finishes seconds to minutes after the
+        # ack, so the phone is usually gone by now and this is
+        # best-effort by nature; ambient_digest_request is what makes
+        # the digest reliably reachable. Pushing anyway matters for the
+        # case the pull leg handles worst: a recording made while the
+        # brain is up and the phone stays connected would otherwise show
+        # no summary until the next reconnect.
+        #
+        # node_id is not a parameter of this function, so it comes off
+        # the row. On the boot sweep the original socket is long gone
+        # and this simply finds nobody, which is the correct outcome.
+        await _ambient_push_digest(transcript_id)
+    except Exception:
+        # processed_at stays NULL, so the boot sweep retries it.
+        logger.exception("ambient: processing failed for %s", transcript_id)
 
 
 async def _handle_subdevice_status(

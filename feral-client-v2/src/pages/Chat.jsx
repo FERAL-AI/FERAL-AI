@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { History, Save, GitBranch, Plus, Trash2, X, Mic, MicOff, Paperclip, FileText } from 'lucide-react';
+import {
+  History, Save, GitBranch, Plus, Trash2, X, Mic, MicOff, Paperclip, FileText,
+  Search, Pin, PinOff, Pencil,
+} from 'lucide-react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import Orb from '../ui/Orb';
@@ -15,6 +18,7 @@ import { useChatThread } from '../shell/Shell';
 import { useVoice } from '../shell/VoiceContext';
 import MarkdownMessage from '../lib/markdown.jsx';
 import BudgetExceededBanner from '../components/BudgetExceededBanner';
+import VoiceLane from '../components/VoiceLane';
 import { ToolCallList } from '../components/ToolCallCard';
 import ReasoningSection from '../components/ReasoningSection';
 import TimelineCard from '../components/TimelineCard';
@@ -96,6 +100,9 @@ export default function Chat() {
   const messages = thread?.messages || localMessages;
   const setMessages = thread?.setMessages || setLocalMessages;
   const [input, setInput] = useState('');
+  // Mute is separate from end, per the design: muting is recoverable,
+  // ending the session is not.
+  const [voiceMuted, setVoiceMuted] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [streamingText, setStreamingText] = useState('');
   const [streamingReasoning, setStreamingReasoning] = useState('');
@@ -138,6 +145,7 @@ export default function Chat() {
   // to retry. Cleared on the next successful send.
   const [sendError, setSendError] = useState('');
   const fileInputRef = useRef(null);
+  const composerInputRef = useRef(null);
 
   const bottomRef = useRef(null);
   const logRef = useRef(null);
@@ -151,6 +159,22 @@ export default function Chat() {
   // socket chatter) or a turn that silently died and must surface.
   const turnActiveRef = useRef(false);
   const chatReady = thread?.ready ?? true;
+
+  // The command palette's Ask row parks the typed query on the shell
+  // thread and navigates here. Pick it up, put it in the composer and
+  // clear it, so the query survives the navigation but does not come
+  // back the next time the user visits /chat. Deliberately not sent
+  // automatically: the palette is where you type fast, and a palette
+  // that fires a message at the brain on Enter is a palette that sends
+  // half-finished questions.
+  const askDraft = thread?.askDraft || '';
+  const clearAskDraft = thread?.clearAskDraft;
+  useEffect(() => {
+    if (!askDraft) return;
+    setInput(askDraft);
+    clearAskDraft?.();
+    composerInputRef.current?.focus();
+  }, [askDraft, clearAskDraft]);
 
   // On mount, pull paused thoughts from the consciousness store so the
   // user can re-thread any half-formed sentence the agent was in the
@@ -499,6 +523,13 @@ export default function Chat() {
           {
             key,
             label,
+            // Carried so the card can pick a skill-family glyph.
+            // `ToolResultPayload` has no skill_id/endpoint_id at all
+            // (models/protocol.py), only `tool`, so the result branch
+            // below relies on `tool` and the `skill__endpoint` split.
+            tool: p.tool || p.name || '',
+            skill_id: p.skill_id || '',
+            endpoint_id: p.endpoint_id || '',
             args_preview: argsPreview,
             success: null,
             error: '',
@@ -519,6 +550,9 @@ export default function Chat() {
         const result = {
           key,
           label,
+          tool: p.tool || p.name || '',
+          skill_id: p.skill_id || '',
+          endpoint_id: p.endpoint_id || '',
           args_preview: '',
           result_preview: p.result_preview
             || (p.result != null ? p.result : null)
@@ -1198,26 +1232,40 @@ export default function Chat() {
           style={{ display: 'none' }}
           aria-hidden="true"
         />
-        <input
-          className="v2-chat-input"
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onPaste={onPaste}
-          placeholder={!chatReady ? 'Loading conversation…' : state === 'open' ? 'Ask FERAL…' : 'Reconnecting…'}
-          disabled={state !== 'open' || !chatReady}
-        />
+        {voice?.active ? (
+          // The approved design replaces the field in place while voice
+          // is live, rather than covering the page with an overlay.
+          <VoiceLane
+            voice={voice}
+            muted={voiceMuted}
+            onMute={() => setVoiceMuted((m) => !m)}
+            onEnd={voice.stop}
+          />
+        ) : (
+          <input
+            ref={composerInputRef}
+            className="v2-chat-input"
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onPaste={onPaste}
+            placeholder={!chatReady ? 'Loading conversation…' : state === 'open' ? 'Ask FERAL…' : 'Reconnecting…'}
+            disabled={state !== 'open' || !chatReady}
+          />
+        )}
+        {!voice?.active && (
         <button
           type="button"
-          className={`v2-chat-mic${voice?.active ? ' v2-chat-mic--active' : ''}`}
+          className="v2-chat-mic"
           onClick={onMicClick}
           aria-label={voice?.active ? 'Stop voice mode' : 'Start voice mode'}
           aria-pressed={!!voice?.active}
           disabled={state !== 'open' || !chatReady}
           title={voice?.active ? `Voice active (${voice.provider || 'realtime'})` : 'Hold a conversation by voice'}
         >
-          {voice?.active ? <MicOff size={18} aria-hidden="true" /> : <Mic size={18} aria-hidden="true" />}
+          <Mic size={18} aria-hidden="true" />
         </button>
+        )}
         <button type="submit" className="v2-chat-send" disabled={!input.trim() || state !== 'open' || !chatReady} aria-label="Send">Send</button>
       </Glass>
 
@@ -1338,20 +1386,110 @@ function PermissionCard({ path, operation, reason, onAllow, onDeny }) {
   );
 }
 
+/** Page size for the thread list. The route clamps anything larger. */
+export const THREADS_PAGE_SIZE = 25;
+
+function threadRelativeTime(ts) {
+  if (!ts) return '';
+  const diff = (Date.now() / 1000) - ts;
+  if (diff < 60) return `${Math.max(0, Math.round(diff))}s ago`;
+  if (diff < 3600) return `${Math.round(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.round(diff / 3600)}h ago`;
+  return `${Math.round(diff / 86400)}d ago`;
+}
+
+/**
+ * Read the error envelope off a call made with `silent: true`.
+ *
+ * `apiFetch` inspects even a 200 body and throws when it carries a
+ * non-empty `error` string. Rename and pin BOTH answer 200 with
+ * `{"error": "Not found"}` for a thread that was deleted in another
+ * tab, which is a designed outcome and not a reason to fire the global
+ * error toast. Verified against the real routes.
+ */
+function envelopeError(err) {
+  return err?.raw?.error || err?.detail || 'request failed';
+}
+
+/**
+ * ThreadsPane: search, rename, pin, page.
+ *
+ * What it used to do, and why each is a defect:
+ *   - `GET /api/conversations` with no query string. The route's
+ *     default was 50 and the pane rendered every row it got with no
+ *     way to ask for more, so thread 51 was unreachable. It now pages
+ *     with an explicit limit/offset and shows the real total.
+ *   - Discarded `preview` and `message_count`, both of which the route
+ *     has always returned (verified against the live store), leaving
+ *     every row identified only by a title derived from its own first
+ *     message.
+ *   - No rename, and the autosave path overwrote any title anyway
+ *     (fixed in memory/store.py; renames go through `/rename`, which
+ *     is the only route that marks a title as user-chosen).
+ *   - No pin, so a thread you return to daily sank as fast as one you
+ *     opened once.
+ */
 function ThreadsPane({ onClose, onOpenConversation, onStartNewConversation }) {
   const [threads, setThreads] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
+  const [renaming, setRenaming] = useState(null); // {id, value}
+  const [err, setErr] = useState('');
 
-  const refresh = useCallback(async () => {
+  // Debounce so typing a word is one request, not one per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setQuery(search.trim()), 250);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const load = useCallback(async (offset, q) => {
+    const params = new URLSearchParams({
+      limit: String(THREADS_PAGE_SIZE),
+      offset: String(offset),
+    });
+    if (q) params.set('q', q);
+    return apiJson(`/api/conversations?${params.toString()}`);
+  }, []);
+
+  const refresh = useCallback(async (q = query) => {
+    setLoading(true);
     try {
-      const d = await apiJson('/api/conversations');
-      setThreads(d.conversations || d.items || []);
+      const d = await load(0, q);
+      setThreads(d.conversations || []);
+      setTotal(Number(d.total || 0));
+      setHasMore(!!d.has_more);
+      setErr('');
+    } catch (e) {
+      setErr(e?.message || 'could not load threads');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [load, query]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => { refresh(query); }, [query]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const loadMore = async () => {
+    setLoadingMore(true);
+    try {
+      const d = await load(threads.length, query);
+      // Concatenate rather than replace; dedupe by id so a thread that
+      // moved between pages while we were reading cannot appear twice.
+      setThreads((prev) => {
+        const seen = new Set(prev.map((t) => t.id));
+        return [...prev, ...(d.conversations || []).filter((t) => !seen.has(t.id))];
+      });
+      setTotal(Number(d.total || 0));
+      setHasMore(!!d.has_more);
+    } catch (e) {
+      setErr(e?.message || 'could not load more threads');
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const open = async (id) => {
     try {
@@ -1365,7 +1503,8 @@ function ThreadsPane({ onClose, onOpenConversation, onStartNewConversation }) {
     try {
       if (onStartNewConversation) await onStartNewConversation();
     } finally {
-      refresh();
+      setSearch('');
+      refresh('');
     }
   };
 
@@ -1374,32 +1513,161 @@ function ThreadsPane({ onClose, onOpenConversation, onStartNewConversation }) {
     refresh();
   };
 
+  const togglePin = async (t) => {
+    const next = !t.pinned;
+    // Optimistic: the pane is a list the user is actively scanning and
+    // a round-trip of dead time reads as a dead button. Reverted below
+    // if the route disagrees.
+    setThreads((prev) => prev.map((x) => (x.id === t.id ? { ...x, pinned: next } : x)));
+    try {
+      await apiFetch(`/api/conversations/${encodeURIComponent(t.id)}/pin`, {
+        method: 'POST',
+        body: JSON.stringify({ pinned: next }),
+        silent: true,
+      });
+      setErr('');
+      refresh();
+    } catch (e) {
+      setThreads((prev) => prev.map((x) => (x.id === t.id ? { ...x, pinned: t.pinned } : x)));
+      setErr(envelopeError(e));
+    }
+  };
+
+  const commitRename = async () => {
+    if (!renaming) return;
+    const { id, value } = renaming;
+    const title = value.trim();
+    if (!title) { setRenaming(null); return; }
+    try {
+      const r = await apiFetch(`/api/conversations/${encodeURIComponent(id)}/rename`, {
+        method: 'POST',
+        body: JSON.stringify({ title }),
+        silent: true,
+      });
+      const body = await r.json();
+      setThreads((prev) => prev.map((x) => (
+        x.id === id ? { ...x, title: body.title, title_custom: true } : x
+      )));
+      setErr('');
+      setRenaming(null);
+    } catch (e) {
+      setErr(envelopeError(e));
+      setRenaming(null);
+    }
+  };
+
+  const pinned = threads.filter((t) => t.pinned);
+  const rest = threads.filter((t) => !t.pinned);
+
+  const row = (t) => (
+    <li key={t.id}>
+      <Glass level={0} radius="sm" padding="sm" className="v2-thread-row" data-pinned={t.pinned ? 'true' : 'false'}>
+        <div className="v2-flow-card-head">
+          {renaming?.id === t.id ? (
+            <input
+              className="v2-input v2-thread-rename"
+              value={renaming.value}
+              autoFocus
+              aria-label="Thread title"
+              onChange={(e) => setRenaming({ id: t.id, value: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
+                if (e.key === 'Escape') { e.preventDefault(); setRenaming(null); }
+              }}
+              onBlur={commitRename}
+            />
+          ) : (
+            <button type="button" className="v2-flow-card-title" onClick={() => open(t.id)}>
+              {t.title || t.id.slice(0, 16)}
+            </button>
+          )}
+          <button
+            type="button"
+            className={`v2-btn v2-btn--ghost${t.pinned ? ' is-active' : ''}`}
+            onClick={() => togglePin(t)}
+            aria-pressed={!!t.pinned}
+            aria-label={t.pinned ? 'Unpin thread' : 'Pin thread'}
+            title={t.pinned ? 'Unpin thread' : 'Pin thread'}
+          >
+            {t.pinned ? <PinOff size={12} /> : <Pin size={12} />}
+          </button>
+          <button
+            type="button"
+            className="v2-btn v2-btn--ghost"
+            onClick={() => setRenaming({ id: t.id, value: t.title || '' })}
+            aria-label="Rename thread"
+            title="Rename thread"
+          >
+            <Pencil size={12} />
+          </button>
+          <button type="button" className="v2-btn v2-btn--ghost" onClick={() => del(t.id)} aria-label="Delete" title="Delete thread"><Trash2 size={12} /></button>
+        </div>
+        {/* preview and message_count come straight off the route and
+            used to be dropped on the floor. */}
+        {t.preview && <div className="v2-thread-preview" title={t.preview}>{t.preview}</div>}
+        <div className="v2-mem-meta">
+          <span>{Number(t.message_count || 0)} message{Number(t.message_count) === 1 ? '' : 's'}</span>
+          {t.updated_at && (
+            <span title={new Date(t.updated_at * 1000).toLocaleString()}>
+              {threadRelativeTime(t.updated_at)}
+            </span>
+          )}
+        </div>
+      </Glass>
+    </li>
+  );
+
   return (
-    <div className="v2-chat-pane">
+    <div className="v2-chat-pane v2-chat-pane--threads">
       <header className="v2-chat-pane-head">
         <h3>Threads</h3>
         <button type="button" className="v2-btn v2-btn--ghost" onClick={onClose} aria-label="Close"><X size={13} /></button>
       </header>
+      <div className="v2-thread-search">
+        <Search size={12} aria-hidden="true" />
+        <input
+          className="v2-input v2-thread-search__input"
+          type="search"
+          placeholder="Search threads"
+          aria-label="Search threads"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+      </div>
       <div className="v2-forge-actions">
         <button type="button" className="v2-btn v2-btn--primary" onClick={startNew}><Plus size={12} /> New thread</button>
+        <span className="v2-thread-count" data-testid="thread-count">
+          {query ? `${total} match${total === 1 ? '' : 'es'}` : `${threads.length} of ${total}`}
+        </span>
       </div>
+      {err && <div className="v2-thread-error" role="status">{err}</div>}
       {loading && <EmptyState title="Loading…" />}
-      {!loading && threads.length === 0 && <EmptyState title="No threads yet" />}
-      <ul className="v2-mem-list">
-        {threads.map((t) => (
-          <li key={t.id}>
-            <Glass level={0} radius="sm" padding="sm">
-              <div className="v2-flow-card-head">
-                <button type="button" className="v2-flow-card-title" onClick={() => open(t.id)}>
-                  {t.title || t.id.slice(0, 16)}
-                </button>
-                <button type="button" className="v2-btn v2-btn--ghost" onClick={() => del(t.id)} aria-label="Delete"><Trash2 size={12} /></button>
-              </div>
-              {t.updated_at && <div className="v2-mem-meta">{new Date(t.updated_at * 1000).toLocaleString()}</div>}
-            </Glass>
-          </li>
-        ))}
-      </ul>
+      {!loading && threads.length === 0 && (
+        <EmptyState title={query ? `No threads match "${query}"` : 'No threads yet'} />
+      )}
+      {!loading && pinned.length > 0 && (
+        <>
+          <div className="v2-thread-group-label">Pinned</div>
+          <ul className="v2-mem-list">{pinned.map(row)}</ul>
+        </>
+      )}
+      {!loading && rest.length > 0 && (
+        <>
+          {pinned.length > 0 && <div className="v2-thread-group-label">Everything else</div>}
+          <ul className="v2-mem-list">{rest.map(row)}</ul>
+        </>
+      )}
+      {!loading && hasMore && (
+        <button
+          type="button"
+          className="v2-btn v2-thread-more"
+          onClick={loadMore}
+          disabled={loadingMore}
+          data-testid="threads-load-more"
+        >
+          {loadingMore ? 'Loading…' : `Load ${Math.min(THREADS_PAGE_SIZE, total - threads.length)} more`}
+        </button>
+      )}
     </div>
   );
 }

@@ -1,13 +1,23 @@
 import React from 'react';
-import { Mic, MicOff, Sun, Moon } from 'lucide-react';
+import { Mic, MicOff, Sun, Moon, Search } from 'lucide-react';
 import { useConnectionStatus } from '../hooks/useConnectionStatus';
 import { useTheme } from '../hooks/useTheme';
 import { useVoice } from './VoiceContext';
+import { useCommandPalette } from './PaletteContext';
 import StatusDot from '../ui/StatusDot';
 
 /**
- * Top menubar — minimal. Left: FERAL mark + connection state. Right: voice
- * toggle. Command palette + identity slot in later.
+ * Top menubar. Left: FERAL mark + connection state. Centre: the command
+ * palette trigger. Right: theme + voice toggles.
+ *
+ * The header of this file used to end "Command palette + identity slot
+ * in later", and that promise sat here through every release while the
+ * bar navigated precisely nothing: two toggles and a brand mark. The
+ * palette exists now and this is its most discoverable trigger, because
+ * a search field that looks like a search field is found by people who
+ * do not know that Cmd-K is a thing. It is a button rather than an
+ * input: the real field lives in the dialog, and two fields for one
+ * query is a query that gets typed into the wrong one.
  */
 
 /*
@@ -28,6 +38,7 @@ export default function Menubar() {
   const { state } = useConnectionStatus();
   const voice = useVoice();
   const { theme, toggle: toggleTheme } = useTheme();
+  const { open: paletteOpen, openPalette } = useCommandPalette();
 
   const connection = CONNECTION_STATE[state] || {
     tone: 'off',
@@ -47,6 +58,19 @@ export default function Menubar() {
         <span className="v2-menubar-brand">FERAL</span>
         <span className="v2-menubar-version">v2</span>
       </div>
+      <button
+        type="button"
+        className="v2-menubar-search"
+        onClick={openPalette}
+        aria-haspopup="dialog"
+        aria-expanded={paletteOpen}
+        aria-label="Open the command palette"
+        title="Search, run a command, or ask (⌘K)"
+      >
+        <Search size={13} aria-hidden="true" />
+        <span className="v2-menubar-search-text">Search or run a command</span>
+        <kbd className="v2-menubar-search-kbd">⌘K</kbd>
+      </button>
       <div className="v2-menubar-right" aria-label="Menubar actions">
         <button
           type="button"

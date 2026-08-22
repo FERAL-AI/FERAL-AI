@@ -7,7 +7,7 @@ FERAL decouples the reasoning engine (Brain) from the physical executors (Nodes)
 FERAL uses three main components communicating strictly via our JSON WebSocket Protocol.
 
 1. **FERAL Brain (`/feral-core`)**: The absolute center of authority. It retains long-term memory, maintains conversation sliding windows, and drives the LLM tool invocation loop.
-2. **FERAL Client (`/feral-client`)**: A "dumb" renderer. It connects via `ws://.../v1/session` to provide audio/text input. It simply renders the SDUI payloads requested by the Brain.
+2. **FERAL Client (`/feral-client-v2`)**: A "dumb" renderer. It connects via `ws://.../v1/session` to provide audio/text input. It simply renders the SDUI payloads requested by the Brain.
 3. **Hardware Nodes (`/feral-nodes`)**: Actuators and Sensors. They connect via `ws://.../v1/node`. They register "Capabilities" with the Brain upon connection.
 
 ## Agentic Loop Lifecycle

@@ -112,7 +112,7 @@ describe('VoiceOverlay', () => {
       },
     });
     const { getByText } = render(<VoiceOverlay />);
-    expect(getByText(/Voice degraded — using fallback TTS/)).toBeInTheDocument();
+    expect(getByText(/Voice degraded, using fallback TTS/)).toBeInTheDocument();
     expect(getByText(/out of credit/i)).toBeInTheDocument();
   });
 

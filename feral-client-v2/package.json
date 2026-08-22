@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "FERAL v2 — ambient-OS client. Opt-in via ?v2=1. Runs alongside feral-client/.",
+  "description": "FERAL ambient-OS web client. The dashboard the brain serves from feral-core/webui_v2/.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

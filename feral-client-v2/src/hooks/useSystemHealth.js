@@ -2,7 +2,7 @@
  * useSystemHealth — single shared subscriber to /api/dashboard.
  *
  * Replaces the polling storm flagged in AUDIT-r14 finding 03:
- *   Shell useSomatic 10s + Home 15s + GlassBrain 8s + HubLauncher (on-open)
+ *   Shell useSomatic 10s + Home 15s + GlassBrain 8s + CommandPalette (on-open)
  *   = ~29-30 /api/dashboard GETs per minute steady-state across 3 tabs.
  *
  * Design:

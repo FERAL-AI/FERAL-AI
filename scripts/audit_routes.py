@@ -4,7 +4,7 @@ Scans every ``@router.(get|post|put|delete|patch)`` + ``@app.(get|post|…)``
 decorator in ``feral-core/api/**/*.py`` and collects each route's
 full path (including router prefixes).
 
-Then scans ``feral-client-v2/src/**/*.{js,jsx}`` + ``feral-client/src/**/*.{js,jsx}``
+Then scans ``feral-client-v2/src/**/*.{js,jsx}`` + ``feral-extension/**``
 + ``feral-extension/**/*.{js,html}`` for witnesses:
   apiJson('/...')         apiFetch('/...')         fetch(`${API_BASE}/...`)
   fetch('/api/...')       navigate('/...')
@@ -31,7 +31,6 @@ ROOT = Path(__file__).resolve().parent.parent
 API_DIR = ROOT / "feral-core" / "api"
 CLIENT_DIRS = [
     ROOT / "feral-client-v2" / "src",
-    ROOT / "feral-client" / "src",
     ROOT / "feral-extension",
 ]
 

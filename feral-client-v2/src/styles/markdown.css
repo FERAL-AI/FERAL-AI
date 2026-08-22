@@ -307,24 +307,57 @@
   margin: 0 0 10px;
   max-width: 100%;
 }
+/* One tone per outcome, declared once as a pair of custom properties
+   and consumed by every element on the card: the rail, the family
+   glyph and the status word all read `--v2-tool-tone`.
+   `--v2-tool-tone-soft` is the attention wash.
+
+   The defect this replaces: a failure took a full-strength border AND
+   a tinted background, while a success took a border at 18% alpha and
+   no tint (`--v2-state-live-soft` is `rgba(48,209,88,0.18)`). The two
+   states were drawn on two different scales, so the card shouted on
+   failure and whispered on success and neither could be compared with
+   the other at a glance.
+
+   The rule now, applied to all four outcomes identically: the RAIL is
+   the full-strength hue, always, so the outcome is legible on a card
+   the reader is not looking at. The WASH is reserved for the two
+   states that want the reader to stop (failed, refused). It is not an
+   arbitrary difference; it is one rule about attention, and success
+   and running are on the same side of it as each other. Washing every
+   success as well was measured in the browser and reads as a wall of
+   green over a normal turn, which is its own kind of illegible. */
 .v2-tool-card {
   font-size: 12.5px;
   max-width: 100%;
   overflow: hidden;
-  border-left: 2px solid transparent;
+  /* Per-outcome tone, set by the modifiers below. */
+  --v2-tool-tone: var(--v2-text-tertiary);
+  --v2-tool-tone-soft: transparent;
+  border-left: 2px solid var(--v2-tool-tone);
 }
-.v2-tool-card--running { border-left-color: var(--v2-accent); }
-.v2-tool-card--ok { border-left-color: var(--v2-state-live-soft); }
+/* The attention wash. Applied on the modifiers, not the base, so a
+   card that somehow lands without a status keeps the Glass surface. */
+.v2-tool-card--failed,
+.v2-tool-card--refused { background: var(--v2-tool-tone-soft); }
+.v2-tool-card--running {
+  --v2-tool-tone: var(--v2-accent);
+  --v2-tool-tone-soft: var(--v2-accent-soft);
+}
+.v2-tool-card--ok {
+  --v2-tool-tone: var(--v2-state-live);
+  --v2-tool-tone-soft: var(--v2-state-live-soft);
+}
 .v2-tool-card--failed {
-  border-left-color: var(--v2-state-error);
-  background: var(--v2-state-error-soft);
+  --v2-tool-tone: var(--v2-state-error);
+  --v2-tool-tone-soft: var(--v2-state-error-soft);
 }
 /* Refused, not failed: FERAL declined the call and nothing ran. Warn
    rather than error, so a held boundary does not read as a malfunction.
    The warn tokens are already defined for both themes. */
 .v2-tool-card--refused {
-  border-left-color: var(--v2-state-warn);
-  background: var(--v2-state-warn-soft);
+  --v2-tool-tone: var(--v2-state-warn);
+  --v2-tool-tone-soft: var(--v2-state-warn-soft);
 }
 .v2-tool-card__head {
   display: flex;
@@ -345,9 +378,10 @@
 .v2-tool-card__head:focus-visible { outline: none; box-shadow: var(--v2-shadow-focus); }
 .v2-tool-card__chev { transition: transform var(--v2-dur-fast) var(--v2-ease-out); flex-shrink: 0; }
 .v2-tool-card__chev.is-open { transform: rotate(90deg); }
-.v2-tool-card__icon { flex-shrink: 0; }
-.v2-tool-card__icon--ok { color: var(--v2-state-live); }
-.v2-tool-card__icon--error { color: var(--v2-state-error); }
+/* The glyph says WHICH family of thing ran; it takes the outcome tone
+   so one element carries both without needing five outcome icons to
+   cover forty-one skills. */
+.v2-tool-card__icon { flex-shrink: 0; color: var(--v2-tool-tone, var(--v2-text-tertiary)); }
 .v2-tool-card__icon--refused { color: var(--v2-state-warn); }
 .v2-tool-card__label { font-weight: 600; white-space: nowrap; flex-shrink: 0; }
 .v2-tool-card__summary {
@@ -367,8 +401,10 @@
   letter-spacing: 0.4px;
   flex-shrink: 0;
 }
-.v2-tool-card--failed .v2-tool-card__status-text { color: var(--v2-state-error); }
-.v2-tool-card--refused .v2-tool-card__status-text { color: var(--v2-state-warn); }
+.v2-tool-card--failed .v2-tool-card__status-text,
+.v2-tool-card--refused .v2-tool-card__status-text { color: var(--v2-tool-tone); }
+/* Duration always sits at the end of the head, right-aligned on a
+   tabular figure so a column of cards reads as a column of times. */
 .v2-tool-card__lat {
   margin-left: auto;
   color: var(--v2-text-tertiary);
@@ -422,7 +458,12 @@
   padding: 6px;
   max-width: 100%;
 }
-.v2-tool-group--failed { border-color: var(--v2-state-error-soft); }
+/* Same one-scale rule as the cards: every aggregate outcome gets the
+   same treatment, only the hue changes. */
+.v2-tool-group--running { border-color: var(--v2-accent); }
+.v2-tool-group--ok { border-color: var(--v2-state-live); }
+.v2-tool-group--failed { border-color: var(--v2-state-error); }
+.v2-tool-group--refused { border-color: var(--v2-state-warn); }
 .v2-tool-group__head {
   display: flex;
   align-items: center;
@@ -856,3 +897,85 @@
   text-decoration: line-through;
 }
 .v2-todo--in_progress .v2-todo__text { font-weight: 600; }
+
+/* ── Tool cards, to the approved instrument-panel design ───────
+   The mockup's tool row is a three-column grid, mono throughout, dense:
+   a 19px glyph, the tool name and its main argument sharing the middle
+   on one baseline, and the duration hard right on tabular figures.
+
+   Grid rather than flex is what makes a column of these line up: with
+   flex the name and duration sat at whatever x the previous row's text
+   happened to end at, so a stack of calls read as ragged. */
+.v2-tool-card__head {
+  display: grid;
+  grid-template-columns: 19px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  padding: 7px 10px;
+  min-height: 28px;
+  font-size: 11.5px;
+}
+.v2-tool-card__icon {
+  width: 19px;
+  height: 19px;
+  display: grid;
+  place-items: center;
+}
+.v2-tool-card__label {
+  font-family: var(--v2-font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--v2-text-primary);
+}
+/* Name and argument share the middle column on one baseline. */
+.v2-tool-card__head > .v2-tool-card__label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.v2-tool-card__summary {
+  font-family: var(--v2-font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--v2-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.v2-tool-card__lat {
+  margin-left: 0;
+  font-family: var(--v2-font-mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  color: var(--v2-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Body: a caption strip over the payload, on the page ground so it
+   reads as output rather than as more chrome. */
+.v2-tool-card__body { border-top: 1px solid var(--v2-hairline); background: var(--v2-bg-base); }
+.v2-tool-card__cap {
+  font-family: var(--v2-font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--v2-hairline);
+}
+.v2-tool-card__pre {
+  font-family: var(--v2-font-mono);
+  font-size: 10.5px;
+  line-height: 1.7;
+  padding: 8px 10px;
+  color: var(--v2-text-secondary);
+  overflow-x: auto;
+  letter-spacing: 0;
+}
+/* An accessibility tree is the one payload with real structure, so the
+   node id and the role are coloured and the label is left plain. */
+.v2-tool-card__ax { color: var(--v2-text-primary); font-weight: 500; }
+.v2-tool-card__role { color: var(--v2-accent); }

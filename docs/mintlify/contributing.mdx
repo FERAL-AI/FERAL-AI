@@ -21,7 +21,7 @@ feral serve    # brain running on localhost:9090
 For the web UI (in a separate terminal):
 
 ```bash
-cd FERAL-AI/feral-client
+cd FERAL-AI/feral-client-v2
 npm install
 npm run dev     # dev server on localhost:5173
 ```
@@ -176,11 +176,11 @@ Pick the area that matches your skills:
 |:-----|:-------------------|:-------------|
 | **Runtime / Orchestrator** | Agent loop, LLM routing, TaskFlows, sessions, security | `feral-core/agents/` |
 | **Memory / Knowledge** | 4-tier memory, wiki compilation, ingest pipelines, federated sync | `feral-core/memory/` |
-| **GenUI / Provider Surfaces** | SDUI engine, provider contracts, surface caching, client renderer | `feral-core/genui/`, `feral-client/src/components/SduiRenderer.jsx` |
+| **GenUI / Provider Surfaces** | SDUI engine, provider contracts, surface caching, client renderer | `feral-core/genui/`, `feral-client-v2/src/ui/SduiRenderer.jsx` |
 | **Hardware / Daemons** | HUP protocol, daemon SDKs, device profiles, edge bridges | `feral-core/hardware/`, `feral-nodes/` |
 | **Voice / Perception** | Realtime voice, Gemini Live, wake word, vision pipeline | `feral-core/voice/`, `feral-core/perception/` |
 | **Nix / Packaging** | Flake outputs, NixOS modules, reproducible builds | `flake.nix` |
-| **Frontend / Shell** | Web UI, dashboard, Tauri desktop, mobile bridges | `feral-client/`, `desktop/` |
+| **Frontend / Shell** | Web UI, dashboard, Tauri desktop, mobile bridges | `feral-client-v2/`, `desktop/` |
 | **Documentation** | Guides, API reference, architecture docs | `docs/` |
 
 ## Architecture Docs

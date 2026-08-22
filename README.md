@@ -23,7 +23,7 @@
 
 <p align="center">
   <!-- sync-versions:badge -->
-  <img src="https://img.shields.io/badge/version-2026.8.12-06b6d4?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2026.8.13-06b6d4?style=flat-square" alt="Version" />
   <!-- /sync-versions:badge -->
   <a href="https://github.com/FERAL-AI/FERAL-AI/stargazers"><img src="https://img.shields.io/github/stars/FERAL-AI/FERAL-AI?style=flat-square&color=06b6d4" alt="Stars" /></a>
   <a href="https://github.com/FERAL-AI/FERAL-AI/commits/main"><img src="https://img.shields.io/github/last-commit/FERAL-AI/FERAL-AI?style=flat-square&color=06b6d4" alt="Last Commit" /></a>
@@ -296,5 +296,5 @@ Apache License 2.0 — see [`LICENSE`](LICENSE). Attribution requirements live i
   reconcile live pytest / vitest counts. Not for human eyes — please leave
   it in place and do not edit by hand.
 -->
-<!-- sync-versions:test-counts pytest=8145 vitest=848 -->
+<!-- sync-versions:test-counts pytest=9814 vitest=1136 -->
 <!-- /sync-versions:test-counts -->

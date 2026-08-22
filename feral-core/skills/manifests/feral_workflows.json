@@ -1,202 +1,245 @@
 {
-  "skill_id": "feral_workflows",
-  "version": "1.0.0",
-  "author": "feral-core",
-  "brand": {
-    "name": "FERAL Workflows",
-    "primary_color": "#10B981",
-    "secondary_color": "#059669",
-    "logo_url": "",
-    "icon_set": "sf_symbols"
-  },
-  "description": "Author and run multi-step WORKFLOWS for complicated tasks that need several ordered steps. Use this when the user describes a task with multiple stages, e.g. 'first do X, then Y, then save the result', or anything that chains skill calls, web fetches, LLM reasoning, conditions, and notes. Each workflow runs in the background as a resumable TaskFlow. Step types include: skill.invoke (call any skill endpoint), llm.chat (reason / produce text), note.save, memory.search, http.get, sleep, condition (branch), and noop. Steps can reference earlier output via {{previous_output}} and {{step_N}} templating.",
-  "trigger_phrases": [
-    "workflow",
-    "multi-step",
-    "multi step",
-    "first do",
-    "then do",
-    "and then",
-    "step by step",
-    "a series of steps",
-    "run a workflow",
-    "build a workflow",
-    "automate the process",
-    "pipeline"
-  ],
-  "categories": [
-    "productivity",
-    "automation",
-    "workflows"
-  ],
-  "auth": {
-    "type": "none"
-  },
-  "endpoints": [
-    {
-      "id": "create",
-      "method": "PYTHON",
-      "url": "python://feral_workflows/create",
-      "description": "Author and queue a multi-step workflow. Provide a title and an ordered list of steps. Each step is an object with a 'type' and type-specific fields, e.g. {\"type\":\"skill.invoke\",\"skill_id\":\"web_search\",\"endpoint\":\"search\",\"args\":{\"q\":\"...\"}}, {\"type\":\"llm.chat\",\"prompt\":\"summarize {{previous_output}}\"}, {\"type\":\"note.save\",\"content\":\"{{previous_output}}\"}, {\"type\":\"condition\",\"field\":\"...\",\"op\":\"truthy\",\"then\":3,\"else\":4}. The workflow runs in the background; poll with get.",
-      "params": [
-        {
-          "name": "title",
-          "type": "string",
-          "required": true,
-          "description": "Short title for the workflow."
-        },
-        {
-          "name": "steps",
-          "type": "array",
-          "required": true,
-          "description": "Ordered list of step objects. Each must have a 'type'. Supported: skill.invoke, llm.chat, note.save, memory.search, http.get, sleep, condition, noop.",
-          "items": {
-            "type": "object"
-          }
-        },
-        {
-          "name": "session_id",
-          "type": "string",
-          "required": false,
-          "description": "Session id to associate the workflow with.",
-          "default": ""
-        },
-        {
-          "name": "context",
-          "type": "object",
-          "required": false,
-          "description": "Optional initial context dict available to step templating."
-        }
-      ],
-      "returns_description": "{flow: {id, title, status, steps, ...}}",
-      "ui_hint": "detail_card",
-      "safety_tier": "safe"
+    "skill_id": "feral_workflows",
+    "version": "1.0.0",
+    "author": "feral-core",
+    "brand": {
+        "name": "FERAL Workflows",
+        "primary_color": "#10B981",
+        "secondary_color": "#059669",
+        "logo_url": "",
+        "icon_set": "sf_symbols"
     },
-    {
-      "id": "list",
-      "method": "GET",
-      "url": "python://feral_workflows/list",
-      "description": "List workflows, optionally filtered by session_id and/or status (queued, running, waiting, completed, failed, cancelled).",
-      "params": [
+    "description": "Author and run multi-step WORKFLOWS for complicated tasks that need several ordered steps. Use this when the user describes a task with multiple stages, e.g. 'first do X, then Y, then save the result', or anything that chains skill calls, web fetches, LLM reasoning, conditions, and notes. Each workflow runs in the background as a resumable TaskFlow. Step types include: skill.invoke (call any skill endpoint), llm.chat (reason / produce text), note.save, memory.search, http.get, sleep, condition (branch), and noop. Steps can reference earlier output via {{previous_output}} and {{step_N}} templating.",
+    "trigger_phrases": [
+        "workflow",
+        "multi-step",
+        "multi step",
+        "first do",
+        "then do",
+        "and then",
+        "step by step",
+        "a series of steps",
+        "run a workflow",
+        "build a workflow",
+        "automate the process",
+        "pipeline",
+        "what did I promise",
+        "what am I on the hook for",
+        "what did I commit to",
+        "mark that done",
+        "that's done",
+        "my commitments",
+        "what do I owe someone"
+    ],
+    "categories": [
+        "productivity",
+        "automation",
+        "workflows"
+    ],
+    "auth": {
+        "type": "none"
+    },
+    "endpoints": [
         {
-          "name": "session_id",
-          "type": "string",
-          "required": false,
-          "description": "Filter to a session."
+            "id": "create",
+            "method": "PYTHON",
+            "url": "python://feral_workflows/create",
+            "description": "Author and queue a multi-step workflow. Provide a title and an ordered list of steps. Each step is an object with a 'type' and type-specific fields, e.g. {\"type\":\"skill.invoke\",\"skill_id\":\"web_search\",\"endpoint\":\"search\",\"args\":{\"q\":\"...\"}}, {\"type\":\"llm.chat\",\"prompt\":\"summarize {{previous_output}}\"}, {\"type\":\"note.save\",\"content\":\"{{previous_output}}\"}, {\"type\":\"condition\",\"field\":\"...\",\"op\":\"truthy\",\"then\":3,\"else\":4}. The workflow runs in the background; poll with get.",
+            "params": [
+                {
+                    "name": "title",
+                    "type": "string",
+                    "required": true,
+                    "description": "Short title for the workflow."
+                },
+                {
+                    "name": "steps",
+                    "type": "array",
+                    "required": true,
+                    "description": "Ordered list of step objects. Each must have a 'type'. Supported: skill.invoke, llm.chat, note.save, memory.search, http.get, sleep, condition, noop.",
+                    "items": {
+                        "type": "object"
+                    }
+                },
+                {
+                    "name": "session_id",
+                    "type": "string",
+                    "required": false,
+                    "description": "Session id to associate the workflow with.",
+                    "default": ""
+                },
+                {
+                    "name": "context",
+                    "type": "object",
+                    "required": false,
+                    "description": "Optional initial context dict available to step templating."
+                }
+            ],
+            "returns_description": "{flow: {id, title, status, steps, ...}}",
+            "ui_hint": "detail_card",
+            "safety_tier": "safe"
         },
         {
-          "name": "status",
-          "type": "string",
-          "required": false,
-          "description": "Filter by status."
-        }
-      ],
-      "returns_description": "{flows: [...], count}",
-      "ui_hint": "list",
-      "read_only_hint": true,
-      "safety_tier": "safe",
-      "emit_result_preview": true
-    },
-    {
-      "id": "get",
-      "method": "GET",
-      "url": "python://feral_workflows/get",
-      "description": "Get a single workflow by flow_id, including per-step status and results.",
-      "params": [
-        {
-          "name": "flow_id",
-          "type": "string",
-          "required": true,
-          "description": "The workflow (flow) id returned by create."
-        }
-      ],
-      "returns_description": "{flow: {...}}",
-      "ui_hint": "detail_card",
-      "read_only_hint": true,
-      "safety_tier": "safe"
-    },
-    {
-      "id": "cancel",
-      "method": "POST",
-      "url": "python://feral_workflows/cancel",
-      "description": "Cancel a running or queued workflow by flow_id.",
-      "params": [
-        {
-          "name": "flow_id",
-          "type": "string",
-          "required": true,
-          "description": "The workflow (flow) id to cancel."
-        }
-      ],
-      "returns_description": "{flow: {...}}",
-      "ui_hint": "detail_card",
-      "safety_tier": "safe"
-    },
-    {
-      "id": "todo_write",
-      "method": "POST",
-      "url": "python://feral_workflows/todo_write",
-      "description": "Track YOUR OWN task list for the current conversation. Use this for multi-step work you are doing right now: write the complete list when you start, and rewrite it whenever anything changes so the user can see where you are. This is NOT feral_reminders (that is the user's own time-anchored reminders), NOT feral_routines (recurring schedules), NOT the create endpoint above (that queues a workflow the brain executes in the background), and NOT background_task (long-running autonomous runs). Nothing here is executed for you; it is a visible scratchpad. Always send the COMPLETE list, since every call replaces the previous one. Exactly one item may be 'in_progress' at a time, and the call is rejected if more than one is: mark the item you are actually working on now, leave the rest 'pending', and flip finished items to 'completed' rather than deleting them mid-task.",
-      "params": [
-        {
-          "name": "todos",
-          "type": "array",
-          "required": true,
-          "description": "The COMPLETE todo list, replacing whatever was stored before. Each item is {\"id\":\"short-stable-id\",\"content\":\"what to do\",\"status\":\"pending|in_progress|completed\"}. id is optional and is generated when omitted; status defaults to pending. At most 40 items, and at most one may be in_progress.",
-          "items": {
-            "type": "object"
-          }
+            "id": "list",
+            "method": "GET",
+            "url": "python://feral_workflows/list",
+            "description": "List workflows, optionally filtered by session_id and/or status (queued, running, waiting, completed, failed, cancelled).",
+            "params": [
+                {
+                    "name": "session_id",
+                    "type": "string",
+                    "required": false,
+                    "description": "Filter to a session."
+                },
+                {
+                    "name": "status",
+                    "type": "string",
+                    "required": false,
+                    "description": "Filter by status."
+                }
+            ],
+            "returns_description": "{flows: [...], count}",
+            "ui_hint": "list",
+            "read_only_hint": true,
+            "safety_tier": "safe",
+            "emit_result_preview": true
         },
         {
-          "name": "session_id",
-          "type": "string",
-          "required": false,
-          "description": "Session the list belongs to. Leave unset; the runtime fills it from the call context.",
-          "default": ""
-        }
-      ],
-      "returns_description": "{todos: [{id, content, status}], counts: {pending, in_progress, completed, total}, session_id}",
-      "ui_hint": "list",
-      "safety_tier": "safe",
-      "result_budget": "feed",
-      "emit_result_preview": true
-    },
-    {
-      "id": "instantiate_pack",
-      "method": "POST",
-      "url": "python://feral_workflows/instantiate_pack",
-      "description": "Instantiate a named first-party workflow pack (template) into a live workflow run.",
-      "params": [
-        {
-          "name": "workflow_id",
-          "type": "string",
-          "required": true,
-          "description": "The workflow pack id (from the first-party catalog)."
+            "id": "get",
+            "method": "GET",
+            "url": "python://feral_workflows/get",
+            "description": "Get a single workflow by flow_id, including per-step status and results.",
+            "params": [
+                {
+                    "name": "flow_id",
+                    "type": "string",
+                    "required": true,
+                    "description": "The workflow (flow) id returned by create."
+                }
+            ],
+            "returns_description": "{flow: {...}}",
+            "ui_hint": "detail_card",
+            "read_only_hint": true,
+            "safety_tier": "safe"
         },
         {
-          "name": "session_id",
-          "type": "string",
-          "required": false,
-          "description": "Session id to associate the run with."
+            "id": "cancel",
+            "method": "POST",
+            "url": "python://feral_workflows/cancel",
+            "description": "Cancel a running or queued workflow by flow_id.",
+            "params": [
+                {
+                    "name": "flow_id",
+                    "type": "string",
+                    "required": true,
+                    "description": "The workflow (flow) id to cancel."
+                }
+            ],
+            "returns_description": "{flow: {...}}",
+            "ui_hint": "detail_card",
+            "safety_tier": "safe"
         },
         {
-          "name": "title",
-          "type": "string",
-          "required": false,
-          "description": "Optional override title for the instantiated run."
+            "id": "todo_write",
+            "method": "POST",
+            "url": "python://feral_workflows/todo_write",
+            "description": "Track YOUR OWN task list for the current conversation. Use this for multi-step work you are doing right now: write the complete list when you start, and rewrite it whenever anything changes so the user can see where you are. This is NOT feral_reminders (that is the user's own time-anchored reminders), NOT feral_routines (recurring schedules), NOT the create endpoint above (that queues a workflow the brain executes in the background), and NOT background_task (long-running autonomous runs). Nothing here is executed for you; it is a visible scratchpad. Always send the COMPLETE list, since every call replaces the previous one. Exactly one item may be 'in_progress' at a time, and the call is rejected if more than one is: mark the item you are actually working on now, leave the rest 'pending', and flip finished items to 'completed' rather than deleting them mid-task.",
+            "params": [
+                {
+                    "name": "todos",
+                    "type": "array",
+                    "required": true,
+                    "description": "The COMPLETE todo list, replacing whatever was stored before. Each item is {\"id\":\"short-stable-id\",\"content\":\"what to do\",\"status\":\"pending|in_progress|completed\"}. id is optional and is generated when omitted; status defaults to pending. At most 40 items, and at most one may be in_progress.",
+                    "items": {
+                        "type": "object"
+                    }
+                },
+                {
+                    "name": "session_id",
+                    "type": "string",
+                    "required": false,
+                    "description": "Session the list belongs to. Leave unset; the runtime fills it from the call context.",
+                    "default": ""
+                }
+            ],
+            "returns_description": "{todos: [{id, content, status}], counts: {pending, in_progress, completed, total}, session_id}",
+            "ui_hint": "list",
+            "safety_tier": "safe",
+            "result_budget": "feed",
+            "emit_result_preview": true
+        },
+        {
+            "id": "instantiate_pack",
+            "method": "POST",
+            "url": "python://feral_workflows/instantiate_pack",
+            "description": "Instantiate a named first-party workflow pack (template) into a live workflow run.",
+            "params": [
+                {
+                    "name": "workflow_id",
+                    "type": "string",
+                    "required": true,
+                    "description": "The workflow pack id (from the first-party catalog)."
+                },
+                {
+                    "name": "session_id",
+                    "type": "string",
+                    "required": false,
+                    "description": "Session id to associate the run with."
+                },
+                {
+                    "name": "title",
+                    "type": "string",
+                    "required": false,
+                    "description": "Optional override title for the instantiated run."
+                }
+            ],
+            "returns_description": "{flow: {...}, workflow_id}",
+            "ui_hint": "detail_card",
+            "safety_tier": "safe"
+        },
+        {
+            "id": "list_commitments",
+            "method": "GET",
+            "url": "python://feral_workflows/list_commitments",
+            "description": "List what the user has promised to do and not yet done, newest first. USE THIS for 'what did I promise', 'what am I on the hook for', 'what did I commit to this week'. Commitments come from the user saying them out loud in a recorded conversation, or from feral_workflows__todo_write; the user never types them. The daily brief shows at most three of these, so the count here is often higher than the brief suggests. Returns 503 if the intent compiler is unavailable.",
+            "params": [
+                {
+                    "name": "include_completed",
+                    "type": "boolean",
+                    "required": false,
+                    "description": "Include commitments already marked done. Omit for open ones only."
+                }
+            ],
+            "returns_description": "{commitments: [{commitment, status, created, plan_id}], count}",
+            "ui_hint": "list",
+            "safety_tier": "safe",
+            "read_only_hint": true
+        },
+        {
+            "id": "complete_commitment",
+            "method": "POST",
+            "url": "python://feral_workflows/complete_commitment",
+            "description": "Mark a commitment done, identified by describing it rather than by id. USE THIS for 'I sent Noah the SDK', 'that's done', 'mark the flights booked'. Matching is on the content words, so 'sdk to noah' finds 'send Noah the SDK by Friday'. If more than one open commitment matches, or none does, this returns 404 with the open list and changes nothing rather than guessing: completing the wrong one removes it from every surface silently.",
+            "params": [
+                {
+                    "name": "text",
+                    "type": "string",
+                    "required": true,
+                    "description": "Enough of the commitment's wording to identify it uniquely, e.g. 'sdk to noah'."
+                }
+            ],
+            "returns_description": "{plan_id, intent, status} on success; 404 with {active: [...]} when ambiguous or unmatched",
+            "ui_hint": "confirmation",
+            "safety_tier": "confirm",
+            "read_only_hint": false
         }
-      ],
-      "returns_description": "{flow: {...}, workflow_id}",
-      "ui_hint": "detail_card",
-      "safety_tier": "safe"
-    }
-  ],
-  "flows": [],
-  "crons": [],
-  "triggers": [],
-  "permissions": [
-    "scheduling"
-  ],
-  "requires_daemon": false,
-  "max_calls_per_hour": 10000
+    ],
+    "flows": [],
+    "crons": [],
+    "triggers": [],
+    "permissions": [
+        "scheduling"
+    ],
+    "requires_daemon": false,
+    "max_calls_per_hour": 10000
 }

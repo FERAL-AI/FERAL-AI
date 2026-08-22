@@ -1,15 +1,15 @@
 /**
  * UI component coverage pack (stage 5.4).
  *
- * Covers Modal, CodeEditor, DeviceQRCode, LiveOpsStream — four components
- * at <30% before this stage. Each gets mount + primary interactions.
+ * Covers Modal, CodeEditor, DeviceQRCode: components at <30% before this
+ * stage. Each gets mount + primary interactions. (LiveOpsStream was the
+ * fourth until it was deleted in 2026.8.12; see the note below.)
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, fireEvent, waitFor } from '@testing-library/react';
 import Modal from '../ui/Modal';
 import CodeEditor from '../ui/CodeEditor';
 import DeviceQRCode from '../ui/DeviceQRCode';
-import LiveOpsStream from '../shell/LiveOpsStream';
 
 beforeEach(() => {
   vi.stubGlobal('WebSocket', class { constructor() {} close() {} });
@@ -160,20 +160,8 @@ describe('DeviceQRCode', () => {
   });
 });
 
-// ── LiveOpsStream ───────────────────────────────────────────────
-
-describe('LiveOpsStream', () => {
-  it('renders nothing when no events have arrived', () => {
-    const { container } = render(<LiveOpsStream active={false} />);
- // Empty list; component always renders a ul.
-    const ul = container.querySelector('ul');
-    expect(ul).toBeTruthy();
-    expect(ul.children.length).toBe(0);
-  });
-
-  it('applies `is-active` class when active=true', () => {
-    const { container } = render(<LiveOpsStream active />);
-    const ul = container.querySelector('ul');
-    expect(ul.className).toContain('is-active');
-  });
-});
+// ── LiveOpsStream was deleted in 2026.8.12. It was mounted only from
+// shell/Ambient.jsx behind an `import.meta.env.DEV` gate, so it never
+// reached a shipped bundle, and it could not be un-gated: its event
+// label table named thirteen frame types of which the brain emits one.
+// shell/Ambient.no-liveops.test.jsx guards against reintroduction.

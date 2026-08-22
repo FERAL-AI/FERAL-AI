@@ -129,3 +129,62 @@ def test_unknown_approval_returns_404(approvals_client):
     client, _orch = approvals_client
     r = client.post("/api/approvals/does-not-exist/approve")
     assert r.status_code == 404
+
+
+def test_list_surfaces_policy_sources(approvals_client):
+    """The inbox must return the field ToolRunner records for it.
+
+    `enforce_safety` attaches `policy_sources` to every pending row with a
+    comment saying renderers use it to answer "why are we asking?", but the
+    GET projection listed each field by hand and omitted it. The data was
+    therefore unreachable over HTTP, and the only client that reads it
+    rendered an empty explanation on every row with no error anywhere.
+
+    Comparing against the runner's own copy rather than a literal keeps
+    this honest if the resolver's output shape changes.
+    """
+    client, orch = approvals_client
+    pending = _new_pending(orch, "sess-sources")
+    recorded = pending.get("policy_sources")
+    assert recorded, "enforce_safety should record policy_sources on a pending row"
+
+    r = client.get("/api/approvals")
+    assert r.status_code == 200
+    rows = r.json()["approvals"]
+    row = next(x for x in rows if x["request_id"] == pending["request_id"])
+
+    assert "policy_sources" in row, "GET /api/approvals dropped policy_sources"
+    assert row["policy_sources"] == recorded
+
+
+def test_policy_sources_is_json_safe(approvals_client):
+    """Whatever the resolver puts in there has to survive serialisation.
+
+    `sources` is a `dict[str, Any]` and mixes a nested dict (`manifest`),
+    strings (`danger_map`) and booleans (`surface_deny`). Passing it
+    through unchanged is only safe while every value is JSON-encodable, so
+    this pins that rather than assuming it.
+    """
+    import json
+
+    client, orch = approvals_client
+    _new_pending(orch, "sess-json")
+    row = client.get("/api/approvals").json()["approvals"][0]
+    json.dumps(row["policy_sources"])  # raises if anything in there is not serialisable
+
+
+def test_every_listed_field_reaches_the_client(approvals_client):
+    """A hand-written projection drops fields silently; name what it owes.
+
+    This is the guard for the whole defect class, not just this instance:
+    the bug was a maintainer adding a field to the pending row and the
+    route's literal dict not growing to match.
+    """
+    client, orch = approvals_client
+    _new_pending(orch, "sess-fields")
+    row = client.get("/api/approvals").json()["approvals"][0]
+    expected = {
+        "request_id", "session_id", "tool_name", "args",
+        "safety_level", "created_at", "status", "policy_sources",
+    }
+    assert expected <= set(row), f"missing from the response: {expected - set(row)}"

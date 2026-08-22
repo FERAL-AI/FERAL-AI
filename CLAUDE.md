@@ -19,7 +19,7 @@ Version `2026.8.8`. Public beta. Single-user local deployment is the only suppor
 | `feral-core/models/protocol.py` | Python | **Canonical wire schemas.** `HUP_VERSION` lives at line 15 |
 | `feral-core/cli/` | Python | `feral setup / start / doctor / memory / sync / access` |
 | `feral-core/voice/`, `perception/` | Python | STT/TTS routing, VAD, wake word, sensor fusion |
-| `feral-client-v2/` | React (JSX) | Current web client. `feral-client/` is the superseded v1 |
+| `feral-client-v2/` | React (JSX) | The web client. The superseded v1 at `feral-client/` was deleted in 2026.8.12; its built bundle survives as `feral-core/webui/`, served only when `FERAL_SERVE_LEGACY_WEBUI=1` and `webui_v2/` is absent, and nothing can rebuild it |
 | `feral-nodes/` | Python, TS, Swift, Kotlin | Device SDKs and daemons. `HUP_SPEC.md` is the protocol source of truth |
 | `feral-registry/`, `feral-relay/` | Python | App registry; NAT-traversal relay |
 | `desktop/` | Rust (Tauri) | Experimental shell. Bundles its own CPython + a copy of `feral-core` and spawns `python -m api.server` against them; see "The interpreter" below |
@@ -30,8 +30,8 @@ Version `2026.8.8`. Public beta. Single-user local deployment is the only suppor
 make dev                                  # build pinned .venv, install feral-core[all,dev] + client deps
 make test                                 # both suites: test-py + test-client
 make test-py                              # cd feral-core && python -m pytest tests/ -q --no-cov  (~6 min)
-make test-client                          # cd feral-client-v2 && npm test  (125 files / 848 tests)
-make e2e                                  # cd feral-client-v2 && npm run e2e  (13 playwright specs)
+make test-client                          # cd feral-client-v2 && npm test  (138 files / 1067 tests)
+make e2e                                  # cd feral-client-v2 && npm run e2e  (7 spec files / 30 tests)
 make lint                                 # ruff, the exact ruleset CI gates on
 make serve                                # feral serve
 make doctor                               # feral doctor — reports real runtime state
@@ -181,7 +181,7 @@ For tools, this trap is worse than a skewed count — it takes them to zero. `my
 
 **5. `ruff` runs on `--select=E,F,W` minus six ignores** — roughly 1.5% of its rules, with `F401` (unused imports) disabled. A clean ruff run means very little.
 
-**6. Only `feral-core` is in CI** on the Python side. `feral-registry`, `feral-nodes`, `feral-relay`, `scripts`, `sdk/python`, `packages` (102 Python files total) have zero lint and zero tests. The **Swift and Kotlin** SDKs are still never compiled by CI. On the JS/TS side CI now covers: `feral-client` (v1, build + vitest), `feral-client-v2` (build + vitest coverage + playwright e2e), `feral-extension` (vitest), and `feral-nodes/ts-node-sdk` (typecheck + build + vitest). The last two were added after an audit found they had committed test suites, lockfiles, and weekly Dependabot bump PRs, but no job that installed or ran them.
+**6. Only `feral-core` is in CI** on the Python side. `feral-registry`, `feral-nodes`, `feral-relay`, `scripts`, `sdk/python`, `packages` (102 Python files total) have zero lint and zero tests. The **Swift and Kotlin** SDKs are still never compiled by CI. On the JS/TS side CI now covers: `feral-client-v2` (build + vitest coverage + playwright e2e), `feral-extension` (vitest), and `feral-nodes/ts-node-sdk` (typecheck + build + vitest). The last two were added after an audit found they had committed test suites, lockfiles, and weekly Dependabot bump PRs, but no job that installed or ran them. The `client-build` job that built and tested v1 was deleted in 2026.8.12 along with `feral-client/` itself; if `client-build` is still listed as a required status check in branch protection, that setting has to be dropped by hand or every PR will block on a job that no longer runs.
 
 `desktop/` is still uncovered: it is a Dependabot npm ecosystem whose only workflow is `workflow_dispatch:`, so a bump PR there builds nothing.
 
@@ -190,7 +190,7 @@ For tools, this trap is worse than a skewed count — it takes them to zero. `my
 ## Conventions
 
 - **`models/protocol.py` is canonical.** Never hard-code a wire constant that exists there. `HUP_VERSION` has already shipped a three-way mismatch; there is now an AST guard, but it only covers `api/server.py`.
-- **Version literals are synced by `scripts/sync_versions.py`** across 17 file+regex locations and gated by `.github/workflows/version-coherence.yml`. Run `python scripts/sync_versions.py --check` after touching any version.
+- **Version literals are synced by `scripts/sync_versions.py`** across 14 file+regex locations and gated by `.github/workflows/version-coherence.yml`. Run `python scripts/sync_versions.py --check` after touching any version. (It was 17 until the three `feral-client/` entries went with the v1 client in 2026.8.12.)
 - **Do not add a bare `except Exception: pass`.** There are already 1,702 broad handlers and ~210 silent swallows; they are the repo's dominant defect class. If you must catch broadly, log with context and re-raise or return a typed error.
 - **Async discipline:** never call blocking I/O inside `async def`. Use `asyncio.to_thread` (85 existing call sites) or the async-native API. `subprocess.run` inside a route handler is a bug.
 - **Background tasks must be referenced.** Use `state.register_background_task(...)` or hold the task in a `set[asyncio.Task]` with an `add_done_callback(the_set.discard)` so it stays bounded (see `agents/orchestrator.py:210-218`). A bare `asyncio.create_task(...)` **or `asyncio.ensure_future(...)`** can be garbage-collected mid-flight; the loop holds tasks only weakly. `tests/test_background_task_references.py` AST-scans for both and will fail the build on a new one.

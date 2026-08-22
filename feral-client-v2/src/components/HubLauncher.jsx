@@ -4,13 +4,13 @@ import { useNavigate } from 'react-router-dom';
 import {
   Hammer, Wrench, Database, BookOpen, Users, UserCircle2,
   HeartPulse, Crosshair, Clock, BrainCircuit, Globe, MapPin, Store,
-  Search, X, Plug, Shield, BrainCog,
+  Search, X, Plug, Shield, BrainCog, ShieldAlert, Undo2, FolderLock,
 } from 'lucide-react';
 import { useResource } from '../hooks/useResource';
 import { deviceCounts } from './DeviceTopology';
 
 /**
- * HubLauncher — translucent stack popup anchored above the Dock. Holds the
+ * HubLauncher: translucent stack popup anchored above the Dock. Holds the
  * 15 secondary navigation destinations that used to clutter the Dock.
  *
  * Triggered by the Hub button on the Dock or the ⌘K shortcut. Search
@@ -18,6 +18,9 @@ import { deviceCounts } from './DeviceTopology';
  */
 
 const HUB_ITEMS = [
+  { to: '/approvals', label: 'Needs you', Icon: ShieldAlert, desc: 'Tool calls blocked on your decision' },
+  { to: '/checkpoints', label: 'Undo', Icon: Undo2, desc: 'Put back files a turn wrote' },
+  { to: '/grants', label: 'Folders', Icon: FolderLock, desc: 'Which folders FERAL can use' },
   { to: '/forge', label: 'Forge', Icon: Hammer, desc: 'Tool Genesis drafts + promote' },
   { to: '/skills', label: 'Skills', Icon: Wrench, desc: 'Loaded skills + hot-reload' },
   { to: '/memory', label: 'Memory', Icon: Database, desc: 'Notes, episodes, execution log' },
@@ -165,7 +168,7 @@ export default function HubLauncher({ open, onClose }) {
             <Plug size={14} aria-hidden="true" />
             <div>
               <div className="v2-hub-cta-title">
-                {pairedCount === 1 ? '1 device paired — currently offline' : `${pairedCount} devices paired — none online`}
+                {pairedCount === 1 ? '1 device paired, currently offline' : `${pairedCount} devices paired, none online`}
               </div>
               <div className="v2-hub-cta-hint">Re-open the device's FERAL app to bring it back online.</div>
             </div>

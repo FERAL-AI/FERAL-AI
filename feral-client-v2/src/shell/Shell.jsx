@@ -1,8 +1,12 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import Ambient from './Ambient';
-import Menubar from './Menubar';
 import Dock from './Dock';
+import SystemBar from './SystemBar';
+import WorkRail from './WorkRail';
+import CommandPalette from './CommandPalette';
+import { PaletteProvider } from './PaletteContext';
+import { ChatThreadContext, useChatThread } from './ChatThreadContext';
 import { VoiceProvider, useVoice } from './VoiceContext';
 import VoiceOverlay from './VoiceOverlay';
 import PerceptionShare from '../components/PerceptionShare';
@@ -16,7 +20,6 @@ const DEFAULT_GREETING = {
   role: 'assistant',
   text: 'FERAL v2 is listening. What do you need?',
 };
-const ChatThreadContext = createContext(null);
 
 function newMessageId() {
   return `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -111,14 +114,24 @@ function deriveConversationTitle(messages) {
   return firstUser.text.trim().slice(0, 80);
 }
 
-export function useChatThread() {
-  return useContext(ChatThreadContext);
-}
+// Re-exported from its own module (see ChatThreadContext.js) so
+// CommandPalette can read the thread without an import cycle back
+// through Shell. Every existing `import { useChatThread } from
+// '../shell/Shell'` keeps resolving.
+export { useChatThread };
 
 /**
  * Shell is the v2 chrome: ambient background + minimal top menubar + bottom
  * dock. Pages render in the Outlet between them. The VoiceProvider lifts
  * voice state so Menubar + VoiceOverlay agree on one mode.
+ *
+ * Navigation is exactly two mechanisms. The Dock pins eight destinations;
+ * the CommandPalette indexes every destination, every Settings section,
+ * and the shell's verbs. Both read `shell/navigation.js`, and the palette
+ * is opened from three places (the Dock button, the Menubar search field,
+ * Cmd-K) that all drive one piece of state living here. It used to live
+ * inside Dock.jsx, which meant the Menubar could not open it and any
+ * second trigger would have had its own copy.
  *
  * PerceptionShare.FloatingChip is mounted at the Shell level so the
  * "Sharing camera" indicator is visible no matter which route the user
@@ -145,6 +158,36 @@ function ShellFrame() {
   // separate histories instead of all funnelling into primary.
   const [primarySessionId, setPrimarySessionId] = useState('');
   const [primaryConversationId, setPrimaryConversationId] = useState('');
+  // The palette's Ask row parks the typed query here and navigates to
+  // /chat; the composer picks it up and clears it. Shell state rather
+  // than a query param because the text is a user's prose and does not
+  // belong in a URL, and rather than a DOM event because the composer
+  // may not be mounted yet at the moment the palette fires.
+  const [askDraft, setAskDraft] = useState('');
+  const clearAskDraft = useCallback(() => setAskDraft(''), []);
+
+  // Palette open/close, owned here so the Dock button, the Menubar
+  // search field and Cmd-K all drive the same dialog.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const openPalette = useCallback(() => setPaletteOpen(true), []);
+  const closePalette = useCallback(() => setPaletteOpen(false), []);
+  const togglePalette = useCallback(() => setPaletteOpen((prev) => !prev), []);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        togglePalette();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [togglePalette]);
+
+  const palette = useMemo(
+    () => ({ open: paletteOpen, openPalette, closePalette, togglePalette }),
+    [paletteOpen, openPalette, closePalette, togglePalette],
+  );
 
   const setMessages = useCallback((next) => {
     setMessagesState((prev) => {
@@ -333,6 +376,9 @@ function ShellFrame() {
     isPrimaryThread,
     activeSessionToken,
     activeSessionId,
+    askDraft,
+    setAskDraft,
+    clearAskDraft,
   }), [
     conversationId,
     ensureConversation,
@@ -346,22 +392,58 @@ function ShellFrame() {
     isPrimaryThread,
     activeSessionToken,
     activeSessionId,
+    askDraft,
+    clearAskDraft,
   ]);
+
+  // The design's rail collapses, and says so in its own instructions:
+  // "Press B to collapse the rail." It is the only way to give the page
+  // the full width on a laptop, and there was no control for it at all.
+  const [railOpen, setRailOpen] = useState(true);
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'b' && e.key !== 'B') return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // Never while the operator is typing: b is a letter first.
+      const el = document.activeElement;
+      const tag = (el?.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || el?.isContentEditable) return;
+      e.preventDefault();
+      setRailOpen((r) => !r);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   return (
     <ChatThreadContext.Provider value={chatThread}>
-      <div className={`v2-shell${voice.active ? ' is-voice-mode' : ''}`}>
-        <Ambient />
-        <Menubar />
-        <main className="v2-shell-main">
-          <Outlet />
-        </main>
-        <Dock />
-        <VoiceOverlay />
-        <ProactiveToast />
-        <ErrorToast />
-        <PerceptionShare.FloatingChip />
-      </div>
+      <PaletteProvider value={palette}>
+        <div className={`v2-shell${voice.active ? ' is-voice-mode' : ''}`}>
+          <Ambient />
+          {/* The approved design leads with the machine, not a page:
+              vitals across the top, the work rail down the left, the
+              page in the middle. Menubar stays for the theme and voice
+              controls it owns; the search field it used to carry has
+              moved to the palette, which is where search belongs. */}
+          <SystemBar
+            onOpenPalette={openPalette}
+            railOpen={railOpen}
+            onToggleRail={() => setRailOpen((r) => !r)}
+          />
+          <div className={`v2-shell-body${railOpen ? '' : ' is-rail-collapsed'}`}>
+            {railOpen && <WorkRail />}
+            <main className="v2-shell-main">
+              <Outlet />
+            </main>
+          </div>
+          <Dock />
+          <CommandPalette open={paletteOpen} onClose={closePalette} />
+          <VoiceOverlay />
+          <ProactiveToast />
+          <ErrorToast />
+          <PerceptionShare.FloatingChip />
+        </div>
+      </PaletteProvider>
     </ChatThreadContext.Provider>
   );
 }

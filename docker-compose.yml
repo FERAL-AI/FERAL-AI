@@ -35,19 +35,13 @@ services:
       retries: 3
       start_period: 10s
 
-  feral-client:
-    build:
-      context: ./feral-client
-      dockerfile: Dockerfile
-      args:
-        - VITE_BRAIN_HOST=${VITE_BRAIN_HOST:-localhost}
-        - VITE_BRAIN_PORT=9090
-    ports:
-      - "3000:80"
-    depends_on:
-      feral-brain:
-        condition: service_healthy
-    restart: unless-stopped
+  # There is no separate client container any more. The `feral-client`
+  # service built ./feral-client (the v1 client) into an nginx image on
+  # :3000; feral-client/ was deleted in 2026.8.12 and feral-client-v2 has
+  # no Dockerfile, so the service had no build context left. Nothing is
+  # lost: feral-brain already serves the v2 dashboard from
+  # feral-core/webui_v2/ on :9090, and that is the bundle CI gates
+  # (webui-v2-coherence) and the desktop app ships.
 
   skill-registry:
     build:

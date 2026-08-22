@@ -26,9 +26,9 @@ export default defineConfig({
         'src/styles/**',
       ],
       thresholds: {
-        // Stage 5.4 (Modal/CodeEditor/DeviceQRCode/LiveOpsStream +
-        // tab_pages + chat_devices): measured 34.53 / 27.14 / 28.52 /
-        // 36.68. Floor = measured − 1 per axis. Ratchet plan in
+        // Stage 5.4 (Modal/CodeEditor/DeviceQRCode + tab_pages +
+        // chat_devices): measured 34.53 / 27.14 / 28.52 /
+        // 36.68. Floor = measured minus 1 per axis. Ratchet plan in
         // docs/coverage.md. Target for follow-up: real 50% branches.
         statements: 33,
         branches: 26,

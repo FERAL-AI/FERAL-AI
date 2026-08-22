@@ -56,7 +56,7 @@ git clone https://github.com/FERAL-AI/FERAL-AI.git
 cd FERAL-AI
 make dev           # installs both brain + client
 feral serve        # brain on :9090 (headless)
-cd feral-client && npm run dev  # Vite on :5173
+cd feral-client-v2 && npm run dev  # Vite on :5173
 ```
 
 ## Docker Alternative

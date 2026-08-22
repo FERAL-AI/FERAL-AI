@@ -16,7 +16,17 @@ export default function Geofences() {
   const refresh = useCallback(async () => {
     try {
       const d = await apiJson('/api/geofences');
-      setFences(d.geofences || d || []);
+      // `d.geofences || d || []` looked like a defensive fallback and was
+      // the opposite. When the key is absent or null it hands the whole
+      // response OBJECT to setFences, and the render calls fences.map,
+      // which throws TypeError into the error boundary and takes the
+      // shell down with it. The live brain answers
+      // {"geofences": [], "fences": []} so it never fired in practice,
+      // but any error envelope or a renamed key is a white screen.
+      // Anything that is not an array is not a list of fences.
+      setFences(Array.isArray(d?.geofences) ? d.geofences
+        : Array.isArray(d?.fences) ? d.fences
+        : []);
     } finally { setLoading(false); }
   }, []);
 

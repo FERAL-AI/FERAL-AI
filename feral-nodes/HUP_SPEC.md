@@ -46,7 +46,7 @@ If you can terminate TLS and speak JSON over WebSocket, you can speak HUP.
 
 | Version | Status | Additions |
 |---|---|---|
-| `v1.3.0` | Stable | Phone-as-peer envelopes (§5.9): `chat_request`, `chat_response`, `voice_session_start`, `voice_interrupt`, `genui_push`, `genui_event`, `peripheral_bridge_register`, `backchannel_request`. Strict Pydantic-v2 schemas: literal-typed `chat_request.reply_mode` + `chat_request.channel`, required `session_id` on `voice_session_start`, required `stream_id` + `channels` on `audio_chunk`. Smart-glasses vision streaming via `glasses_frame` (§5.4.3) + per-device circular buffer in `feral-core/perception/glasses_buffer.py`. Hardware peripheral memory via `device_announce` (§5.4.4) routed through `feral-core/hardware/mesh.py` into the knowledge graph. |
+| `v1.3.0` | Stable | Phone-as-peer envelopes (§5.9): `chat_request`, `chat_response`, `voice_session_start`, `voice_interrupt`, `genui_push`, `genui_event`, `peripheral_bridge_register`, `backchannel_request`, `ambient_transcript` + `ambient_transcript_ack`, and the digest return leg `ambient_digest_request` (phone → brain) + `ambient_digest` (brain → phone). Strict Pydantic-v2 schemas: literal-typed `chat_request.reply_mode` + `chat_request.channel`, required `session_id` on `voice_session_start`, required `stream_id` + `channels` on `audio_chunk`. Smart-glasses vision streaming via `glasses_frame` (§5.4.3) + per-device circular buffer in `feral-core/perception/glasses_buffer.py`. Hardware peripheral memory via `device_announce` (§5.4.4) routed through `feral-core/hardware/mesh.py` into the knowledge graph. |
 | `v1.2.0` | Stable | Canonical `node_ack`, `node_heartbeat`, `hup_action_request`, `hup_action_response`, and `node_bye` handling (§5.2-§5.8). |
 
 ---
@@ -703,6 +703,193 @@ existing `/v1/node` transport and authentication model. Directionality:
 - `genui_event` (phone → brain)
 - `peripheral_bridge_register` (phone → brain)
 - `backchannel_request` (phone → brain)
+- `ambient_transcript` (phone → brain)
+- `ambient_transcript_ack` (brain → phone)
+- `ambient_digest_request` (phone → brain)
+- `ambient_digest` (brain → phone)
+
+`ambient_transcript` (phone → brain):
+
+A conversation the phone recorded and transcribed on device. The glasses
+are the microphone; the phone is the recorder and the only thing that
+talks to the brain, so `source` is provenance and never a route.
+
+The phone queues transcripts while the brain is off, so one normally
+arrives hours or days after the conversation happened. `started_at` is
+the real capture time and the brain stores the episode against it;
+without it, asking about "yesterday" would not find a conversation from
+yesterday that was ingested this morning.
+
+`transcript_id` is the replay key. A client that omits it gets one
+minted, but a client that queues MUST send a stable id, because that is
+what makes a resend after a lost ack cost nothing.
+
+```json
+{
+  "hup_version": "1.3.0",
+  "type": "ambient_transcript",
+  "ts": 1755720000.0,
+  "payload": {
+    "transcript_id": "7f1c2a9e-...",
+    "text": "full transcript text, unbounded",
+    "session_id": "",
+    "device_id": "theora-iphone-1",
+    "started_at": 1755633600.0,
+    "ended_at": 1755635400.0,
+    "source": "glasses_mic",
+    "language": "en-US",
+    "speakers": ["Noah"]
+  }
+}
+```
+
+`ambient_transcript_ack` (brain → phone):
+
+Sent once the transcript is durably stored, NOT once it has been
+summarized. Summarization runs in the background and is retried from the
+brain's own copy if it is interrupted; a phone that waited for the
+summary would hold its queue open across every brain restart.
+
+The phone may drop its copy on `accepted: true`. `duplicate: true` means
+the brain already had this `transcript_id`, which is the expected answer
+to a resend after a lost ack, and is not an error.
+
+An error frame instead of an ack means the transcript was NOT stored and
+must be resent.
+
+```json
+{
+  "hup_version": "1.3.0",
+  "type": "ambient_transcript_ack",
+  "ts": 1755720000.5,
+  "payload": {
+    "transcript_id": "7f1c2a9e-...",
+    "duplicate": false,
+    "accepted": true,
+    "detail": ""
+  }
+}
+```
+
+`ambient_digest_request` (phone → brain) and `ambient_digest` (brain → phone):
+
+The return leg for `ambient_transcript`. This is the first pair in this
+feature where one frame goes each way, so the direction of each is
+stated above and repeated here.
+
+`ambient_transcript_ack` fires as soon as the raw text is on disk,
+deliberately, so that a brain dying mid-summarization cannot cost a
+transcript the phone has already dropped. The summary therefore does not
+exist yet at ack time, and by the time it does the phone is usually
+gone. The digest MUST NOT be folded into the ack: that would trade the
+durability property for latency the phone does not need.
+
+Two delivery legs, both required, carrying the same `ambient_digest`
+frame so the phone has one inbound handler:
+
+- **push**: the brain sends `ambient_digest` unsolicited when
+  summarization finishes, if the originating node is still connected.
+  Best-effort by nature.
+- **pull**: the phone sends `ambient_digest_request` on connect naming
+  the transcripts it has synced but holds no digest for. The brain
+  answers one `ambient_digest` per id, in request order.
+
+Push alone loses every digest for a phone that has gone. Pull alone
+means a recording made while the phone stays connected shows no summary
+until the next reconnect.
+
+```json
+{
+  "hup_version": "1.3.0",
+  "type": "ambient_digest_request",
+  "node_id": "phone-<id>",
+  "ts": 1755720000.5,
+  "payload": {
+    "transcript_ids": ["7f1c2a9e-...", "b2d4e6f8-..."],
+    "include_detail": false
+  }
+}
+```
+
+`transcript_ids` is capped at **64**, not the generic 512-item list
+bound. Each reply may carry up to 20,000 characters of `detail`, so 512
+ids is a multi-megabyte burst at the exact moment a phone reconnects,
+which is when it is most likely to be on cellular. A phone with more
+than 64 outstanding asks again; `remaining` tells it when the current
+batch is done.
+
+`include_detail` defaults to `false` and SHOULD stay false for the
+connect-time sync: `summary` is what makes a card readable and `detail`
+is what makes the burst expensive. Request detail one id at a time when
+a card is opened.
+
+```json
+{
+  "hup_version": "1.3.0",
+  "type": "ambient_digest",
+  "ts": 1755720000.9,
+  "payload": {
+    "transcript_id": "7f1c2a9e-...",
+    "status": "ready",
+    "summary": "Noah will send the SDK build by Friday.",
+    "detail": "",
+    "people": ["Noah"],
+    "topics": ["sdk"],
+    "commitments": [{"text": "Send the SDK build", "due_iso": "2026-08-28"}],
+    "degraded": [],
+    "episode_id": "ep-...",
+    "processed_at": 1755720000.4,
+    "remaining": 3
+  }
+}
+```
+
+Every status returns the same key set; only `status` and the populated
+fields differ.
+
+`status` values:
+
+| value | meaning | what the phone does |
+|---|---|---|
+| `ready` | Summarized. Fields populated. | Store it. |
+| `pending` | The brain HAS the transcript but has not finished with it: the background task is running, or it failed and the boot sweep will retry from the brain's copy. | Show the transcript without a summary. Ask again next connect. Do NOT resend. |
+| `unknown` | No row **that this device owns**. | Treat as lost: clear `synced_at` so the outbox resends the transcript. |
+
+`remaining` is how many more digests answer the same request, counting
+down to `0` on the last one. A phone reconnecting after a week cannot
+otherwise tell "your last digest" from "the first of forty" until the
+frames simply stop, so it can only appear to hang. With `remaining` it
+can tell the user it is fetching and show progress.
+
+**Scoping is mandatory.** `transcript_id` is chosen by the phone, so a
+lookup keyed on the id alone is not protected by any unguessability
+argument, and the caller is another paired device on the same brain.
+The brain MUST scope the lookup to the authenticated identity of the
+requesting socket and MUST answer `unknown` for a transcript owned by a
+different device, the same answer it gives for a transcript nobody
+owns. Distinguishing the two would confirm the existence of another
+device's recording to anyone who asked for it.
+
+`injection_flags` is stored with the digest and MUST NOT be sent. It is
+a signal about the transcript, useful in the brain's own logs; putting
+it in a UI invites rendering a scare banner over something a colleague
+said in a meeting.
+
+`ambient_digest` carries the stored `TranscriptOutcome`, never the
+episode fields. The episode is shaped for full-text search and for the
+model's context block, which forces names and dates into prose and caps
+`summary` at 500 characters; on a phone card that renders as a
+duplicated date and a truncated sentence.
+
+The digest is derived from recorded speech and can contain anything a
+person said. Render it as PLAIN TEXT. It is never markup and never a
+link target.
+
+**`unknown` depends on an invariant:** nothing deletes from the brain's
+`ambient_transcripts` table. If retention is ever added, an aged-out
+recording would answer `unknown` and a phone that treats that as "lost"
+would re-upload it forever. Add a distinct status then; do not widen
+`unknown`.
 
 `chat_request`:
 
@@ -759,6 +946,23 @@ existing `/v1/node` transport and authentication model. Directionality:
   }
 }
 ```
+
+A `voice_session_start` the brain could not honour is answered with an
+`error` frame, code `1099`, name `voice_session_failed`, naming the
+stream and the voice mode. There is no positive ack: silence means the
+session opened. A daemon that renders a listening state on send MUST
+leave it on this frame, because no audio will ever arrive on that
+stream. The brain also emits `voice_status` with `state: "unavailable"`
+for the failures it can name, carrying `cause` / `summary` /
+`recommendation` (see `VoiceStatusPayload` in
+`feral-core/models/protocol.py`), but that frame is best-effort
+diagnosis while the error frame is the contract.
+
+The brain used to record the start as allowed and send nothing when the
+voice backend refused to open, because the only refusal it noticed was
+an exception and the router reports every other failure by returning
+nothing. The phone had no way to tell an open session from one that
+never existed.
 
 `voice_interrupt`:
 

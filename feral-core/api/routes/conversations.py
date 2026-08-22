@@ -13,10 +13,25 @@ router = APIRouter()
 # ── Conversation Threads ──
 
 @router.get("/api/conversations")
-async def list_conversations(limit: int = 50):
+async def list_conversations(limit: int = 25, offset: int = 0, q: str = ""):
+    """Page of conversation metadata, newest first, pinned on top.
+
+    ``total`` is the count matching ``q`` across the whole table, not
+    the length of ``conversations``. The v2 thread pane used to request
+    this route with no parameters, render whatever came back, and offer
+    no way forward, so thread 51 was unreachable.
+    """
     if not state.memory:
-        return {"conversations": []}
-    return {"conversations": await state.memory.conversation_list(limit=limit)}
+        return {"conversations": [], "total": 0, "limit": limit, "offset": offset, "has_more": False}
+    page = await state.memory.conversation_page(limit=limit, offset=offset, query=q)
+    return {
+        "conversations": page["items"],
+        "total": page["total"],
+        "limit": page["limit"],
+        "offset": page["offset"],
+        "has_more": page["has_more"],
+        "query": q,
+    }
 
 
 @router.post("/api/conversations/new")
@@ -85,6 +100,38 @@ async def save_conversation(body: dict):
     if not cid:
         return {"error": "id is required"}
     return await state.memory.conversation_save(cid, messages, title)
+
+
+@router.post("/api/conversations/{conversation_id}/rename")
+async def rename_conversation(conversation_id: str, body: dict):
+    """Set a user-chosen title that autosave will not overwrite.
+
+    Distinct from ``/save`` on purpose: only this route marks the title
+    as user-chosen. ``/save`` carries a title derived from the first
+    user message on every autosave, and cannot be told apart from a
+    rename by inspecting the string.
+    """
+    if not state.memory:
+        return {"error": "Memory not initialized"}
+    title = str((body or {}).get("title", "")).strip()
+    if not title:
+        return {"error": "title is required"}
+    conv = await state.memory.conversation_rename(conversation_id, title)
+    if not conv:
+        return {"error": "Not found"}
+    return {"ok": True, "id": conv["id"], "title": conv["title"], "title_custom": conv["title_custom"]}
+
+
+@router.post("/api/conversations/{conversation_id}/pin")
+async def pin_conversation(conversation_id: str, body: dict | None = None):
+    """Pin or unpin a thread. Pinned threads sort above the rest."""
+    if not state.memory:
+        return {"error": "Memory not initialized"}
+    pinned = bool((body or {}).get("pinned", True))
+    conv = await state.memory.conversation_set_pinned(conversation_id, pinned)
+    if not conv:
+        return {"error": "Not found"}
+    return {"ok": True, "id": conv["id"], "pinned": conv["pinned"]}
 
 
 @router.delete("/api/conversations/{conversation_id}")

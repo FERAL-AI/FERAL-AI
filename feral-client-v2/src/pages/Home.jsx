@@ -70,6 +70,64 @@ const SKILL_GLYPH = {
   workspace_scripts: 'sh',
 };
 
+/**
+ * Human names for the job kinds /api/jobs returns.
+ *
+ * The pane rendered `j.kind` straight through, so the chip read
+ * "tool_genesis" and, once backgrounded shell commands were added to the
+ * aggregator, "background_bash". Those are the brain's internal source
+ * names, not words anyone reading a dashboard is looking for.
+ *
+ * An unknown kind falls back to the raw value rather than being hidden,
+ * because a new source appearing unlabelled is a much smaller problem
+ * than a new source silently not rendering.
+ */
+export const JOB_KIND_LABELS = {
+  taskflow: 'TaskFlow',
+  routine: 'Routine',
+  specialist: 'Specialist',
+  tool_genesis: 'New tool',
+  daemon: 'Device',
+  background_bash: 'Shell job',
+};
+
+export function jobKindLabel(kind) {
+  if (!kind) return 'Job';
+  return JOB_KIND_LABELS[kind] || kind;
+}
+
+/**
+ * The per-channel map out of GET /api/channels, and nothing else.
+ *
+ * `ChannelManager.stats()` returns an envelope that also spreads the
+ * per-channel rows to the top level:
+ *
+ *     {active_channels: [...], channel_count: N, details: {...}, ...rows}
+ *
+ * The old expression ended `|| c.value || {}`, so when neither
+ * `status_by_channel` nor `channels` was present it fell through to the
+ * whole envelope and `Object.entries` walked the envelope's own fields.
+ * With no channels configured those three ARE the only keys, so the
+ * Channels card rendered three rows reading `Active_channels off`,
+ * `Channel_count off` and `Details off` instead of the empty state, and
+ * with channels configured it rendered them alongside the real ones.
+ *
+ * `details` is the canonical map. The last branch keeps the flattened
+ * shape working for a brain that predates it, but filters the envelope
+ * keys out by shape: a channel row is an object, and the envelope's
+ * fields are an array and a number.
+ */
+export function channelMap(payload) {
+  const p = payload || {};
+  const named = p.status_by_channel || p.details || p.channels;
+  if (named && typeof named === 'object') return named;
+  return Object.fromEntries(
+    Object.entries(p).filter(([, v]) => (
+      v && typeof v === 'object' && !Array.isArray(v)
+    )),
+  );
+}
+
 export default function Home() {
   const somatic = useSomatic();
   const [time, setTime] = useState(new Date());
@@ -203,7 +261,7 @@ export default function Home() {
       // widget so anything downstream that reads it still works.
       setFlows(items.filter((it) => it.kind === 'taskflow'));
     }
-    if (c.status === 'fulfilled') setChannels(c.value?.status_by_channel || c.value?.channels || c.value || {});
+    if (c.status === 'fulfilled') setChannels(channelMap(c.value));
     if (b.status === 'fulfilled') setBriefing(b.value);
     if (n.status === 'fulfilled') setNextEvent(n.value);
     if (w.status === 'fulfilled') setWindDown(w.value);
@@ -374,7 +432,7 @@ export default function Home() {
     }
   };
 
-  // One derivation, shared with GlassBrain and HubLauncher. See the
+  // One derivation, shared with GlassBrain and CommandPalette. See the
   // doc comment on `deviceCounts` in components/DeviceTopology.jsx for
   // why `device_count`/`online_count` are the same live-only number
   // and why the honest total is `online + paired_offline`. The three
@@ -956,7 +1014,7 @@ export default function Home() {
           )}
         >
           <p className="v2-p v2-p--muted">
-            Everything FERAL is working on — TaskFlows, scheduled routines, specialists on standby, Tool Genesis drafts, and live HUP daemons.
+            Everything FERAL is working on: TaskFlows, scheduled routines, specialists on standby, new tools being drafted, background shell jobs, and live devices.
           </p>
           {jobs.length === 0 ? (
             <EmptyState title="Idle" hint="No active jobs. Schedule a routine or start a TaskFlow to see activity here." />
@@ -967,10 +1025,10 @@ export default function Home() {
                   <StatusDot
                     tone={j.status === 'running' ? 'live' : j.status === 'failed' || j.status === 'error' ? 'error' : j.status === 'paused' ? 'warn' : 'neutral'}
                     pulse={j.status === 'running' || j.status === 'connected'}
-                    label={`${j.kind || 'Job'} ${j.name || ''}: ${j.status || 'unknown'}`}
+                    label={`${jobKindLabel(j.kind)} ${j.name || ''}: ${j.status || 'unknown'}`}
                   />
                   <div className="v2-flow-title">
-                    <span className="v2-chip v2-chip--muted" style={{ marginRight: 6 }}>{j.kind}</span>
+                    <span className="v2-chip v2-chip--muted" style={{ marginRight: 6 }}>{jobKindLabel(j.kind)}</span>
                     {j.name}
                   </div>
                   <div className="v2-flow-status">
@@ -984,7 +1042,7 @@ export default function Home() {
           {Object.keys(jobCounts).length > 0 && (
             <div className="v2-device-caps" style={{ marginTop: 10 }}>
               {Object.entries(jobCounts).map(([kind, count]) => (
-                <span key={kind} className="v2-chip v2-chip--muted">{kind}: {count}</span>
+                <span key={kind} className="v2-chip v2-chip--muted">{jobKindLabel(kind)}: {count}</span>
               ))}
             </div>
           )}

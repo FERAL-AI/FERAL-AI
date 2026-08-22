@@ -2,7 +2,7 @@
  * One `/api/dashboard` payload, three surfaces, one answer.
  *
  * Home read `online_count`/`paired_count`, GlassBrain read the legacy
- * `device_count` under a bare "Devices" label, and HubLauncher had a
+ * `device_count` under a bare "Devices" label, and CommandPalette had a
  * third fallback chain again. On the payload below (nothing online,
  * three devices paired) Home said "0/3" and GlassBrain said "0". The
  * same brain, two clicks apart, two different device counts.
@@ -20,7 +20,7 @@ import { waitFor } from '@testing-library/react';
 import { renderV2 } from '../_helpers/renderV2';
 import Home from '../../pages/Home';
 import GlassBrain from '../../pages/GlassBrain';
-import HubLauncher from '../../components/HubLauncher';
+import CommandPalette from '../../shell/CommandPalette';
 import { deviceCounts } from '../../components/DeviceTopology';
 import { _resetSystemHealthForTesting } from '../../hooks/useSystemHealth';
 import { _resetSharedSocketForTesting } from '../../hooks/useFeralSocket';
@@ -61,7 +61,7 @@ function glassBrainVital(container, label) {
   return tile?.querySelector('.v2-glass-brain-vital-value')?.textContent ?? null;
 }
 
-describe('device counts agree across Home, GlassBrain and HubLauncher', () => {
+describe('device counts agree across Home, GlassBrain and CommandPalette', () => {
   it('derives online / total / offline from the fields the brain actually sends', () => {
     expect(deviceCounts(PAYLOAD)).toMatchObject({
       online: 0, offline: 3, total: 3,
@@ -96,13 +96,13 @@ describe('device counts agree across Home, GlassBrain and HubLauncher', () => {
     unmount();
   });
 
-  it('HubLauncher counts the same three paired devices', async () => {
+  it('CommandPalette counts the same three paired devices', async () => {
     const { container, unmount } = renderV2(
-      <HubLauncher open onClose={() => {}} />,
+      <CommandPalette open onClose={() => {}} />,
       { fetch: fetchDashboard },
     );
     await waitFor(() => {
-      expect(container.querySelector('.v2-hub-cta-title')?.textContent)
+      expect(container.querySelector('.v2-cmdk-cta-title')?.textContent)
         .toMatch(/^3 devices paired/);
     });
     // The "you have nothing paired" CTA must not fire when three

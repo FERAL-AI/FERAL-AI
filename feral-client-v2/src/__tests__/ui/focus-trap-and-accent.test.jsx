@@ -1,7 +1,7 @@
 /**
  * The four items left open by the accessibility pass.
  *
- * Two are behavioural (HubLauncher had no focus trap, Pair rendered a dot
+ * Two are behavioural (the palette's predecessor had no focus trap, Pair rendered a dot
  * animating a keyframe that does not exist), one is a measurement
  * (--v2-accent as text was under AA), and the fourth is recorded as a known
  * limit rather than a fix.
@@ -13,47 +13,40 @@ import { MemoryRouter } from 'react-router-dom';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import HubLauncher from '../../components/HubLauncher';
+import CommandPalette from '../../shell/CommandPalette';
+import { colorIn, contrast, resolveIn, toHex } from '../_helpers/tokens';
 
-const TOKENS = fs.readFileSync(
-  path.resolve(__dirname, '../../styles/tokens.css'),
-  'utf8',
-);
-
-function luminance(hex) {
-  const h = hex.replace('#', '');
-  const ch = [0, 2, 4]
-    .map((i) => parseInt(h.slice(i, i + 2), 16) / 255)
-    .map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
-  return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
-}
-
-function contrast(a, b) {
-  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (hi + 0.05) / (lo + 0.05);
-}
-
-/** Every declaration of `name`, in source order: dark block first. */
-function declarations(name) {
-  return [...TOKENS.matchAll(new RegExp(`--${name}:\\s*(#[0-9A-Fa-f]{6})`, 'g'))]
-    .map((m) => m[1]);
-}
+/**
+ * Token values come from the cascade resolver rather than from counting
+ * hex literals in source order. tokens.css is now a palette layer plus a
+ * semantic layer, so no --v2-* token is written as a hex at all and the
+ * old positional reader matched nothing.
+ */
+const hexIn = (state, name) => toHex(colorIn(state, name));
 
 describe('--v2-accent-text clears AA where the accent did not', () => {
   // Composited surfaces, same values the token comments cite.
   const SHELL_BASE = '#1F1F27';
   const SURFACE_ELEV = '#2E2E38';
 
-  it('the plain accent really was failing, which is why a second token exists', () => {
-    const [accent] = declarations('v2-accent');
-    // Not a regression guard on the accent: it documents WHY the split
-    // exists, so nobody later "simplifies" it back to one token.
-    expect(contrast(accent, SHELL_BASE)).toBeLessThan(4.5);
-    expect(contrast(accent, SURFACE_ELEV)).toBeLessThan(4.5);
+  it('whichever token is used for accent TEXT clears AA', () => {
+    // This used to assert that the plain --v2-accent FAILS AA, as the
+    // documented reason a second token exists. That is a fragile shape:
+    // it requires a defect to persist. Porting the instrument-panel
+    // palette made the dark accent #7FB0DE, which clears AA at 7.14:1
+    // on the shell base, and the test failed for the good reason.
+    //
+    // The invariant worth holding is the one a reader actually depends
+    // on: text painted with the accent-text token is legible on every
+    // dark surface. Whether the plain accent happens to clear it too is
+    // a property of the current palette, not a contract.
+    const accentText = hexIn('darkMedia', '--v2-accent-text');
+    expect(contrast(accentText, SHELL_BASE)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(accentText, SURFACE_ELEV)).toBeGreaterThanOrEqual(4.5);
   });
 
   it('meets AA on the shell base and on the worst dark surface', () => {
-    const [dark] = declarations('v2-accent-text');
+    const dark = hexIn('darkMedia', '--v2-accent-text');
     expect(contrast(dark, SHELL_BASE)).toBeGreaterThanOrEqual(4.5);
     // The elevated surface is where most accent-coloured chips sit, and it
     // is the case a check against the page background alone would miss.
@@ -61,15 +54,24 @@ describe('--v2-accent-text clears AA where the accent did not', () => {
   });
 
   it('meets AA in light mode', () => {
-    const light = declarations('v2-accent-text')[1];
+    const light = hexIn('light', '--v2-accent-text');
     expect(light).toBeTruthy();
     expect(contrast(light, '#ECEEF3')).toBeGreaterThanOrEqual(4.5);
   });
 
-  it('is declared in the dark block and both light blocks', () => {
-    // tokens.css carries .v2-light and a prefers-color-scheme duplicate.
-    // A value that lands in only one of them is the drift this catches.
-    expect(declarations('v2-accent-text')).toHaveLength(3);
+  it('resolves in all three theme states, not just the one that was edited', () => {
+    // A token that lands in one theme state only is the drift this
+    // catches. It used to be checked by counting three hex declarations;
+    // resolving the cascade per state checks the property that actually
+    // matters, and covers the alias case a count cannot see.
+    for (const state of ['light', 'darkMedia', 'darkAttr']) {
+      expect(resolveIn(state, '--v2-accent-text'), `--v2-accent-text is absent in ${state}`)
+        .toBeTruthy();
+    }
+    expect(resolveIn('darkAttr', '--v2-accent-text'))
+      .toBe(resolveIn('darkMedia', '--v2-accent-text'));
+    expect(resolveIn('light', '--v2-accent-text'))
+      .not.toBe(resolveIn('darkMedia', '--v2-accent-text'));
   });
 });
 
@@ -127,17 +129,17 @@ describe('no stylesheet animates a keyframe that does not exist', () => {
   });
 });
 
-describe('HubLauncher contains focus, as aria-modal promises', () => {
-  const renderHub = () => render(
+describe('CommandPalette contains focus, as aria-modal promises', () => {
+  const renderPalette = () => render(
     <MemoryRouter>
       <button type="button" data-testid="outside">outside</button>
-      <HubLauncher open onClose={() => {}} />
+      <CommandPalette open onClose={() => {}} />
     </MemoryRouter>,
   );
 
   it('keeps Tab inside the dialog', () => {
-    renderHub();
-    const dialog = screen.getByRole('dialog', { name: /hub launcher/i });
+    renderPalette();
+    const dialog = screen.getByRole('dialog', { name: /command palette/i });
     const focusables = dialog.querySelectorAll(
       'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
     );
@@ -153,8 +155,8 @@ describe('HubLauncher contains focus, as aria-modal promises', () => {
   });
 
   it('pulls focus back when it is outside the dialog', () => {
-    renderHub();
-    const dialog = screen.getByRole('dialog', { name: /hub launcher/i });
+    renderPalette();
+    const dialog = screen.getByRole('dialog', { name: /command palette/i });
 
     screen.getByTestId('outside').focus();
     fireEvent.keyDown(window, { key: 'Tab' });
@@ -163,8 +165,8 @@ describe('HubLauncher contains focus, as aria-modal promises', () => {
   });
 
   it('wraps backwards from the first item to the last', () => {
-    renderHub();
-    const dialog = screen.getByRole('dialog', { name: /hub launcher/i });
+    renderPalette();
+    const dialog = screen.getByRole('dialog', { name: /command palette/i });
     const focusables = dialog.querySelectorAll(
       'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
     );

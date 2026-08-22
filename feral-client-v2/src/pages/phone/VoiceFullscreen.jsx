@@ -338,6 +338,22 @@ export function VoiceFullscreen({
       } else if (type === 'voice_error') {
         setVoiceState('error');
         setErrorMessage(payload.message || 'Voice session failed');
+      } else if (type === 'error' && payload.name === 'voice_session_failed') {
+        // The HUP §8 refusal for a `voice_session_start` the brain
+        // could not honour (code 1099). Before it existed the brain
+        // recorded the start as allowed and sent nothing at all when
+        // the voice backend refused to open, and this surface, which
+        // flips itself to `listening` the moment it sends the
+        // envelope, had nothing to flip back on. The orb said
+        // "listening" for the life of the connection against a
+        // session that was never opened.
+        //
+        // Matched on `name` rather than on `type === 'error'`, because
+        // the brain sends that type for schema and capability
+        // refusals too, and an oversized frame or a rejected envelope
+        // is not a reason to tear down a live voice session.
+        setVoiceState('error');
+        setErrorMessage(payload.message || 'Voice session failed to open');
       } else if (type === 'voice_status') {
         // Audit-r11 — Bug 3 banner contract. Brain emits this when
         // the realtime provider died (`state=degraded`,
