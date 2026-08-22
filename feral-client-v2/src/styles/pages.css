@@ -3320,3 +3320,69 @@
   font-size: var(--v2-size-xs);
   color: var(--v2-state-warn);
 }
+
+/* Approvals: why the queue is empty, and what would land in it.
+   An empty queue was the whole page (a title, a sentence, Refresh),
+   which is accurate and answers neither question a person has here. */
+.v2-approvals-idle { display: flex; flex-direction: column; gap: 18px; }
+.v2-appr-why {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 16px;
+  border: 1px solid var(--v2-hairline);
+  border-radius: var(--v2-radius-md);
+  background: var(--v2-surface-1);
+}
+.v2-appr-why-h {
+  margin: 0 0 8px;
+  font-family: var(--v2-font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+}
+.v2-appr-tierrow { display: flex; gap: 8px; flex-wrap: wrap; }
+.v2-appr-tierbtn {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  min-height: 24px;
+  padding: 8px 12px;
+  border: 1px solid var(--v2-hairline);
+  border-radius: var(--v2-radius-sm);
+  background: none;
+  color: var(--v2-text-secondary);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.v2-appr-tierbtn:hover:not(:disabled) {
+  border-color: var(--v2-hairline-strong);
+  color: var(--v2-text-primary);
+}
+.v2-appr-tierbtn[aria-pressed="true"] {
+  border-color: var(--v2-accent);
+  background: var(--v2-accent-soft);
+  color: var(--v2-accent-text);
+}
+.v2-appr-tierbtn:disabled { opacity: 0.6; cursor: default; }
+.v2-appr-tiername { font-family: var(--v2-font-mono); font-size: var(--v2-size-sm); }
+.v2-appr-tiermeaning { font-size: var(--v2-size-xs); color: var(--v2-text-tertiary); }
+.v2-appr-warn {
+  margin: 10px 0 0;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-state-warn);
+  line-height: 1.45;
+}
+.v2-appr-policy-list {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-secondary);
+  line-height: 1.45;
+}

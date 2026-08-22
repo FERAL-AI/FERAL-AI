@@ -31,6 +31,59 @@ import { apiFetch, apiJson } from '../lib/api';
 
 const POLL_MS = 4000;
 
+/**
+ * Why the queue is empty, and what would land in it.
+ *
+ * Rendered only when there is nothing pending: with real requests on
+ * screen the requests are the page, and this would be noise.
+ */
+function AutonomyExplainer({ mode, policy, busy, onSet }) {
+  const lines = policyLines(policy);
+  if (!mode && lines.length === 0) return null;
+
+  return (
+    <section className="v2-appr-why" aria-label="Why nothing is waiting">
+      {mode && (
+        <div className="v2-appr-tier">
+          <p className="v2-appr-why-h">Autonomy is set to</p>
+          <div className="v2-appr-tierrow" role="group" aria-label="Autonomy tier">
+            {TIERS.map(([tier, meaning]) => (
+              <button
+                key={tier}
+                type="button"
+                className="v2-appr-tierbtn"
+                aria-pressed={tier === mode}
+                disabled={busy === tier}
+                onClick={() => (tier === mode ? null : onSet(tier))}
+                title={meaning}
+              >
+                <span className="v2-appr-tiername">{tier}</span>
+                <span className="v2-appr-tiermeaning">{meaning}</span>
+              </button>
+            ))}
+          </div>
+          {mode === 'loose' && (
+            <p className="v2-appr-warn" role="status">
+              On loose the brain never stops to ask, so this page stays
+              empty however much it does. Move to hybrid to be asked
+              about risky actions.
+            </p>
+          )}
+        </div>
+      )}
+
+      {lines.length > 0 && (
+        <div className="v2-appr-policy">
+          <p className="v2-appr-why-h">What the current policy allows</p>
+          <ul className="v2-appr-policy-list">
+            {lines.map((l) => <li key={l}>{l}</li>)}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** Where a request came from, read off the session id prefix. */
 export function originOf(sessionId) {
   const sid = String(sessionId || '');
@@ -55,6 +108,44 @@ export function describeCall(approval) {
   const first =
     args.path || args.command || args.url || args.script || args.query || '';
   return first ? `${tool}: ${String(first).slice(0, 160)}` : tool;
+}
+
+/** What each tier means, in the words the popover uses. */
+export const TIERS = [
+  ['strict', 'ask before anything'],
+  ['hybrid', 'ask for risky actions'],
+  ['loose', 'never ask'],
+];
+
+/**
+ * The safety rules in force, from GET /api/policy.
+ *
+ * Returns plain sentences rather than the raw object, because the raw
+ * object is a nested config and the question is "what gets held". Every
+ * line is derived from a field that is actually present; a field the
+ * brain does not send produces no line rather than a guess.
+ */
+export function policyLines(policy) {
+  const out = [];
+  const perms = policy?.permissions || {};
+  const auto = Array.isArray(perms.auto_approve_categories)
+    ? perms.auto_approve_categories.filter(Boolean) : [];
+  if (auto.length) {
+    out.push(`Runs without asking: ${auto.join(', ')}.`);
+  }
+  if (perms.require_confirmation_above) {
+    out.push(`Held for you above the "${perms.require_confirmation_above}" tier.`);
+  }
+  const fs = policy?.filesystem || {};
+  const writes = Array.isArray(fs.write_paths) ? fs.write_paths.filter(Boolean) : [];
+  if (writes.length) {
+    out.push(`Can write to ${writes.slice(0, 3).join(', ')}${writes.length > 3 ? ' and more' : ''} without a grant.`);
+  }
+  const net = policy?.network || {};
+  if (net.mode === 'allowlist' && Array.isArray(net.allowed_domains)) {
+    out.push(`Network is an allowlist of ${net.allowed_domains.length} domains.`);
+  }
+  return out;
 }
 
 /** Seconds since the request was raised, as a short human string. */
@@ -118,6 +209,9 @@ export default function Approvals() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
+  const [autonomy, setAutonomy] = useState('');
+  const [policy, setPolicy] = useState(null);
+  const [tierBusy, setTierBusy] = useState('');
   const timer = useRef(null);
 
   const load = useCallback(async () => {
@@ -134,11 +228,45 @@ export default function Approvals() {
     }
   }, []);
 
+  /*
+   * The tier and the policy, read once rather than on the 4s poll:
+   * neither changes on its own, and this page is often left open.
+   * Failures are silent by design here. They only feed the explainer,
+   * which renders whatever it has and nothing when it has nothing, so a
+   * failed read costs an explanation and never a broken page.
+   */
+  const loadContext = useCallback(async () => {
+    const [a, p] = await Promise.allSettled([
+      apiJson('/api/autonomy'),
+      apiJson('/api/policy'),
+    ]);
+    if (a.status === 'fulfilled') setAutonomy(String(a.value?.mode || ''));
+    if (p.status === 'fulfilled') setPolicy(p.value || null);
+  }, []);
+
+  const setTier = useCallback(async (tier) => {
+    setTierBusy(tier);
+    try {
+      await apiFetch('/api/autonomy', {
+        method: 'POST', silent: true, body: JSON.stringify({ mode: tier }),
+      });
+      // Re-read rather than trusting the write: the brain is the owner
+      // of this value and a POST that half-applied would otherwise show
+      // as a clean change.
+      await loadContext();
+    } catch (e) {
+      setError(e?.message || 'could not change the autonomy tier');
+    } finally {
+      setTierBusy('');
+    }
+  }, [loadContext]);
+
   useEffect(() => {
     load();
+    loadContext();
     timer.current = setInterval(load, POLL_MS);
     return () => clearInterval(timer.current);
-  }, [load]);
+  }, [load, loadContext]);
 
   const decide = useCallback(async (requestId, approved) => {
     setBusy(requestId);
@@ -182,12 +310,34 @@ export default function Approvals() {
           <div className="v2-approvals-error" role="status">{error}</div>
         )}
 
+        {/* An empty queue used to be the whole page: a title, one
+            sentence, and a Refresh button. That is accurate and tells
+            you nothing, because the question a person actually has here
+            is "will anything ever stop and ask me, and what?"
+
+            The tier is the answer to the first half and it was nowhere
+            on the page. On `loose` the brain never asks, so an empty
+            queue means "nothing will ever appear here", which is a
+            completely different fact from "nothing right now" and used
+            to look identical. The policy answers the second half: what
+            is auto-approved, and what is held. Both are real endpoints
+            the page simply never called. */}
         {!loading && approvals.length === 0 && !error && (
-          <EmptyState
-            icon={<ShieldAlert size={22} aria-hidden="true" />}
-            title="Nothing is waiting on you"
-            hint="Tool calls that need your decision show up here, whichever surface raised them."
-          />
+          <div className="v2-approvals-idle">
+            <EmptyState
+              icon={<ShieldAlert size={22} aria-hidden="true" />}
+              title={autonomy === 'loose'
+                ? 'Nothing will stop and ask you'
+                : 'Nothing is waiting on you'}
+              hint="Tool calls that need your decision show up here, whichever surface raised them: this chat, a routine, a channel, or your phone."
+            />
+            <AutonomyExplainer
+              mode={autonomy}
+              policy={policy}
+              busy={tierBusy}
+              onSet={setTier}
+            />
+          </div>
         )}
 
         {approvals.length > 0 && (

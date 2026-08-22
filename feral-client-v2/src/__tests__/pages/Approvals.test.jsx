@@ -183,9 +183,31 @@ describe('the page', () => {
   it('polls, because an approval can arrive while the page is open', async () => {
     apiJson.mockResolvedValue({ count: 0, approvals: [] });
     render(<Approvals />);
-    await waitFor(() => expect(apiJson).toHaveBeenCalledTimes(1));
+
+    // Counts calls to /api/approvals specifically, not every fetch.
+    // The page also reads /api/autonomy and /api/policy once on mount,
+    // to explain an empty queue, and a bare call count conflated those
+    // with the poll and failed at 3.
+    const approvalCalls = () =>
+      apiJson.mock.calls.filter(([url]) => String(url).includes('/api/approvals')).length;
+
+    await waitFor(() => expect(approvalCalls()).toBe(1));
     vi.advanceTimersByTime(4100);
-    await waitFor(() => expect(apiJson.mock.calls.length).toBeGreaterThan(1));
+    await waitFor(() => expect(approvalCalls()).toBeGreaterThan(1));
+  });
+
+  it('reads the tier and the policy once, not on every poll', async () => {
+    // They do not change on their own and this page is often left open.
+    apiJson.mockResolvedValue({ count: 0, approvals: [] });
+    render(<Approvals />);
+
+    const contextCalls = () => apiJson.mock.calls.filter(
+      ([url]) => String(url).includes('/api/autonomy') || String(url).includes('/api/policy'),
+    ).length;
+
+    await waitFor(() => expect(contextCalls()).toBe(2));
+    vi.advanceTimersByTime(20000);
+    expect(contextCalls()).toBe(2);
   });
 });
 

@@ -133,3 +133,65 @@ test('the palette search field is marked without a hard rectangle', async ({ pag
   expect(style.shadow, 'the focused search field has no indicator at all')
     .not.toBe('none');
 });
+
+/**
+ * An empty Needs You has to answer why it is empty.
+ *
+ * The tier is the load-bearing fact: on `loose` the brain never stops
+ * to ask, so an empty queue means "nothing will ever appear here",
+ * which used to render identically to "nothing right now".
+ */
+test('an empty approvals queue explains itself and can change the tier', async ({ page }) => {
+  await page.route('**/api/**', (r) => r.fulfill({
+    status: 200, contentType: 'application/json', body: '{}',
+  }));
+  await page.route('**/api/approvals*', (r) => r.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ count: 0, approvals: [] }),
+  }));
+  await page.route('**/api/autonomy', (r) => r.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ mode: 'hybrid' }),
+  }));
+  await page.route('**/api/policy', (r) => r.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({
+      permissions: { require_confirmation_above: 'active', auto_approve_categories: ['sensor'] },
+      filesystem: { write_paths: ['~/.feral/skills/'] },
+      network: { mode: 'allowlist', allowed_domains: ['api.openai.com'] },
+    }),
+  }));
+
+  await page.goto('/approvals');
+  await expect(page.getByText('Nothing is waiting on you')).toBeVisible();
+
+  // The tier, and which one is in force.
+  const tiers = page.locator('.v2-appr-tierbtn');
+  await expect(tiers).toHaveCount(3);
+  await expect(page.locator('.v2-appr-tierbtn[aria-pressed="true"] .v2-appr-tiername'))
+    .toHaveText('hybrid');
+
+  // And what the policy actually permits, from the brain.
+  await expect(page.getByText(/Runs without asking: sensor/)).toBeVisible();
+  await expect(page.getByText(/Held for you above the "active" tier/)).toBeVisible();
+});
+
+test('a loose brain says so, because it will never fill this page', async ({ page }) => {
+  await page.route('**/api/**', (r) => r.fulfill({
+    status: 200, contentType: 'application/json', body: '{}',
+  }));
+  await page.route('**/api/approvals*', (r) => r.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ count: 0, approvals: [] }),
+  }));
+  await page.route('**/api/autonomy', (r) => r.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ mode: 'loose' }),
+  }));
+
+  await page.goto('/approvals');
+  // The heading itself changes, because the fact is different.
+  await expect(page.getByText('Nothing will stop and ask you')).toBeVisible();
+  await expect(page.locator('.v2-appr-warn')).toBeVisible();
+  await expect(page.locator('.v2-appr-warn')).toContainText(/never stops to ask/i);
+});
