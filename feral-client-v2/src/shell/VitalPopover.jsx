@@ -27,7 +27,7 @@ const SOURCES = {
   jobs: '/api/jobs?limit=40',
   needs: '/api/approvals',
   dev: '/api/devices',
-  brain: null,
+  brain: '/api/llm/status',
   mem: null,
   cost: null,
   autonomy: null,
@@ -51,6 +51,19 @@ export function money(n) {
   const v = Number(n || 0);
   if (!Number.isFinite(v)) return '$0.00';
   return `$${v.toFixed(2)}`;
+}
+
+/** Uptime as the design's Brain popover renders it: "4h 12m". */
+export function uptimeLabel(seconds) {
+  const s = Math.floor(Number(seconds) || 0);
+  if (s <= 0) return '';
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${s}s`;
 }
 
 /** Elapsed seconds as the design renders it: 4m12s. */
@@ -120,11 +133,32 @@ export function rowsFor(kind, data, vitals) {
   }
 
   if (kind === 'brain') {
+    // The design's Brain popover leads with uptime and then names the
+    // model. What shipped led with "LLM / unavailable", which is both
+    // less useful and, on a brain that is answering, misleading: it read
+    // `llm_available` off a payload where that field is the only LLM
+    // fact, so it could not say WHICH model.
+    //
+    // Context and Last turn are in the design and are not here: the
+    // brain records neither. Inventing plausible values for them would
+    // be worse than leaving them out.
+    const provider = String(data?.provider || '');
+    const model = String(data?.model || '');
+    const ok = data?.available !== false && (provider || model);
     return [
-      { id: 'llm', title: 'LLM', sub: 'the model behind every turn',
-        value: vitals.llmAvailable ? 'available' : 'unavailable' },
+      {
+        id: 'model',
+        title: 'Model',
+        sub: provider && model ? `${provider} / ${model}` : 'not configured',
+        value: ok ? 'ok' : 'unavailable',
+        tone: ok ? '' : 'warn',
+      },
       { id: 'sk', title: 'Skills', sub: 'loaded and callable', value: String(vitals.skills || 0) },
       { id: 'run', title: 'Running', sub: 'work in flight now', value: String(vitals.running || 0) },
+      {
+        id: 'dev', title: 'Devices', sub: 'paired and online',
+        value: String(vitals.devices || 0),
+      },
     ];
   }
 
@@ -232,6 +266,15 @@ export default function VitalPopover({ kind, title, vitals, onClose }) {
   return (
     <div className="v2-pop" ref={ref} role="dialog" aria-label={`${title} details`}>
       <header className="v2-pop-h">{title}</header>
+
+      {/* The design leads this one with a single large number. It is the
+          question a person actually has about a background process. */}
+      {kind === 'brain' && uptimeLabel(vitals.uptime) && (
+        <div className="v2-pop-big">
+          <b>{uptimeLabel(vitals.uptime)}</b>
+          <span>uptime</span>
+        </div>
+      )}
 
       {data === null && <p className="v2-pop-quiet">Reading…</p>}
 

@@ -16,6 +16,7 @@ import { test, expect } from '@playwright/test';
 
 const DASHBOARD = {
   device_count: 3, online_count: 3, skills_count: 42, llm_available: true,
+  uptime_s: 15132,
   memory: { episodes: 12410, notes: 8, knowledge_triples: 5, embedded_chunks: 60, vec_index_mode: 'numpy' },
   budget: { enabled: true, daily_budget_usd: 10, daily_spend_usd: 1.84 },
   autonomy: 'loose',
@@ -160,4 +161,46 @@ test('B does not collapse the rail while you are typing', async ({ page }) => {
     page.locator('.v2-rail'),
     'a letter key ate the rail mid-sentence',
   ).toBeVisible();
+});
+
+test('the brand light is green when the brain answers and red when it does not', async ({ page }) => {
+  // A dot beside a product name reads as a status light, so it has to
+  // BE one. It was a conic gradient ring: identical whether the brain
+  // was up or gone.
+  await stub(page);
+  await page.goto('/console');
+  const mark = page.locator('.v2-sysbar-mark');
+  await expect(mark).toHaveAttribute('data-up', 'yes');
+
+  const green = await mark.evaluate((el) => getComputedStyle(el).backgroundColor);
+
+  // Now fail every source the shared poller reads, the way a stopped
+  // brain does. `reachable` is false only when ALL of them fail, so one
+  // slow endpoint must not turn this red.
+  await page.route('**/api/**', (r) => r.abort());
+  await expect(mark).toHaveAttribute('data-up', 'no', { timeout: 15000 });
+
+  const red = await mark.evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(red, 'the light looks identical up and down').not.toBe(green);
+
+  // Colour alone is not an accessible signal.
+  await expect(page.locator('.v2-sr-only')).toHaveText(/not responding/i);
+});
+
+test('the Brain popover leads with uptime and names the model', async ({ page }) => {
+  await stub(page);
+  await page.route('**/api/llm/status*', (r) => r.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ available: true, provider: 'openai', model: 'gpt-5.6-sol' }),
+  }));
+  await page.goto('/console');
+  await page.locator('.v2-ext[aria-label*="Brain"]').click();
+
+  const pop = page.locator('.v2-pop');
+  await expect(pop).toBeVisible();
+  // The design leads this one with a single large number.
+  await expect(pop.locator('.v2-pop-big b')).toHaveText(/\d/);
+  await expect(pop.locator('.v2-pop-big span')).toHaveText('uptime');
+  // And says WHICH model, which "LLM: available" could not.
+  await expect(pop.getByText('openai / gpt-5.6-sol')).toBeVisible();
 });

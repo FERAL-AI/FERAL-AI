@@ -297,6 +297,11 @@ class BrainState:
         for env_key, env_value in self.config.export_as_env().items():
             if _should_export_runtime_env_key(env_key):
                 os.environ[env_key] = env_value
+        # When this process came up. Nothing recorded it, so "how long
+        # has the brain been running" was unanswerable from any surface:
+        # the dashboard's Brain readout had no uptime to show and could
+        # only report whether the LLM was configured.
+        self.started_at: float = time.time()
         self.sessions: dict[str, WebSocket] = {}
         self.daemons: dict[str, WebSocket] = {}
         # trigger_id -> last escalation timestamp, so a signal that keeps
