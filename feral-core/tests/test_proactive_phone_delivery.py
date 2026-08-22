@@ -1,5 +1,6 @@
-"""Proactive messages reach a bound phone without leaking to other nodes."""
+"""Proactive messages reach a bound, capable phone without blocking peers."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,9 +12,16 @@ from models.protocol import HUP_VERSION
 
 
 class _Socket:
-    def __init__(self, *, node_type: str, platform: str):
+    def __init__(
+        self,
+        *,
+        node_type: str,
+        platform: str,
+        capabilities: list[str] | None = None,
+    ):
         self._feral_node_type = node_type
         self._feral_platform = platform
+        self._feral_capabilities = capabilities or []
         self.frames: list[dict] = []
 
     async def send_json(self, frame: dict) -> None:
@@ -31,8 +39,16 @@ def _state() -> BrainState:
 @pytest.mark.asyncio
 async def test_ambient_text_response_goes_only_to_bound_phone_nodes():
     state = _state()
-    phone = _Socket(node_type="phone", platform="ios")
-    unbound_phone = _Socket(node_type="phone", platform="ios")
+    phone = _Socket(
+        node_type="phone",
+        platform="ios",
+        capabilities=["ambient_delivery"],
+    )
+    unbound_phone = _Socket(
+        node_type="phone",
+        platform="ios",
+        capabilities=["ambient_delivery"],
+    )
     robot = _Socket(node_type="robot", platform="linux")
     state.daemons = {
         "phone-bound": phone,
@@ -69,6 +85,70 @@ async def test_ambient_text_response_goes_only_to_bound_phone_nodes():
     assert frame["payload"]["channel"] == "ambient"
     assert frame["payload"]["trigger_id"] == "hr_elevated"
     assert frame["payload"]["context"]["source"] == "jw_health_glasses"
+
+
+@pytest.mark.asyncio
+async def test_ambient_delivery_requires_explicit_node_capability():
+    state = _state()
+    capable = _Socket(
+        node_type="phone",
+        platform="ios",
+        capabilities=["ambient_delivery"],
+    )
+    legacy = _Socket(node_type="phone", platform="ios")
+    state.daemons = {"capable": capable, "legacy": legacy}
+    state._daemon_session_bindings = {
+        "capable": {"shared-session"},
+        "legacy": {"shared-session"},
+    }
+
+    delivered = await state._deliver_proactive_to_phone_nodes({"body": "Hello"})
+
+    assert delivered == 1
+    assert len(capable.frames) == 1
+    assert legacy.frames == []
+
+
+@pytest.mark.asyncio
+async def test_one_backpressured_phone_does_not_block_other_delivery(monkeypatch):
+    import api.state as state_module
+
+    class _BlockedSocket(_Socket):
+        async def send_json(self, frame: dict) -> None:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(state_module, "PROACTIVE_NODE_SEND_TIMEOUT_S", 0.01)
+    state = _state()
+    blocked = _BlockedSocket(
+        node_type="phone",
+        platform="ios",
+        capabilities=["ambient_delivery"],
+    )
+    healthy = _Socket(
+        node_type="phone",
+        platform="android",
+        capabilities=["ambient_delivery"],
+    )
+    state.daemons = {"blocked": blocked, "healthy": healthy}
+    state._daemon_session_bindings = {
+        "blocked": {"shared-session"},
+        "healthy": {"shared-session"},
+    }
+
+    delivered = await state._deliver_proactive_to_phone_nodes({"body": "Hello"})
+
+    assert delivered == 1
+    assert len(healthy.frames) == 1
+
+
+def test_daemon_binding_cleanup_is_explicit():
+    state = _state()
+    state._daemon_session_bindings = {"phone": {"one", "two"}}
+
+    removed = state.clear_daemon_bindings("phone")
+
+    assert removed == {"one", "two"}
+    assert state.get_sessions_for_daemon("phone") == set()
 
 
 @pytest.mark.asyncio

@@ -26,8 +26,12 @@ def _configure_bindings(mock_state: MagicMock) -> None:
     def _sessions_for(node_id: str) -> set[str]:
         return set(bindings.get(node_id, set()))
 
+    def _clear(node_id: str) -> set[str]:
+        return bindings.pop(node_id, set())
+
     mock_state.bind_session_to_daemon = MagicMock(side_effect=_bind)
     mock_state.get_sessions_for_daemon = MagicMock(side_effect=_sessions_for)
+    mock_state.clear_daemon_bindings = MagicMock(side_effect=_clear)
 
 
 def _flush_with_known_error(ws):
@@ -70,6 +74,23 @@ def test_phone_registration_binds_shared_session_before_first_chat_turn():
                 capabilities=["jw_health_glasses"],
             )
             assert "shared-primary" in mock.get_sessions_for_daemon("phone-ambient")
+
+
+def test_phone_registration_advertises_primary_session_and_ambient_capability():
+    mock = _mock_state_with_supervisor()
+    mock.primary_session_id = "shared-primary"
+
+    with _node_client(mock) as client:
+        with client.websocket_connect(f"/v1/node?api_key={_TEST_NODE_KEY}") as ws:
+            ack = _register_node(
+                ws,
+                node_id="phone-ambient",
+                node_type="phone",
+                capabilities=["jw_health_glasses", "ambient_delivery"],
+            )
+
+    assert ack["payload"]["primary_session_id"] == "shared-primary"
+    assert "ambient_delivery" in ack["payload"]["granted_capabilities"]
 
 
 def test_chat_request_routes_to_orchestrator_and_responds():

@@ -2532,6 +2532,11 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
 
             if msg.type in ("node_register", "register") and isinstance(payload, NodeRegisterPayload):
                 node_id = payload.node_id
+                # A reconnect may reuse a stable node id before the old socket
+                # observes its close. The new registration owns a fresh set of
+                # bindings; the stale socket's eventual teardown is guarded by
+                # object identity below.
+                state.clear_daemon_bindings(node_id)
                 state.daemons[node_id] = ws
                 # Stash the HUP-declared node_type on the WebSocket so
                 # /api/devices/connected can report the real type instead
@@ -3869,8 +3874,15 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
 
     except WebSocketDisconnect:
         if node_id:
+            if state.daemons.get(node_id) is not ws:
+                logger.info(
+                    "Ignoring disconnect cleanup for superseded daemon socket: %s",
+                    node_id,
+                )
+                return
             logger.info(f"Daemon disconnected: {node_id}")
             state.daemons.pop(node_id, None)
+            bound_sessions = state.clear_daemon_bindings(node_id)
             # Same leak as the web handler: audio/perception/mesh state
             # was cleared here but the voice router never was, so a
             # phone that dropped LTE or went to background kept a live
@@ -3892,7 +3904,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
             if state.hardware_mesh:
                 state.hardware_mesh.on_node_disconnected(node_id)
             state.capability_registry.unregister_node(node_id)
-            for sid in state.get_sessions_for_daemon(node_id):
+            for sid in bound_sessions:
                 state.perception.update_connected_nodes(sid, list(state.daemons.keys()))
 
 

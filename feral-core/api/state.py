@@ -4,6 +4,7 @@ Shared brain state singleton.
 Every route module and the main server import ``state`` from here.
 """
 
+import asyncio
 import logging
 import os
 import time
@@ -80,6 +81,17 @@ from api.boot_report import BootReport, boot_subsystem
 logger = logging.getLogger("feral.brain")
 
 VISION_MAX_FRAME_KB = int(os.environ.get("FERAL_VISION_MAX_FRAME_KB", "512"))
+
+# HUP capability advertised by phone nodes that understand unsolicited
+# ``text_response(channel="ambient")`` delivery. Pairing authenticates the
+# node; this capability makes delivery support explicit instead of inferring it
+# from a broad platform label such as "ios".
+AMBIENT_DELIVERY_CAPABILITY = "ambient_delivery"
+
+# This bounds WebSocket backpressure only; it is not an LLM/provider timeout.
+# Proactive evaluation and every other phone delivery continue independently
+# if one half-open client stops accepting frames.
+PROACTIVE_NODE_SEND_TIMEOUT_S = 15.0
 
 # -A13: avoid exporting channel/webhook secrets into process-global env
 # when applying ConfigLoader/export_as_env at boot. These credentials are
@@ -3441,25 +3453,48 @@ class BrainState:
             },
         }
 
-        delivered = 0
+        recipients: list[tuple[str, WebSocket]] = []
         for node_id, ws in list(getattr(self, "daemons", {}).items()):
             node_type = str(getattr(ws, "_feral_node_type", "") or "").lower()
             platform = str(getattr(ws, "_feral_platform", "") or "").lower()
             if node_type != "phone" and platform not in {"ios", "android"}:
                 continue
+            capabilities = {
+                str(capability).lower()
+                for capability in (getattr(ws, "_feral_capabilities", []) or [])
+            }
+            if AMBIENT_DELIVERY_CAPABILITY not in capabilities:
+                continue
             if session_id and session_id not in self.get_sessions_for_daemon(node_id):
                 continue
+            recipients.append((node_id, ws))
+
+        async def _send(node_id: str, expected_ws: WebSocket) -> bool:
+            # A reconnect may replace a socket after the recipient snapshot.
+            # Never send a personal alert to a stale connection.
+            if self.daemons.get(node_id) is not expected_ws:
+                return False
             try:
-                await self._send_dict_to_node(node_id, frame)
+                await asyncio.wait_for(
+                    expected_ws.send_json(frame),
+                    timeout=PROACTIVE_NODE_SEND_TIMEOUT_S,
+                )
             except Exception:
                 logger.warning(
                     "Proactive phone delivery failed for node %s",
                     node_id,
                     exc_info=True,
                 )
-                continue
-            delivered += 1
-        return delivered
+                return False
+            return True
+
+        if not recipients:
+            return 0
+        results = await asyncio.gather(
+            *(_send(node_id, ws) for node_id, ws in recipients),
+            return_exceptions=True,
+        )
+        return sum(result is True for result in results)
 
     def bind_session_to_daemon(self, session_id: str, node_id: str):
         if node_id not in self._daemon_session_bindings:
@@ -3468,6 +3503,10 @@ class BrainState:
 
     def get_sessions_for_daemon(self, node_id: str) -> set[str]:
         return self._daemon_session_bindings.get(node_id, set())
+
+    def clear_daemon_bindings(self, node_id: str) -> set[str]:
+        """Remove and return all session bindings owned by one daemon."""
+        return self._daemon_session_bindings.pop(node_id, set())
 
 
 state = BrainState()

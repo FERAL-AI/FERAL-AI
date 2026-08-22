@@ -91,6 +91,19 @@ def test_daemon_disconnect_stops_node_voice():
     mock.voice_router.stop_node_voice.assert_awaited_once_with("phone-drop")
 
 
+def test_daemon_disconnect_clears_session_bindings():
+    mock = _mock_state_with_supervisor()
+    mock.primary_session_id = "shared-primary"
+
+    with _node_client(mock) as client:
+        with client.websocket_connect(f"/v1/node?api_key={_TEST_NODE_KEY}") as ws:
+            _register_node(ws, node_id="phone-drop", node_type="phone")
+            assert mock.get_sessions_for_daemon("phone-drop")
+
+    assert mock.get_sessions_for_daemon("phone-drop") == set()
+    mock.clear_daemon_bindings.assert_called_with("phone-drop")
+
+
 # ── VoiceRouter.stop_node_voice ─────────────────────────────────────
 
 
