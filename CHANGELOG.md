@@ -1,10 +1,244 @@
 # Changelog
 
-<!-- feral-version: 2026.8.14 -->
+<!-- feral-version: 2026.8.22 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.22] - 2026-08-22 - the body in the loop
+
+**HUP bumps to 1.4.0.** Additive throughout, per the MINOR rule in §1 of
+the spec: every new field is optional and every new `device_event` type
+is opt-in, so a 1.3.0 daemon that sends none of them behaves
+identically.
+
+The theme is a system that was reading the user's body and acting on it
+where nothing could see it happen, on top of a sensor path where most of
+the body never arrived. Three of the five signals the glasses send could
+not reach the somatic engine at all, including the one that dominates
+cognitive load; the policy derived from what did arrive was applied
+invisibly; and the one health alert that fired did so on a raw threshold
+that any flight of stairs would trip.
+
+Reported from the Theora iOS client, and every finding below was
+measured against a running brain rather than read off the source.
+
+### Added
+
+- **The behavioural policy is observable.** New `somatic_state` HUP
+  frame (brain to phone), an optional `somatic` field on
+  `chat_response`, and the full policy on `GET /api/dashboard`'s
+  `somatic` block, which previously reported the vector and none of the
+  policy derived from it.
+
+  The agent already read the somatic vector, shortened its answers,
+  suppressed proactive messages and restricted its own tools. None of
+  that was observable from outside, and a shorter reply is
+  indistinguishable from a reply that happened to be short, so the
+  adaptation could not be demonstrated or disagreed with.
+
+  The frame carries both halves deliberately: `cognitive_load` and the
+  vitals are the input, `tone` / `suppress_non_urgent` /
+  `max_response_tokens` / `tool_restrictions` are what the policy did
+  with it. It reports `get_behavioral_policy`, which is the derivation
+  the system prompt is actually built from, and not
+  `BehavioralPolicy.from_vector`, which is a second derivation with no
+  production caller that answers "calm" where the live one answers
+  "concise".
+
+  `stale` and `age_s` are on the frame because a somatic vector
+  outlives the wearable that fed it, so a policy can go on being
+  applied from a reading taken hours ago. Pushes are deduplicated on
+  the policy signature, so a continuous heart-rate stream does not
+  produce a frame per reading.
+
+- **Physiological moments alongside an ambient transcript.**
+  `ambient_transcript` accepts optional `moments`
+  (`{segment_index, delta_bpm, score, confounded, quote?, t_offset_s?}`),
+  `baseline_hr` and `respiratory_bpm`. The digest reasons over them and
+  returns `physiological_note` plus `moments_considered` on
+  `ambient_digest`.
+
+  A phone that sends none of this gets byte-identical behaviour: the
+  physiology block is appended to the reduce prompt only when usable
+  moments exist.
+
+  **`confounded` means movement explains the rise, and such a moment is
+  never described as an emotional response.** That is enforced twice,
+  not once. Confounded moments are dropped before the model sees them,
+  and the sentence the model returns is independently re-checked for
+  words asserting an inner state, with the whole sentence dropped if
+  any are found (dropped whole, not edited: a sentence with the emotion
+  word removed still carries the causal claim that made it wrong). A
+  rule stated only in a prompt is a request; the filter and the
+  post-check are what make it a guarantee. Moments below a confidence
+  score of 0.5 are dropped too.
+
+  `segment_index` indexes the PHONE's segmentation.
+  `agents/ambient_transcript.py` chunks into 6000-character segments
+  labelled `[segment N]`, which is a different partition of the same
+  conversation, so nothing joins on the bare index and the prompt says
+  so explicitly. Moments are anchored by `quote`, then `t_offset_s`,
+  then reported as unanchored with no claim about when.
+
+  `physiological_note` is a separate field rather than a sentence
+  folded into `summary`, so a client can suppress it and a reader can
+  tell what people said from what a heart rate did.
+
+### Fixed
+
+- **The glasses could not reach the somatic engine.** Reported from the
+  Theora iOS client. The wiring was present (`device_event` →
+  `_handle_biometric_device_event` → `update_from_perception_frame` →
+  `update_biometrics`), but three of five signals could not arrive.
+  Measured against a live brain, feeding one `device_event` of each
+  type:
+
+  ```
+  heart_rate  78    arrived
+  spo2        97    arrived
+  skin_temp   33.4  DROPPED  written flat, read only under "vitals"
+  steps       4213  DROPPED  written "steps", read "steps_today"
+  hrv         42    DROPPED  no ingestion path existed at all
+  ```
+
+  The vector the model saw was "HR:78bpm | SpO2:97%", and cognitive
+  load ran without `hrv_ms`, its largest term (weight 0.3).
+
+  `hrv` now has a `device_event` branch and both it and `activity` are
+  in the dispatcher vocabulary. `update_from_perception_frame` reads
+  the flat shape as well as the nested one. The dispatcher's filter was
+  a second hand-maintained copy of `_EXTRACTABLE_EVENT_TYPES` and is
+  now the same list: a branch existing while the type is missing from
+  the filter is exactly how every `uv` reading was dropped for the life
+  of that feature.
+
+- **`hrv_ms` is validated as RMSSD in milliseconds.** Readings outside
+  5-300 ms are rejected and logged at WARNING, never clamped, and the
+  last plausible value stands. Cognitive load reads HRV as
+  `1.0 - hrv_ms/100.0` at weight 0.3, so a vendor "HRV index" on an
+  undocumented scale does not degrade the policy, it inverts it: an
+  index of 3 reads as 0.97 load and pins the agent in calm, suppressed,
+  tool-restricted mode. Clamping would turn a scale error into a
+  confident maximum-stress reading that the policy then acts on.
+
+- **A wearable-only session always looked like midnight.**
+  `circadian_phase` was written only by `update_interaction`, so a
+  session fed by biometrics and nothing else kept the 0.0 default.
+  Measured at 14:00: a glasses stream produced `tone="calm"` and
+  `suppress_non_urgent=True` from the `hour < 5` branch, plus a
+  spurious 0.3 circadian term in cognitive load. `update_biometrics`
+  now sets the clock it already had access to.
+
+- **The activity gate never engaged.** Cognitive load uses heart rate
+  only when `activity_level < 0.3`, which is what stops a walk upstairs
+  reading as strain, but nothing populated `activity_level` from the
+  device path so it was permanently 0.0 (sedentary). There is now an
+  `activity` event type, and a frame that says nothing about activity
+  leaves it alone instead of resetting it: a `device_event` carries one
+  reading, so defaulting to 0.0 meant the next heart rate that arrived
+  overwrote a known "walking" back to "sedentary" and undid the guard.
+
+- **`hr_elevated` fired on any physical exertion.** The trigger was
+  `frame.heart_rate > 100`, and a flight of stairs is 110-130 bpm in a
+  healthy adult. It now fires on cognitive load crossing 0.7, the same
+  boundary `get_behavioral_policy` treats as high load, so the agent
+  alerts exactly when it also changes its own behaviour rather than on
+  a second threshold free to drift from the first. Measured: running at
+  128 bpm with HRV 60 gives load 0.32 and stays silent; sitting at 118
+  bpm with HRV 8 gives load 0.76 and speaks up.
+
+  The raw threshold is kept as the fallback, not removed. A brain with
+  no wearable HRV, or with no somatic engine, still gets the old alert.
+  `_cognitive_load_for` returns None rather than 0.0 when the answer is
+  unknown, because 0.0 is a real value meaning "this person is fine"
+  and would silence a genuine alert; it also returns None for a reading
+  older than 120 s, so an alert is never decided on a body state that
+  no longer exists.
+
+- **"Open this link on my Mac" from the phone opened an app called
+  "Https".** `RefusalHandler.build_action_intent_tool_call` asked for an
+  app name before it looked for a URL, and "open" answers both
+  questions, so the URL branch was unreachable for any sentence
+  containing open, launch or start. Reported from the Theora iOS client
+  and reproduced verbatim on `a4667d253`:
+
+  ```
+  "open https://youtube.com/watch?v=abc in chrome"
+      -> desktop_control__open_app: tell application "Https" to activate
+  "open the youtube link in chrome"
+      -> desktop_control__open_app: tell application "The Youtube Link In Chrome" to activate
+  ```
+
+  Two separate causes. The ordering above, and a fallback regex
+  `(?:open|launch|start)\s+([a-z0-9 ._+-]{2,40})` whose character class
+  omits `:` and `/` (so it stops at the scheme and captures `https`)
+  while including a space (so it runs to the end of the sentence).
+
+  The URL branch now runs first, and when the sentence also names a
+  known app the command is `open -a "<App>" "<url>"` rather than a bare
+  activate, so "open this in Chrome" opens the link in Chrome instead of
+  merely focusing it. The fallback regex refuses a URL scheme outright
+  and stops at a preposition or object noun. Determiners are
+  deliberately not stop words: "open my cool app" is a real request for
+  an app named "My Cool App". When a stop word does end the phrase, the
+  app the sentence actually names wins, so "open the youtube link in
+  chrome" resolves to Chrome.
+
+  Also fixed while here: matching an app name inside a URL. "open
+  https://mail.google.com" would have routed the link into Mail.app,
+  because a hostname is not a statement of intent.
+
+### Changed
+
+- **Device routing is now decided by the brain, not by each client.**
+  `agents.prompt_refiner.infer_device_target` is public and
+  deterministic, and is applied on both the HUP `phone_surface` path and
+  the WebUI chat path whenever the client sent no explicit
+  `device_target`.
+
+  The keyword rules already existed but sat inside `refine`, which is
+  behind `FERAL_PROMPT_REFINER`. That flag is off by default and makes
+  `refine` return an identity envelope, so the brain inferred nothing
+  and a phone saying "on my Mac" resolved to `http_api`, where every
+  `desktop_control` tool is denied. Clients worked around it by sending
+  `device_target` themselves, which put a second copy of a
+  security-routing rule in each SDK, in a different language, free to
+  drift. The iOS client had done exactly that.
+
+  Flipping `FERAL_PROMPT_REFINER` on was the alternative and is a much
+  larger change: it also enables LLM rewriting of the user's text on
+  every turn. The two were coupled only because the keyword extractor
+  happened to live in that module.
+
+  An explicit `device_target` from the client still wins, because the
+  client knows things the text does not say. On the WebUI path the
+  inference can only narrow what is permitted: the `websocket` deny list
+  is a strict subset of both `brain_host` and `phone_actuator`.
+
+### Protocol
+
+- **HUP 1.3.0 to 1.4.0**, synced across all nine pinned surfaces:
+  `models/protocol.py`, `HUP_SPEC.md` (header, version table and
+  Appendix B), the Python node SDK (`schemas.py` and `__init__.py`), the
+  TypeScript node SDK, the Swift node SDK, the two first-party daemon
+  manifests, and the companion iOS app's `Info.swift` +
+  `Info.plist`. `test_hup_version_unified.py` gates every one of them
+  and now pins 1.4.0.
+
+  The companion iOS surfaces live in a sibling repository
+  (`feral-companion-ios`), which the unification test walks when it is
+  checked out beside ASOS. Those two files were edited but NOT
+  committed; that repo's own release is separate.
+
+### Coverage
+
+- pytest (feral-core): 9944 passed, 49 skipped, 0 failed.
+- vitest (feral-client-v2): see the release run below.
+- Live verification against a running brain over real `/v1/node`
+  websockets: 27 checks across the somatic pipeline and the ambient
+  digest legs, nothing stubbed.
 
 ## [2026.8.14] - 2026-08-22 - the surfaces nobody had driven
 

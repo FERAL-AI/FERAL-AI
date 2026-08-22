@@ -1,7 +1,7 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.19
 FROM ${BUILD_FROM}
 
-ARG FERAL_VERSION=2026.8.14
+ARG FERAL_VERSION=2026.8.22
 
 RUN apk add --no-cache python3 py3-pip py3-wheel
 

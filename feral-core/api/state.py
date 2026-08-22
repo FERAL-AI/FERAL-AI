@@ -2057,6 +2057,12 @@ class BrainState:
                 # them against the biometric namespace and notifies; it does
                 # not dispatch the declared action.
                 skill_registry=self.skill_registry,
+                # So the health triggers can ask "is this person under
+                # load" rather than "is this number above 100". The
+                # SomaticEngine is constructed earlier in boot than this.
+                # Without it the triggers fall back to their raw
+                # thresholds and behave exactly as they did before.
+                somatic_engine=self.somatic_engine,
             )
 
             async def _proactive_delivery(msg):

@@ -70,6 +70,26 @@ class TranscriptOutcome:
     degraded: list[str] = field(default_factory=list)
     injection_flags: list[str] = field(default_factory=list)
 
+    physiological_note: str = ""
+    """What the body did, in one sentence, or "".
+
+    Deliberately separate from ``summary`` rather than folded into it.
+    A client must be able to render or suppress the physiological claim
+    on its own, and a reader must be able to tell which part of the
+    record is what people said and which part is what a heart rate did.
+
+    Never describes an emotional state, and never derives from a
+    movement-confounded moment. See ``sanitise_physiological_note``.
+    """
+
+    moments_considered: int = 0
+    """How many moments survived the confound and confidence filters.
+
+    0 with a non-empty ``physiological_note`` is impossible by
+    construction; it is reported so a client can say "no physiological
+    signal" rather than showing an empty field of unknown meaning.
+    """
+
 
 def chunk_transcript(text: str, chunk_chars: int = CHUNK_CHARS) -> list[str]:
     """Split on sentence boundaries, packing up to ``chunk_chars``.
@@ -148,10 +168,175 @@ _REDUCE_PROMPT = (
     '  "summary": "3-5 sentences naming every person and what was discussed",\n'
     '  "people": ["names spoken in the conversation"],\n'
     '  "topics": ["short topic labels"],\n'
-    '  "commitments": [{"text": "what the user promised", "due_iso": "YYYY-MM-DD or null"}]\n'
+    '  "commitments": [{"text": "what the user promised", "due_iso": "YYYY-MM-DD or null"}],\n'
+    '  "physiological_note": "one sentence, or empty string. See the rules."\n'
     "}\n\n"
     "Output ONLY valid JSON. No prose. No markdown.\n\n"
 )
+
+# Appended to the reduce prompt only when the phone sent moments. Kept
+# separate so a transcript without physiology is summarized by the exact
+# prompt it was summarized by before, rather than one carrying rules
+# about data that is not there.
+_PHYSIOLOGY_RULES = (
+    "\n\nPHYSIOLOGICAL SIGNAL\n"
+    "A wearable recorded the speaker's heart rate during this "
+    "conversation. Points where it deviated from their baseline are "
+    "listed below. Use them for `physiological_note` ONLY.\n\n"
+    "RULES, IN ORDER OF IMPORTANCE:\n"
+    "1. A moment marked CONFOUNDED means MOVEMENT explains the rise: "
+    "they stood up, walked, took stairs. You must NEVER describe a "
+    "confounded moment as an emotional or stress response, and never "
+    "connect it to what was being discussed. If every moment is "
+    "confounded, return an empty `physiological_note`. Inventing a "
+    "feeling from a flight of stairs is the worst thing you can do "
+    "here.\n"
+    "2. Describe only what was measured. \"His heart rate rose 14 bpm "
+    "above baseline while the investor update was discussed\" is a "
+    "fact. \"He was anxious about the investors\" is a diagnosis, and "
+    "you are not permitted to make one. No emotion words: not anxious, "
+    "stressed, nervous, upset, afraid, excited.\n"
+    "3. Anchor to the conversation using the QUOTE or TIME given with "
+    "each moment. The segment numbers below are the RECORDING DEVICE'S "
+    "numbering and do NOT correspond to the [segment N] labels above. "
+    "Never match them to each other. A moment with no quote and no time "
+    "is not anchored to anything; mention it only as something that "
+    "happened during the conversation, with no claim about when.\n"
+    "4. Say nothing about health, diagnosis or medical significance.\n"
+    "5. `physiological_note` is at most one sentence, and an empty "
+    "string is the right answer whenever the signal is weak, entirely "
+    "confounded, or you cannot anchor it honestly.\n\n"
+)
+
+
+#: Words that assert an inner state. A physiological note may report
+#: what the body did; it may not say what the person felt, and it may
+#: never do so on the strength of a movement artefact. Checked after the
+#: model returns, because a prompt rule is a request and this is a
+#: guarantee.
+_EMOTION_WORDS = frozenset({
+    "anxious", "anxiety", "stressed", "stress", "stressful", "nervous",
+    "nerves", "upset", "afraid", "fear", "fearful", "scared", "panic",
+    "panicked", "worried", "worry", "worrying", "tense", "agitated",
+    "distressed", "uneasy", "excited", "excitement", "angry", "anger",
+    "frustrated", "frustration", "emotional", "emotionally", "triggered",
+    "defensive", "uncomfortable", "alarmed", "dread", "rattled",
+})
+
+# Below this the phone is not confident it saw a real reaction, and a
+# summary should not narrate a maybe.
+_MOMENT_MIN_SCORE = 0.5
+
+
+def usable_moments(moments: Any) -> list[dict]:
+    """The moments a summary is allowed to reason about.
+
+    Drops confounded moments outright rather than passing them to the
+    model with a warning attached. A rule in a prompt is a request; not
+    sending the data is a guarantee, and the guarantee is the one worth
+    having when the failure mode is telling somebody they were anxious
+    about their investors because they climbed the stairs.
+
+    Also drops low-confidence moments: the phone's own score is the only
+    evidence that a deviation was a reaction at all.
+    """
+    if not isinstance(moments, list):
+        return []
+    out: list[dict] = []
+    for item in moments:
+        if not isinstance(item, dict):
+            continue
+        if item.get("confounded"):
+            continue
+        try:
+            score = float(item.get("score") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if score < _MOMENT_MIN_SCORE:
+            continue
+        try:
+            delta = float(item.get("delta_bpm") or 0.0)
+        except (TypeError, ValueError):
+            delta = 0.0
+        if delta == 0:
+            continue
+        out.append(item)
+    return out
+
+
+def render_moments(
+    moments: list[dict],
+    *,
+    baseline_hr: Optional[float] = None,
+    respiratory_bpm: Optional[float] = None,
+) -> str:
+    """Format moments for the reduce prompt, anchored honestly.
+
+    The anchor priority is quote, then time, then nothing. It is never
+    the segment index: that indexes the PHONE's segmentation, while the
+    prompt above labels the brain's 6000-character map chunks
+    ``[segment N]``. Handing the model both numberings and letting it
+    match them would attach physiology to the wrong part of the
+    conversation while looking precise, which is worse than saying "at
+    some point during this conversation".
+    """
+    if not moments:
+        return ""
+    lines = []
+    if baseline_hr:
+        lines.append(f"Baseline heart rate: {float(baseline_hr):.0f} bpm.")
+    if respiratory_bpm:
+        lines.append(f"Respiration: {float(respiratory_bpm):.0f} breaths/min.")
+    for item in moments:
+        delta = float(item.get("delta_bpm") or 0.0)
+        score = float(item.get("score") or 0.0)
+        direction = "above" if delta > 0 else "below"
+        quote = str(item.get("quote") or "").strip()
+        offset = item.get("t_offset_s")
+        if quote:
+            where = f'while these words were spoken: "{quote[:300]}"'
+        elif isinstance(offset, (int, float)):
+            where = f"{int(offset)}s into the conversation"
+        else:
+            where = "at an unanchored point in the conversation"
+        lines.append(
+            f"- {abs(delta):.0f} bpm {direction} baseline, {where} "
+            f"(confidence {score:.2f})"
+        )
+    return "\n".join(lines)
+
+
+def sanitise_physiological_note(note: Any, had_usable_moments: bool) -> str:
+    """Enforce the confound and diagnosis rules on what the model wrote.
+
+    The prompt already forbids all of this. This exists because the
+    prompt cannot guarantee it, and the thing being guaranteed is that
+    the system never tells someone what they felt on the strength of a
+    heart rate. Dropping a good sentence occasionally is the correct
+    trade against emitting a bad one once.
+
+    Returns "" rather than an edited sentence. A note with the emotion
+    word removed still carries the causal claim that made it wrong.
+    """
+    text = str(note or "").strip()
+    if not text:
+        return ""
+    if not had_usable_moments:
+        # Nothing survivable was sent, so anything here was invented.
+        logger.warning(
+            "ambient: dropping physiological_note produced with no usable "
+            "moments: %r", text[:200],
+        )
+        return ""
+    words = set(re.findall(r"[a-z]+", text.lower()))
+    offending = words & _EMOTION_WORDS
+    if offending:
+        logger.warning(
+            "ambient: dropping physiological_note asserting an inner state "
+            "(%s): %r", ", ".join(sorted(offending)), text[:200],
+        )
+        return ""
+    return text[:300]
 
 
 async def summarize_transcript(
@@ -161,6 +346,9 @@ async def summarize_transcript(
     started_at: Optional[float] = None,
     speakers: Optional[list[str]] = None,
     source: str = "ambient_transcript",
+    moments: Optional[list[dict]] = None,
+    baseline_hr: Optional[float] = None,
+    respiratory_bpm: Optional[float] = None,
 ) -> TranscriptOutcome:
     """Map every chunk, reduce once to JSON, degrade rather than fail.
 
@@ -219,9 +407,28 @@ async def summarize_transcript(
         joined = "\n\n".join(f"[segment {i + 1}] {p}" for i, p in enumerate(partials))
 
     # ── reduce ──
+    #
+    # Physiology is appended only when the phone actually sent usable
+    # moments, so a transcript without it is summarized by the identical
+    # prompt it was summarized by before this feature existed.
+    kept_moments = usable_moments(moments)
+    dropped = len(moments or []) - len(kept_moments)
+    if dropped > 0:
+        logger.info(
+            "ambient: %d of %d moments not used (confounded or below "
+            "confidence)", dropped, len(moments or []),
+        )
+    reduce_prompt = _REDUCE_PROMPT
+    if kept_moments:
+        reduce_prompt = reduce_prompt + _PHYSIOLOGY_RULES + render_moments(
+            kept_moments,
+            baseline_hr=baseline_hr,
+            respiratory_bpm=respiratory_bpm,
+        ) + "\n\n"
+
     try:
         response = await llm.chat(
-            messages=[{"role": "user", "content": _REDUCE_PROMPT + joined}],
+            messages=[{"role": "user", "content": reduce_prompt + joined}],
             temperature=0.2,
             max_tokens=1200,
             call_site="compaction",
@@ -254,6 +461,13 @@ async def summarize_transcript(
         commitments=_commitment_list(parsed.get("commitments")),
         degraded=degraded,
         injection_flags=flags,
+        # Checked here, after the model, not only asked for in the
+        # prompt. The prompt states the confound and diagnosis rules;
+        # this is what makes them hold when the model ignores them.
+        physiological_note=sanitise_physiological_note(
+            parsed.get("physiological_note"), bool(kept_moments),
+        ),
+        moments_considered=len(kept_moments),
     )
 
 

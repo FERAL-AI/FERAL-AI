@@ -5,7 +5,7 @@
 
 import { z } from "zod";
 
-export const HUP_VERSION = "1.3.0";
+export const HUP_VERSION = "1.4.0";
 
 // Per-frame decoded-size caps from HUP_SPEC.md §5.4.1 / §5.4.2.
 export const AUDIO_FRAME_MAX_BYTES = 64 * 1024;

@@ -1,6 +1,6 @@
 # Hardware Unification Protocol (HUP) — Public Specification
 
-**Version:** `HUP v1.3.0`
+**Version:** `HUP v1.4.0`
 **Status:** Stable
 **License:** Apache-2.0
 **Canonical schemas:** this file (normative) + Pydantic mirror in
@@ -8,7 +8,7 @@
 `feral-nodes/ts-node-sdk/src/schemas.ts` + Swift mirror in
 `feral-nodes/ios-node-sdk/Sources/FeralNodeSDK/HUPFrame.swift`.
 
-Every surface that participates in HUP MUST advertise `1.3.0` as
+Every surface that participates in HUP MUST advertise `1.4.0` as
 `hup_version` in every outbound envelope. The five surfaces that the
 `feral-core/tests/test_hup_version_unified.py` CI test pins together
 are: this spec, `feral-core/models/protocol.py` (`HUP_VERSION`), the
@@ -46,6 +46,7 @@ If you can terminate TLS and speak JSON over WebSocket, you can speak HUP.
 
 | Version | Status | Additions |
 |---|---|---|
+| `v1.4.0` | Stable | Somatic observability and physiology alongside speech. `somatic_state` (brain → phone, §5.9) reports the behavioural policy the agent is applying and the body state it derived it from; the same object appears as the optional `somatic` field on `chat_response`. `device_event` gains `hrv` (RMSSD in milliseconds, range-validated), `activity`, and documented `skin_temperature` / `steps` conventions (§5.4). `ambient_transcript` gains optional `moments`, `baseline_hr` and `respiratory_bpm`; `ambient_digest` gains `physiological_note` and `moments_considered` (§5.9). All additive: a v1.3.0 daemon that sends none of it is unaffected. |
 | `v1.3.0` | Stable | Phone-as-peer envelopes (§5.9): `chat_request`, `chat_response`, `voice_session_start`, `voice_interrupt`, `genui_push`, `genui_event`, `peripheral_bridge_register`, `backchannel_request`, `ambient_transcript` + `ambient_transcript_ack`, and the digest return leg `ambient_digest_request` (phone → brain) + `ambient_digest` (brain → phone). Strict Pydantic-v2 schemas: literal-typed `chat_request.reply_mode` + `chat_request.channel`, required `session_id` on `voice_session_start`, required `stream_id` + `channels` on `audio_chunk`. Smart-glasses vision streaming via `glasses_frame` (§5.4.3) + per-device circular buffer in `feral-core/perception/glasses_buffer.py`. Hardware peripheral memory via `device_announce` (§5.4.4) routed through `feral-core/hardware/mesh.py` into the knowledge graph. |
 | `v1.2.0` | Stable | Canonical `node_ack`, `node_heartbeat`, `hup_action_request`, `hup_action_response`, and `node_bye` handling (§5.2-§5.8). |
 
@@ -364,14 +365,40 @@ Conventions for common events:
 | `event_type`       | `data` shape                                                           |
 |--------------------|------------------------------------------------------------------------|
 | `heart_rate`       | `{"bpm": int, "confidence": float?}`                                   |
+| `hrv`              | `{"rmssd_ms": float}` (RMSSD in MILLISECONDS, see below)              |
 | `spo2`             | `{"current": int, "high": int?, "low": int?}`                          |
 | `temperature`      | `{"celsius": float}`                                                   |
+| `skin_temperature` | `{"celsius": float}`                                                   |
+| `steps`            | `{"count": int}`                                                       |
+| `activity`         | `{"state": "sedentary"\|"walking"\|"running"}` or `{"activity_level": 0.0-1.0}` |
 | `accelerometer`    | `{"x": float, "y": float, "z": float}`                                 |
 | `button_press`     | `{"button": str, "pressed": bool, "count": int?}`                      |
 | `camera_frame`     | `{"encoding": "jpeg", "resolution": [w,h], "data_b64": str (≤512KB)}`  |
 | `microphone_chunk` | `{"encoding": "pcm16", "sample_rate": int, "data_b64": str}`           |
 | `audio_frame`      | v1.1 media frame — see §5.4.1                                           |
 | `video_frame`      | v1.1 media frame — see §5.4.2                                           |
+
+**`hrv` MUST be RMSSD in milliseconds.** Not a vendor "HRV index", not
+a 0-10 score, not microseconds. The brain feeds it into
+`SomaticEngine._recompute_cognitive_load` as `1.0 - hrv_ms / 100.0` at
+weight 0.3, the largest single term, so a reading on the wrong scale
+does not merely degrade the behavioural policy, it inverts it: an index
+of 3 reads as 0.97 load and puts the agent into a permanently calm,
+suppressed, tool-restricted mode, while the same index at 250 reads as
+zero load and never leaves it.
+
+Readings outside roughly 5-300 ms are therefore REJECTED and logged at
+WARNING, not clamped. Clamping would turn a scale error into a
+confident maximum-stress reading, which the policy would then act on.
+The last plausible value stands. Bounds are
+`perception/somatic.HRV_MIN_MS` / `HRV_MAX_MS`.
+
+**`activity` gates the heart-rate term.** Cognitive load uses heart
+rate only when activity level is below 0.3, which is what stops a walk
+upstairs reading as strain. Nothing in the brain derives activity from
+the accelerometer, so a node that knows what the wearer is doing has to
+say so. A node that never sends `activity` is treated as sedentary and
+its heart rate is read as a resting one.
 
 `camera_frame` and `microphone_chunk` remain valid for v1.0.0 daemons.
 New daemons SHOULD emit `audio_frame` / `video_frame` instead — those
@@ -707,6 +734,69 @@ existing `/v1/node` transport and authentication model. Directionality:
 - `ambient_transcript_ack` (brain → phone)
 - `ambient_digest_request` (phone → brain)
 - `ambient_digest` (brain → phone)
+- `somatic_state` (brain → phone)
+
+`somatic_state` (brain → phone):
+
+The behavioural policy the agent is currently applying, and the body
+state it derived it from. Unsolicited: pushed when a biometric reading
+moves the policy, deduplicated so a continuous heart-rate stream does
+not produce a frame per reading.
+
+This exists because the policy was applied invisibly. The agent already
+shortened its answers, suppressed proactive messages and restricted its
+own tools from the somatic vector, and none of that was observable: a
+shorter reply is indistinguishable from a reply that happened to be
+short. Anything a system changes about itself in response to the user's
+body has to be inspectable, both to prove it is working and to let the
+user disagree with it.
+
+```json
+{
+  "hup_version": "1.3.0",
+  "type": "somatic_state",
+  "ts": 1787412345.101,
+  "payload": {
+    "session_id": "phone-abc",
+    "cognitive_load": 0.7669,
+    "stress_level": 0.83,
+    "fatigue_level": 0.0,
+    "heart_rate": 121.0,
+    "hrv_ms": 8.0,
+    "spo2_pct": 98.0,
+    "activity_level": 0.0,
+    "tone": "concise",
+    "proactive_level": "reduced",
+    "suppress_non_urgent": true,
+    "max_response_tokens": 150,
+    "tool_restrictions": ["financial", "delete", "send_email"],
+    "updated_at": 1787412345.09,
+    "age_s": 0.011,
+    "stale": false,
+    "has_biometrics": true,
+    "reason": "biometrics"
+  }
+}
+```
+
+Two halves, deliberately in one frame. `cognitive_load` and the vitals
+are the INPUT; `tone`, `suppress_non_urgent`, `max_response_tokens` and
+`tool_restrictions` are the OUTPUT the policy derived from it. Shipping
+only the second half gives a UI no way to explain itself, and only the
+first gives it nothing to show.
+
+`stale` is not decoration. A somatic vector persists in memory after
+the wearable disconnects, so a policy can go on being applied from a
+reading taken hours ago. **A client MUST NOT present a stale frame as
+the wearer's current state.** `age_s` is the age of the reading;
+`stale` is true past 120 s, the same freshness window the perception
+layer and the proactive health triggers use.
+
+The same object appears as the optional `somatic` field on
+`chat_response`, where it reports the policy applied to THAT turn.
+Absent (not an empty object) when no biometric reading has ever landed:
+"the agent is not adapting" and "the agent is adapting to a neutral
+state" are different claims.
 
 `ambient_transcript` (phone → brain):
 
@@ -738,10 +828,64 @@ what makes a resend after a lost ack cost nothing.
     "ended_at": 1755635400.0,
     "source": "glasses_mic",
     "language": "en-US",
-    "speakers": ["Noah"]
+    "speakers": ["Noah"],
+    "baseline_hr": 58.0,
+    "respiratory_bpm": 14.0,
+    "moments": [
+      {
+        "segment_index": 2,
+        "delta_bpm": 14.0,
+        "score": 0.82,
+        "confounded": false,
+        "quote": "the investor update",
+        "t_offset_s": 412.0
+      },
+      {
+        "segment_index": 5,
+        "delta_bpm": 22.0,
+        "score": 0.91,
+        "confounded": true,
+        "quote": "lets head upstairs"
+      }
+    ]
   }
 }
 ```
+
+**Physiological moments (optional).** `moments`, `baseline_hr` and
+`respiratory_bpm` are all optional; a phone that computes none of them
+sends none of them and the transcript is summarized exactly as before.
+
+Moments are detected ON THE PHONE, which is the only side holding the
+raw heart-rate series aligned to the audio. The brain never computes
+them; it reasons over them, and the result surfaces as
+`ambient_digest.physiological_note`.
+
+`baseline_hr` is required for `delta_bpm` to mean anything: +12 bpm off
+a baseline of 55 is a different event from +12 off 95.
+
+**`confounded` is the most important field in the envelope.** It means
+MOVEMENT explains the rise: the wearer stood up, walked, took stairs. A
+confounded moment is a fact about physics, not about feeling. The brain
+guarantees that such a moment never reaches the summarizing model at
+all, and independently re-checks the sentence the model returns for
+words asserting an inner state, dropping the whole sentence if it finds
+any. Narrating a flight of stairs as an emotional response is the
+difference between a health product and a liability, and a rule stated
+only in a prompt is a request rather than a guarantee.
+
+Moments below a confidence `score` of 0.5 are also dropped: the phone's
+own score is the only evidence a deviation was a reaction at all.
+
+**`segment_index` indexes the PHONE's segmentation, not the brain's.**
+`agents/ambient_transcript.py` chunks the transcript into
+6000-character map segments labelled `[segment N]`; those are a
+different partition of the same conversation and the two numberings do
+NOT correspond. Nothing joins on the bare index. A moment is anchored
+by `quote` if present, then by `t_offset_s`, and a moment carrying
+neither is reported to the model as an unanchored observation with no
+claim about when it happened. **Send `quote` wherever you can**: it is
+the only anchor that survives every chunking decision on either side.
 
 `ambient_transcript_ack` (brain → phone):
 
@@ -839,13 +983,30 @@ a card is opened.
     "degraded": [],
     "episode_id": "ep-...",
     "processed_at": 1755720000.4,
-    "remaining": 3
+    "remaining": 3,
+    "physiological_note": "Heart rate rose 14 bpm above baseline while the investor update was discussed.",
+    "moments_considered": 1
   }
 }
 ```
 
 Every status returns the same key set; only `status` and the populated
 fields differ.
+
+`physiological_note` is what the body did, in at most one sentence, or
+`""`. It is a SEPARATE field rather than a sentence folded into
+`summary` so a client can render or suppress the physiological claim on
+its own, and so a reader can always tell which part of the record is
+what people said and which part is what a heart rate did.
+
+It is guaranteed never to describe an emotional state and never to
+derive from a movement-confounded moment. See the `moments` notes under
+`ambient_transcript` for how that is enforced.
+
+`moments_considered` is how many moments survived the confound and
+confidence filters. It lets a client distinguish "no physiological
+signal was measured" from "signal was measured and said nothing worth
+reporting", which an empty note alone cannot.
 
 `status` values:
 
@@ -1235,6 +1396,54 @@ Deltas from the current `/v1/node` handler are tracked in
 ---
 
 ## Appendix B — Version Changelog
+
+### v1.4.0 (2026-08-22)
+
+- **Added** `somatic_state` (brain → phone, §5.9). The behavioural
+  policy the agent is currently applying, plus the body state it
+  derived it from, pushed when a biometric reading moves the policy and
+  deduplicated on the policy signature. The same object appears as the
+  optional `somatic` field on `chat_response`, reporting the policy
+  applied to that turn.
+
+  The agent already shortened its answers, suppressed proactive
+  messages and restricted its own tools from the somatic vector. None
+  of it was observable, and a shorter reply is indistinguishable from a
+  reply that happened to be short, so the adaptation could be neither
+  demonstrated nor disagreed with.
+
+- **Added** `device_event` types `hrv` and `activity`, and documented
+  the `skin_temperature` and `steps` conventions that the brain already
+  accepted but the spec never listed (§5.4).
+
+  `hrv` MUST be RMSSD in milliseconds. Values outside 5-300 ms are
+  rejected and logged, never clamped: the brain reads HRV as
+  `1.0 - hrv_ms/100.0` at weight 0.3, the largest term in cognitive
+  load, so a vendor index on an undocumented scale inverts the
+  behavioural policy rather than degrading it.
+
+  `activity` gates the heart-rate term. Nothing in the brain derives
+  activity from the accelerometer, so a node that never sends it is
+  read as sedentary and its heart rate is read as a resting one.
+
+- **Added** optional `moments`, `baseline_hr` and `respiratory_bpm` on
+  `ambient_transcript`, and `physiological_note` + `moments_considered`
+  on `ambient_digest` (§5.9). Moments are detected on the phone, which
+  is the only side holding the heart-rate series aligned to the audio.
+
+  A moment marked `confounded` means movement explains the rise and is
+  never described as an emotional response. Enforced twice: confounded
+  moments never reach the summarizing model, and the sentence it
+  returns is independently re-checked for words asserting an inner
+  state. `segment_index` indexes the PHONE's segmentation and is never
+  joined to the brain's `[segment N]` map chunks; anchoring is by
+  `quote`, then `t_offset_s`, then explicitly unanchored.
+
+- **Backward-compat:** strictly additive, per the §1 MINOR rule. Every
+  new field is optional and every new `device_event` type is opt-in. A
+  v1.3.0 daemon that sends none of them behaves identically, and
+  `somatic_state` is a new type that §1 already requires clients to
+  ignore if unknown.
 
 ### v1.3.1 (2026-05-19)
 
