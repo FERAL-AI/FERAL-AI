@@ -6,6 +6,46 @@ All notable changes to FERAL are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A routine that could never succeed retried every minute forever, and
+  said so every day.** Refusing to fire a `JobType.TRIGGERED` routine
+  (`api/server.py`, added when the 4,766-run unconditional-firing
+  incident was fixed) stopped the ACTION but not the POLL. The row stayed
+  `enabled = 1` at `cron_expr = "every 1m"`, so `CronService._loop` kept
+  finding it due, `execute_routine_job` kept refusing it, and every one
+  of those refusals wrote a non-success into `routine_runs`. The
+  stalled-routine alert then reported it as IMPORTANT on its own
+  cooldown, forever:
+
+      '[auto] smart_home_hue: trigger on sleep_detected' has run 54 times
+      without succeeding once. It is still enabled and still firing.
+
+  The refusal is permanent for these rows by construction, since no
+  future tick can make an unevaluated condition evaluated, so every one
+  of those retries was guaranteed to skip before it ran. Such a routine
+  is now DISABLED at the first refusal, via the new
+  `CronService.disable_job(job_id, reason)`, and the reason is stored on
+  the row (new `scheduled_jobs.disabled_reason` column, migrated onto
+  existing databases) rather than only logged. `/api/routines`, the
+  `feral_routines` skill and the Routines pane all carry it, so the pane
+  shows an auto-disabled routine as "turned off" with its explanation
+  instead of "paused", which is a thing the user did not do.
+  `resume_job` clears the reason, and re-disables with a fresh one if the
+  cause is still there.
+
+  The user is told once, not repeatedly: `_check_auto_disabled_routines`
+  on the proactive tick announces the disabling at IMPORTANT and marks it
+  with a `disabled_notified` column, so the notice survives a restart
+  without becoming the next thing that nags. The stalled-routine alert
+  only ever looked at `enabled = 1` routines, so the daily nag ends the
+  moment the routine stops costing a run.
+
+  The condition itself is unaffected: `agents/trigger_conditions.py`
+  still evaluates it on the proactive loop and still only notifies.
+  `mark_completed`'s existing auto-disable for an unparseable cron
+  expression now records its reason on the row too, for the same reason.
+
 ## [2026.8.13] - 2026-08-21 - surfaces that painted correctly and did nothing
 
 The previous release was about capabilities that reported success while

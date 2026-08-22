@@ -98,6 +98,14 @@ class ScheduledJob:
     recurring: bool = True
     priority: int = 1
     tz_name: str = "UTC"
+    # Why the RUNTIME turned this routine off. Empty when it is still on, and
+    # empty when the user paused it by hand. A routine that can never succeed
+    # has to stop costing a run every minute, and the operator has to be able
+    # to find out why it stopped without reading a log file.
+    disabled_reason: str = ""
+    # 1 once the operator has been told about disabled_reason, so that notice
+    # fires once instead of becoming the next thing that nags every tick.
+    disabled_notified: int = 0
 
 
 def _default_db_path() -> str:
@@ -404,6 +412,8 @@ class CronService:
                 ("recurring", "INTEGER NOT NULL DEFAULT 1"),
                 ("priority", "INTEGER NOT NULL DEFAULT 1"),
                 ("tz_name", "TEXT NOT NULL DEFAULT 'UTC'"),
+                ("disabled_reason", "TEXT NOT NULL DEFAULT ''"),
+                ("disabled_notified", "INTEGER NOT NULL DEFAULT 0"),
             ]:
                 try:
                     conn.execute(f"ALTER TABLE scheduled_jobs ADD COLUMN {col} {default}")
@@ -451,6 +461,14 @@ class CronService:
             tz_name = row["tz_name"] or "UTC"
         except (IndexError, KeyError):
             tz_name = "UTC"
+        try:
+            disabled_reason = row["disabled_reason"] or ""
+        except (IndexError, KeyError):
+            disabled_reason = ""
+        try:
+            disabled_notified = int(row["disabled_notified"] or 0)
+        except (IndexError, KeyError, TypeError, ValueError):
+            disabled_notified = 0
         return ScheduledJob(
             id=row["id"],
             job_type=JobType(row["job_type"]),
@@ -466,6 +484,8 @@ class CronService:
             recurring=recurring,
             priority=priority,
             tz_name=tz_name,
+            disabled_reason=disabled_reason,
+            disabled_notified=disabled_notified,
         )
 
     def create_job(
@@ -589,10 +609,18 @@ class CronService:
                     conn.execute(
                         """
                         UPDATE scheduled_jobs
-                        SET last_run = ?, run_count = run_count + 1, enabled = 0
+                        SET last_run = ?, run_count = run_count + 1, enabled = 0,
+                            disabled_reason = ?, disabled_notified = 0
                         WHERE id = ?
                         """,
-                        (now, job_id),
+                        (
+                            now,
+                            f"Schedule {cron!r} matches no supported form, so "
+                            f"the next run time cannot be computed. Edit the "
+                            f"routine to use {_SUPPORTED_CRON_FORMS}, then "
+                            f"resume it.",
+                            job_id,
+                        ),
                     )
                     conn.commit()
                     logger.critical(
@@ -623,6 +651,53 @@ class CronService:
                 )
                 logger.info(f"Non-recurring job {job_id} completed and disabled")
             conn.commit()
+
+    def disable_job(self, job_id: int, reason: str) -> bool:
+        """Turn a routine off because the runtime decided it cannot work.
+
+        Distinct from ``pause_job``, which is the user's own decision and
+        records no reason. This is for a routine that CANNOT succeed, ever,
+        on any future tick: leaving it enabled buys nothing and costs a run
+        every poll interval, forever. The install this was written for had
+        two of those firing on a 1m poll since 2026-06-24.
+
+        The reason is stored on the row, not only logged, so ``/api/routines``
+        and the Routines page can say why the routine is off and the operator
+        can decide whether to fix it, delete it, or resume it. ``resume_job``
+        clears the reason, since a resumed routine is the user overruling this
+        and the stale explanation would then be a lie.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE scheduled_jobs SET enabled = 0, disabled_reason = ?, "
+                "disabled_notified = 0 WHERE id = ?",
+                (reason, job_id),
+            )
+            self._conn.commit()
+            if cur.rowcount > 0:
+                # WARNING, not debug. A routine the user set up has just been
+                # switched off by the machine; that is exactly the event the
+                # log is for.
+                logger.warning(
+                    "feral.scheduler.auto_disabled: routine %d disabled: %s",
+                    job_id, reason,
+                )
+            return cur.rowcount > 0
+
+    def mark_disabled_notified(self, job_ids: list[int]) -> None:
+        """Record that the operator has been told about these disablings.
+
+        Persisted rather than kept in memory so the notice does not repeat on
+        every brain restart, which is how a one-shot becomes a nag.
+        """
+        if not job_ids:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE scheduled_jobs SET disabled_notified = 1 WHERE id = ?",
+                [(jid,) for jid in job_ids],
+            )
+            self._conn.commit()
 
     def pause_job(self, job_id: int) -> bool:
         with self._lock:
@@ -656,8 +731,14 @@ class CronService:
                     job_id, row["cron_expr"], _SUPPORTED_CRON_FORMS,
                 )
                 return False
+            # Clear disabled_reason: the user has overruled whatever the
+            # runtime decided, and a reason left behind on an enabled row
+            # would show in the UI as an explanation for a state that no
+            # longer exists. If the cause is still there, the next fire
+            # re-disables the routine and writes the reason again.
             self._conn.execute(
-                "UPDATE scheduled_jobs SET enabled = 1, next_run = ? WHERE id = ?",
+                "UPDATE scheduled_jobs SET enabled = 1, next_run = ?, "
+                "disabled_reason = '', disabled_notified = 0 WHERE id = ?",
                 (nxt, job_id),
             )
             self._conn.commit()

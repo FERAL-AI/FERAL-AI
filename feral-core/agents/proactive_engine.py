@@ -537,6 +537,9 @@ class ProactiveEngine:
         # --- Routines that have stopped working ---
         self._check_stalled_routines(messages)
 
+        # --- Routines the runtime has switched off, reported once each ---
+        self._check_auto_disabled_routines(messages)
+
         # --- LLM-based evaluation (additive, runs last) ---
         await self._evaluate_with_llm(frames, messages)
 
@@ -814,6 +817,80 @@ class ProactiveEngine:
             voice_text=f"{name} has failed {runs} times in a row.",
             action="Show routines",
         ))
+
+    def _check_auto_disabled_routines(self, messages: list) -> None:
+        """Say ONCE that the runtime turned a routine off, and why.
+
+        The stalled-routine alert above only sees ``enabled = 1`` routines, so
+        the moment a routine is auto-disabled it drops out of that query and
+        the user hears nothing more about it. That is the right behaviour for
+        the nag (the routine has stopped costing a run a minute, so there is
+        nothing left to escalate every day) and the wrong behaviour for the
+        event: a routine the user set up has just been switched off by the
+        machine, and silence there is the same defect in a new place.
+
+        So this fires exactly once per routine. ``disabled_notified`` is a
+        column, not an in-memory set, because an in-memory flag would reset on
+        every brain restart and turn the one-shot back into a nag.
+        """
+        if not self._can_fire("routine_auto_disabled"):
+            return
+
+        svc = getattr(self, "_cron_service", None)
+        conn = getattr(svc, "_conn", None)
+        if conn is None:
+            return
+
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, description, disabled_reason
+                  FROM scheduled_jobs
+                 WHERE enabled = 0
+                   AND disabled_reason != ''
+                   AND disabled_notified = 0
+                 ORDER BY id ASC
+                """
+            ).fetchall()
+        except Exception as exc:
+            # Not debug, for the same reason as the stalled check: a watcher
+            # that cannot watch is the silence this exists to end.
+            logger.warning("Auto-disabled routine check failed: %s", exc)
+            return
+
+        if not rows:
+            return
+
+        def _col(row, key, idx):
+            return row[key] if hasattr(row, "keys") else row[idx]
+
+        first = rows[0]
+        job_id = _col(first, "id", 0)
+        name = _col(first, "description", 1) or f"Routine {job_id}"
+        why = _col(first, "disabled_reason", 2) or ""
+
+        others = ""
+        if len(rows) > 1:
+            others = f" ({len(rows) - 1} other routine(s) were turned off too.)"
+
+        messages.append(ProactiveMessage(
+            trigger_id="routine_auto_disabled",
+            priority=Priority.IMPORTANT,
+            title="A routine was turned off",
+            body=f"'{name}' has been disabled. {why}{others}",
+            voice_text=f"I turned off the routine {name}, because it could never succeed.",
+            action="Show routines",
+        ))
+
+        # Mark every row reported, not just the one named: the others are
+        # accounted for by the "(N other routine(s))" line, and leaving them
+        # unnotified would make this fire again on the next tick for the same
+        # batch. _can_fire was checked above and nothing else claims this
+        # trigger id, so the delivery loop will send this message.
+        try:
+            svc.mark_disabled_notified([_col(r, "id", 0) for r in rows])
+        except Exception as exc:
+            logger.warning("Could not mark auto-disabled routines notified: %s", exc)
 
     # Namespace for manifest-declared trigger ids, so they can never collide
     # with the hardcoded trigger ids above (a skill is free to call its

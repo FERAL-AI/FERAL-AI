@@ -1069,6 +1069,20 @@ def execute_routine_job(job):
         # no soak time to a send is the incident above. Any future wiring of the
         # declared action must go through the surface="cron" pre-flight below,
         # which auto_confirm may not waive.
+        #
+        # The refusal alone was not enough. It stopped the action but not the
+        # POLL: the row stayed enabled at "every 1m", so the scheduler re-armed
+        # it every sixty seconds and every one of those runs recorded a
+        # non-success. That is a routine that can never succeed retrying
+        # forever, and it surfaced to the user as the routine_stalled alert
+        # ("has run 54 times without succeeding once. It is still enabled and
+        # still firing."), which re-fired on its own cooldown for as long as
+        # the routine existed. The refusal is permanent for these rows, so
+        # retrying it is pointless by construction: disable the routine, with
+        # the reason on the row where /api/routines and the Routines page can
+        # show it, and the loop and the nag both end at the first fire after
+        # this ships. The routine is still there, still visible, and the user
+        # can delete it or resume it; nothing is destroyed.
         trigger_condition = payload.get("condition")
         # JobType subclasses str, but str(JobType.TRIGGERED) is
         # "JobType.TRIGGERED", not "triggered". Compare the value, and unwrap
@@ -1087,6 +1101,18 @@ def execute_routine_job(job):
                 "triggered routines are not fired: no evaluator for the "
                 "condition, so firing on the 1m poll would run the action "
                 "unconditionally",
+            )
+            _cond = f" ({trigger_condition})" if trigger_condition else ""
+            state.cron_service.disable_job(
+                job.id,
+                "This routine fires an action on a fixed poll, but its "
+                f"condition{_cond} is not evaluated at fire time, so running "
+                "it would run the action whether or not the condition holds. "
+                "It has been turned off instead of retried every minute. "
+                "FERAL still watches this condition on the proactive loop and "
+                "will tell you when it holds. Delete the routine, or resume it "
+                "if you want the action to run on the schedule regardless of "
+                "the condition.",
             )
             return
 

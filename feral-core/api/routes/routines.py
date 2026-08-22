@@ -22,6 +22,11 @@ def _job_to_dict(job) -> dict:
         "next_run": job.next_run,
         "enabled": job.enabled,
         "run_count": job.run_count,
+        # Why the runtime turned this routine off, empty when the user did it
+        # or when it is still on. Without this the UI can only say "disabled",
+        # and the user has to read the server log to find out why a routine
+        # they set up stopped.
+        "disabled_reason": getattr(job, "disabled_reason", ""),
     }
 
 

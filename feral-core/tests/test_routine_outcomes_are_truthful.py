@@ -25,6 +25,12 @@ rather than by reading:
 The equality in that guard is itself pinned below. JobType subclasses str,
 but ``str(JobType.TRIGGERED)`` is "JobType.TRIGGERED", so the obvious
 string test silently never matches and the guard is a no-op.
+
+The refusal stopped the action but not the poll: the row stayed enabled at
+"every 1m" and skipped forever, which the user saw as a routine that had
+"run 54 times without succeeding once". That half is fixed and covered in
+tests/test_unfireable_routine_is_disabled.py; the tests here stay as they
+are, because "does not dispatch the action" has to hold on its own.
 """
 
 from __future__ import annotations
