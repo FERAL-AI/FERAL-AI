@@ -126,8 +126,42 @@ const BASE_STYLES = `
   img { max-width: 100%; }
 `;
 
+/**
+ * Directives that only work as an HTTP header, stripped before the
+ * policy is delivered as a `<meta>`.
+ *
+ * `frame-ancestors` is ignored by every browser when it arrives in a
+ * meta tag; the CSP spec says so and Chromium says so out loud, once
+ * per surface: "The Content Security Policy directive 'frame-ancestors'
+ * is ignored when delivered via a <meta> element." Found by opening an
+ * app surface against a live brain and reading the console.
+ *
+ * So `AppSurface.csp.js:14`'s promise, "frame-ancestors 'self' only the
+ * FERAL host page may embed", was never in force here. Removing it
+ * changes no behaviour, because the directive had none: it removes a
+ * console error and a claim the code could not keep. The embedding
+ * control that IS in force is the iframe's own
+ * `sandbox="allow-scripts"` (AppSurface.jsx:243), which withholds
+ * allow-same-origin and puts the surface in an opaque origin.
+ *
+ * `buildCspHeader` keeps emitting the directive, because it mirrors
+ * `feral-core/genui/permissions_policy.py::build_csp_header`, and on
+ * that path the policy really is an HTTP header where frame-ancestors
+ * applies. The two deliveries want different policies; only this one is
+ * a meta tag.
+ */
+const HEADER_ONLY_DIRECTIVES = ['frame-ancestors'];
+
+export function cspForMetaTag(manifest) {
+  return buildCspHeader(manifest)
+    .split(';')
+    .map((d) => d.trim())
+    .filter((d) => d && !HEADER_ONLY_DIRECTIVES.some((h) => d.startsWith(h)))
+    .join('; ');
+}
+
 export function buildSrcDoc({ tree, manifest, signedWithKeyId = 'unsigned' }) {
-  const csp = buildCspHeader(manifest);
+  const csp = cspForMetaTag(manifest);
   const html = renderTreeToHtml(tree);
   return [
     '<!DOCTYPE html>',

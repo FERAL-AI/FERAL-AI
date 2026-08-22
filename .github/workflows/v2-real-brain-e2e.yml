@@ -1,0 +1,117 @@
+name: Client v2 real-brain e2e
+
+# ──────────────────────────────────────────────────────────────────
+# The stubbed lane (`client-v2-e2e` in ci.yml) runs every spec under
+# feral-client-v2/e2e against `vite preview` with `**/api/**` stubbed.
+# That server answers index.html for any path at status 200 and hosts
+# no API, so a route the brain does not serve, a JSON fetch answered
+# with HTML, a `/api/*` path nobody registered and a control that
+# reports success while its request failed are all structurally
+# invisible there.
+#
+# This workflow closes that gap: it boots a real brain, serves the real
+# bundle from it, and runs the two `real_brain_*` specs against it.
+#
+# Opt-in, and deliberately NOT part of the required PR gate:
+#   - `workflow_dispatch` to run it by hand on any ref,
+#   - the `real-brain-e2e` label on a PR,
+#   - nightly, so a regression is found within a day rather than
+#     whenever someone next remembers this exists.
+#
+# It is opt-in because it needs a brain and because the control walk
+# MUTATES the brain it points at (it clicks by blocklist, so anything
+# not named destructive gets clicked). FERAL_HOME is a throwaway
+# directory created inside the runner for exactly that reason.
+# ──────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled, synchronize]
+  schedule:
+    # 04:20 UTC daily.
+    - cron: '20 4 * * *'
+
+concurrency:
+  group: real-brain-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-brain-e2e:
+    name: Client v2 playwright against a live brain
+    if: >-
+      github.event_name != 'pull_request'
+      || contains(github.event.pull_request.labels.*.name, 'real-brain-e2e')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: feral-client-v2/package-lock.json
+
+      - name: Install the brain
+        working-directory: feral-core
+        run: pip install --constraint requirements.lock -e ".[all,dev]"
+
+      - name: Install client dependencies
+        working-directory: feral-client-v2
+        run: npm ci
+
+      - name: Install Playwright chromium
+        working-directory: feral-client-v2
+        run: npm run e2e:install
+
+      # The brain serves the bundle from feral-core/webui_v2, so it has
+      # to exist before the brain starts. This is the same script the
+      # release path uses; building only feral-client-v2/dist would
+      # leave the brain serving whatever was committed.
+      - name: Build and bundle the v2 client
+        run: bash scripts/build_webui_v2.sh
+
+      - name: Start the brain
+        env:
+          # Throwaway home. The control walk writes to it.
+          FERAL_HOME: /tmp/feral-e2e-home
+        working-directory: feral-core
+        run: |
+          mkdir -p "$FERAL_HOME"
+          nohup python -m uvicorn api.server:app \
+            --host 127.0.0.1 --port 9461 > /tmp/brain.log 2>&1 &
+          for i in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              http://127.0.0.1:9461/api/setup/status || true)
+            if [ "$code" = "200" ]; then echo "brain up after ${i}s"; break; fi
+            sleep 1
+          done
+          curl -sf -X POST http://127.0.0.1:9461/api/setup/complete \
+            -H 'Content-Type: application/json' \
+            -d '{"settings":{},"credentials":{},"identity":{}}'
+
+      - name: Run the real-brain specs
+        working-directory: feral-client-v2
+        env:
+          FERAL_E2E_REAL_BRAIN: "1"
+          FERAL_E2E_URL: http://127.0.0.1:9461
+        run: npx playwright test real_brain_pages real_brain_controls --reporter=list
+
+      - name: Brain log
+        if: always()
+        run: tail -400 /tmp/brain.log || true
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-brain-playwright-report
+          path: feral-client-v2/playwright-report/
+          if-no-files-found: warn
+          retention-days: 7

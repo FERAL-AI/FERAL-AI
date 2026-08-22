@@ -13,7 +13,8 @@
  * index against the router; this file pins what a person sees.
  *
  * What it asserts:
- *   1. All 23 destinations are reachable THROUGH the palette, and each
+ *   1. Every destination in the index is reachable THROUGH the palette
+ *      (the count is read from navigation.js, not written here), and each
  *      one lights exactly one Dock control on arrival. A blank Dock is
  *      the bug the old hand-written Hub/Dock mirror shipped twice.
  *   2. No shell chrome overlaps the chat composer.
@@ -24,33 +25,22 @@
  *   6. The Ask row lands the typed query in the chat composer.
  */
 import { test, expect, Page } from '@playwright/test';
+import { readDestinations } from './destinations';
 
-/** Every destination the palette indexes, label as rendered. */
-const DESTINATIONS: Array<[string, string]> = [
-  ['/', 'Home'],
-  ['/chat', 'Chat'],
-  ['/canvas', 'Canvas'],
-  ['/flows', 'Flows'],
-  ['/intents', 'Intents'],
-  ['/timeline', 'Timeline'],
-  ['/apps', 'Apps'],
-  ['/apps/publish', 'Publish an app'],
-  ['/marketplace', 'Market'],
-  ['/skills', 'Skills'],
-  ['/forge', 'Forge'],
-  ['/webhooks', 'Webhooks'],
-  ['/memory', 'Memory'],
-  ['/memory/context', 'Memory context'],
-  ['/wiki', 'Wiki'],
-  ['/identity', 'Identity'],
-  ['/devices', 'Devices'],
-  ['/geofences', 'Places'],
-  ['/health', 'Health'],
-  ['/oversight', 'Oversight'],
-  ['/glass-brain', 'Brain'],
-  ['/agents', 'Agents'],
-  ['/settings', 'Settings'],
-];
+/**
+ * Every destination the palette indexes, read out of
+ * `src/shell/navigation.js` at run time.
+ *
+ * This was a hand-written array of 23 pairs, and the index had 28. The
+ * five it never held were `/console` (which is the DEFAULT landing
+ * view), `/jobs`, `/approvals`, `/checkpoints` and `/grants`, so the
+ * three tests below that say "every destination" had never visited the
+ * first screen a user sees. That is the same defect navigation.js's own
+ * header describes: a second list, written by hand, that goes stale
+ * silently because nothing compares it to the first.
+ */
+const DESTINATIONS: Array<[string, string]> = readDestinations()
+  .map((d) => [d.to, d.label] as [string, string]);
 
 /**
  * One permissive stub for every REST call the shell and its pages make.

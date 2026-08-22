@@ -7,7 +7,10 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="theme-color" content="#0B0B0D" />
-    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <!-- An icon that ships. This declared /favicon.ico, which exists in
+         neither public/ nor dist/, so the brain's SPA catch-all answered
+         it with index.html at 200 text/html and the tab showed nothing. -->
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
     <link rel="apple-touch-icon" sizes="192x192" href="/icons/icon-192.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta property="og:title" content="FERAL — Ambient OS (v2)" />

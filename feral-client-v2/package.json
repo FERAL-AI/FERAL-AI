@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "e2e": "playwright test",
+    "e2e:real-brain": "playwright test real_brain_pages real_brain_controls",
     "e2e:install": "playwright install --with-deps chromium"
   },
   "engines": {

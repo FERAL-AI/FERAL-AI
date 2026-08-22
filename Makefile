@@ -1,4 +1,4 @@
-.PHONY: install dev dev-python dev-brain dev-deps dev-verify dev-reset guard-python-version serve client docker docker-down test test-py test-py-ci test-client e2e lint clean clean-uv setup doctor bundle-webui docker-logs help
+.PHONY: install dev dev-python dev-brain dev-deps dev-verify dev-reset guard-python-version serve client docker docker-down test test-py test-py-ci test-client e2e lint clean clean-uv setup doctor bundle-webui docker-logs help e2e-real-brain
 
 # ── Pinned development interpreter ───────────────────────────
 #
@@ -299,6 +299,22 @@ e2e:
 	fi
 	cd feral-client-v2 && npm run e2e
 
+# The other half of the e2e story: `make e2e` runs every spec against
+# `vite preview` with `**/api/**` stubbed, which cannot see a route the
+# brain does not serve, a JSON fetch answered with HTML, a `/api/*` path
+# nobody registered, or a control that reports success while its request
+# failed. This target boots a real brain on a throwaway FERAL_HOME,
+# serves the real bundle from it, walks every destination and clicks
+# every non-destructive control. It MUTATES the brain it points at, so
+# it is a separate target rather than part of `make e2e`.
+e2e-real-brain:
+	@if [ ! -d feral-client-v2/node_modules/@playwright ]; then \
+	    echo "  [error] @playwright/test is not installed in feral-client-v2."; \
+	    echo "          Run:  make dev-deps"; \
+	    exit 1; \
+	fi
+	bash scripts/e2e_real_brain.sh
+
 serve:
 	$(FERAL) serve
 
@@ -455,6 +471,7 @@ help:
 	@echo "    make test-py-ci    same suite in CI's deterministic order"
 	@echo "    make test-client   feral-client-v2 vitest suite only"
 	@echo "    make e2e           playwright browser specs (needs make dev-deps)"
+	@echo "    make e2e-real-brain  the same browser, a live brain, no API stubs"
 	@echo "    make lint          ruff, the exact ruleset CI gates on"
 	@echo ""
 	@echo "  Docker:"

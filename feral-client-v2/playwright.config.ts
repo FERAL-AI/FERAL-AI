@@ -10,13 +10,21 @@
  * `make e2e`, both against this config.
  *
  * SCOPE, stated plainly rather than deferred: chromium only, and `/api/*`
- * is stubbed per-spec. A multi-browser matrix and a real-brain harness are
- * genuinely not covered here. That is a known gap, not a hidden one.
+ * is stubbed per-spec in every file EXCEPT `real_brain_pages.spec.ts` and
+ * `real_brain_controls.spec.ts`. Those two stub nothing and walk every
+ * destination against a live brain; they skip themselves unless
+ * `FERAL_E2E_REAL_BRAIN=1` is set alongside a `FERAL_E2E_URL` pointing at
+ * one, and CI runs them from the opt-in
+ * `.github/workflows/v2-real-brain-e2e.yml` rather than from the required
+ * gate, because they need a brain and the control walk mutates it.
+ * A multi-browser matrix is still not covered here. That is a known gap,
+ * not a hidden one.
  *
  * Behavior:
  *   - Chromium only.
  *   - baseURL reads from FERAL_E2E_URL so devs can point at any
- *     running instance (`npm run dev` or `npm run preview`).
+ *     running instance (`npm run dev`, `npm run preview`, or a brain
+ *     serving the bundled webui_v2).
  *   - When FERAL_E2E_URL is unset, vite preview is started on 5173
  *     against the production-style bundle.
  */
