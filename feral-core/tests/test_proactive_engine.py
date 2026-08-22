@@ -225,6 +225,185 @@ class TestDelivery:
         await engine._deliver(msg)  # should not raise
 
 
+class TestLLMEvaluationIsolation:
+    @pytest.mark.asyncio
+    async def test_slow_model_does_not_delay_rule_delivery(self, engine):
+        import asyncio
+
+        release = asyncio.Event()
+
+        class SlowLLM:
+            async def chat(self, **_kwargs):
+                await release.wait()
+                return "null"
+
+        frame = MagicMock()
+        frame.heart_rate = 120
+        frame.heart_rate_sample_ts = time.time() - 2
+        frame.heart_rate_source = "jw_health_glasses"
+        frame.spo2_pct = 98
+        frame.spo2_sample_ts = time.time() - 2
+        frame.spo2_source = "jw_health_glasses"
+        frame.activity_state = "working"
+        frame.scene_description = ""
+        frame.to_system_context.return_value = "Heart rate: 120"
+        engine._perception._frames = {"s1": frame}
+        engine._perception.get_frame.return_value = frame
+        engine._llm = SlowLLM()
+        engine._first_interaction_today = False
+
+        delivered = []
+
+        async def capture(msg):
+            delivered.append(msg)
+
+        engine.on_message(capture)
+        await engine._evaluate()
+
+        assert any(msg.trigger_id == "hr_elevated" for msg in delivered)
+        assert engine._llm_task is not None
+        assert not engine._llm_task.done()
+
+        release.set()
+        await engine._llm_task
+
+    @pytest.mark.asyncio
+    async def test_model_is_not_called_without_context(self, engine):
+        engine._llm = AsyncMock()
+        engine._perception._frames = {}
+        engine._first_interaction_today = False
+        engine._session_start = time.time()
+
+        await engine._evaluate()
+
+        assert engine._llm_task is None
+        engine._llm.chat.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_repeated_ticks_keep_one_model_call_in_flight(self, engine):
+        import asyncio
+
+        release = asyncio.Event()
+
+        class SlowLLM:
+            def __init__(self):
+                self.calls = 0
+
+            async def chat(self, **_kwargs):
+                self.calls += 1
+                await release.wait()
+                return "null"
+
+        frame = MagicMock()
+        frame.heart_rate = 72
+        frame.heart_rate_sample_ts = time.time()
+        frame.heart_rate_source = "test"
+        frame.spo2_pct = 98
+        frame.spo2_sample_ts = time.time()
+        frame.spo2_source = "test"
+        frame.activity_state = "working"
+        frame.scene_description = "desk"
+        frame.to_system_context.return_value = "Working at a desk"
+        engine._perception._frames = {"s1": frame}
+        llm = SlowLLM()
+        engine._llm = llm
+        engine._first_interaction_today = False
+
+        await engine._evaluate()
+        first_task = engine._llm_task
+        await asyncio.sleep(0)
+        await engine._evaluate()
+
+        assert engine._llm_task is first_task
+        assert llm.calls == 1
+
+        release.set()
+        await first_task
+
+    @pytest.mark.asyncio
+    async def test_stop_returns_if_provider_ignores_cancellation(self, engine):
+        import asyncio
+
+        release = asyncio.Event()
+
+        class StubbornLLM:
+            async def chat(self, **_kwargs):
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    await release.wait()
+                return (
+                    '{"trigger_id":"llm_late","priority":"SUGGESTION",'
+                    '"title":"Late","body":"Too late","action":""}'
+                )
+
+        frame = MagicMock()
+        frame.heart_rate = 72
+        frame.heart_rate_sample_ts = time.time()
+        frame.heart_rate_source = "test"
+        frame.spo2_pct = 98
+        frame.spo2_sample_ts = time.time()
+        frame.spo2_source = "test"
+        frame.activity_state = "working"
+        frame.scene_description = "desk"
+        frame.to_system_context.return_value = "Working at a desk"
+        engine._perception._frames = {"s1": frame}
+        engine._llm = StubbornLLM()
+        engine._first_interaction_today = False
+        engine._llm_shutdown_grace_s = 0.01
+        delivered = []
+        engine.on_message(delivered.append)
+
+        await engine._evaluate()
+        detached = engine._llm_task
+        await asyncio.sleep(0)
+        await engine.stop()
+
+        assert not detached.done()
+        release.set()
+        await detached
+        assert delivered == []
+
+    @pytest.mark.asyncio
+    async def test_stale_model_result_is_not_delivered(self, engine, monkeypatch):
+        clock = [1000.0]
+        monkeypatch.setattr("agents.proactive_engine.time.time", lambda: clock[0])
+        engine._llm_result_max_age_s = 60
+        engine._llm = AsyncMock()
+        engine._llm.chat.return_value = (
+            '{"trigger_id":"llm_stale","priority":"SUGGESTION",'
+            '"title":"Stale","body":"Old context","action":""}'
+        )
+        frame = MagicMock()
+        frame.to_system_context.return_value = "Old sensor context"
+        engine._perception._frames = {"s1": frame}
+        engine._first_interaction_today = False
+        delivered = []
+        engine.on_message(delivered.append)
+
+        await engine._evaluate()
+        clock[0] = 1061.0
+        await engine._llm_task
+
+        assert delivered == []
+
+    def test_llm_interval_is_configurable_without_shortening_below_one_minute(self):
+        configured = ProactiveEngine(
+            config={"features": {"proactive_llm_interval_s": 300}},
+        )
+        assert configured._llm_interval_s == 300
+
+        bounded = ProactiveEngine(
+            config={"features": {"proactive_llm_interval_s": 2}},
+        )
+        assert bounded._llm_interval_s == 60
+
+        result_age = ProactiveEngine(
+            config={"features": {"proactive_llm_result_max_age_s": 3600}},
+        )
+        assert result_age._llm_result_max_age_s == 3600
+
+
 class TestRecordFire:
     def test_record_fire_updates_state(self, engine):
         engine._record_fire("t1")

@@ -2059,6 +2059,7 @@ class BrainState:
                 health_aggregator=self.health_aggregator,
                 baseline_engine=self.baseline_engine,
                 cost_guard=self.proactive_cost_guard,
+                config=dict(getattr(self.config, "_merged", {}) or {}),
                 # So the engine can notice a routine that has been firing and
                 # failing for weeks with nobody told. CronService is created
                 # earlier in boot than this.
