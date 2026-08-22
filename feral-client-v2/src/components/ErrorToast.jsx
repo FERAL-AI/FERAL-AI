@@ -29,6 +29,11 @@ function ErrorCard({ entry, onDismiss }) {
           className="v2-btn v2-btn--ghost"
           onClick={() => onDismiss(id)}
           aria-label="Dismiss error"
+          // The stack is pointer-transparent so it cannot cover a page
+          // control. This one control turns that back on for itself,
+          // so the toast is still dismissable while the button it
+          // happens to be sitting over stays clickable.
+          style={{ pointerEvents: 'auto' }}
         >
           <X size={13} />
         </button>
@@ -69,7 +74,14 @@ export default function ErrorToast() {
       data-testid="error-toast-stack"
       style={{
         position: 'fixed',
-        top: 72,
+        // Below the page action row, which ends at y=103 at this scale.
+        // pointerEvents alone was not enough: it protects the card body,
+        // but the dismiss button has to take clicks to be dismissable,
+        // and at top:72 that one re-enabled element landed exactly on
+        // "Refresh" at (1182,71). Measured after the first fix: Refresh
+        // blocked by `v2-btn v2-btn--ghost`, which is the dismiss button
+        // itself. So it moves clear of the row AND stays transparent.
+        top: 112,
         right: 20,
         maxWidth: 420,
         minWidth: 260,
@@ -77,6 +89,23 @@ export default function ErrorToast() {
         display: 'flex',
         flexDirection: 'column',
         gap: 8,
+        // A toast must never intercept a click. This one is pinned at
+        // top:72 right:20, which is exactly where a page puts its own
+        // action row: measured on /oversight at 1280x720, the stack
+        // covered "Pause actions" at (1045,71) and "Refresh" at
+        // (1182,71) for its full six-second life. "Pause actions" is
+        // the supervisor kill switch, so the message telling you
+        // something went wrong sat on top of the button that stops it.
+        //
+        // Moving it is not the fix: the opposite corner is already
+        // taken by ProactiveToast at right:20 bottom:130, so relocating
+        // trades one collision for another, and any fixed corner
+        // eventually collides with something. Being transparent to the
+        // pointer holds wherever it is put. Each card turns pointer
+        // events back on for itself so its own dismiss button still
+        // works, and the card body deliberately does not, so whatever
+        // is underneath stays clickable through it.
+        pointerEvents: 'none',
       }}
     >
       {errors.slice(0, 5).map((entry) => (

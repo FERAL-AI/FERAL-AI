@@ -441,14 +441,26 @@ test.describe('Real brain: every safe control', () => {
   });
 
   /**
-   * RECORDED REPRODUCTION, not a passing guard. `test.fail()` means
-   * "this is broken and we know it": the day someone fixes the layout
-   * this goes red and the annotation has to come off, which is the
-   * repo's existing convention for a defect a test lane found and did
-   * not own the fix for (see the note above the /memory/context test in
-   * shell_navigation.spec.ts).
+   * FIXED. This was a recorded reproduction (`test.fail()`), and the
+   * annotation came off the moment the layout was fixed, exactly as the
+   * note below predicted: a `test.fail()` whose defect is repaired is
+   * reported as a failure, which is the mechanism working.
    *
-   * The defect. `components/ErrorToast.jsx:70-79` pins the global error
+   * The fix is BOTH halves, because either alone is insufficient:
+   * the stack moved to `top: 112`, clear of the action row, AND it is
+   * `pointer-events: none` so it cannot intercept a click wherever it
+   * ends up. Making it transparent alone was tried first and was not
+   * enough, because the dismiss button has to take clicks to be
+   * dismissable and at `top: 72` that one re-enabled element landed
+   * precisely on "Refresh". Moving it alone is not enough either, for
+   * the reason recorded below: every fixed corner eventually collides
+   * with something.
+   *
+   * Verified against a live brain with the toast actually on screen:
+   * zero covered controls, "Pause actions" and "Refresh" both take a
+   * real Playwright click, and the toast still dismisses.
+   *
+   * The defect. `components/ErrorToast.jsx:70-79` pinned the global error
    * stack to `position: fixed; top: 72; right: 20; zIndex: 65`. Page
    * action rows live in the same corner. Measured on /oversight against
    * a live brain at 1280x720, with one forced 500 on
@@ -472,10 +484,6 @@ test.describe('Real brain: every safe control', () => {
    * this collision for another one.
    */
   test('the error toast does not cover the page action row', async ({ page }) => {
-    // Inside the body, not at describe scope: a bare `test.fail()` in
-    // the enclosing scope marks every test in it, which would silently
-    // invert the whole walk above.
-    test.fail();
     test.setTimeout(60_000);
     await page.route('**/api/supervisor/stats*', (r) => r.fulfill({
       status: 500, contentType: 'application/json', body: '{"error":"forced"}',
@@ -512,9 +520,15 @@ test.describe('Real brain: every safe control', () => {
    * to the top-right corner, over a page action row that is also
    * top-right. Two independent surfaces have now landed on it, which is
    * what makes it a pattern rather than a one-off.
+   *
+   * FIXED, and the cause was a stale variable rather than a bad number.
+   * `top: calc(var(--v2-menubar-height) + 24px)` was written when the
+   * menubar existed; retiring it set that variable to 0 and quietly
+   * moved the pane up into the action row. It is anchored to
+   * `--v2-sysbar-height` now, and opens below the row. Verified: pane
+   * top 112, Save bottom 103, and the toggle closes it again.
    */
   test('the chat snapshots pane does not cover its own toggle', async ({ page }) => {
-    test.fail();
     test.setTimeout(60_000);
     await page.goto('/chat');
     await page.locator('.v2-shell').waitFor({ timeout: 15_000 });

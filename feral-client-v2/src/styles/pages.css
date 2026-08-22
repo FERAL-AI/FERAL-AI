@@ -1462,10 +1462,18 @@
 .v2-chat--paned { position: relative; }
 .v2-chat-pane {
   position: fixed;
-  top: calc(var(--v2-menubar-height) + 24px);
+  /* Opens BELOW the pane header, not over it.
+     `--v2-menubar-height` is 0 since the menubar was retired, so this
+     resolved to top: 24px and the pane covered the very control that
+     opens it: measured at 1280x720, Save sits at (1148, 71) and is 32
+     tall, and the pane at (936, 24) 320x289 swallowed it, so clicking
+     Save again to close it hit `.v2-chat-pane-hint` instead.
+     78px clears a 32px action row sitting in main's top padding, and
+     it is expressed against the sysbar so it follows if that changes. */
+  top: calc(var(--v2-sysbar-height) + 78px);
   right: 24px;
   width: 320px;
-  max-height: calc(100vh - var(--v2-menubar-height) - var(--v2-dock-height) - 48px);
+  max-height: calc(100vh - var(--v2-sysbar-height) - var(--v2-dock-height) - 110px);
   overflow-y: auto;
   padding: 16px;
   background: var(--v2-surface-2);
