@@ -110,14 +110,27 @@ describe('the navigation index mirrors the router', () => {
 });
 
 describe('the palette indexes what the Dock pins', () => {
-  it('finds all eight Dock destinations', () => {
+  it('finds every Dock destination', () => {
     // The defect: HubLauncher's fifteen items excluded seven of the
     // eight Dock primaries, so typing "chat" or "settings" into the
     // one search box in the app matched nothing.
     const indexed = new Set(GO_ITEMS.map((d) => d.to));
     const missing = DOCK_PATHS.filter((p) => !indexed.has(p));
     expect(missing).toEqual([]);
-    expect(DOCK_ITEMS).toHaveLength(8);
+    // Derived from DOCK_PATHS, not a literal. This asserted `8` and
+    // failed the day Home was added back to the dock, which is a
+    // deliberate change: the count is not the property, "every pinned
+    // path resolves to exactly one tile" is.
+    expect(DOCK_ITEMS).toHaveLength(DOCK_PATHS.length);
+    expect(new Set(DOCK_ITEMS.map((d) => d.to)).size).toBe(DOCK_PATHS.length);
+  });
+
+  it('pins Home, which the whole v2 overview lives behind', () => {
+    // Dropping it left briefing, in-flight work, suggestions, hardware,
+    // consciousness, channels, LLM and the digital twin reachable only
+    // by remembering the palette shortcut.
+    expect(DOCK_PATHS).toContain('/');
+    expect(DOCK_ITEMS.find((d) => d.to === '/')?.label).toBe('Home');
   });
 
   it('gives every destination exactly one owner: a Dock tile or the palette', () => {

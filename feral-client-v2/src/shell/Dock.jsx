@@ -20,6 +20,18 @@ import DockStack, { HOLD_MS, isStackable } from './DockStack';
  * that membership from the same list the palette renders, so the two
  * cannot drift apart.
  */
+/** Whether the operator asked the OS to keep motion down. */
+export function prefersReducedMotion() {
+  try {
+    return Boolean(window.matchMedia
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  } catch {
+    // jsdom has no matchMedia. Treating that as "no preference" keeps
+    // the tests exercising the real path.
+    return false;
+  }
+}
+
 export default function Dock() {
   const location = useLocation();
   const { open, togglePalette } = useCommandPalette();
@@ -54,6 +66,43 @@ export default function Dock() {
 
   const endHold = useCallback(() => { clearTimeout(holdRef.current); }, []);
 
+  /*
+   * The magnify, ported from the mockup's `wireMagnify` rather than
+   * approximated. Each tile scales by 1 + 0.5k^2 and lifts by 8k^2 px,
+   * where k falls off linearly with the cursor's horizontal distance
+   * over 118px. The square makes the falloff feel like a lens rather
+   * than a ramp, which is why the exact curve matters.
+   *
+   * What shipped was a flat `transform: translateY(-2px)` on :hover, so
+   * the row did not respond to the pointer at all: only the tile under
+   * it moved, and it moved the same amount however close you were.
+   *
+   * Written directly to style.transform rather than through state: this
+   * runs on every mousemove and a React render per frame would be worse
+   * than the effect is worth. The CSS deliberately does not transition
+   * transform, or each frame would fight a 140ms animation.
+   */
+  const listRef = useRef(null);
+  const onDockMove = useCallback((e) => {
+    const list = listRef.current;
+    if (!list || prefersReducedMotion()) return;
+    for (const tile of list.querySelectorAll('.v2-dock-btn')) {
+      const r = tile.getBoundingClientRect();
+      const dist = Math.abs(e.clientX - (r.left + r.width / 2));
+      const k = Math.max(0, 1 - dist / 118);
+      const kk = k * k;
+      tile.style.transform = `scale(${(1 + 0.5 * kk).toFixed(3)}) translateY(${(-8 * kk).toFixed(2)}px)`;
+    }
+  }, []);
+
+  const onDockLeave = useCallback(() => {
+    const list = listRef.current;
+    if (!list) return;
+    for (const tile of list.querySelectorAll('.v2-dock-btn')) {
+      tile.style.transform = '';
+    }
+  }, []);
+
   const onTileClick = useCallback((e) => {
     if (heldRef.current) {
       e.preventDefault();
@@ -81,7 +130,12 @@ export default function Dock() {
   return (
     <nav className="v2-dock" role="navigation" aria-label="Primary">
       {stack && <DockStack to={stack} onClose={() => setStack('')} />}
-      <ul className="v2-dock-list">
+      <ul
+        className="v2-dock-list"
+        ref={listRef}
+        onMouseMove={onDockMove}
+        onMouseLeave={onDockLeave}
+      >
         {DOCK_ITEMS.map(({ to, label, Icon }) => (
           <li key={to} className="v2-dock-item">
             <NavLink

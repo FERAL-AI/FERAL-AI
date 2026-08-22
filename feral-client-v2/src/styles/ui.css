@@ -144,12 +144,25 @@
   background: transparent;
   pointer-events: none;
 }
+/* Ported from the mockup's .dock / .dk rules rather than approximated.
+   The three numbers that were wrong and are visible:
+
+     container radius   pill  ->  18px   (a full pill curves so hard at
+                                          the ends that the outer tiles
+                                          sit inside the curve and read
+                                          as clipped)
+     gap between tiles   2px  ->   7px
+     tile                40px ->  44px, radius 12px, icons 20 -> 22px
+
+   The tile also gains its own surface and border. It was transparent
+   until hover, so the dock read as loose icons on glass rather than as
+   a row of keys. */
 .v2-dock-list {
   pointer-events: auto;
   display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 6px 8px;
+  align-items: flex-end;
+  gap: 7px;
+  padding: 7px 10px 8px;
   margin: 0;
   list-style: none;
   background: var(--v2-surface-0);
@@ -157,15 +170,15 @@
   -webkit-backdrop-filter: var(--v2-blur-lg);
   backdrop-filter: var(--v2-blur-lg);
   border: 1px solid var(--v2-hairline);
-  border-radius: var(--v2-radius-pill);
+  border-radius: 18px;
   box-shadow: var(--v2-shadow-glass-soft);
   max-width: min(1100px, 94vw);
   justify-content: center;
 }
 .v2-dock-item { display: flex; }
 .v2-dock-item--divider {
-  padding-left: 6px;
-  margin-left: 4px;
+  padding-left: 7px;
+  margin-left: 3px;
   border-left: 1px solid var(--v2-hairline);
 }
 .v2-dock-btn {
@@ -173,25 +186,27 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   padding: 0;
-  border: none;
-  background: transparent;
+  border: 1px solid var(--v2-hairline);
+  background: linear-gradient(160deg, var(--v2-surface-1), var(--v2-surface-2));
   color: var(--v2-text-secondary);
   text-decoration: none;
-  border-radius: var(--v2-radius-sm);
+  border-radius: 12px;
   font: inherit;
   cursor: pointer;
+  /* The magnify sets transform inline, so it must not be transitioned
+     here or every mousemove frame fights a 140ms animation and the
+     whole row lags behind the cursor. */
+  transform-origin: bottom center;
   transition:
-    transform var(--v2-dur-fast) var(--v2-ease-out),
     color var(--v2-dur-fast) var(--v2-ease-out),
-    background var(--v2-dur-fast) var(--v2-ease-out);
+    border-color var(--v2-dur-fast) var(--v2-ease-out);
 }
 .v2-dock-btn:hover {
   color: var(--v2-text-primary);
-  background: var(--v2-surface-1);
-  transform: translateY(-2px);
+  border-color: var(--v2-hairline-strong);
 }
 .v2-dock-btn:focus-visible {
   outline: none;
@@ -1461,7 +1476,18 @@
 /* Raise the icon above the fill, and stop it shrinking. It is a flex
    item with the default flex-shrink: 1, so anything else competing for
    width in the tile collapses it to 0. */
-.v2-dock-btn > svg { position: relative; z-index: 2; flex: none; }
+/* 22px, per the mockup's `.dk .tile svg`. The tiles grew to 44px and an
+   icon left at 20px floats in them. `!important` is not needed: this
+   wins on order, but the width/height must be set here because lucide
+   renders size as attributes and the magnify scales the tile around
+   them. */
+.v2-dock-btn > svg {
+  position: relative;
+  z-index: 2;
+  flex: none;
+  width: 22px;
+  height: 22px;
+}
 /* z-index ONLY. .v2-dock-label is position: absolute on purpose: it is
    the hover tooltip that floats above the tile
    (bottom: calc(100% + 8px)). Overriding it to relative put it into the
