@@ -218,6 +218,7 @@ def _register_node(ws, node_id="test-node-hup", node_type="sensor", capabilities
 class TestNodeRegisterReturnsNodeAck:
     def test_node_ack_shape(self):
         mock = _make_mock_state()
+        mock.primary_session_id = "shared-primary"
         with _node_client(mock) as client:
             with client.websocket_connect(f"/v1/node?api_key={_TEST_NODE_KEY}") as ws:
                 ack = _register_node(ws, capabilities=["camera", "heart_rate"])
@@ -231,6 +232,7 @@ class TestNodeRegisterReturnsNodeAck:
                 assert p["hup_version"] == HUP_VERSION
                 assert p["heartbeat_ms"] == 10000
                 assert "session_token" in p and len(p["session_token"]) > 0
+                assert p["primary_session_id"] == "shared-primary"
                 assert set(p["capabilities"]) == {"camera", "heart_rate"}
 
     def test_node_ack_not_text_response(self):

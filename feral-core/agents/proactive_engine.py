@@ -64,6 +64,10 @@ class ProactiveMessage:
     action_payload: dict = field(default_factory=dict)
     sdui: dict | None = None   # optional GenUI card
     voice_text: str = ""       # what to say aloud
+    # Structured, non-display context for downstream delivery surfaces.
+    # This keeps sensor provenance out of brittle prose parsing while
+    # remaining generic enough for calendar, routine, and LLM triggers.
+    context: dict = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
 
 
@@ -300,6 +304,12 @@ class ProactiveEngine:
                         voice_text=f"Hey, I noticed your heart rate jumped to {frame.heart_rate}. Maybe a short break would help?",
                         action="Take a break",
                         action_payload={"smart_home": "set_scene", "scene": "calming"},
+                        context={
+                            "metric": "heart_rate",
+                            "value": frame.heart_rate,
+                            "source": hr_src_raw,
+                            "sample_age_s": int(hr_age),
+                        },
                     ))
 
             if (
@@ -325,6 +335,12 @@ class ProactiveEngine:
                         voice_text=f"Your blood oxygen is at {frame.spo2_pct} percent, which is low. Please take some deep breaths.",
                         action="Start breathing exercise",
                         action_payload={"smart_home": "breathing_exercise", "duration_minutes": 3},
+                        context={
+                            "metric": "spo2",
+                            "value": frame.spo2_pct,
+                            "source": spo2_src_raw,
+                            "sample_age_s": int(spo2_age),
+                        },
                     ))
 
         # --- Screen Context Triggers ---
@@ -508,6 +524,12 @@ class ProactiveEngine:
                                 title="Heart Rate Anomaly",
                                 body=alert.message,
                                 voice_text=alert.message,
+                                context={
+                                    "metric": chosen_metric_id or "hr_resting",
+                                    "value": fresh_hr_frame.heart_rate,
+                                    "source": hr_src_norm,
+                                    "sample_age_s": hr_age_log,
+                                },
                             ))
                 for mid in ("sleep_hours", "hrv_ms"):
                     if not self._can_fire(f"baseline_trend_{mid}"):

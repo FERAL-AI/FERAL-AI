@@ -57,6 +57,21 @@ def _mock_state_with_supervisor() -> MagicMock:
     return mock
 
 
+def test_phone_registration_binds_shared_session_before_first_chat_turn():
+    mock = _mock_state_with_supervisor()
+    mock.primary_session_id = "shared-primary"
+
+    with _node_client(mock) as client:
+        with client.websocket_connect(f"/v1/node?api_key={_TEST_NODE_KEY}") as ws:
+            _register_node(
+                ws,
+                node_id="phone-ambient",
+                node_type="phone",
+                capabilities=["jw_health_glasses"],
+            )
+            assert "shared-primary" in mock.get_sessions_for_daemon("phone-ambient")
+
+
 def test_chat_request_routes_to_orchestrator_and_responds():
     mock = _mock_state_with_supervisor()
     mock.orchestrator.handle_command = AsyncMock(return_value={"text": "Chat acknowledged"})

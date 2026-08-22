@@ -2570,7 +2570,20 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 logger.info(f"Node registered: {node_id} ({payload.node_type}/{payload.platform}) — caps: {payload.capabilities}, skills: {len(getattr(payload, 'skills', []) or [])}")
                 _log_activity("device_connected", f"{node_id} ({payload.node_type})")
 
-                for sid in state.sessions:
+                bindable_sessions = set(state.sessions)
+                primary_sid = getattr(state, "primary_session_id", "")
+                if (
+                    str(payload.node_type or "").lower() == "phone"
+                    and isinstance(primary_sid, str)
+                    and primary_sid
+                ):
+                    # A phone can receive ambient turns before it has opened
+                    # chat. Bind the shared conversation at registration so
+                    # the first sensor-driven message and the user's natural
+                    # follow-up live in the same thread.
+                    bindable_sessions.add(primary_sid)
+
+                for sid in bindable_sessions:
                     state.bind_session_to_daemon(sid, node_id)
                     state.perception.update_connected_nodes(sid, list(state.daemons.keys()))
 
@@ -2582,6 +2595,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     })
 
                 session_token = str(__import__("uuid").uuid4())
+                shared_session_id = getattr(state, "primary_session_id", "")
+                if not isinstance(shared_session_id, str):
+                    shared_session_id = ""
                 await ws.send_json({
                     "hup_version": HUP_VERSION,
                     "type": "node_ack",
@@ -2589,6 +2605,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     "payload": {
                         "node_id": node_id,
                         "session_token": session_token,
+                        "primary_session_id": shared_session_id,
                         "hup_version": HUP_VERSION,
                         "heartbeat_ms": 10000,
                         "server_time": __import__("time").time(),

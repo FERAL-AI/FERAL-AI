@@ -14,7 +14,7 @@ from typing import Optional
 from fastapi import WebSocket
 
 from version import VERSION as __version__
-from models.protocol import FeralMessage
+from models.protocol import FeralMessage, HUP_VERSION
 from agents.orchestrator import Orchestrator
 from agents.learner import Learner
 from agents.skill_generator import SkillGenerator
@@ -2069,9 +2069,15 @@ class BrainState:
                     "action_payload": msg.action_payload,
                     "sdui": msg.sdui,
                     "voice_text": msg.voice_text,
+                    "context": dict(getattr(msg, "context", {}) or {}),
                 }
                 await self.broadcast_event("proactive_alert", alert)
-                await self._escalate_when_nobody_is_watching(msg)
+                await self._record_proactive_assistant_turn(msg)
+                direct_deliveries = await self._deliver_proactive_to_phone_nodes(alert)
+                await self._escalate_when_nobody_is_watching(
+                    msg,
+                    direct_delivery_count=direct_deliveries,
+                )
 
             self.proactive.on_message(_proactive_delivery)
             # A6 — only start the proactive loop when enabled. Before
@@ -3243,7 +3249,12 @@ class BrainState:
     # Escalation is deliberately rare. See _escalate_when_nobody_is_watching.
     _ESCALATION_COOLDOWN_S = 1800.0
 
-    async def _escalate_when_nobody_is_watching(self, msg) -> None:
+    async def _escalate_when_nobody_is_watching(
+        self,
+        msg,
+        *,
+        direct_delivery_count: int = 0,
+    ) -> None:
         """Deliver an important alert to a human who has no browser open.
 
         Until now every proactive decision went to ``broadcast_event``, which
@@ -3271,7 +3282,7 @@ class BrainState:
 
         # Someone is already looking at a live surface, so the browser push
         # was delivery. Escalating on top of it would be a duplicate.
-        if self.sessions:
+        if self.sessions or direct_delivery_count > 0:
             return
 
         priority = getattr(msg, "priority", None)
@@ -3367,6 +3378,88 @@ class BrainState:
         ws = self.daemons.get(node_id)
         if ws:
             await ws.send_json(msg_dict)
+
+    async def _record_proactive_assistant_turn(self, msg) -> None:
+        """Put an unsolicited message in the shared conversation before reply.
+
+        Browser and phone surfaces share ``primary_session_id``. Recording the
+        message there means a natural follow-up does not reach an agent that
+        has forgotten what it initiated one moment earlier.
+        """
+        session_id = getattr(self, "primary_session_id", "")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        note_turn = getattr(
+            getattr(self, "orchestrator", None),
+            "note_proactive_assistant_turn",
+            None,
+        )
+        if not callable(note_turn):
+            return
+        try:
+            await note_turn(
+                session_id,
+                getattr(msg, "body", "") or getattr(msg, "voice_text", ""),
+                trigger_id=getattr(msg, "trigger_id", ""),
+                priority=getattr(getattr(msg, "priority", None), "name", ""),
+                context=dict(getattr(msg, "context", {}) or {}),
+            )
+        except Exception:
+            logger.warning(
+                "Could not record proactive assistant turn",
+                exc_info=True,
+            )
+
+    async def _deliver_proactive_to_phone_nodes(self, alert: dict) -> int:
+        """Send one ambient ``text_response`` to each bound phone node.
+
+        ``text_response`` is an existing HUP brain-to-node frame, so older
+        clients continue to parse the text while newer clients can use the
+        additive ``channel=ambient`` metadata for notification and speech
+        policy. Non-phone daemons and unbound sockets never receive personal
+        proactive context.
+        """
+        session_id = getattr(self, "primary_session_id", "")
+        if not isinstance(session_id, str):
+            session_id = ""
+
+        frame = {
+            "hup_version": HUP_VERSION,
+            "type": "text_response",
+            "ts": time.time(),
+            "payload": {
+                "session_id": session_id,
+                "text": str(alert.get("body") or alert.get("voice_text") or ""),
+                "reply_mode": "final",
+                "channel": "ambient",
+                "source": "proactive",
+                "trigger_id": str(alert.get("trigger_id") or ""),
+                "priority": str(alert.get("priority") or "AMBIENT"),
+                "title": str(alert.get("title") or "FERAL"),
+                "voice_text": str(alert.get("voice_text") or ""),
+                "context": dict(alert.get("context") or {}),
+            },
+        }
+
+        delivered = 0
+        for node_id, ws in list(getattr(self, "daemons", {}).items()):
+            node_type = str(getattr(ws, "_feral_node_type", "") or "").lower()
+            platform = str(getattr(ws, "_feral_platform", "") or "").lower()
+            if node_type != "phone" and platform not in {"ios", "android"}:
+                continue
+            if session_id and session_id not in self.get_sessions_for_daemon(node_id):
+                continue
+            try:
+                await self._send_dict_to_node(node_id, frame)
+            except Exception:
+                logger.warning(
+                    "Proactive phone delivery failed for node %s",
+                    node_id,
+                    exc_info=True,
+                )
+                continue
+            delivered += 1
+        return delivered
 
     def bind_session_to_daemon(self, session_id: str, node_id: str):
         if node_id not in self._daemon_session_bindings:

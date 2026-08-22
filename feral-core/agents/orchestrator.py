@@ -4964,14 +4964,21 @@ class Orchestrator:
 
         return out
 
-    async def _append_voice_row(self, session_id: str, role: str, text: str) -> None:
-        """Append one live-voice row to the full transcript.
+    async def _append_external_row(
+        self,
+        session_id: str,
+        role: str,
+        text: str,
+        *,
+        source: str,
+    ) -> None:
+        """Append one non-chat-loop row to the full transcript.
 
         Serialised on the per-session lock, the same lock
         ``handle_command`` / ``handle_command_stream`` hold. Without it a
-        transcript landing mid-turn was written into a list the text
-        turn had already snapshotted, and the turn's write-back then
-        overwrote it.
+        voice transcript or proactive message landing mid-turn was written
+        into a list the text turn had already snapshotted, and the turn's
+        write-back then overwrote it.
         """
         async with self._get_session_lock(session_id):
             history = self.conversation_history.setdefault(session_id, [])
@@ -4983,11 +4990,20 @@ class Orchestrator:
                 # Providers re-emit the same final transcript on
                 # reconnect; one utterance is one row.
                 return
-            history.append({"role": role, "content": text, "source": "voice_realtime"})
+            history.append({"role": role, "content": text, "source": source})
             if len(history) > self._conversation_max_per_session:
                 self.conversation_history[session_id] = history[
                     -self._conversation_max_per_session:
                 ]
+
+    async def _append_voice_row(self, session_id: str, role: str, text: str) -> None:
+        """Append one live-voice row to the full transcript."""
+        await self._append_external_row(
+            session_id,
+            role,
+            text,
+            source="voice_realtime",
+        )
 
     async def note_voice_assistant_turn(self, session_id: str, text: str) -> None:
         """Record a live-voice ASSISTANT turn in ``conversation_history``.
@@ -5008,6 +5024,63 @@ class Orchestrator:
         if not session_id or not clean:
             return
         await self._append_voice_row(session_id, "assistant", clean)
+
+    async def note_proactive_assistant_turn(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        trigger_id: str = "",
+        priority: str = "",
+        context: dict | None = None,
+    ) -> None:
+        """Record an unsolicited assistant message before the user's reply.
+
+        Proactive delivery is not part of ``handle_command``'s turn stack, so
+        without this row a natural follow-up such as "why?" arrives in a
+        conversation where the assistant has no record of what it just said.
+        Working and episodic memory mirror the transcript row so the context
+        survives the in-memory conversation window and a brain restart.
+        """
+        clean = (text or "").strip()
+        if not session_id or not clean:
+            return
+
+        await self._append_external_row(
+            session_id,
+            "assistant",
+            clean,
+            source="proactive",
+        )
+
+        if not self.memory:
+            return
+        self.memory.working_push(
+            session_id,
+            {
+                "role": "assistant",
+                "text": clean,
+                "source": "proactive",
+                "trigger_id": trigger_id,
+            },
+        )
+        try:
+            await self.memory.episode_save(
+                session_id=session_id,
+                event_type="proactive_alert",
+                summary=clean[:300],
+                detail=json.dumps({
+                    "trigger_id": trigger_id,
+                    "priority": priority,
+                    "context": context or {},
+                }, sort_keys=True),
+                importance=0.8 if priority in {"CRITICAL", "IMPORTANT"} else 0.5,
+            )
+        except Exception:
+            logger.debug(
+                "proactive assistant turn episodic save failed",
+                exc_info=True,
+            )
 
     # Max user turns scanned for a pending routine intent. Two is enough
     # to cover "request → clarification → answer" (the typical
