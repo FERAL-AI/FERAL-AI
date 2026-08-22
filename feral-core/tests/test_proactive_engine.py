@@ -305,6 +305,7 @@ class TestLLMEvaluationIsolation:
         frame.scene_description = "desk"
         frame.to_system_context.return_value = "Working at a desk"
         engine._perception._frames = {"s1": frame}
+        engine._perception.get_frame.return_value = frame
         llm = SlowLLM()
         engine._llm = llm
         engine._first_interaction_today = False
@@ -348,6 +349,7 @@ class TestLLMEvaluationIsolation:
         frame.scene_description = "desk"
         frame.to_system_context.return_value = "Working at a desk"
         engine._perception._frames = {"s1": frame}
+        engine._perception.get_frame.return_value = frame
         engine._llm = StubbornLLM()
         engine._first_interaction_today = False
         engine._llm_shutdown_grace_s = 0.01
@@ -375,8 +377,17 @@ class TestLLMEvaluationIsolation:
             '"title":"Stale","body":"Old context","action":""}'
         )
         frame = MagicMock()
+        frame.heart_rate = 72
+        frame.heart_rate_sample_ts = clock[0]
+        frame.heart_rate_source = "test"
+        frame.spo2_pct = 98
+        frame.spo2_sample_ts = clock[0]
+        frame.spo2_source = "test"
+        frame.activity_state = "working"
+        frame.scene_description = "desk"
         frame.to_system_context.return_value = "Old sensor context"
         engine._perception._frames = {"s1": frame}
+        engine._perception.get_frame.return_value = frame
         engine._first_interaction_today = False
         delivered = []
         engine.on_message(delivered.append)
