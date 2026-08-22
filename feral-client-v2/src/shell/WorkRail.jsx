@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ShieldCheck, Terminal, Bot, MessageSquare, Activity } from 'lucide-react';
+import { ShieldCheck, Terminal, Bot, MessageSquare, Activity, ChevronDown } from 'lucide-react';
 import { apiJson, apiFetch } from '../lib/api';
+import { useChatThread } from './ChatThreadContext';
 
 /**
  * The work rail: what needs you, what is running, what just happened.
@@ -27,6 +28,9 @@ import { apiJson, apiFetch } from '../lib/api';
 
 const POLL_MS = 4000;
 
+/** Which rail sections the operator has folded away. */
+const RAIL_CLOSED_KEY = 'feral_v2_rail_closed';
+
 /** Where an approval came from, read off the session id prefix. */
 export function originLabel(sessionId) {
   const sid = String(sessionId || '');
@@ -51,6 +55,33 @@ export function elapsed(startedAt, now = Date.now() / 1000) {
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m${s % 60}s`;
   return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
+}
+
+/**
+ * How recent an entry has to be to count as "just happened".
+ *
+ * The section was showing rows 126 hours old, which is five days, under
+ * a heading that promises the opposite. There was no window at all: it
+ * took `entries.slice(0, 5)` from the timeline, and on a brain that has
+ * been quiet for a week the five most recent things are all ancient.
+ *
+ * Twelve hours because the heading is about a working session, not
+ * about history. Anything older belongs on the timeline page, which is
+ * what the section links to.
+ */
+export const JUST_HAPPENED_WINDOW_S = 12 * 60 * 60;
+
+/** Timeline rows recent enough to sit under "Just happened". */
+export function recentEnough(entries, now = Date.now() / 1000) {
+  const rows = Array.isArray(entries) ? entries : [];
+  return rows.filter((e) => {
+    const ts = Number(e?.timestamp || 0);
+    // A row with no usable timestamp is dropped rather than shown as
+    // "just happened" on no evidence.
+    if (!Number.isFinite(ts) || ts <= 0) return false;
+    const age = now - ts;
+    return age >= 0 && age <= JUST_HAPPENED_WINDOW_S;
+  });
 }
 
 /** A timeline row's one-line label, from the shape the brain sends. */
@@ -84,7 +115,13 @@ export default function WorkRail() {
   const [needs, setNeeds] = useState([]);
   const [running, setRunning] = useState([]);
   const [recent, setRecent] = useState([]);
+  const [threads, setThreads] = useState([]);
   const [busy, setBusy] = useState('');
+  // The shell already owns thread loading, so the rail asks it rather
+  // than writing localStorage behind Chat's back: Chat reads the active
+  // id once on mount, so poking storage would do nothing at all when
+  // you are already on /chat, which is exactly where you use this.
+  const thread = useChatThread();
   // Keyed by request_id. A failed decision used to leave the row in
   // place with no message anywhere on screen, which reads exactly like
   // a click that missed.
@@ -95,10 +132,15 @@ export default function WorkRail() {
     // Each source is read independently. One failing must not blank the
     // whole rail: a rail that disappears when the timeline is slow is
     // worse than a rail with two sections.
-    const [a, j, t] = await Promise.allSettled([
+    const [a, j, t, c] = await Promise.allSettled([
       apiJson('/api/approvals'),
       apiJson('/api/jobs?limit=40'),
       apiJson('/api/timeline?limit=6'),
+      // Verified against the running brain: GET /api/conversations
+      // answers {conversations, total, has_more, limit, offset, query}
+      // and a row is {id, title, created_at, updated_at, message_count,
+      // pinned, preview, title_custom}.
+      apiJson('/api/conversations?limit=5&offset=0'),
     ]);
     if (a.status === 'fulfilled') {
       setNeeds(Array.isArray(a.value?.approvals) ? a.value.approvals : []);
@@ -112,8 +154,15 @@ export default function WorkRail() {
       // {count, days, entries}, and a row is
       // {type, timestamp, title, content, metadata}. The id lives under
       // metadata, not at the top level.
-      const rows = t.value?.entries;
-      setRecent(Array.isArray(rows) ? rows.slice(0, 5) : []);
+      // Filtered by age BEFORE the slice. Taking the newest five and
+      // then filtering would still show nothing on a quiet brain, but
+      // taking five unfiltered is what put five-day-old rows under a
+      // heading that says "just happened".
+      setRecent(recentEnough(t.value?.entries).slice(0, 5));
+    }
+    if (c.status === 'fulfilled') {
+      const rows = c.value?.conversations;
+      setThreads(Array.isArray(rows) ? rows.slice(0, 5) : []);
     }
   }, []);
 
@@ -122,6 +171,45 @@ export default function WorkRail() {
     timer.current = setInterval(load, POLL_MS);
     return () => clearInterval(timer.current);
   }, [load]);
+
+  /*
+   * Sections fold. On a busy machine the rail is four groups deep and
+   * the one you care about is pushed under the ones you do not, and
+   * there was no way to put any of them away.
+   *
+   * The choice is remembered, because a section you closed reopening on
+   * every navigation is the same as not having the control.
+   */
+  const [closed, setClosed] = useState(() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(RAIL_CLOSED_KEY) || '[]'));
+    } catch {
+      return new Set();
+    }
+  });
+
+  const openThread = useCallback(async (id) => {
+    try {
+      await thread?.loadConversation?.(id);
+    } catch {
+      // Loading failed; still go to Chat rather than leaving the click
+      // with no effect. Chat reports its own load errors.
+    }
+    navigate('/chat');
+  }, [navigate, thread]);
+
+  const toggleSection = useCallback((key) => {
+    setClosed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      try {
+        localStorage.setItem(RAIL_CLOSED_KEY, JSON.stringify([...next]));
+      } catch {
+        // Private mode. The rail still folds for this session.
+      }
+      return next;
+    });
+  }, []);
 
   const decide = useCallback(async (requestId, approved) => {
     setBusy(requestId);
@@ -152,12 +240,25 @@ export default function WorkRail() {
   return (
     <aside className="v2-rail" aria-label="Work">
       <section className="v2-rail-sect">
-        <header className="v2-rail-head">
+        <button
+          type="button"
+          className="v2-rail-head"
+          data-tone={needs.length > 0 ? 'needs' : 'plain'}
+          aria-expanded={!closed.has('needs')}
+          onClick={() => toggleSection('needs')}
+        >
           <span>Needs you</span>
           {needs.length > 0 && <span className="v2-rail-n">{needs.length}</span>}
-        </header>
-        {needs.length === 0 && <p className="v2-rail-quiet">Nothing waiting.</p>}
-        {needs.map((n) => (
+          <ChevronDown
+            size={11}
+            aria-hidden="true"
+            className="v2-rail-caret"
+            data-open={closed.has('needs') ? 'no' : 'yes'}
+          />
+        </button>
+        {!closed.has('needs') && needs.length === 0
+          && <p className="v2-rail-quiet">Nothing waiting.</p>}
+        {!closed.has('needs') && needs.map((n) => (
           <article key={n.request_id} className="v2-rail-card v2-rail-card--needs">
             <button
               type="button"
@@ -197,15 +298,28 @@ export default function WorkRail() {
       </section>
 
       <section className="v2-rail-sect">
-        <header className="v2-rail-head">
+        <button
+          type="button"
+          className="v2-rail-head"
+          data-tone={running.length > 0 ? 'running' : 'plain'}
+          aria-expanded={!closed.has('running')}
+          onClick={() => toggleSection('running')}
+        >
           <span>Running</span>
           {running.length > 0 && <span className="v2-rail-n">{running.length}</span>}
-        </header>
-        {running.length === 0 && <p className="v2-rail-quiet">Idle.</p>}
-        {running.map((r) => {
+          <ChevronDown
+            size={11}
+            aria-hidden="true"
+            className="v2-rail-caret"
+            data-open={closed.has('running') ? 'no' : 'yes'}
+          />
+        </button>
+        {!closed.has('running') && running.length === 0
+          && <p className="v2-rail-quiet">Idle.</p>}
+        {!closed.has('running') && running.map((r) => {
           const Icon = iconForJob(r.kind);
           return (
-          <article key={r.id} className="v2-rail-card">
+          <article key={r.id} className="v2-rail-card v2-rail-card--running">
             <button
               type="button"
               className="v2-rail-title"
@@ -223,10 +337,64 @@ export default function WorkRail() {
         })}
       </section>
 
+      {/* The design's RECENT: quick access to conversations you were
+          just in. The rail had no route back to a thread at all, so
+          returning to one meant opening Chat and finding it in a
+          picker. These are conversations, not timeline rows, and they
+          open the thread rather than a history page. */}
       <section className="v2-rail-sect">
-        <header className="v2-rail-head"><span>Just happened</span></header>
-        {recent.length === 0 && <p className="v2-rail-quiet">Nothing yet.</p>}
-        {recent.map((e, i) => (
+        <button
+          type="button"
+          className="v2-rail-head"
+          aria-expanded={!closed.has('recent')}
+          onClick={() => toggleSection('recent')}
+        >
+          <span>Recent</span>
+          {threads.length > 0 && <span className="v2-rail-n">{threads.length}</span>}
+          <ChevronDown
+            size={11}
+            aria-hidden="true"
+            className="v2-rail-caret"
+            data-open={closed.has('recent') ? 'no' : 'yes'}
+          />
+        </button>
+        {!closed.has('recent') && threads.length === 0
+          && <p className="v2-rail-quiet">No conversations yet.</p>}
+        {!closed.has('recent') && threads.map((c) => (
+          <button
+            key={c.id}
+            type="button"
+            className="v2-rail-recent"
+            onClick={() => openThread(c.id)}
+            title={c.title || 'Conversation'}
+          >
+            <MessageSquare size={12} aria-hidden="true" className="v2-rail-ic" />
+            <span className="v2-rail-recent-t">{c.title || 'Conversation'}</span>
+            {c.updated_at
+              ? <span className="v2-rail-recent-w">{elapsed(c.updated_at)}</span>
+              : null}
+          </button>
+        ))}
+      </section>
+
+      <section className="v2-rail-sect">
+        <button
+          type="button"
+          className="v2-rail-head"
+          aria-expanded={!closed.has('happened')}
+          onClick={() => toggleSection('happened')}
+        >
+          <span>Just happened</span>
+          <ChevronDown
+            size={11}
+            aria-hidden="true"
+            className="v2-rail-caret"
+            data-open={closed.has('happened') ? 'no' : 'yes'}
+          />
+        </button>
+        {!closed.has('happened') && recent.length === 0
+          && <p className="v2-rail-quiet">Nothing in the last few hours.</p>}
+        {!closed.has('happened') && recent.map((e, i) => (
           <button
             key={e?.metadata?.id || `${e?.timestamp || ''}-${i}`}
             type="button"

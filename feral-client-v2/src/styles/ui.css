@@ -1355,47 +1355,108 @@
 .v2-sysbar-cmd { font-family: var(--v2-font-mono); }
 
 /* Work rail */
+/* Ported from the mockup's .panel / .rgroup / .ritem rather than
+   approximated. The rail read as three headings with a sentence under
+   each and no visual separation at all: "NEEDS YOU / Nothing waiting.
+   / RUNNING / Idle. / JUST HAPPENED / Nothing yet." was the entire
+   surface, in one colour, with nothing to say which section a row
+   belonged to or that NEEDS YOU is the one that blocks you.
+
+   Three things carry that in the design and none were present:
+   the group heading turns warn-coloured when it needs you, sections
+   are separated by real space and a hairline, and every row is a card
+   with a left accent stripe in its state colour. */
 .v2-rail {
-  flex: 0 0 232px;
+  flex: 0 0 228px;
   min-width: 0;
   overflow-y: auto;
-  padding: 12px 10px 20px;
+  padding: 6px 6px 20px;
   border-right: 1px solid var(--v2-hairline);
-  background: var(--v2-surface-0);
+  background: var(--v2-surface-1);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 2px;
 }
-.v2-rail-sect { display: flex; flex-direction: column; gap: 6px; }
+.v2-rail-sect { display: flex; flex-direction: column; gap: 2px; }
+/* The separation the report asked for: nothing marked where one
+   section ended and the next began. */
+.v2-rail-sect + .v2-rail-sect {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--v2-hairline);
+}
 .v2-rail-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 10px;
-  letter-spacing: 0.09em;
+  padding: 8px 6px 5px;
+  font-family: var(--v2-font-mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--v2-text-tertiary);
+  white-space: nowrap;
+  background: none;
+  border: 0;
+  width: 100%;
+  text-align: left;
 }
+/* A heading that is holding something up says so in its own colour. */
+.v2-rail-head[data-tone="needs"] { color: var(--v2-state-warn); }
+.v2-rail-head[data-tone="running"] { color: var(--v2-accent-text); }
+button.v2-rail-head { cursor: pointer; }
+button.v2-rail-head:hover { color: var(--v2-text-primary); }
+.v2-rail-caret {
+  margin-left: auto;
+  flex: none;
+  transition: transform var(--v2-dur-fast) var(--v2-ease-out);
+}
+.v2-rail-caret[data-open="no"] { transform: rotate(-90deg); }
 .v2-rail-n {
   margin-left: auto;
   font-variant-numeric: tabular-nums;
-  color: var(--v2-text-secondary);
+  color: inherit;
 }
-.v2-rail-quiet { margin: 0; font-size: var(--v2-size-xs); color: var(--v2-text-tertiary); }
+.v2-rail-head .v2-rail-n + .v2-rail-caret { margin-left: 4px; }
+.v2-rail-quiet {
+  margin: 0;
+  padding: 2px 7px 6px;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+}
 
 .v2-rail-card {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 7px 9px;
+  gap: 2px;
+  padding: 7px;
   border-radius: var(--v2-radius-sm);
-  background: var(--v2-surface-1);
+  background: none;
   border-left: 2px solid transparent;
+  margin-bottom: 1px;
+  transition: background var(--v2-dur-fast) var(--v2-ease-out);
 }
+.v2-rail-card:hover { background: var(--v2-surface-2); }
 /* Attention gets the warm edge the design uses, and only attention. */
 .v2-rail-card--needs {
   border-left-color: var(--v2-state-warn);
   background: var(--v2-state-warn-soft);
+}
+.v2-rail-card--needs .v2-rail-sub { color: var(--v2-state-warn); }
+.v2-rail-card--needs .v2-rail-verb {
+  color: var(--v2-state-warn);
+  border-color: var(--v2-state-warn);
+}
+/* Work in flight reads in the run colour, so the two live sections are
+   distinguishable at a glance and not just by their heading. */
+.v2-rail-card--running {
+  border-left-color: var(--v2-accent);
+  background: var(--v2-accent-soft);
+}
+.v2-rail-card--running .v2-rail-ic { color: var(--v2-accent-text); }
+.v2-rail-card--running .v2-rail-verb {
+  color: var(--v2-accent-text);
+  border-color: var(--v2-accent);
 }
 .v2-rail-title {
   background: none; border: 0; padding: 0; cursor: pointer;
