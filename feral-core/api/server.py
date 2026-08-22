@@ -718,6 +718,25 @@ def _is_document_navigation(request: Request) -> bool:
     return "text/html" in request.headers.get("accept", "")
 
 
+#: One URL, two representations, so every cache between here and the
+#: browser has to be told what decides which one.
+#:
+#: Without this the shim is worse than the bug it fixed. Measured in
+#: Chrome against a running brain: navigating to /skills returned the
+#: dashboard (correct), and the SPA's own `fetch("/skills")` for its
+#: data then got that cached HTML back, so the Skills page rendered
+#: "Could not reach the brain to load the skill list: Unexpected token
+#: '<'". A second page that had NEVER navigated to /skills got the HTML
+#: too, because the cached representation is shared across the context.
+#: With the HTTP cache disabled the same fetch correctly returned JSON,
+#: which is what pinned it on caching rather than on the branch logic.
+#:
+#: `Accept` and `Sec-Fetch-Dest` are exactly the two inputs
+#: `_is_document_navigation` reads, so they are exactly what must be
+#: varied on.
+_NEGOTIATED = "Accept, Sec-Fetch-Dest"
+
+
 async def _spa_document_if_navigation(request: Request):
     """The dashboard for a navigation, or None to fall through to JSON.
 
@@ -727,7 +746,14 @@ async def _spa_document_if_navigation(request: Request):
     """
     if not _is_document_navigation(request):
         return None
-    return await serve_webui_or_fallback("")
+    doc = await serve_webui_or_fallback("")
+    try:
+        doc.headers["Vary"] = _NEGOTIATED
+    except Exception:
+        # Whatever the catch-all handed back is still the right body;
+        # a missing Vary is not worth failing the page over.
+        logger.debug("could not set Vary on the SPA document", exc_info=True)
+    return doc
 
 
 @app.get("/skills", include_in_schema=False)
@@ -735,14 +761,16 @@ async def skills_page_or_json(request: Request, response: Response):
     doc = await _spa_document_if_navigation(request)
     if doc is not None:
         return doc
+    response.headers["Vary"] = _NEGOTIATED
     return await _skills_list_json(response)
 
 
 @app.get("/health", include_in_schema=False)
-async def health_page_or_json(request: Request):
+async def health_page_or_json(request: Request, response: Response):
     doc = await _spa_document_if_navigation(request)
     if doc is not None:
         return doc
+    response.headers["Vary"] = _NEGOTIATED
     return await _dashboard_health_json()
 
 
