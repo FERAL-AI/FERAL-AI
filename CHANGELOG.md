@@ -8,6 +8,228 @@ All notable changes to FERAL are documented here.
 
 ### Fixed
 
+- **REGRESSION from 2026.8.13: the Skills page could not load.** The
+  `/skills` and `/health` shim serves two representations from one URL
+  and never declared `Vary`, so a cache is entitled to treat them as
+  interchangeable. Measured in Chrome: navigating to `/skills` returned
+  the dashboard correctly, and the SPA's own `fetch("/skills")` for its
+  data then got that cached HTML back, so the page rendered "Could not
+  reach the brain to load the skill list: Unexpected token '<'" and
+  listed nothing. A second tab that had never visited `/skills` got the
+  HTML too, because the cached representation is shared. With the HTTP
+  cache disabled the identical fetch returned JSON, which is what pinned
+  it on caching rather than on the branch logic. Both branches now
+  declare `Vary: Accept, Sec-Fetch-Dest`, which are exactly the two
+  inputs the negotiation reads.
+
+  The original shim was verified with curl and with browser
+  navigations. Neither has a shared cache holding a competing
+  representation of the same URL, which was the one case that mattered,
+  and the page it broke is the page whose name is in the URL.
+
+- **`pip install feral-ai` shipped a dashboard with no fonts and no
+  icons.** Measured on a built wheel: 0 of the 59 KaTeX font files and 0
+  of the 3 PWA icons, against 59 font references from the built CSS. So
+  every installed dashboard rendered maths in a fallback face and 404ed
+  its own icons. Two independent causes: `webui_v2.assets` listed no
+  font extensions, and `webui_v2/icons/` had no `__init__.py` so
+  setuptools never discovered it and no glob could reach it. After: 70
+  files, 59 fonts, 3 icons, every reference resolving. Not a regression;
+  identical on 2026.8.12 and earlier, so this is the first release whose
+  published wheel carries the whole dashboard.
+
+  Nothing caught it. `check_webui_v2_contract.py` reads the SOURCE tree,
+  where the files obviously exist, and `release_wheel_smoke.py` resolves
+  only the `assets/*.js|css` that index.html names.
+
+- **The publish gate could not read its own bundle.**
+  `release_wheel_smoke.py` matched entry points with a regex accepting
+  only `assets/x.js` and `./assets/x.js`. `vite.config.js` had moved
+  `base` from `'./'` to `'/'` for a measured reason (a relative ref
+  resolves against the current URL's directory, so a hard load of
+  `/memory/context` fetched `/memory/assets/index-<hash>.js`, got
+  index.html from the SPA fallback at 200, and executed HTML as
+  JavaScript). The gate was not updated with it, so it rejected a
+  correctly built wheel while printing two contradictory lines seconds
+  apart, and 2026.8.13 could not be published at all until it was fixed.
+
+- **A silent room was billed an STT call every 12 seconds.** 60s of
+  digital silence produced 4 calls of 387,200 bytes with zero non-zero
+  samples: `overflowing()` lacked the voiced guard `speech_ended()` has.
+  Whisper hallucinates words on silence and the router wraps whatever
+  comes back as a user turn, so an open mic in a quiet room made the
+  brain answer a room that had said nothing, on a timer. Compressed
+  audio keeps the unconditional ceiling, because silence there is
+  unmeasurable and a buffer growing without limit is the worse failure.
+
+- **The credential sweep could never run on the install it targets.**
+  Migrations run before `state.init()`, but the plaintext credentials
+  file is written later in the same boot when the vault first unlocks.
+  So on a fresh install the sweep found nothing, was marked applied, and
+  never ran again. Measured across four boots: the plaintext
+  `OPENAI_API_KEY` still on disk with doctor reporting "up to date". A
+  sweep is not a one-time shape change; it declares `RECURRING` and the
+  runner never writes a marker for one.
+
+- **Reloading `/skills` or `/health` dumped raw JSON with no way back.**
+  Both are mounted without the `/api` prefix and shadow two of the 28
+  SPA routes, and FastAPI matches a registered route before the SPA
+  catch-all. Reloading `/skills` gave 33KB of JSON with zero anchor
+  elements. Neither path could move (`/health` is the Docker
+  HEALTHCHECK), so the request decides.
+
+- **`/api/devices/connected` returned empty with three daemons
+  attached.** The route replaced the daemon list with the handoff
+  registry, which only the messaging-channel bridge writes to, so the
+  Live devices pane had never been renderable.
+
+- **Memory search had never returned a result.** The page sent `?q=`
+  and the route declares `query`. Live proof: `?q=quokka` returned `[]`,
+  `?query=quokka` returned both matching notes. `MemoryStore.search_all`,
+  the four-tier hybrid search, had no HTTP route at all and was reachable
+  only from the gateway RPC. `GET /api/memory/search` now exposes it with
+  per-tier counts and declared degradations.
+
+- **Settings reported "Test push sent." while nothing was sent.** The
+  brain returned `sent: 0, failed: 1, degraded: ["no push credentials
+  configured", "APNs key not configured"]`. Also fixed on that page: a
+  Devices "Invoke" that had never invoked anything (it posted
+  `{device_id, method, args}` to a route reading `{node_id, command,
+  params}`, then blamed the device), a permanently disabled "Clear
+  unclaimed", four swallowed failures, and MCP refusals rendering in the
+  green success chip.
+
+- **The Home Briefing tab rendered zero DOM**, and tab selection was
+  overwritten by the 15s poll, so Briefing / Desk / Wind-Down reverted
+  while you watched. Also on Home: a stale heart rate shown as live
+  (`heart_rate_fresh` ignored), a Load figure reading
+  `health.cognitive_load` which does not exist in that payload, in-flight
+  jobs reading `description` which no source emits, and four `degraded[]`
+  arrays discarded so a failed read rendered as calm emptiness.
+
+- **Chat erased its own tool traces on commit.** `normaliseUiMessages`
+  projected every row to `{id, role, text}`, so at commit time each turn
+  lost `tools`, `reasoning`, `timeline`, `model` and `usage`, and
+  text-less rows were dropped entirely. Measured: 4 tool cards rendered
+  live during a turn, 0 in the transcript after the answer landed. Every
+  Chat test renders the page outside the Shell provider, where the
+  fallback setter does no normalising, which is why a green suite never
+  saw it. The tool card's head also declared 3 grid columns for 6
+  children, so tool names wrapped under the duration and arguments
+  clipped to two characters.
+
+- **Skills hot-reload reported into a place nobody looks.** The button
+  worked; its outcome banner rendered at y = -71px for the first card
+  and y = -3365px for a lower one, off-screen for success and failure
+  alike. `GET /skills` also sent `endpoints` as an integer while two
+  components guard with `Array.isArray`, so the endpoint chip was dead
+  code in both.
+
+- **The dock ate its own end tiles.** Built to the mockup's numbers
+  rather than an approximation of them: container radius pill to 18px
+  (a full pill curves so hard at the ends that the outer tiles sit
+  inside the curve), gap 2px to 7px, tile 40 to 44px, icon 20 to 22px,
+  and the hover magnify ported exactly (`1 + 0.5k^2`, lift `8k^2`, k
+  falling off over 118px) instead of a flat `translateY(-2px)`. Home is
+  back on the dock, first: dropping it left the entire v2 overview
+  reachable only by remembering the palette shortcut. Ten tiles do not
+  fit a phone, so the row scrolls rather than pushing two destinations
+  outside the container.
+
+- **The work rail was three headings and a sentence each.** No
+  separation, no colour, no recent conversations, nothing foldable. It
+  now carries the mockup's spacing and rules, warn and run colours so
+  "two things are waiting on you" and "a build is running" are
+  distinguishable without reading, the RECENT section that was missing
+  entirely, and folding sections that persist. "Just happened" was
+  showing rows 126 hours old under a heading that promises the opposite,
+  because it had no time window at all.
+
+- **Four of the seven system-bar vitals were wired to fields that do not
+  exist.** `/api/dashboard` has no `cost_today`, `spend_today`,
+  `tokens_used` or `autonomy`, so cost read 0 and autonomy read empty on
+  every install and the render-if-non-zero rule hid both. The bar looked
+  sparse because it was reading nothing. The budget lived only on
+  `LLMProvider._budget_snapshot()` with no HTTP surface at all, and the
+  tier only on `GET /api/autonomy`. Every vital now opens a popover you
+  act from, and the brand dot is a real status light: green when the
+  brain answers, red when it does not.
+
+- **The Brain readout could not name the model or say when anything last
+  happened.** It read `llm_available`, the only LLM fact on that
+  payload. It now leads with uptime, names provider and model, and
+  carries Context and Last turn, all four measured for the first time:
+  `BrainState.started_at`, and the orchestrator recording the turn stamp
+  and the context view size off paths that already run once per turn.
+
+- **The Jobs page had no verb on any row.** The cancel route was
+  computed and then rendered as a `<span>` reading "stoppable", so the
+  surface that lists everything the brain is doing offered nothing to do
+  about any of it.
+
+- **Console rendered a bare "?" for the brain.** It read `health` off
+  `/api/dashboard`, which is the health-READINGS summary and `{}` on any
+  brain with no sensor data.
+
+- **An empty Needs You answered neither question you have there.** It
+  now shows the autonomy tier, which is the load-bearing fact: on
+  `loose` the brain never stops to ask, so an empty queue means "nothing
+  will ever appear here", which used to render identically to "nothing
+  right now". The tier is changeable in place and re-read from the brain
+  afterwards.
+
+- **Two pages misread `GET /api/channels` in two different ways.** Home
+  walked the response envelope and rendered `Active_channels off`,
+  `Channel_count off` and `Details off` as if they were channels;
+  Settings read `status_by_channel || channels`, neither of which exists
+  on that payload, so its channel panel listed nothing on every install.
+  One reader now, in `lib/channels.js`.
+
+- **Three ways to end one voice session were visible at once.** The
+  overlay drops its End only where a composer lane is actually mounted,
+  asked of the lane through context rather than inferred from the route.
+  Fullscreen voice was also an inescapable modal: it declared
+  `role="dialog" aria-modal="true"` over a full-viewport scrim with no
+  Escape and no focus containment, and a real click on a dock tile timed
+  out underneath it.
+
+### Accessibility
+
+- Every system-bar control was under the 24x24 WCAG 2.2 SC 2.5.8 floor,
+  identically at 1512px and 375px since none had a width-dependent rule.
+- Focus landed inside an `aria-hidden` subtree on all 28 routes: the
+  voice overlay is always in the DOM, and `aria-hidden` plus opacity 0
+  plus `pointer-events: none` do not remove anything from the tab order.
+- Tertiary text measured 4.46:1 against the real composited ground in
+  light mode. The previous tuning was correct arithmetic against a
+  nominal ground colour, and light glass composites toward white.
+- The palette search field carried a hard 2px rectangle that was on
+  screen every time the palette opened, because the field is focused on
+  open.
+
+### Tests
+
+- **Two guards in `VoiceLane.test.jsx` could never fail.** They grepped
+  `ui.css` for two selectors that had already been deleted, so both were
+  `expect(css).not.toMatch(<absent>)` and passed on every run while the
+  behaviour they were named after came back through a different door.
+- **CI could never test the ripgrep engine.** `coding_tools`' grep has
+  two engines and the parity suite runs both; the runner had no `rg`, so
+  the ripgrep leg silently produced the fallback and failed at 24%,
+  halting the whole matrix (this job runs with `-x`). Installed, and
+  `FERAL_REQUIRE_RIPGREP` makes CI fail loudly rather than skip it.
+- Two macOS tests asserted platform-specific answers flatly on a Linux
+  runner, and a third failed on a busy machine because its "unbounded"
+  baseline walk carries an 8s timeout.
+- `Orchestrator.runtime_status` is a `@property`, and a new dashboard
+  reader guarded it with `callable()`. So it returned `{}` on every
+  request: the field was present, permanently empty, and raised nothing.
+  There is now a test asserting it stays a property, because if it
+  becomes a method the dashboard goes quietly empty again rather than
+  failing.
+
+### Routines
+
 - **A routine that could never succeed retried every minute forever, and
   said so every day.** Refusing to fire a `JobType.TRIGGERED` routine
   (`api/server.py`, added when the 4,766-run unconditional-firing
