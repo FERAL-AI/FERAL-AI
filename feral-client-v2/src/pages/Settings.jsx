@@ -374,21 +374,35 @@ function AccessSection() {
 // ── General ───────────────────────────────────────────────────
 
 function GeneralSection() {
-  const { config, update } = useConfig();
+  const { config, error: configError, update } = useConfig();
   const [busy, setBusy] = useState('');
-  if (!config) return <EmptyState title="Loading config…" />;
+  // `update` rejects on a non-2xx. The old handler was
+  // `try { await update(...) } finally { setBusy('') }` with no catch,
+  // so a refused toggle became an unhandled rejection: the switch
+  // snapped back on the next render and nothing on screen said why.
+  const [err, setErr] = useState(null);
+  if (!config) return <EmptyState title={configError ? `Could not load config: ${configError}` : 'Loading config…'} />;
   const features = config.features || {};
   const featureRow = (key, label, hint) => (
     <Row label={label} hint={hint} key={key}>
       <Toggle
         checked={!!features[key]}
         disabled={busy === key}
-        onChange={async (next) => { setBusy(key); try { await update('features', key, next); } finally { setBusy(''); } }}
+        onChange={async (next) => {
+          setBusy(key);
+          setErr(null);
+          try {
+            await update('features', key, next);
+          } catch (e) {
+            setErr(`${label} did not change: ${e?.detail || e?.message || 'update failed'}`);
+          } finally { setBusy(''); }
+        }}
       />
     </Row>
   );
   return (
     <div className="v2-setting-stack">
+      {err && <div className="v2-chip v2-chip--error" role="alert" data-testid="general-error">{err}</div>}
       <Row label="Version" hint="Current feral-ai build"><code className="v2-code-inline">{config.version || '—'}</code></Row>
       {featureRow('streaming', 'Streaming replies', 'Token-by-token output')}
       {featureRow('proactive', 'Proactive alerts', 'Brain surfaces things without being asked')}
@@ -1595,33 +1609,56 @@ function ChannelsSection() {
   const [creds, setCreds] = useState({});
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
+  const [msg, setMsg] = useState(null);
 
-  useEffect(() => { apiJson('/api/channels').then(setStats).catch((e) => setError(e.message)); }, []);
+  const refresh = useCallback(async () => {
+    try { setStats(await apiJson('/api/channels')); } catch (e) { setError(e?.detail || e?.message); }
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
 
   if (!stats) return <EmptyState title={error || 'Loading channels…'} />;
   const entries = Object.entries(stats.status_by_channel || stats.channels || {});
 
   const save = async (channel) => {
     setBusy(channel);
+    setError(null);
+    setMsg(null);
     try {
       const envKey = {
         telegram: 'FERAL_TELEGRAM_BOT_TOKEN',
         discord: 'FERAL_DISCORD_BOT_TOKEN',
         slack: 'FERAL_SLACK_BOT_TOKEN',
       }[channel] || `FERAL_${channel.toUpperCase()}_BOT_TOKEN`;
-      await apiFetch('/api/config/credentials', {
+      // Both calls used to run bare inside `try { … } finally { setBusy }`
+      // with no catch and no refresh: a rejected credential save or a
+      // refused channel start left the panel exactly as it was, with the
+      // token still in the box and the channel still reading "disabled",
+      // and nothing on screen said the save had failed.
+      const credRes = await apiFetch('/api/config/credentials', {
         method: 'POST',
         body: JSON.stringify({ [envKey]: creds[channel] }),
       });
+      const credBody = await credRes.json().catch(() => ({}));
+      if (Array.isArray(credBody?.rejected) && credBody.rejected.length) {
+        setError(`${channel}: the brain rejected ${credBody.rejected.join(', ')}`);
+        return;
+      }
       await apiFetch('/api/channels/start', {
         method: 'POST',
         body: JSON.stringify({ type: channel, config: { bot_token: creds[channel], enabled: true } }),
       });
+      setCreds((s) => ({ ...s, [channel]: '' }));
+      setMsg(`${channel}: token saved and start requested. The badge below reflects the brain's own status.`);
+      await refresh();
+    } catch (e) {
+      setError(`${channel}: ${e?.detail || e?.message || 'save failed'}`);
     } finally { setBusy(null); }
   };
 
   return (
     <div className="v2-setting-stack">
+      {msg && <div className="v2-chip v2-chip--live" role="status">{msg}</div>}
+      {error && <div className="v2-chip v2-chip--error" role="alert" data-testid="channels-error">{error}</div>}
       <Row label="Active channels"><Status>{stats.active ?? entries.length}</Status></Row>
       {entries.map(([name, info]) => (
         <Row key={name} label={name} hint={info?.description || ''}>
@@ -1645,8 +1682,15 @@ function ChannelsSection() {
 function AutonomySection() {
   const [mode, setMode] = useState(null);
   const [busy, setBusy] = useState(false);
-  useEffect(() => { apiJson('/api/autonomy').then((d) => setMode(d.mode)); }, []);
-  if (!mode) return <EmptyState title="Loading…" />;
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    // A failed read used to reject unhandled and leave `mode` null, so
+    // the panel sat on "Loading…" forever with no explanation.
+    apiJson('/api/autonomy')
+      .then((d) => setMode(d.mode))
+      .catch((e) => setErr(e?.detail || e?.message || 'could not read the autonomy tier'));
+  }, []);
+  if (!mode) return <EmptyState title={err ? `Autonomy tier unavailable: ${err}` : 'Loading…'} />;
   const tiers = [
     { id: 'strict', label: 'Strict', desc: 'Approval for every tool call. Safest, slowest.' },
     { id: 'hybrid', label: 'Hybrid', desc: 'Surfaces drafts for approval. Default.' },
@@ -1654,13 +1698,26 @@ function AutonomySection() {
   ];
   const set = async (next) => {
     setBusy(true);
+    setErr(null);
     try {
-      const r = await apiFetch('/api/autonomy', { method: 'POST', body: JSON.stringify({ mode: next }) });
-      if (r.ok) setMode(next);
+      // `apiFetch` throws on any non-2xx, so `if (r.ok)` was only ever
+      // reachable when true and the rejection had no catch: a refused
+      // tier change left the panel showing the old tier with no error.
+      // Re-read the brain instead of trusting the request: this control
+      // changes what the agent is allowed to do without asking.
+      await apiFetch('/api/autonomy', { method: 'POST', body: JSON.stringify({ mode: next }) });
+      const confirmed = await apiJson('/api/autonomy');
+      setMode(confirmed?.mode || next);
+      if (confirmed?.mode && confirmed.mode !== next) {
+        setErr(`The brain reports tier "${confirmed.mode}", not "${next}".`);
+      }
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'could not change the autonomy tier');
     } finally { setBusy(false); }
   };
   return (
     <div className="v2-setting-stack">
+      {err && <div className="v2-chip v2-chip--error" role="alert" data-testid="autonomy-error">{err}</div>}
       <Row label="Current tier"><Status tone={mode === 'loose' ? 'warn' : 'live'}>{mode}</Status></Row>
       {tiers.map((t) => (
         <Row key={t.id} label={t.label} hint={t.desc}>
@@ -1952,10 +2009,16 @@ function SecuritySection() {
 }
 
 function VaultSub() {
-  const [items, setItems] = useState([]);
+  // `null` = we have not successfully read the vault. `[]` = the brain
+  // told us it holds no keys. The old code started at `[]` and had
+  // `catch { setItems([]) }`, so a vault read that failed rendered
+  // "No stored keys yet." — an affirmative claim about the user's
+  // secrets built out of a request that never landed.
+  const [items, setItems] = useState(null);
   const [key, setKey] = useState('');
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -1975,27 +2038,42 @@ function VaultSub() {
         entries = d.map((k) => typeof k === 'string' ? { name: k } : k);
       }
       setItems(entries);
-    } catch { setItems([]); }
+      setErr(null);
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'could not read the vault');
+    }
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
 
   const store = async () => {
     setBusy(true);
+    setErr(null);
     try {
+      // No catch here before: a refused store rejected out of the click
+      // handler, the fields kept their contents and the list did not
+      // change, so the only signal was a toast that vanished after 6s.
       await apiFetch('/api/security/vault/store', {
         method: 'POST',
         body: JSON.stringify({ key_name: key, value }),
       });
       setKey(''); setValue('');
-      refresh();
+      await refresh();
+    } catch (e) {
+      setErr(`${key} was not stored: ${e?.detail || e?.message || 'store failed'}`);
     } finally { setBusy(false); }
   };
 
   const remove = async (name) => {
     if (!window.confirm(`Remove ${name}? This deletes the stored secret.`)) return;
-    await apiFetch(`/api/security/vault/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    refresh();
+    setErr(null);
+    try {
+      await apiFetch(`/api/security/vault/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    } catch (e) {
+      setErr(`${name} was not removed: ${e?.detail || e?.message || 'delete failed'}`);
+    } finally {
+      await refresh();
+    }
   };
 
   return (
@@ -2005,8 +2083,9 @@ function VaultSub() {
         Encrypted at-rest storage for API keys + secrets. Values never leave
         the Brain or render in the UI — only the key name + a fingerprint.
       </p>
+      {err && <div className="v2-chip v2-chip--error" role="alert" data-testid="vault-error">{err}</div>}
       <div className="v2-vault-list">
-        {items.map((it) => (
+        {(items || []).map((it) => (
           <div key={it.name} className="v2-vault-row">
             <code className="v2-vault-name">{it.name}</code>
             {it.fingerprint && (
@@ -2022,7 +2101,13 @@ function VaultSub() {
             </button>
           </div>
         ))}
-        {items.length === 0 && <div className="v2-p v2-p--muted">No stored keys yet.</div>}
+        {items && items.length === 0 && <div className="v2-p v2-p--muted">No stored keys yet.</div>}
+        {!items && !err && <div className="v2-p v2-p--muted">Reading the vault…</div>}
+        {!items && err && (
+          <div className="v2-p v2-p--muted" data-testid="vault-unknown">
+            The vault could not be read, so we cannot say what it holds. Nothing has been deleted.
+          </div>
+        )}
       </div>
       <div className="v2-setting-stack" style={{ marginTop: 16 }}>
         <Row label="Key name"><input className="v2-input" value={key} onChange={(e) => setKey(e.target.value)} placeholder="OPENWEATHER_API_KEY" /></Row>
@@ -3556,26 +3641,70 @@ function PushSection() {
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  // Separated from `msg` so a failure cannot be painted in the green
+  // "live" chip that success uses.
+  const [err, setErr] = useState(null);
 
   const register = async () => {
     setBusy(true);
+    setMsg(null);
+    setErr(null);
     try {
+      // `apiFetch` throws on any non-2xx, so the old `r.ok ? … : …`
+      // ternary had an unreachable false branch AND no catch: a failed
+      // registration rejected out of this handler and the panel said
+      // nothing at all.
       const r = await apiFetch('/api/push/register', {
         method: 'POST',
         body: JSON.stringify({ platform, token }),
       });
-      setMsg(r.ok ? 'Registered ✓' : `Failed: ${r.status}`);
+      const body = await r.json().catch(() => ({}));
+      if (body?.success === false) {
+        setErr(formatApiDetail(body, 'registration was refused'));
+      } else {
+        setMsg(`Registered ${platform.toUpperCase()} token.`);
+      }
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'registration failed');
     } finally { setBusy(false); }
   };
 
   const testSend = async () => {
     setBusy(true);
+    setMsg(null);
+    setErr(null);
     try {
-      await apiFetch('/api/push/send', {
+      // This used to discard the response and say "Test push sent."
+      // unconditionally, in the green chip. Measured against a brain
+      // with no APNs key, /api/push/send answers 200 with
+      // {"success": false, "sent": 0, "failed": 1, "degraded": ["no push
+      // credentials configured …", "apns device …: APNs key not
+      // configured"]}. Nothing left the machine and the panel said it
+      // had. `degraded` carries no `error` key, so apiFetch does not
+      // throw on it either; the body has to be read.
+      const r = await apiFetch('/api/push/send', {
         method: 'POST',
         body: JSON.stringify({ title: 'FERAL', body: 'Test push from Settings', platform }),
       });
-      setMsg('Test push sent.');
+      const body = await r.json().catch(() => ({}));
+      const sent = Number(body?.sent ?? 0);
+      const failed = Number(body?.failed ?? 0);
+      const degraded = Array.isArray(body?.degraded) ? body.degraded : [];
+      if (body?.success === false || sent === 0) {
+        setErr(
+          degraded.length
+            ? `Nothing was sent. ${degraded.join('; ')}`
+            : `Nothing was sent (${failed} device${failed === 1 ? '' : 's'} failed).`,
+        );
+      } else {
+        setMsg(
+          `Sent to ${sent} device${sent === 1 ? '' : 's'}`
+          + (failed ? `, ${failed} failed` : '')
+          + (degraded.length ? ` — ${degraded.join('; ')}` : '.'),
+        );
+      }
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'send failed');
     } finally { setBusy(false); }
   };
 
@@ -3594,7 +3723,8 @@ function PushSection() {
         <button type="button" className="v2-btn v2-btn--primary" onClick={register} disabled={busy || !token}>Register</button>
         <button type="button" className="v2-btn" onClick={testSend} disabled={busy}>Send test</button>
       </Row>
-      {msg && <div className="v2-chip v2-chip--live">{msg}</div>}
+      {msg && <div className="v2-chip v2-chip--live" role="status" data-testid="push-ok">{msg}</div>}
+      {err && <div className="v2-chip v2-chip--error" role="alert" data-testid="push-error">{err}</div>}
     </div>
   );
 }
@@ -3608,6 +3738,7 @@ function McpSection() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(null);
   const [msg, setMsg] = useState(null);
+  const [err, setErr] = useState(null);
 
   const refresh = useCallback(async () => {
     const [s, r, t] = await Promise.allSettled([
@@ -3626,6 +3757,7 @@ function McpSection() {
   const connect = async (server) => {
     setBusy(server.id);
     setMsg(null);
+    setErr(null);
     try {
       const body = {
         name: server.id,
@@ -3635,8 +3767,14 @@ function McpSection() {
       };
       const r = await apiFetch('/api/mcp/connect', { method: 'POST', body: JSON.stringify(body) });
       const data = await r.json().catch(() => ({}));
-      setMsg(data?.success ? `${server.name} connected — ${data.tools} tools` : (data?.error || `Failed: ${r.status}`));
+      // A refused connection used to land in `msg`, which renders in the
+      // green "live" chip: "Failed to connect to MCP server 'x'" was
+      // painted as a success. Failures go to `err` now.
+      if (data?.success) setMsg(`${server.name} connected — ${data.tools} tools`);
+      else setErr(data?.error || formatApiDetail(data, `connect returned ${r.status}`));
       refresh();
+    } catch (e) {
+      setErr(e?.detail || e?.message || 'connect failed');
     } finally { setBusy(null); }
   };
 
@@ -3750,7 +3888,8 @@ function McpSection() {
         </details>
       )}
 
-      {msg && <div className="v2-chip v2-chip--live">{msg}</div>}
+      {msg && <div className="v2-chip v2-chip--live" role="status">{msg}</div>}
+      {err && <div className="v2-chip v2-chip--error" role="alert" data-testid="mcp-error">{err}</div>}
     </div>
   );
 }

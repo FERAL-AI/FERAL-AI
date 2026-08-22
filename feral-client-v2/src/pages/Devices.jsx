@@ -18,10 +18,10 @@ import { firstRejection } from '../hooks/useResource';
  * below. They were focusable but had no key handler, so a keyboard user
  * could land on a device card and had no way to open its detail modal:
  * the whole modal was mouse-only. A native <button> is not available here
- * because these cards contain their own buttons (Forget, Wake) and
- * nesting interactive controls inside a button is invalid.
+ * because the card is a Glass panel that also needs a hover transform,
+ * and nesting interactive controls inside a button is invalid.
  *
- * The `e.target !== e.currentTarget` guard stops a nested button's own
+ * The `e.target !== e.currentTarget` guard stops a nested control's own
  * Enter/Space from bubbling up and opening the card at the same time.
  * preventDefault on Space stops the page scrolling, which is what a
  * native button does.
@@ -63,11 +63,11 @@ function labelFor(row) {
 }
 
 /**
- * Build the hover tooltip for a sub-device chip on the Live pane.
- * Renders the canonical truth fields the brain's NodeSubdeviceStore
- * exposes — capability, status, provenance, last-seen age, and the
- * heartbeat window that drives the live↔stale derate. Truthful even
- * when the row is stale: the user can read why the dot is grey.
+ * Build the hover tooltip for a sub-device chip. Renders the canonical
+ * truth fields the brain's NodeSubdeviceStore exposes — capability,
+ * status, provenance, last-seen age, and the heartbeat window that
+ * drives the live↔stale derate. Truthful even when the row is stale:
+ * the user can read why the dot is grey.
  */
 function subdeviceTooltip(s) {
   if (!s) return '';
@@ -89,13 +89,94 @@ function subdeviceTooltip(s) {
 }
 
 /**
+ * Capability names, whatever shape the brain sent.
+ *
+ * Three shapes are live at once: `/api/devices/connected` sends a list
+ * of strings straight off the daemon's node_register payload,
+ * `/api/hardware/mesh` sends an object keyed by capability, and
+ * `/api/hardware/device/{id}` sends a list of full capability manifests
+ * (`{id, name, description, category, ...}`). The last one used to be
+ * rendered with `String(c)`, so the detail modal for any node in the
+ * device registry printed a row of `[object Object]` where its
+ * capabilities should have been.
+ */
+function capListOf(source) {
+  if (Array.isArray(source)) {
+    return source.map((c) => {
+      if (typeof c === 'string') return c;
+      if (c && typeof c === 'object') return String(c.id || c.name || c.capability || '').trim() || 'capability';
+      return String(c);
+    }).filter(Boolean);
+  }
+  if (source && typeof source === 'object') return Object.keys(source);
+  return [];
+}
+
+/**
+ * The one card every pane on this page renders.
+ *
+ * Before this, the four lists each drew their own card with their own
+ * content, so a Live card measured 343x149 (type, manufacturer, model,
+ * five capability chips, a "Haptic: unwired" chip and one chip per
+ * sub-device), a Paired card measured 520x162 (chips plus its own Revoke
+ * button) and a HUP mesh card measured 343x87. Three panes, three sizes,
+ * and the widest card carried more text than the summary it was
+ * supposed to be.
+ *
+ * Every card is now the same fixed size and carries exactly three
+ * things: a status dot, a name, and one line of meta. Everything that
+ * used to be printed on the card is in the detail modal the card opens,
+ * which is reachable by click and by Enter/Space.
+ */
+function DeviceCard({
+  tone, pulse, statusLabel, name, meta, onOpen, ariaLabel, testid,
+}) {
+  return (
+    <Glass
+      level={0}
+      radius="md"
+      padding="sm"
+      className="v2-device-card"
+      data-testid={testid}
+      onClick={onOpen}
+      onKeyDown={activateOnKey(onOpen)}
+      role="button"
+      tabIndex={0}
+      aria-label={ariaLabel}
+      title={`${name}\n${meta}`}
+    >
+      <header className="v2-device-head">
+        <StatusDot tone={tone} pulse={pulse} label={statusLabel} />
+        <h3 className="v2-device-name">{name}</h3>
+      </header>
+      <div className="v2-device-meta">{meta}</div>
+    </Glass>
+  );
+}
+
+/**
+ * One line of summary, built from counts rather than from a list of
+ * chips. `3 capabilities` is the same fact as three chips and costs one
+ * card row instead of three.
+ */
+function summarize(parts) {
+  return parts.filter(Boolean).join(' · ');
+}
+
+function countLabel(n, singular, plural) {
+  if (!n) return '';
+  return `${n} ${n === 1 ? singular : (plural || `${singular}s`)}`;
+}
+
+/**
  * Devices — live + paired + HUP mesh. Click a device for detail +
  * actuator invoke. Uses Brain's real endpoints:
  *   GET /api/devices/connected   <- live daemon WebSockets, real types
- *   GET /api/devices/paired      <- historical pairing tokens
+ *   GET /api/devices/paired      <- historical pairing tokens (claimed)
+ *   GET /api/devices/paired?include_unclaimed=true <- + unclaimed tokens
  *   GET /api/hardware/mesh       <- HUP mesh snapshot
- *   GET /api/hardware/device/{id}, /api/hardware/context
- *   POST /api/hardware/invoke (or /api/hardware/execute)
+ *   GET /api/hardware/device/{id}
+ *   POST /api/hardware/invoke
  *   DELETE /api/devices/{device_id}
  */
 export default function Devices() {
@@ -107,6 +188,13 @@ export default function Devices() {
   // nothing ever contradicted that.
   const [offline, setOffline] = useState([]);
   const [paired, setPaired] = useState([]);
+  // Unclaimed pairing tokens. `/api/devices/paired` filters them out by
+  // default (deliberately — they are pairing codes, not devices), which
+  // meant `unclaimed` in the Paired pane was computed over a list that by
+  // construction contained none, so the "Clear unclaimed" button was
+  // permanently disabled and could never prune anything. The count comes
+  // from the endpoint that actually returns those rows.
+  const [unclaimedCount, setUnclaimedCount] = useState(0);
   const [mesh, setMesh] = useState([]);
   // 2026-06-05 demo prep — Topology view also wants the live HR/SpO2
   // numbers off /api/dashboard.latest_health so the brain card can
@@ -145,11 +233,12 @@ export default function Devices() {
     // rendered "No devices paired yet" plus a "Pair your first device"
     // CTA, which is an assertion about hardware the client never got to
     // ask about. Inspect each settled result instead.
-    const [c, p, m, d] = await Promise.allSettled([
+    const [c, p, m, d, u] = await Promise.allSettled([
       apiJson('/api/devices/connected'),
       apiJson('/api/devices/paired'),
       apiJson('/api/hardware/mesh'),
       apiJson('/api/dashboard'),
+      apiJson('/api/devices/paired?include_unclaimed=true'),
     ]);
     if (c.status === 'fulfilled') {
       setConnected(c.value?.devices || []);
@@ -160,9 +249,14 @@ export default function Devices() {
     if (d.status === 'fulfilled') {
       setLatestHealth(d.value?.latest_health || null);
     }
+    if (u.status === 'fulfilled') {
+      const rows = u.value?.devices || [];
+      setUnclaimedCount(rows.filter((r) => !r.claimed_at && !r.last_seen).length);
+    }
     // The three device-list endpoints are what the "no devices" empty
     // state speaks for. If ANY of them failed we do not know the list
-    // is empty, so the page must not say it is.
+    // is empty, so the page must not say it is. The unclaimed count is
+    // not one of them: it arms a button, it does not speak for the list.
     setLoadError(firstRejection([c, p, m]));
     // `error` is now only ever a mutation failure (revoke / prune). It
     // used to be cleared here on every 10s tick, which also silently
@@ -300,6 +394,7 @@ export default function Devices() {
     } catch (e) {
       setError(e?.message || 'delete failed');
     } finally {
+      setSelected(null);
       refresh();
     }
   };
@@ -336,6 +431,9 @@ export default function Devices() {
             action={<button type="button" className="v2-btn v2-btn--primary" onClick={() => setShowPair(true)}>Pair your first device</button>}
           />
         )}
+        {!loading && !nothingVisible && (
+          <p className="v2-p v2-p--muted">Click any device for its full detail, sub-devices and actuator console.</p>
+        )}
       </Pane>
 
       <PerceptionShare />
@@ -355,70 +453,29 @@ export default function Devices() {
             <code style={{ margin: '0 4px' }}>node_register</code> payload — never fabricated.
           </p>
           <div className="v2-device-grid">
-            {connected.map((d, i) => (
-              <Glass
-                key={d.node_id || i}
-                level={0}
-                radius="md"
-                padding="md"
-                className="v2-device-card"
-                onClick={() => setSelected({ ...d, _source: 'connected' })}
-                onKeyDown={activateOnKey(() => setSelected({ ...d, _source: 'connected' }))}
-                role="button"
-                tabIndex={0}
-                aria-label={`${d.name || d.node_id || 'Device'}, connected. Open details`}
-              >
-                <header className="v2-device-head">
-                  <StatusDot tone="live" pulse label={`${d.name || d.node_id || 'Device'} connected`} />
-                  <h3 className="v2-device-name">{d.name || d.node_id || 'Device'}</h3>
-                </header>
-                <div className="v2-device-meta">
-                  {d.type || 'unknown'}
-                  {d.manufacturer && <> · {d.manufacturer}{d.model ? ` ${d.model}` : ''}</>}
-                </div>
-                {Array.isArray(d.capabilities) && d.capabilities.length > 0 && (
-                  <div className="v2-device-caps">
-                    {d.capabilities.slice(0, 5).map((c, ci) => (
-                      <span key={ci} className="v2-chip">{String(c)}</span>
-                    ))}
-                  </div>
-                )}
-                {d.type === 'wearable' && !(d.capabilities || []).includes('haptic') && (
-                  <div className="v2-device-caps" style={{ marginTop: 6 }}>
-                    <span className="v2-chip v2-chip--muted" title="This daemon hasn't declared a haptic capability. For Theora wristbands the production path is the iOS FeralNode bridge which drives Veepoo SDK haptic directly.">
-                      Haptic: unwired
-                    </span>
-                  </div>
-                )}
-                {/* Phase-1: render the brain's truth-store sub-device
-                    tree directly under each connected node. Each chip
-                    binds to the per-row `live` flag so a row whose
-                    last heartbeat is past its provenance window
-                    auto-derates to `off`. */}
-                {Array.isArray(d.subdevices) && d.subdevices.length > 0 && (
-                  <div className="v2-device-caps" style={{ marginTop: 6 }}>
-                    {d.subdevices.map((s, si) => (
-                      <span
-                        key={si}
-                        className="v2-chip"
-                        title={subdeviceTooltip(s)}
-                        data-testid="v2-device-subdevice-chip"
-                      >
-                        <StatusDot
-                          tone={s.live ? 'live' : 'off'}
-                          pulse={s.live}
-                          label={`${s.capability} ${s.live ? 'live' : 'stale'}`}
-                        />
-                        {s.capability}
-                        {s.status && s.status !== 'ready' && (
-                          <span className="v2-chip-suffix"> · {s.status}</span>
-                        )}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </Glass>
-            ))}
+            {connected.map((d, i) => {
+              const name = d.name || d.node_id || 'Device';
+              const caps = capListOf(d.capabilities);
+              const subs = Array.isArray(d.subdevices) ? d.subdevices : [];
+              const liveSubs = subs.filter((s) => s.live).length;
+              return (
+                <DeviceCard
+                  key={d.node_id || i}
+                  testid="v2-devices-live-card"
+                  tone="live"
+                  pulse
+                  statusLabel={`${name} connected`}
+                  name={name}
+                  meta={summarize([
+                    d.type || 'unknown',
+                    countLabel(caps.length, 'capability', 'capabilities'),
+                    subs.length ? `${liveSubs}/${subs.length} sub-devices live` : '',
+                  ])}
+                  ariaLabel={`${name}, connected. Open details`}
+                  onOpen={() => setSelected({ ...d, _source: 'connected' })}
+                />
+              );
+            })}
           </div>
         </Pane>
       )}
@@ -432,60 +489,27 @@ export default function Devices() {
             reconnect them itself; only the device can start that.
           </p>
           <div className="v2-device-grid">
-            {offline.map((d, i) => (
-              <Glass
-                key={d.node_id || i}
-                level={0}
-                radius="md"
-                padding="md"
-                className="v2-device-card"
-                data-testid="v2-devices-offline-card"
-                onClick={() => setSelected({ ...d, _source: 'offline' })}
-                onKeyDown={activateOnKey(() => setSelected({ ...d, _source: 'offline' }))}
-                role="button"
-                tabIndex={0}
-                aria-label={`${d.name || d.node_id || 'Device'}, disconnected. Open details`}
-              >
-                <header className="v2-device-head">
-                  <StatusDot tone="off" pulse={false} label={`${d.node_id} disconnected`} />
-                  <h3 className="v2-device-name">{d.name || d.node_id || 'Device'}</h3>
-                </header>
-                <div className="v2-device-meta">
-                  {d.type || 'unknown'}
-                  {' · disconnected'}
-                  {ageText(d.last_seen_age_s) ? ` · last seen ${ageText(d.last_seen_age_s)}` : ''}
-                </div>
-                {Array.isArray(d.also_known_as) && d.also_known_as.length > 0 && (
-                  <div className="v2-device-meta v2-p--muted" title={d.also_known_as.join('\n')}>
-                    {`Same device as ${d.also_known_as.length} earlier install${d.also_known_as.length === 1 ? '' : 's'}`}
-                  </div>
-                )}
-                {Array.isArray(d.subdevices) && d.subdevices.length > 0 && (
-                  <div className="v2-device-caps" style={{ marginTop: 6 }}>
-                    {d.subdevices.map((s, si) => (
-                      <span
-                        key={si}
-                        className="v2-chip"
-                        title={subdeviceTooltip(s)}
-                        data-testid="v2-device-subdevice-chip"
-                      >
-                        <StatusDot
-                          tone={s.live ? 'live' : 'off'}
-                          pulse={s.live}
-                          label={`${s.capability} ${s.live ? 'live' : 'stale'}`}
-                        />
-                        {s.name || s.capability}
-                      </span>
-                    ))}
-                  </div>
-                )}
-                {Array.isArray(d.reconnect?.steps) && d.reconnect.steps.length > 0 && (
-                  <ol className="v2-p v2-p--tiny v2-p--muted" style={{ marginTop: 8, paddingLeft: 16 }}>
-                    {d.reconnect.steps.map((step, si) => <li key={si}>{step}</li>)}
-                  </ol>
-                )}
-              </Glass>
-            ))}
+            {offline.map((d, i) => {
+              const name = d.name || d.node_id || 'Device';
+              const age = ageText(d.last_seen_age_s);
+              return (
+                <DeviceCard
+                  key={d.node_id || i}
+                  testid="v2-devices-offline-card"
+                  tone="off"
+                  pulse={false}
+                  statusLabel={`${d.node_id} disconnected`}
+                  name={name}
+                  meta={summarize([
+                    d.type || 'unknown',
+                    'disconnected',
+                    age ? `last seen ${age}` : '',
+                  ])}
+                  ariaLabel={`${name}, disconnected. Open details`}
+                  onOpen={() => setSelected({ ...d, _source: 'offline' })}
+                />
+              );
+            })}
           </div>
         </Pane>
       )}
@@ -493,8 +517,8 @@ export default function Devices() {
       {visiblePaired.length > 0 && (
         <PairedPane
           paired={visiblePaired}
+          unclaimedCount={unclaimedCount}
           onSelect={(d) => setSelected({ ...d, _source: 'paired' })}
-          onForget={forget}
           onRefresh={refresh}
         />
       )}
@@ -502,40 +526,32 @@ export default function Devices() {
       {mesh.length > 0 && (
         <Pane title={`HUP mesh (${mesh.length})`}>
           <div className="v2-device-grid">
-            {mesh.map((n, i) => (
-              <Glass
-                key={n.node_id || i}
-                level={0}
-                radius="md"
-                padding="md"
-                className="v2-device-card"
-                onClick={() => setSelected({ ...n, _source: 'mesh' })}
-                onKeyDown={activateOnKey(() => setSelected({ ...n, _source: 'mesh' }))}
-                role="button"
-                tabIndex={0}
-                aria-label={`${n.name || n.node_id || 'Node'}, ${n.online ? 'online' : 'offline'}. Open details`}
-              >
-                <header className="v2-device-head">
-                  <StatusDot
-                    tone={n.online ? 'live' : 'off'}
-                    pulse={n.online}
-                    label={`${n.name || n.node_id || 'Node'} ${n.online ? 'online' : 'offline'}`}
-                  />
-                  <h3 className="v2-device-name">{n.name || n.node_id}</h3>
-                </header>
-                <div className="v2-device-meta">
-                  <Radio size={10} style={{ verticalAlign: 'text-bottom' }} /> HUP {n.hup_version || '1.x'}
-                  {n.signal != null && <> · <Wifi size={10} style={{ verticalAlign: 'text-bottom' }} /> {Math.round(n.signal)}%</>}
-                </div>
-                {n.capabilities && (
-                  <div className="v2-device-caps">
-                    {(Array.isArray(n.capabilities) ? n.capabilities : Object.keys(n.capabilities || {})).slice(0, 5).map((c, ci) => (
-                      <span key={ci} className="v2-chip">{String(c)}</span>
-                    ))}
-                  </div>
-                )}
-              </Glass>
-            ))}
+            {mesh.map((n, i) => {
+              const name = n.name || n.node_id || 'Node';
+              // `/api/hardware/mesh` returns only nodes holding an open
+              // socket, and now says `online: true` on each row. Older
+              // brains omit the key; treat a missing flag as unknown
+              // rather than as offline, since this list is by definition
+              // the connected set.
+              const isOnline = n.online !== false;
+              return (
+                <DeviceCard
+                  key={n.node_id || i}
+                  testid="v2-devices-mesh-card"
+                  tone={isOnline ? 'live' : 'off'}
+                  pulse={isOnline}
+                  statusLabel={`${name} ${isOnline ? 'online' : 'offline'}`}
+                  name={name}
+                  meta={summarize([
+                    n.node_type || n.type || 'node',
+                    `HUP ${n.hup_version || '1.x'}`,
+                    n.signal != null ? `${Math.round(n.signal)}% signal` : '',
+                  ])}
+                  ariaLabel={`${name}, ${isOnline ? 'online' : 'offline'}. Open details`}
+                  onOpen={() => setSelected({ ...n, _source: 'mesh' })}
+                />
+              );
+            })}
           </div>
         </Pane>
       )}
@@ -551,20 +567,15 @@ export default function Devices() {
   );
 }
 
-function PairedPane({ paired, onSelect, onForget, onRefresh }) {
+function PairedPane({ paired, unclaimedCount, onSelect, onRefresh }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
 
-  const unclaimed = useMemo(
-    () => paired.filter((d) => !d.claimed_at && !d.last_seen),
-    [paired],
-  );
-
   const clearUnclaimed = async () => {
-    if (unclaimed.length === 0) return;
-    const msg = unclaimed.length === 1
+    if (unclaimedCount === 0) return;
+    const msg = unclaimedCount === 1
       ? 'Clear 1 unclaimed pairing?'
-      : `Clear ${unclaimed.length} unclaimed pairings?`;
+      : `Clear ${unclaimedCount} unclaimed pairings?`;
     if (!window.confirm(msg)) return;
     setBusy(true);
     setErr(null);
@@ -594,76 +605,43 @@ function PairedPane({ paired, onSelect, onForget, onRefresh }) {
           type="button"
           className="v2-btn v2-btn--ghost"
           onClick={clearUnclaimed}
-          disabled={busy || unclaimed.length === 0}
+          disabled={busy || unclaimedCount === 0}
+          data-testid="v2-devices-clear-unclaimed"
           title="Revoke every pairing token that was never claimed by a live device"
         >
-          <Sparkles size={13} /> Clear unclaimed{unclaimed.length ? ` (${unclaimed.length})` : ''}
+          <Sparkles size={13} /> Clear unclaimed{unclaimedCount ? ` (${unclaimedCount})` : ''}
         </button>
       )}
     >
       <p className="v2-p v2-p--muted">
         Historical pairings — tokens issued via pair flow. A device can be paired but not
-        currently connected. Rows marked "unclaimed" never completed a
-        <code style={{ margin: '0 4px' }}>/pair/complete</code> handshake and are safe
-        to prune.
+        currently connected. Tokens that never completed a
+        <code style={{ margin: '0 4px' }}>/pair/complete</code> handshake are not listed
+        here; the button above prunes them.
       </p>
       {err && <div className="v2-chip v2-chip--error">{err}</div>}
       <div className="v2-device-grid">
         {paired.map((d, i) => {
           const claimed = !!(d.claimed_at || d.last_seen);
+          const caps = capListOf(d.capabilities);
+          const name = labelFor(d);
           return (
-            <Glass
+            <DeviceCard
               key={d.device_id || d.id || i}
-              level={0}
-              radius="md"
-              padding="md"
-              className="v2-device-card"
-            >
-              <header
-                className="v2-device-head"
-                onClick={() => onSelect(d)}
-                onKeyDown={activateOnKey(() => onSelect(d))}
-                role="button"
-                tabIndex={0}
-                aria-label={`${labelFor(d)}, ${claimed ? 'claimed' : 'unclaimed'}. Open details`}
-                style={{ cursor: 'pointer' }}
-              >
-                <StatusDot
-                  tone={claimed ? 'neutral' : 'off'}
-                  pulse={false}
-                  label={`${labelFor(d)} ${claimed ? 'claimed' : 'unclaimed'}`}
-                />
-                <h3 className="v2-device-name">{labelFor(d)}</h3>
-              </header>
-              <div className="v2-device-meta" title={d.explain || undefined}>
-                {(d.type || d.kind) || '—'}
-                {!claimed && <> · <span className="v2-chip v2-chip--warn">unclaimed</span></>}
-                {/* `is_device === false` is the brain saying "this row is
-                    a pairing code nobody ever redeemed", which is what 43
-                    of the owner's 61 rows actually are. Counting them as
-                    devices is what filled the list with browsers he never
-                    paired. */}
-                {d.is_device === false && <> · <span className="v2-chip v2-chip--muted">not a device</span></>}
-              </div>
-              {d.capabilities && (
-                <div className="v2-device-caps">
-                  {(Array.isArray(d.capabilities) ? d.capabilities : Object.keys(d.capabilities || {})).slice(0, 5).map((c, ci) => (
-                    <span key={ci} className="v2-chip">{String(c)}</span>
-                  ))}
-                </div>
-              )}
-              <div className="v2-forge-actions" style={{ marginTop: 8 }}>
-                <button
-                  type="button"
-                  className="v2-btn v2-btn--ghost"
-                  onClick={(e) => { e.stopPropagation(); onForget(d.device_id || d.id); }}
-                  aria-label="Revoke this pairing"
-                  title="Delete this pairing token"
-                >
-                  <Trash2 size={12} /> Revoke
-                </button>
-              </div>
-            </Glass>
+              testid="v2-devices-paired-card"
+              tone={claimed ? 'neutral' : 'off'}
+              pulse={false}
+              statusLabel={`${name} ${claimed ? 'claimed' : 'unclaimed'}`}
+              name={name}
+              meta={summarize([
+                (d.type || d.kind) || '—',
+                claimed ? 'claimed' : 'unclaimed',
+                d.is_device === false ? 'not a device' : '',
+                countLabel(caps.length, 'capability', 'capabilities'),
+              ])}
+              ariaLabel={`${name}, ${claimed ? 'claimed' : 'unclaimed'}. Open details`}
+              onOpen={() => onSelect(d)}
+            />
           );
         })}
       </div>
@@ -671,8 +649,21 @@ function PairedPane({ paired, onSelect, onForget, onRefresh }) {
   );
 }
 
+function DetailRow({ label, children }) {
+  return (
+    <div className="v2-setting-row">
+      <div className="v2-setting-label"><div>{label}</div></div>
+      <div className="v2-setting-control">{children}</div>
+    </div>
+  );
+}
+
 function DeviceDetailModal({ device, onClose, onForget }) {
   const [detail, setDetail] = useState(device);
+  // A failed enrichment used to be indistinguishable from a device with
+  // no extra detail, because the brain answered 200 {"error": ...} and
+  // the client set that object AS the device.
+  const [detailError, setDetailError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [invoke, setInvoke] = useState({ method: '', args: '{}' });
   const [result, setResult] = useState(null);
@@ -682,8 +673,27 @@ function DeviceDetailModal({ device, onClose, onForget }) {
 
   useEffect(() => {
     if (!id) return;
-    apiJson(`/api/hardware/device/${encodeURIComponent(id)}`).then(setDetail).catch(() => {});
-  }, [id]);
+    let cancelled = false;
+    setDetailError(null);
+    apiJson(`/api/hardware/device/${encodeURIComponent(id)}`)
+      .then((body) => {
+        if (cancelled) return;
+        // Never let an enrichment lookup destroy the row we already had.
+        // Older brains answer 200 with an {"error": ...} body for an
+        // unknown id; that is not a device, so it does not replace one.
+        if (!body || typeof body !== 'object' || body.error) {
+          setDetailError(body?.error || 'no mesh record for this id');
+          return;
+        }
+        setDetail({ ...device, ...body });
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        // 404 here is normal for a paired row that is not a mesh node.
+        setDetailError(e?.status === 404 ? 'not a mesh node' : (e?.detail || e?.message || 'lookup failed'));
+      });
+    return () => { cancelled = true; };
+  }, [id, device]);
 
   // AUDIT-r14 finding 06 fix: previously invalid JSON args were
   // silently coerced to `{}` and the actuator fired with no
@@ -717,59 +727,139 @@ function DeviceDetailModal({ device, onClose, onForget }) {
         setBusy(false);
         return;
       }
+      // The wire contract is {node_id, command, params}; see
+      // docs/mintlify/reference/api.mdx and hardware/mesh.py invoke().
+      // This used to post {device_id, method, args}: all three keys
+      // missed, so the brain invoked node_id="" command="" and answered
+      // `Node not connected: ` with nothing after the colon. Every
+      // Invoke click for the life of this modal failed that way, and
+      // the message blamed the device.
       const r = await apiFetch('/api/hardware/invoke', {
         method: 'POST',
-        body: JSON.stringify({ device_id: id, method: invoke.method.trim(), args }),
+        body: JSON.stringify({ node_id: id, command: invoke.method.trim(), params: args }),
       });
       const body = await r.json().catch(() => ({}));
-      if (!r.ok || body?.error) {
+      if (!r.ok || body?.error || body?.success === false) {
         setError(body?.detail || body?.error || `${r.status}`);
       } else {
         setResult(body);
       }
     } catch (err) {
-      setError(err.message);
+      setError(err?.detail || err?.message || 'invoke failed');
     } finally {
       setBusy(false);
     }
   };
 
-  const caps = detail.capabilities || device.capabilities;
-  const capList = Array.isArray(caps) ? caps : Object.keys(caps || {});
+  const capList = capListOf(detail.capabilities ?? device.capabilities);
+  const subdevices = Array.isArray(device.subdevices) ? device.subdevices : [];
+  const alsoKnownAs = Array.isArray(device.also_known_as) ? device.also_known_as : [];
+  const reconnectSteps = Array.isArray(device.reconnect?.steps) ? device.reconnect.steps : [];
+  const claimed = !!(device.claimed_at || device.last_seen);
+  const age = ageText(device.last_seen_age_s);
+  const title = device._source === 'paired' ? labelFor(device) : (device.name || id || 'Device');
 
   return (
     <Modal
       open
       onClose={onClose}
-      title={device.name || id || 'Device'}
+      title={title}
       size="lg"
       actions={(
         <>
           <button type="button" className="v2-btn" onClick={onClose}>Close</button>
-          <button type="button" className="v2-btn" onClick={() => onForget(id)}>Forget device</button>
+          <button
+            type="button"
+            className="v2-btn"
+            onClick={() => onForget(id)}
+            data-testid="v2-devices-forget"
+          >
+            <Trash2 size={12} /> {device._source === 'paired' ? 'Revoke pairing' : 'Forget device'}
+          </button>
         </>
       )}
     >
       <div className="v2-setting-stack">
-        <div className="v2-setting-row">
-          <div className="v2-setting-label"><div>ID</div></div>
-          <div className="v2-setting-control"><code className="v2-code-inline">{id}</code></div>
-        </div>
-        <div className="v2-setting-row">
-          <div className="v2-setting-label"><div>Type</div></div>
-          <div className="v2-setting-control">{detail.type || detail.kind || '—'}</div>
-        </div>
-        <div className="v2-setting-row">
-          <div className="v2-setting-label"><div>Source</div></div>
-          <div className="v2-setting-control">{device._source || 'unknown'}</div>
-        </div>
+        <DetailRow label="ID"><code className="v2-code-inline">{id}</code></DetailRow>
+        <DetailRow label="Type">{detail.type || detail.device_type || detail.kind || device.node_type || '—'}</DetailRow>
+        <DetailRow label="Source">{device._source || 'unknown'}</DetailRow>
+        {device._source === 'connected' && <DetailRow label="Status">Connected{age ? ` · last seen ${age}` : ''}</DetailRow>}
+        {device._source === 'offline' && <DetailRow label="Status">Disconnected{age ? ` · last seen ${age}` : ''}</DetailRow>}
+        {device._source === 'paired' && (
+          <DetailRow label="Status">
+            {claimed ? 'Claimed' : 'Unclaimed pairing code'}
+            {device.is_device === false && <span className="v2-chip v2-chip--muted" style={{ marginLeft: 6 }}>not a device</span>}
+          </DetailRow>
+        )}
+        {device._source === 'mesh' && (
+          <DetailRow label="Mesh">
+            <Radio size={10} style={{ verticalAlign: 'text-bottom' }} /> HUP {device.hup_version || '1.x'}
+            {device.signal != null && <> · <Wifi size={10} style={{ verticalAlign: 'text-bottom' }} /> {Math.round(device.signal)}%</>}
+          </DetailRow>
+        )}
+        {(device.platform || device.manufacturer || device.model) && (
+          <DetailRow label="Hardware">
+            {summarize([device.manufacturer, device.model, device.platform])}
+          </DetailRow>
+        )}
+        {device.firmware_version && <DetailRow label="Firmware">{device.firmware_version}</DetailRow>}
+        {device.explain && <DetailRow label="Why">{device.explain}</DetailRow>}
+        {alsoKnownAs.length > 0 && (
+          <DetailRow label="Also known as">
+            <div className="v2-device-caps">
+              {alsoKnownAs.map((a, i) => <span key={i} className="v2-chip v2-chip--muted">{String(a)}</span>)}
+            </div>
+          </DetailRow>
+        )}
         {capList.length > 0 && (
-          <div className="v2-setting-row">
-            <div className="v2-setting-label"><div>Capabilities</div></div>
-            <div className="v2-setting-control v2-device-caps">
+          <DetailRow label="Capabilities">
+            <div className="v2-device-caps">
               {capList.map((c, i) => <span key={i} className="v2-chip">{String(c)}</span>)}
             </div>
-          </div>
+          </DetailRow>
+        )}
+        {device.type === 'wearable' && !capList.includes('haptic') && (
+          <DetailRow label="Haptic">
+            <span className="v2-chip v2-chip--muted" title="This daemon hasn't declared a haptic capability. For Theora wristbands the production path is the iOS FeralNode bridge which drives Veepoo SDK haptic directly.">
+              unwired
+            </span>
+          </DetailRow>
+        )}
+        {subdevices.length > 0 && (
+          <DetailRow label="Sub-devices">
+            <div className="v2-device-caps">
+              {subdevices.map((s, si) => (
+                <span
+                  key={si}
+                  className="v2-chip"
+                  title={subdeviceTooltip(s)}
+                  data-testid="v2-device-subdevice-chip"
+                >
+                  <StatusDot
+                    tone={s.live ? 'live' : 'off'}
+                    pulse={s.live}
+                    label={`${s.capability} ${s.live ? 'live' : 'stale'}`}
+                  />
+                  {s.name || s.capability}
+                  {s.status && s.status !== 'ready' && (
+                    <span className="v2-chip-suffix"> · {s.status}</span>
+                  )}
+                </span>
+              ))}
+            </div>
+          </DetailRow>
+        )}
+        {reconnectSteps.length > 0 && (
+          <DetailRow label="Reconnect">
+            <ol className="v2-p v2-p--tiny v2-p--muted" style={{ margin: 0, paddingLeft: 16 }}>
+              {reconnectSteps.map((step, si) => <li key={si}>{step}</li>)}
+            </ol>
+          </DetailRow>
+        )}
+        {detailError && (
+          <DetailRow label="Mesh record">
+            <span className="v2-chip v2-chip--muted" data-testid="v2-devices-detail-note">{detailError}</span>
+          </DetailRow>
         )}
       </div>
 

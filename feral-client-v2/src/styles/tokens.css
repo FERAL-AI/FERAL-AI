@@ -326,6 +326,15 @@
   --v2-size-xl: 22px;
   --v2-size-2xl: 32px;
 
+  /* ── Device card ─────────────────────────────────────────────── */
+  /* One height for every device card in every pane of the Devices
+     page. It lives here rather than in pages.css because "all device
+     cards are the same size" is the guarantee, and a guarantee split
+     across four call sites is how the Live / Paired / mesh cards ended
+     up at 149px, 162px and 87px respectively. The card is a summary;
+     the detail is in the modal it opens. */
+  --v2-device-card-h: 68px;
+
   /* ── Radii ───────────────────────────────────────────────────── */
   --v2-radius-xs: 6px;
   --v2-radius-sm: 10px;

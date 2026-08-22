@@ -103,11 +103,21 @@ async def list_hardware_devices():
 
 @router.get("/api/hardware/device/{device_id}")
 async def get_hardware_device(device_id: str):
+    """One registered hardware device, or a real HTTP error.
+
+    Both miss paths used to answer ``200 {"error": ...}``. A 200 is an
+    assertion that the body IS the device, so every client that does
+    ``fetch(...).then(json).then(setDetail)`` replaced the good row it
+    already had with an error object. The v2 device detail modal did
+    exactly that: opening the detail for a paired row that is not a mesh
+    node blanked its Type and Capabilities and showed nothing about why.
+    A missing device is 404 and an absent registry is 503.
+    """
     if not state.device_registry:
-        return {"error": "No device registry"}
+        raise HTTPException(status_code=503, detail="No device registry")
     device = state.device_registry.get_device(device_id)
     if not device:
-        return {"error": f"Device not found: {device_id}"}
+        raise HTTPException(status_code=404, detail=f"Device not found: {device_id}")
     return device.model_dump()
 
 
@@ -700,13 +710,40 @@ async def revoke_workspace_folder(path: str):
 
 @router.post("/api/hardware/invoke")
 async def hardware_invoke(body: dict):
-    """Invoke a command on a connected node via the hardware mesh."""
+    """Invoke a command on a connected node via the hardware mesh.
+
+    Canonical body is ``{node_id, command, params}`` (see
+    docs/mintlify/reference/api.mdx). The v2 Devices detail modal sent
+    ``{device_id, method, args}`` instead: all three keys missed, so every
+    Invoke click reached ``hardware_mesh.invoke(node_id="", command="",
+    params={})`` and came back ``{"success": false, "error": "Node not
+    connected: "}``. The empty id after the colon is the tell. The button
+    had never invoked anything, and it blamed the device for it.
+
+    The client is fixed, and the pre-fix key names are accepted as
+    aliases so any older build stops silently failing too. An empty
+    ``node_id`` or ``command`` is now a 400 rather than a "not connected"
+    that names no node.
+    """
     if not state.hardware_mesh:
-        return {"error": "Hardware mesh not initialized"}
+        raise HTTPException(status_code=503, detail="Hardware mesh not initialized")
+    node_id = str(body.get("node_id") or body.get("device_id") or "").strip()
+    command = str(body.get("command") or body.get("method") or "").strip()
+    params = body.get("params")
+    if params is None:
+        params = body.get("args")
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        raise HTTPException(status_code=400, detail="params must be a JSON object")
+    if not node_id:
+        raise HTTPException(status_code=400, detail="node_id is required")
+    if not command:
+        raise HTTPException(status_code=400, detail="command is required")
     return await state.hardware_mesh.invoke(
-        node_id=body.get("node_id", ""),
-        command=body.get("command", ""),
-        params=body.get("params", {}),
+        node_id=node_id,
+        command=command,
+        params=params,
         timeout=body.get("timeout", 10.0),
     )
 

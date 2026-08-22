@@ -1153,14 +1153,45 @@
 .v2-step-detail-type { flex: 1; color: var(--v2-text-secondary); }
 .v2-step-detail-status { color: var(--v2-text-tertiary); }
 
-/* ── Device cards ──────────────────────────────────────────── */
+/* ── Device cards ──────────────────────────────────────────────
+   Every pane on the Devices page (Live, Disconnected, Paired, HUP
+   mesh) draws the same card, and the card is a fixed size on purpose.
+   Before this, each pane sized itself from whatever it happened to
+   render: a Live card measured 343x149, a Paired card 520x162 and a
+   mesh card 343x87 on the same 1440px viewport. `auto-fill` with a
+   fixed `minmax` floor keeps the column count identical between
+   panes, and the explicit height stops a device with more
+   capabilities than its neighbour from making its row taller. The
+   detail all of that height used to hold lives in the detail modal
+   the card opens. */
 .v2-device-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-auto-rows: var(--v2-device-card-h, 68px);
   gap: 10px;
 }
-.v2-device-card { cursor: pointer; transition: transform var(--v2-dur-fast) var(--v2-ease-out); display: flex; flex-direction: column; gap: 6px; }
+.v2-device-card {
+  cursor: pointer;
+  transition: transform var(--v2-dur-fast) var(--v2-ease-out);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  height: var(--v2-device-card-h, 68px);
+  overflow: hidden;
+}
 .v2-device-card:hover { transform: translateY(-2px); border-color: var(--v2-hairline-strong); }
+/* One line each, ellipsised. A long node id must not wrap the card
+   open again — the card is a summary, the modal is the record. */
+.v2-device-card .v2-device-name,
+.v2-device-card .v2-device-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.v2-device-card .v2-device-meta { margin-top: 2px; }
+.v2-device-card .v2-device-head { min-width: 0; }
 
 /* ── Topology view (DeviceTopology.jsx) ─────────────────────── */
 /* Demo prep 2026-06-05 — visualises the brain ↔ phone ↔ glasses /

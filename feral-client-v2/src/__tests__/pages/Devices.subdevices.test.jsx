@@ -1,15 +1,36 @@
 /**
  * Devices page — sub-device tree binding (Phase 1).
  *
- * The /api/devices/connected payload now carries `subdevices: [...]`
- * per node, populated by the brain's NodeSubdeviceStore. The Live
- * pane renders one chip per sub-device with a dot tone bound to the
- * row's `live` flag — the previous build had no binding at all.
+ * The /api/devices/connected payload carries `subdevices: [...]` per
+ * node, populated by the brain's NodeSubdeviceStore. One chip per
+ * sub-device is rendered with a dot tone bound to the row's `live`
+ * flag — the pre-Phase-1 build had no binding at all.
+ *
+ * The chips moved from the Live card into the device detail modal when
+ * the four panes were unified onto one fixed-size card: one chip per
+ * sub-device is exactly the kind of detail that made a card 149px tall
+ * and a different size from its neighbours. The `live` binding these
+ * tests exist to guard is unchanged, so they open the card first.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { waitFor } from '@testing-library/react';
+import { fireEvent, waitFor } from '@testing-library/react';
 import { renderV2 } from '../_helpers/renderV2';
 import Devices from '../../pages/Devices';
+
+/** Click the Live card and return its detail dialog. */
+async function openDeviceDetail(container) {
+  const card = await waitFor(() => {
+    const el = container.querySelector('[data-testid="v2-devices-live-card"]');
+    if (!el) throw new Error('no device card rendered');
+    return el;
+  });
+  fireEvent.click(card);
+  return waitFor(() => {
+    const dialog = document.querySelector('[role="dialog"]');
+    if (!dialog) throw new Error('detail modal did not open');
+    return dialog;
+  });
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -61,8 +82,9 @@ describe('Devices — sub-device chips', () => {
       ]),
     });
 
+    const dialog = await openDeviceDetail(container);
     const chip = await waitFor(() => {
-      const el = container.querySelector('[data-testid="v2-device-subdevice-chip"]');
+      const el = dialog.querySelector('[data-testid="v2-device-subdevice-chip"]');
       if (!el) throw new Error('subdevice chip not rendered');
       return el;
     });
@@ -96,8 +118,9 @@ describe('Devices — sub-device chips', () => {
       ]),
     });
 
+    const dialog = await openDeviceDetail(container);
     const chip = await waitFor(() => {
-      const el = container.querySelector('[data-testid="v2-device-subdevice-chip"]');
+      const el = dialog.querySelector('[data-testid="v2-device-subdevice-chip"]');
       if (!el) throw new Error('subdevice chip not rendered');
       return el;
     });
@@ -113,12 +136,10 @@ describe('Devices — sub-device chips', () => {
     const { container } = renderV2(<Devices />, {
       fetch: fetchWithSubdevices([]),
     });
-    // Live pane should still render for the connected node, but no
-    // sub-device chips ride along.
-    await waitFor(() => {
-      const node = container.querySelector('.v2-device-card');
-      if (!node) throw new Error('no device card rendered');
-    });
+    // Live pane still renders the connected node, and its detail modal
+    // carries no sub-device row.
+    const dialog = await openDeviceDetail(container);
+    expect(dialog.querySelector('[data-testid="v2-device-subdevice-chip"]')).toBeNull();
     expect(container.querySelector('[data-testid="v2-device-subdevice-chip"]')).toBeNull();
   });
 });

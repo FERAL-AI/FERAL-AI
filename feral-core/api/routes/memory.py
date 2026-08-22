@@ -220,6 +220,60 @@ async def get_memory_stats():
     return out
 
 
+@router.get("/api/memory/search")
+async def memory_search_all(q: str = "", query: str = "", limit: int = 20):
+    """Hybrid search across EVERY memory tier, with declared degradations.
+
+    ``MemoryStore.search_all`` (memory/context_builder.py) has always been
+    the brain's most capable recall path: episodes via FTS5 + vector
+    hybrid, notes via the same, knowledge triples, and knowledge-graph
+    entities, isolated per tier and merged by score. It was reachable from
+    the gateway RPC and from taskflow, and from no HTTP route at all, so
+    the dashboard's "Semantic search" pane could only ever see one of the
+    four tiers.
+
+    ``q`` and ``query`` are both accepted because the two spellings are
+    already in the wild (``/internal/memory/search`` declares ``query``;
+    the v2 client sent ``q``).
+
+    ``degradations`` is the point of this endpoint as much as ``results``.
+    ``search_all`` records per-tier failures on
+    ``store.last_search_degradations`` precisely so that a partial answer
+    is never mistaken for an empty store, and nothing was reading it.
+    A caller can now tell "the knowledge tier is broken" from "you have no
+    knowledge about this".
+    """
+    text = (q or query or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="q (or query) is required")
+    if state.memory is None:
+        raise HTTPException(status_code=503, detail="memory store not initialized")
+    limit = max(1, min(int(limit), 100))
+
+    # Cleared before the call so a stale list from an earlier query can
+    # never be reported as this query's degradations.
+    try:
+        state.memory.last_search_degradations = []
+    except Exception:  # pragma: no cover - plain attribute
+        logger.debug("could not reset last_search_degradations", exc_info=True)
+
+    results = await state.memory.search_all(text, limit=limit)
+
+    degradations = list(getattr(state.memory, "last_search_degradations", None) or [])
+    tiers: dict[str, int] = {}
+    for row in results:
+        tier = str(row.get("tier") or "unknown")
+        tiers[tier] = tiers.get(tier, 0) + 1
+    return {
+        "query": text,
+        "count": len(results),
+        "results": results,
+        "tiers": tiers,
+        "degradations": degradations,
+        "degraded": bool(degradations),
+    }
+
+
 @router.post("/api/memory/forget/{episode_id}")
 async def memory_forget(episode_id: str):
     """Mark an episode as forgotten *now*. Operator escape hatch for
@@ -621,10 +675,24 @@ async def memory_save(body: dict):
 
 
 @router.get("/internal/memory/search")
-async def memory_search(query: str = "", limit: int = 10):
-    if not query:
+async def memory_search(query: str = "", q: str = "", limit: int = 10):
+    """Notes-tier hybrid search (FTS5 + vector), legacy surface.
+
+    ``q`` is accepted as an alias for ``query``. The v2 Memory page's
+    Search tab called this route as ``?q=...`` for its whole life; the
+    route only declared ``query``, so the guard below saw an empty string
+    and returned ``[]`` on every search. Measured against a live brain
+    holding two matching notes: ``?q=quokka`` -> ``[]``, ``?query=quokka``
+    -> both notes with scores. An empty list from a search reads as
+    "nothing matched", so the page said "No results" and the store looked
+    empty rather than unreachable.
+
+    Prefer ``/api/memory/search``, which spans all four tiers.
+    """
+    text = (query or q or "").strip()
+    if not text:
         return []
-    return await state.memory.search(query=query, limit=limit)
+    return await state.memory.search(query=text, limit=limit)
 
 
 @router.get("/internal/memory/recent")
