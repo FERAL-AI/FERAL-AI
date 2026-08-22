@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   History, Save, GitBranch, Plus, Trash2, X, Mic, MicOff, Paperclip, FileText,
-  Search, Pin, PinOff, Pencil,
+  Search, Pin, PinOff, Pencil, ChevronDown,
 } from 'lucide-react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
@@ -29,6 +29,29 @@ import CopyButton from '../ui/CopyButton';
 
 function newId() {
   return `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/**
+ * The name to show for the open thread.
+ *
+ * Same rule the Shell autosaves under (`deriveConversationTitle`), and
+ * the same empty-thread wording, so the name in the header and the name
+ * in the threads list are never two different strings for one thread:
+ * the first thing the user actually said, or "New conversation" when
+ * they have not said anything yet. An id is not a name.
+ * Exported for the vitest.
+ */
+export const THREAD_TITLE_MAX = 42;
+
+export function deriveThreadTitle(messages) {
+  const firstUser = (messages || []).find(
+    (m) => m?.role === 'user' && typeof m?.text === 'string' && m.text.trim(),
+  );
+  if (!firstUser) return 'New conversation';
+  const text = firstUser.text.trim();
+  return text.length > THREAD_TITLE_MAX
+    ? `${text.slice(0, THREAD_TITLE_MAX - 1)}…`
+    : text;
 }
 
 // Tools whose calls are NOT rendered as a ToolCallCard.
@@ -88,6 +111,35 @@ export function sanitizeAssistantText(input) {
   out = out.replace(SENTINEL_RE, '');
   out = out.replace(TRAILING_MARKER_RE, '');
   return out;
+}
+
+/**
+ * The speaker mark at the head of a chat row.
+ *
+ * The two roles used to share one <Orb>, differing only by its `mode`,
+ * which produced two small blue discs a reader cannot tell apart at a
+ * glance. The Orb's own docstring says what is wrong with that: it is
+ * "the persona anchor. One entity, one state machine ... wherever FERAL
+ * needs to show it". Drawing the USER with FERAL's persona mark is the
+ * defect, not the styling of it.
+ *
+ * So: FERAL keeps the Orb, and the user gets a plain disc. That is the
+ * approved mockup's split too, where `.who` is a flat surface circle and
+ * `.who.ai` is the branded one.
+ */
+export function ChatAvatar({ role, mode }) {
+  if (role === 'user') {
+    return (
+      <div className="v2-chat-role" aria-hidden="true">
+        <span className="v2-chat-avatar" data-role="user" />
+      </div>
+    );
+  }
+  return (
+    <div className="v2-chat-role" aria-hidden="true">
+      <Orb size={22} mode={mode || 'idle'} />
+    </div>
+  );
 }
 
 export default function Chat() {
@@ -159,6 +211,7 @@ export default function Chat() {
   // socket chatter) or a turn that silently died and must surface.
   const turnActiveRef = useRef(false);
   const chatReady = thread?.ready ?? true;
+  const threadTitle = deriveThreadTitle(messages);
 
   // The command palette's Ask row parks the typed query on the shell
   // thread and navigates here. Pick it up, put it in the composer and
@@ -974,16 +1027,40 @@ export default function Chat() {
   return (
     <div className="v2-chat v2-chat--paned" data-testid="v2-marker">
       <Pane
-        title="Conversation"
+        /* The thread is named, and its name is the control that switches
+           it: a document-title menu, the way a native app puts the open
+           document's name at the top of its window and hangs the file
+           verbs off it. The two bare icons this replaces said nothing
+           about which conversation you were in and nothing about what
+           they would do, so nobody found them. */
+        title={(
+          <button
+            type="button"
+            className={`v2-chat-threadpicker${paneOpen === 'threads' ? ' is-active' : ''}`}
+            onClick={() => setPaneOpen((p) => (p === 'threads' ? null : 'threads'))}
+            title="Threads"
+            aria-haspopup="dialog"
+            aria-expanded={paneOpen === 'threads'}
+            data-testid="chat-thread-picker"
+          >
+            <History size={13} aria-hidden="true" />
+            <span className="v2-chat-threadpicker__name">{threadTitle}</span>
+            <ChevronDown size={13} aria-hidden="true" className="v2-chat-threadpicker__chev" />
+            <span className="v2-chat-threadpicker__verb">Threads</span>
+          </button>
+        )}
         actions={(
-          <>
-            <button type="button" className={`v2-btn v2-btn--ghost${paneOpen === 'threads' ? ' is-active' : ''}`} onClick={() => setPaneOpen((p) => p === 'threads' ? null : 'threads')} title="Threads">
-              <History size={13} />
-            </button>
-            <button type="button" className={`v2-btn v2-btn--ghost${paneOpen === 'snapshots' ? ' is-active' : ''}`} onClick={() => setPaneOpen((p) => p === 'snapshots' ? null : 'snapshots')} title="Snapshots">
-              <Save size={13} />
-            </button>
-          </>
+          <button
+            type="button"
+            className={`v2-btn${paneOpen === 'snapshots' ? ' is-active' : ''}`}
+            onClick={() => setPaneOpen((p) => (p === 'snapshots' ? null : 'snapshots'))}
+            title="Save a restore point for this conversation, or go back to one"
+            aria-haspopup="dialog"
+            aria-expanded={paneOpen === 'snapshots'}
+            data-testid="chat-save-toggle"
+          >
+            <Save size={13} aria-hidden="true" /> Save
+          </button>
         )}
       >
         {pausedThoughts.length > 0 && (
@@ -1014,10 +1091,9 @@ export default function Chat() {
         <div className="v2-chat-log" ref={logRef} onScroll={onLogScroll}>
           {messages.map((m) => (
             <div key={m.id} className={`v2-chat-row v2-chat-row--${m.role}`}>
-              <div className="v2-chat-role" aria-hidden="true">
-                <Orb size={22} mode={m.role === 'user' ? 'observing' : 'idle'} />
-              </div>
+              <ChatAvatar role={m.role} />
               <div className="v2-chat-body">
+                <span className="v2-chat-who">{m.role === 'user' ? 'You' : 'FERAL'}</span>
                 {m.type === 'sdui' ? (
                   <SduiRenderer
                     tree={m.sdui}
@@ -1111,8 +1187,9 @@ export default function Chat() {
           ))}
           {(streamingText || streamingReasoning || (liveTools.length > 0 && !thinking)) && (
             <div className="v2-chat-row v2-chat-row--assistant">
-              <div className="v2-chat-role" aria-hidden="true"><Orb size={22} mode="speaking" /></div>
+              <ChatAvatar role="assistant" mode="speaking" />
               <div className="v2-chat-body">
+                <span className="v2-chat-who">FERAL</span>
                 {streamingReasoning && (
                   <ReasoningSection
                     text={streamingReasoning}
@@ -1139,8 +1216,9 @@ export default function Chat() {
           )}
           {thinking && !streamingText && (
             <div className="v2-chat-row v2-chat-row--assistant">
-              <div className="v2-chat-role" aria-hidden="true"><Orb size={22} mode="thinking" /></div>
+              <ChatAvatar role="assistant" mode="thinking" />
               <div className="v2-chat-body">
+                <span className="v2-chat-who">FERAL</span>
                 <div
                   className="v2-chat-working"
                   role="status"
@@ -1774,17 +1852,23 @@ function SnapshotsPane({ onClose, onRestore }) {
   return (
     <div className="v2-chat-pane">
       <header className="v2-chat-pane-head">
-        <h3>Snapshots</h3>
+        <h3>Saved points</h3>
         <button type="button" className="v2-btn v2-btn--ghost" onClick={onClose} aria-label="Close"><X size={13} /></button>
       </header>
+      {/* The header control says "Save"; this says what saving does, so
+          the two words are visibly one feature rather than two. */}
+      <p className="v2-p v2-p--muted v2-chat-pane-hint">
+        A saved point is this conversation as it stands. Restore returns the
+        thread to it; branch starts a new thread from it.
+      </p>
       <div className="v2-forge-actions">
         <button type="button" className="v2-btn v2-btn--primary" onClick={save} disabled={busy === 'save' || !sessionId}>
-          <Save size={12} /> {busy === 'save' ? 'Saving…' : 'Snapshot now'}
+          <Save size={12} /> {busy === 'save' ? 'Saving…' : 'Save this thread'}
         </button>
       </div>
       {err && <div className="v2-chip v2-chip--error" role="alert">{err}</div>}
       {loading && <EmptyState title="Loading…" />}
-      {!loading && snapshots.length === 0 && <EmptyState title="No snapshots yet" />}
+      {!loading && snapshots.length === 0 && <EmptyState title="No saved points yet" />}
       <ul className="v2-mem-list">
         {snapshots.map((s) => {
           // Backend stores snapshots with `snapshot_id` (preferred) but

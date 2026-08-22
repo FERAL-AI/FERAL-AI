@@ -25,17 +25,25 @@ describe('Chat persistence', () => {
       return DEFAULT_FETCH_BODY;
     };
 
-    const { findByText, getByRole } = renderV2(<App />, {
+    const { findByText, findAllByText, getByRole } = renderV2(<App />, {
       route: '/chat',
       fetch: fetchResponder,
     });
 
-    expect(await findByText('persist this message')).toBeInTheDocument();
+    // Two matches on purpose: the transcript bubble, and the thread
+    // picker in the pane header, which names the open thread after its
+    // first user message. Assert the transcript one specifically.
+    const inTranscript = async () => {
+      const hits = await findAllByText('persist this message');
+      return hits.filter((el) => el.closest('.v2-chat-log'));
+    };
+
+    expect(await inTranscript()).toHaveLength(1);
 
     fireEvent.click(getByRole('link', { name: /Settings/i }));
     await findByText('Settings');
 
     fireEvent.click(getByRole('link', { name: /^Chat$/i }));
-    expect(await findByText('persist this message')).toBeInTheDocument();
+    expect(await inTranscript()).toHaveLength(1);
   });
 });

@@ -57,11 +57,25 @@ function emit(msg) {
 
 const GREETING = 'FERAL v2 is listening. What do you need?';
 
+/**
+ * Every row now opens with a `.v2-chat-who` speaker label ("You" /
+ * "FERAL"), which lives inside `.v2-chat-body` because it belongs to the
+ * content column. Read the row's prose with that label removed, so these
+ * ordering assertions stay about ordering.
+ */
+function rowText(row) {
+  const body = row.querySelector('.v2-chat-body');
+  if (!body) return '';
+  const clone = body.cloneNode(true);
+  clone.querySelectorAll('.v2-chat-who').forEach((n) => n.remove());
+  return clone.textContent.trim();
+}
+
 function renderedRows(container) {
   return Array.from(container.querySelectorAll('.v2-chat-row'))
     .map((row) => ({
       role: row.className.includes('v2-chat-row--user') ? 'user' : 'assistant',
-      text: row.querySelector('.v2-chat-body')?.textContent?.trim() || '',
+      text: rowText(row),
     }))
     // Chat seeds its local state with a greeting bubble.
     .filter((r) => r.text !== GREETING);
@@ -141,9 +155,11 @@ describe('Chat — voice transcript ordering', () => {
     ]);
   });
 
-  it('keeps the user transcript right-aligned and the reply left-aligned', async () => {
-    // Alignment is driven purely by the wire `role` — pages.css flips
-    // the grid only for `.v2-chat-row--user`.
+  it('marks the user transcript as a user row and the reply as an assistant row', async () => {
+    // Role treatment is driven purely by the wire `role`. Both turns now
+    // read down one column (the approved mockup's layout), so the modifier
+    // class is what selects the user's mark, name and bubble; it no longer
+    // mirrors the grid.
     const { container } = renderV2(<Chat />);
 
     await act(async () => {
