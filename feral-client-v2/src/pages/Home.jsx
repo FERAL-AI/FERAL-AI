@@ -15,6 +15,11 @@ import ForYouToday from '../components/ForYouToday';
 import ConnectedHardware from '../components/ConnectedHardware';
 import { deviceCounts } from '../components/DeviceTopology';
 import { apiJson, apiFetch } from '../lib/api';
+import { channelMap } from '../lib/channels';
+
+// Re-exported: it moved to lib/channels.js when Settings turned out to
+// have the same bug, and several tests import it from here.
+export { channelMap };
 import { useSomatic } from '../hooks/useSomatic';
 import { useSystemHealth, refreshSystemHealth } from '../hooks/useSystemHealth';
 import { useBrainEvents, EVENT_TYPES } from '../hooks/useBrainEvents';
@@ -96,37 +101,6 @@ export function jobKindLabel(kind) {
   return JOB_KIND_LABELS[kind] || kind;
 }
 
-/**
- * The per-channel map out of GET /api/channels, and nothing else.
- *
- * `ChannelManager.stats()` returns an envelope that also spreads the
- * per-channel rows to the top level:
- *
- *     {active_channels: [...], channel_count: N, details: {...}, ...rows}
- *
- * The old expression ended `|| c.value || {}`, so when neither
- * `status_by_channel` nor `channels` was present it fell through to the
- * whole envelope and `Object.entries` walked the envelope's own fields.
- * With no channels configured those three ARE the only keys, so the
- * Channels card rendered three rows reading `Active_channels off`,
- * `Channel_count off` and `Details off` instead of the empty state, and
- * with channels configured it rendered them alongside the real ones.
- *
- * `details` is the canonical map. The last branch keeps the flattened
- * shape working for a brain that predates it, but filters the envelope
- * keys out by shape: a channel row is an object, and the envelope's
- * fields are an array and a number.
- */
-export function channelMap(payload) {
-  const p = payload || {};
-  const named = p.status_by_channel || p.details || p.channels;
-  if (named && typeof named === 'object') return named;
-  return Object.fromEntries(
-    Object.entries(p).filter(([, v]) => (
-      v && typeof v === 'object' && !Array.isArray(v)
-    )),
-  );
-}
 
 /**
  * Tone + label for one channel row out of GET /api/channels.

@@ -9,6 +9,7 @@ import ErrorState from '../ui/ErrorState';
 import { SelfWorkspace } from '../components/SelfEditors';
 import { toApiError } from '../hooks/useResource';
 import { apiFetch, apiJson } from '../lib/api';
+import { channelMap, activeChannelCount } from '../lib/channels';
 import { API_BASE } from '../lib/config';
 
 /**
@@ -1617,7 +1618,14 @@ function ChannelsSection() {
   useEffect(() => { refresh(); }, [refresh]);
 
   if (!stats) return <EmptyState title={error || 'Loading channels…'} />;
-  const entries = Object.entries(stats.status_by_channel || stats.channels || {});
+  // `status_by_channel` and `channels` are both absent from
+  // GET /api/channels. Its shape is {active_channels, channel_count,
+  // details, ...rows spread at the top level}, so this fell through to
+  // `{}` and the panel listed nothing, or, before the fallback was
+  // added, listed the envelope's own fields as if they were channels.
+  // Home had the identical bug; `channelMap` is that fix, reused rather
+  // than reimplemented so the two cannot drift.
+  const entries = Object.entries(channelMap(stats));
 
   const save = async (channel) => {
     setBusy(channel);
@@ -1659,7 +1667,16 @@ function ChannelsSection() {
     <div className="v2-setting-stack">
       {msg && <div className="v2-chip v2-chip--live" role="status">{msg}</div>}
       {error && <div className="v2-chip v2-chip--error" role="alert" data-testid="channels-error">{error}</div>}
-      <Row label="Active channels"><Status>{stats.active ?? entries.length}</Status></Row>
+      {/* `stats.active` does not exist either. The count the brain
+          actually reports is `active_channels`, a LIST, and the number
+          of configured channels is `channel_count`. Falling back to
+          `entries.length` silently made this read as "however many rows
+          we managed to render", which is not the same question. */}
+      <Row label="Active channels">
+        <Status>
+          {activeChannelCount(stats)}
+        </Status>
+      </Row>
       {entries.map(([name, info]) => (
         <Row key={name} label={name} hint={info?.description || ''}>
           <Status tone={info?.connected ? 'live' : 'warn'}>{info?.connected ? 'connected' : 'disabled'}</Status>
