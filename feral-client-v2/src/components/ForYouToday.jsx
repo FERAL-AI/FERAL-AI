@@ -62,6 +62,19 @@ function useIdeas() {
       if (r.ok) {
         const d = await r.json();
         setIdeas(d?.today || []);
+        // POST /api/ideas/refresh answers 200 with
+        // `{success, degraded: {generator: "<Type>: <msg>"}, ...}` when
+        // a generator RAISED. The brain added `degraded` precisely so
+        // "nothing to suggest today" and "both generators are broken"
+        // could be told apart (api/routes/ideas.py:76-96), and this
+        // pane threw it away, then rendered the empty state. Report it.
+        const degraded = d && typeof d.degraded === 'object' ? d.degraded : null;
+        const failed = degraded ? Object.keys(degraded) : [];
+        setError(failed.length
+          ? `Idea generation degraded: ${failed.map((k) => `${k} (${degraded[k]})`).join('; ')}`
+          // Clear a stale error from a previous failed attempt; without
+          // this the chip outlived the problem it described.
+          : null);
       }
     } catch (e) {
       setError(e?.message || 'refresh failed');
@@ -72,12 +85,14 @@ function useIdeas() {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  return { ideas, error, busy, refresh, pullRefresh, setIdeas };
+  return { ideas, error, busy, refresh, pullRefresh, setIdeas, setError };
 }
 
 export default function ForYouToday() {
   const navigate = useNavigate();
-  const { ideas, error, busy, refresh, pullRefresh, setIdeas } = useIdeas();
+  const {
+    ideas, error, busy, refresh, pullRefresh, setIdeas, setError,
+  } = useIdeas();
   const [acting, setActing] = useState(() => new Set());
 
   const wsPushes = useBrainEvents({ types: ['ideas_updated', 'state_push'], limit: 5 });
@@ -94,15 +109,18 @@ export default function ForYouToday() {
         if (a.route) navigate(a.route);
         return;
       case 'install_routine':
-        try {
-          await apiFetch('/api/routines', {
-            method: 'POST',
-            body: JSON.stringify({
-              routine_id: a.payload?.routine_id || 'wind_down',
-              source: 'idea',
-            }),
-          });
-        } catch { /* best-effort, brain may not have routines wired */ }
+        // Previously `catch { /* best-effort */ }`. Accept would then
+        // remove the row and report success while the routine was
+        // never installed, which is the "reports success while the
+        // request failed" pattern. Let it throw so the caller's catch
+        // keeps the row and names the failure.
+        await apiFetch('/api/routines', {
+          method: 'POST',
+          body: JSON.stringify({
+            routine_id: a.payload?.routine_id || 'wind_down',
+            source: 'idea',
+          }),
+        });
         return;
       case 'confirm_about_me_fact': {
         const fid = a.payload?.fact_id;
@@ -123,26 +141,39 @@ export default function ForYouToday() {
     }
   }, [navigate]);
 
+  // `apiFetch` THROWS on a non-2xx (lib/api.js:138-142), and both of
+  // these were bare try/finally, so a 404 ("Unknown idea id", which is
+  // exactly what a second click or an expired idea produces) or a 503
+  // ("IdeasEngine not initialised") escaped the click handler as an
+  // unhandled promise rejection. The row correctly stayed on screen,
+  // but nothing on THIS pane said why, and nothing here cleared a
+  // previous error either.
   const accept = useCallback(async (idea) => {
     const next = new Set(acting); next.add(idea.id); setActing(next);
     try {
       await runAction(idea);
       await apiFetch(`/api/ideas/${encodeURIComponent(idea.id)}/accept`, { method: 'POST' });
       setIdeas((prev) => prev.filter((i) => i.id !== idea.id));
+      setError(null);
+    } catch (e) {
+      setError(`Accept failed: ${e?.detail || e?.message || 'unknown error'}`);
     } finally {
       const done = new Set(acting); done.delete(idea.id); setActing(done);
     }
-  }, [acting, runAction, setIdeas]);
+  }, [acting, runAction, setIdeas, setError]);
 
   const dismiss = useCallback(async (idea) => {
     const next = new Set(acting); next.add(idea.id); setActing(next);
     try {
       await apiFetch(`/api/ideas/${encodeURIComponent(idea.id)}/dismiss`, { method: 'POST' });
       setIdeas((prev) => prev.filter((i) => i.id !== idea.id));
+      setError(null);
+    } catch (e) {
+      setError(`Dismiss failed: ${e?.detail || e?.message || 'unknown error'}`);
     } finally {
       const done = new Set(acting); done.delete(idea.id); setActing(done);
     }
-  }, [acting, setIdeas]);
+  }, [acting, setIdeas, setError]);
 
   const visible = useMemo(() => ideas.slice(0, MAX_VISIBLE), [ideas]);
   const overflow = Math.max(0, ideas.length - MAX_VISIBLE);
