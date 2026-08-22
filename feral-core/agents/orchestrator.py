@@ -58,7 +58,7 @@ from perception.fusion import PerceptionEngine, PerceptionFrame
 # Sub-modules — orchestrator delegates to these focused classes
 from agents.tool_runner import ToolRunner
 from security.dangerous_tools import resolve_surface_from_context
-from agents.context_manager import ContextManager
+from agents.context_manager import ContextManager, _chars_from
 from agents.refusal_handler import RefusalHandler
 from agents.identity_loader import IdentityLoader
 from agents.tool_display import friendly_tool_label
@@ -210,6 +210,14 @@ class Orchestrator:
         # Delegate sub-modules
         self.tool_runner = ToolRunner(self, approval_manager=approval_manager)
         self.context_manager = ContextManager(max_messages=15)
+        # When a turn last finished, and how full the context window was
+        # the last time one was built. Nothing measured either, so the
+        # dashboard could not answer "when did this thing last do
+        # anything" or "how much room is left", which are the two
+        # questions the design's Brain readout asks. Both are recorded
+        # off paths that already run per turn rather than adding work.
+        self._last_turn_at: float = 0.0
+        self._last_context_chars: int = 0
         self.refusal_handler = RefusalHandler(self)
         self.identity_loader = IdentityLoader(memory=memory)
 
@@ -587,7 +595,28 @@ class Orchestrator:
             "multi_agent_ready": self._multi_agent is not None,
             "active_subagents": self.tool_runner._active_subagent_tasks,
             "pending_confirmations": len(self._pending_confirmations),
+            # 0.0 when no turn has run in this process, which a caller
+            # must read as "unknown" rather than "just now".
+            "last_turn_at": self._last_turn_at,
+            "context_used_pct": self.context_used_pct(),
         }
+
+    def context_used_pct(self) -> float:
+        """How full the last context view was, 0..100, or 0.0 if unknown.
+
+        Measured against `history_budget_chars`, which is the share of
+        the model's window the conversation is allowed to occupy, not
+        the whole window: the rest is the system prompt, tool schemas
+        and the memory block, so dividing by the full window would
+        report a number that is always comfortable and never true.
+        """
+        try:
+            budget = int(self.context_manager.history_budget_chars)
+            if budget <= 0 or self._last_context_chars <= 0:
+                return 0.0
+            return round(min(100.0, (self._last_context_chars / budget) * 100.0), 1)
+        except Exception:
+            return 0.0
 
     # ─────────────────────────────────────────────
     # Subagent spawn (additive)
@@ -643,7 +672,18 @@ class Orchestrator:
     # ─────────────────────────────────────────────
 
     def _compact_context(self, history: list[dict]) -> list[dict]:
-        return self.context_manager.compact(history)
+        view = self.context_manager.compact(history)
+        # Measure the VIEW, not the stored history: the view is what is
+        # actually sent to the model, so it is the thing that can
+        # overflow the window. Measured here because this already runs
+        # once per request and the numbers are otherwise unobservable
+        # from any surface.
+        try:
+            self._last_context_chars = _chars_from(view, 0)
+        except Exception:
+            # A reporting number is never worth failing a turn over.
+            self._last_context_chars = 0
+        return view
 
     def _maybe_auto_compact(self, session_id: str) -> None:
         """F2 — increment the per-session turn counter and schedule a
@@ -656,6 +696,13 @@ class Orchestrator:
         Idempotent against overlapping invocations via
         ``_compaction_inflight``.
         """
+        # A turn just finished. Recorded here because this is already
+        # the post-turn hook on BOTH the streaming and non-streaming
+        # paths, so it cannot drift out of step with one of them, and
+        # recorded BEFORE the settings read below: compaction being
+        # disabled returns early, and a turn still happened.
+        self._last_turn_at = time.time()
+
         try:
             from config.loader import load_settings
             settings = load_settings()

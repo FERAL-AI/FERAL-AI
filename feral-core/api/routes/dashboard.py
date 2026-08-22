@@ -468,6 +468,7 @@ async def _get_dashboard_data() -> dict:
         # Seconds this process has been up. The Brain readout had no
         # uptime to show because nothing recorded a start time.
         "uptime_s": _uptime_seconds(),
+        "brain_activity": _brain_activity(),
         "autonomy": _autonomy_mode(),
         "demo": is_demo,
         "is_demo_mode": getattr(state, "_demo", None) is not None,
@@ -514,6 +515,42 @@ def _uptime_seconds() -> float:
     if started <= 0.0:
         return 0.0
     return max(0.0, time.time() - started)
+
+
+def _brain_activity() -> dict:
+    """When a turn last ran, and how full the context view was.
+
+    Both were unmeasured, so the dashboard's Brain readout could not
+    answer "when did this last do anything" or "how much room is left",
+    which are two of the four rows the design specifies. The orchestrator
+    records them off paths that already run per turn.
+
+    `last_turn_at` is 0.0 when no turn has run in this process, and a
+    caller must read that as "unknown" rather than "just now".
+    """
+    try:
+        orch = getattr(state, "orchestrator", None)
+        if orch is None:
+            return {}
+        # `runtime_status` is a @property, so this is already the dict.
+        # Calling it returns a TypeError, and guarding with `callable()`
+        # silently returns nothing at all, which is how this first
+        # shipped: the field was present and permanently empty, with no
+        # error anywhere. `/api/system/info` reads it the same way.
+        data = orch.runtime_status
+        # Deliberately not `or {}`: None and [] are falsy, so that idiom
+        # turns "the orchestrator told us nothing" into a valid empty
+        # dict and then into two zeros. Zero is a reading; unknown is
+        # not, and the readout cannot tell them apart.
+        if not isinstance(data, dict) or not data:
+            return {}
+        return {
+            "last_turn_at": float(data.get("last_turn_at") or 0.0),
+            "context_used_pct": float(data.get("context_used_pct") or 0.0),
+        }
+    except Exception:
+        logger.debug("dashboard: brain activity unavailable", exc_info=True)
+        return {}
 
 
 def _autonomy_mode() -> str:

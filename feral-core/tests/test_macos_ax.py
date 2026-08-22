@@ -41,6 +41,7 @@ from models.skill_manifest import SkillManifest  # noqa: E402
 from skills.impl import macos_ax  # noqa: E402
 from skills.impl.macos_ax import (  # noqa: E402
     ACTIONABLE_ACTIONS,
+    MAX_TIMEOUT_S,
     AXNode,
     MACOS_AX_ENDPOINTS,
     MacOSAccessibilitySkill,
@@ -692,12 +693,31 @@ def test_a_depth_limit_is_reported_not_hidden():
     Note ``max_nodes`` is pagination (``returned`` / ``next_offset``), not
     a walk limit, so it never appears in ``limits_hit``. Only bounds that
     stop the walk early do.
+
+    The baseline walk is NOT unbounded, which is the second way this
+    test was flaky. It carries ``DEFAULT_TIMEOUT_S`` (8s), so on a busy
+    machine, or against a Finder window with a large tree, the baseline
+    hit ``limits_hit == ['timeout']`` and the test failed reporting "an
+    unbounded walk reported a limit" while the code was behaving
+    correctly. Observed while a full suite was running on the same box.
+
+    So the baseline asks for the maximum the tool allows, and a timeout
+    that survives that is a SKIP rather than a failure: a baseline that
+    could not complete cannot establish the tree depth this test needs,
+    which is the same shape as the two skips already here. Only
+    `max_depth` appearing in a bounded walk is the property under test.
     """
-    full = run("snapshot", app="Finder", filter="all")
+    full = run("snapshot", app="Finder", filter="all", timeout_s=MAX_TIMEOUT_S)
     if not full["success"]:
         pytest.skip("Finder is not readable here")
+    if "timeout" in full["data"]["limits_hit"]:
+        pytest.skip(
+            f"the baseline walk timed out at {MAX_TIMEOUT_S}s, so there is no "
+            "complete tree to measure a depth against"
+        )
     assert full["data"]["limits_hit"] == [], (
-        "an unbounded walk reported a limit: " f"{full['data']['limits_hit']}"
+        "a walk with no depth or node bound reported a limit: "
+        f"{full['data']['limits_hit']}"
     )
 
     depth = _max_depth_in_tree(full["data"]["tree"])

@@ -34,6 +34,8 @@ const EMPTY = {
   autonomy: '',
   uptime: 0,        // seconds this brain process has been up
   llmAvailable: false,
+  lastTurnAt: 0,    // 0 = no turn has run in this process
+  contextPct: 0,    // 0 = unknown, not "empty"
   reachable: true,  // false once every source has failed
 };
 
@@ -76,6 +78,11 @@ async function poll() {
     next.autonomy = String(v.autonomy || '');
     next.uptime = Number(v.uptime_s ?? 0);
     next.llmAvailable = Boolean(v.llm_available);
+    // 0 means "no turn has run in this process", which is not the same
+    // as "just now" and must not render as a time.
+    const act = v.brain_activity || {};
+    next.lastTurnAt = Number(act.last_turn_at ?? 0);
+    next.contextPct = Number(act.context_used_pct ?? 0);
   }
   // Only a total failure means unreachable. One slow endpoint must not
   // make the shell claim the brain is down.

@@ -153,13 +153,28 @@ export function rowsFor(kind, data, vitals) {
         value: ok ? 'ok' : 'unavailable',
         tone: ok ? '' : 'warn',
       },
+      // Context and Last turn were left out of this popover because the
+      // brain measured neither. It records both now, off paths that
+      // already run per turn, so the popover carries the four rows the
+      // design specifies. Both are omitted rather than shown as zero
+      // when the brain has not answered: "0% used" and "no turn yet"
+      // are different facts from "we do not know".
+      vitals.contextPct > 0 && {
+        id: 'ctx', title: 'Context', sub: 'of the conversation budget',
+        value: `${vitals.contextPct}%`,
+        tone: vitals.contextPct >= 85 ? 'warn' : '',
+      },
+      vitals.lastTurnAt > 0 && {
+        id: 'turn', title: 'Last turn', sub: 'since the brain last answered',
+        value: elapsed(vitals.lastTurnAt),
+      },
       { id: 'sk', title: 'Skills', sub: 'loaded and callable', value: String(vitals.skills || 0) },
       { id: 'run', title: 'Running', sub: 'work in flight now', value: String(vitals.running || 0) },
       {
         id: 'dev', title: 'Devices', sub: 'paired and online',
         value: String(vitals.devices || 0),
       },
-    ];
+    ].filter(Boolean);
   }
 
   if (kind === 'cost') {
