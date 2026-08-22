@@ -2536,8 +2536,21 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # observes its close. The new registration owns a fresh set of
                 # bindings; the stale socket's eventual teardown is guarded by
                 # object identity below.
+                previous_ws = state.daemons.get(node_id)
                 state.clear_daemon_bindings(node_id)
                 state.daemons[node_id] = ws
+                if previous_ws is not None and previous_ws is not ws:
+                    try:
+                        await previous_ws.close(
+                            code=4000,
+                            reason="Superseded by a newer connection for this node id",
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Could not close superseded daemon socket: %s",
+                            node_id,
+                            exc_info=True,
+                        )
                 # Stash the HUP-declared node_type on the WebSocket so
                 # /api/devices/connected can report the real type instead
                 # of the legacy "phone"-for-everyone default. `manufacturer`

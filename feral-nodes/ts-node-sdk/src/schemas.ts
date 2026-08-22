@@ -64,6 +64,9 @@ export type NodeAckPayload = z.infer<typeof NodeAckPayload>;
 
 export const TextResponsePayload = z.object({
   text: z.string(),
+  tool_calls: z.array(z.record(z.any())).nullable().optional(),
+  model: z.string().default(""),
+  usage: z.record(z.any()).default({}),
   session_id: z.string().default(""),
   reply_mode: z.string().default(""),
   channel: z.string().default(""),

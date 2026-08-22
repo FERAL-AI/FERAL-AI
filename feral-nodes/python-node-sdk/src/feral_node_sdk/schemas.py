@@ -76,6 +76,9 @@ class NodeAckPayload(BaseModel):
 
 class TextResponsePayload(BaseModel):
     text: str
+    tool_calls: Optional[list[dict[str, Any]]] = None
+    model: str = ""
+    usage: dict[str, Any] = Field(default_factory=dict)
     session_id: str = ""
     reply_mode: str = ""
     channel: str = ""

@@ -6,6 +6,7 @@ import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from starlette.websockets import WebSocketDisconnect
 
 from tests.test_hup_protocol import (
     _TEST_NODE_KEY,
@@ -91,6 +92,26 @@ def test_phone_registration_advertises_primary_session_and_ambient_capability():
 
     assert ack["payload"]["primary_session_id"] == "shared-primary"
     assert "ambient_delivery" in ack["payload"]["granted_capabilities"]
+
+
+def test_new_connection_with_same_node_id_closes_superseded_socket():
+    mock = _mock_state_with_supervisor()
+    mock.primary_session_id = "shared-primary"
+
+    with _node_client(mock) as client:
+        with client.websocket_connect(f"/v1/node?api_key={_TEST_NODE_KEY}") as old_ws:
+            _register_node(old_ws, node_id="stable-phone", node_type="phone")
+            with client.websocket_connect(f"/v1/node?api_key={_TEST_NODE_KEY}") as new_ws:
+                _register_node(new_ws, node_id="stable-phone", node_type="phone")
+
+                with pytest.raises(WebSocketDisconnect) as excinfo:
+                    old_ws.receive_json()
+                assert excinfo.value.code == 4000
+
+                # The replacement remains registered and operational after
+                # the old handler observes its close.
+                _flush_with_known_error(new_ws)
+                assert "stable-phone" in mock.daemons
 
 
 def test_chat_request_routes_to_orchestrator_and_responds():
