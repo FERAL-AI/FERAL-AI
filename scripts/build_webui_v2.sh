@@ -44,4 +44,14 @@ PY
 mkdir -p "$WEBUI/assets"
 touch "$WEBUI/assets/__init__.py"
 
+# Same reason, for the PWA icons. Without an __init__.py setuptools does
+# not discover `webui_v2/icons` as a package, so no package-data glob can
+# reach it and the wheel shipped none of the three icons that
+# manifest.webmanifest and index.html both reference. Only created when
+# the directory exists, so a bundle without icons is not given an empty
+# package.
+if [ -d "$WEBUI/icons" ]; then
+  touch "$WEBUI/icons/__init__.py"
+fi
+
 echo "Done. v2 web UI bundled at $WEBUI"

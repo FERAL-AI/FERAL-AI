@@ -574,7 +574,22 @@ exclude = ["tests*"]
 # v2 ambient-OS bundle — the wheel MUST carry these or pip-installed
 # users fall back to the v1 UI. See feral-core/api/server.py::_webui_v2_dir.
 "webui_v2" = ["*.html", "*.css", "*.js", "*.svg", "*.png", "*.ico", "*.json", "*.webmanifest", "*.txt"]
-"webui_v2.assets" = ["*.html", "*.css", "*.js", "*.svg", "*.png", "*.ico", "*.json", "*.map"]
+# Fonts were not globbed, so the wheel carried none of them. Measured on
+# a built wheel: 0 of the 59 KaTeX font files on disk, against 59
+# references from `assets/index-*.css`. A pip-installed dashboard
+# therefore rendered every piece of maths in a fallback face. This is
+# the same defect the `*.webmanifest` note above records, found once and
+# missed for the fonts.
+"webui_v2.assets" = [
+    "*.html", "*.css", "*.js", "*.svg", "*.png", "*.ico", "*.json", "*.map",
+    "*.woff", "*.woff2", "*.ttf", "*.eot", "*.otf",
+]
+# And `webui_v2/icons/` was not a discovered package at all, so no glob
+# could reach it: the wheel carried 0 of the 3 PWA icons that
+# `manifest.webmanifest` and `index.html` both reference. The build
+# script now writes an `__init__.py` there for the same reason it writes
+# one in `assets/`.
+"webui_v2.icons" = ["*.png", "*.svg", "*.ico"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
