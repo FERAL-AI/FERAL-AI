@@ -1,10 +1,24 @@
 # Changelog
 
-<!-- feral-version: 2026.8.13 -->
+<!-- feral-version: 2026.8.14 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.14] - 2026-08-22 - the surfaces nobody had driven
+
+Thirty-seven commits. One of them fixes a regression this project put on
+PyPI yesterday; the rest are what six parallel audits found when every
+page was finally opened against a running brain and every control was
+actually clicked.
+
+The pattern is the same one 2026.8.13 was named for, one layer deeper. A
+page renders, its tests pass, and the thing it claims to show was never
+wired to anything: a memory search that sent the wrong parameter name
+and had therefore never returned a result in its life, a devices route
+that answered empty with three daemons attached, a tab that rendered
+zero DOM, a stop button that was a `<span>`.
 
 ### Fixed
 
