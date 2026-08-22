@@ -272,8 +272,27 @@
 }
 @media (max-width: 640px) {
   .v2-dock { padding-bottom: 8px; }
-  .v2-dock-list { max-width: 98vw; padding: 4px 6px; gap: 2px; }
-  .v2-dock-btn { width: 36px; height: 36px; }
+  .v2-dock-list {
+    max-width: 98vw;
+    padding: 4px 5px;
+    gap: 3px;
+    /* The backstop, and the reason this is not just smaller numbers.
+       Ten tiles at 36px with 2px gaps needed ~390px against a 98vw cap
+       of 367px at 375px wide, so two tiles were pushed outside the
+       container and became unclickable. Measured: 2 of 10 dock controls
+       unreachable at 375px.
+       Arithmetic that has to stay right as tiles are added is the same
+       trap twice. Scrolling means an eleventh tile, or a narrower
+       phone, degrades to "swipe the dock" instead of "two destinations
+       silently vanish". */
+    overflow-x: auto;
+    overflow-y: visible;
+    justify-content: flex-start;
+    scrollbar-width: none;
+  }
+  .v2-dock-list::-webkit-scrollbar { display: none; }
+  .v2-dock-btn { width: 34px; height: 34px; border-radius: 10px; }
+  .v2-dock-btn > svg { width: 18px; height: 18px; }
   .v2-dock-label { display: none; }
 }
 

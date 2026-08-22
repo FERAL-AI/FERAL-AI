@@ -467,7 +467,7 @@ async def _get_dashboard_data() -> dict:
         "budget": _budget_status(),
         # Seconds this process has been up. The Brain readout had no
         # uptime to show because nothing recorded a start time.
-        "uptime_s": max(0.0, time.time() - getattr(state, "started_at", time.time())),
+        "uptime_s": _uptime_seconds(),
         "autonomy": _autonomy_mode(),
         "demo": is_demo,
         "is_demo_mode": getattr(state, "_demo", None) is not None,
@@ -490,6 +490,30 @@ def _budget_status() -> dict:
     except Exception:
         logger.debug("dashboard: budget snapshot unavailable", exc_info=True)
     return {}
+
+
+def _uptime_seconds() -> float:
+    """Seconds since this process came up, or 0.0 if unknowable.
+
+    The arithmetic is guarded rather than inlined, and the reason is a
+    real 500 this shipped with: `getattr(state, "started_at", default)`
+    looks safe and is not, because `state` is a MagicMock under test and
+    a mock ALWAYS has every attribute. The default therefore never
+    applied, `time.time() - <MagicMock>` raised TypeError, and the whole
+    dashboard endpoint answered 500.
+
+    Coercing through float() covers the same shape in production: an
+    older BrainState pickled without the field, or anything that leaves
+    a non-numeric there, degrades to "unknown" instead of taking down
+    the one endpoint the entire shell polls.
+    """
+    try:
+        started = float(getattr(state, "started_at", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if started <= 0.0:
+        return 0.0
+    return max(0.0, time.time() - started)
 
 
 def _autonomy_mode() -> str:

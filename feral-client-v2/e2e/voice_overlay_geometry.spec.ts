@@ -143,9 +143,23 @@ test.describe('docked voice overlay', () => {
           setTimeout(() => {
             resolve([...document.querySelectorAll('.v2-dock a, .v2-dock button')]
               .filter((el) => {
-                const b = el.getBoundingClientRect();
+                // Scroll it into view first, unconditionally. Below
+                // 430px the dock is a horizontal scroller (ten
+                // destinations do not fit on a phone), so a tile can be
+                // off to one side and perfectly clickable once swiped
+                // to. Without this the test counts "not currently
+                // scrolled to" as "covered by the pill", which are
+                // different failures with different fixes.
+                //
+                // Unconditionally, because a tile can also be PARTLY
+                // visible with its centre outside the viewport, and an
+                // off-screen test keyed on the whole rect misses that.
+                // Scrolling a tile that is already fully visible is a
+                // no-op.
+                el.scrollIntoView({ block: 'nearest', inline: 'center' });
+                const r = el.getBoundingClientRect();
                 const hit = document.elementFromPoint(
-                  b.left + b.width / 2, b.top + b.height / 2,
+                  r.left + r.width / 2, r.top + r.height / 2,
                 );
                 return !(hit === el || el.contains(hit as Node));
               })

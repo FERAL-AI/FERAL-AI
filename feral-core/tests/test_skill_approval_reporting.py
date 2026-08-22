@@ -321,3 +321,61 @@ def test_list_skills_still_lists_a_real_registry(make_client):
     assert isinstance(rows, list)
     assert rows
     assert {"skill_id", "name", "description", "endpoints", "trigger_phrases"} <= set(rows[0])
+
+
+def test_list_skills_sends_endpoints_as_a_list_not_a_count(make_client):
+    """``endpoints`` was ``len(s.endpoints)``, an integer.
+
+    Both readers of this payload, ``pages/Skills.jsx`` and
+    ``components/SkillsLauncher.jsx``, guard the endpoint chip with
+    ``Array.isArray(s.endpoints) && s.endpoints.length``. An integer
+    fails that guard, so the chip was dead code in two places and no
+    client could show what a skill can actually do. Sending the list is
+    what makes the Skills page's detail sheet possible at all.
+    """
+    from skills.registry import SkillRegistry
+
+    registry = SkillRegistry()
+    registry.load_builtin_skills()
+    c = make_client(skill_registry=registry)
+    rows = c.get("/skills").json()
+
+    with_endpoints = [r for r in rows if r["endpoint_count"] > 0]
+    assert with_endpoints, "no builtin skill declares an endpoint, so this proves nothing"
+    for row in with_endpoints:
+        assert isinstance(row["endpoints"], list)
+        assert len(row["endpoints"]) == row["endpoint_count"]
+        first = row["endpoints"][0]
+        assert {"id", "method", "description", "read_only"} <= set(first)
+        assert isinstance(first["id"], str) and first["id"]
+
+
+def test_list_skills_sends_the_categories_the_icon_is_derived_from(make_client):
+    """No manifest carries an icon, so the Skills page derives one.
+
+    It derives it from ``categories``, which every shipped manifest
+    declares and which this payload did not carry. Without it the page
+    would have to invent an icon from nothing, and every skill would get
+    the same fallback glyph. ``version`` is here for the same reason:
+    the page rendered a ``v{version}`` chip against a key the payload
+    never sent, so the chip never appeared.
+    """
+    from skills.registry import SkillRegistry
+
+    registry = SkillRegistry()
+    registry.load_builtin_skills()
+    c = make_client(skill_registry=registry)
+    rows = c.get("/skills").json()
+
+    assert rows
+    for row in rows:
+        assert isinstance(row["categories"], list)
+        assert isinstance(row["version"], str)
+    # Not merely present: actually populated, for most of them. A payload
+    # of 42 empty lists would pass a shape check and leave the grid
+    # uniformly iconless.
+    with_categories = [r for r in rows if r["categories"]]
+    assert len(with_categories) == len(rows), (
+        "every shipped manifest declares categories; a row without them means "
+        "the field is being dropped somewhere between the manifest and the wire"
+    )

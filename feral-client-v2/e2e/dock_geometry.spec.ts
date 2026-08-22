@@ -147,3 +147,68 @@ test('Home is back on the dock and it goes Home', async ({ page }) => {
   // And it lights up as the active tile once you are there.
   await expect(page.locator('.v2-dock-btn[href="/"]')).toHaveClass(/is-active/);
 });
+
+/**
+ * Ten destinations do not fit across a phone.
+ *
+ * Adding Home took the dock to ten tiles, and the mockup's 44px tile
+ * with a 7px gap needs about 523px of row. Measured at 375px, where the
+ * container caps at 94vw: two tiles were pushed outside it and became
+ * unclickable, and one of them was Settings.
+ *
+ * Shrinking the tiles is not the fix on its own, because that is
+ * arithmetic that has to keep being right as tiles are added, and this
+ * is the second time that arithmetic has been wrong. The dock scrolls
+ * instead, so an eleventh tile or a narrower phone degrades to "swipe
+ * the dock" rather than "two destinations silently vanish".
+ */
+for (const width of [320, 375, 430]) {
+  test(`every dock destination is reachable at ${width}px`, async ({ page }) => {
+    await stub(page);
+    await page.setViewportSize({ width, height: 860 });
+    await page.goto('/console');
+    await expect(page.locator('.v2-dock-list')).toBeVisible();
+
+    const tiles = page.locator('.v2-dock a, .v2-dock button');
+    const n = await tiles.count();
+    expect(n).toBeGreaterThan(8);
+
+    // Reachable means clickable, scrolling to it if the row is a
+    // scroller. It does NOT mean visible without scrolling.
+    for (let i = 0; i < n; i += 1) {
+      const tile = tiles.nth(i);
+      await tile.scrollIntoViewIfNeeded();
+      const label = (await tile.getAttribute('aria-label'))
+        || (await tile.getAttribute('title')) || `tile ${i}`;
+      await expect(tile, `${label} is not reachable at ${width}px`).toBeVisible();
+      const hit = await tile.evaluate((el) => {
+        const b = el.getBoundingClientRect();
+        const top = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+        return top === el || el.contains(top as Node);
+      });
+      expect(hit, `${label} is covered or off-screen at ${width}px`).toBe(true);
+    }
+  });
+}
+
+test('the narrow dock actually scrolls rather than clipping', async ({ page }) => {
+  await stub(page);
+  await page.setViewportSize({ width: 375, height: 860 });
+  await page.goto('/console');
+
+  const m = await page.locator('.v2-dock-list').evaluate((el) => ({
+    client: el.clientWidth, scroll: el.scrollWidth,
+  }));
+  // If the content is wider than the box, the box must be scrollable,
+  // otherwise the overflow is simply hidden and the tiles are gone.
+  if (m.scroll > m.client) {
+    const overflow = await page.locator('.v2-dock-list')
+      .evaluate((el) => getComputedStyle(el).overflowX);
+    expect(overflow, 'the dock overflows but does not scroll').toMatch(/auto|scroll/);
+  }
+
+  // And the far tile takes a real click once scrolled to.
+  const last = page.locator('.v2-dock-btn').last();
+  await last.scrollIntoViewIfNeeded();
+  await last.click({ timeout: 3000 });
+});
