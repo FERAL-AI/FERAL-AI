@@ -1171,15 +1171,150 @@
 .v2-wizard-step.is-active { color: var(--v2-accent-text); background: var(--v2-accent-soft); }
 .v2-wizard-step.is-done { color: var(--v2-state-live); }
 
-/* ── Skills grid ───────────────────────────────────────────── */
-.v2-skills-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; }
-.v2-skill-card { display: flex; flex-direction: column; gap: 8px; }
-.v2-skill-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
-.v2-skill-card-name { margin: 0; font-size: var(--v2-size-md); font-weight: 600; }
-.v2-skill-card-id { font-family: var(--v2-font-mono); font-size: 10px; color: var(--v2-text-tertiary); }
-.v2-skill-card-meta { display: flex; flex-wrap: wrap; gap: 4px; }
+/* ── Skills grid ───────────────────────────────────────────────
+ *
+ * Every card is the SAME height, and that is enforced here rather than
+ * left to the content. It used to be a flex column with no height at
+ * all, holding the skill's full `description`; measured on a live brain,
+ * cards in one grid ran 527px to 1055px because `macos_ax` ships a
+ * 2,000-character description and `weather_current` ships 63 characters.
+ *
+ * `--v2-skill-card-h` is the single place the height is written down.
+ * The summary line is clamped to two lines so a long first sentence
+ * cannot push the meta row out of the box.
+ */
+.v2-skills-grid {
+  --v2-skill-card-h: 176px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
+  gap: 10px;
+}
+.v2-skill-card {
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  grid-template-rows: auto auto 1fr auto;
+  align-content: start;
+  gap: 2px 10px;
+  height: var(--v2-skill-card-h);
+  padding: 14px;
+  text-align: left;
+  background: var(--v2-surface-0);
+  border: 1px solid var(--v2-hairline);
+  border-radius: var(--v2-radius-md);
+  color: var(--v2-text-primary);
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  transition: background var(--v2-dur-fast) var(--v2-ease-out), transform var(--v2-dur-fast) var(--v2-ease-out);
+}
+.v2-skill-card:hover { background: var(--v2-surface-1); transform: translateY(-1px); }
+.v2-skill-card-icon {
+  grid-row: 1 / span 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-accent-soft);
+  color: var(--v2-accent-text);
+}
+.v2-skill-card-name {
+  margin: 0;
+  font-size: var(--v2-size-md);
+  font-weight: 600;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v2-skill-card-id {
+  font-family: var(--v2-font-mono);
+  font-size: 10px;
+  color: var(--v2-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Two lines, hard, with a real ellipsis.
+ *
+ * Two rules rather than one because `-webkit-line-clamp` only clamps a
+ * `-webkit-box`, and a direct child of a grid container is blockified:
+ * declared on `.v2-skill-card-summary` the display computed to
+ * `flow-root` and the clamp did nothing, which measured in Chrome as a
+ * three-line summary carrying a stray ellipsis. The outer element is
+ * the grid item, the inner one is a plain inline-level box that keeps
+ * its `-webkit-box` display and therefore its clamp. `max-height` is
+ * the backstop for any engine that ignores the webkit pair: it clips
+ * without an ellipsis, but it cannot let the card grow.
+ */
+.v2-skill-card-summary {
+  grid-column: 1 / -1;
+  align-self: start;
+  margin-top: 8px;
+  font-size: var(--v2-size-sm);
+  line-height: 1.45;
+  color: var(--v2-text-secondary);
+  max-height: 2.9em;
+  overflow: hidden;
+}
+.v2-skill-card-summary-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.v2-skill-card-meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; align-self: end; }
 .v2-skill-card-phrases { display: flex; flex-wrap: wrap; gap: 4px; font-size: var(--v2-size-xs); }
 .v2-skill-card-phrases .v2-chip { font-style: italic; }
+
+/* Where more skills come from, and how to make one. */
+.v2-skills-ways { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.v2-skills-ways-note { flex: 1 1 260px; min-width: 200px; margin: 0; font-size: var(--v2-size-xs); }
+
+/* ── Skill detail sheet ────────────────────────────────────── */
+.v2-skill-detail { display: flex; flex-direction: column; gap: 18px; }
+.v2-skill-detail-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.v2-skill-detail-section { display: flex; flex-direction: column; gap: 8px; }
+.v2-skill-detail-h {
+  margin: 0;
+  font-size: var(--v2-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--v2-text-tertiary);
+}
+.v2-skill-endpoints { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.v2-skill-endpoint {
+  padding: 10px 12px;
+  background: var(--v2-surface-0);
+  border: 1px solid var(--v2-hairline);
+  border-radius: var(--v2-radius-sm);
+}
+.v2-skill-endpoint-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 4px; }
+.v2-skill-endpoint-id { font-family: var(--v2-font-mono); font-size: 11px; color: var(--v2-text-primary); }
+.v2-skill-reload { align-items: flex-start; }
+.v2-skill-reload .v2-btn { align-self: flex-start; }
+.v2-skill-reload-result {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--v2-radius-sm);
+  font-size: var(--v2-size-sm);
+  line-height: 1.5;
+}
+.v2-skill-reload-result--ok {
+  align-items: center;
+  background: var(--v2-state-live-soft);
+  color: var(--v2-state-live);
+}
+.v2-skill-reload-result--bad {
+  flex-direction: column;
+  background: var(--v2-state-warn-soft);
+  color: var(--v2-text-primary);
+}
+.v2-skill-reload-result-title { font-weight: 600; }
 
 /* ── Memory + Wiki ─────────────────────────────────────────── */
 .v2-mem-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -2688,6 +2823,7 @@
 .v2-tab:focus-visible,
 .v2-seg-btn:focus-visible,
 .v2-skill-pin:focus-visible,
+.v2-skill-card:focus-visible,
 .v2-device-card:focus-visible,
 .v2-device-head[role="button"]:focus-visible,
 .v2-flow-card-title:focus-visible,

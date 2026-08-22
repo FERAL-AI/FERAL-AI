@@ -60,8 +60,20 @@ function renderSkills(reload) {
   return { ...view, calls };
 }
 
+/**
+ * The button moved into the per-skill detail sheet, so reaching it means
+ * opening the card first. That relocation is itself the fix for the
+ * user-reported "hot-reload does nothing": the outcome used to render in
+ * a page-level banner above a 42-card grid, measured on a live brain at
+ * y = -71px for the first card and y = -3365px for a lower one, i.e.
+ * off-screen for both success and failure. It renders at the click site
+ * now, which is inside the sheet. `Modal` portals to document.body, so
+ * assertions read document.body rather than the render container.
+ */
 async function clickHotReload() {
-  const button = await screen.findByRole('button', { name: /hot-reload/i });
+  const card = await screen.findByTestId('v2-skill-card');
+  fireEvent.click(card);
+  const button = await screen.findByTestId('v2-skill-reload');
   fireEvent.click(button);
 }
 
@@ -71,7 +83,7 @@ describe('Skills hot-reload reporting', () => {
 
   it('does not claim success when a 200 body says ok:false', async () => {
     // The exact pre-fix wire shape: success status, ok:false, no `error`.
-    const { container } = renderSkills(() => makeResponse(200, {
+    renderSkills(() => makeResponse(200, {
       ok: false,
       skill_id: 'calendar_google',
     }));
@@ -79,17 +91,17 @@ describe('Skills hot-reload reporting', () => {
     await clickHotReload();
 
     await waitFor(() => {
-      expect(container.querySelectorAll('[data-testid="v2-error-state"]').length)
+      expect(document.body.querySelectorAll('[data-testid="v2-error-state"]').length)
         .toBeGreaterThan(0);
     });
-    expect(container.textContent).not.toMatch(/Hot-reloaded/i);
+    expect(document.body.querySelectorAll('[data-testid="v2-skill-reload-ok"]').length).toBe(0);
     // And it must say what the user is left with, not just that something
     // went wrong: the old code is still the code that is running.
-    expect(container.textContent).toMatch(/still what is running/i);
+    expect(document.body.textContent).toMatch(/still what is running/i);
   });
 
   it('reports the brain-supplied reason when the reload conflicts', async () => {
-    const { container } = renderSkills(() => makeResponse(409, {
+    renderSkills(() => makeResponse(409, {
       ok: false,
       skill_id: 'calendar_google',
       code: 'no_source',
@@ -99,15 +111,15 @@ describe('Skills hot-reload reporting', () => {
     await clickHotReload();
 
     await waitFor(() => {
-      expect(container.querySelectorAll('[data-testid="v2-error-state"]').length)
+      expect(document.body.querySelectorAll('[data-testid="v2-error-state"]').length)
         .toBeGreaterThan(0);
     });
-    expect(container.textContent).not.toMatch(/Hot-reloaded/i);
-    expect(container.textContent).toMatch(/nothing on disk to reload/i);
+    expect(document.body.querySelectorAll('[data-testid="v2-skill-reload-ok"]').length).toBe(0);
+    expect(document.body.textContent).toMatch(/nothing on disk to reload/i);
   });
 
   it('still confirms a reload that actually happened', async () => {
-    const { container } = renderSkills(() => makeResponse(200, {
+    renderSkills(() => makeResponse(200, {
       ok: true,
       skill_id: 'calendar_google',
     }));
@@ -115,8 +127,44 @@ describe('Skills hot-reload reporting', () => {
     await clickHotReload();
 
     await waitFor(() => {
-      expect(container.textContent).toMatch(/Hot-reloaded calendar_google/i);
+      expect(screen.getByTestId('v2-skill-reload-ok').textContent)
+        .toMatch(/calendar_google/i);
     });
-    expect(container.querySelectorAll('[data-testid="v2-error-state"]').length).toBe(0);
+    expect(document.body.querySelectorAll('[data-testid="v2-error-state"]').length).toBe(0);
+  });
+
+  /**
+   * GUARD for the user-reported defect. The outcome must be inside the
+   * detail sheet, next to the button that produced it, not somewhere else
+   * on the page. Rendering it into a page-level banner is what made a
+   * working button look inert.
+   */
+  it('renders the outcome inside the sheet that holds the button', async () => {
+    renderSkills(() => makeResponse(200, { ok: true, skill_id: 'calendar_google' }));
+
+    await clickHotReload();
+
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => {
+      expect(dialog.querySelectorAll('[data-testid="v2-skill-reload-ok"]').length).toBe(1);
+    });
+    const button = screen.getByTestId('v2-skill-reload');
+    expect(dialog.contains(button)).toBe(true);
+  });
+
+  it('keeps a failed reload inside the sheet too', async () => {
+    renderSkills(() => makeResponse(409, {
+      ok: false,
+      skill_id: 'calendar_google',
+      code: 'no_source',
+      error: "nothing on disk to reload for 'calendar_google'",
+    }));
+
+    await clickHotReload();
+
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => {
+      expect(dialog.querySelectorAll('[data-testid="v2-skill-reload-error"]').length).toBe(1);
+    });
   });
 });

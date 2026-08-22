@@ -360,6 +360,48 @@ def _reload(registry, skill_id: str) -> tuple[bool, str, str]:
     return False, "", f"the skill registry did not reload '{skill_id}' and gave no reason"
 
 
+def _endpoint_row(endpoint) -> dict:
+    """One endpoint, as the Skills page's detail sheet renders it."""
+    return {
+        "id": getattr(endpoint, "id", ""),
+        "method": getattr(endpoint, "method", ""),
+        "description": getattr(endpoint, "description", ""),
+        "read_only": bool(getattr(endpoint, "read_only_hint", False)),
+    }
+
+
+def _skill_row(manifest) -> dict:
+    """One skill, as the Skills page renders it.
+
+    ``endpoints`` used to be ``len(s.endpoints)``, an integer, while both
+    of its readers (``pages/Skills.jsx`` and ``components/
+    SkillsLauncher.jsx``) guard with ``Array.isArray(s.endpoints) &&
+    s.endpoints.length``. An integer fails that guard, so the endpoint
+    chip was dead code in two places and no client could show what a
+    skill can actually do. It is a list of endpoint summaries now, and
+    ``endpoint_count`` carries the number for anything that only wants
+    the count.
+
+    ``categories`` and ``version`` are new here and both are read
+    straight off the manifest, not invented: every shipped manifest under
+    ``skills/manifests/`` declares ``categories``, and ``version``
+    defaults to "1.0.0" on the model. The Skills page derives a per-skill
+    icon from the first category, and rendered a ``v{version}`` chip
+    against a key the payload never carried.
+    """
+    endpoints = list(getattr(manifest, "endpoints", None) or [])
+    return {
+        "skill_id": manifest.skill_id,
+        "name": manifest.brand.name,
+        "description": manifest.description,
+        "endpoints": [_endpoint_row(e) for e in endpoints],
+        "endpoint_count": len(endpoints),
+        "trigger_phrases": list(getattr(manifest, "trigger_phrases", None) or []),
+        "categories": list(getattr(manifest, "categories", None) or []),
+        "version": getattr(manifest, "version", "") or "",
+    }
+
+
 @router.get("/skills")
 async def list_skills(response: Response):
     """Every registered skill manifest, as the Skills page renders it.
@@ -380,16 +422,7 @@ async def list_skills(response: Response):
             "error": "skill registry not initialized, so the brain cannot say which skills are loaded",
         }
     try:
-        return [
-            {
-                "skill_id": s.skill_id,
-                "name": s.brand.name,
-                "description": s.description,
-                "endpoints": len(s.endpoints),
-                "trigger_phrases": s.trigger_phrases,
-            }
-            for s in registry.skills.values()
-        ]
+        return [_skill_row(s) for s in registry.skills.values()]
     except Exception as exc:
         logger.warning("list_skills failed: %s", exc)
         response.status_code = _BRAIN_FAILED
