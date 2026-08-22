@@ -199,9 +199,24 @@ def test_omitting_every_optional_param_still_dispatches():
     ``snapshot`` carries seven optional params. Calling it with none of
     them must reach the app lookup and fail there, not fail earlier on a
     missing argument.
+
+    The status that proves that is platform-dependent, and asserting the
+    macOS one flatly is why this failed on every Linux CI run: there the
+    call gets past argument handling and stops at the platform check
+    instead, returning 501 because pyobjc's bindings do not exist. Both
+    are "it dispatched"; neither is an argument error.
+
+    Kept running on Linux rather than marked live_macos, because the
+    assertion below it is the one this test is really named after and it
+    holds on both: no optional parameter name may appear in the error.
+    Skipping would take that off CI entirely.
     """
     result = run("snapshot", app="__definitely_not_running__")
-    assert result["status_code"] == 404, "should fail on the app, not on args"
+    expected = 404 if platform.system() == "Darwin" else 501
+    assert result["status_code"] == expected, (
+        f"should fail on the app (404) or the platform (501), not on args; "
+        f"got {result['status_code']}: {result.get('error')}"
+    )
     for param in ("filter", "max_nodes", "offset", "max_depth", "timeout_s"):
         assert param not in (result["error"] or "")
 
