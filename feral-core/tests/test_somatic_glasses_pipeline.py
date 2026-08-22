@@ -43,7 +43,47 @@ SESSION = "sess-test"
 
 
 @pytest.fixture()
-def glasses(monkeypatch):
+def midday(monkeypatch):
+    """Pin the local clock to 13:30 so circadian terms are deterministic.
+
+    Both the cognitive-load circadian term and the `hour < 5 or
+    hour > 23` branch of get_behavioral_policy read `time.localtime()`,
+    so anything asserting a tone or a load figure is otherwise a
+    function of when the suite happens to run.
+
+    This is not hypothetical: two tests here passed locally at 16:00
+    PDT and failed on a UTC runner at 23:18, where the fractional hour
+    is 23.31 and the quiet-hours branch rewrote tone to "calm". A first
+    attempt guarded with `time.localtime().tm_hour > 23`, which is the
+    INTEGER hour and can never exceed 23, so the guard could not fire
+    for the very case that breaks. Freeze the clock instead of trying
+    to detect it.
+
+    13:30 is chosen to sit outside the 13:00-15:00 post-lunch dip,
+    which carries its own 0.15 circadian load.
+    """
+    import time as _time
+
+    frozen = _time.struct_time((2026, 8, 22, 13, 30, 0, 4, 234, 1))
+
+    class _FrozenClock:
+        """Only localtime is frozen. `time()` must keep advancing:
+        freshness, staleness and age_s are all measured with it."""
+
+        @staticmethod
+        def localtime(*args, **kwargs):
+            return frozen
+
+        @staticmethod
+        def time():
+            return _time.time()
+
+    monkeypatch.setattr("perception.somatic.time", _FrozenClock)
+    return frozen
+
+
+@pytest.fixture()
+def glasses(monkeypatch, midday):
     """A somatic engine bound to one node, driven by real device_events."""
     engine = SomaticEngine()
     monkeypatch.setattr(state, "somatic_engine", engine, raising=False)
@@ -107,26 +147,37 @@ class TestCircadianPhase:
     cognitive load.
     """
 
-    def test_biometrics_alone_set_the_clock(self, glasses):
+    def test_biometrics_alone_set_the_clock(self, glasses, midday):
         engine, send = glasses
         send("heart_rate", {"bpm": 70, "source": "jw_health_glasses", "ts": time.time()})
 
         v = _vector(engine)
-        expected = (time.localtime().tm_hour * 60 + time.localtime().tm_min) / 1440.0
-        assert v.circadian_phase == pytest.approx(expected, abs=0.01)
+        expected = (midday.tm_hour * 60 + midday.tm_min) / 1440.0
+        assert v.circadian_phase == pytest.approx(expected, abs=0.001)
+        assert v.circadian_phase > 0, "0.0 is the bug: it reads as midnight"
 
     def test_a_daytime_reading_is_not_treated_as_midnight(self, glasses):
         engine, send = glasses
-        hour = time.localtime().tm_hour
-        if hour < 5 or hour > 23:
-            pytest.skip("test machine's local clock is genuinely in the quiet hours")
-
         send("heart_rate", {"bpm": 70, "source": "jw_health_glasses", "ts": time.time()})
         send("hrv", {"rmssd_ms": 55})
 
         policy = engine.get_behavioral_policy(SESSION)
         assert policy.suppress_non_urgent is False
         assert policy.tone == "normal"
+
+    def test_the_quiet_hours_branch_still_works(self, glasses, monkeypatch):
+        """The daytime fix must not disable the behaviour it sits next to."""
+        engine, send = glasses
+        send("heart_rate", {"bpm": 70, "source": "jw_health_glasses", "ts": time.time()})
+        send("hrv", {"rmssd_ms": 55})
+        assert engine.get_behavioral_policy(SESSION).suppress_non_urgent is False
+
+        # 02:00. Note the branch compares the FRACTIONAL hour, which is
+        # why a guard written against tm_hour cannot express this case.
+        _vector(engine).circadian_phase = 2.0 / 24.0
+        policy = engine.get_behavioral_policy(SESSION)
+        assert policy.tone == "calm"
+        assert policy.suppress_non_urgent is True
 
 
 # ── Ask 1: hrv_ms must be RMSSD in milliseconds ─────────────────────────
