@@ -162,7 +162,25 @@ def brain_process_executable(pid: int) -> Optional[str]:
     """
     try:
         if sys.platform.startswith("linux"):
-            return os.path.realpath(f"/proc/{int(pid)}/exe")
+            link = f"/proc/{int(pid)}/exe"
+            # readlink FIRST, and not realpath.
+            #
+            # os.path.realpath does not raise for a path that is not
+            # there; it hands back the string it was given. So a dead
+            # pid returned the literal "/proc/<pid>/exe", which is not
+            # an interpreter, does not equal sys.executable, and made
+            # `feral update` refuse with "the brain is running on a
+            # different interpreter" when the brain was not running at
+            # all. Caught by CI on Linux; the macOS path this was
+            # written on cannot reach it.
+            #
+            # os.readlink raises instead: FileNotFoundError when the
+            # process is gone, PermissionError when it belongs to
+            # somebody else. Both mean "cannot tell", which is what the
+            # caller needs to hear. realpath still does the resolving
+            # afterwards, so the symlink caveat above is unchanged.
+            os.readlink(link)
+            return os.path.realpath(link)
         proc = subprocess.run(
             ["ps", "-p", str(int(pid)), "-o", "comm="],
             capture_output=True, text=True, timeout=10,

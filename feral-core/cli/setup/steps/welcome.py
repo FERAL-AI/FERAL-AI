@@ -72,7 +72,14 @@ def run(state: WizardState) -> None:
             # space made them think the wizard was stuck.
             "[dim]At any prompt: ↑/↓ navigate · enter to choose the "
             "highlighted row.[/]\n"
-            "[dim]Type [/][bold]back[/][dim] to return to the previous step, "
+            # `menu` is advertised because it is the strongest escape
+            # hatch in the wizard and was the only one nobody was told
+            # about. `back` walks one step at a time, which is no help
+            # sixteen steps in; `menu` jumps straight to any step. An
+            # operator who feels stuck reaches for the exit they know
+            # exists, so the exits have to be named.
+            "[dim]Type [/][bold]back[/][dim] for the previous step, "
+            "[/][bold]menu[/][dim] to jump to any step, "
             "[/][bold]quit[/][dim] to stop and keep what you've entered.[/]"
         )
         block = Group(Align.center(logo), Align.center(subtitle), Text(""), body)
@@ -92,4 +99,7 @@ def run(state: WizardState) -> None:
         console.print(line)
     console.print("=" * 60)
     console.print("Welcome to FERAL setup.")
-    console.print("Type 'back' to go back, 'quit' to stop.")
+    console.print(
+        "Type 'back' for the previous step, 'menu' to jump to any step, "
+        "'quit' to stop."
+    )
