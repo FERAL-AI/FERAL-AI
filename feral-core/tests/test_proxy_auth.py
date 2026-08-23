@@ -25,7 +25,7 @@ def headers(**values):
     return {
         "X-FERAL-Proxy-Secret": "shared-secret",
         "X-FERAL-Proxy-User": "noah",
-        "X-FERAL-Proxy-Groups": "operators, demo",
+        "X-FERAL-Proxy-Groups": "operators|demo",
         **values,
     }
 
@@ -49,10 +49,16 @@ def test_never_uses_forwarded_for_as_trust_boundary():
     [
         ({"enabled": False}, "disabled"),
         ({"shared_secret": ""}, "secret"),
+        ({"shared_secret": "   "}, "secret"),
         ({"trusted_proxies": ()}, "trusted proxy list"),
         ({"trusted_proxies": ("not-an-ip",)}, "invalid trusted"),
         ({"allowed_origins": ()}, "allowed origin list"),
         ({"allowed_origins": ("feral.example",)}, "invalid canonical"),
+        (
+            {"allowed_origins": ("https://user:pass@feral.example",)},
+            "invalid canonical",
+        ),
+        ({"allowed_origins": ("https://feral.example:bad",)}, "invalid canonical"),
     ],
 )
 def test_invalid_or_disabled_configuration_fails_closed(override, message):
@@ -78,14 +84,44 @@ def test_headers_are_case_insensitive_and_groups_deduplicate():
         headers={
             "x-feral-proxy-secret": "shared-secret",
             "x-feral-proxy-user": "noah",
-            "x-feral-proxy-groups": "operators,operators,demo",
+            "x-feral-proxy-groups": "operators|operators|demo",
         },
     )
     assert identity.groups == ("operators", "demo")
 
 
+def test_group_separator_is_configurable_for_other_proxies():
+    identity = authenticate_proxy(
+        cfg(groups_separator=","),
+        socket_client_ip="10.0.0.2",
+        headers=headers(**{"X-FERAL-Proxy-Groups": "operators,demo"}),
+    )
+    assert identity.groups == ("operators", "demo")
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"secret_header": "Bad Header"},
+        {"identity_header": "X:Injected"},
+        {"groups_header": "X-Bad\r\nHeader"},
+        {"identity_header": "Authorization"},
+        {"groups_header": "X-Forwarded-For"},
+        {"identity_header": "X-FERAL-Proxy-Secret"},
+        {"groups_separator": ""},
+        {"groups_separator": "||"},
+    ],
+)
+def test_invalid_or_ambiguous_header_configuration_fails_closed(override):
+    with pytest.raises(ProxyAuthError):
+        authenticate_proxy(
+            cfg(**override), socket_client_ip="10.0.0.2", headers=headers()
+        )
+
+
 def test_origin_rules_allow_same_origin_and_reject_cross_site():
     authorize_browser_origin(cfg(), headers={"Origin": "https://feral.example"})
+    authorize_browser_origin(cfg(), headers={"Origin": "HTTPS://FERAL.EXAMPLE:443"})
     with pytest.raises(ProxyAuthError, match="Origin"):
         authorize_browser_origin(cfg(), headers={"Origin": "https://evil.example"})
     with pytest.raises(ProxyAuthError, match="required"):
@@ -93,6 +129,31 @@ def test_origin_rules_allow_same_origin_and_reject_cross_site():
     with pytest.raises(ProxyAuthError, match="required"):
         authorize_browser_origin(cfg(), headers={}, websocket=True)
     authorize_browser_origin(cfg(), headers={}, method="GET")
+
+
+def test_fetch_metadata_rejects_cross_site_except_safe_top_level_navigation():
+    with pytest.raises(ProxyAuthError, match="cross-site"):
+        authorize_browser_origin(
+            cfg(),
+            headers={"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors"},
+        )
+    with pytest.raises(ProxyAuthError, match="cross-site"):
+        authorize_browser_origin(
+            cfg(),
+            headers={
+                "Origin": "https://feral.example",
+                "Sec-Fetch-Site": "cross-site",
+            },
+            websocket=True,
+        )
+    authorize_browser_origin(
+        cfg(),
+        headers={
+            "Sec-Fetch-Site": "cross-site",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "document",
+        },
+    )
 
 
 def test_origin_config_is_required_for_unsafe_and_websocket_requests():
@@ -109,7 +170,9 @@ def test_env_loader_is_disabled_by_default_and_parses_explicit_values():
             "FERAL_PROXY_AUTH_TRUSTED_PROXIES": "10.0.0.0/8, 192.168.1.10",
             "FERAL_PROXY_AUTH_SECRET": "secret",
             "FERAL_PROXY_AUTH_ALLOWED_ORIGINS": "https://feral.example",
+            "FERAL_PROXY_AUTH_GROUPS_SEPARATOR": ",",
         }
     )
     assert loaded.enabled is True
     assert loaded.trusted_proxies == ("10.0.0.0/8", "192.168.1.10")
+    assert loaded.groups_separator == ","
