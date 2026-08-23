@@ -211,6 +211,46 @@ class TestDashboard:
         assert "memory" in body
         assert "skills_count" in body
 
+    def test_dashboard_carries_both_version_answers(self, client):
+        """`runtime` and `update` answer two different questions.
+
+        `runtime` is local: is this process executing the version that
+        is installed. `update` is about the world: does a newer release
+        exist. The second needs the network, so it is opt-in and reads
+        a cache; what this pins is that both fields are always present
+        and always JSON, whatever the answer is, because the shell polls
+        this endpoint and a missing field renders as a missing panel.
+        """
+        body = client.get("/api/dashboard").json()
+
+        assert "runtime" in body
+        assert "update" in body
+        assert body["update"]["status"] in {
+            "disabled", "unknown", "current", "update-available",
+        }
+
+    def test_the_update_field_opens_no_socket(self, client, monkeypatch):
+        """/api/dashboard must not degrade because pypi.org is slow, so
+        the request path does not talk to pypi.org at all."""
+        import socket
+
+        monkeypatch.setenv("FERAL_UPDATE_CHECK", "1")
+        attempts = []
+        real_connect = socket.socket.connect
+
+        def _refused(self, addr, *args, **kwargs):
+            attempts.append(addr)
+            raise AssertionError(f"the dashboard tried to connect to {addr!r}")
+
+        monkeypatch.setattr(socket.socket, "connect", _refused, raising=True)
+        try:
+            response = client.get("/api/dashboard")
+        finally:
+            monkeypatch.setattr(socket.socket, "connect", real_connect, raising=True)
+
+        assert response.status_code == 200
+        assert attempts == []
+
     def test_api_info(self, client):
         r = client.get("/api/info")
         assert r.status_code == 200
