@@ -466,6 +466,13 @@ async def _get_dashboard_data() -> dict:
         # install, a brain served for two days and one hour from code
         # that predated four releases. Local comparison, no network.
         "runtime": _runtime_staleness(),
+        # The other half of the same story: whether a newer release
+        # exists at all. That question needs the network, so it is
+        # opt-in and this field only ever reads a cache written
+        # elsewhere. No socket is opened on this request path whatever
+        # pypi.org is doing, and a check that has never run, is turned
+        # off, or failed reports itself rather than erroring.
+        "update": _update_availability(),
         "session_count": len(state.sessions), "health": latest_health,
         "memory": stats, "skills_count": len(state.skill_registry.skills),
         "llm_available": _check_llm_available(),
@@ -514,6 +521,28 @@ def _runtime_staleness() -> dict:
     except Exception as exc:
         logger.debug("runtime staleness check failed: %s", exc)
         return {"stale": False, "detail": "unavailable"}
+
+
+def _update_availability() -> dict:
+    """Whether a newer release exists, from cache only.
+
+    ``update_status`` reads a JSON file and opens no socket, which is
+    the property that makes this safe to put on the endpoint the whole
+    shell polls: a slow or unreachable pypi.org cannot slow this
+    response down, because this response never asks it anything. The
+    cache is filled by the brain's own opt-in refresher and by
+    `feral update`.
+
+    Wrapped anyway. Same rule as `_runtime_staleness` above: a
+    diagnostic on this route costs its own panel, never the page.
+    """
+    try:
+        from config.update_check import update_status
+
+        return update_status()
+    except Exception as exc:
+        logger.debug("update availability check failed: %s", exc)
+        return {"enabled": False, "status": "unknown", "detail": "unavailable"}
 
 
 def _budget_status() -> dict:

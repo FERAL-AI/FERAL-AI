@@ -72,6 +72,21 @@ feral start
 ### Upgrading
 
 ```bash
+feral update
+```
+
+That is the recommended path. It upgrades the Python environment that
+is actually running the brain (`sys.executable`, not whatever `pip`
+your PATH resolves first), prints which environment that is before
+touching it, and restarts the brain afterwards so the new code is the
+code that serves. It refuses rather than half-works: a source checkout
+is sent to `git pull` instead of pip, and a brain running under a
+different interpreter than the CLI is reported rather than skipped.
+`feral update --check` reports what it would do and changes nothing.
+
+By hand, the same thing is two commands:
+
+```bash
 pip install --upgrade "feral-ai[all]"
 feral restart
 ```
@@ -99,6 +114,37 @@ feral restart
 Check which install you are actually upgrading with `which feral`. More
 than one Python environment on a machine can each hold their own copy,
 and upgrading the one that is not running is the common mistake.
+`feral update` exists because of that mistake: one operator ran the
+upgrade against the wrong environment and served stale code for two
+days believing they were current.
+
+#### Checking for new releases (off by default)
+
+FERAL does not contact PyPI unless you ask it to. Nothing in the boot
+path, and nothing on any request path, opens a connection to check for
+releases; the version rows described above compare two things that are
+already on your machine.
+
+`feral update` asks the index when you run it, because running it is
+the request. If you also want the brain to notice new releases on its
+own, turn the check on:
+
+```bash
+export FERAL_UPDATE_CHECK=1          # or "updates": {"check_pypi": true} in ~/.feral/settings.json
+```
+
+With it on, the brain asks pypi.org once a day on a background task
+(never on a request), caches the answer under `~/.feral/update-check.json`,
+and reports it as an **Update check** row in `feral doctor` and as
+`update` on `GET /api/dashboard`. `updates.ttl_hours` (or
+`FERAL_UPDATE_CHECK_TTL_HOURS`) changes the interval, and
+`FERAL_PYPI_JSON_URL` points the check at an internal mirror. If the
+network is unavailable the answer is `unknown`; it is never an error
+and never blocks anything.
+
+The brain will not upgrade itself. An upgrade replaces the code of the
+process that would have to perform the restart, so it stays an operator
+command.
 
 ### What `feral setup` walks you through
 
