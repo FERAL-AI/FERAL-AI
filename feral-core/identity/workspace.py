@@ -14,6 +14,7 @@ Session startup: workspace files are injected into the system prompt.
 
 from __future__ import annotations
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -118,6 +119,46 @@ class IdentityWorkspace:
         """Read the USER.md — information about the user."""
         path = self._home / "USER.md"
         return path.read_text() if path.exists() else ""
+
+    def read_user_name(self) -> str:
+        """The operator's name from USER.md, or "" if it does not say.
+
+        Added because the morning briefing card greeted every operator
+        as "Alex", a placeholder hardcoded into the SDUI headline. The
+        name was sitting in USER.md the whole time; nothing looked.
+
+        Returns "" rather than a guess. A greeting with no name is
+        slightly plain; a greeting with the WRONG name tells the
+        operator their assistant does not know who they are, which is
+        worse than saying nothing, and worse still on a machine whose
+        entire pitch is that it knows you.
+
+        Recognises the two shapes this file is written in: the
+        ``Name: X`` line the setup wizard produces, and a leading
+        ``# X`` markdown heading.
+        """
+        text = self.read_user() or ""
+        if not text.strip() or text.strip() == DEFAULT_USER_MD.strip():
+            # The scaffolded template is not a profile. See
+            # agents/ambient_transcript.load_operator_identity, which
+            # applies the same test for the same reason.
+            return ""
+
+        match = re.search(r"^\s*name\s*[:\-]\s*(.+)$", text, re.IGNORECASE | re.MULTILINE)
+        if match:
+            name = match.group(1).strip().strip("*_`")
+            if name:
+                return name.split(",")[0].strip()[:60]
+
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("#"):
+                heading = line.lstrip("#").strip()
+                # "# About Me" is the template's own heading, not a name.
+                if heading and heading.lower() not in {"about me", "user", "profile"}:
+                    return heading[:60]
+                continue
+        return ""
 
     def write_user(self, content: str):
         """Update the user profile (agent self-modification)."""

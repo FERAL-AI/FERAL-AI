@@ -1,10 +1,153 @@
 # Changelog
 
-<!-- feral-version: 2026.8.23 -->
+<!-- feral-version: 2026.8.24 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.24] - 2026-08-23 - a check that can fail
+
+A hardening pass, prompted by a simple question: the last three
+releases each fixed real defects found by hand, so what else is out
+there that nobody has looked at?
+
+The answer, measured rather than assumed, is encouraging. Three
+detectors were run across the codebase for the exact pattern the recent
+bugs share, and two came back completely clean; the third found three
+dead reads of no consequence. The API surface is healthy: 134 of 134
+registered GET routes answer an authenticated read with no 5xx and no
+exception.
+
+So the problem was never that the code is riddled with this. It is that
+nothing was *checking*. Every one of these defects was found by a person
+starting the real thing and reading the output, and the three suites
+that run on every commit are each structurally blind to the class:
+pytest runs against mocks that satisfy any attribute, vitest runs in
+jsdom which has no layout, and `make e2e` stubs `**/api/**` so it cannot
+see a route that 500s.
+
+This release turns the one-off sweep into a permanent test.
+
+### Added
+
+- **`scripts_audit/route_sweep.py` and `tests/test_every_route_answers.py`.**
+  Boots the real app on a throwaway `FERAL_HOME`, authenticates, and
+  walks every registered GET route asserting no 5xx and no exception.
+  134 routes in about seven seconds.
+
+  This would have caught the `/api/dashboard` 500 that shipped during
+  the 2026.8.22 work: the endpoint the entire shell polls, broken
+  because `getattr(state, "started_at", default)` was called on a
+  MagicMock and a mock has every attribute, so the default never
+  applied. Every unit test passed. The dashboard was blank.
+
+  The assertion is deliberately narrow, "an authenticated read does not
+  raise and does not 5xx", not "the body is correct", which would need
+  a fixture per route and would rot. Narrow, total and unambiguous beats
+  broad and unmaintained.
+
+  It runs in a SUBPROCESS with a wall-clock ceiling. The first version
+  ran in-process and hung the entire pytest session, twice: once on a
+  wedged route and once on a lifespan-teardown deadlock caused by
+  booting a second brain inside a session where `conftest` had already
+  initialised `api.state.state`. A test that can hang the suite is worse
+  than no test.
+
+  The exclusion list carries a written reason per entry, enforced by its
+  own test, so it cannot quietly become the place failing routes go to
+  hide.
+
+### Fixed
+
+- **The morning briefing greeted every operator as "Alex".** Reported
+  from a live install: starting FERAL produced a Morning Briefing card
+  reading "Good morning, Alex!" to an operator whose `USER.md` says
+  `Name: Omar` on line 3.
+
+  A placeholder hardcoded into the SDUI headline
+  (`f"{greeting}, Alex!"`). Only the card carried it; the plain-text
+  body and the voice line had no name at all, which is why chat greeted
+  the operator correctly while the dashboard did not, and why it
+  survived this long.
+
+  `IdentityWorkspace.read_user_name()` now reads the name that was
+  sitting in `USER.md` unread, recognising both shapes the file is
+  written in: the `Name: X` line the setup wizard produces and a
+  leading `# X` heading. It returns `""` rather than a guess, and the
+  briefing greets without a name when it has none. Greeting somebody by
+  the wrong name is worse than not greeting them by name, and on a
+  product whose whole claim is that it knows you it is the first thing
+  they see. The template's own "About Me" heading and the unfilled
+  scaffold both count as no name.
+
+- **"Good afternoon" ran until midnight.** The briefing had two
+  branches, `hour < 12` and everything else, so a briefing at 11pm
+  opened by calling it the afternoon. There is now an evening branch at
+  18:00.
+
+- **`/api/capabilities/has` answered a malformed call with `200
+  {"available": false}`.** A caller that omitted both `action` and
+  `node_type` was told the capability is unavailable, which is a
+  confident answer to a question nobody asked: a client reading
+  `available` cannot tell "you have no phone connected" from "you
+  called this endpoint wrong", and would reasonably conclude the
+  hardware is missing. It now returns 400. Same principle as the
+  `None`-not-`0.0` rule in the somatic work: unknown must not be
+  representable as a plausible answer.
+
+### Audit
+
+Findings from the sweep, recorded because a clean result is worth
+writing down too. Nothing below needed a fix.
+
+- Placeholder identities in user-visible strings: **1 real hit**, the
+  "Alex" above. Everything else was template or documentation prose.
+- Client calls a route the brain does not register: **0 real gaps.** Two
+  apparent ones were POST endpoints probed with GET.
+- Client reads a field the brain never writes: **6 of 228 fields**, of
+  which three are dead speculative reads (`qr_png_b64`, `ast_gate`,
+  `sandbox_result`). The QR one degrades to rendering the JSON body as
+  text, and only on a fallback branch that needs `qrcode` to be absent;
+  it is a base dependency and is installed, so the path is latent.
+- Honest degradation discarded by the UI: the client reads `degraded`
+  in 12+ components, so the class the earlier audits opened is largely
+  closed.
+- Registered GET routes returning 5xx: **0 of 134.**
+
+Two things are known-not-checked and deliberately not claimed as clean:
+these scans are string heuristics and cannot see a field that exists but
+means something different, and the Swift and Kotlin surfaces are not
+covered at all.
+
+### Known
+
+- **The mypy ratchet is stale and still red.** It records 683 errors
+  while clean `main` measures 749 in CI and 740 locally, so it has been
+  failing on every PR for reasons no author can act on, which means it
+  can never warn about the one thing it exists for.
+
+  It was NOT regenerated here. The count is platform-dependent (CI
+  measures 749 across 219 files on Linux, this machine 740 across 214),
+  so a baseline generated on macOS would still fail CI, and shipping one
+  while claiming the gate was fixed would be worse than leaving it
+  visibly broken. The real fix is to regenerate it from a Linux job.
+
+- **A MagicMock satisfies every `getattr`**, so
+  `getattr(state, "x", default)` never reaches its default when the
+  double is a bare mock. This has now caused two production defects in
+  one week: the `/api/dashboard` 500, and `somatic` putting an
+  unserialisable mock on a chat response. Both are fixed and both have
+  guard tests, but nothing stops the third. A conftest rule banning bare
+  MagicMock for BrainState is the durable fix and is not in this
+  release.
+
+### Coverage
+
+- pytest (feral-core): 10018 passed, 48 skipped, 0 failed.
+- vitest (feral-client-v2): 1251 passed across 157 files.
+- ruff: clean on the CI ruleset.
+- live route sweep: 134 of 134 registered GET routes answered, 0 5xx.
 
 ## [2026.8.23] - 2026-08-22 - what it heard, and what it can reach
 

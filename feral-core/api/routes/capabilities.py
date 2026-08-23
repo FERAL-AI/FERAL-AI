@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict, is_dataclass
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from api.state import state
 
@@ -154,4 +154,15 @@ async def has_capability(action: str | None = None, node_type: str | None = None
             "available": state.capability_registry.has_node_type(node_type),
             "node_type": node_type,
         }
-    return {"available": False, "error": "pass either `action` or `node_type`"}
+    # 400, not a 200 saying `available: false`.
+    #
+    # A caller that forgot both parameters was told the capability is
+    # unavailable, which is a confident answer to a question nobody
+    # asked. A client reading `available` cannot tell "you have no phone
+    # connected" from "you called this endpoint wrong", and would
+    # reasonably conclude the hardware is missing. Unknown must not be
+    # representable as a plausible answer.
+    raise HTTPException(
+        status_code=400,
+        detail="pass either `action` or `node_type`",
+    )

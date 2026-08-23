@@ -768,9 +768,34 @@ class ProactiveEngine:
             return None
 
         hour = time.localtime().tm_hour
-        greeting = "Good morning" if hour < 12 else "Good afternoon"
-        body = f"{greeting}! Here's your briefing:\n\n" + "\n".join(sections)
-        voice = f"{greeting}! " + " ".join(sections[:3])
+        # "Good afternoon" ran from noon to midnight, so a briefing at
+        # 11pm opened by calling it the afternoon.
+        if hour < 12:
+            greeting = "Good morning"
+        elif hour < 18:
+            greeting = "Good afternoon"
+        else:
+            greeting = "Good evening"
+
+        # The operator's actual name, or none at all.
+        #
+        # The SDUI card below said "Good morning, Alex!" to everyone: a
+        # placeholder hardcoded into the headline while the real name sat
+        # in USER.md, unread. Greeting somebody by the wrong name is
+        # worse than not greeting them by name, and on a product whose
+        # whole claim is that it knows you it is the first thing they
+        # see.
+        name = ""
+        try:
+            from identity.workspace import IdentityWorkspace
+
+            name = IdentityWorkspace().read_user_name()
+        except Exception:
+            logger.debug("morning briefing: could not read operator name", exc_info=True)
+        salutation = f"{greeting}, {name}!" if name else f"{greeting}!"
+
+        body = f"{salutation} Here's your briefing:\n\n" + "\n".join(sections)
+        voice = f"{salutation} " + " ".join(sections[:3])
 
         return ProactiveMessage(
             trigger_id="morning_briefing",
@@ -781,7 +806,7 @@ class ProactiveEngine:
             sdui={
                 "type": "Card",
                 "children": [
-                    {"type": "Text", "value": f"{greeting}, Alex!", "style": "headline"},
+                    {"type": "Text", "value": salutation, "style": "headline"},
                     {"type": "Divider"},
                     *[{"type": "Text", "value": s, "style": "body"} for s in sections],
                 ],
