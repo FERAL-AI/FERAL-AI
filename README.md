@@ -69,6 +69,16 @@ feral setup
 feral start
 ```
 
+### Or install with your coding agent
+
+If you have Claude Code, Cursor, Codex or similar and would rather not
+use a terminal directly, **[AGENT_INSTALL.md](AGENT_INSTALL.md)** has a
+prompt to paste into your agent. It installs FERAL, walks you through
+setup, and then verifies the result rather than assuming it worked:
+it checks the interpreter for FTS5 before installing (the usual reason
+an install looks fine and the brain then will not start), and reads
+`feral doctor` back to you at the end.
+
 ### Upgrading
 
 ```bash
