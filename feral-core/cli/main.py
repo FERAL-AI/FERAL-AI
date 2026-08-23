@@ -101,6 +101,12 @@ NEEDS_BRAIN_SUBCOMMANDS = frozenset({
     "memory", "sync", "twin", "marketplace", "install",
     "bridge",  # bridge install runs a script that contacts brain
     "start", "serve", "demo",
+    # `update` does not need the brain's API, but it does reach the
+    # network: it asks the package index what the newest release is and
+    # then runs pip. This set is the "may touch the network" side of the
+    # R2-002 classification, so it belongs here rather than in the
+    # pure-local set, whose contract it would break on the first run.
+    "update",
 })
 
 
@@ -1772,6 +1778,55 @@ def cmd_doctor():
                 _pass("Disk space", _disk.detail)
         except Exception as _disk_exc:
             _info("Disk space", f"could not be measured: {_disk_exc}")
+
+        # Is the running brain executing the version that is installed?
+        #
+        # A Python process never reloads its source, so
+        # `pip install --upgrade feral-ai` cannot reach a brain that is
+        # already running: the upgrade succeeds, nothing errors, and the
+        # operator keeps using the old build with no visible symptom.
+        # Measured on a real install, a brain served for two days from
+        # code that predated four releases, every fix in them inert.
+        # Doctor is where somebody looks when the thing they just fixed
+        # is still broken, so it belongs here.
+        try:
+            from config.staleness import runtime_staleness as _staleness
+
+            _stale = _staleness()
+            if _stale.get("stale"):
+                _warn(
+                    "Running version",
+                    _stale.get("detail", ""),
+                    "feral restart  (or stop the brain and re-run `feral serve`)",
+                )
+            elif _stale.get("installed_version"):
+                _pass("Running version", _stale.get("detail", ""))
+            else:
+                _info("Running version", _stale.get("detail", "could not compare"))
+        except Exception as _stale_exc:
+            _info("Running version", f"could not be checked: {_stale_exc}")
+
+        # Is there a newer release than the one installed?
+        #
+        # The row above compares two versions that are already on this
+        # machine. This one is about the world, which needs the network,
+        # so it is opt-in and reads only the cached answer: `doctor` is
+        # in PURE_LOCAL_SUBCOMMANDS and must stay there. `feral update`
+        # is the command that actually asks.
+        #
+        # Always `_info`, never `_warn`, even when a release is waiting.
+        # A warning says something is wrong with this installation, and
+        # nothing is: an older release runs exactly as well today as it
+        # did yesterday. Reserving yellow for the staleness row above
+        # keeps it meaning what it says, which is that the operator has
+        # already upgraded and is not getting it.
+        try:
+            from config.update_check import update_status as _update_status
+
+            _upd = _update_status()
+            _info("Update check", _upd.get("detail", ""))
+        except Exception as _upd_exc:
+            _info("Update check", f"could not be checked: {_upd_exc}")
 
         from memory.sqlite_features import (
             FTS5_REMEDY as _FTS5_REMEDY,
@@ -3925,6 +3980,14 @@ def _main():
     from cli.model_commands import register_models_subparser
     register_models_subparser(sub)
 
+    # `feral update`: upgrade the environment that is actually running
+    # the brain, then restart it. Registered here rather than as a bare
+    # `sub.add_parser` because the command carries real decision logic
+    # (editable vs wheel, which interpreter) that belongs in its own
+    # module with its own tests.
+    from cli.update_command import register_update_subparser
+    register_update_subparser(sub)
+
     # ── Lane 07  — integrations connect (Gmail / OAuth / HA) ──
     from cli.integration_commands import register_integrations_subparser
     register_integrations_subparser(sub)
@@ -4043,6 +4106,9 @@ def _main():
     elif args.subcommand == "models":
         from cli.model_commands import dispatch_models_subcommand
         sys.exit(dispatch_models_subcommand(args))
+    elif args.subcommand == "update":
+        from cli.update_command import dispatch_update
+        sys.exit(dispatch_update(args))
     elif args.subcommand == "integrations":
         from cli.integration_commands import dispatch_integrations_subcommand
         sys.exit(dispatch_integrations_subcommand(args))

@@ -258,6 +258,24 @@ feral doctor
 
 Checks: Python version, FERAL package, config directory, LLM credentials (keys + Ollama), identity files, memory database, port availability, Playwright/chromium, Node.js, local audio backends (faster-whisper, piper), and core dependencies.
 
+### `feral update`
+
+Upgrade `feral-ai` in the environment that is actually running the brain, then restart it.
+
+```bash
+feral update
+feral update --check        # report what it would do, change nothing
+feral update --no-restart   # install, but leave the brain on the old code
+```
+
+The upgrade targets `sys.executable`, the interpreter running this command, not whatever `pip` your PATH resolves first. That distinction is the point: a machine with more than one Python environment will happily upgrade the one that is not serving, which reads as an upgrade that did nothing.
+
+It refuses rather than half-works. A source checkout (`pip install -e`) is sent to `git pull` instead of pip. A brain running under a different interpreter than the CLI is reported, with the command that would work, rather than silently skipped. Running it when you are already current does nothing and says so.
+
+The restart afterwards is not decoration: a Python process never reloads its source, so an upgrade without a restart leaves the old code serving. It reuses `feral restart`.
+
+Checking for releases on a schedule is separate and **off by default** (see `FERAL_UPDATE_CHECK` in the [environment reference](/reference/environment)). `feral update` asks the index when you run it, because running it is the request.
+
 ### `feral key`
 
 Manage per-provider API keys in the encrypted vault. Multiple labeled keys per provider are supported, and `add` probes the key before the prompt closes so you see green/red immediately.

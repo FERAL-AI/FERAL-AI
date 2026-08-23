@@ -1,10 +1,145 @@
 # Changelog
 
-<!-- feral-version: 2026.8.25 -->
+<!-- feral-version: 2026.8.26 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.26] - 2026-08-23 - the upgrade that did nothing
+
+An operator upgraded from PyPI, correctly, and served two-day-old code
+for two more days without knowing. `pip install --upgrade feral-ai`
+succeeded, exited 0, printed nothing alarming, and changed nothing:
+a Python process holds its source in memory from the moment it starts
+and never reloads it. There was no error to notice, because nothing was
+broken. It simply was not the code they thought it was.
+
+They also had two installs, and upgraded the one that was not running.
+
+This release makes both states visible, gives the upgrade a command
+that cannot pick the wrong environment, and fixes the setup wizard
+dead ends found while looking.
+
+### Added
+
+- **`Running version`, a new `feral doctor` row, and `runtime` on
+  `GET /api/dashboard`.** `version.VERSION` is resolved at import, so
+  it is the version RUNNING; asking importlib again re-reads disk, so
+  that is the version INSTALLED. Different means somebody upgraded
+  under a live process. No network: this compares what is already on
+  the machine.
+
+- **An update strip in the web client.** Renders only when
+  `runtime.stale` is exactly `true`, reserves no pixel otherwise, adds
+  no poll, and leads with the remedy rather than the diagnosis, so a
+  narrow window loses the explanation and never the instruction.
+
+- **`feral update`.** Upgrades the environment that is actually running
+  the brain (`sys.executable`), prints which one that is before
+  touching it, and restarts afterwards, because an upgrade without a
+  restart changes nothing. Refuses rather than half-works: an editable
+  checkout is pointed at `git pull`, a brain running under a different
+  interpreter than the CLI is reported instead of silently ignored, and
+  an already-current install does nothing and says so.
+
+  It deliberately does NOT expose an API-triggered self-upgrade. The
+  process performing the upgrade is the process being replaced, and
+  also the one that would have to restart it.
+
+- **An optional PyPI availability check**, `FERAL_UPDATE_CHECK` or
+  `updates.check_pypi`, **off by default**. An update check is an
+  outbound request carrying this machine's IP, a timestamp and the name
+  of the software it runs, made on the operator's behalf without being
+  asked, on a product whose promise is that it talks to nobody you did
+  not point it at. `feral update` bypasses the gate because typing the
+  command is the request.
+
+  It never opens a socket on a request path: fetching happens in a
+  background task and `/api/dashboard` reads cache only. Verified by
+  patching `socket.connect` to raise and serving the endpoint with the
+  check enabled: zero connect attempts. Version comparison is
+  calver-correct, where a string comparison holds `2026.8.9` to be
+  newer than `2026.8.10`.
+
+- **`AGENT_INSTALL.md`**, an install path for people who have a coding
+  agent but do not use a terminal. It installs, sets up, and then
+  VERIFIES, which is the part that matters: two failures here look
+  exactly like success. A Python without FTS5 installs happily and then
+  cannot boot; an upgrade against a running brain succeeds and changes
+  nothing.
+
+### Fixed
+
+- **The setup wizard stranded the operator on a provider that could not
+  work.** Reported live: `feral setup` reached "Step 1 of 16 - LLM
+  Provider" and could not go forward. Selecting a provider badged
+  `unreachable` printed "re-run `feral setup`", which is an instruction
+  to restart all 16 steps, and then the wizard CONTINUED holding that
+  provider: model selection had nothing to list and the smoke test
+  could not pass.
+
+  A blocked provider now offers "Pick a different provider" and loops
+  back to a re-probed list, so starting `ollama serve` in another
+  window and picking it again works without leaving setup. The
+  legitimate case where a cloud provider probes unreachable right after
+  its key was entered is untouched and still says "continue and
+  re-probe later".
+
+- **Typing `quit` did nothing.** `steps/tcc_preflight.py` wrapped a
+  prompt in `except Exception: pass`, and `BackNavigation`,
+  `QuitNavigation` and `JumpToStep` all subclass `Exception`. So
+  `back`, `quit` and `menu` at that prompt were caught and discarded:
+  the wizard ignored the request and walked on. `quit` is the operator
+  saying stop.
+
+- **Two loops that could not end.** `steps/channels.py` and
+  `steps/home_assistant.py` each had a `while True` whose only
+  non-success exit was `confirm(..., default=True)`, the exact shape
+  `_MAX_MODEL_ATTEMPTS` already exists to prevent: entering through the
+  defaults re-asks until stdin runs out, and a piped run never answers.
+  Both bounded.
+
+  Bounding the channels loop surfaced a second defect: falling off a
+  `for` returns `None`, and `None` is falsy, so the caller would have
+  recorded a channel as unconfigured while its credential was genuinely
+  stored, which is the distinction that function's docstring draws.
+
+- **A speech engine that is not installed was chosen silently.** The
+  local STT and TTS engines render as `unavailable` when their package
+  is missing, and picking one wrote it to settings with no warning and
+  no way to change your mind. Voice then produced nothing, and the only
+  trace was a line in the boot log: "TTS is set to a LOCAL engine but
+  it cannot run: piper-tts not installed". That line appeared in this
+  repo's own test output while the LLM half of the same bug was being
+  fixed, which is how it was found.
+
+### Known
+
+- **Nothing in the product can restart the brain.** There is no HTTP
+  restart route, only the CLI, so the update strip is instructional
+  plus a copy control rather than a button that acts. That is the
+  ceiling on an agent-driven update until a guarded endpoint exists.
+- Running the full pytest suite WHILE editing source produces failures
+  that are not real: `inspect.getsource` reads a stale linecache and
+  source-asserting tests fail spuriously. Hit independently twice
+  today. Let the suite finish before editing.
+- `.v2-rail` does not switch to the dark palette while the rest of the
+  shell does. Reproduced with the new strip absent, so it predates this
+  work. A lead, not a diagnosis.
+- The Linux interpreter check in `feral update` resolves
+  `/proc/<pid>/exe` through symlinks, so two virtualenvs sharing one
+  base interpreter look identical. It can miss a real mismatch; it
+  cannot invent one, which is the safe direction for a check that
+  refuses when it fires.
+
+### Coverage
+
+- pytest (feral-core): 10185 passed, 48 skipped, 0 failed.
+- vitest (feral-client-v2): 1264 passed across 158 files.
+- playwright: 106 passed.
+- ruff: clean on the CI ruleset.
+
 
 ## [2026.8.25] - 2026-08-23 - tests that can fail
 

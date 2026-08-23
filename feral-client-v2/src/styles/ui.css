@@ -1296,7 +1296,10 @@
    positioning; main becomes an ordinary flex child. */
 .v2-shell-body {
   position: absolute;
-  inset: var(--v2-sysbar-height) 0 var(--v2-dock-height) 0;
+  /* --v2-chrome-top, not --v2-sysbar-height: the runtime notice strip
+     is chrome too, and the page has to start below it rather than
+     under it. */
+  inset: var(--v2-chrome-top) 0 var(--v2-dock-height) 0;
   display: flex;
   min-height: 0;
   gap: 0;
@@ -1550,7 +1553,83 @@ button.v2-rail-head:hover { color: var(--v2-text-primary); }
 .v2-shell {
   --v2-menubar-height: 0px;
   --v2-sysbar-height: 34px;
+  /* One RuntimeNotice row. The count is the only thing that crosses
+     over from JS (RuntimeNotice sets --v2-runtime-notice-rows on this
+     element), so the height itself is written down once, here. */
+  --v2-runtime-notice-row: 28px;
+  /* How many notice rows are on screen. Declared here at 0 (the healthy
+     brain, which is the overwhelming case) and OVERWRITTEN as an inline
+     style on this element by RuntimeNotice when it has something to
+     say. Declaring it rather than relying on a var() fallback is what
+     keeps the D1 token guard honest: every --v2-* a sheet reads is
+     declared by a sheet. */
+  --v2-runtime-notice-rows: 0;
+  /* Everything the shell puts above the page: the system bar, plus any
+     runtime notice rows. ANY surface that anchors to the top of the
+     page area must measure from this and not from --v2-sysbar-height,
+     or it lands 28px too high the moment a notice appears. That is the
+     exact shape of the defect that made .v2-chat-pane open over the
+     Save button when --v2-menubar-height went to 0. */
+  --v2-chrome-top: calc(
+    var(--v2-sysbar-height) + var(--v2-runtime-notice-rows) * var(--v2-runtime-notice-row)
+  );
 }
+
+/* ── Runtime notice strip ──────────────────────────────────────
+   Why this is chrome and not an overlay: it reports a condition that
+   does not clear on its own (a brain running code that was replaced on
+   disk), so it has no dismiss control and no timer, and something with
+   no way to go away must not be able to sit on top of a control. The
+   shell reserves its height above, so the page starts below it.
+
+   Rows never wrap. `white-space: nowrap` is what makes the reserved
+   height exact at every viewport width instead of approximately right
+   at the width it was designed on. The version detail is the only part
+   allowed to shrink; the sentence and the command that carry the
+   remedy keep their space at any size. */
+.v2-runtime-notice {
+  position: absolute;
+  top: var(--v2-sysbar-height);
+  left: 0;
+  right: 0;
+  /* One above --z-base (.v2-shell-body). If the reservation above ever
+     failed, an overlap is loud and an invisible banner is not, and the
+     e2e spec pins that it does not overlap in the first place. */
+  z-index: 2;
+  background: var(--v2-state-warn-soft);
+  color: var(--v2-text-primary);
+  font-size: var(--v2-size-sm);
+  /* An inset shadow, not a border: a border would add its 1px to the
+     element's height and put it back out of step with the space the
+     shell reserved for it. */
+  box-shadow: inset 0 -1px 0 rgb(var(--v2-state-warn-rgb) / 0.45);
+}
+.v2-runtime-notice__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--v2-runtime-notice-row);
+  padding: 0 14px;
+  white-space: nowrap;
+}
+.v2-runtime-notice__icon { flex: none; color: var(--v2-state-warn); }
+.v2-runtime-notice__lede { flex: none; font-weight: 600; }
+.v2-runtime-notice__do { flex: none; }
+.v2-runtime-notice__cmd {
+  font-family: var(--v2-font-mono);
+  background: var(--v2-fill-subtle);
+  border: 1px solid var(--v2-hairline);
+  border-radius: var(--v2-radius-sm);
+  padding: 1px 6px;
+}
+.v2-runtime-notice__detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--v2-text-secondary);
+}
+.v2-runtime-notice__copy { flex: none; }
 .v2-rail-recent { display: flex; align-items: baseline; gap: 6px; width: 100%; }
 .v2-rail-recent-t { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v2-rail-recent-w { flex: none; font-variant-numeric: tabular-nums; opacity: 0.7; }

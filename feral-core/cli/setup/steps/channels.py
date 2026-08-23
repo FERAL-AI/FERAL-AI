@@ -32,6 +32,10 @@ _CHANNEL_FIELDS = {
 # says so instead of implying they were checked.
 _PROBEABLE_CHANNELS = ("telegram", "discord", "slack")
 
+#: How many times the operator may re-enter a channel credential before
+#: the wizard stops asking and moves on. See the comment at the loop.
+_MAX_CREDENTIAL_ATTEMPTS = 3
+
 
 async def run(state: WizardState) -> None:
     console = get_console()
@@ -62,8 +66,19 @@ async def _configure_channel(state: WizardState, channel: str, fields, console) 
     which includes the "probe failed but the operator kept the token
     anyway" case, since the credential is genuinely stored.
     """
+    # Bounded, because the only non-success exit below is
+    # `confirm("Re-enter the ... credentials?", default=True)`. That is
+    # exactly the shape `_MAX_MODEL_ATTEMPTS` in steps/llm.py documents:
+    # an operator pressing enter through the defaults re-asks forever
+    # until stdin runs out, and a piped or scripted run never answers at
+    # all. Setup must always terminate.
+    #
+    # Three, because the realistic reasons a token probe fails are a
+    # typo, a paste that lost a character, and the wrong token entirely.
+    # Past that the answer is not another attempt, it is to go and get a
+    # working token, which is what the message below now says.
     first_pass = True
-    while True:
+    for attempt in range(_MAX_CREDENTIAL_ATTEMPTS):
         for env_key, label, secret in fields:
             # On a retry the operator already said the stored value is
             # wrong, so never offer to keep it.
@@ -96,7 +111,10 @@ async def _configure_channel(state: WizardState, channel: str, fields, console) 
             return True
 
         first_pass = False
-        if not confirm(f"    Re-enter the {channel} credentials?", default=True):
+        last_attempt = attempt == _MAX_CREDENTIAL_ATTEMPTS - 1
+        if last_attempt or not confirm(
+            f"    Re-enter the {channel} credentials?", default=True,
+        ):
             console.print(
                 f"  [yellow]Keeping the {channel} token as typed — fix it "
                 f"later with `feral key add`.[/]"
@@ -105,3 +123,10 @@ async def _configure_channel(state: WizardState, channel: str, fields, console) 
                 f"with `feral key add`."
             )
             return True
+
+    # Unreachable: the last pass above always returns. Kept explicit
+    # because falling off a `for` returns None, and None is falsy, so
+    # the caller would record a channel as unconfigured while its
+    # credential is genuinely stored. That is the docstring's whole
+    # distinction, and it should not depend on the loop body's shape.
+    return True
