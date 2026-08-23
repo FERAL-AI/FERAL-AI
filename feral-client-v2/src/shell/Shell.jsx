@@ -3,6 +3,7 @@ import { Outlet } from 'react-router-dom';
 import Ambient from './Ambient';
 import Dock from './Dock';
 import SystemBar from './SystemBar';
+import RuntimeNotice from './RuntimeNotice';
 import WorkRail from './WorkRail';
 import CommandPalette from './CommandPalette';
 import { PaletteProvider } from './PaletteContext';
@@ -465,6 +466,13 @@ function ShellFrame() {
             railOpen={railOpen}
             onToggleRail={() => setRailOpen((r) => !r)}
           />
+          {/* Sits between the bar and the page, and renders nothing at
+              all unless the brain reports something the operator has to
+              act on (today: this process is not the build that is
+              installed). It reserves its own height on .v2-shell rather
+              than floating, so it never lands on a control the way the
+              error toast did. */}
+          <RuntimeNotice />
           <div className={`v2-shell-body${railOpen ? '' : ' is-rail-collapsed'}`}>
             {railOpen && <WorkRail />}
             <main className="v2-shell-main">

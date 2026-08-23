@@ -525,8 +525,11 @@ test.describe('Real brain: every safe control', () => {
    * `top: calc(var(--v2-menubar-height) + 24px)` was written when the
    * menubar existed; retiring it set that variable to 0 and quietly
    * moved the pane up into the action row. It is anchored to
-   * `--v2-sysbar-height` now, and opens below the row. Verified: pane
-   * top 112, Save bottom 103, and the toggle closes it again.
+   * `--v2-chrome-top` now (the system bar plus any runtime notice
+   * rows, so it also follows the strip that appears when the brain is
+   * running a build that was replaced on disk), and opens below the
+   * row. Verified: pane top 112, Save bottom 103, and the toggle
+   * closes it again.
    */
   test('the chat snapshots pane does not cover its own toggle', async ({ page }) => {
     test.setTimeout(60_000);
