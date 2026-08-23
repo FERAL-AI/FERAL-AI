@@ -59,6 +59,22 @@ voice:
 
 Latency: **400–800ms** depending on Whisper model size and LLM speed. Works offline with Ollama + Piper TTS.
 
+The classic path can also use an operator-hosted OpenAI-compatible
+transcription endpoint without an API key:
+
+```bash
+FERAL_STT_PROVIDER=openai-compatible
+FERAL_STT_ENDPOINT=http://speech-host:8000/v1/audio/transcriptions
+FERAL_STT_MODEL=whisper-v3:turbo
+FERAL_STT_TIMEOUT_SECONDS=300
+```
+
+Set `FERAL_STT_API_KEY` only if that endpoint requires its own bearer token.
+FERAL never borrows `OPENAI_API_KEY` for this provider and never reroutes its
+audio to OpenAI when the private endpoint is absent or fails. The response may
+remain text for client-side speech; server-side TTS is not required for the
+orchestrator turn to complete.
+
 ## Wake Word Detection
 
 FERAL uses [openwakeword](https://github.com/dscripka/openwakeword) for always-on, local wake word detection. No audio leaves the device until the wake word fires.

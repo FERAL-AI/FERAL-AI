@@ -40,7 +40,7 @@ def test_list_providers_returns_stt_and_tts(client):
     body = r.json()
     stt_ids = {p["id"] for p in body["stt"]}
     tts_ids = {p["id"] for p in body["tts"]}
-    assert {"openai", "faster-whisper"} <= stt_ids
+    assert {"openai", "openai-compatible", "faster-whisper"} <= stt_ids
     assert {"openai", "piper"} <= tts_ids
 
 
@@ -53,6 +53,12 @@ def test_list_providers_marks_local_vs_cloud(client):
     assert local_stt["needs_api_key"] is False
     assert cloud_stt["needs_api_key"] is True
     assert cloud_stt["credential_env_var"] == "OPENAI_API_KEY"
+    compatible = next(
+        p for p in body["stt"] if p["id"] == "openai-compatible"
+    )
+    assert compatible["needs_api_key"] is False
+    assert compatible["needs_endpoint"] is True
+    assert compatible["endpoint_env_var"] == "FERAL_STT_ENDPOINT"
 
 
 def test_list_stt_models(client):
@@ -97,6 +103,39 @@ def test_set_config_persists_each_field(client):
     assert r.status_code == 200
     assert store["audio"]["stt_provider"] == "faster-whisper"
     assert store["audio"]["tts_voice"] == "en_US-lessac-medium"
+
+
+def test_set_private_stt_endpoint_and_timeout(client):
+    c, _, store = client
+    endpoint = "http://speech.internal/v1/audio/transcriptions"
+    r = c.post(
+        "/api/audio/config",
+        json={
+            "stt_provider": "openai-compatible",
+            "stt_model": "whisper-v3:turbo",
+            "stt_endpoint": endpoint,
+            "stt_timeout_seconds": 900,
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["stt_endpoint"] == endpoint
+    assert r.json()["stt_timeout_seconds"] == 900
+    assert store["audio"]["stt_provider"] == "openai-compatible"
+
+
+def test_private_stt_timeout_is_bounded(client):
+    c, _, _ = client
+    r = c.post("/api/audio/config", json={"stt_timeout_seconds": 3601})
+    assert r.status_code == 422
+
+
+def test_private_stt_endpoint_rejects_embedded_credentials(client):
+    c, _, _ = client
+    r = c.post(
+        "/api/audio/config",
+        json={"stt_endpoint": "http://user:secret@speech.internal/v1/audio/transcriptions"},
+    )
+    assert r.status_code == 400
 
 
 def test_set_config_rejects_unknown_stt_provider(client):

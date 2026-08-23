@@ -204,6 +204,37 @@ def test_voice_session_start_registers_voice_session():
     assert _phone_recorded(mock, "voice_session_start", "allowed")
 
 
+def test_voice_session_start_preserves_explicit_classic_whisper_mode():
+    """A phone can choose STT→orchestrator without faking realtime."""
+    mock = _mock_state_with_supervisor()
+    mock.voice_router = MagicMock()
+    mock.voice_router.open_session = AsyncMock(return_value=MagicMock())
+
+    with _node_client(mock) as client:
+        with client.websocket_connect(f"/v1/node?api_key={_TEST_NODE_KEY}") as ws:
+            _register_node(ws, node_id="phone-classic", node_type="phone")
+            ws.send_json(
+                {
+                    "type": "voice_session_start",
+                    "hup_version": "1.3.0",
+                    "ts": 1734369923.0,
+                    "payload": {
+                        "stream_id": "voice-stream-classic",
+                        "sample_rate": 24000,
+                        "channels": 1,
+                        "voice_mode": "whisper",
+                    },
+                }
+            )
+            _flush_with_known_error(ws)
+
+    assert mock.voice_router.open_session.await_args.kwargs["mode"] == "whisper"
+    config = mock.voice_router.register_voice_config.call_args.args[1]
+    assert config["mode"] == "whisper"
+    assert config["supports_realtime"] is False
+    assert _phone_recorded(mock, "voice_session_start", "allowed")
+
+
 def test_voice_interrupt_cancels_inflight_tts():
     mock = _mock_state_with_supervisor()
     realtime_session = MagicMock()

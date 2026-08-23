@@ -7,14 +7,18 @@ Handles the full audio lifecycle:
 
 Supports:
   - OpenAI Whisper API for STT
+  - Operator-configured OpenAI-compatible HTTP endpoints for STT
   - Local STT via faster-whisper (offline, no API key required)
   - OpenAI TTS API for speech synthesis
   - Local TTS via Piper (offline, no API key required)
   - Simple energy-based VAD for utterance boundary detection
 
 Environment variables:
-  FERAL_STT_PROVIDER  — "openai" (default) | "local" | "whisper-local" | "faster-whisper"
+  FERAL_STT_PROVIDER  — "openai" (default) | "openai-compatible" | "local" | "whisper-local" | "faster-whisper"
   FERAL_STT_MODEL     — Cloud: "whisper-1" / Local: "tiny" | "base" | "small" | "medium" | "large"
+  FERAL_STT_ENDPOINT  — Exact /audio/transcriptions URL for "openai-compatible"
+  FERAL_STT_API_KEY   — Optional credential for that endpoint (never inherited from OPENAI_API_KEY)
+  FERAL_STT_TIMEOUT_SECONDS — Request timeout for that endpoint (default: 300)
   FERAL_TTS_PROVIDER  — "openai" (default) | "local" | "piper"
   FERAL_TTS_VOICE     — Cloud: "nova" / Local: "en_US-lessac-medium"
 """
@@ -31,18 +35,23 @@ import sys
 import time
 import wave
 from typing import Optional
+from urllib.parse import urlsplit
 
 import httpx
 
 logger = logging.getLogger("feral.audio")
 
 STT_PROVIDER_OPENAI = "openai"
+STT_PROVIDER_OPENAI_COMPATIBLE = "openai-compatible"
 STT_PROVIDER_LOCAL = "local"
 
 TTS_PROVIDER_OPENAI = "openai"
 TTS_PROVIDER_LOCAL = "local"
 
 _LOCAL_STT_PROVIDERS = frozenset({"local", "whisper-local", "faster-whisper"})
+_OPENAI_COMPATIBLE_STT_PROVIDERS = frozenset({
+    "openai-compatible", "openai_compatible", "compatible",
+})
 _LOCAL_TTS_PROVIDERS = frozenset({"local", "piper"})
 
 _VALID_LOCAL_STT_MODELS = ("tiny", "base", "small", "medium", "large")
@@ -70,6 +79,47 @@ def _cloud_fallback_permitted() -> bool:
     return os.getenv("FERAL_LOCAL_AUDIO_CLOUD_FALLBACK", "0").lower() in (
         "1", "true", "yes",
     )
+
+
+def validate_stt_endpoint(value: str) -> str:
+    """Return an explicit HTTP(S) transcription endpoint or ``""``.
+
+    This deliberately does not invent an OpenAI URL when the value is
+    missing. Selecting ``openai-compatible`` is an operator decision about
+    where microphone audio goes, so an incomplete configuration must fail
+    closed instead of falling through to the cloud default.
+
+    Credentials embedded in a URL are rejected as well. Operators that need
+    bearer authentication use ``FERAL_STT_API_KEY`` so the secret is kept out
+    of settings responses and ordinary endpoint logs.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        logger.error(
+            "FERAL_STT_ENDPOINT must be an absolute http(s) URL; "
+            "OpenAI-compatible STT is unavailable"
+        )
+        return ""
+    if parsed.username is not None or parsed.password is not None:
+        logger.error(
+            "FERAL_STT_ENDPOINT must not contain credentials; use "
+            "FERAL_STT_API_KEY instead"
+        )
+        return ""
+    return raw
+
+
+def _stt_timeout_seconds(value: str) -> float:
+    """Parse a bounded custom-STT timeout without making boot fragile."""
+    try:
+        timeout = float(value or 300)
+    except (TypeError, ValueError):
+        logger.warning("Invalid FERAL_STT_TIMEOUT_SECONDS=%r; using 300", value)
+        return 300.0
+    return min(max(timeout, 1.0), 3600.0)
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +424,18 @@ class AudioPipeline:
     def __init__(self, wake_word_detector=None):
         self._api_key = os.getenv("OPENAI_API_KEY", "")
         self._stt_provider = os.getenv("FERAL_STT_PROVIDER", STT_PROVIDER_OPENAI).lower()
+        compatible_selected = (
+            self._stt_provider in _OPENAI_COMPATIBLE_STT_PROVIDERS
+        )
+        self._stt_endpoint = (
+            validate_stt_endpoint(os.getenv("FERAL_STT_ENDPOINT", ""))
+            if compatible_selected else ""
+        )
+        self._stt_api_key = os.getenv("FERAL_STT_API_KEY", "")
+        self._stt_timeout = (
+            _stt_timeout_seconds(os.getenv("FERAL_STT_TIMEOUT_SECONDS", "300"))
+            if compatible_selected else 300.0
+        )
         self._tts_provider = os.getenv("FERAL_TTS_PROVIDER", TTS_PROVIDER_OPENAI).lower()
         self._tts_voice = os.getenv("FERAL_TTS_VOICE", "nova")
         self._tts_model = os.getenv("FERAL_TTS_MODEL", "tts-1")
@@ -384,6 +446,20 @@ class AudioPipeline:
             headers={"Authorization": f"Bearer {self._api_key}"},
             timeout=30.0,
         )
+        # This client is intentionally separate from ``_client``. In
+        # particular, it never inherits OPENAI_API_KEY: a private compatible
+        # endpoint may need no credential, or a credential unrelated to the
+        # operator's OpenAI account.
+        self._compatible_stt_client: Optional[httpx.AsyncClient] = None
+        if compatible_selected:
+            compatible_headers = (
+                {"Authorization": f"Bearer {self._stt_api_key}"}
+                if self._stt_api_key else {}
+            )
+            self._compatible_stt_client = httpx.AsyncClient(
+                headers=compatible_headers,
+                timeout=self._stt_timeout,
+            )
 
         self._buffers: dict[str, AudioBuffer] = {}
         self._wake_word = wake_word_detector
@@ -394,12 +470,27 @@ class AudioPipeline:
 
         # Determine availability
         self._use_local_stt = self._stt_provider in _LOCAL_STT_PROVIDERS
+        self._use_openai_compatible_stt = (
+            self._stt_provider in _OPENAI_COMPATIBLE_STT_PROVIDERS
+        )
         self._use_local_tts = self._tts_provider in _LOCAL_TTS_PROVIDERS
 
-        has_cloud = bool(self._api_key)
+        has_openai = bool(self._api_key)
+        has_compatible_stt = bool(
+            self._use_openai_compatible_stt and self._stt_endpoint
+        )
         has_local_stt = self._use_local_stt
         has_local_tts = self._use_local_tts
-        self.available = has_cloud or has_local_stt or has_local_tts
+        if has_local_stt:
+            self.stt_available = True
+        elif self._use_openai_compatible_stt:
+            self.stt_available = has_compatible_stt
+        else:
+            self.stt_available = has_openai
+        self.tts_available = has_local_tts or (
+            not self._use_local_tts and has_openai
+        )
+        self.available = self.stt_available or self.tts_available
 
         # "Ready" used to mean only "an env var selects this engine".
         # `feral voice providers` was meanwhile reporting the same engines
@@ -426,18 +517,26 @@ class AudioPipeline:
         if has_local_stt:
             state = "ready" if self.local_stt_ready else f"NOT READY: {self.local_stt_detail}"
             parts.append(f"STT: local/faster-whisper ({self._stt_model}, {state})")
-        elif has_cloud:
+        elif self._use_openai_compatible_stt:
+            state = "ready" if has_compatible_stt else "NOT READY: endpoint not configured"
+            parts.append(
+                f"STT: openai-compatible/{self._stt_model} ({state})"
+            )
+        elif has_openai:
             parts.append(f"STT: openai/{self._stt_model}")
         if has_local_tts:
             state = "ready" if self.local_tts_ready else f"NOT READY: {self.local_tts_detail}"
             parts.append(f"TTS: local/piper ({self._tts_voice}, {state})")
-        elif has_cloud:
+        elif has_openai:
             parts.append(f"TTS: openai/{self._tts_voice}")
 
         if self.available:
             logger.info("Audio pipeline configured — %s", ", ".join(parts))
         else:
-            logger.warning("Audio pipeline unavailable — no OPENAI_API_KEY and no local backend configured")
+            logger.warning(
+                "Audio pipeline unavailable — selected STT/TTS backends "
+                "are not configured"
+            )
 
     def _probe_local_stt(self) -> tuple[bool, str]:
         """Can the selected local STT engine run right now? Filesystem only."""
@@ -482,6 +581,13 @@ class AudioPipeline:
                 f"{self._tts_voice}`"
             )
         return True, "ready"
+
+    @property
+    def selected_stt_ready(self) -> bool:
+        """Whether the explicitly selected STT path can accept audio now."""
+        if self._use_local_stt:
+            return self.local_stt_ready
+        return self.stt_available
 
     # ── buffer management ──────────────────────────────────────────────
 
@@ -584,8 +690,70 @@ class AudioPipeline:
         if self._use_local_stt:
             return await self._transcribe_local(audio_bytes, encoding, sample_rate)
 
+        # ── Explicit OpenAI-compatible endpoint path ──
+        if self._use_openai_compatible_stt:
+            return await self._transcribe_openai_compatible(
+                audio_bytes, encoding, sample_rate
+            )
+
         # ── Cloud (OpenAI Whisper API) path ──
         return await self._transcribe_cloud(audio_bytes, encoding, sample_rate)
+
+    async def _transcribe_openai_compatible(
+        self,
+        audio_bytes: bytes,
+        encoding: str,
+        sample_rate: int,
+    ) -> Optional[str]:
+        """Send audio only to the operator's explicitly configured endpoint."""
+        if not self._stt_endpoint or self._compatible_stt_client is None:
+            logger.error(
+                "OpenAI-compatible STT unavailable — FERAL_STT_ENDPOINT is "
+                "not configured; audio was NOT sent to OpenAI"
+            )
+            return None
+
+        encoding = (encoding or "opus").lower()
+        ext_map = {
+            "opus": "ogg", "wav": "wav", "mp3": "mp3", "webm": "webm",
+            "ogg": "ogg", "pcm16": "wav", "pcm": "wav", "linear16": "wav",
+        }
+        ext = ext_map.get(encoding, "ogg")
+        payload_audio = audio_bytes
+        if encoding in ("pcm16", "pcm", "linear16"):
+            payload_audio = _pcm16_to_wav(audio_bytes, sample_rate=sample_rate)
+        mime_type = "audio/wav" if ext == "wav" else f"audio/{ext}"
+
+        try:
+            response = await self._compatible_stt_client.post(
+                self._stt_endpoint,
+                files={
+                    "file": (
+                        f"audio.{ext}", io.BytesIO(payload_audio), mime_type,
+                    )
+                },
+                data={"model": self._stt_model, "response_format": "json"},
+            )
+            response.raise_for_status()
+            try:
+                body = response.json()
+            except Exception:
+                body = None
+            transcript = (
+                str(body.get("text", "")).strip()
+                if isinstance(body, dict) else response.text.strip()
+            )
+            if transcript:
+                logger.info("Compatible STT transcript: %s", transcript[:100])
+            return transcript or None
+        except Exception as exc:
+            # Never call ``_transcribe_cloud`` here. The provider selector is
+            # the privacy boundary, and failure must preserve that choice.
+            logger.error(
+                "OpenAI-compatible STT failed; audio was NOT rerouted to "
+                "OpenAI: %s", exc,
+            )
+            return None
 
     async def _transcribe_local(
         self,
@@ -824,6 +992,8 @@ class AudioPipeline:
 
     async def close(self):
         await self._client.aclose()
+        if self._compatible_stt_client is not None:
+            await self._compatible_stt_client.aclose()
 
 
 # ---------------------------------------------------------------------------

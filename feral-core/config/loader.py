@@ -214,6 +214,14 @@ DEFAULT_SETTINGS = {
     "audio": {
         "stt_provider": "openai",
         "stt_model": "whisper-1",
+        # Exact transcription URL used only when stt_provider is
+        # ``openai-compatible``. Empty is deliberately not replaced with an
+        # OpenAI default: selecting a private endpoint must fail closed when
+        # its address is missing.
+        "stt_endpoint": "",
+        # Private/self-hosted inference can take substantially longer than a
+        # cloud API. Operators may tune this from 1 to 3600 seconds.
+        "stt_timeout_seconds": 300,
         "tts_provider": "openai",
         "tts_model": "tts-1",
         "tts_voice": "nova",
@@ -763,6 +771,8 @@ class ConfigLoader:
             "FERAL_SCENE_COOLDOWN": ("vision", "scene_cooldown"),
             "FERAL_STT_PROVIDER": ("audio", "stt_provider"),
             "FERAL_STT_MODEL": ("audio", "stt_model"),
+            "FERAL_STT_ENDPOINT": ("audio", "stt_endpoint"),
+            "FERAL_STT_TIMEOUT_SECONDS": ("audio", "stt_timeout_seconds"),
             "FERAL_TTS_PROVIDER": ("audio", "tts_provider"),
             "FERAL_TTS_MODEL": ("audio", "tts_model"),
             "FERAL_TTS_VOICE": ("audio", "tts_voice"),
@@ -1380,6 +1390,12 @@ class ConfigLoader:
             env["FERAL_STT_PROVIDER"] = str(audio["stt_provider"])
         if audio.get("stt_model"):
             env["FERAL_STT_MODEL"] = str(audio["stt_model"])
+        if audio.get("stt_endpoint"):
+            env["FERAL_STT_ENDPOINT"] = str(audio["stt_endpoint"])
+        if audio.get("stt_timeout_seconds") is not None:
+            env["FERAL_STT_TIMEOUT_SECONDS"] = str(
+                audio["stt_timeout_seconds"]
+            )
         if audio.get("tts_provider"):
             env["FERAL_TTS_PROVIDER"] = str(audio["tts_provider"])
         if audio.get("tts_model"):

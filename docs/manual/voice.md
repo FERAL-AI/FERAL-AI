@@ -38,6 +38,31 @@ what happened and why.
 This is the point of choosing local, so it is not treated as an error to
 route around.
 
+## Use a private OpenAI-compatible transcription service
+
+The classic `whisper` voice mode can send microphone audio to an endpoint you
+operate while the normal FERAL orchestrator continues to own the agent turn.
+This is useful when the brain and speech model run on different machines:
+
+```sh
+export FERAL_STT_PROVIDER=openai-compatible
+export FERAL_STT_ENDPOINT=http://speech-host:8000/v1/audio/transcriptions
+export FERAL_STT_MODEL=whisper-v3:turbo
+export FERAL_STT_TIMEOUT_SECONDS=300
+```
+
+An API key is not required. If that server requires bearer authentication, set
+`FERAL_STT_API_KEY` separately. FERAL deliberately does not reuse
+`OPENAI_API_KEY` for a compatible endpoint.
+
+Endpoint selection is fail-closed: if the URL is missing, invalid, or the
+request fails, that audio is not rerouted to OpenAI. The default remains
+`FERAL_STT_PROVIDER=openai`, so existing cloud configurations are unchanged.
+
+Clients should request `voice_mode: "whisper"` in `voice_session_start` for
+this STT-to-orchestrator path. TTS is independent; a client may speak the
+normal assistant text locally instead of configuring server-side TTS.
+
 ## What the orb is telling you
 
 The orb tracks the actual state of the turn: listening, thinking,

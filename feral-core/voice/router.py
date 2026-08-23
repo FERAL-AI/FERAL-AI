@@ -1801,6 +1801,7 @@ class VoiceRouter:
     #   - openai_realtime → RealtimeProxy (GA, gpt-realtime)
     #   - gemini_live     → GeminiRealtimeProxy (existing)
     #   - chained         → ChainedVoicePipeline via open_chained_session
+    #   - whisper         → classic AudioPipeline STT → orchestrator path
 
     async def open_session(self, session_id: str, mode: str, provider_opts: dict | None = None):
         """High-level entry point for opening a voice session by mode.
@@ -1809,6 +1810,7 @@ class VoiceRouter:
           - ``openai_realtime``: OpenAI Realtime GA (Subagent A)
           - ``chained``: Deepgram/Whisper STT → LLM → OpenAI/ElevenLabs TTS (Subagent B)
           - ``gemini_live``: existing GeminiRealtimeProxy
+          - ``whisper``: selected classic STT → orchestrator, with TTS optional
         """
         opts = provider_opts or {}
         # A session that is still muted has to say so the moment it
@@ -1829,6 +1831,38 @@ class VoiceRouter:
         # session. Emitted after the mute frame above so that frame
         # still reports the state the session was actually in.
         self._session_degraded.pop(session_id, None)
+        if mode == "whisper":
+            ready = getattr(self._audio, "selected_stt_ready", None)
+            if ready is None:
+                ready = bool(getattr(self._audio, "available", False))
+            if not self._audio or not ready:
+                logger.warning("whisper requested but selected STT is unavailable")
+                await self._report_open_failure(
+                    session_id,
+                    reason="classic_stt_unavailable",
+                    provider="whisper",
+                    cause=_dx().CAUSE_UNKNOWN,
+                    summary=(
+                        "The selected classic speech-to-text backend is not "
+                        "configured or ready, so voice could not start."
+                    ),
+                )
+                return None
+            node_id = opts.get("node_id", "")
+            if node_id:
+                self.register_voice_config(node_id, {
+                    "mode": "whisper",
+                    "voice_provider": "whisper",
+                    "supports_realtime": False,
+                    "sample_rate": int(opts.get("sample_rate") or 24000),
+                    "language_hint": opts.get("language_hint", ""),
+                    "skip_wake": True,
+                })
+            self._session_voice_mode[session_id] = "whisper"
+            # The classic path has no upstream session object: AudioPipeline
+            # buffers per session id. Returning the pipeline is the honest
+            # live handle expected by the phone bootstrap contract.
+            return self._audio
         if mode == "openai_realtime":
             if not self._realtime or not self._realtime.available:
                 logger.warning("openai_realtime requested but proxy unavailable")

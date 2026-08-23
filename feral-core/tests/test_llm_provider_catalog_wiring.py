@@ -33,7 +33,8 @@ def _clear_audio_env(monkeypatch):
     # Strip any leaked env from earlier tests in the same pytest run
     # so we exercise the settings.json → env path cleanly.
     for k in (
-        "FERAL_STT_PROVIDER", "FERAL_STT_MODEL",
+        "FERAL_STT_PROVIDER", "FERAL_STT_MODEL", "FERAL_STT_ENDPOINT",
+        "FERAL_STT_TIMEOUT_SECONDS",
         "FERAL_TTS_PROVIDER", "FERAL_TTS_MODEL", "FERAL_TTS_VOICE",
     ):
         monkeypatch.delenv(k, raising=False)
@@ -91,6 +92,33 @@ class TestAudioExport:
         # Env overrides should feed back into the merged settings tree.
         assert cfg.get("audio", "stt_model") == "medium"
         assert cfg.get("audio", "tts_model") == "tts-1-hd"
+
+    def test_private_stt_endpoint_and_timeout_round_trip(self, tmp_path, monkeypatch):
+        _clear_audio_env(monkeypatch)
+        monkeypatch.setenv("FERAL_HOME", str(tmp_path / ".feral"))
+        endpoint = "http://speech.internal/v1/audio/transcriptions"
+        _write_settings(tmp_path / ".feral", {
+            "audio": {
+                "stt_provider": "openai-compatible",
+                "stt_model": "whisper-v3:turbo",
+                "stt_endpoint": endpoint,
+                "stt_timeout_seconds": 900,
+            },
+        })
+        cfg = ConfigLoader()
+        cfg.discover()
+        env = cfg.export_as_env()
+        assert env["FERAL_STT_PROVIDER"] == "openai-compatible"
+        assert env["FERAL_STT_ENDPOINT"] == endpoint
+        assert env["FERAL_STT_TIMEOUT_SECONDS"] == "900"
+
+        _clear_audio_env(monkeypatch)
+        monkeypatch.setenv("FERAL_STT_ENDPOINT", endpoint)
+        monkeypatch.setenv("FERAL_STT_TIMEOUT_SECONDS", "600")
+        reloaded = ConfigLoader()
+        reloaded.discover()
+        assert reloaded.get("audio", "stt_endpoint") == endpoint
+        assert reloaded.get("audio", "stt_timeout_seconds") == 600
 
 
 class TestFirstRunDetection:

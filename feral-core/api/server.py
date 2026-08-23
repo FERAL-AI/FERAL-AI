@@ -3091,7 +3091,8 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 state.voice_router.bind_node_to_session(node_id, session_id)
 
                 # PR #61 (voice-v2) wire-up: dispatch to the user-selected
-                # voice mode (openai_realtime / gemini_live / chained) via
+                # voice mode (openai_realtime / gemini_live / chained /
+                # whisper) via
                 # VoiceRouter.open_session. Phone emits the selected mode
                 # in the `voice_mode` payload field; falls back to the
                 # operator's configured default when absent.
@@ -3107,7 +3108,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     voice_cfg = merged_cfg.get("voice") or {}
                     selected_mode = voice_cfg.get("mode", "openai_realtime")
                 if selected_mode not in (
-                    "openai_realtime", "gemini_live", "chained",
+                    "openai_realtime", "gemini_live", "chained", "whisper",
                 ):
                     logger.warning(
                         "voice_session_start: unknown voice_mode=%r, "
@@ -3119,7 +3120,11 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 voice_provider = "openai"
                 if selected_mode == "gemini_live":
                     voice_provider = "gemini"
-                mode_for_router = selected_mode if selected_mode in {"openai_realtime", "gemini_live", "chained"} else "openai_realtime"
+                elif selected_mode == "whisper":
+                    voice_provider = "whisper"
+                mode_for_router = selected_mode if selected_mode in {
+                    "openai_realtime", "gemini_live", "chained", "whisper",
+                } else "openai_realtime"
                 state.voice_router.register_voice_config(
                     node_id,
                     {

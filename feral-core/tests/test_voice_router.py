@@ -85,6 +85,38 @@ def test_session_uses_realtime(router):
     assert router.session_uses_realtime("unknown") is False
 
 
+async def test_open_session_accepts_classic_whisper_mode():
+    pipeline = MagicMock()
+    pipeline.available = True
+    pipeline.selected_stt_ready = True
+    router = VoiceRouter(audio_pipeline=pipeline)
+
+    handle = await router.open_session(
+        "classic-session",
+        "whisper",
+        {"node_id": "phone-classic", "sample_rate": 24000},
+    )
+
+    assert handle is pipeline
+    assert router._session_voice_mode["classic-session"] == "whisper"
+    assert router._node_voice_config["phone-classic"]["mode"] == "whisper"
+    assert router._node_voice_config["phone-classic"]["skip_wake"] is True
+
+
+async def test_open_session_refuses_classic_mode_when_selected_stt_is_not_ready():
+    pipeline = MagicMock()
+    pipeline.available = False
+    pipeline.selected_stt_ready = False
+    router = VoiceRouter(audio_pipeline=pipeline)
+    router._report_open_failure = AsyncMock()
+
+    handle = await router.open_session("classic-session", "whisper")
+
+    assert handle is None
+    router._report_open_failure.assert_awaited_once()
+    assert "classic-session" not in router._session_voice_mode
+
+
 # ── Wake word gating ─────────────────────────────────────────────
 
 async def test_wake_word_blocks_audio():

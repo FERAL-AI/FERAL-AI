@@ -9,13 +9,17 @@ two surfaces.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from api.state import state
-from perception.audio_pipeline import detect_local_audio_capabilities
+from perception.audio_pipeline import (
+    detect_local_audio_capabilities,
+    validate_stt_endpoint,
+)
 
 logger = logging.getLogger("feral.api.audio")
 
@@ -47,6 +51,20 @@ _STT_PROVIDERS = (
         "aliases": ("local", "whisper-local", "local-whisper"),
         "default_model": "base",
         "available_models": ["tiny", "base", "small", "medium", "large"],
+    },
+    {
+        "id": "openai-compatible",
+        "display_name": "OpenAI-compatible STT (operator endpoint)",
+        "needs_api_key": False,
+        "credential_env_var": "FERAL_STT_API_KEY",
+        "needs_endpoint": True,
+        "endpoint_env_var": "FERAL_STT_ENDPOINT",
+        "is_local": False,
+        "aliases": ("openai-compatible", "openai_compatible", "compatible"),
+        "default_model": "whisper-1",
+        # Compatible servers choose their own model ids; the operator enters
+        # the exact value instead of being constrained to a cloud catalogue.
+        "available_models": [],
     },
 )
 
@@ -91,6 +109,13 @@ def _enrich_with_local_capabilities() -> tuple[list[dict], list[dict]]:
         if row["is_local"]:
             row["available"] = caps.get("local_stt", False)
             row["available_models"] = list(caps.get("stt_models") or row["available_models"])
+        elif row["id"] == "openai-compatible":
+            endpoint = os.getenv("FERAL_STT_ENDPOINT", "").strip()
+            if not endpoint and state.config is not None:
+                endpoint = str(
+                    state.config.get("audio", "stt_endpoint", "") or ""
+                ).strip()
+            row["available"] = bool(validate_stt_endpoint(endpoint))
         else:
             row["available"] = True
         stt.append(row)
@@ -146,6 +171,10 @@ async def get_audio_config():
     return {
         "stt_provider": state.config.get("audio", "stt_provider", "openai"),
         "stt_model": state.config.get("audio", "stt_model", "whisper-1"),
+        "stt_endpoint": state.config.get("audio", "stt_endpoint", ""),
+        "stt_timeout_seconds": state.config.get(
+            "audio", "stt_timeout_seconds", 300
+        ),
         "tts_provider": state.config.get("audio", "tts_provider", "openai"),
         "tts_model": state.config.get("audio", "tts_model", "tts-1"),
         "tts_voice": state.config.get("audio", "tts_voice", "nova"),
@@ -155,6 +184,10 @@ async def get_audio_config():
 class AudioConfigRequest(BaseModel):
     stt_provider: Optional[str] = None
     stt_model: Optional[str] = None
+    stt_endpoint: Optional[str] = Field(default=None, max_length=2048)
+    stt_timeout_seconds: Optional[float] = Field(
+        default=None, ge=1, le=3600
+    )
     tts_provider: Optional[str] = None
     tts_model: Optional[str] = None
     tts_voice: Optional[str] = None
@@ -175,6 +208,8 @@ async def set_audio_config(req: AudioConfigRequest):
     for key, value in (
         ("stt_provider", req.stt_provider),
         ("stt_model", req.stt_model),
+        ("stt_endpoint", req.stt_endpoint),
+        ("stt_timeout_seconds", req.stt_timeout_seconds),
         ("tts_provider", req.tts_provider),
         ("tts_model", req.tts_model),
         ("tts_voice", req.tts_voice),
@@ -183,6 +218,14 @@ async def set_audio_config(req: AudioConfigRequest):
             continue
         if key == "stt_provider" and value not in stt_ids:
             raise HTTPException(status_code=400, detail=f"unknown stt_provider {value!r}")
+        if key == "stt_endpoint" and value and not validate_stt_endpoint(value):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "stt_endpoint must be an absolute http(s) URL without "
+                    "embedded credentials"
+                ),
+            )
         if key == "tts_provider" and value not in tts_ids:
             raise HTTPException(status_code=400, detail=f"unknown tts_provider {value!r}")
         state.config.update_settings("audio", key, value)
