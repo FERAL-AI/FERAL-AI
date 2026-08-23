@@ -56,6 +56,14 @@ from security.session_auth import (
     warn_if_unsafe_bypass,
 )
 from security.device_pairing import DevicePairingStore  # used in type hint
+from security.proxy_auth import (
+    ProxyAuthConfig,
+    ProxyAuthError,
+    ProxyIdentity,
+    authenticate_proxy,
+    authorize_browser_origin,
+    config_from_env,
+)
 
 from api.routes.dashboard import health as _dashboard_health_json
 from api.routes.dashboard import router as dashboard_router
@@ -570,6 +578,53 @@ def _is_webhook_receive(path: str) -> bool:
     return bool(tail) and "/" not in tail
 
 
+def _proxy_identity(
+    config: ProxyAuthConfig,
+    *,
+    peer: str | None,
+    headers,
+    method: str,
+    websocket: bool = False,
+) -> tuple[ProxyIdentity | None, bool, bool]:
+    """Return proxy identity, whether proxy headers were attempted, and config error.
+
+    The proxy path is deliberately additive.  With the feature disabled, this
+    is a no-op; with it enabled, a malformed configuration is fail-closed and
+    any supplied proxy envelope must authenticate.  ``peer`` is always the
+    ASGI socket peer, never a forwarded header.
+    """
+    if not config.enabled:
+        return None, False, False
+
+    try:
+        config.validated()
+    except ProxyAuthError:
+        return None, False, True
+
+    names = (config.secret_header, config.identity_header, config.groups_header)
+    attempted = any(
+        any(str(key).lower() == name.lower() for key in names)
+        for key in headers.keys()
+    )
+    if not attempted:
+        return None, False, False
+    try:
+        identity = authenticate_proxy(
+            config,
+            socket_client_ip=peer or "",
+            headers=headers,
+        )
+        authorize_browser_origin(
+            config,
+            headers=headers,
+            method=method,
+            websocket=websocket,
+        )
+    except ProxyAuthError:
+        return None, attempted, True
+    return identity, True, False
+
+
 class APIKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         path = request.url.path
@@ -603,13 +658,34 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         # dashboard's complete exemption from auth.
         client_host = request.client.host if request.client else None
         trusted = _session_auth_module.transport_is_trusted(request.scope)
-        if trusted and _session_auth_module.is_localhost(client_host):
-            return await call_next(request)
-        if trusted and _session_auth_module.local_bypass_enabled():
+
+        proxy_identity, proxy_attempted, proxy_error = _proxy_identity(
+            config_from_env(),
+            peer=client_host,
+            headers=request.headers,
+            method=request.method,
+        )
+        if proxy_identity is not None:
+            try:
+                request.state.proxy_identity = proxy_identity
+            except Exception:
+                pass
             return await call_next(request)
 
         auth = request.headers.get("authorization", "")
+        # Existing API-key callers remain valid even when a request also
+        # carries a bad proxy envelope; the envelope itself is never treated
+        # as authenticated in that case.
         if auth == f"Bearer {FERAL_API_KEY}":
+            return await call_next(request)
+
+        if trusted and _session_auth_module.is_localhost(client_host):
+            if proxy_attempted or proxy_error:
+                return JSONResponse({"error": "Unauthorized — invalid trusted proxy authentication"}, status_code=401)
+            return await call_next(request)
+        if trusted and _session_auth_module.local_bypass_enabled():
+            if proxy_attempted or proxy_error:
+                return JSONResponse({"error": "Unauthorized — invalid trusted proxy authentication"}, status_code=401)
             return await call_next(request)
 
         # v2026.5.26 — phone-bearer HTTP auth. Pre-fix the middleware
@@ -1837,10 +1913,30 @@ def _build_chat_turn_runner(
 
 @app.websocket("/v1/session")
 async def client_session(ws: WebSocket, token: str = Query(default=None)):
-    await ws.accept()
-
     client_host = ws.client.host if ws.client else None
     _ws_authed = False
+
+    proxy_identity, _proxy_attempted, proxy_error = _proxy_identity(
+        config_from_env(),
+        peer=client_host,
+        headers=ws.headers,
+        method="GET",
+        websocket=True,
+    )
+    if proxy_identity is not None:
+        _ws_authed = True
+        try:
+            ws.state.proxy_identity = proxy_identity
+        except Exception:
+            pass
+
+    # Origin and proxy credentials are checked before the handshake is
+    # accepted.  Existing token/loopback authentication retains its original
+    # post-accept first-message behavior.
+    if not _ws_authed and proxy_error:
+        await ws.close(code=4001, reason="Unauthorized")
+        return
+    await ws.accept()
 
     # audit-r12 A1 (v2026.5.38) — loopback always bypasses; off-loopback
     # requires a token, with ``FERAL_LOCAL_BYPASS=1`` as the dev opt-in.
@@ -1851,11 +1947,11 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
     # would publish an unauthenticated chat socket to the internet. That
     # is the single most dangerous line in the remote-access design.
     _trusted = _session_auth_module.transport_is_trusted(ws.scope)
-    if _trusted and is_localhost(client_host):
+    if not _ws_authed and _trusted and is_localhost(client_host):
         _ws_authed = True
-    elif _trusted and local_bypass_enabled():
+    elif not _ws_authed and _trusted and local_bypass_enabled():
         _ws_authed = True
-    elif token and (verify_session(token) or token == FERAL_API_KEY):
+    elif not _ws_authed and token and (verify_session(token) or token == FERAL_API_KEY):
         _ws_authed = True
 
     if not _ws_authed:
