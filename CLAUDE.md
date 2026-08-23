@@ -190,6 +190,14 @@ For tools, this trap is worse than a skewed count — it takes them to zero. `my
 
 **7. `desktop/` is built by no automatic trigger.** `.github/workflows/desktop.yml` is `workflow_dispatch:` only — deliberately, per the note at the top of that file, because the artifacts are not shipped until signing certs land. A change to `desktop/src-tauri/` compiles in no CI run until somebody dispatches it by hand.
 
+**8. `getattr(<MagicMock>, name, default)` NEVER reaches its default.** A mock has every attribute, so the default is the one place the author wrote down what the value should be and it is dead code under test. This shipped twice in one week. `/api/dashboard` answered 500 for a whole release on `float(getattr(state, "started_at", 0.0))`: `started_at` is a real `float` on a real `BrainState`, so the *name* was fine, and what broke production was the mock answering with a `MagicMock` where a float was declared, then `time.time() - <MagicMock>` raising `TypeError`. Separately, `_somatic_state_for_turn` returned a `MagicMock` that got JSON-serialised onto a chat response.
+
+`tests/conftest.py` now closes this. Any spec-less mock assigned to the `state` attribute of an `api.*` module (`api.state`, `api.server`, `api.routes.*`) is wrapped in `_GuardedStateMock`, which raises `AttributeError` instead of auto-vivifying a child mock when the name is either absent from the real `BrainState` or holds a non-`None` `int/float/str/bool/bytes` there. `AttributeError` is the point: it is exactly what `getattr` catches, so the default goes live again and the trap closes rather than merely being reported. A bare `state.x` with no default fails on the spot instead.
+
+Deliberately still allowed, because this is what mocks are legitimately for: attributes the test set itself (`mock.started_at = 123.0`, which Mock keeps in `__dict__`), object-valued collaborators (`orchestrator`, `memory`, `voice_router`), and `None`-valued fields, which boot fills in with objects later. The refused names are printed once at session end under `[state-mock guard]`.
+
+Prefer the `brain_state_mock` fixture (`MagicMock(spec=BrainState)`) in new tests. `tests/test_state_mock_getattr_guard.py` is the proof the guard fires; 5 of its 11 tests fail with the original production symptoms if the wrapper is disabled.
+
 ## Conventions
 
 - **`models/protocol.py` is canonical.** Never hard-code a wire constant that exists there. `HUP_VERSION` has already shipped a three-way mismatch; there is now an AST guard, but it only covers `api/server.py`.

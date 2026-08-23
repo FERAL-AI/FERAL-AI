@@ -1,5 +1,6 @@
 import pytest
 import os
+import types
 import warnings
 
 
@@ -308,6 +309,31 @@ def pytest_sessionfinish(session, exitstatus):
             f"hosts:\n{detail}"
         )
 
+    if _STATE_MOCK_REFUSALS:
+        # Every line here is a place where a bare MagicMock was about to
+        # answer for a BrainState field it has no business answering for,
+        # and the production code only survived because it had written a
+        # `getattr` default. Reported rather than failed: with the default
+        # honoured the behaviour is now CORRECT, and the code under test
+        # took the branch production takes. This is the inventory of the
+        # remaining stand-ins, so the next one is visible on the run that
+        # introduces it instead of on the release that ships it.
+        by_attr: dict[str, int] = {}
+        for (_nodeid, attr), count in _STATE_MOCK_REFUSALS.items():
+            by_attr[attr] = by_attr.get(attr, 0) + count
+        detail = "\n".join(
+            f"  state.{attr}  (refused {count} time(s))"
+            for attr, count in sorted(by_attr.items(), key=lambda kv: -kv[1])
+        )
+        print(
+            "\n[state-mock guard] A MagicMock standing in for BrainState was "
+            "stopped from inventing these attributes:\n"
+            f"{detail}\n"
+            "The `getattr` defaults applied, which is the production "
+            "behaviour. Use the `brain_state_mock` fixture, or set the "
+            "attribute explicitly, to make the intent local to the test."
+        )
+
     if not _ENV_LEAKS:
         return
     lines = "\n".join(
@@ -466,6 +492,274 @@ def _reset_glasses_buffer_registration():
         glasses.set_glasses_buffer(buf)
 
 
+# ---------------------------------------------------------------------------
+# The `getattr(mock, name, default)` trap.
+#
+# A MagicMock has EVERY attribute, so `getattr(state, "x", default)` never
+# reaches its default when `state` is a bare mock. The default is the one
+# place the author wrote down what the value is supposed to be, and against
+# a mock it is dead code: the test exercises a path production never takes,
+# passes, and the endpoint ships broken.
+#
+# Twice in one week, both in production:
+#
+#   1. `/api/dashboard` answered 500 for a whole release.
+#      `_uptime_seconds` did `float(getattr(state, "started_at", 0.0))`.
+#      `started_at` is a real float on a real BrainState, so the name was
+#      not the problem; the mock handing back a MagicMock where a float
+#      was declared was. `time.time() - <MagicMock>` raised TypeError and
+#      took down the single endpoint the whole shell polls. Every unit
+#      test passed.
+#   2. `_somatic_state_for_turn` returned a MagicMock that went on to be
+#      JSON-serialised onto a chat response.
+#
+# Both were repaired at the call site. Nothing stopped a third, so this
+# attacks the mechanism instead of the symptom.
+#
+# HOW IT WORKS. Any mock installed as the `state` attribute of an `api.*`
+# module is wrapped in `_GuardedStateMock`. The proxy refuses to
+# auto-vivify a child mock for a name that, on the REAL BrainState, is
+# either absent or a plain scalar, and raises AttributeError instead.
+#
+# AttributeError, deliberately, and not a custom exception: it is the
+# exact signal `getattr` is documented to catch, so
+# `getattr(state, "started_at", 0.0)` goes back to returning 0.0. The
+# default becomes live code again and the trap closes rather than merely
+# being reported. Bare `state.started_at` with no default has nowhere to
+# fall back to and fails on the spot, at the line that did it, which is
+# the loud half.
+#
+# WHAT IS DELIBERATELY LET THROUGH, because narrowing is what keeps this
+# from breaking the ~10k tests that mock state legitimately:
+#
+#   * anything the test set itself (`mock.started_at = 123.0`). Mock puts
+#     an explicitly assigned attribute in `__dict__`, so it never reaches
+#     this path at all. That distinction is the whole reason the check
+#     lives in `__getattr__`: it fires on auto-vivification only.
+#   * every attribute whose real value is an OBJECT (orchestrator,
+#     memory, voice_router, the session dicts). Standing a mock in for a
+#     collaborator is the normal, correct use of a mock and the thing
+#     nearly every one of the ~115 `patch("api.state.state", ...)` sites
+#     is doing.
+#   * `None`-valued attributes, which matter more than they look. A field
+#     that is None on the freshly imported singleton is one that boot
+#     fills in later with an object, so refusing it would break exactly
+#     the tests that legitimately stand in for a booted brain.
+#
+# So the refusal set is only: names BrainState does not have, and names
+# whose real value is a non-None `int/float/str/bool/bytes`. That is the
+# shape of both shipped defects and almost nothing else.
+# ---------------------------------------------------------------------------
+
+# The genuine BrainState singleton, captured before any test patches it.
+# Every decision below is measured against this object rather than against
+# the class, because BrainState assigns its fields in `__init__` and a
+# class-level scan would see almost none of them.
+_REAL_BRAIN_STATE = None
+
+# "Not there at all", distinct from a field that is legitimately None.
+_MISSING = object()
+
+# Scalars a mock must not silently impersonate. A caller that wrote
+# `getattr(state, name, 0.0)` is declaring it wants a number; handing it a
+# MagicMock is how the dashboard 500 happened.
+_STATE_SCALAR_TYPES = (bool, int, float, str, bytes)
+
+# `unittest.mock`'s own surface. These must reach the mock untouched or
+# assertions and reconfiguration stop working.
+_MOCK_PROTOCOL_PREFIXES = ("assert_", "assret_", "asert_", "aseert_", "assrt_")
+
+# (nodeid, attribute) -> count, for the end-of-session report. A refusal
+# the production code absorbed via a `getattr` default is invisible
+# otherwise, and invisible is how this class survived two releases.
+_STATE_MOCK_REFUSALS: dict[tuple, int] = {}
+
+
+class _GuardedStateMock:
+    """A mock standing in for BrainState, with `getattr` defaults restored.
+
+    A plain proxy rather than a Mock subclass or a `__class__` swap on the
+    mock itself. `NonCallableMock` makes `__class__` a property so it can
+    lie about its type for `isinstance`, so reassigning it is not
+    available, and subclassing cannot help with an instance the test has
+    already constructed.
+
+    Delegation is total: attribute reads, writes and deletes all land on
+    the wrapped mock, so the test's own handle on that mock and this proxy
+    stay the same object for every purpose except the refusal above.
+    """
+
+    __slots__ = ("_feral_mock", "_feral_nodeid")
+
+    def __init__(self, mock, nodeid):
+        object.__setattr__(self, "_feral_mock", mock)
+        object.__setattr__(self, "_feral_nodeid", nodeid)
+
+    def __getattr__(self, name):
+        mock = object.__getattribute__(self, "_feral_mock")
+        reason = _state_mock_refusal(mock, name)
+        if reason is not None:
+            nodeid = object.__getattribute__(self, "_feral_nodeid")
+            key = (nodeid, name)
+            _STATE_MOCK_REFUSALS[key] = _STATE_MOCK_REFUSALS.get(key, 0) + 1
+            raise AttributeError(
+                f"{name!r}: refusing to invent it on the MagicMock standing "
+                f"in for BrainState. {reason}. A mock has every attribute, so "
+                f"`getattr(state, {name!r}, <default>)` would never reach its "
+                "default and production code would get a MagicMock where it "
+                "declared a value. That is the /api/dashboard 500. If the "
+                "test needs a value here, set it (`mock."
+                f"{name} = ...`); if it needs the real shape, use the "
+                "`brain_state_mock` fixture, which is spec'd to BrainState."
+            )
+        return getattr(mock, name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_feral_mock"), name, value)
+
+    def __delattr__(self, name):
+        delattr(object.__getattribute__(self, "_feral_mock"), name)
+
+    def __repr__(self):
+        return f"<GuardedStateMock {object.__getattribute__(self, '_feral_mock')!r}>"
+
+
+def _state_mock_refusal(mock, name):
+    """Why `name` must not auto-vivify on this mock, or None to allow it."""
+    if name.startswith("_") or name.startswith(_MOCK_PROTOCOL_PREFIXES):
+        return None
+    # Set by the test on purpose. Mock keeps assigned attributes in
+    # `__dict__`, which is precisely the "the author meant this" signal.
+    if name in mock.__dict__:
+        return None
+    real = _REAL_BRAIN_STATE
+    if real is None:
+        return None
+    # One lookup with a sentinel rather than `hasattr` then `getattr`.
+    # `hasattr` swallows only AttributeError, so a BrainState property
+    # that raises anything else (one that wants a booted brain) would
+    # escape this guard and surface as that exception at whatever line
+    # touched the mock, which is a worse mystery than the one being
+    # fixed. Anything unreadable is simply not refused.
+    try:
+        value = getattr(real, name, _MISSING)
+    except Exception:
+        return None
+    if value is _MISSING:
+        return "BrainState has no attribute of that name"
+    if value is not None and isinstance(value, _STATE_SCALAR_TYPES):
+        return (
+            f"the real BrainState.{name} is a {type(value).__name__}, "
+            "not an object worth mocking"
+        )
+    return None
+
+
+def _unwrap_state_mock(value):
+    """The mock behind a guard proxy, or the value itself."""
+    if isinstance(value, _GuardedStateMock):
+        return object.__getattribute__(value, "_feral_mock")
+    return value
+
+
+class _StateGuardModule(types.ModuleType):
+    """An `api.*` module that wraps any mock assigned to its `state`.
+
+    Assignment is the only interception point that covers every route
+    module. Route modules do `from api.state import state` at import, so
+    they hold their OWN binding, which is why tests patch
+    `api.state.state` and `api.routes.<name>.state` in the same breath.
+    Hooking `patch` itself would miss `monkeypatch.setattr`, and hooking
+    `Mock.__getattr__` globally would put this check on the hot path of
+    every one of the thousands of unrelated mocks in the suite.
+    """
+
+    def __setattr__(self, name, value):
+        if name == "state":
+            from unittest.mock import NonCallableMock
+
+            value = _unwrap_state_mock(value)
+            # `spec=` already closes the trap: a spec'd mock raises
+            # AttributeError for names the spec lacks, all by itself.
+            # Wrapping one would add nothing and cost a layer.
+            if isinstance(value, NonCallableMock) and value._mock_methods is None:
+                value = _GuardedStateMock(value, _CURRENT_NODEID[0])
+        object.__setattr__(self, name, value)
+
+
+# The nodeid is read at wrap time so a refusal can name the test that
+# caused it even though the report is printed once, at the end.
+_CURRENT_NODEID = [""]
+
+
+@pytest.fixture(autouse=True)
+def _guard_state_mocks(request):
+    """Arm the BrainState-mock guard for every `api.*` module.
+
+    Re-scanned per test rather than armed once at session start, because
+    `api.routes.*` modules are imported lazily by whichever test needs
+    them first. A module imported at test 4000 has to be covered too.
+    The scan is a `sys.modules` walk over a few dozen names against a set,
+    which does not register against a suite of this size.
+    """
+    import sys
+
+    _CURRENT_NODEID[0] = request.node.nodeid
+
+    global _REAL_BRAIN_STATE
+    if _REAL_BRAIN_STATE is None:
+        api_state = sys.modules.get("api.state")
+        candidate = getattr(api_state, "state", None) if api_state else None
+        # Only ever record the genuine article. If the very first test to
+        # run has already installed a mock, skip and try again next test,
+        # or the mock becomes the yardstick every later check measures
+        # against and the guard agrees with exactly what it should refuse.
+        if candidate is not None and not isinstance(candidate, _GuardedStateMock):
+            from unittest.mock import NonCallableMock
+
+            if not isinstance(candidate, NonCallableMock):
+                _REAL_BRAIN_STATE = candidate
+
+    for name, module in list(sys.modules.items()):
+        if module is None or type(module) is _StateGuardModule:
+            continue
+        if name != "api.state" and name != "api.server" and not name.startswith("api.routes."):
+            continue
+        # Only a plain module can be re-classed. Anything else (a lazy
+        # loader's proxy, a test's own stub in sys.modules) is left alone.
+        if type(module) is not types.ModuleType:
+            continue
+        try:
+            module.__class__ = _StateGuardModule
+        except TypeError:
+            continue
+
+    yield
+
+
+@pytest.fixture
+def brain_state_mock():
+    """A BrainState stand-in that cannot invent attributes.
+
+    The fix rather than the alarm: `MagicMock(spec=BrainState)` raises
+    AttributeError for any name the real class does not define, so
+    `getattr(state, "missing", default)` returns the default the way it
+    does in production.
+
+    Prefer this over a bare `MagicMock()` in any new test that stands in
+    for state. It is offered rather than enforced because a spec built
+    from the class sees only what BrainState declares at class scope,
+    while BrainState assigns most of its fields in `__init__`; the
+    autouse guard above covers the instance attributes that a spec alone
+    would not.
+    """
+    from unittest.mock import MagicMock
+
+    from api.state import BrainState
+
+    return MagicMock(spec=BrainState)
+
+
 @pytest.fixture(autouse=True)
 def _api_server_state_is_not_left_mocked(request):
     """Fail the test that leaves ``api.server.state`` as a mock.
@@ -496,7 +790,10 @@ def _api_server_state_is_not_left_mocked(request):
     if module is None:
         return
 
-    current = getattr(module, "state", None)
+    # Unwrap first. `_StateGuardModule` wraps a bare mock in a proxy that
+    # is deliberately NOT a Mock, so an `isinstance` check alone would go
+    # blind to precisely the leaks this fixture exists to catch.
+    current = _unwrap_state_mock(getattr(module, "state", None))
     if isinstance(current, Mock):
         # Put the real one back so the whole rest of the session is not
         # collateral damage from one test's leak.
