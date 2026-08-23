@@ -210,6 +210,36 @@ Set these variables in the backend environment:
 | `FERAL_PROXY_AUTH_ALLOWED_GROUPS` | — | Optional comma-separated group allowlist; any intersection is accepted. |
 | `FERAL_PROXY_AUTH_ALLOWED_ORIGINS` | — | Required comma-separated canonical browser origins. |
 
+For Nginx on the same host as FERAL, trust the connection peer, not the
+forwarded browser address:
+
+```bash
+FERAL_PROXY_AUTH_TRUSTED_PROXIES=127.0.0.1
+```
+
+Put the injected headers in a reusable Nginx snippet and include it in every
+location that proxies to FERAL, including the `/v1/session` WebSocket
+location. The identity variables below are placeholders populated by the
+authentication module in front of FERAL:
+
+```nginx
+# /etc/nginx/snippets/feral-proxy-auth.conf
+proxy_set_header X-FERAL-Proxy-User   $authenticated_user;
+proxy_set_header X-FERAL-Proxy-Groups $authenticated_groups;
+include /etc/nginx/snippets/feral-proxy-auth-secret.conf;
+```
+
+Keep `feral-proxy-auth-secret.conf` root-readable only; it should contain the
+matching `proxy_set_header X-FERAL-Proxy-Secret ...` directive. These
+directives replace client-supplied values rather than forwarding them. Nginx
+may still send `X-Forwarded-For`: the supported server entrypoint preserves
+the `127.0.0.1` socket peer before Uvicorn rewrites the request client.
+
+`feral serve` uses that entrypoint automatically. If Uvicorn is launched
+directly, use `python -m uvicorn api.server:uvicorn_app --no-proxy-headers`;
+letting Uvicorn add a second outer proxy-header middleware would erase the
+socket-peer trust boundary before FERAL can record it.
+
 Use placeholders in proxy configuration and keep the backend listener off the
 public Internet. A private direct route may remain for API-key, session-token,
 or phone-bearer clients, but it must not accept proxy identity from any peer
@@ -220,7 +250,11 @@ WebSocket `Upgrade`/`Connection` headers.
 This feature adds an authentication method to protected FERAL routes; it does
 not redefine intentionally open pairing, health, or signed-webhook endpoints.
 Apply the proxy's own access policy to the whole operator hostname unless a
-specific bootstrap or webhook endpoint is deliberately public.
+specific bootstrap or webhook endpoint is deliberately public. When proxy
+authentication is enabled, protected requests without a valid proxy envelope
+cannot use the implicit loopback or `FERAL_LOCAL_BYPASS` paths; explicit
+FERAL API-key, session-token, and phone-bearer authentication remains
+available on its existing routes.
 
 ## Monitoring
 

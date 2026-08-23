@@ -145,7 +145,9 @@ as trusted. The backend authenticates the exact ASGI socket peer address;
 `X-Forwarded-For` and similar forwarded headers do not establish trust. Keep
 the backend off the public Internet; if a private direct route remains, it must
 continue to use FERAL's independent API-key, session-token, or phone-bearer
-authentication.
+authentication. When this feature is enabled, a protected request with no
+valid proxy envelope cannot inherit the implicit loopback or
+`FERAL_LOCAL_BYPASS` exemption; explicit FERAL credentials remain available.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -164,6 +166,9 @@ The proxy must authenticate the user before injecting the identity, groups, and
 assertion headers, and must strip any client-supplied copies first. Do not send
 `FERAL_API_KEY` or `FERAL_PROXY_AUTH_SECRET` to the browser. Preserve the
 `Upgrade` and `Connection` headers for `/v1/session` WebSocket handshakes.
+For same-host Nginx, the trusted proxy is normally `127.0.0.1`, even when
+Nginx also sends the browser address in `X-Forwarded-For`; FERAL preserves the
+pre-forwarding socket peer at its supported Uvicorn entrypoint.
 This feature adds an authentication method to FERAL's protected routes; it does
 not change intentionally open pairing, health, or signed-webhook routes. Apply
 the reverse proxy's own access policy to the whole operator hostname unless a
