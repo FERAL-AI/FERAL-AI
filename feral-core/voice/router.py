@@ -933,7 +933,14 @@ class VoiceRouter:
             )
 
             tts_text = self._get_last_assistant_text(session_id)
-            if tts_text and self._audio:
+            tts_ready = bool(
+                getattr(
+                    self._audio,
+                    "tts_available",
+                    getattr(self._audio, "available", False),
+                )
+            )
+            if tts_text and self._audio and tts_ready:
                 chunks = await self._audio.synthesize_speech(tts_text)
                 if chunks:
                     for chunk in chunks:

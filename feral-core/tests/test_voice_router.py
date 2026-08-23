@@ -117,6 +117,36 @@ async def test_open_session_refuses_classic_mode_when_selected_stt_is_not_ready(
     assert "classic-session" not in router._session_voice_mode
 
 
+async def test_classic_voice_does_not_call_unconfigured_server_tts():
+    pipeline = MagicMock()
+    pipeline.process_audio_chunk = AsyncMock(return_value="spoken request")
+    pipeline.tts_available = False
+    pipeline.synthesize_speech = AsyncMock()
+    orchestrator = MagicMock()
+    orchestrator.handle_command_stream = AsyncMock()
+    memory = MagicMock()
+    memory.working_get.return_value = [
+        {"role": "assistant", "text": "Text delivered to the client"},
+    ]
+    router = VoiceRouter(
+        audio_pipeline=pipeline,
+        orchestrator=orchestrator,
+        memory=memory,
+    )
+
+    await router._handle_whisper_path(
+        session_id="classic-session",
+        audio_b64="AAAA",
+        chunk_index=0,
+        is_final=True,
+        encoding="pcm16",
+        sample_rate=24000,
+    )
+
+    orchestrator.handle_command_stream.assert_awaited_once()
+    pipeline.synthesize_speech.assert_not_awaited()
+
+
 # ── Wake word gating ─────────────────────────────────────────────
 
 async def test_wake_word_blocks_audio():
