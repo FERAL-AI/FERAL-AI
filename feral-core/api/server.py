@@ -5808,6 +5808,17 @@ _HISTORY_METRIC_MAP = {
     ),
     "temperature": ("body_temp", None, None),
     "steps": ("steps", None, None),
+    # HRV was added to _EXTRACTABLE_EVENT_TYPES and to the somatic
+    # bridge in 2026.8.23 and never added here, so the reading moved the
+    # behavioural policy in the moment and left no trace: "how was my
+    # HRV last week" had nothing to read. Same writer-reader gap that
+    # dropped skin_temp and steps on the way into the somatic vector,
+    # one layer further out.
+    #
+    # Source and sample_ts keys match what _handle_biometric_device_event
+    # writes alongside the value, so the lagging-source exclusion above
+    # applies to HRV exactly as it does to heart rate.
+    "hrv_ms": ("hrv", "hrv_source", "hrv_sample_ts"),
 }
 
 
