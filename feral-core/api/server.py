@@ -1422,6 +1422,34 @@ def check_local_bypass_safety() -> None:
     warn_if_unsafe_bypass(bind)
 
 
+def check_proxy_auth_safety() -> None:
+    """Validate optional trusted-proxy auth without logging credentials.
+
+    A broken proxy-auth configuration never becomes an authentication bypass:
+    proxy assertions fail closed while the existing API-key, session-token,
+    and phone-bearer paths remain independently available.
+    """
+    config = config_from_env()
+    if not config.enabled:
+        return
+    try:
+        config.validated()
+    except ProxyAuthError as exc:
+        logger.error(
+            "FERAL_PROXY_AUTH_ENABLED is set, but trusted-proxy auth is "
+            "unavailable: %s. Proxy assertions will be rejected; existing "
+            "token authentication remains available.",
+            exc,
+        )
+        return
+    logger.info(
+        "Trusted-proxy auth enabled for %d peer rule(s) and %d browser "
+        "origin(s).",
+        len(config.trusted_proxies),
+        len(config.allowed_origins),
+    )
+
+
 # What an operator loses when the integration probe sweeper is not running.
 # One string so the three call sites below cannot describe it three ways.
 _PROBE_SWEEPER_LOSS = (
@@ -1517,6 +1545,7 @@ async def refresh_provider_catalog_once(catalog, consecutive_failures: int) -> i
 @app.on_event("startup")
 async def startup():
     check_local_bypass_safety()
+    check_proxy_auth_safety()
 
     # Apply outstanding ~/.feral shape changes before anything reads from
     # it. Runs before state.init() on purpose: a migration exists to make
@@ -1916,7 +1945,7 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
     client_host = ws.client.host if ws.client else None
     _ws_authed = False
 
-    proxy_identity, _proxy_attempted, proxy_error = _proxy_identity(
+    proxy_identity, proxy_attempted, proxy_error = _proxy_identity(
         config_from_env(),
         peer=client_host,
         headers=ws.headers,
@@ -1930,12 +1959,6 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
         except Exception:
             pass
 
-    # Origin and proxy credentials are checked before the handshake is
-    # accepted.  Existing token/loopback authentication retains its original
-    # post-accept first-message behavior.
-    if not _ws_authed and proxy_error:
-        await ws.close(code=4001, reason="Unauthorized")
-        return
     await ws.accept()
 
     # audit-r12 A1 (v2026.5.38) — loopback always bypasses; off-loopback
@@ -1947,11 +1970,23 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
     # would publish an unauthenticated chat socket to the internet. That
     # is the single most dangerous line in the remote-access design.
     _trusted = _session_auth_module.transport_is_trusted(ws.scope)
-    if not _ws_authed and _trusted and is_localhost(client_host):
+    if not _ws_authed and token and (verify_session(token) or token == FERAL_API_KEY):
         _ws_authed = True
-    elif not _ws_authed and _trusted and local_bypass_enabled():
+    elif (
+        not _ws_authed
+        and not proxy_attempted
+        and not proxy_error
+        and _trusted
+        and is_localhost(client_host)
+    ):
         _ws_authed = True
-    elif not _ws_authed and token and (verify_session(token) or token == FERAL_API_KEY):
+    elif (
+        not _ws_authed
+        and not proxy_attempted
+        and not proxy_error
+        and _trusted
+        and local_bypass_enabled()
+    ):
         _ws_authed = True
 
     if not _ws_authed:

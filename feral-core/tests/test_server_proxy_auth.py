@@ -85,7 +85,7 @@ async def test_http_proxy_identity_never_uses_forwarded_for(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_websocket_bad_proxy_envelope_is_rejected_before_accept(monkeypatch):
+async def test_websocket_bad_proxy_envelope_cannot_authenticate(monkeypatch):
     from api.server import client_session
 
     monkeypatch.setenv("FERAL_PROXY_AUTH_ENABLED", "1")
@@ -104,10 +104,11 @@ async def test_websocket_bad_proxy_envelope_is_rejected_before_accept(monkeypatc
         state=SimpleNamespace(),
         close=AsyncMock(),
         accept=AsyncMock(),
+        receive_json=AsyncMock(return_value={}),
     )
 
     with patch("api.server._session_auth_module.transport_is_trusted", return_value=False):
         await client_session(ws)
 
     ws.close.assert_awaited_once_with(code=4001, reason="Unauthorized")
-    ws.accept.assert_not_awaited()
+    ws.accept.assert_awaited_once()
