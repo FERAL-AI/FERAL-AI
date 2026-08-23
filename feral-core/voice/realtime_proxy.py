@@ -33,6 +33,7 @@ from agents.tool_list import (
     cap_tools_with_pins,
     openai_realtime_tool_choice,
     resolve_forced_tool_choice,
+    truncation_notice,
 )
 from skills.call_context import bind_context
 from voice.transcript_filter import should_commit_user_transcript
@@ -326,10 +327,19 @@ class RealtimeSession:
         if self._language_hint:
             transcription_cfg["language"] = self._language_hint
 
+        # Tell the model its list was cut. Without this the voice path
+        # silently exposes a smaller capability set than chat, so the
+        # same sentence works typed and fails spoken with no explanation
+        # -- and the model reports the BRAIN as incapable rather than
+        # the session as limited.
+        instructions = (self._system_prompt or "") + truncation_notice(
+            self._tools, capped,
+        )
+
         session_update = self._ga_session_update(
             model=self._model,
             output_modalities=["audio"],
-            instructions=self._system_prompt,
+            instructions=instructions,
             audio={
                 "input": {
                     "format": {"type": "audio/pcm", "rate": self._input_sample_rate},

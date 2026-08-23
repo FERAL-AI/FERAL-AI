@@ -119,6 +119,90 @@
             "result_budget": "feed"
         },
         {
+            "id": "list_conversations",
+            "read_only_hint": true,
+            "method": "GET",
+            "url": "python://notes_memory/list_conversations",
+            "description": "List the ambient conversations the operator's glasses have recorded, newest first. CALL THIS whenever you are asked whether any conversation was recorded, what was discussed, who was present, or what was said in a meeting. Do NOT answer such a question from your own idea of what you can do: ambient capture is a real, shipped feature and the recordings live in a store only this tool can see. Returns {total, returned, pending, conversations:[{transcript_id, status, recorded_at, summary, people, topics, commitments}]}. total=0 is the only evidence that nothing was recorded. status='pending' means the transcript arrived but is still being summarized, which is NOT the same as no conversation.",
+            "params": [
+                {
+                    "name": "limit",
+                    "type": "integer",
+                    "required": false,
+                    "default": "20",
+                    "description": "How many conversations to return, newest first (max 100)"
+                },
+                {
+                    "name": "with_commitments_only",
+                    "type": "boolean",
+                    "required": false,
+                    "default": "false",
+                    "description": "Return only conversations that produced at least one commitment"
+                },
+                {
+                    "name": "include_detail",
+                    "type": "boolean",
+                    "required": false,
+                    "default": "false",
+                    "description": "Include the full transcript text. Off by default: transcripts run to 20k+ characters and would bury the answer."
+                }
+            ],
+            "returns_description": "{total, returned, pending, conversations:[{transcript_id, status, recorded_at, summary, people, topics, commitments, physiological_note}]}",
+            "ui_hint": "list",
+            "result_budget": "feed"
+        },
+        {
+            "id": "search_conversations",
+            "read_only_hint": true,
+            "method": "GET",
+            "url": "python://notes_memory/search_conversations",
+            "description": "Search recorded ambient conversations by a word or name, across each conversation's summary, the people in it, its topics, its commitments and the transcript itself. Use for 'what did I discuss with Noah', 'did we talk about the investor round', 'when did the deadline come up'. Prefer this over fused_timeline for questions about what was SAID: fused_timeline is time-windowed and cannot answer 'do I have any'.",
+            "params": [
+                {
+                    "name": "query",
+                    "type": "string",
+                    "required": true,
+                    "description": "Word, name or phrase to look for"
+                },
+                {
+                    "name": "limit",
+                    "type": "integer",
+                    "required": false,
+                    "default": "20",
+                    "description": "Maximum conversations to return (max 100)"
+                },
+                {
+                    "name": "include_detail",
+                    "type": "boolean",
+                    "required": false,
+                    "default": "false",
+                    "description": "Include the full transcript text of each match"
+                }
+            ],
+            "returns_description": "{query, total_searched, matched, conversations:[...]}",
+            "ui_hint": "list",
+            "result_budget": "feed"
+        },
+        {
+            "id": "conversation_commitments",
+            "read_only_hint": true,
+            "method": "GET",
+            "url": "python://notes_memory/conversation_commitments",
+            "description": "Every commitment the operator made out loud in a recorded conversation, with the conversation it came from. This is the direct answer to 'what did I say I'd do' and 'what did I promise', which is the question ambient capture exists to answer. Each entry carries the words spoken, a due date when one was actually said, and the summary and people of the conversation it came from, so the answer can be grounded rather than asserted.",
+            "params": [
+                {
+                    "name": "limit",
+                    "type": "integer",
+                    "required": false,
+                    "default": "50",
+                    "description": "Maximum commitments to return (max 200)"
+                }
+            ],
+            "returns_description": "{total_conversations, count, commitments:[{text, due_iso, transcript_id, recorded_at, from_conversation, people}]}",
+            "ui_hint": "list",
+            "result_budget": "feed"
+        },
+        {
             "id": "fused_timeline",
             "method": "POST",
             "url": "python://notes_memory/fused_timeline",

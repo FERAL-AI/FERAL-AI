@@ -4980,6 +4980,11 @@ async def _process_ambient_transcript(
             moments=moments,
             baseline_hr=float(baseline_hr) if isinstance(baseline_hr, (int, float)) else None,
             respiratory_bpm=float(respiratory_bpm) if isinstance(respiratory_bpm, (int, float)) else None,
+            # None means "load ~/.feral/USER.md yourself". Passed
+            # explicitly rather than left to the default so this call
+            # site records that the summariser needs to know who the
+            # operator is: it is deciding which promises are THEIRS.
+            operator_identity=None,
         )
 
         episode_id = ""
