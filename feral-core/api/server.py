@@ -3626,7 +3626,13 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         "final=%s", node_id, chunk_idx, len(audio_b64 or ""),
                         payload_dict.get("is_final", False),
                     )
-                if state.voice_router and audio_b64:
+                # Push-to-talk clients end an utterance with an empty final
+                # frame. The payload carries no audio by design; its job is to
+                # flush what the router already buffered. Dropping every empty
+                # frame here also dropped that boundary, leaving the user's
+                # last words pending until another chunk happened to arrive.
+                is_final = bool(payload_dict.get("is_final", False))
+                if state.voice_router and (audio_b64 or is_final):
                     sessions = state.get_sessions_for_daemon(node_id)
                     target_sid = next(iter(sessions), None)
                     if not target_sid:
@@ -3643,7 +3649,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                             session_id=target_sid,
                             audio_b64=audio_b64,
                             chunk_index=chunk_idx,
-                            is_final=payload_dict.get("is_final", False),
+                            is_final=is_final,
                             encoding=payload_dict.get("encoding", "pcm16"),
                             sample_rate=payload_dict.get("sample_rate", 24000),
                         )

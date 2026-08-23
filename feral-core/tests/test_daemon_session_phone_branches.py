@@ -235,6 +235,59 @@ def test_voice_session_start_preserves_explicit_classic_whisper_mode():
     assert _phone_recorded(mock, "voice_session_start", "allowed")
 
 
+def test_empty_final_audio_chunk_flushes_push_to_talk_session():
+    """Theora ends capture with an empty final frame, not fake audio bytes."""
+    mock = _mock_state_with_supervisor()
+    mock.voice_router = MagicMock()
+    mock.voice_router.open_session = AsyncMock(return_value=MagicMock())
+    mock.voice_router.handle_audio_from_node = AsyncMock()
+
+    with _node_client(mock) as client:
+        with client.websocket_connect(f"/v1/node?api_key={_TEST_NODE_KEY}") as ws:
+            _register_node(ws, node_id="phone-final", node_type="phone")
+            ws.send_json(
+                {
+                    "type": "voice_session_start",
+                    "hup_version": "1.3.0",
+                    "ts": 1734369923.0,
+                    "payload": {
+                        "stream_id": "voice-stream-final",
+                        "sample_rate": 24000,
+                        "channels": 1,
+                        "voice_mode": "whisper",
+                    },
+                }
+            )
+            ws.send_json(
+                {
+                    "type": "audio_chunk",
+                    "hup_version": "1.3.0",
+                    "ts": 1734369923.5,
+                    "payload": {
+                        "node_id": "phone-final",
+                        "stream_id": "voice-stream-final",
+                        "data_b64": "",
+                        "chunk_index": 7,
+                        "is_final": True,
+                        "encoding": "pcm16",
+                        "sample_rate": 24000,
+                        "channels": 1,
+                    },
+                }
+            )
+            _flush_with_known_error(ws)
+
+    mock.voice_router.handle_audio_from_node.assert_awaited_once_with(
+        node_id="phone-final",
+        session_id="voice-stream-final",
+        audio_b64="",
+        chunk_index=7,
+        is_final=True,
+        encoding="pcm16",
+        sample_rate=24000,
+    )
+
+
 def test_voice_interrupt_cancels_inflight_tts():
     mock = _mock_state_with_supervisor()
     realtime_session = MagicMock()
