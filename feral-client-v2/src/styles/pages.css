@@ -1469,11 +1469,14 @@
      tall, and the pane at (936, 24) 320x289 swallowed it, so clicking
      Save again to close it hit `.v2-chat-pane-hint` instead.
      78px clears a 32px action row sitting in main's top padding, and
-     it is expressed against the sysbar so it follows if that changes. */
-  top: calc(var(--v2-sysbar-height) + 78px);
+     it is expressed against `--v2-chrome-top` (the sysbar PLUS any
+     runtime notice rows) so it follows if either changes. Against the
+     sysbar alone it opened over Save again the moment a notice strip
+     pushed the page down. */
+  top: calc(var(--v2-chrome-top) + 78px);
   right: 24px;
   width: 320px;
-  max-height: calc(100vh - var(--v2-sysbar-height) - var(--v2-dock-height) - 110px);
+  max-height: calc(100vh - var(--v2-chrome-top) - var(--v2-dock-height) - 110px);
   overflow-y: auto;
   padding: 16px;
   background: var(--v2-surface-2);
