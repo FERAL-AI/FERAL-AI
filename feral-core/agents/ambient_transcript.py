@@ -228,6 +228,71 @@ _EMOTION_WORDS = frozenset({
 _MOMENT_MIN_SCORE = 0.5
 
 
+#: Characters of USER.md handed to the reduce pass. Enough to carry a
+#: name, a role and the people around the operator; short enough that an
+#: operator who has written pages of profile does not displace the
+#: conversation being summarized.
+_IDENTITY_CHARS = 1200
+
+
+def load_operator_identity() -> str:
+    """The operator's own profile from ``~/.feral/USER.md``, or "".
+
+    Chat has always read this; this module referenced identity zero
+    times, so the summariser was asked to decide which promises belong
+    to "the user" without being told who that is. On a two-person
+    recording that is a coin flip, and the failure mode is filing a
+    colleague's promise as the operator's commitment.
+
+    Returns "" for the UNFILLED template as well as for a missing file.
+    IdentityWorkspace scaffolds USER.md on first construction, so on a
+    fresh install the file exists and says "Tell your agent about
+    yourself here" -- and handing that to the reduce pass under the
+    heading WHO THE USER IS is worse than saying nothing, because it
+    asserts a wrong answer instead of leaving the question open.
+    identity/workspace.py:207 already applies exactly this test when
+    building the system prompt; the same comparison is used here rather
+    than a fresh guess at what "looks unfilled" means.
+
+    Never raises: no profile is a normal state, and a transcript must
+    still be summarized without one.
+    """
+    try:
+        from identity.workspace import DEFAULT_USER_MD, IdentityWorkspace
+
+        text = (IdentityWorkspace().read_user() or "").strip()
+        if not text or text == DEFAULT_USER_MD.strip():
+            return ""
+    except Exception as exc:
+        logger.debug("ambient: could not read USER.md: %s", exc)
+        return ""
+    return text
+
+
+def _operator_identity_block(identity_text: Optional[str]) -> str:
+    """Format the operator profile for the reduce prompt, or "".
+
+    ``identity_text=None`` means "load it"; an explicit ``""`` means the
+    caller has one and it is empty, which is not the same request.
+    """
+    text = load_operator_identity() if identity_text is None else identity_text
+    text = (text or "").strip()
+    if not text:
+        return ""
+    return (
+        "\n\nWHO THE USER IS\n"
+        "This conversation was recorded by the wearable of the person\n"
+        "described below. In this transcript, THE USER means this person\n"
+        "and nobody else.\n\n"
+        f"{text[:_IDENTITY_CHARS]}\n\n"
+        "Use this to tell the user's own words from other speakers'. A\n"
+        "promise is a commitment only when THIS person made it; when\n"
+        "somebody else promises something, it belongs in the summary\n"
+        "instead. If the transcript does not make clear who was speaking,\n"
+        "say so in the summary rather than assigning the promise.\n"
+    )
+
+
 def usable_moments(moments: Any) -> list[dict]:
     """The moments a summary is allowed to reason about.
 
@@ -349,6 +414,7 @@ async def summarize_transcript(
     moments: Optional[list[dict]] = None,
     baseline_hr: Optional[float] = None,
     respiratory_bpm: Optional[float] = None,
+    operator_identity: Optional[str] = None,
 ) -> TranscriptOutcome:
     """Map every chunk, reduce once to JSON, degrade rather than fail.
 
@@ -419,6 +485,22 @@ async def summarize_transcript(
             "confidence)", dropped, len(moments or []),
         )
     reduce_prompt = _REDUCE_PROMPT
+    # Who "I" is.
+    #
+    # This module referenced identity zero times, so the reduce pass was
+    # asked to decide which promises belong to THE USER while having no
+    # idea who the user is. Chat has always known (it greets the
+    # operator by name from ~/.feral/USER.md); the summariser did not,
+    # and it is the one place where getting "the user" wrong turns a
+    # colleague's promise into the operator's to-do.
+    #
+    # Placed before the physiology block so the identity frames
+    # everything after it, and capped because USER.md is operator-
+    # authored prose of unbounded length while this is one line of
+    # context in a summarization prompt.
+    identity = _operator_identity_block(operator_identity)
+    if identity:
+        reduce_prompt = reduce_prompt + identity
     if kept_moments:
         reduce_prompt = reduce_prompt + _PHYSIOLOGY_RULES + render_moments(
             kept_moments,

@@ -1,10 +1,180 @@
 # Changelog
 
-<!-- feral-version: 2026.8.22 -->
+<!-- feral-version: 2026.8.23 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.23] - 2026-08-22 - what it heard, and what it can reach
+
+Two reports, one shape: the agent held a capability and could not see
+it, so it told the operator the capability did not exist.
+
+Asked whether any conversation had been recorded, it said it records no
+audio, while four transcripts sat in its own store with commitments
+already extracted. Spoken to, it could not drive the Mac, while the
+identical sentence typed worked. Neither was a failed attempt. In both
+cases the agent answered from a model of itself that was smaller than
+the machine it was running on.
+
+### Fixed
+
+- **Voice could not drive the Mac, and voice and text disagreed about
+  what the agent can do.** Reported: "open <url> in chrome" spoken over
+  the iOS app did nothing, while the identical sentence typed worked.
+
+  Not a permissions problem. The cause was the OpenAI Realtime 128-tool
+  cap in `agents/tool_list.py`. Measured on a real registry,
+  `get_all_tools()` returns **265** tools, not the 176 the comment
+  claimed, so 137 are dropped from every voice session, and straight
+  truncation dropped **all ten** `desktop_control__*` tools. Four of the
+  twelve pins were `cutebot__*`: a demo robot outranked the operator's
+  own computer.
+
+  The narrow fix is pinning desktop control. `desktop_control__open_url`
+  is pinned ahead of `open_app` deliberately: `open_url` shells
+  `open -a <app> -- <url>` through LaunchServices and needs no macOS
+  Automation grant, while `open_app` sends an AppleScript that TCC gates
+  per responsible process.
+
+  The wider fix is that truncation was arbitrary with respect to
+  capability. Measured, it left **17 skills with zero tools** on voice,
+  including all 49 `browser` tools and every one of calendar, email,
+  github, google_drive, notion, microsoft365 and health_data, while
+  cutebot kept 6 of 6 and spotify 10 of 10. A skill with no tools is
+  invisible, and an invisible capability is exactly what makes the same
+  sentence work typed and fail spoken.
+
+  `cap_tools_with_pins` now spends its budget breadth-first: every skill
+  is guaranteed `MIN_TOOLS_PER_SKILL` before any remaining budget goes
+  to depth. Result on the live registry: **42 of 42 skills represented,
+  0 fully lost**, against 17 lost before. Six skills trade depth for
+  that breadth (`spotify_music` 10 to 4, `gui_computer_use` 11 to 3);
+  the spoken-word essentials among them are pinned so voice can still
+  operate what it can see.
+
+  `cutebot__halt` stays pinned alongside `cutebot__drive`. A session
+  that can start a physically moving machine and cannot stop it is worse
+  than one that can do neither.
+
+- **The voice session did not tell the model its tool list was cut.**
+  The complaint was not only that the Mac was unreachable, it was that
+  it failed "with no error explaining the difference". The cap is a
+  property of the Realtime session, not of the brain, and nothing told
+  the model it held a smaller list than the text path, so it answered
+  from a smaller world without knowing the world was smaller and
+  reported the BRAIN as incapable.
+
+  `truncation_notice()` now appends one block to the voice system
+  prompt stating how many tools of the total this session carries, that
+  a missing tool does not mean the brain cannot do it, and that the
+  honest response is to offer to do it in chat.
+
+### Added
+
+- **The agent can see recorded conversations.** Three new
+  `notes_memory` endpoints over a new read module
+  (`memory/ambient_conversations.py`): `list_conversations`,
+  `search_conversations`, `conversation_commitments`.
+
+  There was no tool for this. Asked "is there any ambient conversation
+  recorded?", the agent answered "I don't have any ambient audio
+  recording active. I only pick up what's directly spoken here" while
+  the brain held four transcripts with digests generated and
+  commitments already extracted from one of them.
+
+  That is not a failed search. A failed search is a fact about the
+  world; this was a confident false claim about a capability, produced
+  by consulting a self-model because nothing else was available to
+  consult. The ADHD case ambient capture exists for is "what did I say
+  I'd do", and the brain had the answer and denied holding it.
+
+  `list_conversations` returns `{total, returned, pending,
+  conversations}` rather than a bare list, so `total: 0` is the only
+  thing that licenses "nothing was recorded", and a transcript that has
+  arrived but is not yet summarized reports `status: "pending"` instead
+  of being invisible. Full transcripts are withheld unless asked for:
+  they run past 20k characters and a list of ten would bury the answer.
+  `conversation_commitments` answers "what did I say I'd do" directly,
+  each commitment carrying the conversation, the people and the due
+  date, so the answer is grounded rather than asserted.
+
+  `notes_memory__fused_timeline` was the nearest existing tool and
+  could not do this: it is time-windowed and cannot answer "do I have
+  any".
+
+### Fixed
+
+- **The system prompt never mentioned that ambient capture exists.**
+  Even with a tool available, the model volunteered a capability claim
+  instead of checking. A new "Ambient Conversation Capture" block
+  states that the operator's glasses record real conversations, that
+  transcripts arrive as `ambient_conversation` episodes, that the model
+  does NOT know from introspection whether anything was recorded, and
+  that the honest response to any question about spoken conversations
+  is to call the tool first. It names the three tools, says `total: 0`
+  is the only evidence of nothing, and says a `pending` conversation
+  still counts.
+
+- **Overheard speech was rewriting the operator's self-model.** Every
+  `AboutMeStore` extractor pattern is first person: "I prefer X", "I
+  live in X", "My wife <Name>", "I work as X". On a chat episode that
+  "I" is the operator by construction. On an `ambient_conversation`
+  episode it is whoever was talking, and the operator is frequently not
+  the one talking.
+
+  Measured, feeding one overheard sentence through `episode_save`:
+
+  ```
+  event_type=conversation          -> 5 about-me facts
+        preference     'Prefers: tea over coffee...'
+        relationship   'Family: Sarah'
+        place          'Lives in Lisbon...'
+        context        'Works as a tax accountant'
+  event_type=ambient_conversation  -> 5 facts, same text
+  ```
+
+  A stranger's wife, city and job became facts about the operator at
+  0.5 confidence, and `ideas_engine` then asked the operator to confirm
+  them. The profile filling with someone else's preferences is the
+  smaller half; the larger half is that third parties' families and
+  home towns were filed under the operator's identity by a device they
+  did not know was listening. Recording a conversation is not consent
+  to mine the other speaker for a personal profile.
+
+  `episode_save` now skips About-Me extraction for event types in
+  `_NO_SELF_MODEL_EVENT_TYPES`. The same text now yields 5 facts from
+  chat and 0 from ambient. Transcripts are still summarized, still
+  searchable, and still produce commitments; they just no longer
+  silently rewrite who the operator is.
+
+- **The ambient summariser did not know who the operator was.**
+  `agents/ambient_transcript.py` referenced identity zero times, so the
+  reduce pass was asked to decide which promises belong to "the user"
+  without being told who that is. Chat has always known, and greets the
+  operator by name from the same file. On a two-person recording this
+  is a coin flip, and the failure mode is filing a colleague's promise
+  as the operator's commitment.
+
+  The reduce prompt now carries a "WHO THE USER IS" block from
+  `~/.feral/USER.md`, capped at 1200 characters, with an explicit rule
+  that a promise is a commitment only when THIS person made it and that
+  an unclear speaker should be said so rather than assigned.
+
+  The unfilled template counts as no profile. `IdentityWorkspace`
+  scaffolds `USER.md` on first construction, so on a fresh install the
+  file exists and says "Tell your agent about yourself here"; passing
+  that under a "WHO THE USER IS" heading asserts a wrong answer instead
+  of leaving the question open. This uses the same
+  `!= DEFAULT_USER_MD` comparison `identity/workspace.py` already
+  applies when building the system prompt.
+
+### Coverage
+
+- pytest (feral-core): 9996 passed, 48 skipped, 0 failed.
+- vitest (feral-client-v2): 1251 passed across 157 files.
+- ruff: clean on the CI ruleset.
 
 ## [2026.8.22] - 2026-08-22 - the body in the loop
 
