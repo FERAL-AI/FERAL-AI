@@ -596,16 +596,16 @@ def _proxy_identity(
     if not config.enabled:
         return None, False, False
 
-    try:
-        config.validated()
-    except ProxyAuthError:
-        return None, False, True
-
     names = (config.secret_header, config.identity_header, config.groups_header)
     attempted = any(
         any(str(key).lower() == name.lower() for key in names)
         for key in headers.keys()
     )
+    try:
+        config.validated()
+    except ProxyAuthError:
+        return None, attempted, True
+
     if not attempted:
         return None, False, False
     try:
@@ -671,21 +671,19 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             except Exception:
                 pass
             return await call_next(request)
+        if proxy_attempted and proxy_error:
+            return JSONResponse(
+                {"error": "Unauthorized — invalid trusted proxy authentication"},
+                status_code=401,
+            )
 
         auth = request.headers.get("authorization", "")
-        # Existing API-key callers remain valid even when a request also
-        # carries a bad proxy envelope; the envelope itself is never treated
-        # as authenticated in that case.
         if auth == f"Bearer {FERAL_API_KEY}":
             return await call_next(request)
 
         if trusted and _session_auth_module.is_localhost(client_host):
-            if proxy_attempted or proxy_error:
-                return JSONResponse({"error": "Unauthorized — invalid trusted proxy authentication"}, status_code=401)
             return await call_next(request)
         if trusted and _session_auth_module.local_bypass_enabled():
-            if proxy_attempted or proxy_error:
-                return JSONResponse({"error": "Unauthorized — invalid trusted proxy authentication"}, status_code=401)
             return await call_next(request)
 
         # v2026.5.26 — phone-bearer HTTP auth. Pre-fix the middleware
@@ -1959,6 +1957,13 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
         except Exception:
             pass
 
+    # A supplied proxy envelope must authenticate in its own right. Reject a
+    # spoofed or partial envelope before upgrading the connection. With no
+    # envelope, the existing query-token and first-message-token protocols are
+    # unchanged; the latter necessarily authenticates after the HTTP upgrade.
+    if not _ws_authed and proxy_attempted and proxy_error:
+        await ws.close(code=4001, reason="Unauthorized")
+        return
     await ws.accept()
 
     # audit-r12 A1 (v2026.5.38) — loopback always bypasses; off-loopback
@@ -1974,16 +1979,12 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
         _ws_authed = True
     elif (
         not _ws_authed
-        and not proxy_attempted
-        and not proxy_error
         and _trusted
         and is_localhost(client_host)
     ):
         _ws_authed = True
     elif (
         not _ws_authed
-        and not proxy_attempted
-        and not proxy_error
         and _trusted
         and local_bypass_enabled()
     ):

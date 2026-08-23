@@ -77,6 +77,40 @@ def test_secret_and_identity_are_required_and_allowlists_apply():
         authenticate_proxy(cfg(allowed_groups=("admins",)), socket_client_ip="10.0.0.2", headers=headers())
 
 
+def test_asserted_identity_and_groups_are_bounded_and_reject_controls():
+    with pytest.raises(ProxyAuthError, match="identity"):
+        authenticate_proxy(
+            cfg(),
+            socket_client_ip="10.0.0.2",
+            headers=headers(**{"X-FERAL-Proxy-User": "bad\x00user"}),
+        )
+    with pytest.raises(ProxyAuthError, match="identity"):
+        authenticate_proxy(
+            cfg(),
+            socket_client_ip="10.0.0.2",
+            headers=headers(**{"X-FERAL-Proxy-User": "x" * 513}),
+        )
+    with pytest.raises(ProxyAuthError, match="groups"):
+        authenticate_proxy(
+            cfg(),
+            socket_client_ip="10.0.0.2",
+            headers=headers(**{"X-FERAL-Proxy-Groups": "ok|bad\x00group"}),
+        )
+
+
+def test_duplicate_proxy_headers_are_rejected():
+    with pytest.raises(ProxyAuthError, match="duplicate"):
+        authenticate_proxy(
+            cfg(),
+            socket_client_ip="10.0.0.2",
+            headers={
+                "X-FERAL-Proxy-Secret": "shared-secret",
+                "x-feral-proxy-secret": "shared-secret",
+                "X-FERAL-Proxy-User": "noah",
+            },
+        )
+
+
 def test_headers_are_case_insensitive_and_groups_deduplicate():
     identity = authenticate_proxy(
         cfg(),

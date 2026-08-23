@@ -12,6 +12,7 @@ import hmac
 import ipaddress
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Mapping, Optional
 from urllib.parse import urlsplit
@@ -32,6 +33,10 @@ _RESERVED_PROXY_HEADERS = {
     "x-original-uri",
     "x-original-url",
 }
+_MAX_SECRET_LENGTH = 4096
+_MAX_IDENTITY_LENGTH = 512
+_MAX_GROUP_HEADER_LENGTH = 16384
+_MAX_GROUP_COUNT = 256
 
 
 class ProxyAuthError(ValueError):
@@ -57,7 +62,11 @@ class ProxyAuthConfig:
         """Validate all security-critical settings, failing closed."""
         if not self.enabled:
             raise ProxyAuthError("proxy authentication is disabled")
-        if not self.shared_secret.strip():
+        if (
+            not self.shared_secret.strip()
+            or len(self.shared_secret) > _MAX_SECRET_LENGTH
+            or _has_control_character(self.shared_secret)
+        ):
             raise ProxyAuthError("proxy authentication secret is missing")
         if not self.trusted_proxies:
             raise ProxyAuthError("trusted proxy list is missing")
@@ -138,15 +147,27 @@ def authenticate_proxy(
     if not supplied or not hmac.compare_digest(supplied, config.shared_secret):
         raise ProxyAuthError("proxy shared secret is invalid")
     user = _header(headers, config.identity_header).strip()
-    if not user:
-        raise ProxyAuthError("proxy identity is missing")
+    if (
+        not user
+        or len(user) > _MAX_IDENTITY_LENGTH
+        or _has_control_character(user)
+    ):
+        raise ProxyAuthError("proxy identity is missing or invalid")
+    raw_groups = _header(headers, config.groups_header)
+    if len(raw_groups) > _MAX_GROUP_HEADER_LENGTH:
+        raise ProxyAuthError("proxy groups assertion is too large")
     groups = tuple(
         dict.fromkeys(
             x.strip()
-            for x in _header(headers, config.groups_header).split(config.groups_separator)
+            for x in raw_groups.split(config.groups_separator)
             if x.strip()
         )
     )
+    if len(groups) > _MAX_GROUP_COUNT or any(
+        len(group) > _MAX_IDENTITY_LENGTH or _has_control_character(group)
+        for group in groups
+    ):
+        raise ProxyAuthError("proxy groups assertion is invalid")
     if config.allowed_users and user not in config.allowed_users:
         raise ProxyAuthError("proxy identity is not allowed")
     if config.allowed_groups and not set(groups).intersection(config.allowed_groups):
@@ -193,11 +214,21 @@ def authorize_browser_origin(
 
 
 def _header(headers: Mapping[str, str], name: str) -> str:
+    getlist = getattr(headers, "getlist", None)
+    if callable(getlist):
+        values = [str(value) for value in getlist(name)]
+        if len(values) > 1:
+            raise ProxyAuthError(f"duplicate proxy-auth header: {name}")
+        return values[0] if values else ""
+
     wanted = name.lower()
+    values = []
     for key, value in headers.items():
         if str(key).lower() == wanted:
-            return str(value)
-    return ""
+            values.append(str(value))
+    if len(values) > 1:
+        raise ProxyAuthError(f"duplicate proxy-auth header: {name}")
+    return values[0] if values else ""
 
 
 def _ip_trusted(peer: str, entries: tuple[str, ...]) -> bool:
@@ -219,6 +250,10 @@ def _ip_trusted(peer: str, entries: tuple[str, ...]) -> bool:
 
 def _valid_origin(origin: str) -> bool:
     return _canonical_origin(origin) is not None
+
+
+def _has_control_character(value: str) -> bool:
+    return any(unicodedata.category(character).startswith("C") for character in value)
 
 
 def _canonical_origin(origin: str) -> Optional[str]:
