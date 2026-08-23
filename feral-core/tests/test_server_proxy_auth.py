@@ -175,7 +175,7 @@ async def test_websocket_bad_proxy_envelope_is_rejected_before_accept(monkeypatc
     monkeypatch.setenv("FERAL_PROXY_AUTH_ALLOWED_ORIGINS", "https://dashboard.example")
 
     ws = SimpleNamespace(
-        client=("10.20.30.40", 443),
+        client=SimpleNamespace(host="10.20.30.40", port=443),
         scope={"type": "websocket", "client": ("10.20.30.40", 443)},
         headers={
             "X-FERAL-Proxy-Secret": "wrong",

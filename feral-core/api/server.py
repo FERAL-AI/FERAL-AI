@@ -598,8 +598,8 @@ def _proxy_identity(
 
     names = (config.secret_header, config.identity_header, config.groups_header)
     attempted = any(
-        any(str(key).lower() == name.lower() for key in names)
-        for key in headers.keys()
+        any(str(key).lower() == name.lower() for key in headers.keys())
+        for name in names
     )
     try:
         config.validated()
