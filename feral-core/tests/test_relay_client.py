@@ -653,6 +653,7 @@ async def test_tunnel_listener_serves_untrusted_app_and_not_app():
         assert listener.app is not server.app
         assert isinstance(listener.app, server.UntrustedTransport)
         assert listener.app.app is server.app
+        assert listener._server.config.proxy_headers is False
         assert port and port != brain_port()
         assert listener.host == "127.0.0.1"
     finally:

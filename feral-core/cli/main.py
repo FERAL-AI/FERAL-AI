@@ -721,20 +721,17 @@ def _spawn_brain_server(
         import uvicorn as _uvicorn
         try:
             config = _uvicorn.Config(
-                "api.server:app",
+                "api.server:uvicorn_app",
                 host=host,
                 port=port,
                 log_level="warning",
                 access_log=False,
-                # Explicit, not inherited. uvicorn 0.30.6 defaults
-                # proxy_headers=True with forwarded_allow_ips="127.0.0.1",
-                # and that default is the only reason Tailscale Funnel
-                # traffic does not hit the loopback auth bypass in
-                # api/server.py. A uvicorn bump flipping it would open
-                # the entire API. Pin it here so that cannot happen
-                # silently.
-                proxy_headers=True,
-                forwarded_allow_ips="127.0.0.1",
+                # ``uvicorn_app`` explicitly composes raw-peer capture
+                # outside Uvicorn's proxy-header rewrite. A second wrapper
+                # here would rewrite ``scope["client"]`` before the true
+                # socket peer can be preserved. The inner rewrite still
+                # trusts only loopback, retaining the Funnel boundary.
+                proxy_headers=False,
                 **ssl_kwargs,
             )
             server = _uvicorn.Server(config)

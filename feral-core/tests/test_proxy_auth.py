@@ -1,12 +1,15 @@
 import pytest
 
 from security.proxy_auth import (
+    RAW_SOCKET_PEER_SCOPE_KEY,
     ProxyAuthConfig,
     ProxyAuthError,
     ProxyIdentity,
     authenticate_proxy,
     authorize_browser_origin,
     config_from_env,
+    raw_socket_peer_ip,
+    uvicorn_proxy_headers_app,
 )
 
 
@@ -42,6 +45,48 @@ def test_never_uses_forwarded_for_as_trust_boundary():
             socket_client_ip="203.0.113.7",
             headers=headers(**{"X-Forwarded-For": "10.22.1.4"}),
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scope_type", "forwarded_proto", "expected_scheme"),
+    [("http", "https", "https"), ("websocket", "https", "wss")],
+)
+async def test_raw_peer_is_captured_before_uvicorn_rewrites_http_and_websocket(
+    scope_type,
+    forwarded_proto,
+    expected_scheme,
+):
+    seen = {}
+
+    async def downstream(scope, receive, send):
+        seen.update(scope)
+
+    wrapped = uvicorn_proxy_headers_app(downstream)
+    scope = {
+        "type": scope_type,
+        "client": ("127.0.0.1", 43120),
+        "scheme": "http" if scope_type == "http" else "ws",
+        "headers": [
+            (b"x-forwarded-for", b"203.0.113.9"),
+            (b"x-forwarded-proto", forwarded_proto.encode()),
+        ],
+    }
+
+    await wrapped(scope, None, None)
+
+    assert seen["client"] == ("203.0.113.9", 0)
+    assert seen["scheme"] == expected_scheme
+    assert seen[RAW_SOCKET_PEER_SCOPE_KEY] == ("127.0.0.1", 43120)
+    assert raw_socket_peer_ip(seen) == "127.0.0.1"
+
+
+def test_present_but_invalid_raw_peer_does_not_fall_back_to_rewritten_client():
+    scope = {
+        "client": ("10.20.30.40", 443),
+        RAW_SOCKET_PEER_SCOPE_KEY: None,
+    }
+    assert raw_socket_peer_ip(scope) is None
 
 
 @pytest.mark.parametrize(

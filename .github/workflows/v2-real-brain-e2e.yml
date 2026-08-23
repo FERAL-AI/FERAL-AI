@@ -84,7 +84,7 @@ jobs:
         working-directory: feral-core
         run: |
           mkdir -p "$FERAL_HOME"
-          nohup python -m uvicorn api.server:app \
+          nohup python -m uvicorn api.server:uvicorn_app --no-proxy-headers \
             --host 127.0.0.1 --port 9461 > /tmp/brain.log 2>&1 &
           for i in $(seq 1 90); do
             code=$(curl -s -o /dev/null -w '%{http_code}' \

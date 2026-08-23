@@ -150,7 +150,7 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          python -m uvicorn api.server:app --host 127.0.0.1 --port 9100 &
+          python -m uvicorn api.server:uvicorn_app --no-proxy-headers --host 127.0.0.1 --port 9100 &
           UVI_PID=$!
           trap 'kill "${UVI_PID}" 2>/dev/null || true' EXIT
           # Wait up to 60s for the Brain to finish booting (35 subsystems).
@@ -257,7 +257,7 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          python -m uvicorn api.server:app --host 127.0.0.1 --port 9100 &
+          python -m uvicorn api.server:uvicorn_app --no-proxy-headers --host 127.0.0.1 --port 9100 &
           UVI_PID=$!
           trap 'kill "${UVI_PID}" 2>/dev/null || true' EXIT
           BOOTED=0

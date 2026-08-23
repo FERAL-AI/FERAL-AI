@@ -14,7 +14,7 @@ import os
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 from urllib.parse import urlsplit
 
 
@@ -37,6 +37,63 @@ _MAX_SECRET_LENGTH = 4096
 _MAX_IDENTITY_LENGTH = 512
 _MAX_GROUP_HEADER_LENGTH = 16384
 _MAX_GROUP_COUNT = 256
+
+# Uvicorn's proxy-header middleware intentionally rewrites ``scope["client"]``
+# to the forwarded browser address.  Proxy authentication needs a different
+# fact: the TCP peer that supplied the assertion.  This private scope key is
+# stamped by an outer ASGI wrapper before Uvicorn performs that rewrite.
+RAW_SOCKET_PEER_SCOPE_KEY = "feral.raw_socket_peer"
+
+
+class RawSocketPeerMiddleware:
+    """Preserve the server-reported socket peer for HTTP and WebSocket scopes.
+
+    This middleware must wrap (sit outside) any forwarded-header middleware.
+    Network clients cannot populate ASGI scope extensions, so the preserved
+    value is suitable as one input to a trust decision; forwarded headers are
+    not.
+    """
+
+    def __init__(self, app: Any):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") in {"http", "websocket"}:
+            scope = dict(scope)
+            scope.setdefault(RAW_SOCKET_PEER_SCOPE_KEY, scope.get("client"))
+        await self.app(scope, receive, send)
+
+
+def uvicorn_proxy_headers_app(app: Any, *, trusted_hosts: str = "127.0.0.1") -> Any:
+    """Compose Uvicorn proxy-header handling without losing the socket peer.
+
+    Callers must set ``proxy_headers=False`` on Uvicorn itself.  Otherwise
+    Uvicorn would add another, outer rewrite before this wrapper can capture
+    the connection peer.
+    """
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    return RawSocketPeerMiddleware(
+        ProxyHeadersMiddleware(app, trusted_hosts=trusted_hosts)
+    )
+
+
+def raw_socket_peer_ip(scope: Mapping[str, Any]) -> Optional[str]:
+    """Return the pre-forwarding socket peer, falling back for bare ASGI apps.
+
+    Shipped Uvicorn paths stamp ``RAW_SOCKET_PEER_SCOPE_KEY``.  The fallback
+    keeps direct ASGI embedding and TestClient useful; when the key is present
+    but empty or malformed, the function fails closed instead of consulting a
+    possibly rewritten ``scope["client"]`` value.
+    """
+    if RAW_SOCKET_PEER_SCOPE_KEY in scope:
+        peer = scope.get(RAW_SOCKET_PEER_SCOPE_KEY)
+    else:
+        peer = scope.get("client")
+    if not isinstance(peer, (tuple, list)) or not peer:
+        return None
+    host = peer[0]
+    return host if isinstance(host, str) and host else None
 
 
 class ProxyAuthError(ValueError):
