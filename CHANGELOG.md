@@ -1,10 +1,155 @@
 # Changelog
 
-<!-- feral-version: 2026.8.24 -->
+<!-- feral-version: 2026.8.25 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.25] - 2026-08-23 - tests that can fail
+
+2026.8.24 added one check that could fail and said the next step was to
+close the traps behind it. This is that work, and it immediately caught
+two defects the previous two releases had introduced. Both had guard
+tests. Both guard tests passed.
+
+That is the finding worth carrying forward: the problem was never
+missing tests, it was tests that could not fail.
+
+### Fixed
+
+- **The voice truncation notice was dead on every session since it
+  shipped.** 2026.8.23 added `truncation_notice()` so a voice model
+  would be told its tool list had been cut, and
+  `RealtimeProxy._get_tools()` capped the registry to 128 before
+  handing it to `RealtimeSession`. `configure()` then computed
+  `truncation_notice(self._tools, capped)` on a 128-item list against
+  itself, `len(capped) >= len(tools)` was true, and the notice was the
+  empty string. Measured live: 265 tools registered, 128 sent, 137
+  dropped, model told nothing.
+
+  The guard test written alongside it, `test_the_notice_reaches_the_
+  realtime_session`, read `realtime_proxy.py` as TEXT and grepped for
+  `truncation_notice(` and `instructions=instructions`. Both still
+  matched. It was a test that could not fail.
+
+  `start_session` now passes the raw list; `configure()` still caps
+  before sending, so nothing extra reaches the wire. `_get_tools()`
+  stays capped for the turn hooks, deliberately: they pick a tool to
+  FORCE, and a forced name the session never declared is an error event
+  on the wire rather than a tool call.
+
+- **HRV reached the behavioural policy and left no trace.**
+  `_HISTORY_METRIC_MAP` decides which readings are written to the
+  durable biometric time series, which is what answers "how was my HRV
+  last week". `hrv` was added to `_EXTRACTABLE_EVENT_TYPES` and to the
+  somatic bridge in 2026.8.23 and never added here. Same writer-reader
+  gap that dropped `skin_temperature` and `steps` on their way into the
+  somatic vector, one layer further out, and invisible in the same way:
+  nothing errors, the reading simply is not there when somebody asks
+  for a trend.
+
+- **A negative preference was stored as its own opposite.** The
+  About-Me extractor has two patterns sharing the `preference` kind,
+  positive (`I prefer X`) and negative (`I don't X`), and the text
+  template was keyed on the kind alone. `"I don't drink coffee"` was
+  written down as `"Prefers: drink coffee"`.
+
+  The `negative` tag WAS recorded, and recording it is not enough:
+  `system_prompt_chunk` emits `f.text` and nothing else, so the tag
+  never reaches the model and the inverted sentence is what lands in
+  the system prompt. Found in a real operator profile, where "I don't
+  know been working on the demo" had become a stated preference.
+
+### Added
+
+- **A guard for `getattr(<MagicMock>, name, default)`, which never
+  reaches its default.** This shipped twice in one week: the
+  `/api/dashboard` 500, and `_somatic_state_for_turn` putting an
+  unserialisable mock on a chat response.
+
+  Any spec-less mock assigned to the `state` attribute of an `api.*`
+  module is now wrapped so that it raises `AttributeError` instead of
+  auto-vivifying a child mock, when the name is either absent from the
+  real `BrainState` or holds a non-`None` scalar there. `AttributeError`
+  is the point: it is exactly what `getattr` catches, so the default
+  goes live again and the trap closes rather than merely being
+  reported.
+
+  A name-existence check alone would have missed the real bug.
+  `started_at` IS a real float on a real `BrainState`; what broke
+  production was the mock answering with a `MagicMock` where a float was
+  declared. Hence the scalar-type check.
+
+  Zero existing tests broke. 5 of its 11 tests fail with the wrapper
+  disabled, reproducing the original production symptoms.
+
+- **Real-brain tests for the voice wire payload and the ambient
+  websocket chain.** The two surfaces where every defect of the past
+  week lived and which had no real-brain coverage.
+
+  The voice tests boot a real `RealtimeProxy` over the real
+  `SkillRegistry`, let a real `session.created` event drive the real
+  `configure()`, and inspect the JSON handed to the transport. Only the
+  OpenAI socket is faked. That is what caught the dead notice above.
+
+  The ambient tests drive a real bearer against `/v1/node`, a real
+  `ambient_transcript` frame through `parse_message` and
+  `daemon_session`, the real detached summariser, both digest legs, and
+  then ask the real skill registry for the conversation back.
+
+  Every test was verified by breaking the thing it targets and watching
+  it go red: removing `desktop_control__open_url` from the pins, passing
+  the nested chat tool shape, renaming `digest_json` in the reader's
+  column list, and renaming the `ambient_transcript` dispatch branch.
+
+- **A Linux-only regeneration path for the mypy ratchet.**
+  `scripts/regen_mypy_baseline.py` plus a `workflow_dispatch` workflow
+  that runs it on `ubuntu-latest` and opens a PR. The script REFUSES to
+  write the gated file anywhere but Linux.
+
+  The count is platform dependent, which is why the gate has been red on
+  every PR: the file records 683 while CI measures near 749, and a
+  baseline regenerated on a laptop does not merely drift, it keeps the
+  step red for a reason no author can act on. The old header said
+  "regenerate with `mypy .`", which is precisely the instruction that
+  produced the wrong number.
+
+  A PR rather than an artifact, because a PR is self-verifying: CI runs
+  the typecheck job on it, on Linux, against the baseline it introduces.
+  The comparison logic is untouched; no tolerance was added.
+
+- **`scripts_audit/about_me_provenance.py`**, which reconstructs which
+  About-Me facts came from speech the operator merely overheard. The
+  2026.8.23 fix stopped new pollution and could not un-write what was
+  stored, and the rows do not record their own origin. Correlated on
+  time, which is exact in practice because the extractor runs inline at
+  the tail of processing. READ ONLY by default, with a timestamped
+  backup before any deletion.
+
+### Known
+
+- **The mypy gate is still red and needs one human action.** This
+  release shipped the mechanism, not the number. Dispatch
+  "Brain - mypy baseline" from the Actions tab, confirm the provenance
+  block reads `platform : Linux`, and merge the PR it opens.
+- `_get_raw_tools()` is only measured against, never sent. If a future
+  change sends it, the 128 cap is bypassed and OpenAI rejects the
+  session.
+- The MagicMock guard covers `state` on `api.*` modules only. A bare
+  mock passed as a function argument or held in a local is untouched,
+  and the `_somatic_state_for_turn` shape (a mock's method RETURN value)
+  remains guarded only by its own `isinstance` check.
+- A local Ollama on the developer machine means unsetting
+  `OPENAI_API_KEY` is not sufficient to keep a test offline. The ambient
+  sweep detaches the LLM explicitly after boot.
+
+### Coverage
+
+- pytest (feral-core): 10088 passed, 48 skipped, 0 failed.
+- vitest (feral-client-v2): 1251 passed across 157 files.
+- ruff: clean on the CI ruleset.
+
 
 ## [2026.8.24] - 2026-08-23 - a check that can fail
 

@@ -1,0 +1,148 @@
+name: Brain - mypy baseline
+
+# Regenerates feral-core/mypy-baseline.txt, the ratchet the "typecheck" job in
+# ci.yml compares against, and opens a pull request with the result.
+#
+# WHY THIS EXISTS AS ITS OWN MANUAL WORKFLOW
+#
+# The mypy error count is platform dependent. The gate runs on ubuntu-latest;
+# a developer regenerating the baseline on macOS measures a different number
+# for the same commit, commits it, and the gate stays red against it. That is
+# not hypothetical: the committed baseline read 683 while CI measured ~749,
+# so the typecheck step failed on every pull request for months. A check that
+# is always red is worse than no check, because it cannot report the one thing
+# it was built to report.
+#
+# Only a Linux runner can settle the number, so regeneration has to happen
+# here rather than on a laptop. scripts/regen_mypy_baseline.py enforces that
+# from the other side: it refuses to write the real baseline off Linux.
+#
+# WHY A PULL REQUEST AND NOT JUST AN ARTIFACT
+#
+# Because a pull request is self-verifying and an artifact is not. Opening a
+# PR that changes mypy-baseline.txt makes ci.yml run the typecheck job against
+# the new baseline, on Linux, on the same commit. If the regeneration is
+# correct the ratchet goes green; if it is wrong the ratchet says so, before
+# anyone merges. An artifact would hand the maintainer a file and no evidence,
+# which is how the wrong number got committed the first time. The raw mypy
+# output is uploaded as an artifact as well, but as a forensic log, not as the
+# delivery mechanism.
+#
+# WHY NOT A JOB INSIDE ci.yml
+#
+# Opening a PR needs `contents: write` and `pull-requests: write`. ci.yml has
+# no `permissions:` block, so it runs on the default token, and it triggers on
+# `pull_request` from any branch. Adding write scopes there to serve one
+# manual job would widen the token for every job in the workflow that runs on
+# untrusted pull-request refs. Here the scopes sit on a job that only a person
+# with Actions access can start.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Measure and upload the artifact, but do not open a PR"
+        type: boolean
+        default: false
+
+# Two dispatches at once would race on the same PR branch. Do not cancel the
+# in-flight one: a half-finished mypy run is exactly the partial output the
+# script refuses to write, and re-queuing is cheaper than reasoning about it.
+concurrency:
+  group: mypy-baseline
+  cancel-in-progress: false
+
+jobs:
+  regenerate:
+    name: Regenerate on ubuntu-latest and open a PR
+    runs-on: ubuntu-latest
+    # Scoped to this job rather than the workflow so the intent is readable at
+    # the point the token is used.
+    permissions:
+      contents: write
+      pull-requests: write
+    # A full cold mypy run over ~1000 source files takes a few minutes. 30 is
+    # generous enough that a breach means something hung rather than something
+    # was slow.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Byte for byte what the typecheck job in ci.yml installs. If these two
+      # ever drift, the baseline measured here stops describing the tree the
+      # gate measures there, and the ratchet starts comparing two different
+      # numbers. mypy is pinned separately in both places for the same reason
+      # a version is pinned at all: an unpinned mypy release changes the count
+      # and the gate blames the pull request that happened to arrive first.
+      - name: Install dependencies
+        working-directory: feral-core
+        run: |
+          pip install --constraint requirements.lock -e ".[all,dev]"
+          pip install mypy==1.20.2
+
+      # The script preserves the hand-written header in mypy-baseline.txt,
+      # requires mypy's summary line before writing anything (a crashed run
+      # would otherwise produce a near-empty baseline, which reads as "all
+      # errors fixed" and makes the ratchet fire on every future run), and
+      # cross-checks its own count against mypy's headline total.
+      - name: Regenerate the baseline
+        run: python scripts/regen_mypy_baseline.py --mypy-output mypy-raw.txt
+
+      # Printed so the dispatcher can see what changed without downloading
+      # anything. `|| true` because diff exits 1 whenever there IS a delta,
+      # which is the normal and expected case here.
+      - name: Show the delta
+        run: |
+          set -uo pipefail
+          echo "--- provenance now recorded in the baseline ---"
+          sed -n '/^# --- everything below this line is generated/,/^#$/p' \
+            feral-core/mypy-baseline.txt
+          echo "--- per-file error counts, committed vs regenerated ---"
+          git diff -- feral-core/mypy-baseline.txt | head -100 || true
+          if git diff --quiet -- feral-core/mypy-baseline.txt; then
+            echo "::notice::baseline is byte-identical; nothing to open a PR for"
+          fi
+
+      - name: Upload the raw mypy run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mypy-baseline-run
+          path: |
+            mypy-raw.txt
+            feral-core/mypy-baseline.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      # No-op when the file is unchanged, so a dispatch that finds nothing to
+      # do costs nothing.
+      - name: Open the pull request
+        if: inputs.dry_run != true
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(typecheck): regenerate mypy baseline on Linux"
+          title: "chore(typecheck): regenerate mypy baseline on Linux"
+          body: |
+            Regenerated by `.github/workflows/mypy-baseline.yml` on
+            `ubuntu-latest`, the same platform the `typecheck` gate runs on,
+            with the pinned `mypy==1.20.2` and `feral-core/mypy.ini`.
+
+            **This PR checks itself.** CI runs the `typecheck` job here against
+            the baseline this PR introduces. A green typecheck step is the
+            evidence the number is right for the platform that gates merges.
+            A red one means the regeneration is wrong and this should not be
+            merged.
+
+            Before merging, confirm in the diff that the generated provenance
+            block reads `platform : Linux`. Anything else means the baseline
+            was measured somewhere that does not gate pull requests, which is
+            the exact defect this workflow was added to end.
+          branch: chore/mypy-baseline-regen
+          delete-branch: true
+          add-paths: |
+            feral-core/mypy-baseline.txt

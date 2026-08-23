@@ -1,7 +1,7 @@
 {
   "name": "feral-desktop",
   "private": true,
-"version": "2026.8.24",
+"version": "2026.8.25",
   "type": "module",
   "scripts": {
     "sync:tokens": "bash scripts/sync_tokens.sh",
