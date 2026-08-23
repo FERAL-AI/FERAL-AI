@@ -1773,6 +1773,33 @@ def cmd_doctor():
         except Exception as _disk_exc:
             _info("Disk space", f"could not be measured: {_disk_exc}")
 
+        # Is the running brain executing the version that is installed?
+        #
+        # A Python process never reloads its source, so
+        # `pip install --upgrade feral-ai` cannot reach a brain that is
+        # already running: the upgrade succeeds, nothing errors, and the
+        # operator keeps using the old build with no visible symptom.
+        # Measured on a real install, a brain served for two days from
+        # code that predated four releases, every fix in them inert.
+        # Doctor is where somebody looks when the thing they just fixed
+        # is still broken, so it belongs here.
+        try:
+            from config.staleness import runtime_staleness as _staleness
+
+            _stale = _staleness()
+            if _stale.get("stale"):
+                _warn(
+                    "Running version",
+                    _stale.get("detail", ""),
+                    "feral restart  (or stop the brain and re-run `feral serve`)",
+                )
+            elif _stale.get("installed_version"):
+                _pass("Running version", _stale.get("detail", ""))
+            else:
+                _info("Running version", _stale.get("detail", "could not compare"))
+        except Exception as _stale_exc:
+            _info("Running version", f"could not be checked: {_stale_exc}")
+
         from memory.sqlite_features import (
             FTS5_REMEDY as _FTS5_REMEDY,
             LOADABLE_EXTENSIONS_REMEDY as _LOADEXT_REMEDY,

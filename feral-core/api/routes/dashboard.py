@@ -458,6 +458,14 @@ async def _get_dashboard_data() -> dict:
         # not (or vice versa). `null` on the success branch.
         "paired_unavailable": paired_unavailable,
         "channels": channel_types,
+        # Whether this process is executing the version that is
+        # installed. A Python process never reloads its source, so
+        # `pip install --upgrade feral-ai` cannot reach a running brain:
+        # the upgrade succeeds, nothing errors, and the operator keeps
+        # using the old build with no symptom. Measured on a real
+        # install, a brain served for two days and one hour from code
+        # that predated four releases. Local comparison, no network.
+        "runtime": _runtime_staleness(),
         "session_count": len(state.sessions), "health": latest_health,
         "memory": stats, "skills_count": len(state.skill_registry.skills),
         "llm_available": _check_llm_available(),
@@ -487,6 +495,25 @@ async def _get_dashboard_data() -> dict:
         "is_demo_mode": getattr(state, "_demo", None) is not None,
         "somatic": somatic_state,
     }
+
+
+def _runtime_staleness() -> dict:
+    """Whether the running code matches the installed code.
+
+    Never raises into the dashboard. This is a diagnostic on the
+    endpoint the whole shell polls, so a failure here must cost the
+    panel, not the page. A brain that cannot answer reports
+    `stale: False` rather than guessing, on the principle that telling
+    somebody to restart on the strength of a failed lookup is worse
+    than staying quiet.
+    """
+    try:
+        from config.staleness import runtime_staleness
+
+        return runtime_staleness()
+    except Exception as exc:
+        logger.debug("runtime staleness check failed: %s", exc)
+        return {"stale": False, "detail": "unavailable"}
 
 
 def _budget_status() -> dict:

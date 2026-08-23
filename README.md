@@ -69,6 +69,37 @@ feral setup
 feral start
 ```
 
+### Upgrading
+
+```bash
+pip install --upgrade "feral-ai[all]"
+feral restart
+```
+
+**The restart is not optional.** A running brain holds its code in
+memory from the moment it started and never reloads it, so upgrading
+the package on disk does not change a process that is already serving.
+The install succeeds, nothing errors, and the old build keeps answering
+as if nothing happened. This is easy to miss for days.
+
+`feral doctor` has a **Running version** row that compares the version
+this process is executing against the version installed on disk, and
+warns when they differ. `GET /api/dashboard` carries the same answer
+under `runtime`. Neither contacts the network; both compare what is
+already on the machine.
+
+If you installed with the one-line installer, the brain lives in
+`~/.feral-env`, so upgrade with that environment's pip:
+
+```bash
+~/.feral-env/bin/pip install --upgrade "feral-ai[all]"
+feral restart
+```
+
+Check which install you are actually upgrading with `which feral`. More
+than one Python environment on a machine can each hold their own copy,
+and upgrading the one that is not running is the common mistake.
+
 ### What `feral setup` walks you through
 
 `feral setup` is an arrow-key wizard (↑/↓ to navigate, enter to pick the highlighted row):
