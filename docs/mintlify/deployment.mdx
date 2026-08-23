@@ -210,10 +210,17 @@ Set these variables in the backend environment:
 | `FERAL_PROXY_AUTH_ALLOWED_GROUPS` | — | Optional comma-separated group allowlist; any intersection is accepted. |
 | `FERAL_PROXY_AUTH_ALLOWED_ORIGINS` | — | Required comma-separated canonical browser origins. |
 
-Use placeholders in proxy configuration and keep the backend listener private;
-do not publish a second direct route around the declared proxy. A generic
-proxy needs to pass the configured assertion headers only after its own auth
-check and retain the WebSocket `Upgrade`/`Connection` headers.
+Use placeholders in proxy configuration and keep the backend listener off the
+public Internet. A private direct route may remain for API-key, session-token,
+or phone-bearer clients, but it must not accept proxy identity from any peer
+outside `FERAL_PROXY_AUTH_TRUSTED_PROXIES`. A generic proxy needs to pass the
+configured assertion headers only after its own auth check and retain the
+WebSocket `Upgrade`/`Connection` headers.
+
+This feature adds an authentication method to protected FERAL routes; it does
+not redefine intentionally open pairing, health, or signed-webhook endpoints.
+Apply the proxy's own access policy to the whole operator hostname unless a
+specific bootstrap or webhook endpoint is deliberately public.
 
 ## Monitoring
 

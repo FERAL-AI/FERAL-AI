@@ -140,10 +140,12 @@ These tune the runtime flags applied to every container started by `security/doc
 ## Trusted Reverse-Proxy Browser Authentication
 
 Trusted-proxy browser authentication is disabled by default. Enable it only
-when the FERAL API and WebSocket listener are reachable solely through the
-reverse proxy you configure as trusted. The backend authenticates the exact
-ASGI socket peer address; `X-Forwarded-For` and similar forwarded headers do
-not establish trust.
+when the operator dashboard is published through a reverse proxy you configure
+as trusted. The backend authenticates the exact ASGI socket peer address;
+`X-Forwarded-For` and similar forwarded headers do not establish trust. Keep
+the backend off the public Internet; if a private direct route remains, it must
+continue to use FERAL's independent API-key, session-token, or phone-bearer
+authentication.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -162,6 +164,10 @@ The proxy must authenticate the user before injecting the identity, groups, and
 assertion headers, and must strip any client-supplied copies first. Do not send
 `FERAL_API_KEY` or `FERAL_PROXY_AUTH_SECRET` to the browser. Preserve the
 `Upgrade` and `Connection` headers for `/v1/session` WebSocket handshakes.
+This feature adds an authentication method to FERAL's protected routes; it does
+not change intentionally open pairing, health, or signed-webhook routes. Apply
+the reverse proxy's own access policy to the whole operator hostname unless a
+specific bootstrap or webhook endpoint is deliberately public.
 
 ## Integrations
 
