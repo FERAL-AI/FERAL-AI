@@ -180,6 +180,42 @@ feral.example.com {
 
 Caddy handles TLS automatically via Let's Encrypt and upgrades WebSocket connections without extra configuration.
 
+### Trusted proxy browser authentication
+
+FERAL's trusted reverse-proxy browser authentication is disabled by default.
+When enabled, the backend accepts the proxy assertion only when the exact
+socket peer is in `FERAL_PROXY_AUTH_TRUSTED_PROXIES`; forwarded client-IP
+headers never create trust. Configure a shared assertion secret and canonical
+allowed origins. Optional user and group allowlists can further restrict
+access. A group assertion may contain multiple groups separated by `|` (or by
+the configured separator).
+
+The reverse proxy must authenticate the browser first, remove any client-
+supplied copies of the assertion and identity headers, and then inject fresh
+identity headers. Never expose `FERAL_API_KEY` or
+`FERAL_PROXY_AUTH_SECRET` to browser code. Keep WebSocket upgrade forwarding
+enabled for `/v1/session`.
+
+Set these variables in the backend environment:
+
+| Variable | Default | Description |
+|:---------|:--------|:------------|
+| `FERAL_PROXY_AUTH_ENABLED` | `false` | Enable trusted-proxy browser authentication. |
+| `FERAL_PROXY_AUTH_TRUSTED_PROXIES` | — | Comma-separated trusted socket-peer IPs or CIDR ranges. |
+| `FERAL_PROXY_AUTH_SECRET` | — | Server-side shared assertion secret. |
+| `FERAL_PROXY_AUTH_SECRET_HEADER` | `X-FERAL-Proxy-Secret` | Assertion header name. |
+| `FERAL_PROXY_AUTH_IDENTITY_HEADER` | `X-FERAL-Proxy-User` | Authenticated user header name. |
+| `FERAL_PROXY_AUTH_GROUPS_HEADER` | `X-FERAL-Proxy-Groups` | Group header name. |
+| `FERAL_PROXY_AUTH_GROUPS_SEPARATOR` | `\|` | Single-character group separator; defaults to `|`. |
+| `FERAL_PROXY_AUTH_ALLOWED_USERS` | — | Optional comma-separated user allowlist. |
+| `FERAL_PROXY_AUTH_ALLOWED_GROUPS` | — | Optional comma-separated group allowlist; any intersection is accepted. |
+| `FERAL_PROXY_AUTH_ALLOWED_ORIGINS` | — | Required comma-separated canonical browser origins. |
+
+Use placeholders in proxy configuration and keep the backend listener private;
+do not publish a second direct route around the declared proxy. A generic
+proxy needs to pass the configured assertion headers only after its own auth
+check and retain the WebSocket `Upgrade`/`Connection` headers.
+
 ## Monitoring
 
 FERAL exposes a health endpoint and optional Prometheus metrics:
