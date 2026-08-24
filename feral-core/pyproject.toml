@@ -529,7 +529,7 @@ include = [
     "agents*", "api*", "bridges*", "channels*", "cli*", "config*", "cost*", "gateway*",
     "genui*", "hardware*", "identity*", "infra*", "integrations*",
     "mcp*", "memory*", "migrations*", "models*", "observability*", "perception*",
-    "process*", "providers*", "security*", "services*", "skills*", "system*", "voice*",
+    "process*", "providers*", "scripts_audit*", "security*", "services*", "skills*", "system*", "voice*",
     "webui*", "webui_v2*",
     # audit-r9 brief #08: `workflows` is a sibling top-level package
     # (data-only, holds first-party workflow-pack JSONs). Was omitted
