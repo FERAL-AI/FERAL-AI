@@ -47,6 +47,18 @@ When budget routing is enabled, `GET /api/llm/health` (the v2 "Fallbacks" card s
 | `FERAL_PUBLIC_BASE_URL` | — | Public base URL used for remote pairing URL generation |
 | `FERAL_LOG_LEVEL` | `info` | Logging level: `debug`, `info`, `warn`, `error` |
 
+## Update Checks
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FERAL_UPDATE_CHECK` | `false` | Let the brain ask PyPI whether a newer `feral-ai` exists. Off by default: nothing contacts the network unless you turn this on. Also settable as `updates.check_pypi` in `~/.feral/settings.json` |
+| `FERAL_UPDATE_CHECK_TTL_HOURS` | `24` | How long a successful answer is cached (`updates.ttl_hours`). Failures are re-tried after an hour |
+| `FERAL_PYPI_JSON_URL` | `https://pypi.org/pypi/feral-ai/json` | Point the check at an internal mirror instead |
+
+<Note>
+  With the check on, the brain asks once per TTL on a background task and never on a request path; `GET /api/dashboard` and `feral doctor` read the cached answer only. An unreachable index reports `unknown`, never an error. `feral update` asks on demand whatever this is set to, because running the command is the request.
+</Note>
+
 ## Autonomy & Security
 
 | Variable | Default | Description |

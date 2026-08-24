@@ -29,6 +29,7 @@ from ..helpers import (
     existing_provider_key,
     get_console,
     render_provider_table,
+    _can_prompt,
     _RICH_AVAILABLE,
 )
 from ..state import WizardState
@@ -38,6 +39,20 @@ from ..state import WizardState
 # test before the step keeps whatever was typed and moves on. A wizard
 # prompt must always terminate.
 _MAX_MODEL_ATTEMPTS = 3
+
+
+# How many times the provider picker may be re-shown after the operator
+# turns down a provider that cannot work yet.
+#
+# Bounded for the same reason ``_MAX_MODEL_ATTEMPTS`` is: a ``while
+# True`` wrapped around a prompt whose default is "yes, ask me again"
+# re-asks forever on the enter-through-defaults path until stdin runs
+# out, and setup must always terminate. Four is one pass per provider
+# family that can be blocked from outside the wizard (Ollama, LM Studio,
+# Codex) plus one more to land on a working choice, which covers every
+# re-pick a real operator needs. Past that the step keeps the last pick
+# and names the command that changes it later.
+_MAX_PROVIDER_ATTEMPTS = 4
 
 
 def _selectable_providers(catalog: ProviderCatalog) -> list:
@@ -69,9 +84,66 @@ def _unsupported_provider_ids(catalog: ProviderCatalog) -> list[str]:
 
 
 async def run_provider_step(state: WizardState) -> None:
+    """Pick a provider, and never leave the operator holding a dead one.
+
+    This step used to be a straight line: pick, print remediation if the
+    pick cannot work, return. An operator whose cursor landed on
+    ``Codex (ChatGPT sign-in) · unreachable`` was told to install the
+    Codex CLI and re-run the whole wizard, and was then marched forward
+    through a model step with no models to list and a smoke test that
+    could not pass. "Re-run `feral setup`" is not remediation when you
+    are standing inside `feral setup` on step 1 of 16.
+
+    So a pick that cannot work until something happens OUTSIDE the
+    wizard now offers a different provider right here, and the loop
+    re-probes on the way round, which is what makes "start `ollama
+    serve` in the other window, then pick it again" work without
+    leaving setup.
+    """
     console = get_console()
     catalog = _catalog(state)
 
+    # Providers the operator has already been shown as unusable in this
+    # run. They stay in the list (one may have been fixed in another
+    # terminal between passes, and every pass re-probes) but they no
+    # longer supply the picker's default, which would otherwise drop the
+    # cursor straight back onto the provider just turned down.
+    rejected: set[str] = set()
+
+    for attempt in range(_MAX_PROVIDER_ATTEMPTS):
+        blocker = await _pick_and_configure_provider(
+            state, catalog, console, rejected=rejected,
+        )
+        if not blocker:
+            return
+        chosen_id = state.get_setting("llm", "provider") or ""
+        # The final pass does not offer again: something has to end the
+        # loop, and keeping the pick is the answer that still lets setup
+        # finish. See _MAX_PROVIDER_ATTEMPTS.
+        last_attempt = attempt == _MAX_PROVIDER_ATTEMPTS - 1
+        if last_attempt or not _offer_another_provider(console, blocker):
+            _warn_provider_kept(console, chosen_id, blocker)
+            return
+        rejected.add(chosen_id)
+
+
+async def _pick_and_configure_provider(
+    state: WizardState,
+    catalog: ProviderCatalog,
+    console,
+    *,
+    rejected: set[str],
+) -> str:
+    """One pass of the picker. Returns why the pick cannot work.
+
+    An empty string means "nothing is blocking this provider", which
+    includes the deliberate "you can continue and re-probe later" case
+    for a cloud provider: a key that was just entered and probed
+    unreachable can still come good on its own, and ``feral key add``
+    fixes a wrong one without re-walking setup. A non-empty string is
+    reserved for the other kind of not-ready, where no answer the
+    operator can give inside this wizard changes the outcome.
+    """
     # Probe every provider so the table shows reachable state. This is
     # parallel under a single refresh_all but we call probe() per-id so
     # the network results can differ (Ollama reachable, OpenAI not).
@@ -106,13 +178,17 @@ async def run_provider_step(state: WizardState) -> None:
         render_provider_table("Available providers", options, extra_columns=extra_notes)
 
     previous_id = state.get_setting("llm", "provider") or ""
-    default_id = previous_id or _default_choice(options)
+    if previous_id in rejected:
+        # The stored value is this run's own rejected pick, not a
+        # previous install's preference, so it must not be the default.
+        previous_id = ""
+    default_id = previous_id or _default_choice(options, rejected=rejected)
     chosen = ask_choice("Choose a provider", options, default=default_id)
     state.set_setting("llm", "provider", chosen.id)
 
     desc = catalog.get_descriptor(chosen.id)
     if desc is None:
-        return
+        return ""
 
     _apply_base_url(state, desc, provider_changed=(chosen.id != previous_id))
 
@@ -142,27 +218,94 @@ async def run_provider_step(state: WizardState) -> None:
         else:
             msg = updated.error or "unreachable"
             console.print(f"  [yellow]note:[/] probe said: {msg} — you can continue and re-probe later.")
-    elif desc.provider_id == "ollama":
+        # Deliberately not a blocker. A cloud provider whose key was
+        # just entered can probe unreachable transiently (captive
+        # portal, DNS, the vendor having a minute), and a wrong key is
+        # fixed later with `feral key add` rather than by picking a
+        # different vendor. Making the operator choose again here would
+        # be the wizard second-guessing a provider that can still work.
+        return ""
+    if desc.provider_id == "ollama":
         status = statuses.get(desc.provider_id)
         if not (status and status.reachable):
-            await _handle_ollama_unreachable(console)
-        else:
-            # Reachable but maybe zero models — offer to pull one.
-            cached = await catalog.list_models(chosen.id, live=True, force=True)
-            if not cached.models:
-                await _handle_ollama_no_models(catalog, console)
-    elif desc.provider_id == "lmstudio":
+            return await _handle_ollama_unreachable(console) or ""
+        # Reachable but maybe zero models, so offer to pull one.
+        cached = await catalog.list_models(chosen.id, live=True, force=True)
+        if not cached.models:
+            return await _handle_ollama_no_models(catalog, console) or ""
+        return ""
+    if desc.provider_id == "lmstudio":
         status = statuses.get(desc.provider_id)
         if not (status and status.reachable):
-            _show_lmstudio_instructions(console)
-        else:
-            cached = await catalog.list_models(chosen.id, live=True, force=True)
-            if not cached.models:
-                _show_lmstudio_no_model(console)
-    elif desc.provider_id == "codex":
+            return _show_lmstudio_instructions(console) or ""
+        cached = await catalog.list_models(chosen.id, live=True, force=True)
+        if not cached.models:
+            return _show_lmstudio_no_model(console) or ""
+        return ""
+    if desc.provider_id == "codex":
         status = statuses.get(desc.provider_id)
         if not (status and status.reachable):
-            _show_codex_instructions(console, status)
+            return _show_codex_instructions(console, status) or ""
+    return ""
+
+
+def _offer_another_provider(console, blocker: str) -> bool:
+    """Ask whether to go back to the picker. True means "re-pick".
+
+    Only asked when a human is actually there to answer. A scripted or
+    piped ``feral setup`` has nobody to choose, and the honest
+    non-interactive answer is to keep the pick and print how to change
+    it, not to raise a prompt into a stream that will never reply.
+    ``helpers._can_prompt`` is the same guard the prompt helpers use, so
+    both agree about what "interactive" means.
+    """
+    if not _can_prompt():
+        return False
+    console.print()
+    console.print(
+        f"  [yellow]{blocker}[/] Nothing later in this wizard can fix "
+        f"that, so the model picker would come up empty and the smoke "
+        f"test could not pass."
+        if _RICH_AVAILABLE else
+        f"  {blocker} Nothing later in this wizard can fix that, so the "
+        f"model picker would come up empty and the smoke test could not "
+        f"pass."
+    )
+    # No ``status`` on either row: ``helpers._option_badge`` would render
+    # "· ready" next to "Pick a different provider", which reads as a
+    # claim about a provider rather than about the action.
+    options = [
+        Option(
+            id="repick",
+            label="Pick a different provider (the list is probed again)",
+        ),
+        Option(
+            id="keep",
+            label="Keep this one anyway and carry on with setup",
+        ),
+    ]
+    return ask_choice("  What next?", options, default="repick").id == "repick"
+
+
+def _warn_provider_kept(console, provider_id: str, blocker: str) -> None:
+    """Say what keeping an unusable provider costs, and how to undo it.
+
+    Setup still finishes, which is the point: an unfinishable wizard is
+    worse than one that finishes with a provider the operator has been
+    told is not working. Same trade ``_warn_key_skipped`` makes for a
+    missing key, and the message names the one command that reopens
+    this step instead of the whole wizard.
+    """
+    name = provider_id or "this provider"
+    console.print(
+        f"  [yellow]Keeping {name}.[/] {blocker} Chat will not work until "
+        f"that is fixed. Reopen just this step later with "
+        f"[bold]feral setup --from-step llm_provider[/]."
+        if _RICH_AVAILABLE else
+        f"  Keeping {name}. {blocker} Chat will not work until that is "
+        f"fixed. Reopen just this step later with `feral setup "
+        f"--from-step llm_provider`."
+    )
 
 
 def _apply_base_url(state: WizardState, desc, *, provider_changed: bool) -> None:
@@ -767,9 +910,18 @@ def _build_notes(
     return notes
 
 
-def _default_choice(options: Iterable[Option]) -> str:
+def _default_choice(
+    options: Iterable[Option], *, rejected: "set[str] | None" = None,
+) -> str:
     # Prefer a local-ready provider; else the first non-unreachable cloud.
-    ordered = list(options)
+    #
+    # A provider the operator already turned down this run never
+    # supplies the default: putting the cursor back on it is how the
+    # picker would ask the same dead-end question twice in a row. If
+    # rejecting them empties the list we fall back to the full one
+    # rather than returning nothing, since a picker needs a default.
+    rejected = rejected or set()
+    ordered = [o for o in options if o.id not in rejected] or list(options)
     for opt in ordered:
         if opt.status == STATUS_READY and "local" in opt.label.lower():
             return opt.id
@@ -787,7 +939,16 @@ def _default_choice(options: Iterable[Option]) -> str:
 # ----------------------------------------------------------------------
 
 
-async def _handle_ollama_unreachable(console) -> None:
+async def _handle_ollama_unreachable(console) -> str:
+    """Print the remediation, and report why Ollama cannot serve a turn.
+
+    The return value is what tells the caller to offer a different
+    provider: an empty string means "resolved, carry on". Every arm here
+    leaves Ollama not serving, so every arm reports a blocker. The
+    remediation deliberately ends at "pick it again here" rather than
+    "re-run `feral setup`", because the operator is standing inside
+    setup and the picker re-probes on the way round.
+    """
     from ..local_providers import OLLAMA_INSTALL_HINT, ollama_cli_installed
 
     console.print()
@@ -799,18 +960,27 @@ async def _handle_ollama_unreachable(console) -> None:
     if not ollama_cli_installed():
         for line in OLLAMA_INSTALL_HINT.splitlines():
             console.print(f"  {line}")
-        return
+        return "Ollama is not installed on this machine."
     console.print("  `ollama` is on your PATH but the server isn't serving.")
     console.print("  Start it with: ollama serve")
-    console.print("  Then re-run `feral setup` to continue.")
+    console.print("  Then pick Ollama again here and it will be probed again.")
+    return "Ollama is installed but its server is not running."
 
 
-async def _handle_ollama_no_models(catalog, console) -> None:
+async def _handle_ollama_no_models(catalog, console) -> str:
+    """Offer the pull. Returns why Ollama is unusable, or "" once it is.
+
+    Reachable is not the same as usable: a running Ollama with no model
+    dead-ends the model step exactly as hard as one that is not running,
+    because there is nothing for the picker to list and nothing for a
+    chat turn to load.
+    """
     from ..local_providers import STARTER_OLLAMA_MODELS, ollama_pull_model
 
+    no_model = "Ollama is running but has no model installed."
     console.print("  Ollama is running but no models are installed yet.")
     if not confirm("  Pull a starter model now?", default=True):
-        return
+        return no_model
     options_text = ", ".join(STARTER_OLLAMA_MODELS)
     console.print(f"  Suggested: {options_text}")
     choice = ask_text(
@@ -823,7 +993,7 @@ async def _handle_ollama_no_models(catalog, console) -> None:
         code = await ollama_pull_model(choice, on_line=lambda line: console.print(f"    {line}"))
     except Exception as exc:
         console.print(f"  [red]pull failed:[/] {exc}" if _RICH_AVAILABLE else f"  pull failed: {exc}")
-        return
+        return no_model
     if code == 0:
         console.print(f"  [green]✓[/] pulled {choice}" if _RICH_AVAILABLE else f"  pulled {choice}")
         # Refresh cache so the model step sees it.
@@ -831,30 +1001,47 @@ async def _handle_ollama_no_models(catalog, console) -> None:
             await catalog.list_models("ollama", live=True, force=True)
         except Exception:
             pass
-    else:
-        console.print(f"  [red]ollama pull exited with code {code}[/]" if _RICH_AVAILABLE else
-                      f"  ollama pull exited with code {code}")
+        return ""
+    console.print(f"  [red]ollama pull exited with code {code}[/]" if _RICH_AVAILABLE else
+                  f"  ollama pull exited with code {code}")
+    return no_model
 
 
-def _show_lmstudio_instructions(console) -> None:
+def _show_lmstudio_instructions(console) -> str:
+    """Remediation for "LM Studio is not serving". Returns the blocker."""
     from ..local_providers import LMSTUDIO_INSTRUCTIONS
 
     console.print()
     for line in LMSTUDIO_INSTRUCTIONS.splitlines():
         console.print(f"  {line}")
+    return "LM Studio is not serving on http://localhost:1234."
 
 
-def _show_lmstudio_no_model(console) -> None:
+def _show_lmstudio_no_model(console) -> str:
+    """Remediation for "LM Studio has no model loaded"."""
     console.print("  LM Studio is running but no model is loaded.")
     console.print("  Open LM Studio → pick a model → Start the local server.")
-    console.print("  Then re-run `feral setup`.")
+    console.print("  Then pick LM Studio again here and it will be probed again.")
+    return "LM Studio is running but no model is loaded."
 
 
 def _show_codex_instructions(
     console, status: ProviderStatus | None = None
-) -> None:
+) -> str:
+    """Remediation for "Codex has no usable ChatGPT session".
+
+    Codex is the pick the reported dead end started from. It carries no
+    API key the wizard could collect: it needs a CLI installed and a
+    `codex login` run in another terminal, neither of which any later
+    step can do, so it always reports a blocker and the caller offers
+    the picker again.
+    """
     console.print()
     console.print("  Codex is not ready for ChatGPT-backed FERAL turns.")
     if status and status.error:
         console.print(f"  Probe: {status.error}")
-    console.print("  Install the Codex CLI, run `codex login`, then re-run `feral setup`.")
+    console.print(
+        "  Install the Codex CLI and run `codex login` in another "
+        "terminal, then pick Codex again here."
+    )
+    return "Codex has no usable ChatGPT sign-in on this machine."

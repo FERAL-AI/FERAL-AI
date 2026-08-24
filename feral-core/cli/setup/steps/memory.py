@@ -299,7 +299,7 @@ async def _offer_install(console, provider, embeddings_mod):
     if not confirm("  Install local embeddings now?", default=True):
         console.print(
             f"  Skipped. To do it later: {_install_hint()}  "
-            f"(then re-run `feral setup`)"
+            f"(then `feral setup --from-step memory`)"
         )
         return provider, embeddings_mod
 
@@ -318,10 +318,10 @@ async def _offer_install(console, provider, embeddings_mod):
     except Exception as exc:
         console.print(
             f"  [yellow]Installed, but the provider could not be reloaded: "
-            f"{exc}. Restart the shell and re-run `feral setup`.[/]"
+            f"{exc}. Restart the shell, then `feral setup --from-step memory`.[/]"
             if _RICH_AVAILABLE else
             f"  Installed, but the provider could not be reloaded: {exc}. "
-            f"Restart the shell and re-run `feral setup`."
+            f"Restart the shell, then `feral setup --from-step memory`."
         )
         return provider, embeddings_mod
 
@@ -330,11 +330,12 @@ async def _offer_install(console, provider, embeddings_mod):
         # package. Say so; do not print a green tick over it.
         console.print(
             "  [yellow]pip reported success but the embedding provider is "
-            "still on the hash fallback. Restart your shell and re-run "
-            "`feral setup`.[/]"
+            "still on the hash fallback. Restart your shell, then "
+            "`feral setup --from-step memory`.[/]"
             if _RICH_AVAILABLE else
             "  pip reported success but the embedding provider is still on "
-            "the hash fallback. Restart your shell and re-run `feral setup`."
+            "the hash fallback. Restart your shell, then "
+            "`feral setup --from-step memory`."
         )
         return provider, embeddings_mod
 

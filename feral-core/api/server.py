@@ -1631,6 +1631,45 @@ async def startup():
         asyncio.create_task(_provider_catalog_refresher(), name="feral-provider-catalog-refresher")
     )
 
+    # Update availability, and ONLY when the operator asked for it.
+    #
+    # This is the one place the brain contacts a server nobody
+    # configured, so it is gated on `update_check_enabled()` and the
+    # task is not even created when the answer is False. Off is the
+    # default: see config/update_check.py for why a local-first product
+    # does not phone home unasked.
+    #
+    # It lives on a background task rather than on the dashboard route
+    # because the route is polled by the whole shell and must not wait
+    # on pypi.org. The sleep before the first check keeps it off the
+    # boot path too, so a slow or blackholed network delays nothing.
+    # `refresh()` returns cached answers inside the TTL and never
+    # raises, so the loop is one call a day at most and cannot take the
+    # brain down with it.
+    from config.update_check import (
+        refresh as _refresh_update_check,
+        ttl_seconds as _update_check_ttl_seconds,
+        update_check_enabled as _update_check_enabled,
+    )
+
+    if _update_check_enabled():
+        async def _update_check_refresher():
+            await asyncio.sleep(120)
+            while True:
+                try:
+                    # to_thread, not a bare call: `refresh` does a
+                    # blocking urllib GET, and blocking I/O inside
+                    # `async def` stalls the whole event loop.
+                    await asyncio.to_thread(_refresh_update_check)
+                except Exception as exc:
+                    logger.debug("update check refresh failed: %s", exc)
+                await asyncio.sleep(_update_check_ttl_seconds())
+        state.register_background_task(
+            asyncio.create_task(_update_check_refresher(), name="feral-update-check-refresher")
+        )
+    else:
+        logger.debug("update check is disabled; not scheduling a refresher")
+
     start_probe_sweeper(state)
 
 

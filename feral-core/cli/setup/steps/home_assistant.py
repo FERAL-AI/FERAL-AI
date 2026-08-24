@@ -13,6 +13,10 @@ from ..helpers import (
 )
 from ..state import WizardState
 
+#: How many times the operator may re-enter the URL and token before
+#: the wizard stops asking. See the comment at the loop.
+_MAX_HA_ATTEMPTS = 3
+
 
 async def run(state: WizardState) -> None:
     console = get_console()
@@ -28,7 +32,11 @@ async def run(state: WizardState) -> None:
     default_url = state.get_setting(
         "home_assistant", "url", "http://homeassistant.local:8123"
     )
-    while True:
+    # Bounded, for the reason steps/llm.py's _MAX_MODEL_ATTEMPTS states:
+    # the only non-success exit below is a confirm defaulting to yes, so
+    # an operator pressing enter through the defaults re-asks until
+    # stdin runs out, and a piped run never answers at all.
+    for attempt in range(_MAX_HA_ATTEMPTS):
         url = ask_text("  Home Assistant URL", default=default_url, allow_empty=False)
         token = ask_text(
             "  Long-lived access token", default="", allow_empty=False, secret=True,
@@ -63,6 +71,15 @@ async def run(state: WizardState) -> None:
             "  Saved, but Home Assistant did not accept them. Check the URL "
             "and that the token is a Long-Lived Access Token."
         )
-        if not confirm("  Re-enter the URL / token?", default=True):
+        if attempt == _MAX_HA_ATTEMPTS - 1 or not confirm(
+            "  Re-enter the URL / token?", default=True,
+        ):
+            # The credential IS stored either way, so the operator is
+            # not losing what they typed. Say where to fix it rather
+            # than leaving them to wonder.
+            console.print(
+                "  Keeping what you entered. Fix it later with "
+                "`feral setup --from-step home_assistant`."
+            )
             return
         default_url = url

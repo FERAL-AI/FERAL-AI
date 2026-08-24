@@ -16,6 +16,9 @@ from __future__ import annotations
 import platform
 
 from ..helpers import (
+    BackNavigation,
+    JumpToStep,
+    QuitNavigation,
     SkipStep,
     confirm,
     get_console,
@@ -103,8 +106,20 @@ def run(state: WizardState) -> None:
             for status, deeplink in rendered:
                 if deeplink:
                     console.print(f"  {status.permission}: {deeplink}")
+    except (BackNavigation, QuitNavigation, JumpToStep):
+        # Navigation is not an error, and this bare `except Exception`
+        # used to swallow it. All three signals subclass Exception, so
+        # typing `back`, `quit` or `menu` at this prompt did nothing at
+        # all: the wizard printed nothing, ignored the request, and
+        # walked on to the next step. `quit` in particular is the
+        # operator saying "stop", and silently continuing past it is the
+        # worst reading of that word available.
+        raise
     except Exception:
-        # Confirm prompt failures (non-tty etc.) shouldn't kill the wizard.
+        # Everything else genuinely is "the confirm could not run"
+        # (no tty, closed stdin). That must not kill the wizard: this
+        # prompt is an optional convenience for terminals that do not
+        # render OSC-8 hyperlinks.
         pass
 
 

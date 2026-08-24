@@ -28,6 +28,11 @@ from ..helpers import (
 )
 from ..state import WizardState
 
+#: How many times the wizard re-offers the provider list after the
+#: operator picks one that is not installed. See the comment at the
+#: loop in _configure_provider.
+_MAX_AUDIO_PROVIDER_ATTEMPTS = 3
+
 
 _STT_PROVIDERS = (
     {
@@ -318,7 +323,44 @@ def _configure_provider(
     title = "Speech-to-text" if kind == "stt" else "Text-to-speech"
     render_provider_table(title, options)
     default = state.get_setting("audio", f"{kind}_provider", "openai")
+
+    # A provider badged `unavailable` was written to settings silently.
+    #
+    # The local engines (whispercpp, faster-whisper, piper, macos_say)
+    # show `unavailable` when their package is not installed, and
+    # picking one anyway recorded it with no warning at the point of
+    # choice and no way to change your mind. Voice then produced no
+    # audio, and the only sign was a line in the brain's boot log:
+    # "TTS is set to a LOCAL engine but it cannot run: piper-tts not
+    # installed". The operator chose it in this wizard and was never
+    # told it could not work.
+    #
+    # This is the same defect the LLM provider step had, one screen
+    # over. `needs API key` is deliberately NOT treated the same way:
+    # the key step follows and fixes it, so that one can still work.
+    #
+    # Bounded for the reason steps/llm.py's _MAX_MODEL_ATTEMPTS states.
+    # The last pass keeps whatever was picked rather than asking again.
     chosen = ask_choice(f"Choose {title} provider", options, default=default)
+    for attempt in range(_MAX_AUDIO_PROVIDER_ATTEMPTS):
+        if chosen.status != STATUS_UNAVAILABLE:
+            break
+        console.print(
+            f"  {chosen.label} is not installed on this machine, so "
+            f"{title.lower()} would silently produce nothing. "
+            f"Install it with: pip install 'feral-ai[{'stt' if kind == 'stt' else 'tts'}]'"
+        )
+        last = attempt == _MAX_AUDIO_PROVIDER_ATTEMPTS - 1
+        if last or not confirm(
+            f"  Pick a different {title.lower()} provider?", default=True,
+        ):
+            console.print(
+                f"  Keeping {chosen.label}. Install the package, then re-run "
+                f"`feral setup --from-step audio`."
+            )
+            break
+        chosen = ask_choice(f"Choose {title} provider", options, default=default)
+
     state.set_setting("audio", f"{kind}_provider", chosen.id)
 
     # Model + voice

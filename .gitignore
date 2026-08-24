@@ -117,3 +117,15 @@ docs/WAVE5_HARDENING_PROMPT.md
 
 # Agent worktree scaffolding (transient git worktrees)
 .claude/worktrees/
+
+# The v1 web client. Deleted from tracking in 2026.8.12 and replaced by
+# feral-client-v2, but 241MB of its build output still sits in most
+# working trees. It was never gitignored, so `git add -A` sweeps it into
+# a commit, which is why that command is banned in CLAUDE.md.
+#
+# Ignoring it is what makes the ban unnecessary: the reason the ban
+# existed then caused a real defect, when `git add -u` (the habit the
+# ban creates) staged a rebuilt web bundle's deletions and not its new
+# content-hashed files, shipping an index.html that referenced two
+# files absent from the repository.
+feral-client/
