@@ -1,10 +1,837 @@
 # Changelog
 
-<!-- feral-version: 2026.8.14 -->
+<!-- feral-version: 2026.8.26 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.26] - 2026-08-23 - the upgrade that did nothing
+
+An operator upgraded from PyPI, correctly, and served two-day-old code
+for two more days without knowing. `pip install --upgrade feral-ai`
+succeeded, exited 0, printed nothing alarming, and changed nothing:
+a Python process holds its source in memory from the moment it starts
+and never reloads it. There was no error to notice, because nothing was
+broken. It simply was not the code they thought it was.
+
+They also had two installs, and upgraded the one that was not running.
+
+This release makes both states visible, gives the upgrade a command
+that cannot pick the wrong environment, and fixes the setup wizard
+dead ends found while looking.
+
+### Added
+
+- **`Running version`, a new `feral doctor` row, and `runtime` on
+  `GET /api/dashboard`.** `version.VERSION` is resolved at import, so
+  it is the version RUNNING; asking importlib again re-reads disk, so
+  that is the version INSTALLED. Different means somebody upgraded
+  under a live process. No network: this compares what is already on
+  the machine.
+
+- **An update strip in the web client.** Renders only when
+  `runtime.stale` is exactly `true`, reserves no pixel otherwise, adds
+  no poll, and leads with the remedy rather than the diagnosis, so a
+  narrow window loses the explanation and never the instruction.
+
+- **`feral update`.** Upgrades the environment that is actually running
+  the brain (`sys.executable`), prints which one that is before
+  touching it, and restarts afterwards, because an upgrade without a
+  restart changes nothing. Refuses rather than half-works: an editable
+  checkout is pointed at `git pull`, a brain running under a different
+  interpreter than the CLI is reported instead of silently ignored, and
+  an already-current install does nothing and says so.
+
+  It deliberately does NOT expose an API-triggered self-upgrade. The
+  process performing the upgrade is the process being replaced, and
+  also the one that would have to restart it.
+
+- **An optional PyPI availability check**, `FERAL_UPDATE_CHECK` or
+  `updates.check_pypi`, **off by default**. An update check is an
+  outbound request carrying this machine's IP, a timestamp and the name
+  of the software it runs, made on the operator's behalf without being
+  asked, on a product whose promise is that it talks to nobody you did
+  not point it at. `feral update` bypasses the gate because typing the
+  command is the request.
+
+  It never opens a socket on a request path: fetching happens in a
+  background task and `/api/dashboard` reads cache only. Verified by
+  patching `socket.connect` to raise and serving the endpoint with the
+  check enabled: zero connect attempts. Version comparison is
+  calver-correct, where a string comparison holds `2026.8.9` to be
+  newer than `2026.8.10`.
+
+- **`AGENT_INSTALL.md`**, an install path for people who have a coding
+  agent but do not use a terminal. It installs, sets up, and then
+  VERIFIES, which is the part that matters: two failures here look
+  exactly like success. A Python without FTS5 installs happily and then
+  cannot boot; an upgrade against a running brain succeeds and changes
+  nothing.
+
+### Fixed
+
+- **The setup wizard stranded the operator on a provider that could not
+  work.** Reported live: `feral setup` reached "Step 1 of 16 - LLM
+  Provider" and could not go forward. Selecting a provider badged
+  `unreachable` printed "re-run `feral setup`", which is an instruction
+  to restart all 16 steps, and then the wizard CONTINUED holding that
+  provider: model selection had nothing to list and the smoke test
+  could not pass.
+
+  A blocked provider now offers "Pick a different provider" and loops
+  back to a re-probed list, so starting `ollama serve` in another
+  window and picking it again works without leaving setup. The
+  legitimate case where a cloud provider probes unreachable right after
+  its key was entered is untouched and still says "continue and
+  re-probe later".
+
+- **Typing `quit` did nothing.** `steps/tcc_preflight.py` wrapped a
+  prompt in `except Exception: pass`, and `BackNavigation`,
+  `QuitNavigation` and `JumpToStep` all subclass `Exception`. So
+  `back`, `quit` and `menu` at that prompt were caught and discarded:
+  the wizard ignored the request and walked on. `quit` is the operator
+  saying stop.
+
+- **Two loops that could not end.** `steps/channels.py` and
+  `steps/home_assistant.py` each had a `while True` whose only
+  non-success exit was `confirm(..., default=True)`, the exact shape
+  `_MAX_MODEL_ATTEMPTS` already exists to prevent: entering through the
+  defaults re-asks until stdin runs out, and a piped run never answers.
+  Both bounded.
+
+  Bounding the channels loop surfaced a second defect: falling off a
+  `for` returns `None`, and `None` is falsy, so the caller would have
+  recorded a channel as unconfigured while its credential was genuinely
+  stored, which is the distinction that function's docstring draws.
+
+- **A speech engine that is not installed was chosen silently.** The
+  local STT and TTS engines render as `unavailable` when their package
+  is missing, and picking one wrote it to settings with no warning and
+  no way to change your mind. Voice then produced nothing, and the only
+  trace was a line in the boot log: "TTS is set to a LOCAL engine but
+  it cannot run: piper-tts not installed". That line appeared in this
+  repo's own test output while the LLM half of the same bug was being
+  fixed, which is how it was found.
+
+### Known
+
+- **Nothing in the product can restart the brain.** There is no HTTP
+  restart route, only the CLI, so the update strip is instructional
+  plus a copy control rather than a button that acts. That is the
+  ceiling on an agent-driven update until a guarded endpoint exists.
+- Running the full pytest suite WHILE editing source produces failures
+  that are not real: `inspect.getsource` reads a stale linecache and
+  source-asserting tests fail spuriously. Hit independently twice
+  today. Let the suite finish before editing.
+- `.v2-rail` does not switch to the dark palette while the rest of the
+  shell does. Reproduced with the new strip absent, so it predates this
+  work. A lead, not a diagnosis.
+- The Linux interpreter check in `feral update` resolves
+  `/proc/<pid>/exe` through symlinks, so two virtualenvs sharing one
+  base interpreter look identical. It can miss a real mismatch; it
+  cannot invent one, which is the safe direction for a check that
+  refuses when it fires.
+
+### Coverage
+
+- pytest (feral-core): 10185 passed, 48 skipped, 0 failed.
+- vitest (feral-client-v2): 1264 passed across 158 files.
+- playwright: 106 passed.
+- ruff: clean on the CI ruleset.
+
+
+## [2026.8.25] - 2026-08-23 - tests that can fail
+
+2026.8.24 added one check that could fail and said the next step was to
+close the traps behind it. This is that work, and it immediately caught
+two defects the previous two releases had introduced. Both had guard
+tests. Both guard tests passed.
+
+That is the finding worth carrying forward: the problem was never
+missing tests, it was tests that could not fail.
+
+### Fixed
+
+- **The voice truncation notice was dead on every session since it
+  shipped.** 2026.8.23 added `truncation_notice()` so a voice model
+  would be told its tool list had been cut, and
+  `RealtimeProxy._get_tools()` capped the registry to 128 before
+  handing it to `RealtimeSession`. `configure()` then computed
+  `truncation_notice(self._tools, capped)` on a 128-item list against
+  itself, `len(capped) >= len(tools)` was true, and the notice was the
+  empty string. Measured live: 265 tools registered, 128 sent, 137
+  dropped, model told nothing.
+
+  The guard test written alongside it, `test_the_notice_reaches_the_
+  realtime_session`, read `realtime_proxy.py` as TEXT and grepped for
+  `truncation_notice(` and `instructions=instructions`. Both still
+  matched. It was a test that could not fail.
+
+  `start_session` now passes the raw list; `configure()` still caps
+  before sending, so nothing extra reaches the wire. `_get_tools()`
+  stays capped for the turn hooks, deliberately: they pick a tool to
+  FORCE, and a forced name the session never declared is an error event
+  on the wire rather than a tool call.
+
+- **HRV reached the behavioural policy and left no trace.**
+  `_HISTORY_METRIC_MAP` decides which readings are written to the
+  durable biometric time series, which is what answers "how was my HRV
+  last week". `hrv` was added to `_EXTRACTABLE_EVENT_TYPES` and to the
+  somatic bridge in 2026.8.23 and never added here. Same writer-reader
+  gap that dropped `skin_temperature` and `steps` on their way into the
+  somatic vector, one layer further out, and invisible in the same way:
+  nothing errors, the reading simply is not there when somebody asks
+  for a trend.
+
+- **A negative preference was stored as its own opposite.** The
+  About-Me extractor has two patterns sharing the `preference` kind,
+  positive (`I prefer X`) and negative (`I don't X`), and the text
+  template was keyed on the kind alone. `"I don't drink coffee"` was
+  written down as `"Prefers: drink coffee"`.
+
+  The `negative` tag WAS recorded, and recording it is not enough:
+  `system_prompt_chunk` emits `f.text` and nothing else, so the tag
+  never reaches the model and the inverted sentence is what lands in
+  the system prompt. Found in a real operator profile, where "I don't
+  know been working on the demo" had become a stated preference.
+
+### Added
+
+- **A guard for `getattr(<MagicMock>, name, default)`, which never
+  reaches its default.** This shipped twice in one week: the
+  `/api/dashboard` 500, and `_somatic_state_for_turn` putting an
+  unserialisable mock on a chat response.
+
+  Any spec-less mock assigned to the `state` attribute of an `api.*`
+  module is now wrapped so that it raises `AttributeError` instead of
+  auto-vivifying a child mock, when the name is either absent from the
+  real `BrainState` or holds a non-`None` scalar there. `AttributeError`
+  is the point: it is exactly what `getattr` catches, so the default
+  goes live again and the trap closes rather than merely being
+  reported.
+
+  A name-existence check alone would have missed the real bug.
+  `started_at` IS a real float on a real `BrainState`; what broke
+  production was the mock answering with a `MagicMock` where a float was
+  declared. Hence the scalar-type check.
+
+  Zero existing tests broke. 5 of its 11 tests fail with the wrapper
+  disabled, reproducing the original production symptoms.
+
+- **Real-brain tests for the voice wire payload and the ambient
+  websocket chain.** The two surfaces where every defect of the past
+  week lived and which had no real-brain coverage.
+
+  The voice tests boot a real `RealtimeProxy` over the real
+  `SkillRegistry`, let a real `session.created` event drive the real
+  `configure()`, and inspect the JSON handed to the transport. Only the
+  OpenAI socket is faked. That is what caught the dead notice above.
+
+  The ambient tests drive a real bearer against `/v1/node`, a real
+  `ambient_transcript` frame through `parse_message` and
+  `daemon_session`, the real detached summariser, both digest legs, and
+  then ask the real skill registry for the conversation back.
+
+  Every test was verified by breaking the thing it targets and watching
+  it go red: removing `desktop_control__open_url` from the pins, passing
+  the nested chat tool shape, renaming `digest_json` in the reader's
+  column list, and renaming the `ambient_transcript` dispatch branch.
+
+- **A Linux-only regeneration path for the mypy ratchet.**
+  `scripts/regen_mypy_baseline.py` plus a `workflow_dispatch` workflow
+  that runs it on `ubuntu-latest` and opens a PR. The script REFUSES to
+  write the gated file anywhere but Linux.
+
+  The count is platform dependent, which is why the gate has been red on
+  every PR: the file records 683 while CI measures near 749, and a
+  baseline regenerated on a laptop does not merely drift, it keeps the
+  step red for a reason no author can act on. The old header said
+  "regenerate with `mypy .`", which is precisely the instruction that
+  produced the wrong number.
+
+  A PR rather than an artifact, because a PR is self-verifying: CI runs
+  the typecheck job on it, on Linux, against the baseline it introduces.
+  The comparison logic is untouched; no tolerance was added.
+
+- **`scripts_audit/about_me_provenance.py`**, which reconstructs which
+  About-Me facts came from speech the operator merely overheard. The
+  2026.8.23 fix stopped new pollution and could not un-write what was
+  stored, and the rows do not record their own origin. Correlated on
+  time, which is exact in practice because the extractor runs inline at
+  the tail of processing. READ ONLY by default, with a timestamped
+  backup before any deletion.
+
+### Known
+
+- **The mypy gate is still red and needs one human action.** This
+  release shipped the mechanism, not the number. Dispatch
+  "Brain - mypy baseline" from the Actions tab, confirm the provenance
+  block reads `platform : Linux`, and merge the PR it opens.
+- `_get_raw_tools()` is only measured against, never sent. If a future
+  change sends it, the 128 cap is bypassed and OpenAI rejects the
+  session.
+- The MagicMock guard covers `state` on `api.*` modules only. A bare
+  mock passed as a function argument or held in a local is untouched,
+  and the `_somatic_state_for_turn` shape (a mock's method RETURN value)
+  remains guarded only by its own `isinstance` check.
+- A local Ollama on the developer machine means unsetting
+  `OPENAI_API_KEY` is not sufficient to keep a test offline. The ambient
+  sweep detaches the LLM explicitly after boot.
+
+### Coverage
+
+- pytest (feral-core): 10088 passed, 48 skipped, 0 failed.
+- vitest (feral-client-v2): 1251 passed across 157 files.
+- ruff: clean on the CI ruleset.
+
+
+## [2026.8.24] - 2026-08-23 - a check that can fail
+
+A hardening pass, prompted by a simple question: the last three
+releases each fixed real defects found by hand, so what else is out
+there that nobody has looked at?
+
+The answer, measured rather than assumed, is encouraging. Three
+detectors were run across the codebase for the exact pattern the recent
+bugs share, and two came back completely clean; the third found three
+dead reads of no consequence. The API surface is healthy: 134 of 134
+registered GET routes answer an authenticated read with no 5xx and no
+exception.
+
+So the problem was never that the code is riddled with this. It is that
+nothing was *checking*. Every one of these defects was found by a person
+starting the real thing and reading the output, and the three suites
+that run on every commit are each structurally blind to the class:
+pytest runs against mocks that satisfy any attribute, vitest runs in
+jsdom which has no layout, and `make e2e` stubs `**/api/**` so it cannot
+see a route that 500s.
+
+This release turns the one-off sweep into a permanent test.
+
+### Added
+
+- **`scripts_audit/route_sweep.py` and `tests/test_every_route_answers.py`.**
+  Boots the real app on a throwaway `FERAL_HOME`, authenticates, and
+  walks every registered GET route asserting no 5xx and no exception.
+  134 routes in about seven seconds.
+
+  This would have caught the `/api/dashboard` 500 that shipped during
+  the 2026.8.22 work: the endpoint the entire shell polls, broken
+  because `getattr(state, "started_at", default)` was called on a
+  MagicMock and a mock has every attribute, so the default never
+  applied. Every unit test passed. The dashboard was blank.
+
+  The assertion is deliberately narrow, "an authenticated read does not
+  raise and does not 5xx", not "the body is correct", which would need
+  a fixture per route and would rot. Narrow, total and unambiguous beats
+  broad and unmaintained.
+
+  It runs in a SUBPROCESS with a wall-clock ceiling. The first version
+  ran in-process and hung the entire pytest session, twice: once on a
+  wedged route and once on a lifespan-teardown deadlock caused by
+  booting a second brain inside a session where `conftest` had already
+  initialised `api.state.state`. A test that can hang the suite is worse
+  than no test.
+
+  The exclusion list carries a written reason per entry, enforced by its
+  own test, so it cannot quietly become the place failing routes go to
+  hide.
+
+### Fixed
+
+- **The morning briefing greeted every operator as "Alex".** Reported
+  from a live install: starting FERAL produced a Morning Briefing card
+  reading "Good morning, Alex!" to an operator whose `USER.md` says
+  `Name: Omar` on line 3.
+
+  A placeholder hardcoded into the SDUI headline
+  (`f"{greeting}, Alex!"`). Only the card carried it; the plain-text
+  body and the voice line had no name at all, which is why chat greeted
+  the operator correctly while the dashboard did not, and why it
+  survived this long.
+
+  `IdentityWorkspace.read_user_name()` now reads the name that was
+  sitting in `USER.md` unread, recognising both shapes the file is
+  written in: the `Name: X` line the setup wizard produces and a
+  leading `# X` heading. It returns `""` rather than a guess, and the
+  briefing greets without a name when it has none. Greeting somebody by
+  the wrong name is worse than not greeting them by name, and on a
+  product whose whole claim is that it knows you it is the first thing
+  they see. The template's own "About Me" heading and the unfilled
+  scaffold both count as no name.
+
+- **"Good afternoon" ran until midnight.** The briefing had two
+  branches, `hour < 12` and everything else, so a briefing at 11pm
+  opened by calling it the afternoon. There is now an evening branch at
+  18:00.
+
+- **`/api/capabilities/has` answered a malformed call with `200
+  {"available": false}`.** A caller that omitted both `action` and
+  `node_type` was told the capability is unavailable, which is a
+  confident answer to a question nobody asked: a client reading
+  `available` cannot tell "you have no phone connected" from "you
+  called this endpoint wrong", and would reasonably conclude the
+  hardware is missing. It now returns 400. Same principle as the
+  `None`-not-`0.0` rule in the somatic work: unknown must not be
+  representable as a plausible answer.
+
+### Audit
+
+Findings from the sweep, recorded because a clean result is worth
+writing down too. Nothing below needed a fix.
+
+- Placeholder identities in user-visible strings: **1 real hit**, the
+  "Alex" above. Everything else was template or documentation prose.
+- Client calls a route the brain does not register: **0 real gaps.** Two
+  apparent ones were POST endpoints probed with GET.
+- Client reads a field the brain never writes: **6 of 228 fields**, of
+  which three are dead speculative reads (`qr_png_b64`, `ast_gate`,
+  `sandbox_result`). The QR one degrades to rendering the JSON body as
+  text, and only on a fallback branch that needs `qrcode` to be absent;
+  it is a base dependency and is installed, so the path is latent.
+- Honest degradation discarded by the UI: the client reads `degraded`
+  in 12+ components, so the class the earlier audits opened is largely
+  closed.
+- Registered GET routes returning 5xx: **0 of 134.**
+
+Two things are known-not-checked and deliberately not claimed as clean:
+these scans are string heuristics and cannot see a field that exists but
+means something different, and the Swift and Kotlin surfaces are not
+covered at all.
+
+### Known
+
+- **The mypy ratchet is stale and still red.** It records 683 errors
+  while clean `main` measures 749 in CI and 740 locally, so it has been
+  failing on every PR for reasons no author can act on, which means it
+  can never warn about the one thing it exists for.
+
+  It was NOT regenerated here. The count is platform-dependent (CI
+  measures 749 across 219 files on Linux, this machine 740 across 214),
+  so a baseline generated on macOS would still fail CI, and shipping one
+  while claiming the gate was fixed would be worse than leaving it
+  visibly broken. The real fix is to regenerate it from a Linux job.
+
+- **A MagicMock satisfies every `getattr`**, so
+  `getattr(state, "x", default)` never reaches its default when the
+  double is a bare mock. This has now caused two production defects in
+  one week: the `/api/dashboard` 500, and `somatic` putting an
+  unserialisable mock on a chat response. Both are fixed and both have
+  guard tests, but nothing stops the third. A conftest rule banning bare
+  MagicMock for BrainState is the durable fix and is not in this
+  release.
+
+### Coverage
+
+- pytest (feral-core): 10018 passed, 48 skipped, 0 failed.
+- vitest (feral-client-v2): 1251 passed across 157 files.
+- ruff: clean on the CI ruleset.
+- live route sweep: 134 of 134 registered GET routes answered, 0 5xx.
+
+## [2026.8.23] - 2026-08-22 - what it heard, and what it can reach
+
+Two reports, one shape: the agent held a capability and could not see
+it, so it told the operator the capability did not exist.
+
+Asked whether any conversation had been recorded, it said it records no
+audio, while four transcripts sat in its own store with commitments
+already extracted. Spoken to, it could not drive the Mac, while the
+identical sentence typed worked. Neither was a failed attempt. In both
+cases the agent answered from a model of itself that was smaller than
+the machine it was running on.
+
+### Fixed
+
+- **Voice could not drive the Mac, and voice and text disagreed about
+  what the agent can do.** Reported: "open <url> in chrome" spoken over
+  the iOS app did nothing, while the identical sentence typed worked.
+
+  Not a permissions problem. The cause was the OpenAI Realtime 128-tool
+  cap in `agents/tool_list.py`. Measured on a real registry,
+  `get_all_tools()` returns **265** tools, not the 176 the comment
+  claimed, so 137 are dropped from every voice session, and straight
+  truncation dropped **all ten** `desktop_control__*` tools. Four of the
+  twelve pins were `cutebot__*`: a demo robot outranked the operator's
+  own computer.
+
+  The narrow fix is pinning desktop control. `desktop_control__open_url`
+  is pinned ahead of `open_app` deliberately: `open_url` shells
+  `open -a <app> -- <url>` through LaunchServices and needs no macOS
+  Automation grant, while `open_app` sends an AppleScript that TCC gates
+  per responsible process.
+
+  The wider fix is that truncation was arbitrary with respect to
+  capability. Measured, it left **17 skills with zero tools** on voice,
+  including all 49 `browser` tools and every one of calendar, email,
+  github, google_drive, notion, microsoft365 and health_data, while
+  cutebot kept 6 of 6 and spotify 10 of 10. A skill with no tools is
+  invisible, and an invisible capability is exactly what makes the same
+  sentence work typed and fail spoken.
+
+  `cap_tools_with_pins` now spends its budget breadth-first: every skill
+  is guaranteed `MIN_TOOLS_PER_SKILL` before any remaining budget goes
+  to depth. Result on the live registry: **42 of 42 skills represented,
+  0 fully lost**, against 17 lost before. Six skills trade depth for
+  that breadth (`spotify_music` 10 to 4, `gui_computer_use` 11 to 3);
+  the spoken-word essentials among them are pinned so voice can still
+  operate what it can see.
+
+  `cutebot__halt` stays pinned alongside `cutebot__drive`. A session
+  that can start a physically moving machine and cannot stop it is worse
+  than one that can do neither.
+
+- **The voice session did not tell the model its tool list was cut.**
+  The complaint was not only that the Mac was unreachable, it was that
+  it failed "with no error explaining the difference". The cap is a
+  property of the Realtime session, not of the brain, and nothing told
+  the model it held a smaller list than the text path, so it answered
+  from a smaller world without knowing the world was smaller and
+  reported the BRAIN as incapable.
+
+  `truncation_notice()` now appends one block to the voice system
+  prompt stating how many tools of the total this session carries, that
+  a missing tool does not mean the brain cannot do it, and that the
+  honest response is to offer to do it in chat.
+
+### Added
+
+- **The agent can see recorded conversations.** Three new
+  `notes_memory` endpoints over a new read module
+  (`memory/ambient_conversations.py`): `list_conversations`,
+  `search_conversations`, `conversation_commitments`.
+
+  There was no tool for this. Asked "is there any ambient conversation
+  recorded?", the agent answered "I don't have any ambient audio
+  recording active. I only pick up what's directly spoken here" while
+  the brain held four transcripts with digests generated and
+  commitments already extracted from one of them.
+
+  That is not a failed search. A failed search is a fact about the
+  world; this was a confident false claim about a capability, produced
+  by consulting a self-model because nothing else was available to
+  consult. The ADHD case ambient capture exists for is "what did I say
+  I'd do", and the brain had the answer and denied holding it.
+
+  `list_conversations` returns `{total, returned, pending,
+  conversations}` rather than a bare list, so `total: 0` is the only
+  thing that licenses "nothing was recorded", and a transcript that has
+  arrived but is not yet summarized reports `status: "pending"` instead
+  of being invisible. Full transcripts are withheld unless asked for:
+  they run past 20k characters and a list of ten would bury the answer.
+  `conversation_commitments` answers "what did I say I'd do" directly,
+  each commitment carrying the conversation, the people and the due
+  date, so the answer is grounded rather than asserted.
+
+  `notes_memory__fused_timeline` was the nearest existing tool and
+  could not do this: it is time-windowed and cannot answer "do I have
+  any".
+
+### Fixed
+
+- **The system prompt never mentioned that ambient capture exists.**
+  Even with a tool available, the model volunteered a capability claim
+  instead of checking. A new "Ambient Conversation Capture" block
+  states that the operator's glasses record real conversations, that
+  transcripts arrive as `ambient_conversation` episodes, that the model
+  does NOT know from introspection whether anything was recorded, and
+  that the honest response to any question about spoken conversations
+  is to call the tool first. It names the three tools, says `total: 0`
+  is the only evidence of nothing, and says a `pending` conversation
+  still counts.
+
+- **Overheard speech was rewriting the operator's self-model.** Every
+  `AboutMeStore` extractor pattern is first person: "I prefer X", "I
+  live in X", "My wife <Name>", "I work as X". On a chat episode that
+  "I" is the operator by construction. On an `ambient_conversation`
+  episode it is whoever was talking, and the operator is frequently not
+  the one talking.
+
+  Measured, feeding one overheard sentence through `episode_save`:
+
+  ```
+  event_type=conversation          -> 5 about-me facts
+        preference     'Prefers: tea over coffee...'
+        relationship   'Family: Sarah'
+        place          'Lives in Lisbon...'
+        context        'Works as a tax accountant'
+  event_type=ambient_conversation  -> 5 facts, same text
+  ```
+
+  A stranger's wife, city and job became facts about the operator at
+  0.5 confidence, and `ideas_engine` then asked the operator to confirm
+  them. The profile filling with someone else's preferences is the
+  smaller half; the larger half is that third parties' families and
+  home towns were filed under the operator's identity by a device they
+  did not know was listening. Recording a conversation is not consent
+  to mine the other speaker for a personal profile.
+
+  `episode_save` now skips About-Me extraction for event types in
+  `_NO_SELF_MODEL_EVENT_TYPES`. The same text now yields 5 facts from
+  chat and 0 from ambient. Transcripts are still summarized, still
+  searchable, and still produce commitments; they just no longer
+  silently rewrite who the operator is.
+
+- **The ambient summariser did not know who the operator was.**
+  `agents/ambient_transcript.py` referenced identity zero times, so the
+  reduce pass was asked to decide which promises belong to "the user"
+  without being told who that is. Chat has always known, and greets the
+  operator by name from the same file. On a two-person recording this
+  is a coin flip, and the failure mode is filing a colleague's promise
+  as the operator's commitment.
+
+  The reduce prompt now carries a "WHO THE USER IS" block from
+  `~/.feral/USER.md`, capped at 1200 characters, with an explicit rule
+  that a promise is a commitment only when THIS person made it and that
+  an unclear speaker should be said so rather than assigned.
+
+  The unfilled template counts as no profile. `IdentityWorkspace`
+  scaffolds `USER.md` on first construction, so on a fresh install the
+  file exists and says "Tell your agent about yourself here"; passing
+  that under a "WHO THE USER IS" heading asserts a wrong answer instead
+  of leaving the question open. This uses the same
+  `!= DEFAULT_USER_MD` comparison `identity/workspace.py` already
+  applies when building the system prompt.
+
+### Coverage
+
+- pytest (feral-core): 9996 passed, 48 skipped, 0 failed.
+- vitest (feral-client-v2): 1251 passed across 157 files.
+- ruff: clean on the CI ruleset.
+
+## [2026.8.22] - 2026-08-22 - the body in the loop
+
+**HUP bumps to 1.4.0.** Additive throughout, per the MINOR rule in §1 of
+the spec: every new field is optional and every new `device_event` type
+is opt-in, so a 1.3.0 daemon that sends none of them behaves
+identically.
+
+The theme is a system that was reading the user's body and acting on it
+where nothing could see it happen, on top of a sensor path where most of
+the body never arrived. Three of the five signals the glasses send could
+not reach the somatic engine at all, including the one that dominates
+cognitive load; the policy derived from what did arrive was applied
+invisibly; and the one health alert that fired did so on a raw threshold
+that any flight of stairs would trip.
+
+Reported from the Theora iOS client, and every finding below was
+measured against a running brain rather than read off the source.
+
+### Added
+
+- **The behavioural policy is observable.** New `somatic_state` HUP
+  frame (brain to phone), an optional `somatic` field on
+  `chat_response`, and the full policy on `GET /api/dashboard`'s
+  `somatic` block, which previously reported the vector and none of the
+  policy derived from it.
+
+  The agent already read the somatic vector, shortened its answers,
+  suppressed proactive messages and restricted its own tools. None of
+  that was observable from outside, and a shorter reply is
+  indistinguishable from a reply that happened to be short, so the
+  adaptation could not be demonstrated or disagreed with.
+
+  The frame carries both halves deliberately: `cognitive_load` and the
+  vitals are the input, `tone` / `suppress_non_urgent` /
+  `max_response_tokens` / `tool_restrictions` are what the policy did
+  with it. It reports `get_behavioral_policy`, which is the derivation
+  the system prompt is actually built from, and not
+  `BehavioralPolicy.from_vector`, which is a second derivation with no
+  production caller that answers "calm" where the live one answers
+  "concise".
+
+  `stale` and `age_s` are on the frame because a somatic vector
+  outlives the wearable that fed it, so a policy can go on being
+  applied from a reading taken hours ago. Pushes are deduplicated on
+  the policy signature, so a continuous heart-rate stream does not
+  produce a frame per reading.
+
+- **Physiological moments alongside an ambient transcript.**
+  `ambient_transcript` accepts optional `moments`
+  (`{segment_index, delta_bpm, score, confounded, quote?, t_offset_s?}`),
+  `baseline_hr` and `respiratory_bpm`. The digest reasons over them and
+  returns `physiological_note` plus `moments_considered` on
+  `ambient_digest`.
+
+  A phone that sends none of this gets byte-identical behaviour: the
+  physiology block is appended to the reduce prompt only when usable
+  moments exist.
+
+  **`confounded` means movement explains the rise, and such a moment is
+  never described as an emotional response.** That is enforced twice,
+  not once. Confounded moments are dropped before the model sees them,
+  and the sentence the model returns is independently re-checked for
+  words asserting an inner state, with the whole sentence dropped if
+  any are found (dropped whole, not edited: a sentence with the emotion
+  word removed still carries the causal claim that made it wrong). A
+  rule stated only in a prompt is a request; the filter and the
+  post-check are what make it a guarantee. Moments below a confidence
+  score of 0.5 are dropped too.
+
+  `segment_index` indexes the PHONE's segmentation.
+  `agents/ambient_transcript.py` chunks into 6000-character segments
+  labelled `[segment N]`, which is a different partition of the same
+  conversation, so nothing joins on the bare index and the prompt says
+  so explicitly. Moments are anchored by `quote`, then `t_offset_s`,
+  then reported as unanchored with no claim about when.
+
+  `physiological_note` is a separate field rather than a sentence
+  folded into `summary`, so a client can suppress it and a reader can
+  tell what people said from what a heart rate did.
+
+### Fixed
+
+- **The glasses could not reach the somatic engine.** Reported from the
+  Theora iOS client. The wiring was present (`device_event` →
+  `_handle_biometric_device_event` → `update_from_perception_frame` →
+  `update_biometrics`), but three of five signals could not arrive.
+  Measured against a live brain, feeding one `device_event` of each
+  type:
+
+  ```
+  heart_rate  78    arrived
+  spo2        97    arrived
+  skin_temp   33.4  DROPPED  written flat, read only under "vitals"
+  steps       4213  DROPPED  written "steps", read "steps_today"
+  hrv         42    DROPPED  no ingestion path existed at all
+  ```
+
+  The vector the model saw was "HR:78bpm | SpO2:97%", and cognitive
+  load ran without `hrv_ms`, its largest term (weight 0.3).
+
+  `hrv` now has a `device_event` branch and both it and `activity` are
+  in the dispatcher vocabulary. `update_from_perception_frame` reads
+  the flat shape as well as the nested one. The dispatcher's filter was
+  a second hand-maintained copy of `_EXTRACTABLE_EVENT_TYPES` and is
+  now the same list: a branch existing while the type is missing from
+  the filter is exactly how every `uv` reading was dropped for the life
+  of that feature.
+
+- **`hrv_ms` is validated as RMSSD in milliseconds.** Readings outside
+  5-300 ms are rejected and logged at WARNING, never clamped, and the
+  last plausible value stands. Cognitive load reads HRV as
+  `1.0 - hrv_ms/100.0` at weight 0.3, so a vendor "HRV index" on an
+  undocumented scale does not degrade the policy, it inverts it: an
+  index of 3 reads as 0.97 load and pins the agent in calm, suppressed,
+  tool-restricted mode. Clamping would turn a scale error into a
+  confident maximum-stress reading that the policy then acts on.
+
+- **A wearable-only session always looked like midnight.**
+  `circadian_phase` was written only by `update_interaction`, so a
+  session fed by biometrics and nothing else kept the 0.0 default.
+  Measured at 14:00: a glasses stream produced `tone="calm"` and
+  `suppress_non_urgent=True` from the `hour < 5` branch, plus a
+  spurious 0.3 circadian term in cognitive load. `update_biometrics`
+  now sets the clock it already had access to.
+
+- **The activity gate never engaged.** Cognitive load uses heart rate
+  only when `activity_level < 0.3`, which is what stops a walk upstairs
+  reading as strain, but nothing populated `activity_level` from the
+  device path so it was permanently 0.0 (sedentary). There is now an
+  `activity` event type, and a frame that says nothing about activity
+  leaves it alone instead of resetting it: a `device_event` carries one
+  reading, so defaulting to 0.0 meant the next heart rate that arrived
+  overwrote a known "walking" back to "sedentary" and undid the guard.
+
+- **`hr_elevated` fired on any physical exertion.** The trigger was
+  `frame.heart_rate > 100`, and a flight of stairs is 110-130 bpm in a
+  healthy adult. It now fires on cognitive load crossing 0.7, the same
+  boundary `get_behavioral_policy` treats as high load, so the agent
+  alerts exactly when it also changes its own behaviour rather than on
+  a second threshold free to drift from the first. Measured: running at
+  128 bpm with HRV 60 gives load 0.32 and stays silent; sitting at 118
+  bpm with HRV 8 gives load 0.76 and speaks up.
+
+  The raw threshold is kept as the fallback, not removed. A brain with
+  no wearable HRV, or with no somatic engine, still gets the old alert.
+  `_cognitive_load_for` returns None rather than 0.0 when the answer is
+  unknown, because 0.0 is a real value meaning "this person is fine"
+  and would silence a genuine alert; it also returns None for a reading
+  older than 120 s, so an alert is never decided on a body state that
+  no longer exists.
+
+- **"Open this link on my Mac" from the phone opened an app called
+  "Https".** `RefusalHandler.build_action_intent_tool_call` asked for an
+  app name before it looked for a URL, and "open" answers both
+  questions, so the URL branch was unreachable for any sentence
+  containing open, launch or start. Reported from the Theora iOS client
+  and reproduced verbatim on `a4667d253`:
+
+  ```
+  "open https://youtube.com/watch?v=abc in chrome"
+      -> desktop_control__open_app: tell application "Https" to activate
+  "open the youtube link in chrome"
+      -> desktop_control__open_app: tell application "The Youtube Link In Chrome" to activate
+  ```
+
+  Two separate causes. The ordering above, and a fallback regex
+  `(?:open|launch|start)\s+([a-z0-9 ._+-]{2,40})` whose character class
+  omits `:` and `/` (so it stops at the scheme and captures `https`)
+  while including a space (so it runs to the end of the sentence).
+
+  The URL branch now runs first, and when the sentence also names a
+  known app the command is `open -a "<App>" "<url>"` rather than a bare
+  activate, so "open this in Chrome" opens the link in Chrome instead of
+  merely focusing it. The fallback regex refuses a URL scheme outright
+  and stops at a preposition or object noun. Determiners are
+  deliberately not stop words: "open my cool app" is a real request for
+  an app named "My Cool App". When a stop word does end the phrase, the
+  app the sentence actually names wins, so "open the youtube link in
+  chrome" resolves to Chrome.
+
+  Also fixed while here: matching an app name inside a URL. "open
+  https://mail.google.com" would have routed the link into Mail.app,
+  because a hostname is not a statement of intent.
+
+### Changed
+
+- **Device routing is now decided by the brain, not by each client.**
+  `agents.prompt_refiner.infer_device_target` is public and
+  deterministic, and is applied on both the HUP `phone_surface` path and
+  the WebUI chat path whenever the client sent no explicit
+  `device_target`.
+
+  The keyword rules already existed but sat inside `refine`, which is
+  behind `FERAL_PROMPT_REFINER`. That flag is off by default and makes
+  `refine` return an identity envelope, so the brain inferred nothing
+  and a phone saying "on my Mac" resolved to `http_api`, where every
+  `desktop_control` tool is denied. Clients worked around it by sending
+  `device_target` themselves, which put a second copy of a
+  security-routing rule in each SDK, in a different language, free to
+  drift. The iOS client had done exactly that.
+
+  Flipping `FERAL_PROMPT_REFINER` on was the alternative and is a much
+  larger change: it also enables LLM rewriting of the user's text on
+  every turn. The two were coupled only because the keyword extractor
+  happened to live in that module.
+
+  An explicit `device_target` from the client still wins, because the
+  client knows things the text does not say. On the WebUI path the
+  inference can only narrow what is permitted: the `websocket` deny list
+  is a strict subset of both `brain_host` and `phone_actuator`.
+
+### Protocol
+
+- **HUP 1.3.0 to 1.4.0**, synced across all nine pinned surfaces:
+  `models/protocol.py`, `HUP_SPEC.md` (header, version table and
+  Appendix B), the Python node SDK (`schemas.py` and `__init__.py`), the
+  TypeScript node SDK, the Swift node SDK, the two first-party daemon
+  manifests, and the companion iOS app's `Info.swift` +
+  `Info.plist`. `test_hup_version_unified.py` gates every one of them
+  and now pins 1.4.0.
+
+  The companion iOS surfaces live in a sibling repository
+  (`feral-companion-ios`), which the unification test walks when it is
+  checked out beside ASOS. Those two files were edited but NOT
+  committed; that repo's own release is separate.
+
+### Coverage
+
+- pytest (feral-core): 9944 passed, 49 skipped, 0 failed.
+- vitest (feral-client-v2): see the release run below.
+- Live verification against a running brain over real `/v1/node`
+  websockets: 27 checks across the somatic pipeline and the ambient
+  digest legs, nothing stubbed.
 
 ## [2026.8.14] - 2026-08-22 - the surfaces nobody had driven
 

@@ -1508,6 +1508,45 @@ async def startup():
         asyncio.create_task(_provider_catalog_refresher(), name="feral-provider-catalog-refresher")
     )
 
+    # Update availability, and ONLY when the operator asked for it.
+    #
+    # This is the one place the brain contacts a server nobody
+    # configured, so it is gated on `update_check_enabled()` and the
+    # task is not even created when the answer is False. Off is the
+    # default: see config/update_check.py for why a local-first product
+    # does not phone home unasked.
+    #
+    # It lives on a background task rather than on the dashboard route
+    # because the route is polled by the whole shell and must not wait
+    # on pypi.org. The sleep before the first check keeps it off the
+    # boot path too, so a slow or blackholed network delays nothing.
+    # `refresh()` returns cached answers inside the TTL and never
+    # raises, so the loop is one call a day at most and cannot take the
+    # brain down with it.
+    from config.update_check import (
+        refresh as _refresh_update_check,
+        ttl_seconds as _update_check_ttl_seconds,
+        update_check_enabled as _update_check_enabled,
+    )
+
+    if _update_check_enabled():
+        async def _update_check_refresher():
+            await asyncio.sleep(120)
+            while True:
+                try:
+                    # to_thread, not a bare call: `refresh` does a
+                    # blocking urllib GET, and blocking I/O inside
+                    # `async def` stalls the whole event loop.
+                    await asyncio.to_thread(_refresh_update_check)
+                except Exception as exc:
+                    logger.debug("update check refresh failed: %s", exc)
+                await asyncio.sleep(_update_check_ttl_seconds())
+        state.register_background_task(
+            asyncio.create_task(_update_check_refresher(), name="feral-update-check-refresher")
+        )
+    else:
+        logger.debug("update check is disabled; not scheduling a refresher")
+
     start_probe_sweeper(state)
 
 
@@ -1749,6 +1788,23 @@ async def _prepare_chat_turn_context(
         ctx["refinement"] = envelope.model_dump()
     except Exception as exc:
         logger.debug("PromptRefiner skipped: %s", exc)
+
+    # Same deterministic routing the HUP phone path uses, so a sentence
+    # naming a device resolves to the same surface on both. See the
+    # longer note at the phone_surface call site.
+    #
+    # Note this can only narrow what the web client may run: without a
+    # device_target, source "websocket" resolves to the websocket
+    # surface, whose deny list is a strict subset of both brain_host's
+    # and phone_actuator's.
+    if not ctx.get("device_target"):
+        try:
+            from agents.prompt_refiner import infer_device_target
+            inferred = infer_device_target(text)
+            if inferred:
+                ctx["device_target"] = inferred
+        except Exception:
+            logger.debug("device_target inference failed", exc_info=True)
 
     return refined_text, ctx, user_msg_text
 
@@ -2909,6 +2965,25 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 except Exception as _refine_exc:
                     logger.debug("PromptRefiner skipped: %s", _refine_exc)
 
+                # Device routing is decided here, not by the client.
+                # `refine` is behind FERAL_PROMPT_REFINER, which is off
+                # by default and returns an identity envelope, so with
+                # the flag off it infers nothing and a phone saying "on
+                # my Mac" resolved to http_api, where every
+                # desktop_control tool is denied. Clients worked around
+                # that by sending `device_target` themselves, which put
+                # a second copy of a security-routing rule in each SDK.
+                # This inference is deterministic and flag-independent;
+                # an explicit `device_target` from the client still
+                # wins, because the client knows things the text does
+                # not say.
+                if not device_target:
+                    try:
+                        from agents.prompt_refiner import infer_device_target
+                        device_target = infer_device_target(text) or None
+                    except Exception:
+                        logger.debug("device_target inference failed", exc_info=True)
+
                 context = {
                     "source": "phone_surface",
                     "mode": "phone_surface",
@@ -2998,18 +3073,29 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         f"Orchestrator failed for chat_request: {orch_error}",
                         name="orchestrator_error",
                     )
+                chat_payload = {
+                    "session_id": target_sid,
+                    "text": response_text,
+                    "reply_mode": reply_mode,
+                    "channel": channel,
+                    "reply_to": reply_to,
+                    "error": orch_error,
+                }
+                # The behavioural policy that shaped THIS reply, on the
+                # same frame as the reply. Without it a shortened answer
+                # is indistinguishable from an answer that happened to
+                # be short, and the adaptation cannot be demonstrated.
+                # Omitted entirely (not sent as an empty object) when no
+                # biometric reading has ever landed, so "not adapting"
+                # stays distinguishable from "adapting to neutral".
+                _somatic_turn = _somatic_state_for_turn(target_sid)
+                if _somatic_turn is not None:
+                    chat_payload["somatic"] = _somatic_turn
                 await ws.send_json({
                     "hup_version": HUP_VERSION,
                     "type": "chat_response",
                     "ts": time.time(),
-                    "payload": {
-                        "session_id": target_sid,
-                        "text": response_text,
-                        "reply_mode": reply_mode,
-                        "channel": channel,
-                        "reply_to": reply_to,
-                        "error": orch_error,
-                    },
+                    "payload": chat_payload,
                 })
 
             elif msg.type == "chat_response":
@@ -3785,26 +3871,16 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     reason = _handle_video_frame(node_id, de_payload, msg.msg_id)
                     if reason:
                         await _send_frame_too_large(ws, reason)
-                elif ev_type in {
-                    "heart_rate", "spo2", "skin_temperature", "steps",
-                    "temperature", "accelerometer", "gesture",
-                    # The Theora glasses relay emits "uv" (see the iOS
-                    # FeralHUP.EventType list). It was missing here, so
-                    # every UV reading hit the unknown-event branch and
-                    # was dropped at debug level with nothing surfaced.
-                    "uv",
-                    # Each of these is in the HUP v1 capability
-                    # vocabulary (feral-nodes/python-node-sdk
-                    # capability.py) or the §5.4 conventions table, and
-                    # each already has a sink on the brain side
-                    # (PerceptionFrame.ambient_light_lux, .battery_pct,
-                    # .location, .gesture). They were reaching the
-                    # unknown-event branch instead, so a glasses node
-                    # that reported ambient light, battery, position or
-                    # a button press was reporting into nothing.
-                    "gyroscope", "ambient_light", "battery",
-                    "button_press", "gps",
-                }:
+                elif ev_type in _EXTRACTABLE_EVENT_TYPES:
+                    # This filter used to be a second hardcoded copy of
+                    # the same vocabulary, maintained by hand next to
+                    # the one in _EXTRACTABLE_EVENT_TYPES. That is the
+                    # shape of the `uv` bug: a branch existed in the
+                    # handler and the type was missing from the filter,
+                    # so every reading was dropped before it got there.
+                    # One list, read by the dispatcher, the handler and
+                    # the "dropped" log, so adding a branch cannot leave
+                    # the door shut.
                     _handle_biometric_device_event(node_id, ev_type, de_payload)
                 elif ev_type in {"robot_telemetry", "robot_event"}:
                     # CuteBot bridge node feedback (HUP §6.2). Thin path:
@@ -4597,6 +4673,12 @@ def _ambient_digest_frame(
         "episode_id": "",
         "processed_at": None,
         "remaining": remaining,
+        # Present and empty on the unknown/pending frames for the same
+        # reason every other field is: a sparse frame would let a caller
+        # tell "someone else owns this" from "nobody owns this" by which
+        # keys came back, which is exactly what the scoping withholds.
+        "physiological_note": "",
+        "moments_considered": 0,
     }
 
     if row is None:
@@ -4629,6 +4711,12 @@ def _ambient_digest_frame(
         "degraded": [str(x) for x in (digest.get("degraded") or [])],
         "episode_id": str(row.get("episode_id") or ""),
         "processed_at": row.get("processed_at"),
+        # Already sanitised when the digest was written: confounded
+        # moments never reached the model and the sentence it produced
+        # was re-checked for emotion words. Read back as stored, with a
+        # length cap in case an older row predates the cap.
+        "physiological_note": str(digest.get("physiological_note") or "")[:1000],
+        "moments_considered": int(digest.get("moments_considered") or 0),
     })
     return frame
 
@@ -4914,10 +5002,28 @@ async def _process_ambient_transcript(
         speakers = [str(x) for x in (payload.get("speakers") or [])]
         source = str(payload.get("source") or "unknown")
 
+        # Physiology the phone measured alongside the words. All
+        # optional: a phone that sends none of it produces exactly the
+        # summary it produced before this existed. The confound filter
+        # and the emotion-word check live in agents/ambient_transcript,
+        # so nothing here has to be trusted to apply them.
+        moments = payload.get("moments")
+        moments = moments if isinstance(moments, list) else []
+        baseline_hr = payload.get("baseline_hr")
+        respiratory_bpm = payload.get("respiratory_bpm")
+
         llm = getattr(getattr(state, "orchestrator", None), "llm", None)
         outcome = await summarize_transcript(
             text, llm=llm, started_at=started_at,
             speakers=speakers, source=f"ambient:{source}",
+            moments=moments,
+            baseline_hr=float(baseline_hr) if isinstance(baseline_hr, (int, float)) else None,
+            respiratory_bpm=float(respiratory_bpm) if isinstance(respiratory_bpm, (int, float)) else None,
+            # None means "load ~/.feral/USER.md yourself". Passed
+            # explicitly rather than left to the default so this call
+            # site records that the summariser needs to know who the
+            # operator is: it is deciding which promises are THEIRS.
+            operator_identity=None,
         )
 
         episode_id = ""
@@ -5232,13 +5338,128 @@ def _first_present(payload: dict, *keys: str):
     return None
 
 
+# The last somatic policy published per session, so a stream of
+# readings that does not move the policy does not produce a frame per
+# reading. Bounded by the number of live sessions, and cleared with
+# them.
+_somatic_last_published: dict[str, tuple] = {}
+
+
+def _somatic_policy_signature(frame: dict) -> tuple:
+    """What counts as a CHANGE worth telling the client about.
+
+    Cognitive load is included at 2 decimal places rather than in full:
+    a client renders a dial from it, so a move of 0.01 is worth a frame
+    and the fifth decimal of a weighted average is not. The policy
+    fields are compared exactly, because a change in any of them is a
+    change in what the agent will actually do.
+    """
+    return (
+        frame.get("tone"),
+        frame.get("proactive_level"),
+        bool(frame.get("suppress_non_urgent")),
+        frame.get("max_response_tokens"),
+        tuple(frame.get("tool_restrictions") or ()),
+        round(float(frame.get("cognitive_load") or 0.0), 2),
+        bool(frame.get("stale")),
+    )
+
+
+def _somatic_state_for_turn(session_id: str) -> dict | None:
+    """The policy in force for one chat turn, or None to omit the field.
+
+    None, never an empty dict, when there is no engine or no biometric
+    reading has ever landed on this session. "The agent is not adapting"
+    and "the agent is adapting to a neutral state" are different claims
+    and a client has to be able to tell them apart.
+    """
+    engine = getattr(state, "somatic_engine", None)
+    if not engine:
+        return None
+    try:
+        frame = engine.state_frame(session_id, reason="chat_turn")
+    except Exception:
+        logger.debug("somatic state_frame failed for turn", exc_info=True)
+        return None
+    # isinstance, and `is True` rather than truthiness. Whatever comes
+    # back is about to be JSON-serialised onto the reply the user is
+    # waiting for, so anything that is not plainly a dict of the
+    # expected shape has to be dropped rather than sent: a value that
+    # fails to serialise takes the whole chat_response with it. This is
+    # not hypothetical. A MagicMock has every attribute and every call
+    # returns another MagicMock, so a test double standing in for
+    # BrainState satisfies `getattr(..., None)`, `.state_frame(...)` and
+    # `.get("has_biometrics")` all truthily, and put a MagicMock on the
+    # wire. See CLAUDE.md on why `getattr(mock, x, default)` never
+    # reaches its default.
+    if not isinstance(frame, dict):
+        return None
+    if frame.get("has_biometrics") is not True:
+        return None
+    return frame
+
+
+def _somatic_publish(session_id: str, node_id: str, *, reason: str) -> None:
+    """Push a ``somatic_state`` frame to ``node_id`` if the policy moved.
+
+    Fire and forget. This runs on the frame-handling path for every
+    biometric reading, so it must never block that path and must never
+    raise into it: a display failing is not a reason to drop a vital.
+
+    Deliberately no-ops when the policy signature is unchanged. A pair
+    of glasses streams heart rate continuously and almost all of those
+    readings leave the policy exactly where it was.
+    """
+    engine = getattr(state, "somatic_engine", None)
+    if not engine or not node_id:
+        return
+    try:
+        frame = engine.state_frame(session_id, reason=reason)
+        # Same guard as _somatic_state_for_turn, for the same reason:
+        # this is about to be serialised onto a socket.
+        if not isinstance(frame, dict):
+            return
+        signature = _somatic_policy_signature(frame)
+        if _somatic_last_published.get(session_id) == signature:
+            return
+        _somatic_last_published[session_id] = signature
+
+        async def _send() -> None:
+            try:
+                await state._send_dict_to_node(
+                    node_id, {"type": "somatic_state", "payload": frame},
+                )
+            except Exception:
+                logger.debug(
+                    "somatic_state push failed for %s", node_id, exc_info=True,
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Called from a sync context with no loop (a test, or the
+            # boot sweep). Nothing to push to; the next reading on a
+            # live socket will carry the state.
+            return
+        # register_background_task, not a bare create_task: the loop
+        # holds tasks only weakly and a fire-and-forget send can be
+        # collected mid-flight (see CLAUDE.md, "Background tasks must be
+        # referenced").
+        task = loop.create_task(_send())
+        register = getattr(state, "register_background_task", None)
+        if callable(register):
+            register(task)
+    except Exception:
+        logger.debug("somatic_state publish failed", exc_info=True)
+
+
 # Every ``event_type`` this function can turn into a value, kept next
 # to the branches so the "dropped" log below can tell a daemon author
 # what the brain actually understands instead of just saying no.
 _EXTRACTABLE_EVENT_TYPES = (
-    "heart_rate", "spo2", "skin_temperature", "temperature", "steps",
+    "heart_rate", "hrv", "spo2", "skin_temperature", "temperature", "steps",
     "uv", "accelerometer", "gyroscope", "ambient_light", "battery",
-    "gps", "gesture", "button_press",
+    "gps", "gesture", "button_press", "activity",
 )
 
 
@@ -5293,6 +5514,66 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
                     "timestamp",
                 ),
             )
+    elif event_type == "hrv":
+        # RMSSD in milliseconds, and nothing else. hrv_ms is the largest
+        # single term in SomaticEngine._recompute_cognitive_load (weight
+        # 0.3, as `1.0 - hrv_ms/100.0`), and there was no ingestion path
+        # for it at all: `hrv` was in neither the dispatcher filter nor
+        # this chain, so the term that dominates cognitive load was the
+        # one signal the brain could never receive.
+        #
+        # The key names are explicit about the unit because the phone
+        # previously sent a vendor "HRV index" on an undocumented scale.
+        # A bare `value` is accepted for SDK parity but is validated the
+        # same way: perception.somatic.plausible_hrv_ms drops anything
+        # that cannot be RMSSD in ms rather than clamping it, because a
+        # clamp turns a scale error into a confident maximum-stress
+        # reading.
+        val = _first_present(
+            frame_payload, "rmssd_ms", "hrv_ms", "hrv_rmssd_ms", "value", "hrv",
+        )
+        if val is not None:
+            from perception.somatic import HRV_MAX_MS, HRV_MIN_MS, plausible_hrv_ms
+            if plausible_hrv_ms(val):
+                sensors["hrv_ms"] = float(val)
+                _src = (
+                    frame_payload.get("hrv_source")
+                    or frame_payload.get("source")
+                    or _infer_wearable_source_from_node(effective_node)
+                )
+                if _src:
+                    sensors["hrv_source"] = _src
+                sensors["hrv_sample_ts"] = _resolve_sample_ts(
+                    frame_payload,
+                    source=str(_src or ""),
+                    ts_keys=("hrv_sample_ts", "sample_ts", "ts", "timestamp"),
+                )
+            else:
+                # WARNING for the same reason the `uv` drop is: a reading
+                # the brain accepted and discarded has to be visible, and
+                # a scale error at the source is exactly the thing the
+                # device author needs told.
+                logger.warning(
+                    "Dropping hrv device_event from %s: %r is not RMSSD in "
+                    "milliseconds (expected %.0f-%.0f ms). Send RMSSD, not a "
+                    "vendor HRV index.",
+                    effective_node, val, HRV_MIN_MS, HRV_MAX_MS,
+                )
+                return
+    elif event_type == "activity":
+        # What the wearer is doing, which gates the heart-rate term in
+        # cognitive load and is what stops a walk upstairs reading as
+        # stress. Nothing in this repo derives it from the
+        # accelerometer, so a node that knows has to say so. Accepts the
+        # fusion vocabulary (`inferred_state`) or a 0-1 number.
+        state_label = _first_present(
+            frame_payload, "state", "activity", "inferred_state", "value",
+        )
+        if isinstance(state_label, str) and state_label.strip():
+            sensors["inferred_state"] = state_label.strip().lower()
+        level = _first_present(frame_payload, "activity_level", "level")
+        if isinstance(level, (int, float)):
+            sensors["activity_level"] = max(0.0, min(1.0, float(level)))
     elif event_type == "spo2":
         val = frame_payload.get("current") or frame_payload.get("spo2") or frame_payload.get("value")
         if val is not None:
@@ -5433,6 +5714,10 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
             state.perception.update_sensors(sid, sensors)
             if state.somatic_engine:
                 state.somatic_engine.update_from_perception_frame(sid, sensors)
+                # The reading has now moved the policy. Say so, rather
+                # than letting the change show up only as a shorter
+                # reply an hour later.
+                _somatic_publish(sid, effective_node, reason="biometrics")
 
     _record_biometrics_to_baseline(sensors)
     # Purely additive (operator report 2026-06-13): append the raw
@@ -5562,6 +5847,17 @@ _HISTORY_METRIC_MAP = {
     ),
     "temperature": ("body_temp", None, None),
     "steps": ("steps", None, None),
+    # HRV was added to _EXTRACTABLE_EVENT_TYPES and to the somatic
+    # bridge in 2026.8.23 and never added here, so the reading moved the
+    # behavioural policy in the moment and left no trace: "how was my
+    # HRV last week" had nothing to read. Same writer-reader gap that
+    # dropped skin_temp and steps on the way into the somatic vector,
+    # one layer further out.
+    #
+    # Source and sample_ts keys match what _handle_biometric_device_event
+    # writes alongside the value, so the lagging-source exclusion above
+    # applies to HRV exactly as it does to heart rate.
+    "hrv_ms": ("hrv", "hrv_source", "hrv_sample_ts"),
 }
 
 

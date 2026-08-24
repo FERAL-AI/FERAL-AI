@@ -120,11 +120,24 @@ async def context_live():
     if hasattr(state, 'somatic_engine') and state.somatic_engine and state.sessions:
         for sid in state.sessions:
             vec = state.somatic_engine.get_vector(sid)
-            somatic = {
-                "cognitive_load": vec.cognitive_load,
-                "activity_level": vec.activity_level,
-                "circadian_phase": vec.circadian_phase,
-            }
+            # This used to report the vector alone: cognitive_load,
+            # activity, circadian phase. That is the INPUT to the
+            # behavioural policy and none of the OUTPUT, so a dashboard
+            # could show a load figure while the thing the load actually
+            # did (shorter answers, suppressed proactive messages,
+            # restricted tools) stayed invisible. state_frame carries
+            # both halves and is the same shape the phone gets on the
+            # `somatic_state` HUP frame.
+            try:
+                somatic = state.somatic_engine.state_frame(sid, reason="poll")
+            except Exception:
+                somatic = {
+                    "cognitive_load": vec.cognitive_load,
+                    "activity_level": vec.activity_level,
+                    "circadian_phase": vec.circadian_phase,
+                }
+            else:
+                somatic["circadian_phase"] = vec.circadian_phase
             break
 
     hardware_context = ""
@@ -445,6 +458,21 @@ async def _get_dashboard_data() -> dict:
         # not (or vice versa). `null` on the success branch.
         "paired_unavailable": paired_unavailable,
         "channels": channel_types,
+        # Whether this process is executing the version that is
+        # installed. A Python process never reloads its source, so
+        # `pip install --upgrade feral-ai` cannot reach a running brain:
+        # the upgrade succeeds, nothing errors, and the operator keeps
+        # using the old build with no symptom. Measured on a real
+        # install, a brain served for two days and one hour from code
+        # that predated four releases. Local comparison, no network.
+        "runtime": _runtime_staleness(),
+        # The other half of the same story: whether a newer release
+        # exists at all. That question needs the network, so it is
+        # opt-in and this field only ever reads a cache written
+        # elsewhere. No socket is opened on this request path whatever
+        # pypi.org is doing, and a check that has never run, is turned
+        # off, or failed reports itself rather than erroring.
+        "update": _update_availability(),
         "session_count": len(state.sessions), "health": latest_health,
         "memory": stats, "skills_count": len(state.skill_registry.skills),
         "llm_available": _check_llm_available(),
@@ -474,6 +502,47 @@ async def _get_dashboard_data() -> dict:
         "is_demo_mode": getattr(state, "_demo", None) is not None,
         "somatic": somatic_state,
     }
+
+
+def _runtime_staleness() -> dict:
+    """Whether the running code matches the installed code.
+
+    Never raises into the dashboard. This is a diagnostic on the
+    endpoint the whole shell polls, so a failure here must cost the
+    panel, not the page. A brain that cannot answer reports
+    `stale: False` rather than guessing, on the principle that telling
+    somebody to restart on the strength of a failed lookup is worse
+    than staying quiet.
+    """
+    try:
+        from config.staleness import runtime_staleness
+
+        return runtime_staleness()
+    except Exception as exc:
+        logger.debug("runtime staleness check failed: %s", exc)
+        return {"stale": False, "detail": "unavailable"}
+
+
+def _update_availability() -> dict:
+    """Whether a newer release exists, from cache only.
+
+    ``update_status`` reads a JSON file and opens no socket, which is
+    the property that makes this safe to put on the endpoint the whole
+    shell polls: a slow or unreachable pypi.org cannot slow this
+    response down, because this response never asks it anything. The
+    cache is filled by the brain's own opt-in refresher and by
+    `feral update`.
+
+    Wrapped anyway. Same rule as `_runtime_staleness` above: a
+    diagnostic on this route costs its own panel, never the page.
+    """
+    try:
+        from config.update_check import update_status
+
+        return update_status()
+    except Exception as exc:
+        logger.debug("update availability check failed: %s", exc)
+        return {"enabled": False, "status": "unknown", "detail": "unavailable"}
 
 
 def _budget_status() -> dict:

@@ -436,7 +436,25 @@ class AboutMeStore:
                     "goal": lambda p: f"Goal: {p}",
                     "taboo": lambda p: f"Do not mention: {p}",
                 }
-                fact_text = templates[kind](payload)
+                # A negative preference is not a preference.
+                #
+                # The template was keyed on `kind` alone, and the
+                # negative pattern (`I don't X`, `I never X`) shares the
+                # `preference` kind with the positive one. So "I don't
+                # drink coffee" was stored as "Prefers: drink coffee",
+                # the exact opposite of what was said.
+                #
+                # The `negative` tag was recorded, and recording it is
+                # not enough: `render_for_prompt` below emits `f.text`
+                # and nothing else, so the tag is invisible to the model
+                # and the inverted sentence is what reaches the system
+                # prompt. Found in a real profile on 2026-08-23, where
+                # "I don't know been working on the demo" had become a
+                # stated preference.
+                if kind == "preference" and "negative" in extra_tags:
+                    fact_text = f"Does not: {payload}"
+                else:
+                    fact_text = templates[kind](payload)
 
                 tags = list(extra_tags)
                 try:

@@ -33,6 +33,7 @@ from agents.tool_list import (
     cap_tools_with_pins,
     openai_realtime_tool_choice,
     resolve_forced_tool_choice,
+    truncation_notice,
 )
 from skills.call_context import bind_context
 from voice.transcript_filter import should_commit_user_transcript
@@ -326,10 +327,19 @@ class RealtimeSession:
         if self._language_hint:
             transcription_cfg["language"] = self._language_hint
 
+        # Tell the model its list was cut. Without this the voice path
+        # silently exposes a smaller capability set than chat, so the
+        # same sentence works typed and fails spoken with no explanation
+        # -- and the model reports the BRAIN as incapable rather than
+        # the session as limited.
+        instructions = (self._system_prompt or "") + truncation_notice(
+            self._tools, capped,
+        )
+
         session_update = self._ga_session_update(
             model=self._model,
             output_modalities=["audio"],
-            instructions=self._system_prompt,
+            instructions=instructions,
             audio={
                 "input": {
                     "format": {"type": "audio/pcm", "rate": self._input_sample_rate},
@@ -907,7 +917,21 @@ class RealtimeProxy:
     ) -> RealtimeSession:
         """Create and connect a new realtime session for a phone/glasses node."""
         system_prompt = await self._build_system_prompt(session_id)
-        tools = self._get_tools()
+        # The RAW list, not the capped one. ``configure()`` caps before
+        # it sends, so nothing extra reaches the wire, but it also
+        # computes ``truncation_notice(self._tools, capped)`` and that
+        # can only say anything if the session knows how many tools the
+        # brain really has. Handing it the pre-capped 128 made the two
+        # lists identical, ``len(capped) >= len(tools)`` true, and the
+        # notice the empty string on every voice session ever opened.
+        # The model was never told its list had been cut, which is the
+        # exact silence the notice exists to break.
+        #
+        # ``_get_tools()`` (capped) is still what the turn hooks below
+        # get, deliberately: they choose a tool to FORCE, and a forced
+        # name the session did not declare is answered by OpenAI with an
+        # error event rather than a tool call.
+        tools = self._get_raw_tools()
 
         rs = RealtimeSession(
             session_id=session_id,
@@ -1076,9 +1100,25 @@ class RealtimeProxy:
 
         return "\n".join(parts)
 
-    def _get_tools(self) -> list[dict]:
+    def _get_raw_tools(self) -> list[dict]:
+        """Everything the registry has, uncapped.
+
+        Only ``start_session`` wants this, and only so the session can
+        measure how much the cap dropped. See the comment there.
+        """
         if self._skill_registry:
-            raw = self._skill_registry.get_all_tools()
+            return list(self._skill_registry.get_all_tools() or [])
+        return []
+
+    def _get_tools(self) -> list[dict]:
+        """What a voice session can actually reach: the capped list.
+
+        Used by the turn hooks, which pick a tool to force. Forcing a
+        name the session never declared is an error event on the wire,
+        so this side must never see more than the session sent.
+        """
+        raw = self._get_raw_tools()
+        if raw:
             return cap_tools_with_pins(raw, max_tools=OPENAI_TOOL_HARD_LIMIT)
         return []
 

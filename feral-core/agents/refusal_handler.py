@@ -19,6 +19,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("feral.orchestrator.refusal")
 
+#: Words that terminate an app name rather than belonging to one. The
+#: fallback app-name regex has to allow a space, because "visual studio
+#: code" is one app, but without a stop list that space lets the match
+#: run to the end of the sentence: "open the youtube link in chrome"
+#: produced an application named "The Youtube Link In Chrome".
+#: Determiners are deliberately absent: "open my cool app" is a real
+#: request for an app called "My Cool App", so "my" cannot terminate a
+#: name. What terminates one is a preposition or an object noun, which
+#: is where the phrase stops describing an application and starts
+#: describing what to do with it.
+_NOT_AN_APP_WORD = frozenset({
+    "in", "on", "at", "with", "via", "using", "from", "to", "for", "into",
+    "and", "or", "then", "please",
+    "link", "url", "address", "page", "site", "website", "video", "song",
+    "track", "playlist", "document", "tab", "window",
+})
+
 
 class RefusalHandler:
     """Detects LLM refusals and provides fallback action-intent execution."""
@@ -274,17 +291,91 @@ class RefusalHandler:
             return ""
         return match.group(1).rstrip(").,;!?")
 
+    def named_app(self, text: str) -> str:
+        """A KNOWN application named anywhere in the sentence, or "".
+
+        Deliberately not the same question as `extract_open_app_name`.
+        This one only ever answers with an app from `COMMON_APP_NAMES`,
+        so it is safe to ask about a sentence that also contains a URL:
+        "open <url> in chrome" names Chrome without the verb preceding
+        it.
+
+        URLs are removed before matching. A host is not a statement of
+        intent: "open https://mail.google.com" names no application, and
+        matching inside the URL would have opened it in Mail.
+        """
+        lowered = re.sub(r"https?://\S+", " ", (text or "").lower())
+        for hint, app in self.COMMON_APP_NAMES.items():
+            if re.search(rf"\b{re.escape(hint)}\b", lowered):
+                return app
+        return ""
+
     def extract_open_app_name(self, text: str) -> str:
         lowered = (text or "").lower()
         for hint, app in self.COMMON_APP_NAMES.items():
             if any(phrase in lowered for phrase in (f"open {hint}", f"launch {hint}", f"start {hint}")):
                 return app
 
-        match = re.search(r"(?:open|launch|start)\s+([a-z0-9 ._+-]{2,40})(?:\s+app(?:lication)?)?", lowered)
-        if not match:
+        # The fallback, for an app this table has never heard of.
+        #
+        # It used to be `(?:open|launch|start)\s+([a-z0-9 ._+-]{2,40})`,
+        # which had two failure modes, both reported from the phone:
+        #
+        #   "open https://youtube.com/... in chrome"
+        #       -> captured "https", because ':' and '/' are not in the
+        #          class, so it stopped at the scheme and produced
+        #          `tell application "Https" to activate`
+        #   "open the youtube link in chrome"
+        #       -> captured the whole trailing clause, producing
+        #          `tell application "The Youtube Link In Chrome"`
+        #
+        # A space in the character class is what makes the second one
+        # possible: it lets the match run to the end of the sentence.
+        # The fallback now refuses a URL scheme outright and takes at
+        # most four words, so the stop-word scan below can see the word
+        # that ends the name instead of the capture ending first.
+        #
+        # Everything from here down only applies to a sentence that
+        # actually asks for something to be opened. Without this gate
+        # the named-app fallback would answer "create a desktop note",
+        # where "note" matches Notes and nothing was being launched.
+        if not re.search(r"\b(?:open|launch|start)\b", lowered):
             return ""
+
+        match = re.search(
+            r"\b(?:open|launch|start)\s+"
+            r"(?!https?\b|www\b|ftp\b)"
+            r"([a-z0-9._+-]{2,20}(?:\s+[a-z0-9._+-]{2,20}){0,3})"
+            r"(?:\s+app(?:lication)?)?",
+            lowered,
+        )
+        if not match:
+            return self.named_app(text)
         candidate = match.group(1).strip(" ._+-")
-        if not candidate:
+
+        words = []
+        hit_stop_word = False
+        for word in candidate.split():
+            if word in _NOT_AN_APP_WORD:
+                hit_stop_word = True
+                break
+            words.append(word)
+
+        # A stop word means the phrase after the verb was a description,
+        # not a name: "open the youtube link in chrome" describes a link
+        # and names its app later in the sentence. Prefer the app the
+        # sentence actually names over the fragment before the stop word,
+        # which would have been "The Youtube".
+        if hit_stop_word or not words:
+            named = self.named_app(text)
+            if named:
+                return named
+        if not words:
+            return ""
+
+        candidate = " ".join(words)
+        # A bare scheme or host is never an app name.
+        if "://" in candidate or candidate in {"http", "https", "www", "ftp"}:
             return ""
         return " ".join(w.capitalize() for w in candidate.split())
 
@@ -299,20 +390,42 @@ class RefusalHandler:
 
     def build_action_intent_tool_call(self, text: str) -> Optional[dict]:
         lowered = (text or "").lower()
+
+        # URL first, deliberately. This used to ask for an app name
+        # before looking for a URL, and "open" is in both questions, so
+        # every "open <url>" sentence was answered by the app branch and
+        # the URL branch below was unreachable whenever the sentence
+        # contained open, launch or start. Measured before this change:
+        #
+        #   "open https://youtube.com/watch?v=abc in chrome"
+        #       -> open_app, tell application "Https" to activate
+        #   "open the youtube link in chrome"
+        #       -> open_app, tell application "The Youtube Link In Chrome"
+        #
+        # A sentence carrying a URL is asking for that URL to be opened.
+        # If it also names a known app, that app is where it should
+        # open, which is `open -a`, not a separate activate.
+        url = self.extract_first_url(text)
+        if url:
+            in_app = self.named_app(text)
+            if in_app:
+                command = f"open -a {shlex.quote(in_app)} {shlex.quote(url)}"
+                intent = f"open URL {url} in {in_app}"
+            else:
+                command = f"open {shlex.quote(url)}"
+                intent = f"open URL {url}"
+            return {
+                "name": "desktop_control__shell_command",
+                "args": {"command": command},
+                "_intent": intent,
+            }
+
         app_name = self.extract_open_app_name(text)
         if app_name:
             return {
                 "name": "desktop_control__open_app",
                 "args": {"script": f'tell application "{app_name}" to activate'},
                 "_intent": f"open {app_name}",
-            }
-
-        url = self.extract_first_url(text)
-        if url:
-            return {
-                "name": "desktop_control__shell_command",
-                "args": {"command": f"open {shlex.quote(url)}"},
-                "_intent": f"open URL {url}",
             }
 
         if "desktop" in lowered and any(token in lowered for token in ("note", "file", "txt")):

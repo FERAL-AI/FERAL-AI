@@ -312,3 +312,65 @@ async def test_execute_fallback_auto_without_memory_still_sends_summary():
     assert ok is True
     orch._send_text.assert_awaited()
     assert orch.memory is None
+
+
+# ── phone -> Mac "open this link" path ──────────────────────────────────────
+#
+# Reported from the Theora iOS client on 2026-08-22. Every one of these
+# reached desktop_control__open_app with a nonsense application name,
+# because build_action_intent_tool_call asked for an app name before it
+# looked for a URL and "open" answers both questions. The URL branch was
+# unreachable for any sentence containing open, launch or start.
+
+
+def test_url_with_named_app_opens_url_in_that_app():
+    """Was: tell application "Https" to activate."""
+    h = RefusalHandler(MagicMock())
+    tc = h.build_action_intent_tool_call("open https://youtube.com/watch?v=abc in chrome")
+    assert tc is not None
+    assert tc["name"] == "desktop_control__shell_command"
+    assert tc["args"]["command"] == (
+        "open -a 'Google Chrome' 'https://youtube.com/watch?v=abc'"
+    )
+
+
+def test_named_app_without_url_activates_that_app():
+    """Was: tell application "The Youtube Link In Chrome" to activate."""
+    h = RefusalHandler(MagicMock())
+    tc = h.build_action_intent_tool_call("open the youtube link in chrome")
+    assert tc is not None
+    assert tc["name"] == "desktop_control__open_app"
+    assert tc["args"]["script"] == 'tell application "Google Chrome" to activate'
+
+
+def test_url_without_named_app_opens_with_default_handler():
+    h = RefusalHandler(MagicMock())
+    tc = h.build_action_intent_tool_call("play this on my mac https://youtu.be/xyz")
+    assert tc is not None
+    assert tc["name"] == "desktop_control__shell_command"
+    assert tc["args"]["command"] == "open https://youtu.be/xyz"
+
+
+def test_host_is_not_an_app_name():
+    """A hostname is not a statement of intent.
+
+    named_app strips URLs before matching, so "mail" inside
+    mail.google.com must not route the link into Mail.app.
+    """
+    h = RefusalHandler(MagicMock())
+    tc = h.build_action_intent_tool_call("open https://mail.google.com")
+    assert tc is not None
+    assert tc["args"]["command"] == "open https://mail.google.com"
+
+
+def test_app_name_fallback_still_handles_unknown_apps():
+    """The tightened regex must not cost us apps outside COMMON_APP_NAMES."""
+    h = RefusalHandler(MagicMock())
+    assert h.extract_open_app_name("open obsidian") == "Obsidian"
+    assert h.extract_open_app_name("launch final cut") == "Final Cut"
+
+
+def test_app_name_never_captures_a_url_scheme():
+    h = RefusalHandler(MagicMock())
+    assert h.extract_open_app_name("open https://example.com") == ""
+    assert h.extract_open_app_name("open www.example.com") == ""

@@ -64,6 +64,14 @@ class NotesMemorySkill(BaseSkill):
             "search_notes": self._search_notes,
             "list_recent": self._list_recent,
             "fused_timeline": self._fused_timeline,
+            # The ambient conversation read path. Without these the
+            # agent had no way to ask whether anything was recorded, so
+            # it answered from its self-model and said no while four
+            # transcripts sat in the store. See
+            # memory/ambient_conversations.py.
+            "list_conversations": self._list_conversations,
+            "search_conversations": self._search_conversations,
+            "conversation_commitments": self._conversation_commitments,
         }
         fn = dispatch.get(endpoint_id)
         if not fn:
@@ -118,6 +126,50 @@ class NotesMemorySkill(BaseSkill):
         limit = int(args.get("limit") or 10)
         rows = await memory.list_recent(limit=limit)
         return {"success": True, "status_code": 200, "data": rows, "error": None}
+
+    # ── ambient conversations ────────────────────────────────────
+    #
+    # sqlite reads on a worker thread. These are small (one row per
+    # recorded conversation) but they are still blocking file I/O, and
+    # blocking I/O inside `async def` is a bug in this codebase by
+    # convention, not a judgement call.
+
+    async def _list_conversations(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        import asyncio
+
+        from memory.ambient_conversations import list_conversations
+
+        data = await asyncio.to_thread(
+            list_conversations,
+            int(args.get("limit") or 20),
+            include_detail=bool(args.get("include_detail")),
+            with_commitments_only=bool(args.get("with_commitments_only")),
+        )
+        return {"success": True, "status_code": 200, "data": data, "error": None}
+
+    async def _search_conversations(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        import asyncio
+
+        from memory.ambient_conversations import search_conversations
+
+        query = args.get("query") or args.get("q") or ""
+        data = await asyncio.to_thread(
+            search_conversations,
+            str(query),
+            int(args.get("limit") or 20),
+            include_detail=bool(args.get("include_detail")),
+        )
+        return {"success": True, "status_code": 200, "data": data, "error": None}
+
+    async def _conversation_commitments(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        import asyncio
+
+        from memory.ambient_conversations import commitments_from_conversations
+
+        data = await asyncio.to_thread(
+            commitments_from_conversations, int(args.get("limit") or 50),
+        )
+        return {"success": True, "status_code": 200, "data": data, "error": None}
 
     async def _fused_timeline(self, args: Dict[str, Any]) -> Dict[str, Any]:
         st = _state()

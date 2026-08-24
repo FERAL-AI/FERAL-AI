@@ -83,10 +83,22 @@ jobs:
         run: ruff check --output-format=github --select=E,F,W --ignore=E501,E402,F401,W291,W293 .
 
   typecheck:
-    # AUDIT-FIXES S-1. Non-blocking on purpose: the baseline is 683 errors
-    # in 202 files, so failing the build today would only teach people to
+    # AUDIT-FIXES S-1. Non-blocking on purpose: the baseline is several
+    # hundred errors, so failing the build today would only teach people to
     # ignore it. It runs so the number is visible and can be ratcheted down
-    # deliberately, one error code at a time.
+    # deliberately, one error code at a time. The exact count is deliberately
+    # NOT restated here; it lives in feral-core/mypy-baseline.txt, and a
+    # number copied into a comment is a number that goes stale silently.
+    #
+    # THE BASELINE IS REGENERATED ON LINUX, NEVER ON A LAPTOP
+    # The count is platform dependent. This job runs on ubuntu-latest, and the
+    # same commit measures a different total on macOS. A baseline regenerated
+    # locally therefore does not merely drift, it keeps this step red on every
+    # pull request for a reason no author can act on, which is exactly what
+    # happened while the file recorded 683 against a CI measurement near 749.
+    # Regenerate by dispatching .github/workflows/mypy-baseline.yml, which
+    # runs scripts/regen_mypy_baseline.py here on the runner and opens a PR
+    # whose own typecheck run proves the new number.
     #
     # The build/ exclusion is not optional and now lives in mypy.ini:
     # feral-core/build/lib is a complete duplicate of the source tree, and
@@ -167,13 +179,14 @@ jobs:
           # could not even report red on its own step. A ratchet that only
           # ever prints a warning is a number nobody watches.
           if [ "${current}" -gt "${baseline}" ]; then
-            echo "::error::mypy errors rose from ${baseline} to ${current}. Fix the new errors, or regenerate mypy-baseline.txt in the same commit with a reason."
+            echo "::error::mypy errors rose from ${baseline} to ${current}. Fix the new errors listed in the per-file diff below."
+            echo "::error::If the rise is NOT from this PR, the baseline is stale: dispatch the 'Brain - mypy baseline' workflow (.github/workflows/mypy-baseline.yml) and merge the PR it opens. Do NOT regenerate the baseline on macOS; the count is platform dependent and a local one keeps this step red."
             diff <(grep -oE '^\S+\.py' mypy-baseline.txt | sort | uniq -c | sort -rn) \
                  <(grep -oE '^\S+\.py' mypy-current.txt  | sort | uniq -c | sort -rn) || true
             exit 1
           fi
           if [ "${current}" -lt "${baseline}" ]; then
-            echo "::notice::mypy errors fell from ${baseline} to ${current}. Regenerate mypy-baseline.txt to lock the improvement in."
+            echo "::notice::mypy errors fell from ${baseline} to ${current}. Dispatch the 'Brain - mypy baseline' workflow to lock the improvement in."
           fi
 
   brain-tests:
@@ -316,6 +329,27 @@ jobs:
         working-directory: feral-core
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install ripgrep
+        # The push-to-main matrix job installs ripgrep and this lane did
+        # not, so the two lanes were testing different grep engines. The
+        # PR gate ran only the python fallback, where
+        # test_a_ripgrep_failure_is_not_reported_as_an_empty_success
+        # asserts 400 for the invalid pattern `foo(` and the fallback
+        # answers 500. Reproduced locally by stripping `rg` from PATH:
+        # passes with it, fails without, same 500 vs 400.
+        #
+        # Installing it here rather than relaxing the assertion, for the
+        # same reason the matrix job gives: ripgrep is the engine almost
+        # every real install uses, so a lane that cannot exercise it is
+        # not testing the common path.
+        #
+        # The underlying parity defect is real and is NOT fixed by this:
+        # the fallback returns 500 where ripgrep returns 400 for an
+        # unparseable pattern, in a suite named for parity. Worth its own
+        # change.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+        working-directory: .
 
       - uses: actions/setup-python@v5
         with:

@@ -35,8 +35,8 @@ async def ollama_pull_model(
     """
     if not ollama_cli_installed():
         raise RuntimeError(
-            "The `ollama` CLI isn't on $PATH. Install it from https://ollama.com/download "
-            "then re-run `feral setup`."
+            "The `ollama` CLI isn't on $PATH. Install it from "
+            "https://ollama.com/download, then pick Ollama again."
         )
 
     proc = await asyncio.create_subprocess_exec(
@@ -78,5 +78,8 @@ LMSTUDIO_INSTRUCTIONS = (
     "  1. Install LM Studio from https://lmstudio.ai/\n"
     "  2. Download a model in the UI (e.g. 'Llama 3 8B Instruct').\n"
     "  3. Click the 'Local Server' tab and press Start.\n"
-    "  4. Re-run `feral setup` so the wizard can see the loaded model."
+    # Ends at "pick it again here", not "re-run the wizard": this text is
+    # read from inside step 1 of 16, and the provider picker re-probes
+    # every time it is shown, so leaving setup is never the remedy.
+    "  4. Then pick LM Studio again here so the loaded model is seen."
 )

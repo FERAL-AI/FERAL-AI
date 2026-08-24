@@ -171,6 +171,14 @@ ALLOWED_WARN_LABELS: set[str] = {
     # Source install where `pip show feral-ai` returns nothing — the
     # brain runs fine but `feral --version` will print "unknown".
     "FERAL package",
+    # The running process is executing a different version from the one
+    # installed on disk, i.e. somebody ran `pip install --upgrade` and
+    # did not restart. Yellow, not red: the brain works, it is just not
+    # the brain the operator thinks they are running, and the whole
+    # point is that this state is otherwise completely silent. Measured
+    # on a real install, a brain served for two days from code that
+    # predated four releases.
+    "Running version",
     # USER.md missing or near-empty — the agent can run, but it has no
     # idea who the operator is.
     "Identity (USER.md)",

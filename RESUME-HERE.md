@@ -1,171 +1,261 @@
-# FERAL, state at 2026-08-21 end of session
+# FERAL session record, 2026-08-21 to 2026-08-22
 
-Everything is committed and pushed to `main`. **No release tag is cut.**
-Read "The one open thing" before doing anything else.
+**2026.8.14 is released and live on PyPI.** Everything below is done and
+merged unless a section says otherwise.
 
-## The one open thing: CI is red, so the release is not published
+This file replaces the earlier pause-point notes. It is the durable
+record of what the seven audit lanes found, because the worktrees they
+ran in are disposable and their reports were not written down anywhere
+else.
 
-`main` has all the work. The tag is what triggers the PyPI publish, and
-the Linux lane of `ci.yml` fails, so it was deliberately not pushed.
+---
 
-This is NOT new breakage. The two main runs before any of this work
-failed identically (2026-08-20, 2026-08-17), and every recent branch run
-is red too. The job runs `pytest -x`, so each failure hides the next and
-every fix costs a full CI cycle to find the one behind it.
+## What shipped
 
-Fixed so far, both merged:
+Two releases in this session.
 
-1. **CI never installed ripgrep.** `coding_tools`' grep has two engines
-   and the parity suite runs both. The runner had no `rg`, so the
-   ripgrep leg produced the fallback and failed `assert
-   'python-fallback' == 'ripgrep'` at 24%, halting the matrix. Now
-   installed, and `FERAL_REQUIRE_RIPGREP=1` makes CI fail loudly rather
-   than silently skip that leg.
-2. **A macOS status asserted flatly on Linux.** `test_macos_ax.py`
-   expected 404 and got 501, because `_snapshot` resolved the app
-   (platform-gated) BEFORE validating arguments. Validation now runs
-   first, which is also better behaviour: a bad `filter` is a bad
-   `filter` on any platform.
+**2026.8.13** ("surfaces that painted correctly and did nothing") and
+**2026.8.14** ("the surfaces nobody had driven"). 8.14 exists because
+8.13 shipped a regression: the Skills page could not load on it.
 
-Next failure is unknown. Get it with:
+Final gates on the tagged commit `ca12e7753`:
 
-    gh run list --branch main --workflow ci.yml --limit 1
-    gh run view <id> --log-failed | grep "pytest Linux matrix (3.11)" \
-      | grep -E "FAILED|E   "
-
-Do not try to find them all by patching `platform.system()` and running
-the suite: it breaks collection with 19 errors. A Linux container would
-work; colima is installed but was not running.
-
-`mypy` also fails but is `continue-on-error` and has a known ~683-error
-baseline. Ignore it.
-
-## Do not publish until that is green
-
-Version is already bumped to **2026.8.13** and `sync_versions --check`
-reports drift 0. CHANGELOG has a full entry. So the release is one
-command once CI is green:
-
-    git tag v2026.8.13 && git push origin v2026.8.13
-
-2026.8.12 is already on PyPI and the PRODUCTION publish step has no
-`skip-existing` (only the TestPyPI canary does), so the version must not
-be reused.
-
-## Local state, all green
-
-| suite | result |
+| gate | result |
 |---|---|
-| brain pytest (macOS) | 9813 passed, 0 failed |
-| client vitest | 1136 passed / 144 files |
-| e2e vs `vite preview` | 65 passed |
-| e2e vs a LIVE BRAIN | 65 passed |
-| ruff | clean |
-| em dashes added | 0 |
+| pytest | 9893 passed, 32 skipped, 0 failed |
+| vitest | 1251 passed / 157 files |
+| e2e (vite preview) | 98 passed |
+| real-brain e2e (new, opt-in) | 61 passed, 28 routes, 1003 controls, 51 REST paths |
+| CI on main | green, both Linux pytest legs |
+| published wheel | 70 dashboard files, 59 fonts, 3 icons, all CSS refs resolving |
 
-Note the e2e suite had NEVER been green against a real brain before this
-work. CI runs it against `vite preview`, which serves index.html for any
-unknown path and therefore cannot see a route collision.
+---
 
-To reproduce the live-brain run:
+## The one theme
 
-    cd feral-core && FERAL_HOME=<scratch> python -m uvicorn api.server:app --port 9433
-    curl -X POST localhost:9433/api/setup/complete -H 'Content-Type: application/json' \
-      -d '{"settings":{},"credentials":{},"identity":{}}'      # else it bounces to /setup
-    cd feral-client-v2 && FERAL_E2E_URL=http://127.0.0.1:9433 npx playwright test
+Almost every defect this session was the same shape: **a surface that
+rendered, passed its tests, and had never been connected to anything.**
 
-Playwright's browser was wiped by a dependabot bump; run
-`npx playwright install chromium` first.
+Not crashes. Not exceptions. Green suites over dead wiring. The reason
+so much of it survived so long is that the tests asserted markup while
+the failures were in layout, in field names, or in whether a click
+landed at all.
 
-## What was built this session
+Three sub-patterns worth remembering:
 
-**Brain**
+1. **Reading a field that does not exist.** `cost_today`, `tokens_used`,
+   `autonomy`, `health.cognitive_load`, `stats.active`,
+   `status_by_channel`, jobs `description`, `memory.tokens`. Every one
+   read off a payload that has never contained it. The value silently
+   became `undefined`, then `0` or `''`, then invisible.
+2. **A verb rendered as a label.** The Jobs stop control was a `<span>`.
+   The dock stack was inert. `cancellable_via` was computed and thrown
+   away.
+3. **Geometry, which jsdom cannot see.** An inert dock stack, a voice
+   pill covering the dock, a toast covering the kill switch, a pane
+   covering its own toggle, a hot-reload banner at y = -3365px.
 
-- Silence no longer reaches STT. 60s of digital silence produced 4 calls
-  of 387,200 bytes with zero non-zero samples. Whisper hallucinates on
-  silence, so the brain answered an empty room every 12 seconds.
-- The test named after that bug ran 6.0s against a 12.0s ceiling.
-- The credential sweep could never run: migrations run before
-  `state.init()` but the plaintext file is written later in the same
-  boot. Four boots later the key was still on disk with doctor saying
-  "up to date". Now RECURRING.
-- `/skills` and `/health` served raw JSON to a browser, shadowing two
-  SPA routes. Content negotiation, with the rule resting on `Accept`
-  because `sw.js` reissues the navigation and Chromium rewrites the
-  Sec-Fetch metadata.
-- **Ambient digest return leg** (the Theora spec). Persisted as
-  `digest_json`, two frames, push on completion plus pull on connect.
-  Three deviations from the spec, all deliberate: scoped to the
-  authenticated device (transcript_id is client-supplied, so unscoped
-  any paired node could read another device's conversation), capped at
-  64 ids with `include_detail` off (512 x 20k detail is a ~10MB burst on
-  reconnect), and `remaining` on the frame so a phone back after a week
-  can show progress instead of appearing to hang.
+---
 
-**Client**
+## The seven lanes, and what each found
 
-- The press-and-hold dock stack was painted and completely inert
-  (`pointer-events: none` inherited from `.v2-dock`).
-- The docked voice pill covered the dock on every screen under 1317px.
-- Focus landed inside an `aria-hidden` subtree on all 28 routes.
-- Fullscreen voice was an inescapable modal.
-- Two guards in `VoiceLane.test.jsx` grepped for selectors that had
-  already been deleted, so they could never fail.
-- **The system bar was reading fields that do not exist.**
-  `/api/dashboard` has no `cost_today`, `spend_today`, `tokens_used` or
-  `autonomy`. The budget lived only on `LLMProvider._budget_snapshot()`
-  with no HTTP surface; the tier only on `GET /api/autonomy`. Both now
-  ride the dashboard payload. Every vital opens a popover you act from.
-- Rail collapses with a control and with `B`. Rail rows have glyphs.
-- Six system-bar controls were under the 24px WCAG target floor.
-- Tertiary text missed AA in light mode (4.46:1 measured against the
-  real composited ground).
-- The Channels card rendered the response envelope as channels
-  (`Active_channels off / Channel_count off / Details off`).
+Worktrees are gone; this is the surviving record. Every finding below
+was measured against a running brain, not inferred.
 
-## Things to know before touching anything
+### Lane: Skills page
+- **Hot-reload was never broken.** Its outcome banner rendered at
+  **y = -71px** on the first card and **y = -3365px** on a lower one,
+  off-screen for success and failure alike. The button worked; the
+  report was thousands of pixels above the click.
+- Card heights in one grid were `[1055, 1055, 1055, 547, 547, 527, ...]`.
+  Now a uniform 176px.
+- `GET /skills` sent `endpoints` as an **integer** while two components
+  guard with `Array.isArray`. The endpoint chip was dead code in both.
+- **The marketplace never disappeared.** `/marketplace` is a live route
+  over `/api/marketplace/*`. Skills simply had no link to it.
+- No manifest has an icon field. Icons are derived from `categories`,
+  which every manifest does declare. Nothing invented.
+- A real CSS trap: `-webkit-line-clamp` only clamps a `-webkit-box`, and
+  a direct child of a grid container is blockified, so the clamp
+  silently did nothing.
 
-**Home was NOT changed.** `/` still routes to `<Home />` (`App.jsx:67`)
-and the total diff to `Home.jsx` this session is +33/-1 lines, all of it
-the `channelMap` fix. Briefing/Desk/Wind-Down, Skills, In-flight, Right
-now, Ask your Digital Twin, ForYouToday, ConnectedHardware and
-ResumeCockpit (Consciousness) are all still there. If a running install
-shows the old chrome, it is serving an old bundle: rebuild with
-`bash scripts/build_webui_v2.sh` and restart the brain.
+### Lane: Chat page
+- **Committed turns were erased.** `normaliseUiMessages` projected every
+  row to `{id, role, text}`, so at commit time each turn lost `tools`,
+  `reasoning`, `timeline`, `model` and `usage`. Measured: **4 tool cards
+  live during a turn, 0 in the transcript afterwards.** Every Chat test
+  renders outside the Shell provider, where the fallback setter does no
+  normalising, which is why 1140 green tests never saw it.
+- The tool card head declared **3 grid columns for 6 children**, so tool
+  names wrapped under the duration and arguments clipped to `re…`, `ap…`.
+- `tool_start` / `tool_result` frames do arrive; verified against the
+  orchestrator emission site.
+- **Still open:** tool traces do not survive a page reload.
+  `serialiseConversationMessages` persists only `role`/`content`, and a
+  trace saved mid-flight would rehydrate as a card spinning forever.
 
-**`feral-client/`** at the repo root is 241MB of leftover v1 artifacts,
-untracked and NOT gitignored. Never `git add -A` here.
+### Lane: the failing routine
+- Root cause of the nag you reported. A `JobType.TRIGGERED` routine was
+  refused correctly, but the refusal stopped the **action** and not the
+  **poll**: the row stayed `enabled = 1` at `every 1m`, was re-armed
+  every minute, and each refusal wrote a non-success. The stalled-routine
+  alert then reported it forever.
+- The refusal is permanent by construction, so every retry was
+  guaranteed to skip. Such a routine is now **disabled at first refusal**
+  with the reason stored on the row and announced once.
 
-**Agent worktrees get cut from `origin/main`, not the branch tip.** All
-four audit lanes started 57-60 commits stale. Make base verification the
-first required action in every brief.
+### Lane: Settings, Memory, Devices
+- **`/api/devices/connected` returned empty with three daemons
+  attached.** It replaced the daemon list with the handoff registry,
+  which only the messaging bridge writes. The Live pane had never been
+  renderable.
+- **Memory search had never returned a result.** The page sent `?q=` and
+  the route declares `query`. Proof: `?q=quokka` → `[]`,
+  `?query=quokka` → both notes.
+- **`MemoryStore.search_all`, the four-tier hybrid, had no HTTP route at
+  all.** Now `GET /api/memory/search`, verified end to end:
+  `"Perth"` → 8 strong of 14 across 3 tiers; `"zzzznotathing"` → 0 of 12.
+- **Push "Send test" said "Test push sent."** while the brain returned
+  `sent: 0, failed: 1, degraded: ["no push credentials configured"]`.
+- **Devices "Invoke" had never invoked anything**: it posted
+  `{device_id, method, args}` to a route reading
+  `{node_id, command, params}`, then reported `"Node not connected: "`
+  with nothing after the colon, blaming the device.
+- "Clear unclaimed" was permanently disabled; four swallowed failures;
+  MCP refusals rendered in the **green success** chip.
 
-**The user wants file edits through Read/Edit/Write, not shell
-heredocs.** They want to see the changes.
+### Lane: Home page
+- **The Briefing tab rendered zero DOM.**
+- **Tab selection was overwritten by the 15s poll**, so tabs reverted
+  while you watched.
+- A **stale heart rate shown as live** (`heart_rate_fresh` ignored).
+- `health.cognitive_load` does not exist; the Load figure only ever came
+  from its fallback.
+- In-flight jobs read `description`, which no source emits.
+- Four `degraded[]` arrays discarded, so a failed read rendered as calm
+  emptiness.
 
-## Still open, not started
+### Lane: end-to-end real-brain suite
+- **The error toast covered the supervisor kill switch.** On
+  `/oversight`, the stack pinned at `top:72 right:20` covered
+  **"Pause actions" at (1045,71)** and Refresh for its six-second life.
+  The message telling you something went wrong sat on the button that
+  stops it.
+- `.v2-chat-pane` covered its own Save toggle, from a stale variable:
+  `top: calc(var(--v2-menubar-height) + 24px)` resolved to 24px once the
+  menubar was retired.
+- **Fixed the e2e flakiness properly, without retries.** Both flakes read
+  a painted value in a round trip separate from the state change, while a
+  CSS animation ran. Reproduced the marketplace one to three decimals
+  (284.595 mid-animation vs the 283.595 the CI failure reported), and
+  showed the system-bar one reads byte-identical green in the flip frame.
+  Seven consecutive clean full runs.
+- **`shell_navigation.spec.ts` walked 23 of 28 destinations**, missing
+  `/console`, the default landing view. Three tests saying "every
+  destination" had never visited the first screen a user sees.
+- `frame-ancestors` was delivered in a `<meta>` CSP, where browsers
+  discard it, and a test asserted its presence: it pinned the defect.
+- `/favicon.ico` was declared by `index.html` and allowlisted by the
+  brain, and existed in neither.
 
-- Three "end voice" controls on screen at once. The lane renders only on
-  `/chat`; the overlay covers the other 27 routes and is the only
-  surface with the degraded/quota banner. Which one owns "end" on
-  `/chat` is a design call.
-- `pip install feral-ai` ships a broken v2 dashboard: `webui_v2` has 69
-  files on disk, the wheel carries 7. All 59 KaTeX fonts and all 3 PWA
-  icons are dropped. Not a regression.
-- Supervisor race, ~0.9% flake over 111 runs: `_monitor` cancels the
-  consumer tasks then gathers them under a comment claiming they drain
-  the queue. Cancelled tasks drain nothing, so a caller can see
+### My own work (not a lane)
+Dock, work rail, system bar, Approvals, Jobs, Console, palette, voice
+duplication, and the two Brain-popover metrics. Plus the release
+mechanics for both 8.13 and 8.14.
+
+---
+
+## Defects I introduced and then caught
+
+Recorded because the pattern matters more than the fixes.
+
+1. **A 500 on `/api/dashboard`**, the endpoint the whole shell polls.
+   `getattr(state, "started_at", default)` looks defensive and is not: a
+   MagicMock has every attribute, so the default never applied. I had
+   verified the field against a live brain and not re-run the Python
+   suite.
+2. **`callable(runtime_status)`** was False because it is a `@property`,
+   so the field returned `{}` on every request: present, permanently
+   empty, no error, no log, no failing test. Found by making the
+   bail-out print the type it saw.
+3. **The dock did not fit a phone** once Home made it ten tiles: two
+   tiles pushed outside the container at 375px, one being Settings.
+4. **Content negotiation without `Vary`**, which shipped in 8.13 and
+   broke the Skills page for every user of that release.
+5. **The first fix for the kill-switch toast made it worse**: making the
+   stack pointer-transparent left the dismiss X itself sitting on
+   Refresh.
+
+---
+
+## Instruments that lied, twice
+
+Both times the measurement was wrong, not the app, and both times it
+would have sent someone chasing bugs that do not exist:
+
+- `elementFromPoint` counting **"scrolled below the fold"** as
+  **"covered"**. First occurrence: 4 false positives. Second: **58**
+  across four routes. The fix is to scroll each control into view before
+  hit-testing. Anything measuring reachability must do this.
+- Reading a computed value mid-animation. See the flakiness note above.
+
+---
+
+## Still open, deliberately
+
+- **`AppsPublish` tabs** convey selection by CSS class alone: no
+  `role="tab"`, `aria-selected`, `aria-pressed` or `aria-current`.
+- **`Shell.jsx` fires `POST /api/conversations/save`** 450ms after mount
+  on **every** route, including `/settings` and `/grants`. It is the only
+  write any destination makes at rest.
+- **Chat tool traces do not survive a reload** (see the Chat lane).
+- **A supervisor race**, ~0.9% over 111 runs: `_monitor` cancels the
+  consumer tasks and *then* gathers them, under a comment claiming they
+  drain the queue. Cancelled tasks drain nothing, so a caller can see
   `status: completed` with silently lost output.
-- `/approvals` is polled by three components.
-- `remove_key`/`store_key` case normalisation (needs a migration).
-- CLAUDE.md counts are stale: says 138 files/1067 tests (live 144/1136),
-  7 spec files/30 tests (live 12/65), 949 .py (live 1060).
-- 594 pre-existing em dashes in `feral-client-v2/src`. Nothing in CI
-  enforces the rule.
+- **`/approvals` is polled by three components.**
+- **594 pre-existing em dashes** in `feral-client-v2/src`. Nothing in CI
+  enforces the rule; 0 were added this session.
+- **`remove_key`/`store_key` case normalisation** needs a migration.
 
-## The user's live install looked unhealthy
+---
 
-Screenshots from `localhost:9090` showed `BRAIN reconnecting…`,
-`Failed to fetch /api/conversations/save`, `Failed to fetch
-/api/conversations/new`, and `503 on /api/conversations/active/thread`.
-Unrelated to this work and worth diagnosing.
+## Traps that will cost you time
+
+- **Agent worktrees are cut from `origin/main`, not the branch tip.**
+  Every lane this session started 57-60 commits stale and recovered only
+  because the brief made base verification its first required action.
+  Keep that in every brief.
+- **The version-coherence bot commits with `[skip ci]`.** A tag landing
+  on that commit fires **no workflow at all**, which silently swallowed
+  the first 8.13 tag: the tag existed on the remote and did nothing.
+  Always tag an explicit commit you have checked.
+- **`feral-client/`** at the repo root is 241MB of leftover v1 artifacts,
+  untracked and NOT gitignored. Never `git add -A` in this repo.
+- **`.claude/worktrees` was 4.2GB** across 42 worktrees. The six from
+  this session were fully merged and removed. The rest predate it and
+  carry branches like `fix/memory-blockers-2026-07`; check each for
+  unmerged commits before removing.
+- **`feral-core/build/`** is a complete duplicate tree. It contaminated a
+  wheel build during this session. Exclude with `^build/`.
+- **CI had two macOS assumptions and a missing ripgrep** that halted the
+  Linux matrix at 24%, hiding everything behind them because the job runs
+  with `-x`. All three fixed.
+
+---
+
+## How to reproduce the real-brain suite
+
+```bash
+cd feral-core
+FERAL_HOME=<scratch> python -m uvicorn api.server:app --port 9461 &
+curl -X POST localhost:9461/api/setup/complete \
+  -H 'Content-Type: application/json' \
+  -d '{"settings":{},"credentials":{},"identity":{}}'   # else it bounces to /setup
+
+cd ../feral-client-v2
+FERAL_E2E_REAL_BRAIN=1 FERAL_E2E_URL=http://127.0.0.1:9461 npx playwright test
+```
+
+Or `make e2e-real-brain`. It is opt-in, so `make e2e` and the required
+CI gate are unaffected; without the flag those specs skip themselves.

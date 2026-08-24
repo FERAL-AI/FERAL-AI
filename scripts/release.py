@@ -422,6 +422,20 @@ def main(argv: list[str] | None = None) -> int:
             pytest_args=args.pytest_arg or [
                 "-q",
                 "--no-cov",
+                # Match the CI gate. Both pytest lanes in ci.yml pass
+                # `-p no:randomly` with an explicit comment asking for a
+                # deterministic collection order, and this did not, so
+                # the release gate was strictly harsher than the gate
+                # that actually protects main: pytest-randomly is a
+                # [dev] dependency, so it is always active here.
+                #
+                # Measured on 2026-08-22 with seed 4242: 79 failures on
+                # the release branch and the SAME 79 on a clean
+                # origin/main worktree, none of them related to the
+                # change under release. A release driver that blocks on
+                # failures CI has deliberately excluded blocks every
+                # release for a reason nobody can act on.
+                "-p", "no:randomly",
             ],
             vitest_args=args.vitest_arg or [
                 "--run",

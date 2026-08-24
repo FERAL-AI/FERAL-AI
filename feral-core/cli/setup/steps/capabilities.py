@@ -24,6 +24,10 @@ from ..helpers import (
 )
 from ..state import WizardState
 
+#: How many folders the grant step will walk through, counting retries
+#: after a bad path. See the comment at the loop.
+_MAX_GRANT_ATTEMPTS = 8
+
 
 # (section, key, label, help) for every boolean the operator can flip
 # here. ``vision.enabled`` lives in its own section and ConfigLoader
@@ -155,7 +159,18 @@ def _run_workspace_grant(state: WizardState, console) -> None:
     if not confirm("  Grant a workspace folder?", default=False):
         return
 
-    while True:
+    # Bounded, like every other retry in this wizard. Two loops here can
+    # re-ask: a bad path with "Try a different path?" defaulting to yes,
+    # and "Grant another folder?" defaulting to no. The first is the one
+    # that matters, and the same bound covers both.
+    #
+    # Lower risk than the other cases, because the offered default IS a
+    # directory, so entering through the defaults exits on the first
+    # pass. Bounded anyway: "it happens to terminate today because the
+    # default is valid" is not a termination guarantee, and this file is
+    # one changed default away from the `while True` bug the wizard has
+    # already shipped twice.
+    for _attempt in range(_MAX_GRANT_ATTEMPTS):
         raw = ask_text(
             "  Folder to grant (e.g. ~/Projects)",
             default=str(Path.home() / "Desktop"),

@@ -46,6 +46,13 @@ logger = logging.getLogger("feral.proactive")
 # of `_evaluate` consult the same window.
 _FRESH_WINDOW_S = 120.0
 
+# Cognitive load at which the health triggers speak up. Deliberately the
+# SAME 0.7 that SomaticEngine.get_behavioral_policy treats as high load,
+# so "the agent went quiet and started answering in two sentences" and
+# "the agent said something about your heart rate" describe one state
+# rather than two thresholds that drift apart.
+SOMATIC_LOAD_ALERT = 0.7
+
 
 class Priority(Enum):
     CRITICAL = 4    # health emergency, urgent calendar
@@ -99,8 +106,14 @@ class ProactiveEngine:
         cost_model: str = "gpt-4o-mini",
         cron_service=None,
         skill_registry=None,
+        somatic_engine=None,
     ):
         self._perception = perception
+        # Read-only. Lets the health triggers ask "is this person under
+        # load" instead of "is this number above 100". Optional, and
+        # every trigger degrades to its raw-threshold form without it,
+        # so an engine built without one behaves exactly as before.
+        self._somatic_engine = somatic_engine
         # Read-only. Source of manifest TriggerDefinitions for
         # ``_evaluate_manifest_triggers``. Nothing on this path executes a
         # skill: see that method's docstring for why.
@@ -219,11 +232,18 @@ class ProactiveEngine:
 
         # Gather perception frames from all sessions
         frames = []
+        # Parallel to `frames`, same order. PerceptionFrame carries no
+        # session id, and the somatic vector is keyed by one, so the
+        # health triggers below need the id that produced each frame.
+        # Kept as a separate list rather than added to the frame so
+        # nothing else that consumes frames has to change.
+        frame_sids: list[str] = []
         if self._perception:
             for sid in list(getattr(self._perception, '_frames', {}).keys()):
                 f = self._perception.get_frame(sid)
                 if f:
                     frames.append(f)
+                    frame_sids.append(sid)
 
         # --- Morning Briefing ---
         if self._first_interaction_today:
@@ -262,7 +282,8 @@ class ProactiveEngine:
         # adding a new lagging source there propagates here without
         # further edits.
         from perception.fusion import _is_lagging_source
-        for frame in frames:
+        for frame_index, frame in enumerate(frames):
+            frame_sid = frame_sids[frame_index] if frame_index < len(frame_sids) else ""
             hr_age = (now - getattr(frame, "heart_rate_sample_ts", 0.0)) if getattr(frame, "heart_rate_sample_ts", 0.0) > 0 else float("inf")
             spo2_age = (now - getattr(frame, "spo2_sample_ts", 0.0)) if getattr(frame, "spo2_sample_ts", 0.0) > 0 else float("inf")
             hr_src_raw = getattr(frame, "heart_rate_source", "") or ""
@@ -282,22 +303,64 @@ class ProactiveEngine:
                 # `health_summary` / `latest_health` but never drive
                 # a real-time push; their fresh-looking timestamps
                 # cannot be trusted.
-                if frame.heart_rate > 100 and self._can_fire("hr_elevated"):
+                #
+                # The condition is cognitive load where the somatic
+                # engine has a reading, and a raw threshold only where
+                # it does not. `heart_rate > 100` alone fires on any
+                # physical exertion: a flight of stairs is 110-130 bpm
+                # in a healthy adult and is not a thing to interrupt
+                # someone about. Cognitive load already divides those
+                # cases, because its HR term applies only below an
+                # activity level of 0.3 and it weights HRV and circadian
+                # phase alongside it. That turns a threshold alarm into
+                # a judgement, which is the point.
+                #
+                # The raw path is kept rather than removed: a brain with
+                # no wearable HRV, or with the somatic engine absent,
+                # still gets the old alert instead of silently losing
+                # the feature.
+                load = self._cognitive_load_for(frame_sid)
+                if load is not None:
+                    should_fire = load >= SOMATIC_LOAD_ALERT
+                    basis = f"cognitive_load={load:.2f}"
+                else:
+                    should_fire = frame.heart_rate > 100
+                    basis = "raw heart rate (no somatic reading)"
+
+                if should_fire and self._can_fire("hr_elevated"):
                     logger.info(
-                        "proactive.hr_elevated firing: bpm=%d source=%s age=%ds",
-                        frame.heart_rate, hr_src, int(hr_age),
+                        "proactive.hr_elevated firing: bpm=%d source=%s age=%ds basis=%s",
+                        frame.heart_rate, hr_src, int(hr_age), basis,
                     )
+                    if load is not None:
+                        body = (
+                            f"Your heart rate is {frame.heart_rate} bpm and your "
+                            f"body is showing signs of strain rather than exertion. "
+                            f"You've been {frame.activity_state}. "
+                            f"(Source: {hr_src}, sample {int(hr_age)}s old.) "
+                            "Want to take a short break?"
+                        )
+                        voice = (
+                            "Hey, your heart rate is up and it doesn't look like "
+                            "activity. Maybe a short break would help?"
+                        )
+                    else:
+                        body = (
+                            f"Your heart rate is {frame.heart_rate} bpm, that's elevated. "
+                            f"You've been {frame.activity_state}. "
+                            f"(Source: {hr_src}, sample {int(hr_age)}s old.) "
+                            "Want to take a short break?"
+                        )
+                        voice = (
+                            f"Hey, I noticed your heart rate jumped to "
+                            f"{frame.heart_rate}. Maybe a short break would help?"
+                        )
                     messages.append(ProactiveMessage(
                         trigger_id="hr_elevated",
                         priority=Priority.IMPORTANT,
                         title="Heart Rate Alert",
-                        body=(
-                            f"Your heart rate is {frame.heart_rate} bpm — that's elevated. "
-                            f"You've been {frame.activity_state}. "
-                            f"(Source: {hr_src}, sample {int(hr_age)}s old.) "
-                            "Want to take a short break?"
-                        ),
-                        voice_text=f"Hey, I noticed your heart rate jumped to {frame.heart_rate}. Maybe a short break would help?",
+                        body=body,
+                        voice_text=voice,
                         action="Take a break",
                         action_payload={"smart_home": "set_scene", "scene": "calming"},
                     ))
@@ -705,9 +768,34 @@ class ProactiveEngine:
             return None
 
         hour = time.localtime().tm_hour
-        greeting = "Good morning" if hour < 12 else "Good afternoon"
-        body = f"{greeting}! Here's your briefing:\n\n" + "\n".join(sections)
-        voice = f"{greeting}! " + " ".join(sections[:3])
+        # "Good afternoon" ran from noon to midnight, so a briefing at
+        # 11pm opened by calling it the afternoon.
+        if hour < 12:
+            greeting = "Good morning"
+        elif hour < 18:
+            greeting = "Good afternoon"
+        else:
+            greeting = "Good evening"
+
+        # The operator's actual name, or none at all.
+        #
+        # The SDUI card below said "Good morning, Alex!" to everyone: a
+        # placeholder hardcoded into the headline while the real name sat
+        # in USER.md, unread. Greeting somebody by the wrong name is
+        # worse than not greeting them by name, and on a product whose
+        # whole claim is that it knows you it is the first thing they
+        # see.
+        name = ""
+        try:
+            from identity.workspace import IdentityWorkspace
+
+            name = IdentityWorkspace().read_user_name()
+        except Exception:
+            logger.debug("morning briefing: could not read operator name", exc_info=True)
+        salutation = f"{greeting}, {name}!" if name else f"{greeting}!"
+
+        body = f"{salutation} Here's your briefing:\n\n" + "\n".join(sections)
+        voice = f"{salutation} " + " ".join(sections[:3])
 
         return ProactiveMessage(
             trigger_id="morning_briefing",
@@ -718,7 +806,7 @@ class ProactiveEngine:
             sdui={
                 "type": "Card",
                 "children": [
-                    {"type": "Text", "value": f"{greeting}, Alex!", "style": "headline"},
+                    {"type": "Text", "value": salutation, "style": "headline"},
                     {"type": "Divider"},
                     *[{"type": "Text", "value": s, "style": "body"} for s in sections],
                 ],
@@ -1016,6 +1104,38 @@ class ProactiveEngine:
                     f"{result.describe()}."
                 ),
             ))
+
+    def _cognitive_load_for(self, session_id: str) -> float | None:
+        """Cognitive load for this session, or None to use raw thresholds.
+
+        None, not 0.0, when the answer is unknown. 0.0 is a real value
+        meaning "this person is fine" and would silence a genuine alert
+        on a brain that simply has no wearable attached; None routes the
+        caller to the raw threshold it used before.
+
+        Returns None unless the reading is FRESH. A somatic vector
+        outlives the wearable that fed it, so without this an alert
+        could be suppressed (or raised) hours later on the strength of a
+        body state that no longer exists. Same window the rest of the
+        health triggers gate on.
+        """
+        engine = self._somatic_engine
+        if not engine or not session_id:
+            return None
+        try:
+            vector = engine.get_vector(session_id)
+        except Exception:
+            logger.debug("somatic lookup failed for %s", session_id, exc_info=True)
+            return None
+        stamp = getattr(vector, "timestamp", 0.0) or 0.0
+        if stamp <= 0 or (time.time() - stamp) > _FRESH_WINDOW_S:
+            return None
+        # An all-zero vector produces a load figure from circadian phase
+        # alone. That is not a statement about this person's body, so it
+        # must not be allowed to decide whether to interrupt them.
+        if not (vector.heart_rate > 0 or vector.hrv_ms > 0):
+            return None
+        return float(getattr(vector, "cognitive_load", 0.0) or 0.0)
 
     def _can_fire(self, trigger_id: str) -> bool:
         state = self._trigger_states.get(trigger_id)

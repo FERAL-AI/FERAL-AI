@@ -106,6 +106,20 @@ from memory.wiki import (
 
 logger = logging.getLogger("feral.memory")
 
+#: Episode types whose text must NEVER train the operator's self-model.
+#:
+#: The AboutMe extractor is entirely first-person ("I prefer X", "My
+#: wife <Name>", "I live in X"). That is sound for a chat episode, where
+#: "I" is the operator by construction, and wrong for anything the
+#: operator merely OVERHEARD, where "I" is whoever was speaking.
+#:
+#: ``ambient_conversation`` is the recorded-speech type written by
+#: agents/ambient_transcript.py (EVENT_TYPE there). Keep the two in step:
+#: a new capture type belongs here too.
+_NO_SELF_MODEL_EVENT_TYPES = frozenset({
+    "ambient_conversation",
+})
+
 
 # ── Semantic relevance floor ────────────────────────────────────────────────
 #
@@ -1773,7 +1787,35 @@ class MemoryStore:
         # background task so episode_save returns as soon as the WAL
         # commit lands; the extractor's failures are logged but never
         # surfaced — they're best-effort UX.
-        if self._about_me_store is not None and text:
+        # NOT on speech the operator did not type.
+        #
+        # Every AboutMe extractor pattern is first person: "I prefer X",
+        # "I live in X", "My wife <Name>", "I work as X". On a chat
+        # episode that "I" is the operator, which is the whole premise.
+        # On an ambient_conversation episode it is whoever was talking,
+        # and the operator is frequently not the one talking. A
+        # colleague saying "I prefer tea", a stranger saying "my wife
+        # Sarah", someone saying where they live, all became facts about
+        # the OPERATOR at 0.5 confidence, and ideas_engine then asked
+        # them to confirm it.
+        #
+        # Two things wrong with that, and the second is worse. The
+        # profile fills with other people's preferences; and third
+        # parties' families and home towns get filed under the
+        # operator's identity by a device they did not know was
+        # listening. Recording a conversation is not consent to mine the
+        # other speaker for a personal profile.
+        #
+        # The transcript is still summarized, still searchable, still
+        # produces commitments. It just does not silently rewrite who
+        # the operator is.
+        about_me_eligible = event_type not in _NO_SELF_MODEL_EVENT_TYPES
+        if not about_me_eligible and text:
+            logger.debug(
+                "AboutMe extraction skipped for event_type=%r: the speech is "
+                "not necessarily the operator's", event_type,
+            )
+        if self._about_me_store is not None and text and about_me_eligible:
             extractor = getattr(
                 self._about_me_store, "extract_from_text_async", None
             )

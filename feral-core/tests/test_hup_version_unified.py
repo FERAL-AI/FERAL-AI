@@ -1,6 +1,6 @@
 """HUP version unification — single canonical version across 5 surfaces.
 
-This is the CI gate for Lane 11 acceptance item "HUP 1.3.0 unified across
+This is the CI gate for Lane 11 acceptance item "HUP unified across
 spec, Python SDK, TS SDK, Swift SDK, iOS Info.plist". Any drift between
 these five surfaces — even a hypothetical "we only forgot to bump the
 manifest" — fails this test and the build.
@@ -53,12 +53,18 @@ def _extract(pattern: str, text: str, *, source: str) -> str:
     return m.group(1)
 
 
-def test_hup_version_is_1_3_0_in_brain():
-    """The brain's canonical constant is the source of truth."""
-    assert BRAIN_HUP_VERSION == "1.3.0", (
-        "Brain HUP_VERSION must be '1.3.0' — every other surface mirrors this. "
-        "If you intentionally bumped the protocol, update every surface in this "
-        "test and bump the v1.0 release gate evidence."
+def test_hup_version_is_1_4_0_in_brain():
+    """The brain's canonical constant is the source of truth.
+
+    Bumped to 1.4.0 on 2026-08-22 for the somatic and physiology
+    additions: `somatic_state`, the `hrv` / `activity` device_event
+    types, and the optional `moments` block on `ambient_transcript`.
+    Additive throughout, which is a MINOR per §1 of the spec.
+    """
+    assert BRAIN_HUP_VERSION == "1.4.0", (
+        "Brain HUP_VERSION must be '1.4.0'. Every other surface mirrors "
+        "this. If you intentionally bumped the protocol, update every "
+        "surface in this test and bump the v1.0 release gate evidence."
     )
 
 

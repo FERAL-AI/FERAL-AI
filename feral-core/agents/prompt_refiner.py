@@ -156,6 +156,29 @@ def _device_target_keyword(text: str) -> Optional[str]:
     return None
 
 
+def infer_device_target(text: str) -> Optional[str]:
+    """Where the user said to run this, or None if they did not say.
+
+    Public, deterministic, and deliberately NOT behind
+    `FERAL_PROMPT_REFINER`. That flag gates LLM rewriting of the user's
+    text, which is a much larger behaviour change than reading which
+    device a sentence names, and the two were coupled only because the
+    keyword extractor happened to live inside the refiner.
+
+    The coupling had a visible cost: with the flag off (the default),
+    `refine` returns an identity envelope that echoes back whatever
+    `device_target_hint` the caller passed and infers nothing, so every
+    client had to reimplement these rules to reach its own Mac. The iOS
+    client did exactly that, and a second copy of a security-routing
+    rule is a drift bug waiting to happen.
+
+    Callers apply this only when no explicit `device_target` was sent.
+    An explicit field always wins: the client knows something the text
+    does not say.
+    """
+    return _device_target_keyword(text or "")
+
+
 # ───────────────────────── cache ──────────────────────────
 
 
@@ -504,4 +527,4 @@ def _parse_json(content: str) -> Optional[dict]:
     return None
 
 
-__all__ = ["RefinedRequest", "refine"]
+__all__ = ["RefinedRequest", "refine", "infer_device_target"]
