@@ -194,7 +194,7 @@ Every HUP frame is a JSON object with:
 
 ```json
 {
-  "hup_version": "1.0.0",
+  "hup_version": "1.4.0",
   "type": "<message-type>",
   "ts": 1734369922.123,
   "payload": { ... }
@@ -210,7 +210,7 @@ Every HUP frame is a JSON object with:
 
 ```json
 {
-  "hup_version": "1.0.0",
+  "hup_version": "1.4.0",
   "type": "node_register",
   "ts": 1734369920.001,
   "payload": {
@@ -291,7 +291,7 @@ within 5 seconds, or close the socket with an error code from §8.
 
 ```json
 {
-  "hup_version": "1.2.0",
+  "hup_version": "1.4.0",
   "type": "node_ack",
   "ts": 1734369920.040,
   "payload": {
@@ -309,7 +309,7 @@ within 5 seconds, or close the socket with an error code from §8.
 
 ```json
 {
-  "hup_version": "1.0.0",
+  "hup_version": "1.4.0",
   "type": "node_heartbeat",
   "ts": 1734369930.000,
   "payload": {
@@ -330,7 +330,7 @@ Fields:
 
 ```json
 {
-  "hup_version": "1.0.0",
+  "hup_version": "1.4.0",
   "type": "device_event",
   "ts": 1734369931.210,
   "payload": {
@@ -413,7 +413,7 @@ envelope; only `payload.event_type` and `payload` shape are new.
 
 ```json
 {
-  "hup_version": "1.1.0",
+  "hup_version": "1.4.0",
   "type": "device_event",
   "ts": 1734369931.210,
   "node_id": "feral-w300-0001",
@@ -448,7 +448,7 @@ Push JPEG or H.264 video frames from a camera-capable node.
 
 ```json
 {
-  "hup_version": "1.1.0",
+  "hup_version": "1.4.0",
   "type": "device_event",
   "ts": 1734369931.250,
   "node_id": "feral-w300-0001",
@@ -494,7 +494,7 @@ camera channel.
 
 ```json
 {
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "type": "glasses_frame",
   "ts": 1734369931.250,
   "msg_id": "f2c3e1a2-...",
@@ -548,7 +548,7 @@ every individual capability.
 
 ```json
 {
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "type": "device_announce",
   "ts": 1734369931.500,
   "msg_id": "1d6c0d4d-...",
@@ -603,7 +603,7 @@ Canonical name since v1.2.0. Legacy aliases `command`, `execute`, and
 
 ```json
 {
-  "hup_version": "1.2.0",
+  "hup_version": "1.4.0",
   "type": "hup_action_request",
   "ts": 1734369940.000,
   "payload": {
@@ -646,7 +646,7 @@ frames and resolve the matching mesh action future by `action_id`.
 
 ```json
 {
-  "hup_version": "1.2.0",
+  "hup_version": "1.4.0",
   "type": "hup_action_response",
   "ts": 1734369940.180,
   "payload": {
@@ -684,7 +684,7 @@ mapping is: `success = (HUPResult.status == "success")`,
 
 ```json
 {
-  "hup_version": "1.0.0",
+  "hup_version": "1.4.0",
   "type": "node_bye",
   "ts": 1734369999.000,
   "payload": {"reason": "shutdown", "restart_in_s": 0}
@@ -753,7 +753,7 @@ user disagree with it.
 
 ```json
 {
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "type": "somatic_state",
   "ts": 1787412345.101,
   "payload": {
@@ -816,7 +816,7 @@ what makes a resend after a lost ack cost nothing.
 
 ```json
 {
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "type": "ambient_transcript",
   "ts": 1755720000.0,
   "payload": {
@@ -903,7 +903,7 @@ must be resent.
 
 ```json
 {
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "type": "ambient_transcript_ack",
   "ts": 1755720000.5,
   "payload": {
@@ -944,7 +944,7 @@ until the next reconnect.
 
 ```json
 {
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "type": "ambient_digest_request",
   "node_id": "phone-<id>",
   "ts": 1755720000.5,
@@ -969,7 +969,7 @@ a card is opened.
 
 ```json
 {
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "type": "ambient_digest",
   "ts": 1755720000.9,
   "payload": {
@@ -1057,7 +1057,7 @@ would re-upload it forever. Add a distinct status then; do not widen
 ```json
 {
   "type": "chat_request",
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "message_id": "uuid",
   "node_id": "phone-<id>",
   "ts": 1234567890.123,
@@ -1076,7 +1076,7 @@ would re-upload it forever. Add a distinct status then; do not widen
 ```json
 {
   "type": "chat_response",
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "message_id": "uuid",
   "node_id": "brain",
   "ts": 1234567890.456,
@@ -1095,7 +1095,7 @@ would re-upload it forever. Add a distinct status then; do not widen
 ```json
 {
   "type": "voice_session_start",
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "payload": {
     "stream_id": "phone-voice-uuid",
     "sample_rate": 16000,
@@ -1130,7 +1130,7 @@ never existed.
 ```json
 {
   "type": "voice_interrupt",
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "payload": {
     "stream_id": "phone-voice-uuid",
     "reason": "user_interrupt"
@@ -1143,7 +1143,7 @@ never existed.
 ```json
 {
   "type": "genui_push",
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "payload": {
     "kind": "notification|interactive",
     "app_id": "feral.notes",
@@ -1164,7 +1164,7 @@ never existed.
 ```json
 {
   "type": "genui_event",
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "payload": {
     "app_id": "feral.notes",
     "surface_id": "today",
@@ -1180,7 +1180,7 @@ never existed.
 ```json
 {
   "type": "peripheral_bridge_register",
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "payload": {
     "bridge_id": "phone-bridge-id",
     "platform": "ios|android",
@@ -1204,7 +1204,7 @@ never existed.
 ```json
 {
   "type": "backchannel_request",
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "payload": {
     "request_id": "uuid",
     "device_id": "phone-<id>",
@@ -1257,7 +1257,7 @@ Upgrade: websocket
 Connection: Upgrade
 
 # 2. daemon → brain
-{"hup_version":"1.0.0","type":"node_register","ts":1734369920.001,
+{"hup_version":"1.4.0","type":"node_register","ts":1734369920.001,
  "payload":{"node_id":"acme-wb-001","node_type":"wearable",
             "name":"Acme Wristband","manufacturer":"Acme",
             "firmware_version":"1.2.3","platform":"zephyr",
@@ -1265,33 +1265,33 @@ Connection: Upgrade
             "sensors":["heart_rate","battery"],"actuators":["buzzer"]}}
 
 # 3. brain → daemon
-{"hup_version":"1.0.0","type":"node_ack","ts":1734369920.040,
+{"hup_version":"1.4.0","type":"node_ack","ts":1734369920.040,
  "payload":{"node_id":"acme-wb-001","session_token":"b58c2c34-...",
             "heartbeat_ms":10000,"server_time":1734369920.040,
             "granted_capabilities":["heart_rate","buzzer","battery"],
             "denied_capabilities":[]}}
 
 # 4. daemon → brain (streaming)
-{"hup_version":"1.0.0","type":"device_event","ts":1734369931.210,
+{"hup_version":"1.4.0","type":"device_event","ts":1734369931.210,
  "payload":{"node_id":"acme-wb-001","event_type":"heart_rate",
             "data":{"bpm":72,"confidence":0.94},"ts":1734369931.210}}
 
 # 5. daemon → brain (heartbeat)
-{"hup_version":"1.0.0","type":"node_heartbeat","ts":1734369930.000,
+{"hup_version":"1.4.0","type":"node_heartbeat","ts":1734369930.000,
  "payload":{"ts":1734369930.000,"battery_pct":87,"rssi":-54}}
 
 # 6. brain → daemon (user: "buzz my wrist")
-{"hup_version":"1.0.0","type":"hup_action_request","ts":1734369940.000,
+{"hup_version":"1.4.0","type":"hup_action_request","ts":1734369940.000,
  "payload":{"action_id":"f8c3e1a2","name":"buzz",
             "params":{"duration_ms":250,"pattern":"double"},"timeout_ms":5000}}
 
 # 7. daemon → brain
-{"hup_version":"1.0.0","type":"hup_action_response","ts":1734369940.180,
+{"hup_version":"1.4.0","type":"hup_action_response","ts":1734369940.180,
  "payload":{"action_id":"f8c3e1a2","success":true,
             "result":{"vibrated_ms":250},"error":null,"duration_ms":178}}
 
 # 8. graceful shutdown (daemon → brain)
-{"hup_version":"1.0.0","type":"node_bye","ts":1734369999.000,
+{"hup_version":"1.4.0","type":"node_bye","ts":1734369999.000,
  "payload":{"reason":"shutdown","restart_in_s":0}}
 ```
 
@@ -1304,7 +1304,7 @@ it uses the standard error envelope:
 
 ```json
 {
-  "hup_version": "1.0.0",
+  "hup_version": "1.4.0",
   "type": "error",
   "ts": 1734369921.000,
   "payload": {

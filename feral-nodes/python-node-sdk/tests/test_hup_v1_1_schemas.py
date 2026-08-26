@@ -26,8 +26,14 @@ def _b64_of(size: int) -> str:
     return base64.b64encode(b"\x00" * size).decode("ascii")
 
 
-def test_hup_version_is_1_3_0():
-    assert HUP_VERSION == "1.3.0"
+def test_hup_version_is_a_semantic_version():
+    # Not a literal. A pinned number here asserts nothing about behaviour
+    # and fails on the next protocol bump, which is what happened at 1.4.0:
+    # this file claimed the SDK was broken for weeks, unseen, because
+    # feral-nodes has no CI job.
+    parts = HUP_VERSION.split(".")
+    assert len(parts) == 3, f"HUP_VERSION must be MAJOR.MINOR.PATCH, got {HUP_VERSION!r}"
+    assert all(p.isdigit() for p in parts), f"non-numeric component in {HUP_VERSION!r}"
 
 
 def test_audio_frame_valid_opus():
@@ -103,7 +109,7 @@ def test_build_frame_wraps_audio_payload_into_device_event():
         },
     )
     frame = build_frame("device_event", payload)
-    assert frame["hup_version"] == "1.3.0"
+    assert frame["hup_version"] == HUP_VERSION
     assert frame["type"] == "device_event"
     assert frame["payload"]["event_type"] == "audio_frame"
 
