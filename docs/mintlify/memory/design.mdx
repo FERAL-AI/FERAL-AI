@@ -1,0 +1,117 @@
+---
+title: "Why the memory works this way"
+sidebarTitle: "Design rationale"
+description: "What FERAL's memory does that a capped profile file and a keyword search cannot, and why each part exists."
+---
+
+Every agent runtime claims persistent memory. The phrase has stopped
+carrying information, because it covers everything from a two-file
+scratchpad to a replicated database. This page is about which one FERAL
+built, and why each decision was made.
+
+For the schemas, the SQL, and the API, read the
+[Memory System guide](/guides/memory). This page is the reasoning behind it.
+
+## The common shape, and where it runs out
+
+The usual design is a small profile file plus full-text search over past
+sessions. It is a good default. It is easy to inspect, cheap to run, and
+it fits in a prompt. Four things break as usage grows.
+
+**A capped profile forces a lossy summary of a person.** When the store
+is a text file with a character budget, every new fact competes with an
+old one for space. The agent ends up maintaining a paragraph about you
+rather than a model of you, and the eviction policy is whatever the
+summariser felt like that day.
+
+**Keyword search only answers questions you can already phrase.** FTS5
+is fast and exact, and exactness is the problem: ask about "the thing we
+decided about billing" when the transcript says "invoicing", and the
+memory is present but unreachable.
+
+**Never forgetting is not the same as remembering well.** A store that
+only grows gets slower to search and less useful per result, because
+one-off trivia is ranked against things you rely on daily.
+
+**Single-machine memory ends at the machine.** Move to a second device
+and the model of you starts from zero, or it goes through somebody's
+cloud.
+
+## What FERAL does instead
+
+### Four tiers behind one retriever
+
+Working context, episodes, semantic and graph knowledge, and execution
+history each have different retention and different access patterns, so
+they are stored separately. They are read through a single ranked
+retriever (`memory/retriever.py`) that queries every tier, merges the
+results, and reports which tier each one came from.
+
+That last part is the point. Before it existed, the orchestrator and the
+intent compiler each had their own lookup logic, each deciding
+independently which tiers to query and how to rank them, which made
+"what does the agent actually know here" unanswerable. One explainable
+view is worth more than several clever ones.
+
+### Retrieval is hybrid, because recall and meaning are different problems
+
+Three strategies run against the same store:
+
+- **Lexical** via SQLite FTS5, for when you know the word.
+- **Semantic** via 384-dimension embeddings (`all-MiniLM-L6-v2`), for
+  when you know the idea but not the word.
+- **Structural** via an entity-linked knowledge graph, where entities
+  carry embeddings, aliases and types, and relations carry confidence
+  and evidence. Multi-hop traversal runs as a recursive CTE, so
+  "who introduced me to the person who runs that project" is a query
+  rather than a guess.
+
+The vector leg uses `sqlite-vec` where the interpreter supports loadable
+extensions and numpy otherwise. On the measured workload the numpy path
+is the faster of the two, so the fallback costs resident memory and
+nothing else.
+
+### Forgetting is a feature with a citation
+
+`memory/decay.py` implements an Ebbinghaus retention curve with a
+SuperMemo SM-2 derivation for rehearsal intervals. Recently reinforced,
+important material stays sharp; incidental detail fades.
+
+This is not only a fidelity argument. A multi-million-row `episodes`
+table is slow to search, and every irrelevant row that survives is a row
+competing for a place in the ranked result.
+
+### Your devices, not a cloud
+
+Federated sync (`memory/sync.py`) replicates memory between FERAL
+instances over mDNS peer discovery on the local network. Peers exchange
+vector clocks, send only missing operations, and merge under CRDT rules
+with hybrid logical clocks (`memory/hlc.py`) ordering events across
+machines with no shared wall clock.
+
+There is no relay in the middle. The failure modes are documented in
+[Sync chaos and recovery](/memory/chaos), which is worth reading before
+you depend on it: it states plainly which situations recover on their
+own, which need one operator action, and which require a backup restore.
+
+### Encryption at rest, described accurately
+
+`memory/at_rest.py` provides a whole-file AEAD envelope over
+`~/.feral/memory.db`. It is an operator action taken while the brain is
+stopped, not transparent always-on encryption: FTS5 virtual tables,
+`sqlite-vec`, embedding BLOBs and sync WAL materialisation all need real
+database pages, so the runtime requires the plaintext file.
+
+Encrypt when the brain is off, decrypt on next boot.
+
+## What this costs
+
+Honesty about the trade: this design is heavier than a profile file. It
+needs an interpreter with SQLite FTS5 (the store creates FTS5 tables at
+boot and refuses to start without them), it does more work per turn, and
+it has more moving parts to understand. `feral doctor` reports the
+pieces separately so you can see which are active on your machine.
+
+The bet is that an agent meant to know you for years should be built
+like a database from the start, because retrofitting recall, forgetting,
+and replication onto a text file is not an upgrade path.

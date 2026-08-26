@@ -7,9 +7,15 @@ Track B daemons (``wristband_daemon`` + ``w300_daemon``) live under
 Asserts:
 1. Both directories exist with a parsable ``manifest.json``.
 2. The registry loader returns both as ``kind=daemon`` seeds.
-3. Each manifest declares the HUP v1.3.0 hookup (``hup_version == "1.3.0"``)
-   and the ``live_test_env`` gate name so the docs never drift from
-   what the tests expect.
+3. Each manifest declares the current HUP hookup and the ``live_test_env``
+   gate name so the docs never drift from what the tests expect.
+
+The HUP assertion reads ``models.protocol.HUP_VERSION`` rather than a
+literal. It was pinned to "1.3.0" here, so the 1.4.0 bump left this test
+demanding a version the manifests had correctly moved off. It failed on
+every run and nobody saw it, because feral-registry has no CI job. A
+literal cannot express "matches the protocol", which is the thing worth
+asserting.
 """
 
 from __future__ import annotations
@@ -23,6 +29,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NODES_ROOT = REPO_ROOT / "feral-nodes"
+
+sys.path.insert(0, str(REPO_ROOT / "feral-core"))
+from models.protocol import HUP_VERSION  # noqa: E402
 
 EXPECTED_DAEMONS = ["wristband_daemon", "w300_daemon"]
 
@@ -39,8 +48,9 @@ def test_daemon_manifest_exists_and_is_parsable(name: str):
     assert manifest_path.is_file(), f"Missing manifest.json for {name}"
     data = json.loads(manifest_path.read_text())
     assert data.get("name") == name, f"manifest.name != {name!r}"
-    assert data.get("hup_version") == "1.3.0", (
-        f"{name}: hup_version must be pinned to 1.3.0 in the manifest"
+    assert data.get("hup_version") == HUP_VERSION, (
+        f"{name}: manifest hup_version {data.get('hup_version')!r} does not match "
+        f"the protocol's HUP_VERSION {HUP_VERSION!r}"
     )
     assert data.get("live_test_env"), f"{name}: missing live_test_env"
 

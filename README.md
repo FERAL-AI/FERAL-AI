@@ -47,6 +47,20 @@ What's inside:
 
 It ships as `feral-core` (the brain runtime), `feral-client-v2` (web control surface), and `feral-nodes` (device and hardware bridges).
 
+### About that memory
+
+Every agent claims persistent memory, so the phrase says nothing on its own. For most, it means a profile file capped at a few thousand characters plus keyword search over old transcripts: miss the exact word and you miss the memory, nothing is ever forgotten so trivia competes with what matters, and none of it leaves the machine it was written on.
+
+FERAL's is a store, not a note:
+
+- **Four tiers, one retriever.** Working context, episodes, semantic/graph knowledge, and execution history are queried through a single ranked view that reports which tier each result came from, instead of each caller inventing its own lookup.
+- **Hybrid retrieval.** SQLite FTS5 for lexical recall, 384-dim vector embeddings for meaning, and an entity-linked knowledge graph with confidence, evidence, and multi-hop traversal over a recursive CTE.
+- **It forgets on purpose.** Decay is an Ebbinghaus curve with a SuperMemo SM-2 derivation, so rehearsed facts stay sharp and one-off detail fades. A store that never forgets gets slower and less useful at the same time.
+- **It follows you across your own machines.** CRDT replication over mDNS peer discovery with hybrid logical clocks, no cloud relay, exercised by a nightly chaos suite.
+- **Encryption at rest** is available as an AEAD envelope over `~/.feral/memory.db`, applied while the brain is stopped (the plaintext database is required at runtime).
+
+Full detail in [the memory guide](https://docs.feral.sh/guides/memory).
+
 ## Quick Start
 
 > **Requires Python 3.11+ with SQLite FTS5** on macOS 13+ or modern Linux (Ubuntu 22.04+, Fedora 40+, Arch). Windows is not supported as a host yet, use WSL2.

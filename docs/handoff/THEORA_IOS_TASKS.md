@@ -396,7 +396,7 @@ reading shape, so one renderer handles both.**
 
 ```json
 {
-  "hup_version": "1.3.0",
+  "hup_version": "1.4.0",
   "type": "health_update",
   "ts": 1785391964.235,
   "payload": {

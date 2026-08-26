@@ -81,6 +81,7 @@
       {
         "group": "Memory",
         "pages": [
+          "memory/design",
           "memory/chaos"
         ]
       },
