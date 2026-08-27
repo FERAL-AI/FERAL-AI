@@ -6,6 +6,7 @@ import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from starlette.websockets import WebSocketDisconnect
 
 from tests.test_hup_protocol import (
     _TEST_NODE_KEY,
@@ -26,8 +27,12 @@ def _configure_bindings(mock_state: MagicMock) -> None:
     def _sessions_for(node_id: str) -> set[str]:
         return set(bindings.get(node_id, set()))
 
+    def _clear(node_id: str) -> set[str]:
+        return bindings.pop(node_id, set())
+
     mock_state.bind_session_to_daemon = MagicMock(side_effect=_bind)
     mock_state.get_sessions_for_daemon = MagicMock(side_effect=_sessions_for)
+    mock_state.clear_daemon_bindings = MagicMock(side_effect=_clear)
 
 
 def _flush_with_known_error(ws):
@@ -55,6 +60,58 @@ def _mock_state_with_supervisor() -> MagicMock:
     mock.supervisor = MagicMock()
     mock.supervisor.record = MagicMock()
     return mock
+
+
+def test_phone_registration_binds_shared_session_before_first_chat_turn():
+    mock = _mock_state_with_supervisor()
+    mock.primary_session_id = "shared-primary"
+
+    with _node_client(mock) as client:
+        with client.websocket_connect(f"/v1/node?api_key={_TEST_NODE_KEY}") as ws:
+            _register_node(
+                ws,
+                node_id="phone-ambient",
+                node_type="phone",
+                capabilities=["jw_health_glasses"],
+            )
+            assert "shared-primary" in mock.get_sessions_for_daemon("phone-ambient")
+
+
+def test_phone_registration_advertises_primary_session_and_ambient_capability():
+    mock = _mock_state_with_supervisor()
+    mock.primary_session_id = "shared-primary"
+
+    with _node_client(mock) as client:
+        with client.websocket_connect(f"/v1/node?api_key={_TEST_NODE_KEY}") as ws:
+            ack = _register_node(
+                ws,
+                node_id="phone-ambient",
+                node_type="phone",
+                capabilities=["jw_health_glasses", "ambient_delivery"],
+            )
+
+    assert ack["payload"]["primary_session_id"] == "shared-primary"
+    assert "ambient_delivery" in ack["payload"]["granted_capabilities"]
+
+
+def test_new_connection_with_same_node_id_closes_superseded_socket():
+    mock = _mock_state_with_supervisor()
+    mock.primary_session_id = "shared-primary"
+
+    with _node_client(mock) as client:
+        with client.websocket_connect(f"/v1/node?api_key={_TEST_NODE_KEY}") as old_ws:
+            _register_node(old_ws, node_id="stable-phone", node_type="phone")
+            with client.websocket_connect(f"/v1/node?api_key={_TEST_NODE_KEY}") as new_ws:
+                _register_node(new_ws, node_id="stable-phone", node_type="phone")
+
+                with pytest.raises(WebSocketDisconnect) as excinfo:
+                    old_ws.receive_json()
+                assert excinfo.value.code == 4000
+
+                # The replacement remains registered and operational after
+                # the old handler observes its close.
+                _flush_with_known_error(new_ws)
+                assert "stable-phone" in mock.daemons
 
 
 def test_chat_request_routes_to_orchestrator_and_responds():

@@ -871,6 +871,18 @@ class TextResponsePayload(BaseModel):
     # across every LLM round the turn made, not just the final one.
     model: str = Field(default="", max_length=MAX_NAME_LEN)
     usage: dict = Field(default_factory=dict)
+    # Additive phone-delivery metadata. Ordinary requested responses leave
+    # these at their defaults; ``channel="ambient"`` identifies an
+    # unsolicited proactive turn that a capable phone may notify or speak.
+    session_id: str = Field(default="", max_length=MAX_SESSION_ID_LEN)
+    reply_mode: str = Field(default="", max_length=32)
+    channel: str = Field(default="", max_length=32)
+    source: str = Field(default="", max_length=MAX_NAME_LEN)
+    trigger_id: str = Field(default="", max_length=MAX_ID_LEN)
+    priority: str = Field(default="", max_length=32)
+    title: str = Field(default="", max_length=MAX_NAME_LEN)
+    voice_text: str = ""
+    context: dict = Field(default_factory=dict)
 
 
 class StreamDeltaPayload(BaseModel):
@@ -1342,6 +1354,9 @@ class NodeAckPayload(BaseModel):
     """Brain acknowledges a node_register (HUP_SPEC §5.2)."""
     node_id: str = Field(default="", max_length=MAX_ID_LEN)
     session_token: str = Field(default="", max_length=MAX_TOKEN_LEN)
+    # Stable per-install conversation shared by the brain's web and phone
+    # surfaces. Optional/additive for clients talking to older brains.
+    primary_session_id: str = Field(default="", max_length=MAX_SESSION_ID_LEN)
     hup_version: str = Field(default=HUP_VERSION, max_length=32)
     heartbeat_ms: int = Field(default=10000, ge=0)
     server_time: float = Field(default_factory=time, ge=0.0)

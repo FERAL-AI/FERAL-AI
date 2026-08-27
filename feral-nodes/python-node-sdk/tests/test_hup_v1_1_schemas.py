@@ -114,6 +114,28 @@ def test_build_frame_wraps_audio_payload_into_device_event():
     assert frame["payload"]["event_type"] == "audio_frame"
 
 
+def test_text_response_preserves_attribution_and_ambient_metadata():
+    frame = build_frame(
+        "text_response",
+        {
+            "text": "Take a short walk?",
+            "tool_calls": [{"name": "calendar_lookup"}],
+            "model": "provider/model",
+            "usage": {"total_tokens": 42},
+            "session_id": "primary-test",
+            "channel": "ambient",
+            "trigger_id": "inactivity",
+            "context": {"minutes": 63},
+        },
+    )
+
+    assert frame["payload"]["tool_calls"] == [{"name": "calendar_lookup"}]
+    assert frame["payload"]["model"] == "provider/model"
+    assert frame["payload"]["usage"] == {"total_tokens": 42}
+    assert frame["payload"]["channel"] == "ambient"
+    assert frame["payload"]["context"] == {"minutes": 63}
+
+
 def test_feral_node_emit_helpers_validate_locally():
     """The new FeralNode helpers validate before hitting the websocket.
 

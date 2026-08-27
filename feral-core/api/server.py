@@ -2588,7 +2588,25 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
 
             if msg.type in ("node_register", "register") and isinstance(payload, NodeRegisterPayload):
                 node_id = payload.node_id
+                # A reconnect may reuse a stable node id before the old socket
+                # observes its close. The new registration owns a fresh set of
+                # bindings; the stale socket's eventual teardown is guarded by
+                # object identity below.
+                previous_ws = state.daemons.get(node_id)
+                state.clear_daemon_bindings(node_id)
                 state.daemons[node_id] = ws
+                if previous_ws is not None and previous_ws is not ws:
+                    try:
+                        await previous_ws.close(
+                            code=4000,
+                            reason="Superseded by a newer connection for this node id",
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Could not close superseded daemon socket: %s",
+                            node_id,
+                            exc_info=True,
+                        )
                 # Stash the HUP-declared node_type on the WebSocket so
                 # /api/devices/connected can report the real type instead
                 # of the legacy "phone"-for-everyone default. `manufacturer`
@@ -2626,7 +2644,20 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 logger.info(f"Node registered: {node_id} ({payload.node_type}/{payload.platform}) — caps: {payload.capabilities}, skills: {len(getattr(payload, 'skills', []) or [])}")
                 _log_activity("device_connected", f"{node_id} ({payload.node_type})")
 
-                for sid in state.sessions:
+                bindable_sessions = set(state.sessions)
+                primary_sid = getattr(state, "primary_session_id", "")
+                if (
+                    str(payload.node_type or "").lower() == "phone"
+                    and isinstance(primary_sid, str)
+                    and primary_sid
+                ):
+                    # A phone can receive ambient turns before it has opened
+                    # chat. Bind the shared conversation at registration so
+                    # the first sensor-driven message and the user's natural
+                    # follow-up live in the same thread.
+                    bindable_sessions.add(primary_sid)
+
+                for sid in bindable_sessions:
                     state.bind_session_to_daemon(sid, node_id)
                     state.perception.update_connected_nodes(sid, list(state.daemons.keys()))
 
@@ -2638,6 +2669,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     })
 
                 session_token = str(__import__("uuid").uuid4())
+                shared_session_id = getattr(state, "primary_session_id", "")
+                if not isinstance(shared_session_id, str):
+                    shared_session_id = ""
                 await ws.send_json({
                     "hup_version": HUP_VERSION,
                     "type": "node_ack",
@@ -2645,6 +2679,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     "payload": {
                         "node_id": node_id,
                         "session_token": session_token,
+                        "primary_session_id": shared_session_id,
                         "hup_version": HUP_VERSION,
                         "heartbeat_ms": 10000,
                         "server_time": __import__("time").time(),
@@ -3928,8 +3963,15 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
 
     except WebSocketDisconnect:
         if node_id:
+            if state.daemons.get(node_id) is not ws:
+                logger.info(
+                    "Ignoring disconnect cleanup for superseded daemon socket: %s",
+                    node_id,
+                )
+                return
             logger.info(f"Daemon disconnected: {node_id}")
             state.daemons.pop(node_id, None)
+            bound_sessions = state.clear_daemon_bindings(node_id)
             # Same leak as the web handler: audio/perception/mesh state
             # was cleared here but the voice router never was, so a
             # phone that dropped LTE or went to background kept a live
@@ -3951,7 +3993,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
             if state.hardware_mesh:
                 state.hardware_mesh.on_node_disconnected(node_id)
             state.capability_registry.unregister_node(node_id)
-            for sid in state.get_sessions_for_daemon(node_id):
+            for sid in bound_sessions:
                 state.perception.update_connected_nodes(sid, list(state.daemons.keys()))
 
 

@@ -67,10 +67,27 @@ class NodeRegisterPayload(BaseModel):
 class NodeAckPayload(BaseModel):
     node_id: str
     session_token: str
+    primary_session_id: str = ""
     heartbeat_ms: int = 10000
     server_time: float = Field(default_factory=_time.time)
     granted_capabilities: list[str] = Field(default_factory=list)
     denied_capabilities: list[str] = Field(default_factory=list)
+
+
+class TextResponsePayload(BaseModel):
+    text: str
+    tool_calls: Optional[list[dict[str, Any]]] = None
+    model: str = ""
+    usage: dict[str, Any] = Field(default_factory=dict)
+    session_id: str = ""
+    reply_mode: str = ""
+    channel: str = ""
+    source: str = ""
+    trigger_id: str = ""
+    priority: str = ""
+    title: str = ""
+    voice_text: str = ""
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 class NodeHeartbeatPayload(BaseModel):
@@ -232,6 +249,7 @@ MESSAGE_TYPES: dict[str, type[BaseModel]] = {
     "hup_action_request": HUPActionRequestPayload,
     "hup_action_response": HUPActionResponsePayload,
     "node_bye": NodeByePayload,
+    "text_response": TextResponsePayload,
     "error": ErrorPayload,
     # HUP v1.3.0
     "glasses_frame": GlassesFramePayload,

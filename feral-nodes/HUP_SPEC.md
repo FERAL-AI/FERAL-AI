@@ -284,6 +284,13 @@ gating. Each capability string maps to a **tier** for policy purposes:
 | `active_actuator`   | haptic, buzzer, led, display              | yes, rate-limited |
 | `motor`             | motor, relay, valve, vehicle              | off by default — per-command confirmation |
 
+`ambient_delivery` is a transport capability for phone nodes. A phone that
+registers it understands unsolicited `text_response` frames whose
+`channel` is `ambient`; brains MUST NOT send proactive personal context to a
+node that did not advertise it. FERAL installations currently have one
+per-install primary conversation, so multiple paired phones advertising this
+capability are treated as surfaces owned by that same installation owner.
+
 ### 5.2 `node_ack` (brain → daemon, REQUIRED)
 
 Brain MUST reply to every valid `node_register` with a `node_ack`
@@ -297,6 +304,7 @@ within 5 seconds, or close the socket with an error code from §8.
   "payload": {
     "node_id": "acme-wb-001",
     "session_token": "b58c2c34-...",
+    "primary_session_id": "primary-4e8b...",
     "heartbeat_ms": 10000,
     "server_time": 1734369920.040,
     "granted_capabilities": ["heart_rate", "buzzer", "battery"],
@@ -304,6 +312,11 @@ within 5 seconds, or close the socket with an error code from §8.
   }
 }
 ```
+
+`primary_session_id` is an additive field containing the brain's stable
+per-install conversation id. Phone clients SHOULD use it for chat so browser,
+phone, and proactive turns remain one coherent thread. Older brains MAY omit
+it; clients must retain a local session-id fallback.
 
 ### 5.3 `node_heartbeat` (daemon → brain, every `heartbeat_ms`, canonical)
 
@@ -1089,6 +1102,34 @@ would re-upload it forever. Add a distinct status then; do not widen
   }
 }
 ```
+
+`text_response` with `channel: "ambient"` is an unsolicited proactive turn:
+
+```json
+{
+  "type": "text_response",
+  "hup_version": "1.3.0",
+  "ts": 1234567890.456,
+  "payload": {
+    "session_id": "primary-4e8b...",
+    "text": "You have been sitting for a while. Want to take a short walk?",
+    "reply_mode": "final",
+    "channel": "ambient",
+    "source": "proactive",
+    "trigger_id": "inactivity_reminder",
+    "priority": "SUGGESTION",
+    "title": "A good moment to move",
+    "voice_text": "You have been sitting for a while. Want to take a short walk?",
+    "context": {"metric": "inactivity_minutes", "value": 63}
+  }
+}
+```
+
+Only authenticated phone nodes that advertised `ambient_delivery` receive
+this frame. The brain records the turn in `primary_session_id` before delivery,
+so a natural follow-up such as “Why?” has the initiating turn in context.
+Clients that do not implement ambient presentation can continue treating the
+frame as plain text; all metadata beyond `text` is additive.
 
 `voice_session_start`:
 

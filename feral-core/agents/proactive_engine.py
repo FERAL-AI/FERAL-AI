@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -71,6 +72,10 @@ class ProactiveMessage:
     action_payload: dict = field(default_factory=dict)
     sdui: dict | None = None   # optional GenUI card
     voice_text: str = ""       # what to say aloud
+    # Structured, non-display context for downstream delivery surfaces.
+    # This keeps sensor provenance out of brittle prose parsing while
+    # remaining generic enough for calendar, routine, and LLM triggers.
+    context: dict = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
 
 
@@ -140,6 +145,14 @@ class ProactiveEngine:
         # one more LLM evaluation fire while waiting on the interval
         # sleep).
         self._task: Optional[asyncio.Task] = None
+        # The model judge is deliberately separate from the rule loop. Local
+        # and subscription-backed providers can take minutes without making
+        # fresh health checks or direct alert delivery wait behind them.
+        self._llm_task: Optional[asyncio.Task] = None
+        # Invalidates a detached model task if shutdown/restart occurs. A
+        # provider is allowed to be slow, but an old process generation must
+        # never deliver after the engine that scheduled it has stopped.
+        self._generation = 0
         self._callbacks: list[Callable[[ProactiveMessage], Awaitable[None]]] = []
         self._trigger_states: dict[str, TriggerState] = {}
         self._trigger_counts: dict[str, int] = defaultdict(int)
@@ -152,6 +165,26 @@ class ProactiveEngine:
         cfg = config or {}
         features = cfg.get("features", {})
         self._nag_cooldown_s = float(features.get("proactive_nag_cooldown_s", 300))
+        configured_llm_interval = os.environ.get(
+            "FERAL_PROACTIVE_LLM_INTERVAL_SECONDS",
+            features.get("proactive_llm_interval_s", 60),
+        )
+        try:
+            self._llm_interval_s = max(60.0, float(configured_llm_interval))
+        except (TypeError, ValueError):
+            self._llm_interval_s = 60.0
+        configured_result_age = os.environ.get(
+            "FERAL_PROACTIVE_LLM_RESULT_MAX_AGE_SECONDS",
+            features.get("proactive_llm_result_max_age_s", 1800),
+        )
+        try:
+            self._llm_result_max_age_s = max(60.0, float(configured_result_age))
+        except (TypeError, ValueError):
+            self._llm_result_max_age_s = 1800.0
+        # This is only the grace period after explicit cancellation during
+        # shutdown. It is not a model-call timeout; normal inference is allowed
+        # to run for as long as the configured provider permits.
+        self._llm_shutdown_grace_s = 2.0
 
     def on_message(self, callback: Callable[[ProactiveMessage], Awaitable[None]]):
         self._callbacks.append(callback)
@@ -166,6 +199,9 @@ class ProactiveEngine:
             },
             "nag_cooldown_s": self._nag_cooldown_s,
             "running": self._running,
+            "llm_in_flight": bool(self._llm_task and not self._llm_task.done()),
+            "llm_interval_s": self._llm_interval_s,
+            "llm_result_max_age_s": self._llm_result_max_age_s,
         }
 
     async def start(self):
@@ -177,6 +213,7 @@ class ProactiveEngine:
         """
         if self._running and self._task and not self._task.done():
             return
+        self._generation += 1
         self._running = True
         self._session_start = time.time()
         logger.info("Proactive engine started (interval=%.0fs)", self._interval)
@@ -206,15 +243,27 @@ class ProactiveEngine:
         up and fire one more LLM evaluation after shutdown began.
         """
         self._running = False
+        self._generation += 1
         task = self._task
         self._task = None
-        if task is None or task.done():
-            return
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
+        llm_task = self._llm_task
+        self._llm_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if llm_task is not None and not llm_task.done():
+            llm_task.cancel()
+            done, _ = await asyncio.wait(
+                {llm_task}, timeout=self._llm_shutdown_grace_s
+            )
+            if not done:
+                logger.warning(
+                    "LLM proactive task ignored cancellation; detaching it "
+                    "without permitting late delivery"
+                )
 
     async def evaluate(self, session_id: str = ""):
         """Public entry point for on-demand evaluation."""
@@ -363,6 +412,12 @@ class ProactiveEngine:
                         voice_text=voice,
                         action="Take a break",
                         action_payload={"smart_home": "set_scene", "scene": "calming"},
+                        context={
+                            "metric": "heart_rate",
+                            "value": frame.heart_rate,
+                            "source": hr_src_raw,
+                            "sample_age_s": int(hr_age),
+                        },
                     ))
 
             if (
@@ -388,6 +443,12 @@ class ProactiveEngine:
                         voice_text=f"Your blood oxygen is at {frame.spo2_pct} percent, which is low. Please take some deep breaths.",
                         action="Start breathing exercise",
                         action_payload={"smart_home": "breathing_exercise", "duration_minutes": 3},
+                        context={
+                            "metric": "spo2",
+                            "value": frame.spo2_pct,
+                            "source": spo2_src_raw,
+                            "sample_age_s": int(spo2_age),
+                        },
                     ))
 
         # --- Screen Context Triggers ---
@@ -571,6 +632,12 @@ class ProactiveEngine:
                                 title="Heart Rate Anomaly",
                                 body=alert.message,
                                 voice_text=alert.message,
+                                context={
+                                    "metric": chosen_metric_id or "hr_resting",
+                                    "value": fresh_hr_frame.heart_rate,
+                                    "source": hr_src_norm,
+                                    "sample_age_s": hr_age_log,
+                                },
                             ))
                 for mid in ("sleep_hours", "hrv_ms"):
                     if not self._can_fire(f"baseline_trend_{mid}"):
@@ -603,8 +670,8 @@ class ProactiveEngine:
         # --- Routines the runtime has switched off, reported once each ---
         self._check_auto_disabled_routines(messages)
 
-        # --- LLM-based evaluation (additive, runs last) ---
-        await self._evaluate_with_llm(frames, messages)
+        # --- LLM-based evaluation (additive, single-flight background task) ---
+        self._schedule_llm_evaluation(frames, messages)
 
         # --- Deliver Messages ---
         for msg in sorted(messages, key=lambda m: m.priority.value, reverse=True):
@@ -612,18 +679,79 @@ class ProactiveEngine:
                 await self._deliver(msg)
                 self._record_fire(msg.trigger_id)
 
+    def _schedule_llm_evaluation(
+        self,
+        frames: list,
+        existing_triggers: list[ProactiveMessage],
+    ) -> None:
+        """Run the slow model judge without blocking rule evaluation.
+
+        There is at most one call in flight. No model timeout is introduced:
+        a slow local provider may finish in its own time, while the 15-second
+        rule loop continues to process and deliver fresh sensor events.
+        """
+        if self._llm is None:
+            return
+        if self._llm_task is not None and not self._llm_task.done():
+            return
+        # A context-free "should I say something?" call once per minute burns
+        # tokens and produces generic chatter. Calendar/routine/morning checks
+        # already appear in existing_triggers; sensor context appears in frames.
+        if not frames and not existing_triggers:
+            return
+        if time.time() - self._last_llm_eval < self._llm_interval_s:
+            return
+
+        seed = list(existing_triggers)
+        original_count = len(seed)
+        scheduled_at = time.time()
+        generation = self._generation
+
+        async def _run() -> None:
+            await self._evaluate_with_llm(frames, seed)
+            if generation != self._generation:
+                logger.info("Discarding proactive LLM result from a retired engine generation")
+                return
+            result_age_s = time.time() - scheduled_at
+            if result_age_s > self._llm_result_max_age_s:
+                logger.info(
+                    "Discarding stale proactive LLM result (age=%.0fs, max=%.0fs)",
+                    result_age_s,
+                    self._llm_result_max_age_s,
+                )
+                return
+            for msg in seed[original_count:]:
+                if self._can_fire(msg.trigger_id):
+                    await self._deliver(msg)
+                    self._record_fire(msg.trigger_id)
+
+        task = asyncio.create_task(_run(), name="feral-proactive-llm")
+        self._llm_task = task
+
+        def _observe(done: asyncio.Task) -> None:
+            if self._llm_task is done:
+                self._llm_task = None
+            if done.cancelled():
+                return
+            try:
+                done.result()
+            except Exception as exc:
+                logger.warning("LLM proactive background task failed: %s", exc)
+
+        task.add_done_callback(_observe)
+
     async def _evaluate_with_llm(self, frames: list, existing_triggers: list[ProactiveMessage]):
         """Ask the LLM whether FERAL should proactively say something.
 
         Only called when an LLM client is configured and enough time has
-        elapsed since the last LLM evaluation (60s cooldown).  Results are
+        elapsed since the last configured evaluation interval. Results are
         appended to *existing_triggers* — they don't replace rule-based ones.
         """
         if not self._llm:
             return
 
         now = time.time()
-        if now - self._last_llm_eval < 60:
+        if now - self._last_llm_eval < self._llm_interval_s:
             return
         self._last_llm_eval = now
 

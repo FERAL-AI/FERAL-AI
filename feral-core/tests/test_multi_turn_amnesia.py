@@ -127,6 +127,41 @@ async def test_note_voice_assistant_turn_is_idempotent_on_replay():
     ]
 
 
+@pytest.mark.asyncio
+async def test_proactive_turn_is_visible_to_the_users_follow_up():
+    orch = _orchestrator()
+    sid = "sess-proactive-then-chat"
+    memory = MagicMock()
+    memory.episode_save = AsyncMock(return_value={"id": "episode-1"})
+    orch.memory = memory
+    captured = _text_reply(orch, "Because the live reading stayed elevated.")
+
+    await orch.note_proactive_assistant_turn(
+        sid,
+        "I noticed your heart rate stayed elevated.",
+        trigger_id="hr_elevated",
+        priority="IMPORTANT",
+        context={"source": "jw_health_glasses", "sample_age_s": 2},
+    )
+    await orch.handle_command(sid, "Why?")
+
+    messages = captured[-1]
+    assert [m.get("role") for m in messages] == [
+        "system", "assistant", "user",
+    ]
+    assert messages[1]["content"] == "I noticed your heart rate stayed elevated."
+    memory.working_push.assert_any_call(
+        sid,
+        {
+            "role": "assistant",
+            "text": "I noticed your heart rate stayed elevated.",
+            "source": "proactive",
+            "trigger_id": "hr_elevated",
+        },
+    )
+    memory.episode_save.assert_awaited_once()
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Loss path 2 — early returns that skipped the write-back
 # ─────────────────────────────────────────────────────────────────────

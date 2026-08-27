@@ -4,6 +4,7 @@ Shared brain state singleton.
 Every route module and the main server import ``state`` from here.
 """
 
+import asyncio
 import logging
 import os
 import time
@@ -14,7 +15,7 @@ from typing import Optional
 from fastapi import WebSocket
 
 from version import VERSION as __version__
-from models.protocol import FeralMessage
+from models.protocol import FeralMessage, HUP_VERSION
 from agents.orchestrator import Orchestrator
 from agents.learner import Learner
 from agents.skill_generator import SkillGenerator
@@ -80,6 +81,17 @@ from api.boot_report import BootReport, boot_subsystem
 logger = logging.getLogger("feral.brain")
 
 VISION_MAX_FRAME_KB = int(os.environ.get("FERAL_VISION_MAX_FRAME_KB", "512"))
+
+# HUP capability advertised by phone nodes that understand unsolicited
+# ``text_response(channel="ambient")`` delivery. Pairing authenticates the
+# node; this capability makes delivery support explicit instead of inferring it
+# from a broad platform label such as "ios".
+AMBIENT_DELIVERY_CAPABILITY = "ambient_delivery"
+
+# This bounds WebSocket backpressure only; it is not an LLM/provider timeout.
+# Proactive evaluation and every other phone delivery continue independently
+# if one half-open client stops accepting frames.
+PROACTIVE_NODE_SEND_TIMEOUT_S = 15.0
 
 # -A13: avoid exporting channel/webhook secrets into process-global env
 # when applying ConfigLoader/export_as_env at boot. These credentials are
@@ -2047,6 +2059,7 @@ class BrainState:
                 health_aggregator=self.health_aggregator,
                 baseline_engine=self.baseline_engine,
                 cost_guard=self.proactive_cost_guard,
+                config=dict(getattr(self.config, "_merged", {}) or {}),
                 # So the engine can notice a routine that has been firing and
                 # failing for weeks with nobody told. CronService is created
                 # earlier in boot than this.
@@ -2075,9 +2088,15 @@ class BrainState:
                     "action_payload": msg.action_payload,
                     "sdui": msg.sdui,
                     "voice_text": msg.voice_text,
+                    "context": dict(getattr(msg, "context", {}) or {}),
                 }
                 await self.broadcast_event("proactive_alert", alert)
-                await self._escalate_when_nobody_is_watching(msg)
+                await self._record_proactive_assistant_turn(msg)
+                direct_deliveries = await self._deliver_proactive_to_phone_nodes(alert)
+                await self._escalate_when_nobody_is_watching(
+                    msg,
+                    direct_delivery_count=direct_deliveries,
+                )
 
             self.proactive.on_message(_proactive_delivery)
             # A6 — only start the proactive loop when enabled. Before
@@ -3249,7 +3268,12 @@ class BrainState:
     # Escalation is deliberately rare. See _escalate_when_nobody_is_watching.
     _ESCALATION_COOLDOWN_S = 1800.0
 
-    async def _escalate_when_nobody_is_watching(self, msg) -> None:
+    async def _escalate_when_nobody_is_watching(
+        self,
+        msg,
+        *,
+        direct_delivery_count: int = 0,
+    ) -> None:
         """Deliver an important alert to a human who has no browser open.
 
         Until now every proactive decision went to ``broadcast_event``, which
@@ -3277,7 +3301,7 @@ class BrainState:
 
         # Someone is already looking at a live surface, so the browser push
         # was delivery. Escalating on top of it would be a duplicate.
-        if self.sessions:
+        if self.sessions or direct_delivery_count > 0:
             return
 
         priority = getattr(msg, "priority", None)
@@ -3374,6 +3398,111 @@ class BrainState:
         if ws:
             await ws.send_json(msg_dict)
 
+    async def _record_proactive_assistant_turn(self, msg) -> None:
+        """Put an unsolicited message in the shared conversation before reply.
+
+        Browser and phone surfaces share ``primary_session_id``. Recording the
+        message there means a natural follow-up does not reach an agent that
+        has forgotten what it initiated one moment earlier.
+        """
+        session_id = getattr(self, "primary_session_id", "")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        note_turn = getattr(
+            getattr(self, "orchestrator", None),
+            "note_proactive_assistant_turn",
+            None,
+        )
+        if not callable(note_turn):
+            return
+        try:
+            await note_turn(
+                session_id,
+                getattr(msg, "body", "") or getattr(msg, "voice_text", ""),
+                trigger_id=getattr(msg, "trigger_id", ""),
+                priority=getattr(getattr(msg, "priority", None), "name", ""),
+                context=dict(getattr(msg, "context", {}) or {}),
+            )
+        except Exception:
+            logger.warning(
+                "Could not record proactive assistant turn",
+                exc_info=True,
+            )
+
+    async def _deliver_proactive_to_phone_nodes(self, alert: dict) -> int:
+        """Send one ambient ``text_response`` to each bound phone node.
+
+        ``text_response`` is an existing HUP brain-to-node frame, so older
+        clients continue to parse the text while newer clients can use the
+        additive ``channel=ambient`` metadata for notification and speech
+        policy. Non-phone daemons and unbound sockets never receive personal
+        proactive context.
+        """
+        session_id = getattr(self, "primary_session_id", "")
+        if not isinstance(session_id, str):
+            session_id = ""
+
+        frame = {
+            "hup_version": HUP_VERSION,
+            "type": "text_response",
+            "ts": time.time(),
+            "payload": {
+                "session_id": session_id,
+                "text": str(alert.get("body") or alert.get("voice_text") or ""),
+                "reply_mode": "final",
+                "channel": "ambient",
+                "source": "proactive",
+                "trigger_id": str(alert.get("trigger_id") or ""),
+                "priority": str(alert.get("priority") or "AMBIENT"),
+                "title": str(alert.get("title") or "FERAL"),
+                "voice_text": str(alert.get("voice_text") or ""),
+                "context": dict(alert.get("context") or {}),
+            },
+        }
+
+        recipients: list[tuple[str, WebSocket]] = []
+        for node_id, ws in list(getattr(self, "daemons", {}).items()):
+            node_type = str(getattr(ws, "_feral_node_type", "") or "").lower()
+            platform = str(getattr(ws, "_feral_platform", "") or "").lower()
+            if node_type != "phone" and platform not in {"ios", "android"}:
+                continue
+            capabilities = {
+                str(capability).lower()
+                for capability in (getattr(ws, "_feral_capabilities", []) or [])
+            }
+            if AMBIENT_DELIVERY_CAPABILITY not in capabilities:
+                continue
+            if session_id and session_id not in self.get_sessions_for_daemon(node_id):
+                continue
+            recipients.append((node_id, ws))
+
+        async def _send(node_id: str, expected_ws: WebSocket) -> bool:
+            # A reconnect may replace a socket after the recipient snapshot.
+            # Never send a personal alert to a stale connection.
+            if self.daemons.get(node_id) is not expected_ws:
+                return False
+            try:
+                await asyncio.wait_for(
+                    expected_ws.send_json(frame),
+                    timeout=PROACTIVE_NODE_SEND_TIMEOUT_S,
+                )
+            except Exception:
+                logger.warning(
+                    "Proactive phone delivery failed for node %s",
+                    node_id,
+                    exc_info=True,
+                )
+                return False
+            return True
+
+        if not recipients:
+            return 0
+        results = await asyncio.gather(
+            *(_send(node_id, ws) for node_id, ws in recipients),
+            return_exceptions=True,
+        )
+        return sum(result is True for result in results)
+
     def bind_session_to_daemon(self, session_id: str, node_id: str):
         if node_id not in self._daemon_session_bindings:
             self._daemon_session_bindings[node_id] = set()
@@ -3381,6 +3510,10 @@ class BrainState:
 
     def get_sessions_for_daemon(self, node_id: str) -> set[str]:
         return self._daemon_session_bindings.get(node_id, set())
+
+    def clear_daemon_bindings(self, node_id: str) -> set[str]:
+        """Remove and return all session bindings owned by one daemon."""
+        return self._daemon_session_bindings.pop(node_id, set())
 
 
 state = BrainState()

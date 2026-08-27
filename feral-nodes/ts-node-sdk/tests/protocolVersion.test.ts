@@ -53,4 +53,22 @@ describe("HUP protocol version", () => {
     expect(frame.payload.action_id).toBe("act-001");
     expect(frame.payload.success).toBe(true);
   });
+
+  test("text_response preserves attribution and ambient metadata", () => {
+    const frame = buildFrame("text_response", {
+      text: "Take a short walk?",
+      tool_calls: [{ name: "calendar_lookup" }],
+      model: "provider/model",
+      usage: { total_tokens: 42 },
+      session_id: "primary-test",
+      channel: "ambient",
+      trigger_id: "inactivity",
+      context: { minutes: 63 },
+    });
+    expect(frame.payload.tool_calls).toEqual([{ name: "calendar_lookup" }]);
+    expect(frame.payload.model).toBe("provider/model");
+    expect(frame.payload.usage).toEqual({ total_tokens: 42 });
+    expect(frame.payload.channel).toBe("ambient");
+    expect(frame.payload.context).toEqual({ minutes: 63 });
+  });
 });

@@ -54,12 +54,30 @@ export type NodeRegisterPayload = z.infer<typeof NodeRegisterPayload>;
 export const NodeAckPayload = z.object({
   node_id: z.string(),
   session_token: z.string(),
+  primary_session_id: z.string().default(""),
   heartbeat_ms: z.number().int().default(10_000),
   server_time: z.number().default(() => Date.now() / 1000),
   granted_capabilities: z.array(z.string()).default([]),
   denied_capabilities: z.array(z.string()).default([]),
 });
 export type NodeAckPayload = z.infer<typeof NodeAckPayload>;
+
+export const TextResponsePayload = z.object({
+  text: z.string(),
+  tool_calls: z.array(z.record(z.any())).nullable().optional(),
+  model: z.string().default(""),
+  usage: z.record(z.any()).default({}),
+  session_id: z.string().default(""),
+  reply_mode: z.string().default(""),
+  channel: z.string().default(""),
+  source: z.string().default(""),
+  trigger_id: z.string().default(""),
+  priority: z.string().default(""),
+  title: z.string().default(""),
+  voice_text: z.string().default(""),
+  context: z.record(z.any()).default({}),
+});
+export type TextResponsePayload = z.infer<typeof TextResponsePayload>;
 
 export const NodeHeartbeatPayload = z.object({
   ts: z.number().default(() => Date.now() / 1000),
@@ -186,6 +204,7 @@ export const HUPMessageType = z.enum([
   "hup_action_request",
   "hup_action_response",
   "node_bye",
+  "text_response",
   "error",
   "glasses_frame",
   "device_announce",
@@ -200,6 +219,7 @@ const SCHEMAS: Record<string, z.ZodTypeAny> = {
   hup_action_request: HUPActionRequestPayload,
   hup_action_response: HUPActionResponsePayload,
   node_bye: NodeByePayload,
+  text_response: TextResponsePayload,
   error: ErrorPayload,
   glasses_frame: GlassesFramePayload,
   device_announce: DeviceAnnouncePayload,
