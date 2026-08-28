@@ -303,6 +303,19 @@ class Orchestrator:
         # surface deny-lists fire on the actual invocation surface
         # instead of the historical "websocket" default.
         self._session_surfaces: dict[str, str] = {}
+        # B7: wall-clock of the last activity on each session, the key
+        # ``_evict_stale_sessions`` sorts by.
+        #
+        # There was no per-session timestamp before, so the cap sorted by
+        # ``len(conversation_history[sid])`` and evicted the SHORTEST
+        # transcripts. Short means "just started" far more often than it
+        # means "finished", so the cap reliably deleted the session the
+        # operator was mid-conversation on and kept the abandoned ones.
+        # Written at both ends of a turn (start and finalisation) and on
+        # every live-voice row; dropped by eviction and by
+        # ``on_session_disconnect`` so it cannot outgrow the dict it
+        # describes.
+        self._session_last_active: dict[str, float] = {}
         # F2 — turns-since-last-compaction counter per session.
         # ``_maybe_auto_compact`` increments after every full turn and
         # fires ``memory.compact_session`` once it crosses
@@ -2209,6 +2222,9 @@ class Orchestrator:
                 session_id[:8],
             )
 
+        # B7: stamp BEFORE the cap runs, or this turn's own session is a
+        # candidate for the eviction its own completion triggered.
+        self._touch_session(session_id)
         self._evict_stale_sessions()
         if self.learner:
             # AUDIT-FIXES F-06: referenced so the self-learning write cannot
@@ -3293,6 +3309,10 @@ class Orchestrator:
 
         if session_id not in self.conversation_history:
             self.conversation_history[session_id] = []
+        # B7: a turn in flight counts as activity. Without this a long
+        # turn (slow provider, tool loop) looks idle to the cap for its
+        # whole duration.
+        self._touch_session(session_id)
 
         # Re-thread any paused thoughts registered via
         # /api/consciousness/resume (kind=thought). The fragments are
@@ -3913,6 +3933,10 @@ class Orchestrator:
 
         if session_id not in self.conversation_history:
             self.conversation_history[session_id] = []
+        # B7: a turn in flight counts as activity. Without this a long
+        # turn (slow provider, tool loop) looks idle to the cap for its
+        # whole duration.
+        self._touch_session(session_id)
 
         # WS3 — paused-thoughts re-thread parity. Symmetric with the
         # non-stream prelude: when ``/api/consciousness/resume``
@@ -4389,13 +4413,50 @@ class Orchestrator:
             context={"source": "proactive", "alerts": alerts},
         )
 
+    def _touch_session(self, session_id: str) -> None:
+        """Stamp ``session_id`` as active now.
+
+        B7: the input to :meth:`_evict_stale_sessions`. Called at the
+        start of a turn as well as at its end so a session that is
+        mid-turn when the cap fires is never the victim; a turn can run
+        for minutes behind a slow provider, and the row that would prove
+        it alive is not written until the turn finishes.
+        """
+        if session_id:
+            self._session_last_active[session_id] = time.time()
+
+    def _forget_session_activity(self, session_id: str) -> None:
+        self._session_last_active.pop(session_id, None)
+
     def _evict_stale_sessions(self):
-        """Evict oldest conversation sessions when the dict exceeds max size."""
+        """Evict the LEAST RECENTLY ACTIVE sessions once the dict is over
+        ``_conversation_max_sessions``.
+
+        B7: this used to sort by ``len(conversation_history[sid])`` and
+        delete the head, so it evicted the SHORTEST transcripts while
+        claiming to evict the oldest. Measured with the cap at 5: five
+        abandoned 50-row sessions and one 1-row session the operator had
+        just opened, and the 1-row session was the one destroyed while
+        all five dead ones survived. Length is not age. A session is
+        short because it just began at least as often as because it is
+        finished.
+
+        This cap is also the only cleanup most sessions ever get.
+        ``on_session_disconnect`` has a single caller, the WebSocket
+        handler in ``api/server.py``, so channel sessions
+        (``channel_{type}_{user_id}``), cron sessions (``routine-{id}``)
+        and REST turns never reach it.
+
+        A session with no stamp sorts as infinitely old. That is the safe
+        direction: an unstamped entry is one nothing has claimed through
+        a turn, and treating it as fresh would let it pin a cap slot
+        forever.
+        """
         if len(self.conversation_history) <= self._conversation_max_sessions:
             return
         sorted_sids = sorted(
             self.conversation_history,
-            key=lambda sid: len(self.conversation_history[sid]),
+            key=lambda sid: self._session_last_active.get(sid, 0.0),
         )
         to_remove = len(self.conversation_history) - self._conversation_max_sessions
         for sid in sorted_sids[:to_remove]:
@@ -4408,6 +4469,9 @@ class Orchestrator:
             # background tick iterates them, so a stale entry is a
             # forever-retrying compaction on a transcript that is gone.
             self._forget_consolidation_state(sid)
+            # And the activity stamp eviction itself ranks by, or the
+            # next pass would rank a session that no longer exists.
+            self._forget_session_activity(sid)
             # The image side table holds whole base64 payloads; evicting
             # the transcript without it would leak megabytes per session.
             self._forget_tool_images(sid)
@@ -4425,6 +4489,7 @@ class Orchestrator:
         self._session_locks.pop(session_id, None)
         self._session_surfaces.pop(session_id, None)
         self._forget_consolidation_state(session_id)
+        self._forget_session_activity(session_id)
         self._forget_tool_images(session_id)
         self.tool_runner.clear_session(session_id)
 
@@ -5322,6 +5387,10 @@ class Orchestrator:
         """
         async with self._get_session_lock(session_id):
             history = self.conversation_history.setdefault(session_id, [])
+            # B7: a live-voice session never runs ``_finalize_turn``, so
+            # without a stamp here it looks permanently idle to the
+            # eviction cap while the operator is speaking to it.
+            self._touch_session(session_id)
             if (
                 history
                 and history[-1].get("role") == role

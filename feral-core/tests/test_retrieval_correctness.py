@@ -510,3 +510,195 @@ async def test_compaction_reports_key_entities(tmp_path):
     lowered = {n.lower() for n in names}
     assert "alice" in lowered, f"extracted entities missing from {names}"
     assert "user" in lowered, f"relation subject missing from {names}"
+
+
+# ── C8: the same REPLACE orphan on notes + knowledge ────────────────
+#
+# C6 was fixed for ``episodes`` only. ``notes`` and ``knowledge`` already
+# had their AFTER UPDATE triggers (``notes_fts_update`` /
+# ``knowledge_fts_update``), but ``memory/sync.py`` still wrote them with
+# ``INSERT OR REPLACE``, and REPLACE fires neither the delete trigger
+# (recursive_triggers is off) nor the update trigger, so the orphan
+# accrued on exactly the same mechanism.
+
+
+async def _replay_note(engine, i: int, content: str) -> None:
+    from memory.sync import SyncOperation
+
+    op = SyncOperation(
+        op_id=f"n{i}", table="notes", op_type="insert", row_id="note-1",
+        data={
+            "id": "note-1", "content": content, "tags": "[]",
+            "importance": "normal", "source": "sync",
+            "created_at": time.time(),
+        },
+        hlc=f"{1000 + i}:0:node-b", origin_node="node-b",
+    )
+    assert await engine._apply_to_memory(op), f"sync op {i} was rejected"
+
+
+async def _replay_knowledge(engine, i: int, obj: str) -> None:
+    from memory.sync import SyncOperation
+
+    op = SyncOperation(
+        op_id=f"k{i}", table="knowledge", op_type="insert", row_id="kn-1",
+        data={
+            "id": "kn-1", "subject": "alice", "predicate": "lives_in",
+            "object": obj, "confidence": 1.0, "source": "sync",
+            "created_at": time.time(),
+        },
+        hlc=f"{1000 + i}:0:node-b", origin_node="node-b",
+    )
+    assert await engine._apply_to_memory(op), f"sync op {i} was rejected"
+
+
+async def test_replace_note_leaves_no_orphan_fts_rows(tmp_path):
+    """Three sync re-deliveries of one note id must leave one note row
+    and exactly one notes_fts row holding the CURRENT text."""
+    from memory.sync import SyncEngine
+
+    db_path = tmp_path / "memory.db"
+    store = MemoryStore(db_path=str(db_path))
+    engine = SyncEngine(node_id="node-a", memory_store=store, db_path=str(db_path))
+
+    for i in range(3):
+        await _replay_note(engine, i, f"revision {i} of the superseded secret text")
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+        fts_rows = conn.execute("SELECT COUNT(*) FROM notes_fts").fetchone()[0]
+        orphans = conn.execute(
+            "SELECT COUNT(*) FROM notes_fts f "
+            "WHERE NOT EXISTS (SELECT 1 FROM notes n WHERE n.rowid = f.rowid)"
+        ).fetchone()[0]
+        stale = conn.execute(
+            "SELECT COUNT(*) FROM notes_fts WHERE content LIKE '%revision 0%'"
+        ).fetchone()[0]
+        current = conn.execute(
+            "SELECT COUNT(*) FROM notes_fts WHERE content LIKE '%revision 2%'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert rows == 1, f"expected 1 note row, got {rows}"
+    assert orphans == 0, f"{orphans} orphaned notes_fts rows after 3 replaces"
+    assert fts_rows == 1, f"expected 1 fts row, got {fts_rows}"
+    assert stale == 0, "superseded note text is still in the FTS index"
+    assert current == 1, "the surviving note is not in the FTS index"
+
+
+async def test_replace_knowledge_leaves_no_orphan_fts_rows(tmp_path):
+    """Same defect, knowledge tier."""
+    from memory.sync import SyncEngine
+
+    db_path = tmp_path / "memory.db"
+    store = MemoryStore(db_path=str(db_path))
+    engine = SyncEngine(node_id="node-a", memory_store=store, db_path=str(db_path))
+
+    for i, obj in enumerate(["berlin", "hamburg", "munich"]):
+        await _replay_knowledge(engine, i, obj)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+        fts_rows = conn.execute("SELECT COUNT(*) FROM knowledge_fts").fetchone()[0]
+        orphans = conn.execute(
+            "SELECT COUNT(*) FROM knowledge_fts f "
+            "WHERE NOT EXISTS (SELECT 1 FROM knowledge k WHERE k.rowid = f.rowid)"
+        ).fetchone()[0]
+        stale = conn.execute(
+            "SELECT COUNT(*) FROM knowledge_fts WHERE object = 'berlin'"
+        ).fetchone()[0]
+        current = conn.execute(
+            "SELECT COUNT(*) FROM knowledge_fts WHERE object = 'munich'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert rows == 1, f"expected 1 knowledge row, got {rows}"
+    assert orphans == 0, f"{orphans} orphaned knowledge_fts rows after 3 replaces"
+    assert fts_rows == 1, f"expected 1 fts row, got {fts_rows}"
+    assert stale == 0, "superseded knowledge text is still in the FTS index"
+    assert current == 1, "the surviving fact is not in the FTS index"
+
+
+async def test_replaced_note_and_fact_are_still_searchable(tmp_path):
+    """The other half: a fix that just drops the FTS row would pass the
+    orphan assertion and silently halve recall on both tiers."""
+    from memory.sync import SyncEngine
+
+    db_path = tmp_path / "memory.db"
+    store = MemoryStore(db_path=str(db_path))
+    engine = SyncEngine(node_id="node-a", memory_store=store, db_path=str(db_path))
+
+    await _replay_note(engine, 0, "kayak trip to the fjord")
+    await _replay_note(engine, 1, "sailing trip to the fjord")
+    await _replay_knowledge(engine, 0, "berlin")
+    await _replay_knowledge(engine, 1, "munich")
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        note_hits = [
+            r[0] for r in conn.execute(
+                "SELECT n.content FROM notes_fts f JOIN notes n ON n.rowid = f.rowid "
+                "WHERE notes_fts MATCH 'sailing'"
+            )
+        ]
+        stale_note = conn.execute(
+            "SELECT COUNT(*) FROM notes_fts f JOIN notes n ON n.rowid = f.rowid "
+            "WHERE notes_fts MATCH 'kayak'"
+        ).fetchone()[0]
+        fact_hits = [
+            r[0] for r in conn.execute(
+                "SELECT k.object FROM knowledge_fts f "
+                "JOIN knowledge k ON k.rowid = f.rowid "
+                "WHERE knowledge_fts MATCH 'munich'"
+            )
+        ]
+    finally:
+        conn.close()
+
+    assert note_hits == ["sailing trip to the fjord"], note_hits
+    assert stale_note == 0, "superseded note text is still retrievable"
+    assert fact_hits == ["munich"], fact_hits
+
+
+async def test_existing_note_and_knowledge_orphans_are_swept_on_open(tmp_path):
+    """The write-path fix only stops NEW orphans. Stores that already ran
+    the old sync path carry text that was supposed to be gone."""
+    db_path = tmp_path / "memory.db"
+    MemoryStore(db_path=str(db_path))
+    conn = sqlite3.connect(str(db_path))
+    try:
+        now = time.time()
+        conn.execute(
+            "INSERT INTO notes (id, content, tags, created_at, updated_at) "
+            "VALUES ('n1','live note','[]',?,?)", (now, now),
+        )
+        conn.execute(
+            "INSERT INTO knowledge (id, subject, predicate, object, created_at, updated_at) "
+            "VALUES ('k1','alice','lives_in','live fact',?,?)", (now, now),
+        )
+        conn.execute(
+            "INSERT INTO notes_fts(rowid, content, tags) "
+            "VALUES (9001, 'purged secret note', '[]')"
+        )
+        conn.execute(
+            "INSERT INTO knowledge_fts(rowid, subject, predicate, object) "
+            "VALUES (9002, 'alice', 'lives_in', 'purged secret fact')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    MemoryStore(db_path=str(db_path))  # reopen == boot
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        notes_left = [r[0] for r in conn.execute("SELECT content FROM notes_fts")]
+        facts_left = [r[0] for r in conn.execute("SELECT object FROM knowledge_fts")]
+    finally:
+        conn.close()
+    assert notes_left == ["live note"], notes_left
+    assert facts_left == ["live fact"], facts_left

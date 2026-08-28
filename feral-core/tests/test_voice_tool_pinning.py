@@ -183,6 +183,9 @@ async def test_note_voice_user_turn_returns_forced_routine_tool():
     # note_voice_user_turn now appends under the per-session lock.
     orch._session_locks = {}
     orch._conversation_max_per_session = 200
+    # B7: _append_voice_row stamps the session as active so the eviction
+    # cap can sort by staleness rather than transcript length.
+    orch._session_last_active = {}
 
     tools = [_tool("feral_routines__create"), _tool("feral_reminders__create")]
     out = await orch.note_voice_user_turn(

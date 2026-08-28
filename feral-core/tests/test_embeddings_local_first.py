@@ -431,3 +431,61 @@ class TestDimensionMismatch:
         # Refusing means no writes and no results, not wrong results.
         second.upsert("c1", np.ones(LOCAL_DIM, dtype=np.float32))
         assert second.search(np.ones(LOCAL_DIM, dtype=np.float32)) == []
+
+
+class TestExtensionAvailabilityIsNotConnectionScoped:
+    """``_SQLITE_VEC_AVAILABLE`` answers "can this interpreter load the
+    sqlite-vec extension". It used to be demoted to False by a failure on
+    ONE connection, and the demotion is permanent for the process.
+
+    The failure that reaches it in practice is not an unloadable
+    extension at all. ``sqlite3`` raises
+    ``ProgrammingError: SQLite objects created in a thread can only be
+    used in that same thread`` when a connection crosses threads, and
+    FERAL is a threaded FastAPI app whose memory store owns a background
+    embed-queue thread and dispatches through ``asyncio.to_thread``. One
+    such touch turned vector search off process-wide for the rest of the
+    brain's life, with only a debug-level trace, on an interpreter where
+    the extension loads perfectly.
+    """
+
+    @pytest.mark.skipif(
+        not sqlite_vec_available(),
+        reason="sqlite-vec not installed; nothing to demote",
+    )
+    def test_a_cross_thread_connection_does_not_disable_the_extension(self, tmp_path):
+        import sqlite3
+        import threading
+
+        import memory.embeddings as embeddings_module
+
+        assert sqlite_vec_available() is True, "premise: it loads here"
+
+        # A connection created here, used from another thread: exactly the
+        # ProgrammingError the broad handler used to read as "unavailable".
+        conn = sqlite3.connect(str(tmp_path / "crossthread.db"))
+        errors: list[BaseException] = []
+
+        def _touch():
+            try:
+                embeddings_module._try_load_sqlite_vec(conn)
+            except BaseException as exc:  # noqa: BLE001 - recorded, then asserted
+                errors.append(exc)
+
+        thread = threading.Thread(target=_touch)
+        thread.start()
+        thread.join()
+        conn.close()
+        assert not errors, errors
+
+        assert sqlite_vec_available() is True, (
+            "one cross-thread connection permanently disabled sqlite-vec for "
+            "the whole process"
+        )
+        # And a fresh index still gets a real vec0 table.
+        index = VectorIndex(
+            str(tmp_path / "after.db"), dimension=LOCAL_DIM, table_name="vec_after"
+        )
+        assert index.indexed is True, (
+            "vector search stayed off after an unrelated connection failed"
+        )

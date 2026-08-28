@@ -820,6 +820,9 @@ async def knowledge_visualize(entity: str = "", depth: int = 2, limit: int = 50)
 
 @router.get("/internal/episodes/recent")
 async def episodes_recent(limit: int = 10, session_id: str = ""):
+    """Newest episodes by ``created_at``. Safe to poll on a timer: this
+    read does not bump ``access_count``, so it cannot make the newest N
+    episodes decay-resistant. See ``MemoryStore.episode_recent``."""
     return await state.memory.episode_recent(limit=limit, session_id=session_id or None)
 
 

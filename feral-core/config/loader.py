@@ -366,6 +366,22 @@ DEFAULT_SETTINGS = {
             # ``forget_threshold`` as forgotten. ``retention_days``
             # is the grace period before a forgotten episode (plus
             # its chunks + FTS rows) is hard-deleted from disk.
+            #
+            # ``retention_days`` is NOT how long a memory stays
+            # findable, and reading it that way is the mistake these
+            # defaults invite. Visibility ends when the decay curve
+            # crosses ``forget_threshold``, which at the values below
+            # is 73.6 days for a default-importance (0.5) episode and
+            # 83.2 days at importance 1.0. ``retention_days`` starts
+            # counting from ``forgotten_at``, i.e. AFTER that. So the
+            # shipped lifetime is roughly 74 days visible, then 365
+            # days recoverable via ``feral memory forgotten`` and
+            # ``POST /api/memory/recall/{id}``, then gone.
+            # ``memory.decay.forget_horizon_days`` computes the first
+            # number for any settings; the decay service logs it at
+            # start and reports it from ``stats()`` as
+            # ``forget_horizon_days``. Halving ``decay_rate`` roughly
+            # doubles the horizon.
             "enabled": True,
             "cadence_seconds": 3600,
             "decay_rate": 0.001,
@@ -678,6 +694,39 @@ def load_settings() -> dict:
     except Exception:
         logger.debug("load_settings fallback to defaults", exc_info=True)
         return copy.deepcopy(DEFAULT_SETTINGS)
+
+
+def _merge_patch(target: dict, patch: dict) -> dict:
+    """Apply ``patch`` to ``target`` under RFC 7386 JSON Merge Patch rules.
+
+    B8 helper for :meth:`ConfigLoader.save_user_settings`; see that
+    docstring for why the whole-file replacement it supersedes was
+    destroying settings.
+
+    Rules, restated because the choice is load-bearing:
+
+      * ``patch`` value is ``None``  -> delete the key from the result,
+      * both sides are objects       -> recurse,
+      * anything else                -> the patch value replaces.
+
+    An absent key is therefore "leave alone" and an explicit value is
+    "make it this", which is what lets the setup wizard both preserve
+    what it does not render and still clear what it does. Arrays fall
+    into "anything else" on purpose: a settings list is a single value.
+
+    Neither argument is mutated; the result is a new dict.
+    """
+    out = dict(target)
+    for key, value in (patch or {}).items():
+        if value is None:
+            out.pop(key, None)
+            continue
+        current = out.get(key)
+        if isinstance(value, dict) and isinstance(current, dict):
+            out[key] = _merge_patch(current, value)
+        else:
+            out[key] = value
+    return out
 
 
 class ConfigLoader:
@@ -1187,11 +1236,76 @@ class ConfigLoader:
     # ─── Write API ───
 
     def save_user_settings(self, settings: dict):
-        """Write settings to the user config file."""
+        """Merge ``settings`` into the user config file and persist it.
+
+        B8. This used to be ``open(path, "w")`` + ``json.dump(settings)``
+        with no read and no merge, so whatever the caller handed over
+        became the WHOLE of settings.json. Its only non-``update_settings``
+        caller is ``POST /api/setup/complete``, which hands over the
+        browser wizard's form payload, so re-running the wizard deleted
+        every key the wizard does not render. Those keys are not
+        incidental; they are written by six other subsystems that all go
+        through ``update_settings`` (read, patch one key, write back) and
+        are therefore invisible to the form:
+
+          meta.brain_id                    config/loader.py
+          meta.relay_id                    security/brain_identity.py
+          channels.*_allowed_senders       api/state.py _persist_pairing
+          channels.*_allowed_chats         api/state.py _persist_pairing
+          access.tailscale                 api/routes/access.py
+          llm.fallback_providers           api/routes/llm.py
+          memory.backend                   api/routes/memory.py
+
+        The sharpest of those is the pairing allowlist: an operator who
+        re-opened setup to change a model revoked every sender allowed to
+        message the brain, silently.
+
+        SEMANTICS: RFC 7386 JSON Merge Patch, via :func:`_merge_patch`.
+
+          * a key ABSENT from ``settings`` is left exactly as it was,
+          * a key PRESENT with a non-null value replaces what was there,
+            so ``""``, ``false``, ``0`` and ``[]`` all still clear a value,
+          * a key present with ``null`` is DELETED,
+          * objects merge recursively, arrays replace wholesale.
+
+        A blind merge would be its own defect: the wizard must remain able
+        to turn something off. Under these rules it does so by SAYING so,
+        and only silence means "leave alone". Arrays replace rather than
+        accumulate because a list here is one value (an allowlist that
+        merged element-wise could never be shortened, and would grow a
+        duplicate on every write).
+
+        Note the asymmetry with ``update_settings``, which reads the file
+        itself and passes a full document down: merging that document
+        against itself is a no-op, so its read-modify-write contract is
+        unchanged.
+        """
         self.user_home.mkdir(parents=True, exist_ok=True)
         path = self.user_home / "settings.json"
+
+        existing: dict = {}
+        if path.exists():
+            try:
+                with open(path) as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    existing = loaded
+                else:
+                    logger.warning(
+                        "settings.json at %s is not an object; replacing it", path,
+                    )
+            except (OSError, ValueError) as exc:
+                # Unparseable: there is nothing to preserve, and refusing
+                # to write would strand the caller (the setup route) with
+                # a 500 on a file it cannot repair from the browser.
+                logger.warning(
+                    "settings.json at %s is unreadable (%s); writing the new "
+                    "values over it", path, exc,
+                )
+
+        merged = _merge_patch(existing, settings if isinstance(settings, dict) else {})
         with open(path, "w") as f:
-            json.dump(settings, f, indent=2)
+            json.dump(merged, f, indent=2)
         logger.info(f"User settings saved to {path}")
 
     def save_credentials(self, credentials: dict):

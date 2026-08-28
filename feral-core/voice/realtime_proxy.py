@@ -36,6 +36,7 @@ from agents.tool_list import (
     truncation_notice,
 )
 from skills.call_context import bind_context
+from skills.result_budget import serialize_for_storage
 from voice.transcript_filter import should_commit_user_transcript
 from voice.transcript_order import TRANSCRIPT_ORDER
 
@@ -1682,23 +1683,26 @@ class RealtimeProxy:
         # Compact JSON detail — keeps the rows small but preserves the
         # args + observed/expected fields that the LLM uses to narrate
         # recall ("yesterday at 10:32 you asked the cutebot to drive").
+        #
+        # B4: this was ``json.dumps(...)[:2000]``. A byte slice of a
+        # serialized document does not shorten the record, it destroys
+        # it: the cut lands mid-token and the whole detail then fails
+        # ``json.loads``. ``serialize_for_storage`` shrinks the structure
+        # so the stored value always parses.
         try:
-            detail = json.dumps(
-                {
-                    "category": event_type,
-                    "tool_name": name,
-                    "skill_id": skill_id,
-                    "endpoint": endpoint_id,
-                    "params": dict(args or {}),
-                    "success": success,
-                    "verified": verified,
-                    "observed": data.get("observed") if isinstance(data, dict) else None,
-                    "expected": data.get("expected") if isinstance(data, dict) else None,
-                    "source": "voice_realtime",
-                    "ts": time.time(),
-                },
-                default=str,
-            )[:2000]
+            detail = serialize_for_storage({
+                "category": event_type,
+                "tool_name": name,
+                "skill_id": skill_id,
+                "endpoint": endpoint_id,
+                "params": dict(args or {}),
+                "success": success,
+                "verified": verified,
+                "observed": data.get("observed") if isinstance(data, dict) else None,
+                "expected": data.get("expected") if isinstance(data, dict) else None,
+                "source": "voice_realtime",
+                "ts": time.time(),
+            })
         except Exception:
             detail = ""
 

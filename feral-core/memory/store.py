@@ -44,6 +44,12 @@ from uuid import uuid4
 
 import aiosqlite
 
+# B4: the one place in the repo that knows how to bound a serialized
+# payload without breaking it. ``skills.result_budget`` imports only the
+# stdlib at module scope (config/agents are reached lazily), so this is
+# not a cycle.
+from skills.result_budget import serialize_for_storage
+
 # aiosqlite spawns one non-daemon worker Thread per Connection. A
 # pooled MemoryStore holds N connections — if any caller forgets to
 # call aclose() (tests, signal-driven shutdowns, exceptions on the
@@ -389,6 +395,53 @@ def _stable_knowledge_id(subject: str, predicate: str) -> str:
     digest = hashlib.sha256(f"{subject}\0{predicate}".encode("utf-8")).hexdigest()
     return digest[:12]
 
+
+def _sweep_fts_orphans(conn, base_table: str, fts_table: str) -> int:
+    """Delete external-content FTS rows whose base row is gone.
+
+    Every ``*_fts`` table in this store is keyed by the base table's
+    ``rowid`` and kept in step by AFTER INSERT / UPDATE / DELETE
+    triggers. ``INSERT OR REPLACE`` defeats all three: REPLACE is a
+    DELETE plus an INSERT, SQLite does not fire the delete trigger for a
+    REPLACE-induced delete unless ``recursive_triggers`` is on (off by
+    default), and it is not an UPDATE so the update trigger does not run
+    either. The row lands at a fresh rowid, the insert trigger adds a
+    second FTS row, and the superseded text stays indexed forever.
+
+    ``memory/sync.py`` did that to ``episodes``, ``notes`` and
+    ``knowledge``. All three now upsert, which stops NEW orphans, but a
+    store that ran the old code is already carrying text that was meant
+    to be gone, so boot sweeps it once. Costs one anti-join per table
+    (single-digit ms on a 12k-row index) and is a no-op on a clean
+    store.
+
+    Returns the number of rows purged. Never raises: the orphans are
+    invisible to reads (every search inner-joins the FTS table to its
+    base table on rowid), so a store that cannot be swept is still
+    correct, just untidy, and failing boot over tidiness is worse.
+    """
+    try:
+        orphaned = conn.execute(
+            f"SELECT COUNT(*) FROM {fts_table} f WHERE NOT EXISTS "
+            f"(SELECT 1 FROM {base_table} b WHERE b.rowid = f.rowid)"
+        ).fetchone()[0]
+        if not orphaned:
+            return 0
+        conn.execute(
+            f"DELETE FROM {fts_table} WHERE rowid IN ("
+            f"  SELECT f.rowid FROM {fts_table} f WHERE NOT EXISTS "
+            f"  (SELECT 1 FROM {base_table} b WHERE b.rowid = f.rowid))"
+        )
+        logger.info(
+            "Purged %d orphaned %s row(s) left behind by INSERT OR REPLACE "
+            "on %s", orphaned, fts_table, base_table,
+        )
+        return int(orphaned)
+    except sqlite3.DatabaseError as exc:
+        logger.warning("%s orphan sweep skipped: %s", fts_table, exc)
+        return 0
+
+
 # ── Hybrid ranking (rewritten v2026.7.x) ────────────────────────────
 #
 # The previous blend was ``0.3 * fts_score + 0.7 * vec_score`` scaled by
@@ -401,7 +454,7 @@ def _stable_knowledge_id(subject: str, predicate: str) -> str:
 #      Measured on a 28-row corpus, the weakest match scored 3.5x the
 #      best one and came back first.
 #   2. ``decay_factor`` was placed in the *exponent*. It is retention
-#      strength in (0, 1] where 1.0 is pristine, so a nearly-forgotten
+#      strength in (0, 1] where higher is fresher, so a nearly-forgotten
 #      memory got a smaller decay rate and therefore ranked *higher*,
 #      by 423x at 30 days.
 #   3. The rate itself was 0.01/hour, a 69-hour half-life, which let a
@@ -1060,6 +1113,11 @@ class MemoryStore:
                     INSERT INTO notes_fts(rowid, content, tags) VALUES (new.rowid, new.content, new.tags);
                 END
             """)
+            # Having the AFTER UPDATE trigger was never enough on its own:
+            # ``memory/sync.py`` wrote notes with INSERT OR REPLACE, which
+            # fires neither the update nor the delete trigger. See
+            # :func:`_sweep_fts_orphans`.
+            _sweep_fts_orphans(conn, "notes", "notes_fts")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS episodes (
@@ -1118,29 +1176,8 @@ class MemoryStore:
             # The trigger stops NEW orphans. Stores opened before it existed
             # are already carrying old ones, and what they are carrying is
             # text that was meant to be gone, so sweep them once at boot.
-            # Costs one anti-join over episodes_fts (single-digit ms on a
-            # 12k-row index) and is a no-op on a clean store.
-            try:
-                orphaned = conn.execute(
-                    "SELECT COUNT(*) FROM episodes_fts f WHERE NOT EXISTS "
-                    "(SELECT 1 FROM episodes e WHERE e.rowid = f.rowid)"
-                ).fetchone()[0]
-                if orphaned:
-                    conn.execute(
-                        "DELETE FROM episodes_fts WHERE rowid IN ("
-                        "  SELECT f.rowid FROM episodes_fts f WHERE NOT EXISTS "
-                        "  (SELECT 1 FROM episodes e WHERE e.rowid = f.rowid))"
-                    )
-                    logger.info(
-                        "Purged %d orphaned episodes_fts row(s) left by "
-                        "INSERT OR REPLACE before episodes_fts_update existed",
-                        orphaned,
-                    )
-            except sqlite3.DatabaseError as exc:
-                # Never fail boot over a cleanup: the orphans are invisible to
-                # reads (the search query inner-joins on rowid), so a store
-                # that cannot be swept is still correct, just untidy.
-                logger.warning("episodes_fts orphan sweep skipped: %s", exc)
+            # See :func:`_sweep_fts_orphans`.
+            _sweep_fts_orphans(conn, "episodes", "episodes_fts")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_time ON episodes(created_at DESC)")
 
@@ -1177,6 +1214,7 @@ class MemoryStore:
                     INSERT INTO knowledge_fts(rowid, subject, predicate, object) VALUES (new.rowid, new.subject, new.predicate, new.object);
                 END
             """)
+            _sweep_fts_orphans(conn, "knowledge", "knowledge_fts")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_subject ON knowledge(subject)")
 
             conn.execute("""
@@ -2398,7 +2436,7 @@ class MemoryStore:
         The index picks the candidates; it never decides whether they are
         good enough to return. Its ranking is usable, but its score is not a
         cosine: ``vec_chunks`` is created without ``distance_metric=cosine``,
-        so vec0 answers with an L2 distance and ``search_cosine`` reports
+        so vec0 answers with an L2 distance and ``search_similarity`` reports
         ``1 - L2``. On unit vectors that is monotone in cosine, so ORDER is
         right and MAGNITUDE is not (a true cosine of 0.84 arrives as 0.44),
         which is why every score used for a threshold here is recomputed
@@ -2550,7 +2588,7 @@ class MemoryStore:
                 query_vec = await self._embedder.embed(query)
 
                 if self._vec_index.indexed:
-                    hits = await self._vec_index.search_cosine(query_vec, limit=limit * 3)
+                    hits = await self._vec_index.search_similarity(query_vec, limit=limit * 3)
                     # Rank order from the index is usable, but its raw cosines
                     # cannot be thresholded (see _relevance_floor). Re-score
                     # the returned handful against the corpus centre.
@@ -2666,10 +2704,18 @@ class MemoryStore:
 
             # Recency prior: bounded, additive, and multiplied by
             # retention rather than divided into the rate. ``decay_factor``
-            # is retention strength in (0, 1], where 1.0 is a pristine
-            # memory and 0.05 is about to be forgotten, so it belongs on
-            # the score, where a faded memory scores lower. Putting it in
-            # the exponent (the old code) inverted that completely.
+            # is retention strength in (0, 1], where higher is fresher and
+            # 0.05 is about to be forgotten, so it belongs on the score,
+            # where a faded memory scores lower. Putting it in the exponent
+            # (the old code) inverted that completely.
+            #
+            # It is NOT "1.0 means pristine" in practice: the sweep writes
+            # ``base * idle * sqrt(importance) * (1 + boost)``, so a
+            # brand-new default-importance episode settles at 0.7071 and
+            # only ``importance = 1.0`` can reach 1.0 (see
+            # ``memory.decay.compute_decay``). That is why this prior is
+            # bounded by RECENCY_PRIOR_WEIGHT and never thresholded: the
+            # absolute value is not comparable across importances.
             hours_since = max(0.0, (now - info.get("created_at", now)) / 3600.0)
             retention = info.get("decay_factor", 1.0)
             recency = retention * math.exp(-DEFAULT_DECAY_RATE * hours_since)
@@ -2757,9 +2803,34 @@ class MemoryStore:
         *,
         include_forgotten: bool = False,
     ) -> list[dict]:
-        """Recent episodes by ``created_at`` (newest first). Honours
-        the same ``forgotten_at`` filter + access tracking as the
-        other episode read paths."""
+        """Recent episodes by ``created_at`` (newest first). Honours the
+        same ``forgotten_at`` filter as the other episode read paths.
+
+        Deliberately does NOT access-track, unlike ``episode_search`` and
+        ``episode_search_hybrid``. ``access_count`` is the rehearsal term
+        in ``memory.decay.compute_decay``, and rehearsal is meant to mean
+        "this memory was retrieved because it was relevant". Rows here
+        are selected by ``created_at`` alone: no query, no scoring, no
+        human judgement about any individual row. Counting that as a
+        rehearsal made decay a function of polling cadence rather than of
+        use, and every caller of this method is a machine on a loop:
+        ``memory/context_builder.py`` runs one per chat turn,
+        ``memory/agent_activity.py`` and ``memory/retriever.py`` run one
+        per timeline build, ``identity/workspace.py`` runs one per
+        workspace render, and ``GET /internal/episodes/recent`` runs one
+        per dashboard poll. Measured before this change: 50 polls of the
+        recency endpoint lifted a 40-day-old episode's ``decay_factor``
+        from 0.168 to 0.377, so a UI on a timer made the newest N
+        episodes effectively immune to forgetting.
+
+        A second, distinctly-weighted counter was the alternative and it
+        is not worth a column: the correct weight for "was in the newest
+        10 when something refreshed" is zero. Recency is already
+        privileged twice over, by the age terms in the decay formula
+        itself and by ``RECENCY_PRIOR_WEIGHT`` at search time. The access
+        boost exists to rescue OLD memories that are still being used,
+        which is exactly what this read path cannot evidence.
+        """
         filter_clause = "" if include_forgotten else " AND forgotten_at IS NULL"
         conn = await self._conn()
         try:
@@ -2780,9 +2851,7 @@ class MemoryStore:
                     rows = await cur.fetchall()
         finally:
             await self._release(conn)
-        out = [self._episode_row_to_dict(r) for r in rows]
-        self._track_access([r["id"] for r in out])
-        return out
+        return [self._episode_row_to_dict(r) for r in rows]
 
     # ── D11 access tracking ─────────────────────────────────────────────
 
@@ -2791,8 +2860,11 @@ class MemoryStore:
         caller.
 
         Bumping ``last_accessed_at`` + ``access_count`` is the input to
-        the decay sweep's ``access_boost`` term — rehearsed items
-        decay slower. Doing the UPDATE inline would add a transaction
+        the decay sweep's ``access_boost`` term, so rehearsed items
+        decay slower. Call it ONLY from a relevance-driven read
+        (``episode_search``, ``episode_search_hybrid``). See
+        :meth:`episode_recent` for why a recency-ordered read must not.
+        Doing the UPDATE inline would add a transaction
         round-trip to every search; instead we kick a background
         task per call. The task references are kept on
         ``self._access_tasks`` so the GC doesn't tear them down
@@ -3534,6 +3606,21 @@ class MemoryStore:
         self, session_id: str, skill_id: str, endpoint_id: str, args: dict,
         result_status: str, result_summary: str = "", latency_ms: float = 0,
     ) -> str:
+        """Write one ``execution_log`` row.
+
+        B4: ``args`` used to be persisted as ``json.dumps(args)[:2000]``.
+        A byte slice of a serialized document does not shorten it, it
+        breaks it: the cut lands mid-token and ``json.loads`` refuses the
+        whole value with "Unterminated string". Since nothing else
+        persists a tool call's arguments (see
+        ``memory/execution_audit``) and ``memory/retriever`` reads these
+        rows back into recall, every oversized call was being recorded as
+        an unreadable row rather than a clipped one.
+        ``serialize_for_storage`` shrinks the structure instead, so the
+        column always parses. It also carries ``default=str``, which the
+        raw ``json.dumps`` lacked: a non-serialisable value in the args
+        used to raise ``TypeError`` straight out of the audit write.
+        """
         eid = str(uuid4())[:12]
         now = time.time()
         conn = await self._conn()
@@ -3542,7 +3629,7 @@ class MemoryStore:
                 """INSERT INTO execution_log
                    (id, session_id, skill_id, endpoint_id, args, result_status, result_summary, latency_ms, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (eid, session_id, skill_id, endpoint_id, json.dumps(args)[:2000],
+                (eid, session_id, skill_id, endpoint_id, serialize_for_storage(args),
                  result_status, result_summary[:500], latency_ms, now),
             )
             await conn.commit()

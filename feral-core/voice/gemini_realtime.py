@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from agents.tool_display import tool_feedback_text
 from skills.call_context import bind_context
+from skills.result_budget import serialize_for_storage
 from voice.transcript_filter import should_commit_user_transcript
 
 logger = logging.getLogger("feral.voice.gemini")
@@ -822,23 +823,24 @@ class GeminiRealtimeProxy:
         )
         summary = f"{skill_id}: {endpoint_id} {verdict}"
 
+        # B4: see the twin block in ``voice/realtime_proxy.py``. A byte
+        # slice of serialized JSON leaves a row that ``json.loads``
+        # rejects outright, so the whole detail is lost rather than its
+        # tail. Shrink the structure instead.
         try:
-            detail = json.dumps(
-                {
-                    "category": event_type,
-                    "tool_name": name,
-                    "skill_id": skill_id,
-                    "endpoint": endpoint_id,
-                    "params": dict(args or {}),
-                    "success": success,
-                    "verified": verified,
-                    "observed": data.get("observed") if isinstance(data, dict) else None,
-                    "expected": data.get("expected") if isinstance(data, dict) else None,
-                    "source": "voice_realtime_gemini",
-                    "ts": time.time(),
-                },
-                default=str,
-            )[:2000]
+            detail = serialize_for_storage({
+                "category": event_type,
+                "tool_name": name,
+                "skill_id": skill_id,
+                "endpoint": endpoint_id,
+                "params": dict(args or {}),
+                "success": success,
+                "verified": verified,
+                "observed": data.get("observed") if isinstance(data, dict) else None,
+                "expected": data.get("expected") if isinstance(data, dict) else None,
+                "source": "voice_realtime_gemini",
+                "ts": time.time(),
+            })
         except Exception:
             detail = ""
 

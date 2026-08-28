@@ -77,7 +77,7 @@ class _FakeBackend:
     async def search(self, query_vec: np.ndarray, limit: int = 20):
         return [(cid, 0.0) for cid, _ in self.upserts[:limit]]
 
-    async def search_cosine(self, query_vec: np.ndarray, limit: int = 20):
+    async def search_similarity(self, query_vec: np.ndarray, limit: int = 20):
         return [(cid, 1.0) for cid, _ in self.upserts[:limit]]
 
     def close(self) -> None:
@@ -266,7 +266,7 @@ def test_brain_state_helper_never_bricks_boot_on_bad_backend(monkeypatch):
 @pytest.mark.asyncio
 async def test_sqlite_vec_adapter_add_search_roundtrip(tmp_path):
     # Async, for the same reason as the chroma and qdrant adapters below:
-    # upsert / count / search_cosine / delete / close have all been
+    # upsert / count / search_similarity / delete / close have all been
     # coroutine functions since the async-native MemoryStore refactor
     # (328c9a70b, v2026.5.33) and this test called them synchronously.
     # `idx.count` was a bound method, so `== 2` could never be true.
@@ -289,7 +289,7 @@ async def test_sqlite_vec_adapter_add_search_roundtrip(tmp_path):
     await idx.upsert("a", v1)
     await idx.upsert("b", v2)
     assert await idx.count() == 2
-    hits = await idx.search_cosine(v1, limit=2)
+    hits = await idx.search_similarity(v1, limit=2)
     assert hits, "search returned no hits"
     assert hits[0][0] == "a"
     await idx.delete("a")
@@ -300,7 +300,7 @@ async def test_sqlite_vec_adapter_add_search_roundtrip(tmp_path):
 # Optional-dep backends: smoke test if installed
 # ─────────────────────────────────────────────
 
-# These two adapters expose an ASYNC interface (upsert / search_cosine /
+# These two adapters expose an ASYNC interface (upsert / search_similarity /
 # close are all coroutine functions). Both tests used to call them
 # synchronously and assert on the returned coroutine, which fails with
 # "'coroutine' object is not subscriptable". Nobody saw it because each
@@ -324,7 +324,7 @@ async def test_chroma_adapter_add_search_roundtrip(tmp_path):
     v2 = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
     await backend.upsert("a", v1)
     await backend.upsert("b", v2)
-    hits = await backend.search_cosine(v1, limit=2)
+    hits = await backend.search_similarity(v1, limit=2)
     assert hits and hits[0][0] == "a"
     await backend.close()
 
@@ -344,6 +344,6 @@ async def test_qdrant_adapter_add_search_roundtrip(tmp_path):
     v2 = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
     await backend.upsert("a", v1)
     await backend.upsert("b", v2)
-    hits = await backend.search_cosine(v1, limit=2)
+    hits = await backend.search_similarity(v1, limit=2)
     assert hits and hits[0][0] == "a"
     await backend.close()

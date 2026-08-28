@@ -3236,15 +3236,67 @@ class BrainState:
         if loaded:
             logger.info(f"Loaded credentials: {', '.join(loaded)}")
 
-    async def send_to_session(self, session_id: str, msg: FeralMessage):
+    async def send_to_session(self, session_id: str, msg: FeralMessage) -> bool:
+        """Deliver one frame to a session. Returns whether it landed.
+
+        This used to return ``None`` on every path, so a frame nobody
+        could receive was indistinguishable from one that arrived. Two
+        silent drops lived here:
+
+        * No websocket and no collector: the function simply returned.
+          A permission prompt registers its ``request_id`` before
+          sending, so the entry leaked for the life of the process while
+          the caller waited on an answer that could never come.
+        * A channel session forwarded only ``payload["text"]``, so any
+          frame without it was discarded. An SDUI confirmation card
+          carries no ``text``, which is precisely the frame a channel
+          user most needs to see.
+
+        Callers that must not proceed unacknowledged (consent prompts,
+        confirmations) can now branch on the result instead of assuming
+        success.
+        """
         ws = self.sessions.get(session_id)
         if ws:
             await ws.send_json(msg.model_dump())
-        elif session_id in self._channel_collectors:
+            return True
+
+        if session_id in self._channel_collectors:
             payload = msg.payload or {}
             text = payload.get("text", "")
+            if not text:
+                # Render something rather than dropping it. A channel
+                # cannot draw a card, but "you were asked X" beats
+                # silence, and the operator can still answer in words.
+                text = self._describe_undrawable_payload(msg)
             if text:
                 self._channel_collectors[session_id].append(text)
+                return True
+
+        logger.warning(
+            "undeliverable frame type=%s for session=%s: no live websocket and "
+            "no channel collector; the caller will not be told",
+            getattr(msg, "type", "?"), session_id,
+        )
+        return False
+
+    @staticmethod
+    def _describe_undrawable_payload(msg: FeralMessage) -> str:
+        """Plain-text stand-in for a frame a channel cannot render."""
+        payload = msg.payload or {}
+        mtype = getattr(msg, "type", "") or ""
+        if mtype == "permission_request":
+            reason = payload.get("reason") or ""
+            op = payload.get("operation") or "access"
+            path = payload.get("path") or ""
+            return (
+                f"Permission needed: {op} {path}. {reason} "
+                "Reply 'yes' to allow or 'no' to deny."
+            ).strip()
+        if mtype == "sdui":
+            title = payload.get("title") or payload.get("component") or "an interactive card"
+            return f"[{title}] This surface cannot draw it; reply in words."
+        return ""
 
     async def broadcast_event(self, event_type: str, data: dict):
         """Push a state update to all connected WebSocket clients."""
@@ -3395,7 +3447,18 @@ class BrainState:
         return self._daemon_session_bindings.get(node_id, set())
 
 
-state = BrainState()
+# The process-wide brain singleton.
+#
+# The annotation is load-bearing, not decoration. ``api.state`` sits in an
+# import cycle with the modules that consume it (voice proxies, routes,
+# integrations all do a function-level ``from api.state import state``, and
+# this module imports them back). Left to inference, mypy resolves this
+# binding while the cycle is still being processed and types it ``None``,
+# so every ``state.orchestrator`` / ``state.sessions`` in those modules is
+# reported as an attribute on ``None``. Which of them get reported shifts
+# with SCC processing order, so adding an unrelated import edge anywhere in
+# the graph moves the errors around. Naming the type pins it.
+state: BrainState = BrainState()
 
 
 def _log_activity(action: str, detail: str = ""):

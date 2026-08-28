@@ -445,8 +445,32 @@ def _try_load_sqlite_vec(conn: sqlite3.Connection) -> bool:
             import sqlite_vec
             sqlite_vec.load(conn)
             return True
-        except Exception:
-            _SQLITE_VEC_AVAILABLE = False
+        except Exception as exc:
+            # Report the failure for THIS connection and leave the cached
+            # answer alone. ``_SQLITE_VEC_AVAILABLE`` records whether this
+            # INTERPRETER can load the extension, which the probe below
+            # already established; one connection failing says nothing
+            # about that and the demotion it used to perform was
+            # permanent for the process.
+            #
+            # The error that actually arrives here is not an unloadable
+            # extension. It is
+            # ``sqlite3.ProgrammingError: SQLite objects created in a
+            # thread can only be used in that same thread``, and FERAL is
+            # a threaded FastAPI app whose memory store owns a background
+            # embed-queue thread and dispatches through
+            # ``asyncio.to_thread``. Measured: one cross-thread touch
+            # during a single HTTP request turned vector search off for
+            # the rest of the process on a host where the extension loads
+            # perfectly, leaving only a debug line behind. Warning, not
+            # debug, because a connection that cannot take the extension
+            # silently falls back to a full scan.
+            logger.warning(
+                "sqlite-vec could not be loaded onto this connection (%s). "
+                "Falling back to the numpy scan for this call only; the "
+                "extension itself is still available.",
+                exc,
+            )
             return False
 
     # Checked before the load attempt, because the failure it produces is
@@ -666,7 +690,11 @@ class VectorIndex:
     def search(self, query_vec: np.ndarray, limit: int = 20) -> list[tuple[str, float]]:
         """
         Search for nearest vectors. Returns [(chunk_id, distance), ...].
-        Uses vec_distance_cosine when sqlite-vec is available.
+
+        The distance is vec0's default L2, not a cosine distance: the
+        table is created without ``distance_metric=cosine``. The
+        docstring here used to claim ``vec_distance_cosine``, which is
+        where the belief that the scores were cosines came from.
         """
         if not self._use_vec:
             return []
@@ -687,10 +715,17 @@ class VectorIndex:
         finally:
             conn.close()
 
-    def search_cosine(self, query_vec: np.ndarray, limit: int = 20) -> list[tuple[str, float]]:
-        """
-        Search returning cosine similarity (1.0 = identical).
-        vec_distance_cosine returns distance (0 = identical), so we convert.
+    def search_similarity(self, query_vec: np.ndarray, limit: int = 20) -> list[tuple[str, float]]:
+        """Search returning ``1.0 - distance``, best first.
+
+        NOT a cosine, and the old name (``search_cosine``) plus the old
+        docstring's claim about ``vec_distance_cosine`` were both wrong:
+        the vec0 table this queries is created without
+        ``distance_metric``, so sqlite-vec answers with an L2 distance
+        and this returns ``1 - L2``. Monotone in the cosine on unit
+        vectors, so the ordering is correct; the magnitude is not a
+        cosine and must not be thresholded as one. See
+        ``memory/vector_index_backends/base.py``.
         """
         results = self.search(query_vec, limit)
         return [(cid, 1.0 - dist) for cid, dist in results]

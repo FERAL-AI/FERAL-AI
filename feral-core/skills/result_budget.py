@@ -721,6 +721,141 @@ def _annotate(
     }
 
 
+# ── persisted (not model-facing) serialization ───────────────────────
+#
+# B4. The same blind byte slice this module was written to replace also
+# lived on the PERSISTENCE side, where it is worse:
+#
+#   memory/store.py       execution_log.args = json.dumps(args)[:2000]
+#   voice/realtime_proxy.py       episode detail  = json.dumps({...})[:2000]
+#   voice/gemini_realtime.py      episode detail  = json.dumps({...})[:2000]
+#
+# Cutting a serialized document at char 2000 lands mid-token, so the row
+# does not hold "the first 2000 chars of the call", it holds a string
+# that ``json.loads`` refuses outright with "Unterminated string". The
+# reader gets nothing at all rather than a shortened record, and there is
+# no second copy: ``memory/execution_audit.py`` is explicit that nothing
+# else persists a tool call's arguments, and
+# ``memory/retriever._collect_execution_log`` feeds these rows straight
+# back into recall.
+#
+# The remedy is the one already proven above: shrink the STRUCTURE until
+# the serialized form fits, so every intermediate is a real Python object
+# and the output parses by construction.
+
+# Matches the historical 2000-char slice these three call sites used, so
+# the on-disk size profile of execution_log / episodes is unchanged.
+STORAGE_MAX_CHARS: int = 2_000
+
+# Deliberately NOT a member of the tier registry, and deliberately not
+# reached through ``get_budget``. Tiers are operator-overridable via
+# ``settings.skills.result_budgets`` and pinnable via
+# ``FERAL_RESULT_BUDGET_TIER``; both are legitimate for what the model
+# sees in one turn and wrong for what lands in a durable audit column,
+# where an ops-time env var must not silently change the record.
+STORAGE_BUDGET = ResultBudget(
+    name="storage",
+    max_depth=6,
+    max_str_len=STORAGE_MAX_CHARS,
+    max_list_len=20,
+    max_dict_keys=50,
+    max_result_chars=STORAGE_MAX_CHARS,
+)
+
+
+def _annotate_storage(candidate: Any, original_chars: int, max_chars: int) -> Any:
+    """Mark a shrunk audit record as shrunk.
+
+    Same reasoning as :func:`_annotate`: a silent cut is read by whoever
+    (or whatever) loads the row as the complete call. The wording differs
+    because there is no "re-run with offset/limit" available to a reader
+    of a historical record.
+    """
+    note = (
+        f"Record was {original_chars} chars, over the {max_chars}-char "
+        "storage budget, and was shrunk structurally. Long values are "
+        "clipped; this is NOT the verbatim call."
+    )
+    if isinstance(candidate, dict):
+        annotated = dict(candidate)
+        annotated["_truncated"] = True
+        annotated["_truncation_note"] = note
+        return annotated
+    return {"_truncated": True, "_truncation_note": note, "value": candidate}
+
+
+def serialize_for_storage(
+    payload: Any,
+    max_chars: int = STORAGE_MAX_CHARS,
+) -> str:
+    """Serialize ``payload`` for a bounded database column.
+
+    Guarantees, in order of importance:
+
+    1. The returned string ALWAYS parses with ``json.loads``. This is the
+       whole point; see the block comment above.
+    2. It is at most ``max_chars`` plus the annotation envelope.
+    3. A payload that already fits is returned byte-identical to
+       ``json.dumps(payload, default=str)``, so the common small-args case
+       gains no envelope it does not need.
+    4. Identifying scalars survive. Shrinking spends its budget on the
+       long free-text values, so ``{"path": "/etc/hosts", "prompt": <6kB>}``
+       keeps ``path`` intact and clips ``prompt`` -- the row still says
+       WHICH call it describes.
+
+    ``default=str`` matches the call sites' previous behaviour and is
+    load-bearing beyond formatting: without it an arbitrary object in the
+    args raised ``TypeError`` out of the audit write.
+    """
+    max_chars = max(200, int(max_chars))
+    budget = replace(
+        STORAGE_BUDGET, max_str_len=max_chars, max_result_chars=max_chars
+    )
+
+    blob = _dumps(payload)
+    if len(blob) <= max_chars:
+        return blob
+
+    original_chars = len(blob)
+    str_len = budget.max_str_len
+    list_len = budget.max_list_len
+    for _ in range(24):
+        str_len = max(100, str_len // 2)
+        list_len = max(3, list_len // 2)
+        candidate = clamp(
+            payload, replace(budget, max_str_len=str_len, max_list_len=list_len)
+        )
+        blob = _dumps(_annotate_storage(candidate, original_chars, max_chars))
+        if len(blob) <= max_chars:
+            return blob
+        if str_len == 100 and list_len == 3:
+            break
+
+    # Last resort: a pathological payload (tens of thousands of tiny keys)
+    # whose sheer key count, not its values, is what blows the budget.
+    # Keep the shape description rather than a byte prefix, because a byte
+    # prefix is exactly the defect being fixed.
+    shape: Any
+    if isinstance(payload, dict):
+        shape = {
+            "type": "object",
+            "key_count": len(payload),
+            "keys": [str(k)[:40] for k in sorted(map(str, payload))[:20]],
+        }
+    elif isinstance(payload, list):
+        shape = {"type": "array", "length": len(payload)}
+    else:
+        shape = {"type": type(payload).__name__}
+    return _dumps({
+        "_truncated": True,
+        "_truncation_note": (
+            f"Record was {original_chars} chars and could not be shrunk to "
+            f"{max_chars} structurally. Only its shape was kept."
+        ),
+        "_shape": shape,
+    })
+
+
 # ── image-bearing tool results ───────────────────────────────────────
 #
 # A screenshot is ~400 000 base64 chars. ``gui_computer_use`` resolves to
