@@ -322,7 +322,18 @@ class TestHotPathDoesNotBlock:
         )
 
         await asyncio.sleep(0)
-        memory.episode_save.assert_called_once()
+        # A completed turn now saves twice: the operator's words and the
+        # agent's reply. This asserted `called_once` when `user_command`
+        # was the only per-turn save, which meant the assistant's own
+        # words had no durable home and vanished at compaction (see
+        # tests/test_transcript_survives_compaction.py). The contract
+        # this test exists for is the elapsed-time budget above; the
+        # count is incidental, so it is pinned to the event types rather
+        # than to a number that any new save would break.
+        saved_event_types = [
+            c.kwargs.get("event_type") for c in memory.episode_save.call_args_list
+        ]
+        assert saved_event_types == ["user_command", "assistant_reply"], saved_event_types
 
         await orch.drain_background_tasks(timeout=3.0)
         assert orch._background_tasks == set()

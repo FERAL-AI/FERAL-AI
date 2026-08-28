@@ -118,6 +118,13 @@ logger = logging.getLogger("feral.memory")
 #: a new capture type belongs here too.
 _NO_SELF_MODEL_EVENT_TYPES = frozenset({
     "ambient_conversation",
+    # The agent's own replies, persisted per turn so what it said
+    # survives compaction. They are the least eligible text in the
+    # system for self-model extraction: an assistant that says "I have
+    # booked you a flight to Tokyo" would otherwise teach About-Me that
+    # the operator is flying to Tokyo, and an assistant describing its
+    # own capabilities would install those as facts about the user.
+    "assistant_reply",
 })
 
 

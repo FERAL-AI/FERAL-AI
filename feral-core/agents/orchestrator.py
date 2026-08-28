@@ -1862,6 +1862,58 @@ class Orchestrator:
             rows.insert(0, {"role": "user", "content": turn.get("text", "")})
         return rows
 
+    @staticmethod
+    def _assistant_row_text(row: dict) -> str:
+        """Plain text of one assistant row, whatever shape it arrived in.
+
+        ``content`` is a string on most providers and a list of typed
+        blocks on the Anthropic-style ones, so a naive ``str(content)``
+        would persist a repr of a list.
+        """
+        content = row.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts = [
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            ]
+            return "\n".join(p for p in parts if p).strip()
+        return ""
+
+    def _persist_assistant_rows(self, session_id: str, rows: list[dict]) -> None:
+        """Write this turn's assistant replies to the episode store.
+
+        Only ``user_command`` was ever persisted per turn, so what the
+        agent said had no durable home at all. It lived in
+        ``conversation_history`` until ``compact_session`` replaced that
+        list with a summary plus the last few turns, and in
+        ``conversations.messages_json`` only when a web client was
+        attached to autosave it. A voice or CLI session therefore lost
+        the agent's own words: "I booked the flight for Tuesday" was
+        recoverable only if a summariser happened to keep it, which is
+        the one thing a summariser must not be trusted for.
+
+        ``event_type="assistant_reply"`` is in
+        ``store._NO_SELF_MODEL_EVENT_TYPES``. These are the agent's
+        words, not the operator's, and feeding them to About-Me
+        extraction is how a self-model learns facts about itself and
+        reports them as facts about the user.
+        """
+        for row in rows or []:
+            if row.get("role") != "assistant":
+                continue
+            text = self._assistant_row_text(row)
+            if not text:
+                continue
+            self._save_episode_async(
+                session_id=session_id,
+                event_type="assistant_reply",
+                summary=text[:200],
+                detail=text,
+            )
+
     def _finalize_turn(self, session_id: str, turn: dict) -> None:
         """Commit the turn's rows and run the post-turn epilogue.
 
@@ -1879,6 +1931,7 @@ class Orchestrator:
             return
 
         rows = self._turn_rows(turn)
+        self._persist_assistant_rows(session_id, rows)
         if rows:
             history = self.conversation_history.setdefault(session_id, [])
             history.extend(rows)
@@ -2812,7 +2865,17 @@ class Orchestrator:
             session_id=session_id,
             event_type="user_command",
             summary=text[:200],
-            detail=json.dumps(context or {}),
+            # The full text, not just the 200-char preview. ``summary``
+            # is capped because it is what previews and list views
+            # render, and that cap used to be the ONLY durable record
+            # of what the operator said: everything past character 200
+            # existed solely in ``conversation_history``, which
+            # ``compact_session`` replaces wholesale. On any surface
+            # without the web client's autosave (voice, CLI, a paired
+            # phone) the rest of a long message was unrecoverable once
+            # compaction fired. ``episodes_fts`` indexes ``detail``
+            # alongside ``summary``, so this is searchable on arrival.
+            detail=json.dumps({"text": text, "context": context or {}}),
         )
 
         # S1 live-path closure (non-stream parity). The forced-tool
@@ -3451,7 +3514,17 @@ class Orchestrator:
             session_id=session_id,
             event_type="user_command",
             summary=text[:200],
-            detail=json.dumps(context or {}),
+            # The full text, not just the 200-char preview. ``summary``
+            # is capped because it is what previews and list views
+            # render, and that cap used to be the ONLY durable record
+            # of what the operator said: everything past character 200
+            # existed solely in ``conversation_history``, which
+            # ``compact_session`` replaces wholesale. On any surface
+            # without the web client's autosave (voice, CLI, a paired
+            # phone) the rest of a long message was unrecoverable once
+            # compaction fired. ``episodes_fts`` indexes ``detail``
+            # alongside ``summary``, so this is searchable on arrival.
+            detail=json.dumps({"text": text, "context": context or {}}),
         )
 
         # S1 live-path closure: the timeline side-channel scheduling
