@@ -222,6 +222,39 @@ def test_cross_tier_search_does_not_leak_a_previous_querys_degradations(memory_c
     assert body["degraded"] is False
 
 
+def test_degradations_reach_the_response_from_a_real_store(tmp_path):
+    """End-to-end, no mock in the middle: a real ``MemoryStore``, a real
+    tier failure, the real route.
+
+    ``last_search_degradations`` was reported in a dead-code audit as
+    "written with only test readers". It is not: ``search_all`` in
+    ``memory/context_builder.py`` writes it and ``GET /api/memory/search``
+    returns it as ``degradations`` / ``degraded``. The tests above mock
+    ``search_all``, so they pin the read but not the write. This one
+    exercises both halves and is the reason the field was kept."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from fastapi.testclient import TestClient
+
+    from memory.store import MemoryStore
+
+    store = MemoryStore(db_path=str(tmp_path / "degraded.db"))
+    boom = AsyncMock(side_effect=RuntimeError("EmbeddingDimensionMismatch: 1536 != 384"))
+    store.episode_search_hybrid = boom
+
+    mock = MagicMock()
+    mock.memory = store
+    with patch("api.state.state", mock), patch("api.routes.memory.state", mock):
+        from api.server import app
+
+        client = TestClient(app, raise_server_exceptions=False)
+        body = client.get("/api/memory/search", params={"q": "quokka"}).json()
+
+    assert body["degraded"] is True, body
+    assert [d["tier"] for d in body["degradations"]] == ["episode"], body
+    assert "EmbeddingDimensionMismatch" in body["degradations"][0]["error"], body
+
+
 # ─────────────────────────────────────────────
 # 4 + 5. Hardware invoke + device lookup
 # ─────────────────────────────────────────────

@@ -24,8 +24,35 @@ Public surface (intentionally tiny):
     await upsert_batch(items)                  # optimised batch path
     await delete(chunk_id)                     # silent on unknown id
     await search(query_vec, limit)             # top-k, returns (id, distance)
-    await search_cosine(query_vec, limit)      # top-k, returns (id, similarity)
+    await search_similarity(query_vec, limit)  # top-k, returns (id, score)
     await close()                              # release handles
+
+``search_similarity`` was called ``search_cosine`` until v2026.8.x and
+the rename is the fix for a live trap, not a tidy-up. Only two of the
+three first-party backends ever returned a cosine from it:
+
+* ``chroma`` creates its collection with ``hnsw:space=cosine`` and
+  ``qdrant`` with ``Distance.COSINE``, so ``1 - distance`` is a genuine
+  cosine similarity in [-1, 1].
+* ``sqlite_vec``, the DEFAULT, creates its ``vec0`` table with no
+  ``distance_metric``, so vec0 answers with an L2 distance and the
+  adapter returns ``1 - L2``. On unit vectors that is
+  ``1 - sqrt(2 - 2*cos)``: monotone decreasing in the cosine, so
+  ranking is identical, but a true cosine of 0.84 arrives as 0.4343 and
+  an orthogonal pair arrives as -0.4142.
+
+So the scale is BACKEND-DEPENDENT: the value is safe to sort by and
+unsafe to threshold. Applying a cosine floor to it silently kills
+recall, which has happened once already. Anything that needs a real
+cosine recomputes it from the stored embeddings, which is what
+``MemoryStore._centered_filter`` does with this method's output.
+
+Changing ``sqlite_vec`` to ``distance_metric=cosine`` would fix the
+scale but requires rebuilding every existing vec0 table, so the name
+carries the warning instead. Third-party backends that still define
+only ``search_cosine`` keep working: :func:`load_vector_index` aliases
+the old name onto the new one and logs a deprecation.
+``tests/test_vector_index_similarity_semantics.py`` pins the numbers.
 
 The previous sync Protocol shipped in audit-r12 (v2026.5.32) is gone —
 adapters no longer expose a sync surface. Direct callers of the legacy
@@ -51,7 +78,7 @@ class VectorIndexBackend(Protocol):
     ``indexed`` reports whether the backend has an index up and running
     (e.g. the sqlite-vec extension loaded successfully). ``False`` puts
     the backend in a no-op mode where ``upsert`` does nothing and
-    ``search_cosine`` returns ``[]``. This policy is uniform across
+    ``search_similarity`` returns ``[]``. This policy is uniform across
     backends: silent skip rather than crash on first use.
 
     ``False`` does NOT mean semantic search is lost. ``MemoryStore``
@@ -74,7 +101,7 @@ class VectorIndexBackend(Protocol):
     async def upsert_batch(self, items: Iterable[tuple[str, np.ndarray]]) -> None: ...
     async def delete(self, chunk_id: str) -> None: ...
     async def search(self, query_vec: np.ndarray, limit: int = 20) -> list[tuple[str, float]]: ...
-    async def search_cosine(self, query_vec: np.ndarray, limit: int = 20) -> list[tuple[str, float]]: ...
+    async def search_similarity(self, query_vec: np.ndarray, limit: int = 20) -> list[tuple[str, float]]: ...
     async def close(self) -> None: ...
 
 
@@ -149,13 +176,29 @@ def load_vector_index(
         )
 
     backend = factory(dim=dim, **config)
+    # ``search_cosine`` was renamed to ``search_similarity`` because two
+    # of the three first-party backends never returned a cosine from it
+    # (see the module docstring). Community backends are separate
+    # packages on registry.feral.sh and cannot be renamed with this
+    # commit, so adapt the old name rather than failing them at load or,
+    # worse, at first query.
+    if not hasattr(backend, "search_similarity") and hasattr(backend, "search_cosine"):
+        backend.search_similarity = backend.search_cosine  # type: ignore[attr-defined]
+        logger.warning(
+            "vector-index backend %r defines search_cosine but not "
+            "search_similarity. The old name is deprecated: its return "
+            "value is a backend-specific similarity score, not necessarily "
+            "a cosine, and must never be thresholded as one. Rename the "
+            "method to search_similarity.",
+            backend_id,
+        )
     if not isinstance(backend, VectorIndexBackend):
         raise TypeError(
             f"vector-index factory for {backend_id!r} returned "
             f"{type(backend).__name__}, which does not satisfy the "
             "async VectorIndexBackend Protocol (missing one of "
             "indexed, count, upsert, upsert_batch, delete, search, "
-            "search_cosine, close)."
+            "search_similarity, close)."
         )
     logger.info(
         "vector index backend loaded: %s (indexed=%s)",

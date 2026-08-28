@@ -226,9 +226,19 @@ class QdrantVectorIndex:
             for h in hits
         ]
 
-    async def search_cosine(
+    async def search_similarity(
         self, query_vec: np.ndarray, limit: int = 20
     ) -> list[tuple[str, float]]:
+        """Top-k as ``(chunk_id, 1.0 - distance)``, best first.
+
+        Here the value IS a cosine similarity: the collection is created
+        with ``Distance.COSINE``, ``search`` turns Qdrant's cosine score
+        into ``1 - score``, and this turns it back. The default
+        ``sqlite_vec`` backend's version of this method is not a cosine,
+        which is why the method is not called ``search_cosine``: the
+        scale is backend-dependent, so callers must sort by it and never
+        threshold it.
+        """
         return [(cid, 1.0 - dist) for cid, dist in await self.search(query_vec, limit)]
 
     async def close(self) -> None:

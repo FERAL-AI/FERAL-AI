@@ -153,6 +153,12 @@ class SQLiteVecIndex:
                 mod = _sqlite_vec_module()
                 if mod is not None:
                     mod.load(conn)
+                # No ``distance_metric=`` here, so vec0 uses its default
+                # L2. That is deliberate now (changing it would orphan
+                # every existing index) but it is why
+                # ``search_similarity`` returns ``1 - L2`` rather than a
+                # cosine. Read that method before using its output for
+                # anything other than ordering.
                 conn.execute(
                     f"""CREATE VIRTUAL TABLE IF NOT EXISTS {self._table}
                         USING vec0(
@@ -261,9 +267,33 @@ class SQLiteVecIndex:
             logger.debug("sqlite_vec search failed: %s", exc)
             return []
 
-    async def search_cosine(
+    async def search_similarity(
         self, query_vec: np.ndarray, limit: int = 20
     ) -> list[tuple[str, float]]:
+        """Top-k as ``(chunk_id, 1.0 - distance)``, best first.
+
+        NOT a cosine, despite this method having been called
+        ``search_cosine`` until v2026.8.x. The vec0 table above is
+        created without ``distance_metric``, so sqlite-vec answers with
+        an L2 distance and this returns ``1 - L2``. For unit vectors
+        that is ``1 - sqrt(2 - 2*cos)``:
+
+            cos 1.00 ->  1.0000      cos 0.84 ->  0.4343
+            cos 0.95 ->  0.6838      cos 0.71 ->  0.2346
+            cos 0.00 -> -0.4142      cos -1.0 -> -1.0000
+
+        Monotone decreasing in the cosine, so the ORDER is exactly the
+        cosine order and ranking is unaffected. The MAGNITUDE is not a
+        cosine, is not confined to [0, 1], and must never be compared
+        against a cosine threshold: a 0.5 floor drops every document
+        above cosine 0.875. Recompute a real cosine from the stored
+        embeddings if you need one (see
+        ``MemoryStore._centered_filter``).
+
+        Adding ``distance_metric=cosine`` to the vec0 table would fix
+        the scale and invalidate every already-built index, so it is a
+        migration and not a patch.
+        """
         return [(cid, 1.0 - dist) for cid, dist in await self.search(query_vec, limit)]
 
     async def close(self) -> None:

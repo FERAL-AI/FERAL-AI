@@ -74,7 +74,7 @@ class _NoOpVecIndex:
     async def search(self, query_vec: np.ndarray, limit: int = 20):
         return []
 
-    async def search_cosine(self, query_vec: np.ndarray, limit: int = 20):
+    async def search_similarity(self, query_vec: np.ndarray, limit: int = 20):
         return []
 
     def close(self) -> None:
@@ -82,7 +82,7 @@ class _NoOpVecIndex:
 
 
 class _IndexedVecIndex(_NoOpVecIndex):
-    """Indexed variant: ``indexed=True`` and ``search_cosine`` returns
+    """Indexed variant: ``indexed=True`` and ``search_similarity`` returns
     a controlled list. Used to pin the indexed-path branch of
     :func:`search_notes` without needing sqlite-vec on the host.
     """
@@ -93,7 +93,7 @@ class _IndexedVecIndex(_NoOpVecIndex):
         super().__init__()
         self._hits = list(hits)
 
-    async def search_cosine(self, query_vec: np.ndarray, limit: int = 20):
+    async def search_similarity(self, query_vec: np.ndarray, limit: int = 20):
         return self._hits[:limit]
 
 
@@ -274,7 +274,7 @@ async def save_with_no_fts_token(store, content: str, *, topic_dim: int) -> dict
 
 
 async def test_hybrid_indexed_path_resolves_chunk_id_via_memory_chunks(tmp_path):
-    """When the vector index is indexed, ``search_cosine`` returns
+    """When the vector index is indexed, ``search_similarity`` returns
     ``chunk_id`` -> similarity. The hybrid path must look those
     chunk_ids up in ``memory_chunks`` (filtered to ``source_table='notes'``)
     and resolve them to note ids before merging."""

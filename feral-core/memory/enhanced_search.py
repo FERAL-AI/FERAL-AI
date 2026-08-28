@@ -1,95 +1,31 @@
 """
 FERAL Enhanced Memory Search
 ==============================
-Advanced retrieval features on top of the base MemoryStore:
-  - BM25 + vector hybrid reranking with configurable fusion weights
+Knowledge-graph query helpers on top of the base MemoryStore:
   - Relationship queries ("what does X know about Y")
-  - Temporal decay with configurable half-life
   - Graph neighborhood visualization data
+
+Both are reached from ``api/routes/memory.py``.
+
+``bm25_score`` / ``temporal_decay`` / ``hybrid_rerank`` used to live here
+and were removed in v2026.8.x. They had no caller anywhere in the repo,
+including tests: ``hybrid_rerank`` was referenced by nothing, and the
+other two only by ``hybrid_rerank``. Deleted rather than wired up,
+because wiring them in would have been a regression. ``hybrid_rerank``
+linearly blended a raw BM25 score with a raw cosine at fixed 0.3/0.5
+weights, which is precisely the incomparable-scales error the RRF
+rewrite in ``memory/store.py`` (see the "Hybrid ranking" comment block
+there) was written to remove, and its normalisation step
+``bm25 / max(bm25, 1.0)`` collapses every document scoring above 1.0 to
+exactly 1.0, so all strong lexical matches tie. ``episode_search_hybrid``
+already does this job correctly with Reciprocal Rank Fusion plus an MMR
+rerank.
 """
 
 from __future__ import annotations
 import logging
-import math
-import time
 
 logger = logging.getLogger("feral.memory.enhanced")
-
-
-def bm25_score(
-    query_terms: list[str],
-    doc_text: str,
-    avg_dl: float = 200.0,
-    k1: float = 1.5,
-    b: float = 0.75,
-) -> float:
-    """Compute a BM25 relevance score for a single document."""
-    doc_terms = doc_text.lower().split()
-    dl = len(doc_terms)
-    if dl == 0:
-        return 0.0
-
-    tf_map: dict[str, int] = {}
-    for t in doc_terms:
-        tf_map[t] = tf_map.get(t, 0) + 1
-
-    score = 0.0
-    for term in query_terms:
-        tf = tf_map.get(term.lower(), 0)
-        if tf == 0:
-            continue
-        numerator = tf * (k1 + 1)
-        denominator = tf + k1 * (1 - b + b * (dl / avg_dl))
-        score += numerator / denominator
-    return score
-
-
-def temporal_decay(created_at: float, half_life_days: float = 30.0, now: float | None = None) -> float:
-    """Exponential temporal decay. Returns a weight in (0, 1]."""
-    now = now or time.time()
-    age_days = max(0, (now - created_at) / 86400)
-    return math.exp(-0.693 * age_days / half_life_days)
-
-
-def hybrid_rerank(
-    results: list[dict],
-    query: str,
-    text_weight: float = 0.3,
-    vector_weight: float = 0.5,
-    recency_weight: float = 0.2,
-    half_life_days: float = 30.0,
-) -> list[dict]:
-    """Rerank search results using BM25 + vector similarity + temporal decay fusion.
-
-    Each result dict should have:
-      - text/content/summary: the document text
-      - vector_score (optional): cosine similarity score
-      - created_at (optional): Unix timestamp
-    """
-    query_terms = query.lower().split()
-    now = time.time()
-
-    texts = []
-    for r in results:
-        texts.append(r.get("text", r.get("content", r.get("summary", ""))))
-    avg_dl = sum(len(t.split()) for t in texts) / max(len(texts), 1)
-
-    scored = []
-    for i, r in enumerate(results):
-        bm25 = bm25_score(query_terms, texts[i], avg_dl)
-        vec = r.get("vector_score", r.get("similarity", 0.0))
-        ts = r.get("created_at", now)
-        decay = temporal_decay(ts, half_life_days, now) if recency_weight > 0 else 1.0
-
-        max_bm25 = max(bm25, 1.0)
-        norm_bm25 = bm25 / max_bm25
-
-        fused = (text_weight * norm_bm25) + (vector_weight * vec) + (recency_weight * decay)
-        r["_fused_score"] = fused
-        scored.append(r)
-
-    scored.sort(key=lambda x: x["_fused_score"], reverse=True)
-    return scored
 
 
 async def relationship_query(kg, entity_a: str, entity_b: str, max_depth: int = 4) -> dict:

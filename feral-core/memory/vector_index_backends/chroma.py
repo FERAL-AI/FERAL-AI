@@ -141,9 +141,18 @@ class ChromaVectorIndex:
         dists = (res.get("distances") or [[]])[0]
         return [(cid, float(d)) for cid, d in zip(ids, dists)]
 
-    async def search_cosine(
+    async def search_similarity(
         self, query_vec: np.ndarray, limit: int = 20
     ) -> list[tuple[str, float]]:
+        """Top-k as ``(chunk_id, 1.0 - distance)``, best first.
+
+        Here the value IS a cosine similarity, because the collection is
+        created with ``hnsw:space=cosine`` so Chroma's distance is the
+        cosine distance. The default ``sqlite_vec`` backend's version of
+        this method is not, which is why the method is not called
+        ``search_cosine``: callers cannot assume the scale without
+        knowing which backend they got, so they must not threshold it.
+        """
         return [(cid, 1.0 - dist) for cid, dist in await self.search(query_vec, limit)]
 
     async def close(self) -> None:
