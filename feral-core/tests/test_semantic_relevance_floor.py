@@ -185,7 +185,18 @@ class TestTheCentreIsOnlyDerivedFromTheCorpus:
 
 
 class TestTheFloorsAreOrdered:
-    def test_the_centered_floor_is_stricter_than_the_raw_one(self):
+    def test_the_two_floors_are_not_interchangeable(self):
         """Centred scores are not on the same scale as raw cosines, and
-        mixing the two constants up would silently disable the filter."""
-        assert _CENTERED_SEMANTIC_FLOOR > _RAW_SEMANTIC_FLOOR
+        mixing the two constants up would silently disable the filter.
+
+        The direction of the inequality carries no meaning: the two numbers
+        live in different spaces. It is asserted only so a swap of the two
+        constants fails here instead of in production. It reversed when
+        _RAW_SEMANTIC_FLOOR was raised from 0.25 (which, as this module's
+        docstring says, never rejected anything) to a value measured the
+        same way 0.47 was, on the small corpora that constant actually
+        governs. See the block comment in memory/store.py for that table.
+        """
+        assert _RAW_SEMANTIC_FLOOR > _CENTERED_SEMANTIC_FLOOR
+        assert 0.0 < _CENTERED_SEMANTIC_FLOOR < 1.0
+        assert 0.0 < _RAW_SEMANTIC_FLOOR < 1.0
