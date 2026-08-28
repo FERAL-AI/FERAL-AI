@@ -403,12 +403,44 @@ DEFAULT_SETTINGS = {
             # F2 — Real session compaction. When ``enabled`` is true,
             # ``compact_session`` promotes summarisable turns into
             # episode rows (with participants, time_range, summary,
-            # key_entities, source_turn_ids metadata). The brain
-            # auto-fires compaction either at the end of a session or
-            # once a session has accumulated ``turns_threshold`` new
-            # turns since the last compaction.
+            # key_entities and queryable source-turn provenance). The
+            # brain auto-fires compaction at the end of a session, and
+            # otherwise on the trigger ladder below.
             "enabled": True,
+            # BACKLOG, soft. The historical trigger and still the
+            # default one: consolidate once a session has accumulated
+            # this many turns since its last compaction.
             "turns_threshold": 20,
+            # IDLE, debounced. Consolidate a session that has gone
+            # quiet for this long with turns still pending, so the work
+            # lands between conversations rather than inside one.
+            "idle_seconds": 90,
+            # DEADLINE, hard. Idle alone STARVES: a session that is
+            # never quiet never consolidates, and busy sessions are the
+            # ones that need it most. So the oldest pending turn also
+            # carries an absolute deadline, checked on the turn path as
+            # well as on the background cadence. This is the same
+            # free-background -> throttle -> forced ladder used by
+            # RocksDB write stalls, Postgres autovacuum's freeze age,
+            # Linux writeback and Go's GC, and it is what the W3C
+            # requestIdleCallback spec prescribes normatively (race the
+            # idle callback against a timeout).
+            "max_pending_seconds": 900,
+            # Floor for the idle and deadline rungs. Below this there
+            # is not enough conversation to be worth a generation;
+            # ``compact_session`` no-ops under preserve_last_n + 2
+            # anyway. The backlog rung ignores it (turns_threshold is
+            # already a floor).
+            "min_turns": 4,
+            # How often the background scheduler evaluates the idle
+            # rung. Cheap: a dict scan, no I/O.
+            "scheduler_cadence_seconds": 30,
+            # F1: parallel map stage. Bounded small on purpose: a
+            # local model behind Ollama / llama.cpp serves a handful of
+            # slots at most, and firing ten generations at a one-slot
+            # server queues them while shrinking each one's KV cache
+            # share. Raise it on a hosted endpoint.
+            "map_concurrency": 3,
         },
     },
     "security": {

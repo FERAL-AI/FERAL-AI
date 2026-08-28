@@ -233,6 +233,11 @@ def register_core_methods(registry: MethodRegistry, state):
         if state.orchestrator:
             state.orchestrator.conversation_history.pop(session_id, None)
             state.orchestrator._turns_since_compaction.pop(session_id, None)
+            # F6: the backlog and idle clocks belong to the session
+            # that just ended. Left behind they would make a brand-new
+            # session with the same id look overdue on its first turn.
+            state.orchestrator._pending_since.pop(session_id, None)
+            state.orchestrator._session_last_turn_at.pop(session_id, None)
         return {"status": "reset"}
 
     @registry.method("session.compact")

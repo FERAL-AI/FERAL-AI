@@ -73,6 +73,7 @@ from config.loader import feral_data_home
 from memory.fts_query import STRICT as FTS_STRICT, fts5_match_query
 from memory.sqlite_features import require_fts5
 from memory.context_builder import (
+    TURN_EVENT_TYPES,
     build_context_for_llm_async as context_build_context_for_llm_async,
     compact_session as context_compact_session,
     heuristic_summarize as context_heuristic_summarize,
@@ -1334,6 +1335,36 @@ class MemoryStore:
             # has been mirrored into the KG, so the bulk migration on
             # next boot is idempotent and incremental.
             self._add_column_if_missing(conn, "knowledge", "kg_migrated_at", "REAL DEFAULT 0")
+
+            # F7 (consolidation redesign): queryable compaction
+            # provenance.
+            #
+            # A compaction used to record ``source_turn_ids`` as a list
+            # of POSITIONAL INDICES into the message list it was handed,
+            # serialised into an HTML comment inside the episode's
+            # ``detail`` column. That list is discarded by the caller
+            # moments later, so the indices refer to nothing, they
+            # cannot be joined against, and nothing in the codebase
+            # ever read them back.
+            #
+            # PR #224 made per-turn ``user_command`` / ``assistant_reply``
+            # episodes durable, so real row ids now exist. This table is
+            # the edge list between a consolidation episode and the turn
+            # episodes it consolidated, in both directions.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS compaction_sources (
+                    compaction_episode_id TEXT NOT NULL,
+                    source_episode_id TEXT NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    role TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY (compaction_episode_id, source_episode_id)
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_compaction_sources_source "
+                "ON compaction_sources(source_episode_id)"
+            )
 
             # D11 indexes:
             # (forgotten_at, decay_factor) — sweep query "find episodes
@@ -3604,6 +3635,17 @@ class MemoryStore:
 
     async def compact_session(self, session_id: str, history: list[dict], llm=None,
                               preserve_last_n: int = 3, max_summary_chars: int = 16000) -> dict:
+        # ``memory.compaction.map_concurrency`` bounds the parallel map
+        # stage. Read here rather than in context_builder so the memory
+        # layer keeps its single settings entry point, and tolerant of
+        # an unreadable settings file: the module default applies.
+        map_concurrency = None
+        try:
+            from config.loader import load_settings
+            cfg = (load_settings().get("memory") or {}).get("compaction") or {}
+            map_concurrency = int(cfg.get("map_concurrency", 0)) or None
+        except Exception as exc:
+            logger.debug("map_concurrency setting unreadable, using default: %s", exc)
         return await context_compact_session(
             self,
             session_id=session_id,
@@ -3611,7 +3653,145 @@ class MemoryStore:
             llm=llm,
             preserve_last_n=preserve_last_n,
             max_summary_chars=max_summary_chars,
+            map_concurrency=map_concurrency,
         )
+
+    # ── F7: compaction provenance ───────────────────────────────────
+    #
+    # Four methods, all trivially SQL, that make a consolidation
+    # answerable in both directions: "which turns did this summary come
+    # from" and "which summaries cover this turn". Before these, the
+    # answer to both was an HTML comment containing list indices.
+
+    async def turn_episodes(self, session_id: str, limit: int = 200) -> list[dict]:
+        """The durable per-turn episodes for one session, oldest first.
+
+        ``user_command`` / ``assistant_reply`` only: the rows PR #224
+        made durable. This is what compaction resolves its in-memory
+        messages against.
+        """
+        placeholders = ",".join("?" for _ in TURN_EVENT_TYPES)
+        conn = await self._conn()
+        try:
+            async with conn.execute(
+                f"SELECT id, session_id, event_type, summary, detail, created_at "
+                f"FROM episodes WHERE session_id = ? "
+                f"AND event_type IN ({placeholders}) "
+                f"ORDER BY created_at ASC LIMIT ?",
+                (session_id, *TURN_EVENT_TYPES, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        finally:
+            await self._release(conn)
+        return [dict(r) for r in rows]
+
+    async def episodes_by_ids(self, episode_ids: list[str]) -> list[dict]:
+        """Fetch episode rows by id, chronological.
+
+        The re-derivation path (``_carry_or_rederive``) reads raw turns
+        back through this, which is the reason a consolidation is
+        allowed to forget its own summary text: the originals are still
+        addressable.
+        """
+        ids = [str(i) for i in episode_ids if i]
+        if not ids:
+            return []
+        out: list[dict] = []
+        conn = await self._conn()
+        try:
+            # Chunked so a long session cannot blow SQLite's variable
+            # limit (999 by default).
+            for start in range(0, len(ids), 400):
+                batch = ids[start:start + 400]
+                placeholders = ",".join("?" for _ in batch)
+                async with conn.execute(
+                    f"SELECT * FROM episodes WHERE id IN ({placeholders})",
+                    tuple(batch),
+                ) as cur:
+                    out.extend(self._episode_row_to_dict(r) for r in await cur.fetchall())
+        finally:
+            await self._release(conn)
+        out.sort(key=lambda r: r.get("created_at") or 0.0)
+        return out
+
+    async def record_compaction_sources(
+        self, compaction_episode_id: str, sources: list[dict]
+    ) -> int:
+        """Record which turn episodes a consolidation consumed.
+
+        ``sources`` is the list ``context_builder._resolve_source_episodes``
+        produces: ``{"episode_id", "position", "role", "created_at"}``.
+        Idempotent (``INSERT OR REPLACE`` on the composite key) so a
+        retried compaction does not duplicate its edges.
+        """
+        rows = [
+            (
+                compaction_episode_id,
+                str(s["episode_id"]),
+                int(s.get("position") or 0),
+                str(s.get("role") or ""),
+                float(s.get("created_at") or 0.0),
+            )
+            for s in sources or []
+            if s.get("episode_id")
+        ]
+        if not rows:
+            return 0
+        conn = await self._conn()
+        try:
+            await conn.executemany(
+                "INSERT OR REPLACE INTO compaction_sources "
+                "(compaction_episode_id, source_episode_id, position, role, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                rows,
+            )
+            await conn.commit()
+        finally:
+            await self._release(conn)
+        return len(rows)
+
+    async def compaction_sources(self, compaction_episode_id: str) -> list[dict]:
+        """The source turns of one consolidation, resolved to real rows.
+
+        Joined against ``episodes``, so every returned dict carries the
+        turn's actual ``summary`` / ``detail`` / ``created_at``. An id
+        that no longer resolves (the turn was hard-deleted by the decay
+        sweep) is omitted rather than returned as a dangling reference.
+        """
+        conn = await self._conn()
+        try:
+            async with conn.execute(
+                "SELECT cs.compaction_episode_id, cs.source_episode_id, cs.position, "
+                "       cs.role, e.session_id, e.event_type, e.summary, e.detail, "
+                "       e.created_at "
+                "FROM compaction_sources cs "
+                "JOIN episodes e ON e.id = cs.source_episode_id "
+                "WHERE cs.compaction_episode_id = ? "
+                "ORDER BY cs.position ASC",
+                (compaction_episode_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        finally:
+            await self._release(conn)
+        return [dict(r) for r in rows]
+
+    async def consolidations_for_turn(self, source_episode_id: str) -> list[dict]:
+        """The other direction: which consolidations cover this turn."""
+        conn = await self._conn()
+        try:
+            async with conn.execute(
+                "SELECT cs.compaction_episode_id, cs.source_episode_id, cs.position, "
+                "       e.summary, e.created_at "
+                "FROM compaction_sources cs "
+                "LEFT JOIN episodes e ON e.id = cs.compaction_episode_id "
+                "WHERE cs.source_episode_id = ? "
+                "ORDER BY e.created_at ASC",
+                (source_episode_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        finally:
+            await self._release(conn)
+        return [dict(r) for r in rows]
 
     async def _llm_summarize(self, messages: list[dict], llm, max_chars: int) -> str:
         return await context_llm_summarize(messages=messages, llm=llm, max_chars=max_chars)

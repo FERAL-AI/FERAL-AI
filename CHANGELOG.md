@@ -6,6 +6,87 @@ All notable changes to FERAL are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Session consolidation redesigned end to end (F1-F7).** The pipeline
+  in `memory/context_builder.py` was seven separate defects wearing one
+  function.
+
+  - **The map stage was sequential.** `for chunk in chunks: await
+    llm.chat(...)` over chunks that are independent by construction.
+    Now gathered under a semaphore bounded at 3 (`MAP_CONCURRENCY`,
+    overridable via `memory.compaction.map_concurrency`). Bounded small
+    on purpose: a local model behind Ollama or llama.cpp serves 1-4
+    slots, and ten concurrent generations at a one-slot server queue
+    while each one's KV cache share shrinks.
+  - **The knowledge graph saw `conversation_text[:3000]`.** At the
+    default 20-turn threshold that is the first 3-6 messages of each
+    window, and every entity after it was invisible to the graph
+    PERMANENTLY, because the raw turns are replaced by the summary
+    moments later and nothing re-reads them. Measured on a mixed
+    20-turn window: the graph saw 6.5% of the conversation, 2.2% at 60
+    turns. It now sees all of it, extracted per segment.
+  - **Every message was truncated to `content[:500]`.** Leading-N
+    truncation is the worst available choice: arXiv:2210.16732 measures
+    ~80% of the information needed to reconstruct a summary lost at a
+    1K-token leading cut, with salience anti-correlated with position
+    near the cut. The per-message cap is gone; the only remaining one
+    is a 20000-char safety valve that keeps head AND tail. On the same
+    20-turn window, 18 of 45 messages used to reach the model intact.
+    Now 45 of 45 do.
+  - **Chunks were raw 6000-character slices** of the concatenated
+    transcript, cutting mid-message, mid-word and mid-tool-result.
+    Chunking is now on message boundaries, and the target segment is
+    12000 chars rather than 6000, chosen by measurement: at 6000 the
+    honest pipeline needs 4 waves where the old lossy one needed 3, at
+    12000 it needs 2. Net wall clock against the old pipeline is 1.50x
+    faster at 20 turns and 1.80x at 60, while showing the model every
+    message instead of a third of them.
+  - **There was no reduce step and summaries were re-summarised.**
+    `"\n\n".join(summaries)[:16000]` silently deleted the TAIL segment
+    summaries, which on a long session are the most recent part of the
+    conversation. There is now a real reduce, and when it is
+    unavailable or still overflows, every segment is abridged to an
+    equal share rather than the last ones being dropped. Separately,
+    the injected `[Session Summary]` message was fed straight back into
+    the next compaction: arXiv:2608.22752 measures that exact pattern
+    at 53% retention after ONE round and 10% after five. Summary
+    messages are now watermarked, never re-summarised, and when too
+    many accumulate the oldest are collapsed by RE-DERIVING from the
+    raw turn rows the watermark points at.
+  - **The only trigger was a turn counter.** `_last_turn_at` already
+    existed and was read only for status reporting. Consolidation now
+    runs on a ladder: backlog-soft (`turns_threshold`, unchanged and
+    still 20, so existing configs behave as before), idle-debounce
+    (`idle_seconds`), or deadline-hard (`max_pending_seconds`),
+    whichever fires first. The deadline is load-bearing, not padding:
+    idle alone starves, since a session that is never quiet never
+    consolidates and busy sessions are the ones that need it most. The
+    W3C requestIdleCallback spec states this failure mode normatively
+    and races idle against a timeout; RocksDB write stalls, Postgres
+    autovacuum freeze age, Linux writeback and Go's GC all use the same
+    free-background to forced-inline ladder. Backlog and deadline are
+    evaluated on the turn path, so they cannot starve; idle runs on a
+    background cadence shaped after `MemoryDecayService._loop`.
+  - **Provenance pointed at nothing.** `time_range` was always
+    `[0.0, 0.0]`, because ordinary chat history carries no
+    `meta.created_at`, and `source_turn_ids` was a list of positional
+    indices into a list the compaction discards two lines later,
+    serialised into an HTML comment that nothing read. PR #224 made
+    per-turn `user_command` / `assistant_reply` episodes durable, so
+    real row ids now exist: a new `compaction_sources` table records
+    the edge list, `store.compaction_sources()` resolves a
+    consolidation to its real source rows and
+    `store.consolidations_for_turn()` answers the reverse, and
+    `time_range` falls back to those rows' real `created_at`.
+
+  SeCom-style topic segmentation over the existing 384-dim embeddings
+  was evaluated and NOT shipped. Embedding one 20-turn window costs
+  5.82s on this machine (129ms per message), which is the same order as
+  the entire map stage, and there is no ground truth in this repo
+  against which to show it buys anything for that. Message-boundary
+  chunking is what shipped.
+
 ## [2026.8.26] - 2026-08-23 - the upgrade that did nothing
 
 An operator upgraded from PyPI, correctly, and served two-day-old code

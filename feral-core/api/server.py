@@ -1677,6 +1677,18 @@ async def shutdown_event():
     except Exception as exc:
         logger.warning("Shutdown: background-task cancellation failed: %s", exc)
 
+    # (a.0) The consolidation scheduler owns its own task handle and a
+    # stop Event, in the shape of MemoryDecayService. Stopping it
+    # explicitly lets an in-flight tick finish rather than being
+    # cancelled mid-schedule.
+    orch = getattr(state, "orchestrator", None)
+    stop_consolidation = getattr(orch, "stop_consolidation_scheduler", None)
+    if callable(stop_consolidation):
+        try:
+            await stop_consolidation()
+        except Exception as exc:
+            logger.debug("Shutdown: consolidation scheduler stop raised: %s", exc)
+
     # (a.1) Ask the engines that own their own task handles to stop so
     # they can drain any in-flight tick cleanly. These are idempotent
     # with the registry cancellation above — if the task is already
