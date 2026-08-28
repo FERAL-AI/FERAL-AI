@@ -848,14 +848,34 @@ class SyncEngine:
                 )
             elif op.table == "episodes":
                 # episodes are append-only by id; the LWW gate above
-                # has already short-circuited a stale arrival.
-                # INSERT OR REPLACE is now correct because the gate
-                # only lets newer arrivals through.
+                # has already short-circuited a stale arrival, so a
+                # second arrival for the same id is genuinely newer.
+                #
+                # UPSERT, not INSERT OR REPLACE. REPLACE is a DELETE
+                # followed by an INSERT, and SQLite does not fire delete
+                # triggers for a REPLACE-induced delete unless
+                # ``recursive_triggers`` is on, which it is not by
+                # default. So ``episodes_ad`` never ran, the row took a
+                # fresh rowid, ``episodes_ai`` inserted a second FTS row,
+                # and the superseded text stayed in episodes_fts forever:
+                # three replaces of one id left 5 FTS rows, 3 of them
+                # orphans. ON CONFLICT DO UPDATE keeps the rowid and
+                # fires the AFTER UPDATE trigger (store.py's
+                # ``episodes_fts_update``), which reindexes the row in
+                # place.
                 await conn.execute(
-                    "INSERT OR REPLACE INTO episodes "
+                    "INSERT INTO episodes "
                     "(id, session_id, event_type, summary, detail, "
                     "importance, created_at, hlc_string) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET "
+                    "session_id = excluded.session_id, "
+                    "event_type = excluded.event_type, "
+                    "summary = excluded.summary, "
+                    "detail = excluded.detail, "
+                    "importance = excluded.importance, "
+                    "created_at = excluded.created_at, "
+                    "hlc_string = excluded.hlc_string",
                     (
                         d.get("id", op.row_id), d.get("session_id", "sync"),
                         d.get("event_type", "synced"), d.get("summary", ""),
