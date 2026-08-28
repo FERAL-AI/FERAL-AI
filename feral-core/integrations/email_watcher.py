@@ -55,6 +55,19 @@ class EmailWatcher:
         # runs on an asyncio.to_thread worker which has no loop of its
         # own, so every hand-off back to the brain goes through this.
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # B12: strong references to the handler tasks dispatched from the
+        # worker thread. The loop holds tasks only WEAKLY, so a task that
+        # is suspended on a future reachable solely through its own frame
+        # is an unrooted cycle and ``gc.collect()`` destroys it. That
+        # matters more here than almost anywhere else in the codebase:
+        # by the time the task is scheduled the FETCH has already marked
+        # the message ``\Seen``, ``_processed_count`` has already been
+        # bumped, and IMAP will not redeliver. A collected task is a
+        # permanently lost email that ``stats()`` reports as processed.
+        # Same mechanism as ``Orchestrator._track_background_task`` and
+        # ``BrainState.register_background_task``: a set plus a discard
+        # callback, so it stays bounded.
+        self._dispatched_tasks: set[asyncio.Task] = set()
         self._processed_count = 0
         self._idle_supported: Optional[bool] = None
         self._vip_senders = [
@@ -89,6 +102,61 @@ class EmailWatcher:
                      self._imap_user, self._imap_host, bool(self._oauth_token))
         return True
 
+    # ── B12: cross-thread dispatch that keeps its tasks ──────────────
+
+    def _spawn_tracked(self, coro) -> None:
+        """Create a handler task and hold a strong reference to it.
+
+        Runs ON the brain's event loop (it is the callback handed to
+        ``call_soon_threadsafe``), never on the IMAP worker thread.
+
+        This replaces passing ``asyncio.create_task`` itself as the
+        callback. That older shape dropped the Task the loop built, and
+        it was invisible to the AST guard in
+        ``tests/test_background_task_references.py`` because
+        ``asyncio.create_task`` appeared as a bare name rather than a
+        call node.
+        """
+        try:
+            task = asyncio.ensure_future(coro)
+        except Exception:
+            logger.exception("Email watcher: could not schedule handler")
+            coro.close()
+            return
+        self._dispatched_tasks.add(task)
+        task.add_done_callback(self._on_dispatched_done)
+
+    def _on_dispatched_done(self, task: asyncio.Task) -> None:
+        """Unbook the task and say so when the handler failed.
+
+        The failure log is not decoration. The handler's only durable
+        write swallows its own errors at ``logger.debug``, so without
+        this an exception inside the handler left no trace anywhere
+        while the mail was already consumed from the server.
+        """
+        self._dispatched_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "Email watcher: handler failed after the message was "
+                "already marked read: %s", exc, exc_info=exc,
+            )
+
+    def _dispatch(self, coro) -> None:
+        """Hand ``coro`` to the brain's loop from the IMAP worker thread.
+
+        Caller must have checked ``self._loop`` is not None; that check
+        happens once, before the FETCH, precisely so mail is never
+        consumed with no way to deliver it.
+        """
+        loop = self._loop
+        if loop is None:  # pragma: no cover - guarded at the call site
+            coro.close()
+            return
+        loop.call_soon_threadsafe(self._spawn_tracked, coro)
+
     async def stop(self):
         self._running = False
         if self._mail:
@@ -96,6 +164,22 @@ class EmailWatcher:
                 self._mail.logout()
             except Exception:
                 pass
+        # B12: drain handlers that are still in flight. The messages
+        # they describe are already gone from the server, so abandoning
+        # them at shutdown loses exactly the mail this fix exists to
+        # keep. Bounded, so a wedged handler cannot stall shutdown.
+        pending = [t for t in list(self._dispatched_tasks) if not t.done()]
+        if not pending:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*pending, return_exceptions=True), timeout=10.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Email watcher: %d email handler(s) did not finish within 10s",
+                len(pending),
+            )
 
     async def _watch_loop(self):
         while self._running:
@@ -211,17 +295,16 @@ class EmailWatcher:
             else:
                 if state.orchestrator:
                     for sid in list(state.sessions.keys()):
-                        loop.call_soon_threadsafe(
-                            asyncio.create_task,
+                        self._dispatch(
                             state.orchestrator._emit_brain_event(sid, "email_received", {
                                 "from": incoming.sender,
                                 "subject": incoming.subject,
                                 "vip": is_vip,
-                            }),
+                            })
                         )
 
             if self._on_email:
-                loop.call_soon_threadsafe(asyncio.create_task, self._on_email(incoming))
+                self._dispatch(self._on_email(incoming))
         except Exception as e:
             logger.warning("Failed to process email %s: %s", msg_id, e)
 

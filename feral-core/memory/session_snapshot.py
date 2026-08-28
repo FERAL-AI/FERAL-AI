@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -76,6 +77,18 @@ class SessionSnapshotStore:
         self._max_entries = max(1, int(max_entries))
         self._last_save_ts: float = 0.0
         self._min_save_interval_s: float = 2.5  # debounce hot loops
+        # B9: trailing-edge state. The debounce used to be leading-edge
+        # ONLY: the first call in a window wrote, every later call
+        # returned False, and nothing was scheduled to write the state
+        # those calls carried. That is not a deferred write, it is a lost
+        # one; five turns in rapid succession left one turn on disk while
+        # RAM held five. ``_pending`` holds the newest suppressed
+        # snapshot and ``_timer`` is the one-shot that lands it at the
+        # end of the current window.
+        self._lock = threading.RLock()
+        self._pending: Optional[dict] = None
+        self._timer: Optional[threading.Timer] = None
+        self._closed = False
 
     @property
     def path(self) -> Path:
@@ -130,13 +143,31 @@ class SessionSnapshotStore:
 
         Atomicity: writes to a sibling temp file then renames so a
         crash mid-write never leaves a half-JSON snapshot.
+
+        Debounce (B9): the return value still means "was written inline",
+        so a hot chat loop is still not IO-bound and still gets False.
+        What changed is that a suppressed call is now REMEMBERED and
+        written on the trailing edge of the window instead of discarded.
+        Before this, the debounce silently threw away every turn after
+        the first in each 2.5s window, permanently.
         """
         if not session_id:
             return False
 
         now = time.time()
         if not force and (now - self._last_save_ts) < self._min_save_interval_s:
+            self._defer(
+                session_id,
+                conversation_history=conversation_history,
+                working_memory=working_memory,
+                delay=self._min_save_interval_s - (now - self._last_save_ts),
+            )
             return False
+
+        with self._lock:
+            # This write supersedes anything the debounce was holding.
+            self._cancel_timer()
+            self._pending = None
 
         existing = self.load() or {}
         merged: dict[str, Any] = {
@@ -175,6 +206,87 @@ class SessionSnapshotStore:
                 exc,
             )
             return False
+
+    # ── B9: trailing edge ────────────────────────────────────────────
+
+    def _defer(
+        self,
+        session_id: str,
+        *,
+        conversation_history: Optional[list[dict]],
+        working_memory: Optional[list[dict]],
+        delay: float,
+    ) -> None:
+        """Remember a debounced snapshot and arm the trailing write.
+
+        The newest call wins: ``_pending`` is overwritten every time, so
+        the write that eventually lands carries the LATEST state rather
+        than whichever call happened to be first after the window opened.
+
+        The timer is armed ONCE per window and never re-armed by a later
+        call. Re-arming would be a reset-on-activity debounce, which
+        under continuous traffic postpones the write forever -- the exact
+        failure being fixed, wearing a different shape.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._pending = {
+                "session_id": session_id,
+                "conversation_history": conversation_history,
+                "working_memory": working_memory,
+            }
+            if self._timer is not None:
+                return
+            timer = threading.Timer(max(0.0, delay), self._on_trailing_edge)
+            # Daemon: a pending snapshot must never hold the interpreter
+            # open. ``close()`` is the deterministic drain.
+            timer.daemon = True
+            self._timer = timer
+            timer.start()
+
+    def _on_trailing_edge(self) -> None:
+        """Timer callback. Runs off the brain's loop, on the timer thread."""
+        with self._lock:
+            self._timer = None
+        try:
+            self._flush_pending()
+        except Exception:  # pragma: no cover - a timer thread must not die
+            logger.warning(
+                "primary_session_thread trailing snapshot failed", exc_info=True,
+            )
+
+    def _cancel_timer(self) -> None:
+        """Caller must hold ``self._lock``."""
+        timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _flush_pending(self) -> bool:
+        """Write whatever the debounce is holding, if anything."""
+        with self._lock:
+            pending, self._pending = self._pending, None
+        if not pending:
+            return False
+        return self.save(
+            pending["session_id"],
+            conversation_history=pending["conversation_history"],
+            working_memory=pending["working_memory"],
+            force=True,
+        )
+
+    def close(self) -> None:
+        """Drain any deferred snapshot and stop the timer. Idempotent.
+
+        The deterministic counterpart to the daemon timer: a process that
+        exits inside a debounce window still lands its last turn.
+        """
+        with self._lock:
+            self._cancel_timer()
+            self._closed = True
+        # Outside the timer, but the pending payload is still ours to
+        # write; ``_flush_pending`` forces, so ``_closed`` cannot block it.
+        self._flush_pending()
 
     def clear(self) -> None:
         """Remove the snapshot file (operator-initiated 'forget'

@@ -3435,7 +3435,18 @@ class BrainState:
         return self._daemon_session_bindings.get(node_id, set())
 
 
-state = BrainState()
+# The process-wide brain singleton.
+#
+# The annotation is load-bearing, not decoration. ``api.state`` sits in an
+# import cycle with the modules that consume it (voice proxies, routes,
+# integrations all do a function-level ``from api.state import state``, and
+# this module imports them back). Left to inference, mypy resolves this
+# binding while the cycle is still being processed and types it ``None``,
+# so every ``state.orchestrator`` / ``state.sessions`` in those modules is
+# reported as an attribute on ``None``. Which of them get reported shifts
+# with SCC processing order, so adding an unrelated import edge anywhere in
+# the graph moves the errors around. Naming the type pins it.
+state: BrainState = BrainState()
 
 
 def _log_activity(action: str, detail: str = ""):

@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 from uuid import uuid4
 
 from models.protocol import FeralMessage, SDUIPayload, SDUIPatchPayload
+
+if TYPE_CHECKING:
+    # Type-only: importing api.state at runtime here would close
+    # an import cycle (api.state imports this module's callers).
+    from api.state import BrainState
 
 logger = logging.getLogger("feral.orchestrator")
 
@@ -130,10 +135,13 @@ async def _handle_app_action(
        to ``handle_command`` on an app path.
     4. Dispatch per the action's declared handler.
     """
+    _state: Optional[BrainState] = None
     try:
-        from api.state import state as _state
+        from api.state import state as _brain_state
     except Exception:
-        _state = None
+        pass
+    else:
+        _state = _brain_state
     registry = getattr(_state, "app_registry", None) if _state else None
     if registry is None:
         await orchestrator._send_text(
@@ -357,10 +365,13 @@ async def _send_app_surface_payload(
         ),
     )
 
+    _state: Optional[BrainState] = None
     try:
-        from api.state import state as _state
+        from api.state import state as _brain_state
     except Exception:
-        _state = None
+        pass
+    else:
+        _state = _brain_state
     if _state is None:
         return
     bindings = getattr(_state, "_daemon_session_bindings", {}) or {}
