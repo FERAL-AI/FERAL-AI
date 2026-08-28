@@ -103,6 +103,9 @@ def _orch_for_force_tool() -> Orchestrator:
     # note_voice_user_turn now appends under the per-session lock.
     orch._session_locks = {}
     orch._conversation_max_per_session = 200
+    # B7: _append_voice_row stamps the session as active so the eviction
+    # cap can sort by staleness rather than transcript length.
+    orch._session_last_active = {}
     return orch
 
 
