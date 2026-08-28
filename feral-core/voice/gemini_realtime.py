@@ -541,8 +541,16 @@ class GeminiRealtimeProxy:
             # PR 9 gap-fill — durable persistence under voice:<sid>.
             try:
                 if hasattr(self._memory, "conversation_append"):
+                    # Full text. `[:300]` here was the only durable copy
+                    # of what was said: working memory is an in-RAM
+                    # deque and the `voice:<sid>` thread is the sole
+                    # persistent home for a realtime transcript. The
+                    # OpenAI path stores the whole thing through the
+                    # identical call, so any utterance over ~300 chars
+                    # was recoverable on one provider and truncated on
+                    # the other.
                     await self._memory.conversation_append(
-                        f"voice:{session_id}", "assistant", text[:300],
+                        f"voice:{session_id}", "assistant", text,
                         source="voice_realtime_gemini",
                         title=f"Voice session {session_id[:8]}",
                     )
@@ -581,7 +589,7 @@ class GeminiRealtimeProxy:
             try:
                 if hasattr(self._memory, "conversation_append"):
                     await self._memory.conversation_append(
-                        f"voice:{session_id}", "user", text[:300],
+                        f"voice:{session_id}", "user", text,
                         source="voice_realtime_gemini",
                         title=f"Voice session {session_id[:8]}",
                     )
@@ -852,7 +860,14 @@ class GeminiRealtimeProxy:
                     importance=importance,
                 )
             except Exception:
-                logger.debug(
+                # warning, not debug. A voice tool call leaves no other
+                # trace: the audio is streamed straight to the client
+                # and never enters handle_command_stream, so this
+                # episode is the only record that the call happened.
+                # The OpenAI twin was deliberately raised to warning for
+                # exactly this reason; the change was never mirrored
+                # here.
+                logger.warning(
                     "gemini: episode_save for voice tool call raised",
                     exc_info=True,
                 )
