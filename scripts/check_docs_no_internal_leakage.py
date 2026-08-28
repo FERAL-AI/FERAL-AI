@@ -34,10 +34,53 @@ SCAN_ROOTS = [
     REPO_ROOT / "docs" / "mintlify",
     REPO_ROOT / "docs" / "site",
 ]
-SCAN_FILES = [
-    REPO_ROOT / "README.md",
-    REPO_ROOT / "CONTRIBUTING.md",
-]
+
+# Every markdown file at the repository root, not a hand-maintained list.
+#
+# This used to name README.md and CONTRIBUTING.md only, which meant the
+# checker could not see the two files that actually leaked. WORK-ORDER.md
+# sat at the root of a public repository listing four P0 security holes
+# with file:line citations under a line reading "Nothing here is started",
+# long after all four were fixed. It passed every gate because nothing
+# looked at it.
+#
+# A glob rather than a list, because the failure mode was somebody adding
+# a root-level document and nobody remembering to register it. Files that
+# are genuinely internal belong outside the repository or in .gitignore,
+# not in an allowlist here.
+#
+# Exemptions are named here with a reason, and the DEFAULT is to scan.
+# That inversion is the whole point: previously the default was to
+# ignore and inclusions were listed, so a new root-level document was
+# unscanned unless somebody remembered to add it. Now a new document is
+# scanned unless somebody deliberately exempts it and says why.
+_EXEMPT_ROOT_DOCS = {
+    # A dated historical record. It cites internal workstream IDs in
+    # release notes going back years, and rewriting shipped history to
+    # satisfy a lint would destroy the forensic value the file exists
+    # for. New entries should still avoid internal numbering.
+    "CHANGELOG.md",
+    # Instructions addressed to coding agents working in this tree. Its
+    # job is to point at the internal audits and name the traps, so the
+    # tokens this checker forbids in shipped docs are exactly what it is
+    # supposed to contain.
+    "CLAUDE.md",
+    # A record of an audit whose work is done: 34 of 38 entries are
+    # FIXED with the evidence and the commit, and CLAUDE.md sends
+    # agents here on purpose. Its "P0" headings describe what the
+    # priority WAS, not a live queue, which is the opposite of the
+    # WORK-ORDER.md failure. The single still-open entry (F-04, the
+    # embedding path blocking the event loop) is a performance defect,
+    # not a security one.
+    #
+    # If that ratio ever inverts, this exemption should go rather than
+    # the rule.
+    "AUDIT-FIXES.md",
+}
+
+SCAN_FILES = sorted(
+    p for p in REPO_ROOT.glob("*.md") if p.name not in _EXEMPT_ROOT_DOCS
+)
 
 # Forbidden substrings (case-insensitive). Adding a new internal artifact?
 # Add its identifier here so it can never leak into shipped docs again.
@@ -77,6 +120,26 @@ WORKSTREAM_FILE_EXCEPTIONS: dict[str, set[str]] = {
 }
 
 INTERNAL_FINDING_REGEX = re.compile(r"\bfinding-\d{1,3}\b", re.IGNORECASE)
+
+# A markdown heading that triages by severity: "## P0. Security",
+# "### P0.1 A third-party skill can declare itself safe".
+#
+# This is the shape of an internal work order, and it is the rule that
+# would actually have caught WORK-ORDER.md. Extending the file glob was
+# necessary but not sufficient: that document contained none of the
+# forbidden tokens above, so a token scan passed it while it sat in a
+# public repository listing four P0 security holes with file:line
+# citations, under a line reading "Nothing here is started", months
+# after all four were fixed.
+#
+# The danger is not the word "P0". It is publishing a triage list of
+# security findings, because such a list is read as current, is a map
+# for anybody hostile, and goes stale silently the moment the work is
+# done. Triage belongs somewhere private; what ships is the fix and the
+# changelog entry.
+SEVERITY_TRIAGE_HEADING_REGEX = re.compile(
+    r"^#{1,6}\s+P[0-4](?:\.\d+)?[\s.:]", re.MULTILINE
+)
 
 
 def _iter_target_files() -> list[Path]:
@@ -139,6 +202,17 @@ def _check_file(path: Path) -> list[str]:
         if INTERNAL_FINDING_REGEX.search(line):
             violations.append(
                 f"{path}:{lineno}: internal 'finding-NN' reference — rewrite for operators"
+            )
+            break
+
+    # Severity-triage headings: the shape of an internal work order.
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if SEVERITY_TRIAGE_HEADING_REGEX.match(line):
+            violations.append(
+                f"{path}:{lineno}: severity-triage heading {line.strip()!r} — a "
+                "published triage list reads as current, maps the gaps for an "
+                "attacker, and goes stale the moment the work lands. Keep triage "
+                "private; ship the fix and a changelog entry."
             )
             break
 

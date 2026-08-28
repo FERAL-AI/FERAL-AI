@@ -1,6 +1,6 @@
 # AUDIT-FIXES
 
-Defects found in the 2026-08-11 audit of `d15645cd4` (v2026.8.8). Full report with evidence and methodology: https://claude.ai/code/artifact/7e82aa6b-86ce-4677-9af1-42f018e750bf
+Defects found in the 2026-08-11 audit of `d15645cd4` (v2026.8.8). Each entry below carries its own evidence and its current status.
 
 Read `CLAUDE.md` first — it documents traps that will otherwise corrupt your measurements.
 
