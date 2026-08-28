@@ -75,6 +75,14 @@ _MIN_SYNC_INTERVAL_S = 60.0
 #: ``FERAL_WHOOP_SYNC_LOOKBACK_DAYS`` (minimum 1).
 DEFAULT_LOOKBACK_DAYS = 14
 
+#: Ceiling on how long a user-facing health read may spend waiting for a
+#: mirror refresh. "How did I sleep" runs inside the user's turn, which
+#: holds ``Orchestrator._get_session_lock``, so every second spent here
+#: also delays the user's NEXT message. Past this budget the refresh
+#: continues in the background and the question is answered from what is
+#: already in durable storage, which is the whole point of mirroring.
+USER_WAIT_BUDGET_S = 2.0
+
 #: Whoop recovery ``score`` field -> canonical metric.
 _RECOVERY_FIELD_MAP: dict[str, str] = {
     "recovery_score": "recovery_score",
@@ -243,6 +251,10 @@ class WhoopDurableSync:
             Used to push fresh health data to connected nodes.
         interval_s / lookback_days: overrides for the env defaults.
         clock: injectable time source for tests.
+        user_wait_budget_s: the longest a user-facing read is allowed to
+            wait for a refresh in :meth:`maybe_sync`. Past it the refresh
+            keeps running in the background and the caller is answered
+            from what is already stored.
     """
 
     def __init__(
@@ -253,6 +265,7 @@ class WhoopDurableSync:
         interval_s: Optional[float] = None,
         lookback_days: Optional[int] = None,
         clock: Callable[[], float] = time.time,
+        user_wait_budget_s: float = USER_WAIT_BUDGET_S,
     ):
         self._whoop = whoop
         self._store_provider = store_provider
@@ -260,10 +273,19 @@ class WhoopDurableSync:
         self._interval_s = interval_s
         self._lookback_days = lookback_days
         self._clock = clock
+        self._user_wait_budget_s = float(user_wait_budget_s)
         self._last_sync_at: float = 0.0
         self._last_result: dict[str, Any] = {}
         self._task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
+        # How many syncs are running right now. Read by ``maybe_sync`` so a
+        # user query can decline to queue behind one instead of parking on
+        # ``_lock`` for the length of three vendor round-trips.
+        self._inflight: int = 0
+        # Strong reference to a refresh a user query kicked off and then
+        # stopped waiting for. Without it the loop's weak reference lets
+        # the task be collected mid-flight.
+        self._pending_refresh: Optional[asyncio.Future] = None
 
     # -- configuration -------------------------------------------------
 
@@ -401,40 +423,58 @@ class WhoopDurableSync:
 
     # -- public API ----------------------------------------------------
 
+    @property
+    def sync_in_flight(self) -> bool:
+        """True while a sync is between its first and last vendor call."""
+        return self._inflight > 0
+
     async def sync_once(self) -> dict[str, Any]:
         """Run one sync. Never raises; reports what happened."""
         readings: list[dict[str, Any]] = []
         written = 0
-        async with self._lock:
-            now = float(self._clock())
-            if self._whoop is None:
-                result = {"synced": False, "written": 0, "reason": "no_client"}
-                self._last_result = result
-                return result
-            try:
-                connected = bool(getattr(self._whoop, "connected", False))
-            except Exception:  # pragma: no cover - defensive
-                connected = False
-            if not connected:
-                result = {"synced": False, "written": 0, "reason": "not_connected"}
-                self._last_result = result
-                self._last_sync_at = now
-                return result
+        self._inflight += 1
+        try:
+            async with self._lock:
+                now = float(self._clock())
+                if self._whoop is None:
+                    result = {"synced": False, "written": 0, "reason": "no_client"}
+                    self._last_result = result
+                    return result
+                try:
+                    connected = bool(getattr(self._whoop, "connected", False))
+                except Exception:  # pragma: no cover - defensive
+                    connected = False
+                if not connected:
+                    result = {"synced": False, "written": 0, "reason": "not_connected"}
+                    self._last_result = result
+                    self._last_sync_at = now
+                    return result
 
-            readings = await self._collect_readings()
-            outcome = self._persist(readings)
-            written = int(outcome["written"])
-            self._last_sync_at = now
-            result = {
-                "synced": True,
-                "source": SOURCE_WHOOP,
-                "fetched": len(readings),
-                "written": written,
-                "duplicates": outcome["duplicates"],
-                "reason": outcome["reason"],
-                "at": now,
-            }
-            self._last_result = result
+                # Claim the window BEFORE the vendor calls, not after.
+                # ``maybe_sync`` reads ``_last_sync_at`` without the lock,
+                # so writing it only on the way out left the timestamp
+                # stale for the whole length of the sync: anyone arriving
+                # mid-flight passed the throttle and ran a second full
+                # round-trip on top of the one already running. The
+                # docstring on ``maybe_sync`` has always said "since the
+                # last attempt", and this is what makes that true.
+                self._last_sync_at = now
+
+                readings = await self._collect_readings()
+                outcome = self._persist(readings)
+                written = int(outcome["written"])
+                result = {
+                    "synced": True,
+                    "source": SOURCE_WHOOP,
+                    "fetched": len(readings),
+                    "written": written,
+                    "duplicates": outcome["duplicates"],
+                    "reason": outcome["reason"],
+                    "at": now,
+                }
+                self._last_result = result
+        finally:
+            self._inflight -= 1
 
         if written and self._frame_sink is not None:
             await self._emit_frame(readings)
@@ -466,13 +506,54 @@ class WhoopDurableSync:
             logger.warning("Whoop sync: frame_sink failed: %s", exc)
 
     async def maybe_sync(self) -> dict[str, Any]:
-        """Sync only if at least ``interval_s`` has passed since the last
-        attempt. Safe to call on every health query: with no Whoop
-        connected, or inside the interval, it is a cheap no-op."""
+        """Give the mirror a chance to refresh, without holding up the
+        caller.
+
+        This is on the user's read path: ``get_health_summary`` calls it
+        as its first statement, so "how did I sleep" runs through here,
+        inside a turn that holds the session lock. It must therefore never
+        park on ``_lock``, and never spend an unbounded amount of time in
+        the vendor API.
+
+        Three outcomes:
+
+        * a sync is already running       -> return at once, ``in_flight``
+        * inside ``interval_s``           -> return at once, ``throttled``
+        * otherwise                       -> start one, wait up to
+          ``user_wait_budget_s`` for it, and if it outlives that budget
+          leave it running and answer ``still_running``. The refresh is
+          not lost, it just stops being the caller's problem.
+        """
+        if self.sync_in_flight:
+            # Somebody else is already doing exactly this work. Waiting
+            # for them buys the caller nothing: the store is written at
+            # the end either way, and the old code then went on to run a
+            # SECOND full sync because the throttle timestamp was stale.
+            return {"synced": False, "written": 0, "reason": "in_flight"}
+
         now = float(self._clock())
         if self._last_sync_at and (now - self._last_sync_at) < self.interval_s:
             return {"synced": False, "written": 0, "reason": "throttled"}
-        return await self.sync_once()
+
+        task = asyncio.ensure_future(self.sync_once())
+        # Strong reference, so a refresh that outlives the caller's budget
+        # cannot be garbage-collected mid-flight (AUDIT-FIXES F-06).
+        self._pending_refresh = task
+        task.add_done_callback(self._clear_pending_refresh)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(task), timeout=self._user_wait_budget_s,
+            )
+        except asyncio.TimeoutError:
+            logger.info(
+                "Whoop refresh outlived the %.1fs user budget; continuing in "
+                "the background", self._user_wait_budget_s,
+            )
+            return {"synced": False, "written": 0, "reason": "still_running"}
+
+    def _clear_pending_refresh(self, task: asyncio.Future) -> None:
+        if self._pending_refresh is task:
+            self._pending_refresh = None
 
     async def _loop(self) -> None:
         while True:

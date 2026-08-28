@@ -51,6 +51,20 @@ from memory.store import (
 
 logger = logging.getLogger("feral.memory.kg")
 
+
+# Sources whose text must never reach ``_heuristic_extract``.
+#
+# The heuristic matches first-person patterns ("my name is", "i live in")
+# and files every hit under the ``user`` entity. That is right for text the
+# operator typed and wrong for speech the room overheard: it would record a
+# visitor's home town as the operator's. ``store._NO_SELF_MODEL_EVENT_TYPES``
+# draws exactly this boundary for About-Me extraction; the graph needs it
+# too, and did not have it because the ``source`` argument that would carry
+# the distinction was never accepted.
+_NO_FIRST_PERSON_HEURISTIC_SOURCES = frozenset({
+    "ambient_conversation",
+})
+
 ENTITY_MERGE_THRESHOLD = 0.85
 ENTITY_CANDIDATE_THRESHOLD = 0.70
 
@@ -1096,9 +1110,33 @@ class KnowledgeGraph:
 
         return "\n".join(lines) if len(lines) > 1 else ""
 
-    async def extract_and_store(self, text: str, llm=None) -> list[dict]:
-        """Extract entities and relations from text via LLM, then store them."""
+    async def extract_and_store(
+        self, text: str, llm=None, source: str | None = None
+    ) -> list[dict]:
+        """Extract entities and relations from text via LLM, then store them.
+
+        ``source`` names where the text came from. ``api/server.py`` has
+        always passed it and this signature has never accepted it, so
+        every ambient conversation raised TypeError into a debug-level
+        handler and contributed nothing to the graph.
+
+        It is not decoration. The heuristic fallback below matches
+        first-person patterns ("my name is", "i live in") and files them
+        under the ``user`` entity. That is correct for something the
+        operator typed and wrong for speech the room merely overheard,
+        which is the same trust boundary ``store._NO_SELF_MODEL_EVENT_TYPES``
+        draws for About-Me extraction. So for ambient text the heuristic
+        is refused rather than allowed to attribute a stranger's home
+        town to the operator; an LLM pass, which sees whose words these
+        are, still runs.
+        """
         if not llm or not llm.available:
+            if source in _NO_FIRST_PERSON_HEURISTIC_SOURCES:
+                logger.debug(
+                    "heuristic extraction skipped for source=%r: first-person "
+                    "patterns would be attributed to the operator", source,
+                )
+                return []
             return await self._heuristic_extract(text)
 
         prompt = (

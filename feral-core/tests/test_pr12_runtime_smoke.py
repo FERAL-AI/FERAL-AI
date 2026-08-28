@@ -22,6 +22,7 @@ brain, listen on ports, or touch the user's filesystem outside
 
 from __future__ import annotations
 
+import pytest
 import sys
 from pathlib import Path
 
@@ -30,7 +31,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def test_pr12_runtime_smoke(tmp_path):
+@pytest.mark.asyncio
+async def test_pr12_runtime_smoke(tmp_path):
     # ── PR 4 — ComputerUseDriver
     from agents.computer_use_driver import normalize_action
     norm = normalize_action({"type": "click", "x": 100, "y": 200})
@@ -38,14 +40,14 @@ def test_pr12_runtime_smoke(tmp_path):
     assert (norm.x, norm.y) == (100, 200)
 
     # ── PR 5 — CodingRunner runs a subprocess with PYTHONDONTWRITEBYTECODE
-    import asyncio
     from agents.coding_run import _run_command
 
-    exit_code, stdout, _stderr = asyncio.run(
-        _run_command(
-            ["python", "-c", "import os; print(os.environ.get('PYTHONDONTWRITEBYTECODE'))"],
-            cwd=tmp_path,
-        )
+    # `await`, not `asyncio.run`. This test became a coroutine when
+    # MemoryRetriever.retrieve did, and asyncio.run cannot be called
+    # from inside a running loop.
+    exit_code, stdout, _stderr = await _run_command(
+        ["python", "-c", "import os; print(os.environ.get('PYTHONDONTWRITEBYTECODE'))"],
+        cwd=tmp_path,
     )
     assert exit_code == 0
     assert "1" in stdout
@@ -71,10 +73,10 @@ def test_pr12_runtime_smoke(tmp_path):
         def search(self, q, limit=10):
             return [{"id": "n", "content": f"matches {q}"}]
     retriever = MemoryRetriever(_Mem())
-    rr = retriever.retrieve("matches", top_k=1)
+    rr = await retriever.retrieve("matches", top_k=1)
     assert rr.records and rr.records[0].tier == "notes"
 
-    gate = gate_intent("delete it")
+    gate = await gate_intent("delete it")
     assert gate.verdict == IntentVerdict.ASK
     assert gate.impact == "high"
 

@@ -36,6 +36,7 @@ import math
 import re
 import sqlite3
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -1486,6 +1487,11 @@ class MemoryStore:
     # Conversation Threads (persistent chat history)
     # ─────────────────────────────────────────────
 
+    # Most recent messages kept in a thread's stored blob. Was an inline
+    # ``messages[-500:]`` in one place; named because the atomic append
+    # path has to enforce the same ceiling from SQL.
+    CONVERSATION_MESSAGE_CAP = 500
+
     async def conversation_save(self, conversation_id: str, messages: list[dict], title: str = "") -> dict:
         """Save/update a conversation thread."""
         now = time.time()
@@ -1519,7 +1525,11 @@ class MemoryStore:
                     messages_json = excluded.messages_json,
                     message_count = excluded.message_count,
                     updated_at = excluded.updated_at
-            """, (conversation_id, title, preview, json.dumps(messages[-500:]), len(messages), now, now))
+            """, (
+                conversation_id, title, preview,
+                json.dumps(messages[-self.CONVERSATION_MESSAGE_CAP:]),
+                len(messages), now, now,
+            ))
             await conn.commit()
             # Report the title the row actually holds, not the one we
             # asked for. Returning the requested title would let the
@@ -1601,19 +1611,102 @@ class MemoryStore:
         reconnect. The ``source`` field carries the channel id
         (``voice_realtime_openai``, ``voice_realtime_gemini``) so the
         UI can render a small badge on voice threads.
+
+        ATOMICITY. This used to be ``conversation_get`` -> mutate the
+        list in Python -> ``conversation_save``: a read-modify-write
+        spanning two awaits with nothing serialising it. Two appends
+        that interleaved both read the same list, both appended one
+        message to their own copy, and the second write replaced the
+        first. Measured on a throwaway store: 20 concurrent appends,
+        1 message persisted, 19 lost. It was hard to trigger while the
+        only caller was one voice proxy, and became live the moment a
+        second surface touched the same row (the web client's autosave
+        does a whole-blob replace on ``voice:<sid>`` threads).
+
+        The append is now a single SQL statement. ``json_insert`` at
+        ``'$[#]'`` appends to the stored array inside the database, so
+        concurrency is resolved by SQLite's own write serialisation
+        rather than by a lock this process would have to own. That also
+        holds across event loops (the voice proxies each run on their
+        own) and across processes, which no in-process lock can do.
         """
-        existing = await self.conversation_get(conversation_id) or {}
-        messages = list(existing.get("messages", []) or [])
-        messages.append({
-            "id": f"m_{int(time.time() * 1000)}_{len(messages)}",
+        now = time.time()
+        entry = {
+            # Was ``m_<ms>_<len(messages)>``, which needed the list we
+            # are deliberately no longer reading. A random suffix is
+            # collision-free under concurrency, where the index was not.
+            "id": f"m_{int(now * 1000)}_{uuid.uuid4().hex[:8]}",
             "role": role,
             "content": content,
             "source": source,
-            "ts": time.time(),
-        })
-        return await self.conversation_save(
-            conversation_id, messages, title=title or existing.get("title", ""),
-        )
+            "ts": now,
+        }
+        entry_json = json.dumps(entry)
+        text = _message_text(content)
+        preview = text[:120]
+        # Title for a row that does not exist yet, mirroring
+        # ``conversation_save``'s derivation.
+        new_title = title or (text[:80] if role == "user" and text else "")
+        new_title = new_title or "New conversation"
+        explicit_title = title or ""
+
+        conn = await self._conn()
+        try:
+            await conn.execute(
+                f"""
+                INSERT INTO conversations
+                    (id, title, preview, messages_json, message_count,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, json_array(json(?)), 1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    -- A renamed thread keeps its title, exactly as the
+                    -- autosave path does. Otherwise an explicit title
+                    -- from the caller wins, and no title leaves the
+                    -- stored one alone.
+                    title = CASE
+                        WHEN conversations.title_custom = 1 THEN conversations.title
+                        WHEN ? <> '' THEN ?
+                        ELSE conversations.title END,
+                    -- The preview is the newest USER message, so an
+                    -- assistant turn must not overwrite it.
+                    preview = CASE WHEN ? = 'user' THEN ? ELSE conversations.preview END,
+                    messages_json = CASE
+                        WHEN json_array_length(conversations.messages_json) >= {self.CONVERSATION_MESSAGE_CAP}
+                        THEN json_insert(
+                            json_remove(conversations.messages_json, '$[0]'),
+                            '$[#]', json(?))
+                        ELSE json_insert(conversations.messages_json, '$[#]', json(?))
+                        END,
+                    message_count = conversations.message_count + 1,
+                    updated_at = ?
+                """,
+                (
+                    conversation_id, new_title, preview, entry_json, now, now,
+                    explicit_title, explicit_title,
+                    role, preview,
+                    entry_json, entry_json,
+                    now,
+                ),
+            )
+            await conn.commit()
+            async with conn.execute(
+                "SELECT title, title_custom, pinned, preview, message_count "
+                "FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ) as cur:
+                row = await cur.fetchone()
+        finally:
+            await self._release(conn)
+
+        return {
+            "id": conversation_id,
+            "title": row[0] if row else new_title,
+            "title_custom": bool(row[1]) if row else False,
+            "pinned": bool(row[2]) if row else False,
+            "preview": row[3] if row else preview,
+            "message_count": row[4] if row else 1,
+            "updated_at": now,
+        }
 
     # Hard ceiling on one page of conversation metadata. A caller asking
     # for more gets this; ``conversation_page`` reports the real total
