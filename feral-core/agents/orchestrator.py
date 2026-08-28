@@ -2153,8 +2153,16 @@ class Orchestrator:
         Returns the scheduled ``asyncio.Task`` so tests can await on it
         deterministically; production callers ignore the return value.
         ``None`` when ``self.memory`` is unwired.
+
+        ``getattr`` rather than ``self.memory``: an orchestrator built
+        without the attribute at all is unwired in exactly the sense
+        this guard means, and raising ``AttributeError`` from a
+        fire-and-forget audit write would take down the caller's turn
+        over a memory record. Reached once the voice row path began
+        persisting episodes, since that path is exercised against
+        partially-built orchestrators.
         """
-        if not self.memory:
+        if not getattr(self, "memory", None):
             return None
 
         kwargs: dict = {
@@ -5098,6 +5106,30 @@ class Orchestrator:
                 self.conversation_history[session_id] = history[
                     -self._conversation_max_per_session:
                 ]
+
+        # Durable copy. Everything above is in-memory: `compact_session`
+        # replaces `conversation_history` wholesale, and the cap just
+        # above discards the head with nothing behind it. The text paths
+        # persist a `user_command` / `assistant_reply` episode per turn,
+        # but realtime audio never enters `handle_command_stream`, so it
+        # reached neither that prelude nor `_finalize_turn` and a purely
+        # conversational voice session produced no episode at all. It
+        # was invisible to episode_search, episode_recent and the
+        # timeline.
+        #
+        # Written outside the lock: `_save_episode_async` is
+        # fire-and-forget and holding a per-session lock across a
+        # SQLite write is the pattern that made compaction stall the
+        # next turn. Placed after the dedup return above, so a provider
+        # re-emitting the same final transcript on reconnect yields one
+        # episode, not two.
+        event_type = "assistant_reply" if role == "assistant" else "user_command"
+        self._save_episode_async(
+            session_id=session_id,
+            event_type=event_type,
+            summary=text[:200],
+            detail=text,
+        )
 
     async def note_voice_assistant_turn(self, session_id: str, text: str) -> None:
         """Record a live-voice ASSISTANT turn in ``conversation_history``.
