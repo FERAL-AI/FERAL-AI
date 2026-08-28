@@ -209,12 +209,25 @@ async def compact_session(
             )
             if conversation_text:
                 extracted = await store.kg.extract_and_store(conversation_text[:3000], llm)
-                # extract_and_store returns a list of {entity, ...} dicts;
-                # surface the names so callers can inspect what landed.
+                # extract_and_store returns RELATION dicts, both on the LLM
+                # path (KnowledgeGraph.add_relation returns
+                # ``{id, source, relation, target, confidence}``) and on the
+                # heuristic path. This used to read ``name`` / ``entity`` /
+                # ``subject``, none of which any extractor has ever
+                # returned, so key_entities was ALWAYS empty while being
+                # rendered by agents/orchestrator.py and cli/memory_cmd.py
+                # and documented as a returned field by
+                # api/routes/memory.py.
+                #
+                # Both ends of the triple are entities the extraction
+                # created or touched, so both belong here; the predicate
+                # does not.
                 for item in extracted or []:
-                    if isinstance(item, dict):
-                        name = item.get("name") or item.get("entity") or item.get("subject")
-                        if name and name not in key_entities:
+                    if not isinstance(item, dict):
+                        continue
+                    for key in ("source", "target"):
+                        name = item.get(key)
+                        if name and str(name) not in key_entities:
                             key_entities.append(str(name))
         except Exception as e:
             logger.debug("KG extraction during compaction failed: %s", e)

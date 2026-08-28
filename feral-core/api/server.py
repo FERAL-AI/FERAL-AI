@@ -1015,6 +1015,94 @@ async def _log_routine_device_action(
         )
 
 
+# A cron turn must not be able to park the scheduler thread forever. The
+# throwaway-loop version could too (``run_until_complete`` has no timeout),
+# so this is not a new hazard, but there is no reason to keep it.
+CRON_TURN_TIMEOUT_S = 900.0
+# How long to let a finished cron turn's background work land before the
+# turn's loop is torn down. Only used on the fallback path, where there is
+# no long-lived loop to hand the work to.
+CRON_DRAIN_TIMEOUT_S = 10.0
+
+
+def _cron_target_loop(owner):
+    """The long-lived loop a cron turn should run on, or None.
+
+    ``BrainState.init`` pins ``Orchestrator._owning_loop`` to the brain's
+    main loop at boot. When that loop is up, a routine's turn belongs on
+    it: every asyncio primitive the turn touches (the memory connection
+    pool, the session locks) is already bound there, and anything the turn
+    schedules keeps running after the turn returns.
+    """
+    import asyncio as _aio
+
+    if owner is None:
+        return None
+    loop = getattr(owner, "_owning_loop", None)
+    if loop is None:
+        return None
+    try:
+        if loop.is_closed() or not loop.is_running():
+            return None
+    except Exception:  # pragma: no cover - defensive
+        return None
+    try:
+        if loop is _aio.get_running_loop():
+            return None
+    except RuntimeError:
+        pass
+    return loop
+
+
+def _run_cron_coroutine(coro, owner=None):
+    """Run a routine's coroutine without losing what it schedules.
+
+    ROOT CAUSE this exists for: cron turns used to run as
+    ``loop = new_event_loop(); loop.run_until_complete(...); loop.close()``.
+    Everything the turn scheduled with ``create_task`` / ``ensure_future``
+    on that loop died at ``close()``. ``_save_episode_async`` survived
+    because it has explicit loop-affinity routing; ``_maybe_auto_compact``
+    and the learner write did not. Compaction is the worst of those,
+    because ``_compaction_inflight[session_id]`` is set at the top of the
+    task body and cleared only in its ``finally``: a task killed in the
+    middle leaves the flag True, and that session never compacts again for
+    the life of the process.
+
+    Preferred path: hand the coroutine to the brain's own loop. Fallback,
+    when there is no live loop to hand it to: still use a private loop,
+    but drain the orchestrator's tracked background tasks on it before
+    closing, so the work completes instead of being destroyed.
+    """
+    import asyncio as _aio
+
+    target = _cron_target_loop(owner)
+    if target is not None:
+        future = _aio.run_coroutine_threadsafe(coro, target)
+        try:
+            return future.result(timeout=CRON_TURN_TIMEOUT_S)
+        except TimeoutError:
+            future.cancel()
+            raise TimeoutError(
+                f"cron turn exceeded {CRON_TURN_TIMEOUT_S:.0f}s and was cancelled"
+            )
+
+    loop = _aio.new_event_loop()
+    try:
+        result = loop.run_until_complete(coro)
+        drain = getattr(owner, "drain_background_tasks", None)
+        if drain is not None:
+            try:
+                loop.run_until_complete(drain(timeout=CRON_DRAIN_TIMEOUT_S))
+            except Exception:
+                logger.warning(
+                    "cron turn background drain failed; some work scheduled by "
+                    "this routine may not have completed", exc_info=True,
+                )
+        return result
+    finally:
+        loop.close()
+
+
 def execute_routine_job(job):
     """Dispatch a fired CronService routine.
 
@@ -1029,9 +1117,20 @@ def execute_routine_job(job):
       4. ``prompt`` / ``action_text`` — run through the orchestrator.
       5. otherwise — log a no-op.
     """
-    import asyncio as _aio
     logger.info("Routine fired: id=%s type=%s desc=%s", job.id, job.job_type, job.description)
-    run_id = state.cron_service.record_run_start(job.id)
+    # Bookkeeping must not decide whether the routine runs. This is a raw
+    # sqlite3 INSERT + commit and it sat outside the try below, so one
+    # "database is locked" here propagated all the way out of the callback.
+    # A run we could not write a history row for is still a run worth doing;
+    # ``record_run_finish`` with a None id updates no rows and is harmless.
+    try:
+        run_id = state.cron_service.record_run_start(job.id)
+    except Exception:
+        logger.warning(
+            "Could not open a run record for routine %s; running it anyway",
+            job.id, exc_info=True,
+        )
+        run_id = None
     try:
         payload = job.payload or {}
         skill_id = payload.get("skill")
@@ -1205,7 +1304,6 @@ def execute_routine_job(job):
 
             skill = state.skill_registry.get_skill(skill_id)
             if skill:
-                loop = _aio.new_event_loop()
                 session_id = job.session_id or f"routine-{job.id}"
 
                 async def _dispatch_skill():
@@ -1221,10 +1319,9 @@ def execute_routine_job(job):
                         )
                     return result
 
-                try:
-                    result = loop.run_until_complete(_dispatch_skill())
-                finally:
-                    loop.close()
+                result = _run_cron_coroutine(
+                    _dispatch_skill(), owner=state.orchestrator,
+                )
                 state.cron_service.record_run_finish(
                     run_id, "success" if result.get("success") else "error",
                     result, result.get("error"),
@@ -1265,13 +1362,12 @@ def execute_routine_job(job):
                 # the turn context.
                 "auto_confirm": bool(payload.get("auto_confirm")),
             }
-            loop = _aio.new_event_loop()
-            try:
-                loop.run_until_complete(
-                    state.orchestrator.handle_command(session_id, prompt, context=cron_context)
-                )
-            finally:
-                loop.close()
+            _run_cron_coroutine(
+                state.orchestrator.handle_command(
+                    session_id, prompt, context=cron_context,
+                ),
+                owner=state.orchestrator,
+            )
             state.cron_service.record_run_finish(run_id, "success", {"prompt": prompt}, None)
             return
 

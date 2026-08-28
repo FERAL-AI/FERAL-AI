@@ -36,6 +36,7 @@ import math
 import re
 import sqlite3
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -167,13 +168,45 @@ _NO_SELF_MODEL_EVENT_TYPES = frozenset({
 # on the evidence rather than a round number.
 _CENTERED_SEMANTIC_FLOOR = 0.47
 
-# Used only when centring is not possible. Kept at the historical value so a
-# store too small to have a meaningful centre behaves exactly as before.
-_RAW_SEMANTIC_FLOOR = 0.25
+# Used only when centring is not possible, which in practice means a store
+# below _MIN_CHUNKS_FOR_CENTERING: every new install, and every demo.
+#
+# This was 0.25, "the historical value so a store too small to have a
+# meaningful centre behaves exactly as before". The historical behaviour was
+# that nothing was ever rejected, which is the defect this whole block exists
+# to describe, so preserving it on small stores preserved the bug for exactly
+# the users least able to notice it. Measured on a 30-episode store, the
+# nonsense query above came back with ten episodes.
+#
+# 0.25 could not be replaced by guesswork either, so the same method that
+# produced 0.47 was rerun on the corpus sizes this constant actually governs.
+# Five small corpora (12 to 42 documents, one of them deliberately homogeneous
+# where every document is about the same sailing trip), 22 queries whose
+# answer is in the corpus and 40 whose answer is not, scored with the default
+# fastembed provider:
+#
+#   corpus                     n    hit min   miss max
+#   house                     30      0.820      0.604
+#   house (truncated)         12      0.836      0.600
+#   work                      12      0.819      0.614
+#   sailing (homogeneous)     20      0.703      0.586
+#   house + work              42      0.819      0.614
+#
+# Hits bottom out at 0.703, misses top out at 0.614, and 0.66 is the midpoint
+# of that empty band. Note the homogeneous corpus: centring FAILS there (it
+# subtracts the one direction every document shares, dropping real hits to
+# 0.12-0.29, well under 0.47), which is why _MIN_CHUNKS_FOR_CENTERING is not
+# simply lowered instead. Raw cosine is the right tool below the minimum; the
+# number just had to be measured rather than inherited.
+#
+# Like 0.47, this is a property of the embedding model as much as of the data.
+# A provider swap should re-run the measurement.
+_RAW_SEMANTIC_FLOOR = 0.66
 
 # Below this many chunks the mean vector is dominated by whichever handful of
 # documents happens to exist, so centring would subtract noise. A new install
-# searching twenty memories keeps the old behaviour.
+# searching twenty memories uses _RAW_SEMANTIC_FLOOR instead, on both the
+# indexed and the numpy branch.
 _MIN_CHUNKS_FOR_CENTERING = 200
 
 # ── Corpus matrix cache ─────────────────────────────────────────────────────
@@ -199,6 +232,85 @@ _MIN_CHUNKS_FOR_CENTERING = 200
 # chunks fits; that is deliberate, since it is the largest corpus anyone has
 # reported.
 _CORPUS_CACHE_MAX_BYTES = 256 * 1024 * 1024
+
+
+# ── Centring primitives ─────────────────────────────────────────────────────
+#
+# The three steps of a centred scan, as free functions so the knowledge graph's
+# entity tier can run the SAME arithmetic against its own corpus centre rather
+# than reimplementing it. The entity embeddings live in ``entities.embedding``,
+# not in ``memory_chunks``, so they need a different centre; everything else
+# about the computation is identical, and a second copy of it is how the entity
+# tier ended up thresholding a raw cosine while the episode tier did not.
+#
+# MemoryStore's ``_centered_docs`` / ``_score_centered`` are thin wrappers over
+# these and keep the centroid bookkeeping that only the episode corpus needs.
+
+def unit_matrix(blobs, dim: int, min_live: int):
+    """Decode embedding BLOBs into a row-unit-normalised float32 matrix.
+
+    Returns ``(unit, live)`` where ``live`` marks the rows that had a
+    non-zero norm, or None when there are fewer than ``min_live`` usable
+    rows or the blobs are not ``dim`` floats wide.
+
+    Zero vectors are real: four chunks in the store where this was found are
+    all-zero from embedding failures. They must not drag the mean, and they
+    can never be a hit, so they are kept in place and scored -1 rather than
+    dropped, which would break the caller's positional zip.
+    """
+    if len(blobs) < min_live:
+        return None
+    mat = np.frombuffer(b"".join(blobs), dtype=np.float32)
+    mat = mat.reshape(len(blobs), -1)
+    if mat.shape[1] != dim:
+        return None
+
+    norms = np.linalg.norm(mat, axis=1)
+    live = norms > 0
+    if int(live.sum()) < min_live:
+        return None
+
+    unit = np.zeros_like(mat)
+    unit[live] = mat[live] / norms[live][:, None]
+    return unit, live
+
+
+def center_rows(unit, centroid):
+    """Subtract the corpus centre and re-normalise. Modifies ``unit``.
+
+    In place on purpose: ``unit - centroid`` allocated a second full matrix
+    (17.8 MB on the store where this was profiled) only to drop the first one
+    a line later. Same float32 arithmetic, same result, one allocation.
+    """
+    unit -= centroid
+    dn = np.linalg.norm(unit, axis=1)
+    dn[dn == 0] = 1.0
+    unit /= dn[:, None]
+    return unit
+
+
+def score_centered(docs, live, centroid, query_vec):
+    """Score a prepared centred matrix against one query. One mat-vec.
+
+    Returns scores comparable to :data:`_CENTERED_SEMANTIC_FLOOR`, or None
+    when the query itself cannot be centred, in which case the caller falls
+    back to raw cosine and :data:`_RAW_SEMANTIC_FLOOR`.
+    """
+    q = np.asarray(query_vec, dtype=np.float32).ravel()
+    if q.shape[0] != centroid.shape[0]:
+        return None
+    qn = np.linalg.norm(q)
+    if qn == 0:
+        return None
+    qc = (q / qn) - centroid
+    qcn = np.linalg.norm(qc)
+    if qcn == 0:
+        return None
+    qc /= qcn
+
+    scores = docs @ qc
+    scores[~live] = -1.0
+    return scores
 
 
 @dataclass
@@ -984,6 +1096,56 @@ class MemoryStore:
                     DELETE FROM episodes_fts WHERE rowid = old.rowid;
                 END
             """)
+            # ``notes`` and ``knowledge`` have had this since they were
+            # written; ``episodes`` never did, so any UPDATE of an episode's
+            # text left episodes_fts holding the OLD text. The sync path made
+            # it worse: ``INSERT OR REPLACE INTO episodes`` (memory/sync.py)
+            # deletes and reinserts, and SQLite does not fire delete triggers
+            # for a REPLACE-induced delete unless ``recursive_triggers`` is on,
+            # which it is not by default. Measured: three replaces of one
+            # episode id left episodes_fts with 5 rows, 3 of them orphans, so
+            # superseded episode text was retained in the index indefinitely,
+            # including text the decay hard-delete path deliberately purges.
+            # Reads happened to stay correct only because
+            # ``episode_search_hybrid`` inner-joins episodes_fts to episodes on
+            # rowid, so an orphan can never surface: an accident, not a design.
+            #
+            # ``CREATE TRIGGER IF NOT EXISTS`` inside _init_db, which runs on
+            # every open, is how notes/knowledge/wiki reach already-created
+            # stores. Existing databases pick this up on the next boot.
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS episodes_fts_update AFTER UPDATE ON episodes BEGIN
+                    DELETE FROM episodes_fts WHERE rowid = old.rowid;
+                    INSERT INTO episodes_fts(rowid, summary, detail)
+                    VALUES (new.rowid, new.summary, new.detail);
+                END
+            """)
+            # The trigger stops NEW orphans. Stores opened before it existed
+            # are already carrying old ones, and what they are carrying is
+            # text that was meant to be gone, so sweep them once at boot.
+            # Costs one anti-join over episodes_fts (single-digit ms on a
+            # 12k-row index) and is a no-op on a clean store.
+            try:
+                orphaned = conn.execute(
+                    "SELECT COUNT(*) FROM episodes_fts f WHERE NOT EXISTS "
+                    "(SELECT 1 FROM episodes e WHERE e.rowid = f.rowid)"
+                ).fetchone()[0]
+                if orphaned:
+                    conn.execute(
+                        "DELETE FROM episodes_fts WHERE rowid IN ("
+                        "  SELECT f.rowid FROM episodes_fts f WHERE NOT EXISTS "
+                        "  (SELECT 1 FROM episodes e WHERE e.rowid = f.rowid))"
+                    )
+                    logger.info(
+                        "Purged %d orphaned episodes_fts row(s) left by "
+                        "INSERT OR REPLACE before episodes_fts_update existed",
+                        orphaned,
+                    )
+            except sqlite3.DatabaseError as exc:
+                # Never fail boot over a cleanup: the orphans are invisible to
+                # reads (the search query inner-joins on rowid), so a store
+                # that cannot be swept is still correct, just untidy.
+                logger.warning("episodes_fts orphan sweep skipped: %s", exc)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_episodes_time ON episodes(created_at DESC)")
 
@@ -1331,6 +1493,11 @@ class MemoryStore:
     # Conversation Threads (persistent chat history)
     # ─────────────────────────────────────────────
 
+    # Most recent messages kept in a thread's stored blob. Was an inline
+    # ``messages[-500:]`` in one place; named because the atomic append
+    # path has to enforce the same ceiling from SQL.
+    CONVERSATION_MESSAGE_CAP = 500
+
     async def conversation_save(self, conversation_id: str, messages: list[dict], title: str = "") -> dict:
         """Save/update a conversation thread."""
         now = time.time()
@@ -1364,7 +1531,11 @@ class MemoryStore:
                     messages_json = excluded.messages_json,
                     message_count = excluded.message_count,
                     updated_at = excluded.updated_at
-            """, (conversation_id, title, preview, json.dumps(messages[-500:]), len(messages), now, now))
+            """, (
+                conversation_id, title, preview,
+                json.dumps(messages[-self.CONVERSATION_MESSAGE_CAP:]),
+                len(messages), now, now,
+            ))
             await conn.commit()
             # Report the title the row actually holds, not the one we
             # asked for. Returning the requested title would let the
@@ -1446,19 +1617,102 @@ class MemoryStore:
         reconnect. The ``source`` field carries the channel id
         (``voice_realtime_openai``, ``voice_realtime_gemini``) so the
         UI can render a small badge on voice threads.
+
+        ATOMICITY. This used to be ``conversation_get`` -> mutate the
+        list in Python -> ``conversation_save``: a read-modify-write
+        spanning two awaits with nothing serialising it. Two appends
+        that interleaved both read the same list, both appended one
+        message to their own copy, and the second write replaced the
+        first. Measured on a throwaway store: 20 concurrent appends,
+        1 message persisted, 19 lost. It was hard to trigger while the
+        only caller was one voice proxy, and became live the moment a
+        second surface touched the same row (the web client's autosave
+        does a whole-blob replace on ``voice:<sid>`` threads).
+
+        The append is now a single SQL statement. ``json_insert`` at
+        ``'$[#]'`` appends to the stored array inside the database, so
+        concurrency is resolved by SQLite's own write serialisation
+        rather than by a lock this process would have to own. That also
+        holds across event loops (the voice proxies each run on their
+        own) and across processes, which no in-process lock can do.
         """
-        existing = await self.conversation_get(conversation_id) or {}
-        messages = list(existing.get("messages", []) or [])
-        messages.append({
-            "id": f"m_{int(time.time() * 1000)}_{len(messages)}",
+        now = time.time()
+        entry = {
+            # Was ``m_<ms>_<len(messages)>``, which needed the list we
+            # are deliberately no longer reading. A random suffix is
+            # collision-free under concurrency, where the index was not.
+            "id": f"m_{int(now * 1000)}_{uuid.uuid4().hex[:8]}",
             "role": role,
             "content": content,
             "source": source,
-            "ts": time.time(),
-        })
-        return await self.conversation_save(
-            conversation_id, messages, title=title or existing.get("title", ""),
-        )
+            "ts": now,
+        }
+        entry_json = json.dumps(entry)
+        text = _message_text(content)
+        preview = text[:120]
+        # Title for a row that does not exist yet, mirroring
+        # ``conversation_save``'s derivation.
+        new_title = title or (text[:80] if role == "user" and text else "")
+        new_title = new_title or "New conversation"
+        explicit_title = title or ""
+
+        conn = await self._conn()
+        try:
+            await conn.execute(
+                f"""
+                INSERT INTO conversations
+                    (id, title, preview, messages_json, message_count,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, json_array(json(?)), 1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    -- A renamed thread keeps its title, exactly as the
+                    -- autosave path does. Otherwise an explicit title
+                    -- from the caller wins, and no title leaves the
+                    -- stored one alone.
+                    title = CASE
+                        WHEN conversations.title_custom = 1 THEN conversations.title
+                        WHEN ? <> '' THEN ?
+                        ELSE conversations.title END,
+                    -- The preview is the newest USER message, so an
+                    -- assistant turn must not overwrite it.
+                    preview = CASE WHEN ? = 'user' THEN ? ELSE conversations.preview END,
+                    messages_json = CASE
+                        WHEN json_array_length(conversations.messages_json) >= {self.CONVERSATION_MESSAGE_CAP}
+                        THEN json_insert(
+                            json_remove(conversations.messages_json, '$[0]'),
+                            '$[#]', json(?))
+                        ELSE json_insert(conversations.messages_json, '$[#]', json(?))
+                        END,
+                    message_count = conversations.message_count + 1,
+                    updated_at = ?
+                """,
+                (
+                    conversation_id, new_title, preview, entry_json, now, now,
+                    explicit_title, explicit_title,
+                    role, preview,
+                    entry_json, entry_json,
+                    now,
+                ),
+            )
+            await conn.commit()
+            async with conn.execute(
+                "SELECT title, title_custom, pinned, preview, message_count "
+                "FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ) as cur:
+                row = await cur.fetchone()
+        finally:
+            await self._release(conn)
+
+        return {
+            "id": conversation_id,
+            "title": row[0] if row else new_title,
+            "title_custom": bool(row[1]) if row else False,
+            "pinned": bool(row[2]) if row else False,
+            "preview": row[3] if row else preview,
+            "message_count": row[4] if row else 1,
+            "updated_at": now,
+        }
 
     # Hard ceiling on one page of conversation metadata. A caller asking
     # for more gets this; ``conversation_page`` reports the real total
@@ -1886,24 +2140,10 @@ class MemoryStore:
         # min_chunks is lowered by callers that already hold a centre and only
         # need a few rows scored against it, rather than deriving one.
         floor_n = _MIN_CHUNKS_FOR_CENTERING if min_chunks is None else min_chunks
-        if len(blobs) < floor_n:
+        built = unit_matrix(blobs, dim, floor_n)
+        if built is None:
             return None
-        mat = np.frombuffer(b"".join(blobs), dtype=np.float32)
-        mat = mat.reshape(len(blobs), -1)
-        if mat.shape[1] != dim:
-            return None
-
-        # Zero vectors are real: four of this store's chunks are all-zero
-        # from embedding failures. They must not drag the mean, and they
-        # can never be a hit, so they are scored -1 rather than dropped,
-        # which would break the caller's positional zip.
-        norms = np.linalg.norm(mat, axis=1)
-        live = norms > 0
-        if int(live.sum()) < floor_n:
-            return None
-
-        unit = np.zeros_like(mat)
-        unit[live] = mat[live] / norms[live][:, None]
+        unit, live = built
 
         centroid = self._centroid
         # Only the full-corpus call may define the centre. A caller that
@@ -1927,40 +2167,18 @@ class MemoryStore:
         elif centroid is None or centroid.shape[0] != unit.shape[1]:
             return None
 
-        # In place, so ``unit`` IS ``docs``. The old ``unit - centroid``
-        # allocated a second full matrix (17.8 MB on the reporter's store)
-        # only to drop the first one a line later. Same float32 arithmetic,
-        # same result, one allocation.
-        unit -= centroid
-        docs = unit
-        dn = np.linalg.norm(docs, axis=1)
-        dn[dn == 0] = 1.0
-        docs /= dn[:, None]
+        # In place, so ``unit`` IS ``docs``.
+        docs = center_rows(unit, centroid)
         return docs, live, centroid
 
     @staticmethod
     def _score_centered(docs, live, centroid, query_vec):
         """Score a prepared centred matrix against one query. One mat-vec.
 
-        Returns scores comparable to _CENTERED_SEMANTIC_FLOOR, or None when
-        the query itself cannot be centred, in which case the caller falls
-        back to raw cosine and the old floor.
+        Thin wrapper over :func:`score_centered`; kept as a method because
+        several call sites and tests reach it through the store.
         """
-        q = np.asarray(query_vec, dtype=np.float32).ravel()
-        if q.shape[0] != centroid.shape[0]:
-            return None
-        qn = np.linalg.norm(q)
-        if qn == 0:
-            return None
-        qc = (q / qn) - centroid
-        qcn = np.linalg.norm(qc)
-        if qcn == 0:
-            return None
-        qc /= qcn
-
-        scores = docs @ qc
-        scores[~live] = -1.0
-        return scores
+        return score_centered(docs, live, centroid, query_vec)
 
     def _centered_similarity(self, query_vec, blobs, min_chunks=None):
         """Cosine against the corpus with its shared direction removed.
@@ -2145,16 +2363,37 @@ class MemoryStore:
         self._centroid_fingerprint = fingerprint
         return True
 
-    async def _centered_filter(self, conn, query_vec, chunk_ids):
-        """Centered scores for specific chunk ids, keyed by id.
+    async def _centered_filter(self, conn, query_vec, hits):
+        """Relevance scores for the chunk ids the index returned, keyed by id.
 
-        The sqlite-vec index ranks by raw cosine, which is fine because the
-        shared component is near-constant so it barely perturbs the order.
-        What raw cosine cannot do is answer "is this good enough to return",
-        so the returned handful is re-scored here against the corpus centre.
+        ``hits`` is the index's own ``[(chunk_id, score)]``. Ids that do not
+        clear the floor are absent from the result, which is how the caller
+        drops them.
+
+        The index picks the candidates; it never decides whether they are
+        good enough to return. Its ranking is usable, but its score is not a
+        cosine: ``vec_chunks`` is created without ``distance_metric=cosine``,
+        so vec0 answers with an L2 distance and ``search_cosine`` reports
+        ``1 - L2``. On unit vectors that is monotone in cosine, so ORDER is
+        right and MAGNITUDE is not (a true cosine of 0.84 arrives as 0.44),
+        which is why every score used for a threshold here is recomputed
+        from the stored embeddings.
+
+        Every path out of here applies SOME floor. It used to return
+        ``{cid: 1.0 for cid in chunk_ids}`` whenever centring was
+        unavailable, which is not a fallback: it is no floor at all, one
+        weaker than the raw floor the numpy branch falls back to, and it also
+        overwrote the real similarity with the constant 1.0 so the vector
+        leg's ordering collapsed into a tie. Below
+        _MIN_CHUNKS_FOR_CENTERING (every new install) that made "nothing
+        matches" unrepresentable: measured on a 30-episode store, the query
+        "asdfgh zxcvbn qwerty" returned ten episodes at the maximum possible
+        score.
         """
-        if not chunk_ids:
+        if not hits:
             return {}
+        chunk_ids = [cid for cid, _ in hits]
+
         try:
             # The centre is refreshed only when the corpus has actually
             # changed. This used to re-read every embedding in the store and
@@ -2172,23 +2411,41 @@ class MemoryStore:
             ) as cur:
                 rows = await cur.fetchall()
         except Exception as exc:
-            logger.warning("Centered re-scoring failed, keeping raw hits: %s", exc)
-            return {cid: 1.0 for cid in chunk_ids}
+            # The embeddings could not be read, so nothing can be scored
+            # here. Keeping the index's own ordering is the only option
+            # left; it is a real degradation and is logged as one.
+            logger.warning(
+                "Centered re-scoring failed, returning the index hits "
+                "unfiltered: %s", exc,
+            )
+            return {cid: float(sim) for cid, sim in hits}
 
-        if not centred:
-            return {cid: 1.0 for cid in chunk_ids}
+        rows = [r for r in rows if r["embedding"] is not None]
+        if not rows:
+            return {}
 
-        ids = [r["id"] for r in rows]
-        # Score only the handful the index returned against that centre.
-        scores = self._centered_similarity(
-            query_vec, [r["embedding"] for r in rows], min_chunks=1,
-        )
-        if scores is None:
-            return {cid: 1.0 for cid in chunk_ids}
+        if centred:
+            # Score only the handful the index returned against that centre.
+            scores = self._centered_similarity(
+                query_vec, [r["embedding"] for r in rows], min_chunks=1,
+            )
+            if scores is not None:
+                return {
+                    r["id"]: float(s)
+                    for r, s in zip(rows, scores)
+                    if float(s) > _CENTERED_SEMANTIC_FLOOR
+                }
+
+        # No usable centre (corpus below _MIN_CHUNKS_FOR_CENTERING) or a
+        # query that cannot be centred. Real cosine against the stored
+        # vectors and the raw floor, which is exactly what the numpy branch
+        # does in the same situation. The index's own score is not used: see
+        # the note above on what it actually measures.
+        sims = cosine_similarity_bulk(query_vec, [r["embedding"] for r in rows])
         return {
-            cid: float(s)
-            for cid, s in zip(ids, scores)
-            if float(s) > _CENTERED_SEMANTIC_FLOOR
+            r["id"]: float(s)
+            for r, s in zip(rows, sims)
+            if float(s) > _RAW_SEMANTIC_FLOOR
         }
 
     async def episode_search_hybrid(
@@ -2272,9 +2529,7 @@ class MemoryStore:
                     # Rank order from the index is usable, but its raw cosines
                     # cannot be thresholded (see _relevance_floor). Re-score
                     # the returned handful against the corpus centre.
-                    keep = await self._centered_filter(
-                        conn, query_vec, [cid for cid, _ in hits],
-                    )
+                    keep = await self._centered_filter(conn, query_vec, hits)
                     for chunk_id, sim in hits:
                         if chunk_id not in keep:
                             continue

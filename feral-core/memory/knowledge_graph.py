@@ -35,6 +35,19 @@ from memory.embeddings import (
     vec_to_blob,
     cosine_similarity_bulk,
 )
+# The entity tier's relevance floor is the same machinery as the episode
+# tier's, run against an entity-specific centre. Importing rather than
+# reimplementing is the point: a second copy of this arithmetic is how the
+# entity tier ended up thresholding a raw cosine long after the episode tier
+# stopped. ``memory.store`` imports this module lazily (inside
+# ``_init_knowledge_graph``), so this direction does not close a cycle.
+from memory.store import (
+    _CENTERED_SEMANTIC_FLOOR,
+    _MIN_CHUNKS_FOR_CENTERING,
+    center_rows,
+    score_centered,
+    unit_matrix,
+)
 
 logger = logging.getLogger("feral.memory.kg")
 
@@ -54,6 +67,19 @@ _NO_FIRST_PERSON_HEURISTIC_SOURCES = frozenset({
 
 ENTITY_MERGE_THRESHOLD = 0.85
 ENTITY_CANDIDATE_THRESHOLD = 0.70
+
+#: Raw-cosine floor for the entity vector leg, used ONLY when the entity
+#: table is below :data:`_MIN_CHUNKS_FOR_CENTERING` and therefore has no
+#: trustworthy centre. Above that, entity hits are centred and judged
+#: against :data:`_CENTERED_SEMANTIC_FLOOR` instead.
+#:
+#: This number used to be the only gate on this leg, hardcoded at both call
+#: sites. In an anisotropic embedding space a raw cosine cannot separate a
+#: hit from a miss at any threshold (see the block comment on
+#: _CENTERED_SEMANTIC_FLOOR in memory/store.py for the measurements), which
+#: is why the episode tier was given corpus centring; the entity tier was
+#: not, and kept returning entities for queries with no answer in the graph.
+_RAW_ENTITY_FLOOR = 0.3
 
 
 def _stable_kg_id(*parts: str) -> str:
@@ -105,6 +131,17 @@ class KnowledgeGraph:
         # _vector_leg_error and in /internal/memory/stats. Same reasoning,
         # and the same shape, as embeddings._REPORTED_DIM_MISMATCHES.
         self._logged_leg_errors: set[str] = set()
+        # Corpus centre for the ENTITY embeddings, and the fingerprint of the
+        # entity table it was derived from. See _entity_centroid_vector: the
+        # episode centroid lives on MemoryStore and is computed over
+        # memory_chunks, which is a different population, so the entity tier
+        # cannot borrow it.
+        self._entity_centroid = None
+        self._entity_centroid_n = 0
+        self._entity_centroid_fingerprint: Optional[tuple] = None
+        # Bumped whenever the fingerprint cannot be read, so a failed read can
+        # never compare equal to a cached one and serve a stale centre.
+        self._entity_centroid_epoch = 0
         self._init_schema()
 
     @property
@@ -448,8 +485,14 @@ class KnowledgeGraph:
         evidence: str = "",
         source_type: str = "thing",
         target_type: str = "thing",
+        source_origin: str = "conversation",
     ) -> dict:
-        """Add a relation between two entities (creating them if needed)."""
+        """Add a relation between two entities (creating them if needed).
+
+        ``source_origin`` records how the triple was obtained. It exists so
+        ``_heuristic_extract`` can route through here without losing the
+        'heuristic' provenance its own INSERT used to write.
+        """
         source = await self.add_entity(source_name, source_type)
         target = await self.add_entity(target_name, target_type)
 
@@ -499,7 +542,7 @@ class KnowledgeGraph:
                     """INSERT INTO relations
                        (id, source_id, relation_type, target_id, confidence, evidence_text, source_origin, hlc_string, created_at, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (rid, source["id"], relation_type, target["id"], confidence, evidence[:1000], "conversation", hlc, now, now),
+                    (rid, source["id"], relation_type, target["id"], confidence, evidence[:1000], source_origin, hlc, now, now),
                 )
 
             await conn.commit()
@@ -585,6 +628,110 @@ class KnowledgeGraph:
             }
             for r in rows
         ]
+
+    async def _entity_corpus_fingerprint(self, conn) -> tuple:
+        """Cheap change detector for the entity embedding corpus.
+
+        Same contract as ``MemoryStore._corpus_fingerprint``: differs
+        whenever the corpus may have moved, stable while it has not. The
+        NOT NULL predicate is deliberately left off so the count is an
+        index-only read; it is used to detect change, never as the number
+        of usable vectors.
+        """
+        try:
+            async with conn.execute(
+                "SELECT COUNT(*), MAX(rowid) FROM entities"
+            ) as cur:
+                row = await cur.fetchone()
+            return (int(row[0] or 0), int(row[1] or 0))
+        except Exception as exc:
+            logger.debug("Entity corpus fingerprint unavailable: %s", exc)
+            self._entity_centroid_epoch += 1
+            return (-1, -self._entity_centroid_epoch)
+
+    async def _entity_centroid_vector(self, conn):
+        """The mean of the unit-normalised entity embeddings, or None when
+        the entity table is too small for a mean to mean anything.
+
+        This is the entity tier's half of the fix described at length on
+        ``MemoryStore._CENTERED_SEMANTIC_FLOOR``. The episode tier was
+        given corpus centring because a raw cosine floor cannot separate a
+        hit from a miss in an anisotropic embedding space; the entity tier
+        kept a hardcoded raw ``> 0.3`` and so kept the defect. Measured
+        before this existed: "asdfgh zxcvbn qwerty" returned eight
+        entities scoring 0.29-0.42, including a note reading "the wifi
+        password is stored in 1password", while the episode, note and
+        knowledge tiers all correctly returned zero. That leaked into
+        ``search_all`` and into the LLM context builder.
+
+        The centre is entity-specific: entity embeddings live in
+        ``entities.embedding``, not in ``memory_chunks``, so the episode
+        centroid is the wrong vector to subtract.
+        """
+        fingerprint = await self._entity_corpus_fingerprint(conn)
+        if self._entity_centroid is not None:
+            if self._entity_centroid_fingerprint == fingerprint:
+                return self._entity_centroid
+            # Adding one entity moves the fingerprint but not the mean, and
+            # rebuilding would re-read every embedding in the table on the
+            # next query. Same 5 percent tolerance MemoryStore._centered_docs
+            # uses on the episode corpus, for the same reason.
+            n = self._entity_centroid_n
+            if abs(fingerprint[0] - n) <= max(50, n * 0.05):
+                return self._entity_centroid
+        if 0 <= fingerprint[0] < _MIN_CHUNKS_FOR_CENTERING:
+            # Cannot possibly clear the centring floor. The count is taken
+            # without the NOT NULL predicate so it is an upper bound on the
+            # number of usable vectors; skip the fetch entirely.
+            self._entity_centroid = None
+            self._entity_centroid_fingerprint = fingerprint
+            return None
+
+        async with conn.execute(
+            "SELECT embedding FROM entities WHERE embedding IS NOT NULL"
+        ) as cur:
+            blobs = [r["embedding"] for r in await cur.fetchall()]
+        if not blobs:
+            self._entity_centroid = None
+            self._entity_centroid_fingerprint = fingerprint
+            return None
+        try:
+            built = unit_matrix(
+                blobs, len(blobs[0]) // 4, _MIN_CHUNKS_FOR_CENTERING,
+            )
+        except Exception as exc:
+            # A broken relevance floor must not take out entity search.
+            logger.warning("Entity centring unavailable, using raw: %s", exc)
+            built = None
+        if built is None:
+            self._entity_centroid = None
+            self._entity_centroid_fingerprint = fingerprint
+            return None
+        unit, live = built
+        centroid = unit[live].mean(axis=0)
+        self._entity_centroid = centroid
+        self._entity_centroid_n = fingerprint[0]
+        self._entity_centroid_fingerprint = fingerprint
+        return centroid
+
+    def _centered_entity_scores(self, query_vec, blobs, centroid):
+        """Centred scores for a handful of entity embeddings, or None.
+
+        Same arithmetic as the episode path, against the entity centre.
+        """
+        try:
+            q = np.asarray(query_vec, dtype=np.float32).ravel()
+            built = unit_matrix(blobs, int(q.shape[0]), 1)
+            if built is None:
+                return None
+            unit, live = built
+            if centroid.shape[0] != unit.shape[1]:
+                return None
+            docs = center_rows(unit, centroid)
+            return score_centered(docs, live, centroid, query_vec)
+        except Exception as exc:
+            logger.warning("Entity centred scoring failed, using raw: %s", exc)
+            return None
 
     async def _vec_search_candidates(
         self, query_vec, limit: int
@@ -676,6 +823,49 @@ class KnowledgeGraph:
             await conn.close()
         return results
 
+    def _score_entity_rows(self, query_vec, rows, centroid):
+        """Relevance scores for candidate entity rows, keyed by entity id.
+
+        Entities that do not clear the floor are absent from the result,
+        which is how both callers drop them.
+
+        Centred against the entity corpus centre when there is one, and only
+        then thresholded at :data:`_CENTERED_SEMANTIC_FLOOR`. Below
+        :data:`_MIN_CHUNKS_FOR_CENTERING` there is no trustworthy centre, so
+        the raw cosine and the historical 0.3 stand: that is a weak floor,
+        but it is the one this tier has always had on small graphs and
+        changing it is a separate question from the anisotropy defect.
+
+        Both scores are computed here from ``entities.embedding`` rather than
+        taken from the index. ``vec_entities`` is created without
+        ``distance_metric=cosine``, so vec0 answers with an L2 distance and
+        ``_vec_search_candidates`` reports ``1 - L2``: monotone in cosine on
+        unit vectors, so the ORDER is right, but a true cosine of 0.84
+        arrives as 0.44, and the indexed branch was comparing that against a
+        threshold meant for cosines. Same candidates, same ranking, honest
+        numbers.
+        """
+        usable = [r for r in rows if r["embedding"] is not None]
+        if not usable:
+            return {}
+        blobs = [r["embedding"] for r in usable]
+
+        if centroid is not None:
+            scores = self._centered_entity_scores(query_vec, blobs, centroid)
+            if scores is not None:
+                return {
+                    r["id"]: float(s)
+                    for r, s in zip(usable, scores)
+                    if float(s) > _CENTERED_SEMANTIC_FLOOR
+                }
+
+        sims = cosine_similarity_bulk(query_vec, blobs)
+        return {
+            r["id"]: float(s)
+            for r, s in zip(usable, sims)
+            if float(s) > _RAW_ENTITY_FLOOR
+        }
+
     async def search_entities(self, query: str, limit: int = 10) -> list[dict]:
         """Hybrid FTS + embedding search for entities.
 
@@ -708,35 +898,52 @@ class KnowledgeGraph:
                     (match_expr, limit * 2),
                 ) as cur:
                     rows = await cur.fetchall()
-                for r in rows:
+                # The query is ``ORDER BY rank``, so row order is already
+                # the BM25 ordering, best first. Record the POSITION and
+                # never the score. FTS5's ``rank`` is BM25: negative, and
+                # more negative means a better match, so the old
+                # ``1.0 / (1.0 + abs(rank))`` folded the sign away and
+                # mapped the best match to the smallest score, reversing
+                # the ordering exactly. This is verbatim the defect
+                # store.py records having already found and fixed for
+                # episodes; position carries the sign for us.
+                for pos, r in enumerate(rows, start=1):
                     fts_results[r["id"]] = {
                         "id": r["id"], "name": r["name"], "type": r["entity_type"],
                         "mentions": r["mention_count"],
-                        "fts_score": 1.0 / (1.0 + abs(r["rank"])),
+                        "fts_score": 1.0 / (1.0 + pos),
                     }
             except Exception as exc:
                 logger.debug("entity FTS leg failed for %r: %s", query, exc)
 
+            centroid = await self._entity_centroid_vector(conn)
+
             if indexed_hits:
-                # Hydrate the indexed hits with entity metadata.
+                # Hydrate the indexed hits with entity metadata. The
+                # embedding comes with them because the index picks the
+                # candidates but must not decide whether they are good
+                # enough to return: the handful it found is re-scored
+                # against the entity corpus centre below.
                 hit_ids = list(indexed_hits.keys())
                 placeholders = ",".join("?" * len(hit_ids))
                 async with conn.execute(
-                    f"SELECT id, name, entity_type, mention_count "
+                    f"SELECT id, name, entity_type, mention_count, embedding "
                     f"FROM entities WHERE id IN ({placeholders})",
                     hit_ids,
                 ) as cur:
                     indexed_rows = await cur.fetchall()
+
+                scored = self._score_entity_rows(query_vec, indexed_rows, centroid)
                 vec_results = {
                     r["id"]: {
                         "id": r["id"],
                         "name": r["name"],
                         "type": r["entity_type"],
                         "mentions": r["mention_count"],
-                        "vec_score": indexed_hits[r["id"]],
+                        "vec_score": scored[r["id"]],
                     }
                     for r in indexed_rows
-                    if indexed_hits.get(r["id"], 0.0) > 0.3
+                    if r["id"] in scored
                 }
                 # Indexed path resolved — skip the full-table scan
                 # entirely.
@@ -767,9 +974,7 @@ class KnowledgeGraph:
         # numbers (286ms -> 23ms at 100k rows).
         vec_results = {}
         try:
-            sims = cosine_similarity_bulk(
-                query_vec, [e["embedding"] for e in all_entities]
-            )
+            scored = self._score_entity_rows(query_vec, all_entities, centroid)
         except EmbeddingDimensionMismatch as exc:
             # This leg is dead until the store is migrated, and it will
             # fail identically on every subsequent call, so retrying or
@@ -800,14 +1005,13 @@ class KnowledgeGraph:
                 "reembed check`), then restart the brain.",
                 exc,
             )
-            sims = []
-        for e, sim in zip(all_entities, sims):
-            sim = float(sim)
-            if sim > 0.3:
+            scored = {}
+        for e in all_entities:
+            if e["id"] in scored:
                 vec_results[e["id"]] = {
                     "id": e["id"], "name": e["name"], "type": e["entity_type"],
                     "mentions": e["mention_count"],
-                    "vec_score": sim,
+                    "vec_score": scored[e["id"]],
                 }
 
         merged = {}
@@ -976,7 +1180,19 @@ class KnowledgeGraph:
         return stored
 
     async def _heuristic_extract(self, text: str) -> list[dict]:
-        """Pattern-based extraction when LLM is unavailable. Async-native."""
+        """Pattern-based extraction when LLM is unavailable. Async-native.
+
+        Writes through :meth:`add_relation` rather than INSERTing directly.
+        The direct INSERT used a fresh ``uuid4()`` and had no existence
+        check, while ``add_relation`` dedups on
+        ``(source_id, relation_type, target_id)``, derives a stable id from
+        the triple so two brains converge, and blends confidence on a
+        repeat. Measured before this change: three extractions of the same
+        sentence produced three rows per predicate. Entities deduped fine
+        (this loop did check for an existing name), relations did not, and
+        this path runs whenever the LLM is unavailable OR its JSON fails to
+        parse, so a degraded local model grew the relations table linearly.
+        """
         import re
         patterns = [
             (r"(?:my name is|i am|i'm)\s+(\w+)", "user", "is_named", "person"),
@@ -987,40 +1203,35 @@ class KnowledgeGraph:
             (r"i (?:study|studied) (?:at|in)\s+(.+?)(?:\.|,|$)", "user", "studied_at", "organization"),
         ]
         results = []
-        now = time.time()
-        conn = await self._conn()
-        try:
-            for pattern, subject, predicate, obj_type in patterns:
-                match = re.search(pattern, text, re.IGNORECASE)
-                if match:
-                    obj = match.group(1).strip()
-                    if not obj or len(obj) < 2:
-                        continue
-                    for ename, etype in [(subject, "person"), (obj, obj_type)]:
-                        async with conn.execute(
-                            "SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (ename,)
-                        ) as cur:
-                            existing = await cur.fetchone()
-                        if not existing:
-                            eid = str(uuid4())[:12]
-                            await conn.execute(
-                                "INSERT INTO entities (id, name, entity_type, metadata, created_at, updated_at) VALUES (?, ?, ?, '{}', ?, ?)",
-                                (eid, ename, etype, now, now),
-                            )
-                    async with conn.execute("SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (subject,)) as cur:
-                        src = await cur.fetchone()
-                    async with conn.execute("SELECT id FROM entities WHERE name = ? COLLATE NOCASE", (obj,)) as cur:
-                        tgt = await cur.fetchone()
-                    if src and tgt:
-                        rid = str(uuid4())[:12]
-                        await conn.execute(
-                            "INSERT INTO relations (id, source_id, relation_type, target_id, confidence, evidence_text, source_origin, created_at, updated_at) VALUES (?, ?, ?, ?, 0.8, ?, 'heuristic', ?, ?)",
-                            (rid, src["id"], predicate, tgt["id"], text[:200], now, now),
-                        )
-                    results.append({"source": subject, "relation": predicate, "target": obj})
-            await conn.commit()
-        finally:
-            await self._release(conn)
+        for pattern, subject, predicate, obj_type in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if not match:
+                continue
+            obj = match.group(1).strip()
+            if not obj or len(obj) < 2:
+                continue
+            try:
+                rel = await self.add_relation(
+                    source_name=subject,
+                    relation_type=predicate,
+                    target_name=obj,
+                    confidence=0.8,
+                    evidence=text[:200],
+                    source_type="person",
+                    target_type=obj_type,
+                    source_origin="heuristic",
+                )
+            except Exception as exc:
+                # One unstorable triple must not lose the others. Logged,
+                # never swallowed: a heuristic extraction that silently
+                # stored nothing is indistinguishable from text with no
+                # facts in it.
+                logger.warning(
+                    "heuristic extraction could not store (%s)-[%s]->(%s): %s",
+                    subject, predicate, obj, exc,
+                )
+                continue
+            results.append(rel)
         return results
 
     def stats(self) -> dict:
