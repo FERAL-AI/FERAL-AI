@@ -43,6 +43,12 @@ from uuid import uuid4
 
 import aiosqlite
 
+# B4 — the one place in the repo that knows how to bound a serialized
+# payload without breaking it. ``skills.result_budget`` imports only the
+# stdlib at module scope (config/agents are reached lazily), so this is
+# not a cycle.
+from skills.result_budget import serialize_for_storage
+
 # aiosqlite spawns one non-daemon worker Thread per Connection. A
 # pooled MemoryStore holds N connections — if any caller forgets to
 # call aclose() (tests, signal-driven shutdowns, exceptions on the
@@ -3248,6 +3254,21 @@ class MemoryStore:
         self, session_id: str, skill_id: str, endpoint_id: str, args: dict,
         result_status: str, result_summary: str = "", latency_ms: float = 0,
     ) -> str:
+        """Write one ``execution_log`` row.
+
+        B4 — ``args`` used to be persisted as ``json.dumps(args)[:2000]``.
+        A byte slice of a serialized document does not shorten it, it
+        breaks it: the cut lands mid-token and ``json.loads`` refuses the
+        whole value with "Unterminated string". Since nothing else
+        persists a tool call's arguments (see
+        ``memory/execution_audit``) and ``memory/retriever`` reads these
+        rows back into recall, every oversized call was being recorded as
+        an unreadable row rather than a clipped one.
+        ``serialize_for_storage`` shrinks the structure instead, so the
+        column always parses. It also carries ``default=str``, which the
+        raw ``json.dumps`` lacked: a non-serialisable value in the args
+        used to raise ``TypeError`` straight out of the audit write.
+        """
         eid = str(uuid4())[:12]
         now = time.time()
         conn = await self._conn()
@@ -3256,7 +3277,7 @@ class MemoryStore:
                 """INSERT INTO execution_log
                    (id, session_id, skill_id, endpoint_id, args, result_status, result_summary, latency_ms, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (eid, session_id, skill_id, endpoint_id, json.dumps(args)[:2000],
+                (eid, session_id, skill_id, endpoint_id, serialize_for_storage(args),
                  result_status, result_summary[:500], latency_ms, now),
             )
             await conn.commit()

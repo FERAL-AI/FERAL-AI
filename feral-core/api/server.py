@@ -1629,6 +1629,27 @@ async def shutdown_event():
         except Exception as exc:
             logger.warning("Shutdown: %s stop failed: %s", bridge_name, exc)
 
+    # (a.2b) B9 — force the primary thread to disk.
+    #
+    # ``BrainState.snapshot_primary_thread`` has documented since it was
+    # written that it is "called from the orchestrator after each
+    # successful turn, and on FastAPI shutdown ... force=True bypasses
+    # debounce - used on shutdown to guarantee the last turn lands".
+    # This handler never called it. The only force=True in the tree was
+    # on WebSocket disconnect, primary session only, so every surface
+    # with no WS attached (CLI, headless, channels, cron) and every
+    # SIGTERM / ``feral stop`` lost whatever the save debounce had
+    # swallowed.
+    #
+    # Ordering: after the producers are stopped, so nothing appends a
+    # turn behind the snapshot, and BEFORE (a.3) closes the MemoryStore,
+    # because ``snapshot_primary_thread`` reads ``memory.working_get``
+    # and would otherwise persist an empty working-memory half.
+    try:
+        state.snapshot_primary_thread(force=True)
+    except Exception as exc:
+        logger.warning("Shutdown: primary session snapshot failed: %s", exc)
+
     # (a.3) Close the MemoryStore so the embed queue's background
     # coroutine stops before the event loop starts tearing down.
     try:
