@@ -405,7 +405,7 @@ async def send_permission_request(orchestrator, session_id: str, path: str, oper
         "path": path,
         "operation": operation,
     }
-    await orchestrator.send(
+    delivered = await orchestrator.send(
         session_id,
         FeralMessage(
             session_id=session_id,
@@ -419,6 +419,19 @@ async def send_permission_request(orchestrator, session_id: str, path: str, oper
             },
         ),
     )
+    # The entry has to be registered before the send, because a fast
+    # client can answer before this coroutine resumes. But if the frame
+    # reached nobody, an answer can never arrive, and leaving the entry
+    # in place holds a grant open indefinitely for a question the
+    # operator was never shown. Withdraw it and fail closed: an
+    # unanswered permission request is a denied one.
+    if delivered is False:
+        orchestrator._pending_permission_requests.pop(req_id, None)
+        logger.warning(
+            "permission request for %s %s could not be delivered to session %s; "
+            "treating as denied",
+            operation, path, session_id,
+        )
 
 
 async def handle_permission_response(orchestrator, session_id: str, req_id: str, granted: bool, value=None) -> None:
