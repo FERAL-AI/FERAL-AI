@@ -22,6 +22,22 @@ importance-weighted reinforcement: rehearsed items decay slower, items
 the operator marked important decay slower, items left alone for a
 long time get an extra penalty on top of pure age.
 
+Two things about this formula surprise everybody who reads the config
+before reading the code, so they are stated here:
+
+* ``decay_factor`` is capped at 1.0 but a brand-new episode does not
+  start there. ``importance ** 0.5`` is a multiplier, so a fresh
+  default-importance (0.5) episode starts at ``sqrt(0.5) = 0.7071``.
+  Only ``importance = 1.0`` gives 1.0. The ``episodes.decay_factor``
+  column defaults to 1.0, so the first sweep after a write looks like a
+  30% drop and is not one.
+* ``retention_days`` is not how long a memory lasts. It is the grace
+  period between ``forgotten_at`` and the hard delete. What decides
+  when a memory stops being findable is where the curve crosses
+  ``forget_threshold``, which at the shipped defaults is 73.6 days, not
+  365. :func:`forget_horizon_days` computes it, ``start()`` logs it and
+  :meth:`MemoryDecayService.stats` reports it.
+
 Lifecycle:
 
 * :meth:`run_once` is the single-shot sweep — recompute every active
@@ -121,6 +137,17 @@ def compute_decay(
     deliberate: ``decay_rate`` is "fraction lost per hour of age",
     so ``decay_rate=0.001`` gives ≈ 0.9 retention after 100 hours of
     untouched age (matching the documented Ebbinghaus reference).
+
+    The returned ``decay_factor`` is retention strength in (0, 1], but
+    1.0 is reachable only at ``importance = 1.0``, because the
+    ``importance ** 0.5`` term is a multiplier and not a rate. A
+    brand-new episode at the default ``importance = 0.5`` scores
+    ``sqrt(0.5) = 0.7071``, NOT 1.0, and that is what the first sweep
+    writes over the column's 1.0 default. Anything reading
+    ``decay_factor`` as "fraction of this memory still intact" has to
+    read it relative to ``sqrt(importance)``, not to 1.0. See
+    :func:`forget_horizon_days` for where the curve crosses the
+    forget threshold.
     """
     age_hours = max(now - created_at, 0.0) / 3600.0
     # An episode never accessed since creation is still "as fresh as
@@ -136,6 +163,43 @@ def compute_decay(
 
     raw = base_decay * idle_penalty * importance_keep * (1.0 + access_boost)
     return min(max(raw, 0.0), 1.0)
+
+
+def forget_horizon_days(config: "DecayConfig", importance: float = 0.5) -> float:
+    """Age in days at which an untouched episode of *importance* falls
+    under ``config.forget_threshold`` and stops being visible.
+
+    This is the number an operator actually wants and the settings file
+    never carried. ``retention_days`` sits next to ``forget_threshold``
+    in ``settings.json`` and reads like the lifetime of a memory, but it
+    is the grace period BEFORE THE HARD DELETE, counted from
+    ``forgotten_at`` and not from ``created_at``. What decides when a
+    memory stops being findable is where the decay curve crosses the
+    threshold, and at the shipped defaults (``decay_rate=0.001``,
+    ``forget_threshold=0.05``, ``importance=0.5``) that is 73.6 days,
+    not 365. Full lifetime is therefore ~74 days visible, then ~365 days
+    recoverable through ``feral memory forgotten`` / ``recall``, then
+    gone.
+
+    Closed form for the never-accessed case, which is the one that
+    decides the horizon (``access_count = 0``, ``last_accessed_at``
+    unset so ``idle_hours == age_hours``)::
+
+        exp(-r*a) * exp(-r*a*0.5) * sqrt(imp) = threshold
+        a_hours = ln(sqrt(imp) / threshold) / (1.5 * r)
+
+    Returns ``inf`` when nothing ever crosses (``decay_rate <= 0`` or a
+    non-positive threshold) and ``0.0`` when the episode starts below
+    the threshold already.
+    """
+    rate = float(config.decay_rate)
+    threshold = float(config.forget_threshold)
+    if rate <= 0.0 or threshold <= 0.0:
+        return math.inf
+    keep = max(float(importance), 0.1) ** 0.5
+    if keep <= threshold:
+        return 0.0
+    return math.log(keep / threshold) / (1.5 * rate) / 24.0
 
 
 _FORGOTTEN_COLUMNS = (
@@ -234,10 +298,14 @@ class MemoryDecayService:
         self._stop = asyncio.Event()
         self._task = asyncio.create_task(self._loop(), name="memory-decay-sweep")
         logger.info(
-            "MemoryDecayService started: cadence=%.0fs, rate=%g, threshold=%g, retention=%g days",
+            "MemoryDecayService started: cadence=%.0fs, rate=%g, threshold=%g, "
+            "retention=%g days; a default-importance episode stops being "
+            "visible after %.1f days and is hard-deleted %g days after that",
             self.config.cadence_seconds,
             self.config.decay_rate,
             self.config.forget_threshold,
+            self.config.retention_days,
+            forget_horizon_days(self.config),
             self.config.retention_days,
         )
 
@@ -477,18 +545,57 @@ class MemoryDecayService:
         return [forgotten_row_to_dict(r) for r in rows]
 
     async def recall(self, episode_id: str) -> dict:
-        """Reverse a ``forget`` (clears ``forgotten_at`` and bumps
-        ``last_accessed_at`` so the freshly-recalled row decays slowly
-        again). Hard-deleted rows cannot be recalled — they're gone.
+        """Reverse a ``forget``: clear ``forgotten_at``, stamp
+        ``last_accessed_at`` and bump ``access_count`` so the rehearsal
+        and idle terms both work in the row's favour again.
+        Hard-deleted rows cannot be recalled, they are gone.
+
+        ``decay_factor`` is written from :func:`compute_decay` over the
+        post-recall state rather than being set to a flat 1.0. The flat
+        value was cosmetic: the sweep recomputes ``decay_factor`` purely
+        from (age, idle, access_count, importance) and overwrote it
+        within the hour, so a caller that read the row straight after a
+        recall saw 1.0 and the same row an hour later held, measured on
+        a 30-day-old episode, 0.368. Writing the value the sweep is
+        going to compute makes the read stable and the sweep idempotent
+        over a recall.
+
+        Returns ``refades``: True when the recomputed factor is already
+        under ``forget_threshold``, which means the next sweep will put
+        the row straight back into the forgotten set. Recall cannot
+        rescue an episode the formula considers gone, and silently
+        undoing the operator's action an hour later is worse than
+        saying so.
         """
         now = time.time()
         conn = await self.store._conn()
         try:
+            async with conn.execute(
+                "SELECT id, created_at, access_count, importance FROM episodes "
+                "WHERE id = ?",
+                (episode_id,),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                return {
+                    "ok": False,
+                    "reason": "not_found_or_hard_deleted",
+                    "id": episode_id,
+                }
+            new_decay = compute_decay(
+                now=now,
+                created_at=float(row["created_at"] or 0.0),
+                last_accessed_at=now,
+                access_count=int(row["access_count"] or 0) + 1,
+                importance=float(row["importance"] or 0.5),
+                decay_rate=self.config.decay_rate,
+                access_boost_factor=self.config.access_boost_factor,
+            )
             await conn.execute(
                 "UPDATE episodes SET forgotten_at = NULL, last_accessed_at = ?, "
-                "access_count = access_count + 1, decay_factor = 1.0 "
+                "access_count = access_count + 1, decay_factor = ? "
                 "WHERE id = ?",
-                (now, episode_id),
+                (now, new_decay, episode_id),
             )
             await conn.commit()
             async with conn.execute(
@@ -499,11 +606,30 @@ class MemoryDecayService:
             await self.store._release(conn)
         if row is None:
             return {"ok": False, "reason": "not_found_or_hard_deleted", "id": episode_id}
-        return {"ok": True, "id": episode_id, "forgotten_at": row["forgotten_at"]}
+        refades = new_decay < self.config.forget_threshold
+        if refades:
+            logger.warning(
+                "recall(%s): decay_factor recomputes to %.4f, below "
+                "forget_threshold %g, so the next sweep will forget it again. "
+                "Raise the episode's importance or lower decay_rate to keep it.",
+                episode_id, new_decay, self.config.forget_threshold,
+            )
+        return {
+            "ok": True,
+            "id": episode_id,
+            "forgotten_at": row["forgotten_at"],
+            "decay_factor": new_decay,
+            "refades": refades,
+        }
 
     async def stats(self) -> dict:
         """Snapshot the active / forgotten counts + sweep cadence
-        config for the dashboard / metrics route."""
+        config for the dashboard / metrics route.
+
+        ``forget_horizon_days`` is reported alongside ``retention_days``
+        because ``retention_days`` on its own is misleading about how
+        long a memory stays findable: see :func:`forget_horizon_days`.
+        """
         conn = await self.store._conn()
         try:
             async with conn.execute(
@@ -520,6 +646,10 @@ class MemoryDecayService:
             "decay_rate": self.config.decay_rate,
             "forget_threshold": self.config.forget_threshold,
             "retention_days": self.config.retention_days,
+            # Derived, not configured: when an untouched default-importance
+            # episode drops under forget_threshold and leaves every default
+            # read path. retention_days starts counting AFTER this.
+            "forget_horizon_days": forget_horizon_days(self.config),
             "episodes_active": row["active"],
             "episodes_forgotten": row["forgotten"],
         }

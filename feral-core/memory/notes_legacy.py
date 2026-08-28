@@ -31,8 +31,12 @@ logger = logging.getLogger("feral.memory.notes_legacy")
 _NOTES_TEXT_WEIGHT = 0.3
 _NOTES_VECTOR_WEIGHT = 0.7
 
-# Below this cosine similarity a vector hit is noise — the same gate
-# episode_search_hybrid uses.
+# Below this cosine similarity a vector hit is noise, the same gate
+# episode_search_hybrid uses. It is a TRUE cosine, so it may only ever
+# be compared against a value recomputed from the stored embeddings.
+# The vector index's own score is not a cosine on the default
+# sqlite_vec backend (it is ``1 - L2``), and comparing this constant
+# against it turns 0.25 into an effective cosine floor of 0.71875.
 _NOTES_VEC_MIN_SIM = 0.25
 
 
@@ -166,21 +170,40 @@ async def _vec_results_for_notes(
             # path's ``limit * 3`` and gives the post-filter merge
             # enough headroom to still return ``limit`` notes when the
             # head of the global index is dominated by episodes.
-            hits = await store._vec_index.search_cosine(
+            hits = await store._vec_index.search_similarity(
                 query_vec, limit=max(1, limit * candidate_factor)
             )
             if not hits:
                 return vec_results
-            sim_by_cid = {cid: float(sim) for cid, sim in hits}
-            placeholders = ",".join("?" for _ in sim_by_cid)
+            candidate_ids = [cid for cid, _ in hits]
+            placeholders = ",".join("?" for _ in candidate_ids)
+            # ``embedding`` comes back with the row because the index's
+            # own score CANNOT be compared against _NOTES_VEC_MIN_SIM.
+            # The index picks the candidates; the floor is decided here,
+            # on a real cosine, exactly as the numpy branch below does
+            # and as MemoryStore._centered_filter does for episodes.
+            #
+            # This used to gate on the raw index score. The default
+            # sqlite_vec backend returns ``1 - L2`` (see
+            # ``memory/vector_index_backends/sqlite_vec.py``), and
+            # ``1 - L2 >= 0.25`` is ``cos >= 0.71875``, so the indexed
+            # path silently enforced a floor almost 3x the documented
+            # one: a note at cosine 0.5 was returned on a host without
+            # loadable SQLite extensions and dropped on a host with
+            # them. Whether a note is findable must not depend on how
+            # the interpreter was built.
             async with conn.execute(
-                f"SELECT id, source_id FROM memory_chunks "
-                f"WHERE source_table = 'notes' AND id IN ({placeholders})",
-                list(sim_by_cid.keys()),
+                f"SELECT id, source_id, embedding FROM memory_chunks "
+                f"WHERE source_table = 'notes' AND embedding IS NOT NULL "
+                f"AND id IN ({placeholders})",
+                candidate_ids,
             ) as cur:
                 rows = await cur.fetchall()
-            for r in rows:
-                sim = sim_by_cid.get(r["id"], 0.0)
+            if not rows:
+                return vec_results
+            sims = cosine_similarity_bulk(query_vec, [r["embedding"] for r in rows])
+            for r, sim in zip(rows, sims):
+                sim = float(sim)
                 if sim < _NOTES_VEC_MIN_SIM:
                     continue
                 nid = r["source_id"]

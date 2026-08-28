@@ -366,6 +366,22 @@ DEFAULT_SETTINGS = {
             # ``forget_threshold`` as forgotten. ``retention_days``
             # is the grace period before a forgotten episode (plus
             # its chunks + FTS rows) is hard-deleted from disk.
+            #
+            # ``retention_days`` is NOT how long a memory stays
+            # findable, and reading it that way is the mistake these
+            # defaults invite. Visibility ends when the decay curve
+            # crosses ``forget_threshold``, which at the values below
+            # is 73.6 days for a default-importance (0.5) episode and
+            # 83.2 days at importance 1.0. ``retention_days`` starts
+            # counting from ``forgotten_at``, i.e. AFTER that. So the
+            # shipped lifetime is roughly 74 days visible, then 365
+            # days recoverable via ``feral memory forgotten`` and
+            # ``POST /api/memory/recall/{id}``, then gone.
+            # ``memory.decay.forget_horizon_days`` computes the first
+            # number for any settings; the decay service logs it at
+            # start and reports it from ``stats()`` as
+            # ``forget_horizon_days``. Halving ``decay_rate`` roughly
+            # doubles the horizon.
             "enabled": True,
             "cadence_seconds": 3600,
             "decay_rate": 0.001,

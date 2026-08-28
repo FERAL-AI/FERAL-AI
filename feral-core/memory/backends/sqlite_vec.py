@@ -134,8 +134,16 @@ class SQLiteVecBackend:
     ) -> list[MemoryRecord]:
         q_arr = np.asarray(query_vec, dtype=np.float32)
 
-        # sqlite-vec fast path
-        hits = self._vec.search_cosine(q_arr, limit=max(limit * 2, limit + 5))
+        # sqlite-vec fast path.
+        #
+        # NOTE ON ``MemoryRecord.score``: this leg's score is
+        # ``1 - L2`` (the vec0 table has no ``distance_metric``, see
+        # ``memory/embeddings.VectorIndex.search_similarity``) while the
+        # numpy fallback below scores a true cosine. Both orderings are
+        # the same and nothing in this repo thresholds ``score``, but a
+        # consumer that does must not assume a cosine, and must not
+        # assume the two hosts agree.
+        hits = self._vec.search_similarity(q_arr, limit=max(limit * 2, limit + 5))
         if hits:
             return self._hydrate(hits, filter, limit)
 

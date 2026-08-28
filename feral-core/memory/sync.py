@@ -836,10 +836,27 @@ class SyncEngine:
             now = time.time()
             hlc = op.hlc
             if op.table == "notes":
+                # UPSERT, not INSERT OR REPLACE, for the same reason as
+                # ``episodes`` below. ``notes`` has always had its
+                # ``notes_fts_update`` AFTER UPDATE trigger, but REPLACE
+                # is a DELETE plus an INSERT and fires NEITHER the delete
+                # trigger (recursive_triggers is off by default) NOR the
+                # update trigger, so the trigger being present never
+                # helped: measured, 3 re-deliveries of one note id left
+                # notes at rows=1 / notes_fts=3, 2 of them orphans
+                # holding superseded note text.
                 await conn.execute(
-                    "INSERT OR REPLACE INTO notes "
+                    "INSERT INTO notes "
                     "(id, content, tags, importance, source, created_at, updated_at, hlc_string) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET "
+                    "content = excluded.content, "
+                    "tags = excluded.tags, "
+                    "importance = excluded.importance, "
+                    "source = excluded.source, "
+                    "created_at = excluded.created_at, "
+                    "updated_at = excluded.updated_at, "
+                    "hlc_string = excluded.hlc_string",
                     (
                         d.get("id", op.row_id), d.get("content", ""), d.get("tags", "[]"),
                         d.get("importance", "normal"), d.get("source", "sync"),
@@ -884,11 +901,24 @@ class SyncEngine:
                     ),
                 )
             elif op.table == "knowledge":
+                # UPSERT for the same reason as ``notes`` above: measured,
+                # 3 re-deliveries of one fact id left knowledge at
+                # rows=1 / knowledge_fts=3, 2 of them orphans holding the
+                # superseded object text.
                 await conn.execute(
-                    "INSERT OR REPLACE INTO knowledge "
+                    "INSERT INTO knowledge "
                     "(id, subject, predicate, object, confidence, source, "
                     "created_at, updated_at, hlc_string) "
-                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET "
+                    "subject = excluded.subject, "
+                    "predicate = excluded.predicate, "
+                    "object = excluded.object, "
+                    "confidence = excluded.confidence, "
+                    "source = excluded.source, "
+                    "created_at = excluded.created_at, "
+                    "updated_at = excluded.updated_at, "
+                    "hlc_string = excluded.hlc_string",
                     (
                         d.get("id", op.row_id), d.get("subject", ""),
                         d.get("predicate", ""), d.get("object", ""),

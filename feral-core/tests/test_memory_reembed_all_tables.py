@@ -49,7 +49,7 @@ class _NoOpVecIndex:
     backend_id = "noop"
     indexed = False
 
-    async def search_cosine(self, query_vec, limit=20):
+    async def search_similarity(self, query_vec, limit=20):
         return []
 
     def upsert(self, chunk_id, embedding):
