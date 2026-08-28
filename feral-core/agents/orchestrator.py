@@ -877,16 +877,23 @@ class Orchestrator:
         if self._consolidation_task is not None and not self._consolidation_task.done():
             return
         self._consolidation_stop = asyncio.Event()
+        # Closed over as a local, not read back off self each pass.
+        # The attribute is Optional and mypy cannot narrow it across a
+        # closure, correctly: something could reassign it mid-flight.
+        # Binding here also makes the loop respond to the event it was
+        # started with rather than whichever one happens to be on the
+        # instance later, which is the behaviour a restart wants.
+        stop = self._consolidation_stop
 
         async def _loop() -> None:
-            while not self._consolidation_stop.is_set():
+            while not stop.is_set():
                 cfg = self._compaction_cfg() or {}
                 cadence = float(
                     cfg.get("scheduler_cadence_seconds", self._DEFAULT_SCHEDULER_CADENCE)
                 )
                 try:
                     await asyncio.wait_for(
-                        self._consolidation_stop.wait(),
+                        stop.wait(),
                         timeout=max(0.01, cadence),
                     )
                     return  # stop was set
