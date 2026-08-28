@@ -165,7 +165,7 @@ def _extract_target(text: str, action_hint: str) -> tuple[Optional[str], list[st
 # ── Memory self-fill ─────────────────────────────────────────────────
 
 
-def _self_fill_from_memory(
+async def _self_fill_from_memory(
     *,
     text: str,
     action_hint: str,
@@ -180,7 +180,7 @@ def _self_fill_from_memory(
     if retriever is None:
         return None
     try:
-        result = retriever.retrieve(text, top_k=3)
+        result = await retriever.retrieve(text, top_k=3)
     except Exception:
         return None
     if not result.records:
@@ -201,7 +201,7 @@ def _self_fill_from_memory(
 # ── Public entry point ───────────────────────────────────────────────
 
 
-def gate_intent(text: str, *, retriever=None) -> IntentGateDecision:
+async def gate_intent(text: str, *, retriever=None) -> IntentGateDecision:
     """Single-shot deterministic gate.
 
     Args:
@@ -235,7 +235,7 @@ def gate_intent(text: str, *, retriever=None) -> IntentGateDecision:
     if needs_target and target is None:
         # Try to self-fill from memory before clarifying. If memory has
         # a single confident hit we proceed-with-fill; otherwise we ask.
-        fill = _self_fill_from_memory(
+        fill = await _self_fill_from_memory(
             text=text, action_hint=action_hint, missing="target", retriever=retriever,
         )
         if fill is not None:
@@ -251,7 +251,7 @@ def gate_intent(text: str, *, retriever=None) -> IntentGateDecision:
         verdict = IntentVerdict.ASK
         if retriever is not None:
             try:
-                hits = retriever.retrieve(text, top_k=3).top(3)
+                hits = (await retriever.retrieve(text, top_k=3)).top(3)
                 suggestions = [h.content[:120] for h in hits if h.content]
             except Exception:
                 suggestions = []
@@ -265,7 +265,7 @@ def gate_intent(text: str, *, retriever=None) -> IntentGateDecision:
         verdict = IntentVerdict.ASK
         if retriever is not None:
             try:
-                hits = retriever.retrieve(text, top_k=3).top(3)
+                hits = (await retriever.retrieve(text, top_k=3)).top(3)
                 suggestions = [h.content[:120] for h in hits if h.content]
             except Exception:
                 suggestions = []

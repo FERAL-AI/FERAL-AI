@@ -47,14 +47,15 @@ class _FakeMemory:
         return self._logs[:limit]
 
 
-def test_retriever_returns_notes_ranked_by_lexical_overlap():
+@pytest.mark.asyncio
+async def test_retriever_returns_notes_ranked_by_lexical_overlap():
     mem = _FakeMemory(notes=[
         {"id": "n-1", "content": "Buy groceries: milk and bread"},
         {"id": "n-2", "content": "Plan the Q4 product roadmap"},
         {"id": "n-3", "content": "Remember to call Mom about milk delivery"},
     ])
     retriever = MemoryRetriever(mem)
-    result = retriever.retrieve("milk", top_k=3)
+    result = await retriever.retrieve("milk", top_k=3)
     contents = [r.content for r in result.records]
     # The two notes mentioning milk must be ranked above the unrelated one.
     assert "Buy groceries: milk and bread" in contents[:2]
@@ -62,7 +63,8 @@ def test_retriever_returns_notes_ranked_by_lexical_overlap():
     assert "Plan the Q4 product roadmap" not in contents[:2]
 
 
-def test_retriever_skips_tiers_with_no_method():
+@pytest.mark.asyncio
+async def test_retriever_skips_tiers_with_no_method():
     """A MemoryStore stub that doesn't implement `episode_recent`
     must NOT crash the retriever — just skip the tier."""
     class _Minimal:
@@ -70,12 +72,13 @@ def test_retriever_skips_tiers_with_no_method():
             return [{"id": "n", "content": q}]
 
     retriever = MemoryRetriever(_Minimal())
-    result = retriever.retrieve("hello", top_k=3)
+    result = await retriever.retrieve("hello", top_k=3)
     assert any(r.tier == "notes" for r in result.records)
     # Other tiers absent; no exception raised.
 
 
-def test_retriever_records_skipped_tier_when_method_raises():
+@pytest.mark.asyncio
+async def test_retriever_records_skipped_tier_when_method_raises():
     class _Boom:
         def search(self, *a, **kw):
             return [{"id": "ok", "content": "hello world"}]
@@ -84,12 +87,13 @@ def test_retriever_records_skipped_tier_when_method_raises():
             raise RuntimeError("db locked")
 
     retriever = MemoryRetriever(_Boom())
-    result = retriever.retrieve("hello", top_k=3)
+    result = await retriever.retrieve("hello", top_k=3)
     assert "episodes" in result.skipped_tiers
     assert "db locked" in result.skipped_tiers["episodes"]
 
 
-def test_mmr_diversifies_near_duplicate_results():
+@pytest.mark.asyncio
+async def test_mmr_diversifies_near_duplicate_results():
     """With diversity_lambda=0.5, the top-k should not be filled with
     near-identical notes when more diverse hits exist."""
     mem = _FakeMemory(notes=[
@@ -99,32 +103,34 @@ def test_mmr_diversifies_near_duplicate_results():
         {"id": "d", "content": "milk delivery scheduled tomorrow morning early"},
     ])
     retriever = MemoryRetriever(mem, diversity_lambda=0.3)
-    result = retriever.retrieve("buy milk", top_k=2)
+    result = await retriever.retrieve("buy milk", top_k=2)
     contents = [r.content for r in result.records]
     # At least one of the top-2 should be the diverse hit ("delivery scheduled")
     # rather than two near-duplicates of "buy milk and bread".
     assert any("delivery" in c for c in contents)
 
 
-def test_retriever_deduplicates_same_record_from_two_paths():
+@pytest.mark.asyncio
+async def test_retriever_deduplicates_same_record_from_two_paths():
     """If episode_recent and notes return the same content, the
     retriever must keep only one with the higher base score."""
     same = {"id": "shared-1", "content": "hello world"}
     mem = _FakeMemory(notes=[same], episodes=[same])
     retriever = MemoryRetriever(mem)
-    result = retriever.retrieve("hello", top_k=5)
+    result = await retriever.retrieve("hello", top_k=5)
     # Single hit across both tiers — but they're different tiers
     # (notes vs episode) so both keys exist. The dedup is per-key.
     assert len([r for r in result.records if r.content == "hello world"]) == 2  # different tiers OK
 
 
-def test_retriever_records_carry_provenance():
+@pytest.mark.asyncio
+async def test_retriever_records_carry_provenance():
     mem = _FakeMemory(
         notes=[{"id": "n-1", "content": "alpha beta"}],
         knowledge=[{"id": "k-1", "subject": "alpha", "predicate": "is", "object": "letter"}],
     )
     retriever = MemoryRetriever(mem)
-    result = retriever.retrieve("alpha", top_k=5)
+    result = await retriever.retrieve("alpha", top_k=5)
     tiers = {r.tier for r in result.records}
     assert "notes" in tiers
     assert "knowledge" in tiers
@@ -134,18 +140,20 @@ def test_retriever_records_carry_provenance():
         assert r.raw  # original row preserved
 
 
-def test_empty_query_returns_no_records():
+@pytest.mark.asyncio
+async def test_empty_query_returns_no_records():
     retriever = MemoryRetriever(_FakeMemory(notes=[{"id": "n", "content": "x"}]))
-    result = retriever.retrieve("", top_k=5)
+    result = await retriever.retrieve("", top_k=5)
     assert result.records == []
 
 
-def test_top_helper_limits_output():
+@pytest.mark.asyncio
+async def test_top_helper_limits_output():
     mem = _FakeMemory(notes=[
         {"id": str(i), "content": f"alpha {i}"} for i in range(10)
     ])
     retriever = MemoryRetriever(mem)
-    result = retriever.retrieve("alpha", top_k=5)
+    result = await retriever.retrieve("alpha", top_k=5)
     assert len(result.records) <= 5
     assert len(result.top(3)) == 3
 
@@ -215,7 +223,8 @@ class _MemoryWithEmbedder:
         return self._episodes[:limit]
 
 
-def test_embedding_leg_blends_with_lexical_when_real_embedder_is_attached():
+@pytest.mark.asyncio
+async def test_embedding_leg_blends_with_lexical_when_real_embedder_is_attached():
     """A semantic-only match (no token overlap with the query) MUST be
     surfaced thanks to the cosine leg; the existing lexical match
     should still rank ahead because it scores in BOTH legs."""
@@ -228,13 +237,14 @@ def test_embedding_leg_blends_with_lexical_when_real_embedder_is_attached():
         ],
     )
     retriever = MemoryRetriever(mem)
-    result = retriever.retrieve("alpha", top_k=3)
+    result = await retriever.retrieve("alpha", top_k=3)
     ids = [r.record_id for r in result.records]
     # Both alpha-topic notes outrank the beta-topic noise.
     assert "noise" not in ids[:2], f"semantic noise leaked into top-2: {ids}"
 
 
-def test_embedding_leg_surfaces_semantic_only_match():
+@pytest.mark.asyncio
+async def test_embedding_leg_surfaces_semantic_only_match():
     """Note that has zero token overlap with the query but whose
     embedding aligns must clear the ranking floor through the vector
     contribution alone (0.7 * cosine ≥ 0.7 * 1.0 = 0.7)."""
@@ -248,14 +258,15 @@ def test_embedding_leg_surfaces_semantic_only_match():
         ],
     )
     retriever = MemoryRetriever(mem)
-    result = retriever.retrieve("alpha", top_k=3)
+    result = await retriever.retrieve("alpha", top_k=3)
     ids = [r.record_id for r in result.records]
     assert "vec_only" in ids
     # Must outrank the noise note.
     assert ids.index("vec_only") < (ids.index("lex_only") if "lex_only" in ids else 999)
 
 
-def test_retriever_degrades_to_lexical_only_with_hash_embedder():
+@pytest.mark.asyncio
+async def test_retriever_degrades_to_lexical_only_with_hash_embedder():
     """When the attached embedder is the deterministic-but-semantically-
     empty hash fallback, the embedding leg MUST be skipped end-to-end
     so we don't pollute the ranking with fake-cosine noise."""
@@ -268,7 +279,7 @@ def test_retriever_degrades_to_lexical_only_with_hash_embedder():
         ],
     )
     retriever = MemoryRetriever(mem)
-    result = retriever.retrieve("milk", top_k=3)
+    result = await retriever.retrieve("milk", top_k=3)
     ids = [r.record_id for r in result.records]
     assert "match" in ids
     assert "near" in ids
@@ -277,7 +288,8 @@ def test_retriever_degrades_to_lexical_only_with_hash_embedder():
     assert "miss" not in ids[:2]
 
 
-def test_retriever_degrades_to_lexical_only_with_no_embedder():
+@pytest.mark.asyncio
+async def test_retriever_degrades_to_lexical_only_with_no_embedder():
     """The pre-PR fake memory has no ``embedder`` attribute. The new
     embedding leg MUST gracefully skip in that case so existing call
     sites and tests keep their semantics: the lexical leg picks the
@@ -288,12 +300,13 @@ def test_retriever_degrades_to_lexical_only_with_no_embedder():
         {"id": "n-2", "content": "completely unrelated"},
     ])
     retriever = MemoryRetriever(mem)
-    result = retriever.retrieve("alpha", top_k=1)
+    result = await retriever.retrieve("alpha", top_k=1)
     assert result.records, "lexical-only retrieve returned nothing"
     assert result.records[0].record_id == "n-1"
 
 
-def test_retriever_degrades_when_embed_sync_raises():
+@pytest.mark.asyncio
+async def test_retriever_degrades_when_embed_sync_raises():
     """A transient embedder failure must not break the retrieve call —
     the lexical leg owns the ranking when the semantic leg drops."""
 
@@ -312,11 +325,12 @@ def test_retriever_degrades_when_embed_sync_raises():
         ],
     )
     retriever = MemoryRetriever(mem)
-    result = retriever.retrieve("alpha", top_k=1)
+    result = await retriever.retrieve("alpha", top_k=1)
     assert result.records and result.records[0].record_id == "n-1"
 
 
-def test_blended_score_outranks_lexical_only_when_semantic_aligns():
+@pytest.mark.asyncio
+async def test_blended_score_outranks_lexical_only_when_semantic_aligns():
     """Two notes with the same lexical Jaccard score: the one whose
     embedding aligns better with the query should rank higher because
     the vector leg is 0.7 of the blend."""
@@ -331,6 +345,6 @@ def test_blended_score_outranks_lexical_only_when_semantic_aligns():
         ],
     )
     retriever = MemoryRetriever(mem, diversity_lambda=1.0)  # disable MMR penalty
-    result = retriever.retrieve("alpha", top_k=2)
+    result = await retriever.retrieve("alpha", top_k=2)
     ids = [r.record_id for r in result.records]
     assert ids[0] == "aligned", f"semantic-aligned note should be #1: {ids}"

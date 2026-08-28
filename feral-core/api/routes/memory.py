@@ -795,7 +795,7 @@ async def knowledge_relationship(entity_a: str = "", entity_b: str = "", max_dep
         raise HTTPException(status_code=503, detail="Knowledge graph unavailable")
     try:
         from memory.enhanced_search import relationship_query
-        return relationship_query(kg, entity_a, entity_b, max_depth)
+        return await relationship_query(kg, entity_a, entity_b, max_depth)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -813,7 +813,7 @@ async def knowledge_visualize(entity: str = "", depth: int = 2, limit: int = 50)
         raise HTTPException(status_code=503, detail="Knowledge graph unavailable")
     try:
         from memory.enhanced_search import graph_visualization_data
-        return graph_visualization_data(kg, entity, max_depth=depth, limit=limit)
+        return await graph_visualization_data(kg, entity, max_depth=depth, limit=limit)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

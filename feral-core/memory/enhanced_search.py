@@ -11,11 +11,7 @@ Advanced retrieval features on top of the base MemoryStore:
 from __future__ import annotations
 import logging
 import math
-import re
 import time
-from typing import Optional
-
-import numpy as np
 
 logger = logging.getLogger("feral.memory.enhanced")
 
@@ -96,14 +92,21 @@ def hybrid_rerank(
     return scored
 
 
-def relationship_query(kg, entity_a: str, entity_b: str, max_depth: int = 4) -> dict:
+async def relationship_query(kg, entity_a: str, entity_b: str, max_depth: int = 4) -> dict:
     """Query the relationship between two entities in the knowledge graph.
 
     Returns paths connecting entity A to entity B, along with shared
     neighbors and relationship descriptions suitable for natural language.
+
+    Async because ``KnowledgeGraph.traverse`` is. This was a plain ``def``
+    calling it without awaiting, so the two comprehensions below iterated a
+    coroutine and raised ``TypeError: 'coroutine' object is not iterable``.
+    The route handler turned that into a 500, which is why multi-hop
+    traversal has never been reachable from any user-facing path even
+    though ``traverse`` itself is correct.
     """
-    paths_a = kg.traverse(entity_a, max_depth=max_depth)
-    paths_b = kg.traverse(entity_b, max_depth=max_depth)
+    paths_a = await kg.traverse(entity_a, max_depth=max_depth)
+    paths_b = await kg.traverse(entity_b, max_depth=max_depth)
 
     targets_a = {p["target"].lower() for p in paths_a}
     targets_b = {p["target"].lower() for p in paths_b}
@@ -144,13 +147,17 @@ def relationship_query(kg, entity_a: str, entity_b: str, max_depth: int = 4) -> 
     }
 
 
-def graph_visualization_data(kg, center_entity: str, max_depth: int = 2, limit: int = 50) -> dict:
+async def graph_visualization_data(kg, center_entity: str, max_depth: int = 2, limit: int = 50) -> dict:
     """Generate nodes/edges data for graph visualization in the web UI.
 
     Returns a structure compatible with common graph visualization libraries
     (D3.js, vis.js, cytoscape).
+
+    Async for the same reason as :func:`relationship_query`: the ``for p in
+    paths`` below iterated an un-awaited coroutine, so this endpoint has
+    only ever returned 500.
     """
-    paths = kg.traverse(center_entity, max_depth=max_depth, limit=limit)
+    paths = await kg.traverse(center_entity, max_depth=max_depth, limit=limit)
 
     nodes_map: dict[str, dict] = {}
     edges: list[dict] = []
