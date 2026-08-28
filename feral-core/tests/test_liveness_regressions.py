@@ -461,6 +461,9 @@ def _bare_orchestrator(compact_impl):
     orch.conversation_history = {}
     orch._turns_since_compaction = {}
     orch._compaction_inflight = {}
+    # F6: the deadline and idle clocks the trigger ladder reads.
+    orch._pending_since = {}
+    orch._session_last_turn_at = {}
     orch._session_locks = {}
     orch._background_tasks = set()
     orch._last_turn_at = 0.0

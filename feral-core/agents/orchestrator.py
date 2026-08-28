@@ -324,6 +324,17 @@ class Orchestrator:
         # gates against overlapping compactions on the same session.
         self._turns_since_compaction: dict[str, int] = {}
         self._compaction_inflight: dict[str, bool] = {}
+        # F6: the other two rungs of the consolidation ladder.
+        # ``_pending_since`` is when the OLDEST un-consolidated turn in
+        # this session arrived, which is what the hard deadline is
+        # measured against. ``_session_last_turn_at`` is the per-session
+        # idle clock: ``_last_turn_at`` above is process-wide and is
+        # read only for status reporting, so it cannot answer "is THIS
+        # session quiet".
+        self._pending_since: dict[str, float] = {}
+        self._session_last_turn_at: dict[str, float] = {}
+        self._consolidation_task: Optional[asyncio.Task] = None
+        self._consolidation_stop: Optional[asyncio.Event] = None
         # Audit-r11 — Bug 1 (double bubble on iOS): when the phone
         # ``/v1/node chat_request`` handler is about to send its own
         # synchronous ``chat_response`` we set
@@ -698,47 +709,242 @@ class Orchestrator:
             self._last_context_chars = 0
         return view
 
+    # ─────────────────────────────────────────────
+    # F6: the consolidation trigger ladder
+    # ─────────────────────────────────────────────
+    #
+    # Consolidate when the session goes QUIET, but also when the
+    # backlog crosses a soft bound, and ALWAYS by a hard deadline,
+    # whichever fires first.
+    #
+    # The deadline is not defensive padding, it is the load-bearing
+    # part. An idle-only trigger STARVES: a session that is never idle
+    # never consolidates, and the sessions that most need consolidating
+    # are exactly the busy ones. The W3C requestIdleCallback spec
+    # states this failure mode normatively and answers it by racing the
+    # idle callback against a timeout. The same ladder (free background
+    # work -> throttle -> forced inline) is what RocksDB's write
+    # stalls, Postgres autovacuum's freeze age, Linux writeback's
+    # dirty_expire_centisecs and Go's GC forced-cycle all implement.
+    #
+    # The two evaluation points are deliberate:
+    #   * backlog and deadline are evaluated ON EVERY TURN, in
+    #     ``_maybe_auto_compact``, so a busy session cannot starve even
+    #     if the background loop was never started.
+    #   * idle is evaluated by ``_consolidation_tick`` on a background
+    #     cadence, because by definition no turn arrives to trigger it.
+    # The tick re-checks the deadline too, so a session that went quiet
+    # just under the deadline is still covered.
+
+    _DEFAULT_IDLE_SECONDS = 90.0
+    _DEFAULT_MAX_PENDING_SECONDS = 900.0
+    _DEFAULT_MIN_TURNS = 4
+    _DEFAULT_SCHEDULER_CADENCE = 30.0
+
+    def _compaction_cfg(self) -> dict | None:
+        """The ``memory.compaction`` settings block, or None when
+        compaction is disabled / unreadable."""
+        try:
+            from config.loader import load_settings
+            settings = load_settings()
+            cfg = (settings.get("memory") or {}).get("compaction") or {}
+        except Exception:
+            return None
+        if not cfg.get("enabled", True):
+            return None
+        return cfg
+
     def _maybe_auto_compact(self, session_id: str) -> None:
-        """F2 — increment the per-session turn counter and schedule a
-        real ``compact_session`` once it crosses the configured
-        ``turns_threshold``.
+        """Post-turn hook: record the turn, then evaluate the ladder.
 
         Called from the post-turn save sites in ``handle_command``
         and ``_handle_command_stream_impl``. Runs in fire-and-forget
         mode so the user-visible turn isn't blocked on compaction.
         Idempotent against overlapping invocations via
         ``_compaction_inflight``.
+
+        The backlog bound is still ``memory.compaction.turns_threshold``
+        and still defaults to 20, so existing settings.json files keep
+        the behaviour they had. What is new is that crossing it is no
+        longer the ONLY way a session ever consolidates.
         """
+        now = time.time()
         # A turn just finished. Recorded here because this is already
         # the post-turn hook on BOTH the streaming and non-streaming
         # paths, so it cannot drift out of step with one of them, and
         # recorded BEFORE the settings read below: compaction being
         # disabled returns early, and a turn still happened.
-        self._last_turn_at = time.time()
+        self._last_turn_at = now
+        self._session_last_turn_at[session_id] = now
 
-        try:
-            from config.loader import load_settings
-            settings = load_settings()
-            compaction_cfg = (
-                (settings.get("memory") or {}).get("compaction") or {}
-            )
-        except Exception:
+        cfg = self._compaction_cfg()
+        if cfg is None:
             return
-        if not compaction_cfg.get("enabled", True):
-            return
-        threshold = int(compaction_cfg.get("turns_threshold", 20))
+        threshold = int(cfg.get("turns_threshold", 20))
         if threshold <= 0:
             return
 
-        self._turns_since_compaction[session_id] = (
-            self._turns_since_compaction.get(session_id, 0) + 1
+        pending = self._turns_since_compaction.get(session_id, 0) + 1
+        self._turns_since_compaction[session_id] = pending
+        self._pending_since.setdefault(session_id, now)
+
+        reason = self._consolidation_reason(session_id, cfg, now, threshold)
+        if reason:
+            self._schedule_compaction(session_id, reason)
+
+    def _consolidation_reason(
+        self, session_id: str, cfg: dict, now: float, threshold: int
+    ) -> str:
+        """Which rung of the ladder fires for this session, or "".
+
+        Reads ``memory.compaction.turns_threshold`` (via *threshold*),
+        ``memory.compaction.min_turns``,
+        ``memory.compaction.max_pending_seconds`` and
+        ``memory.compaction.idle_seconds`` off *cfg*.
+        """
+        pending = self._turns_since_compaction.get(session_id, 0)
+        if pending <= 0:
+            return ""
+
+        # Backlog, soft. The historical trigger, unchanged.
+        if pending >= threshold:
+            return "backlog"
+
+        min_turns = int(cfg.get("min_turns", self._DEFAULT_MIN_TURNS))
+        if pending < max(1, min_turns):
+            # Below this there is nothing worth a generation:
+            # ``compact_session`` itself no-ops under preserve_last_n+2.
+            return ""
+
+        # Deadline, hard. Evaluated on the turn path as well as the
+        # tick, so continuous traffic cannot outrun it.
+        max_pending = float(cfg.get("max_pending_seconds", self._DEFAULT_MAX_PENDING_SECONDS))
+        since = self._pending_since.get(session_id)
+        if max_pending > 0 and since is not None and (now - since) >= max_pending:
+            return "deadline"
+
+        # Idle, debounced. Only meaningful from the background tick,
+        # but harmless to evaluate here (a turn just landed, so the
+        # session is by definition not idle).
+        idle_seconds = float(cfg.get("idle_seconds", self._DEFAULT_IDLE_SECONDS))
+        last_turn = self._session_last_turn_at.get(session_id)
+        if idle_seconds > 0 and last_turn is not None and (now - last_turn) >= idle_seconds:
+            return "idle"
+
+        return ""
+
+    def _consolidation_tick(self, now: float | None = None) -> list[str]:
+        """Evaluate idle + deadline for every session with a backlog.
+
+        Returns the session ids it scheduled, which is what makes the
+        ladder testable without a running loop. Never raises: this runs
+        on a background cadence and a bad settings file must not kill
+        the loop.
+        """
+        now = time.time() if now is None else now
+        cfg = self._compaction_cfg()
+        if cfg is None:
+            return []
+        threshold = int(cfg.get("turns_threshold", 20))
+        if threshold <= 0:
+            return []
+
+        fired: list[str] = []
+        for session_id in list(self._turns_since_compaction.keys()):
+            try:
+                reason = self._consolidation_reason(session_id, cfg, now, threshold)
+                if reason and self._schedule_compaction(session_id, reason):
+                    fired.append(session_id)
+            except Exception as exc:
+                logger.warning(
+                    "consolidation tick failed for session %s: %s", session_id, exc
+                )
+        return fired
+
+    async def start_consolidation_scheduler(self) -> None:
+        """Start the background cadence that evaluates the idle rung.
+
+        Shape copied from ``memory.decay.MemoryDecayService._loop``:
+        a stop Event, ``wait_for`` on it as the sleep so shutdown is
+        immediate, and an exception inside the body that is logged and
+        stepped over rather than allowed to kill the loop for the rest
+        of the process lifetime.
+
+        Cadence comes from ``memory.compaction.scheduler_cadence_seconds``
+        and is re-read every iteration, so an operator changing it does
+        not need a restart.
+        """
+        if self._consolidation_task is not None and not self._consolidation_task.done():
+            return
+        self._consolidation_stop = asyncio.Event()
+        # Closed over as a local, not read back off self each pass.
+        # The attribute is Optional and mypy cannot narrow it across a
+        # closure, correctly: something could reassign it mid-flight.
+        # Binding here also makes the loop respond to the event it was
+        # started with rather than whichever one happens to be on the
+        # instance later, which is the behaviour a restart wants.
+        stop = self._consolidation_stop
+
+        async def _loop() -> None:
+            while not stop.is_set():
+                cfg = self._compaction_cfg() or {}
+                cadence = float(
+                    cfg.get("scheduler_cadence_seconds", self._DEFAULT_SCHEDULER_CADENCE)
+                )
+                try:
+                    await asyncio.wait_for(
+                        stop.wait(),
+                        timeout=max(0.01, cadence),
+                    )
+                    return  # stop was set
+                except asyncio.TimeoutError:
+                    pass
+                try:
+                    self._consolidation_tick()
+                except Exception as exc:
+                    logger.exception("consolidation scheduler tick failed: %s", exc)
+
+        self._consolidation_task = asyncio.create_task(
+            _loop(), name="consolidation-scheduler"
         )
-        if self._turns_since_compaction[session_id] < threshold:
+        self._track_background_task(self._consolidation_task)
+
+    async def stop_consolidation_scheduler(self) -> None:
+        """Cancel the cadence task and await its termination. Safe when
+        it was never started."""
+        stop = getattr(self, "_consolidation_stop", None)
+        if stop is not None:
+            stop.set()
+        task = getattr(self, "_consolidation_task", None)
+        if task is None:
             return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        self._consolidation_task = None
+
+    def _forget_consolidation_state(self, session_id: str) -> None:
+        """Drop every per-session consolidation clock and counter.
+
+        Called when the transcript goes away. ``_turns_since_compaction``
+        was already leaked by eviction and disconnect before the ladder
+        existed; it matters more now, because ``_consolidation_tick``
+        walks that dict and would keep scheduling compactions for a
+        session whose history no longer exists.
+        """
+        self._turns_since_compaction.pop(session_id, None)
+        self._pending_since.pop(session_id, None)
+        self._session_last_turn_at.pop(session_id, None)
+        self._compaction_inflight.pop(session_id, None)
+
+    def _schedule_compaction(self, session_id: str, reason: str) -> bool:
+        """Fire-and-forget one compaction. True when it was scheduled."""
         if self._compaction_inflight.get(session_id):
-            return
+            return False
         if not self.memory:
-            return
+            return False
 
         async def _run() -> None:
             self._compaction_inflight[session_id] = True
@@ -768,6 +974,13 @@ class Orchestrator:
                     history = list(self.conversation_history.get(session_id, []))
                     snapshot_len = len(history)
                 if not history:
+                    # The transcript is gone (evicted, disconnected,
+                    # reset). Clear the bookkeeping here or the
+                    # background tick, which iterates
+                    # ``_turns_since_compaction``, retries this ghost
+                    # session on every cadence for the life of the
+                    # process.
+                    self._forget_consolidation_state(session_id)
                     return
 
                 result = await self.memory.compact_session(
@@ -798,17 +1011,30 @@ class Orchestrator:
                                 snapshot_len, len(current),
                             )
                     self._turns_since_compaction[session_id] = 0
+                    # The backlog clock restarts from the next turn, not
+                    # from now: a session with nothing pending has no
+                    # deadline to miss.
+                    self._pending_since.pop(session_id, None)
                 logger.info(
-                    "F2 auto-compact: session=%s episode_id=%s entities=%s",
+                    "auto-compact (%s): session=%s episode_id=%s entities=%s",
+                    reason,
                     session_id,
                     result.get("episode_id"),
                     result.get("key_entities", []),
                 )
             except Exception as exc:
-                logger.warning("F2 auto-compact failed: %s", exc)
+                logger.warning("auto-compact (%s) failed: %s", reason, exc)
             finally:
                 self._compaction_inflight[session_id] = False
 
+        # Claimed SYNCHRONOUSLY, not at the top of ``_run``. There are
+        # now two callers (the post-turn hook and the background tick)
+        # and the window between "task created" and "task body starts"
+        # is a real one, so claiming the session inside the coroutine
+        # would let both schedule the same compaction. ``_run`` still
+        # sets it too, which keeps the invariant api/server.py
+        # documents true.
+        self._compaction_inflight[session_id] = True
         try:
             # AUDIT-FIXES F-06: ensure_future has the same weak-reference
             # hazard as create_task. A collected compaction task leaves
@@ -816,8 +1042,13 @@ class Orchestrator:
             # flag is only cleared in _run's finally, so the session never
             # compacts again for the life of the process.
             self._track_background_task(asyncio.ensure_future(_run()))
+            return True
         except RuntimeError:
-            pass
+            # No running loop (sync context, a closed test loop). Nothing
+            # will ever clear the flag we just set, so release it here or
+            # the session never compacts again.
+            self._compaction_inflight[session_id] = False
+            return False
 
     def _is_refusal_text(self, text: str) -> bool:
         return self.refusal_handler.is_refusal(text)
@@ -4241,6 +4472,12 @@ class Orchestrator:
             # grow the lock dict without bound.
             self._session_locks.pop(sid, None)
             self._session_surfaces.pop(sid, None)
+            # Same reasoning for the consolidation clocks: the ladder's
+            # background tick iterates them, so a stale entry is a
+            # forever-retrying compaction on a transcript that is gone.
+            self._forget_consolidation_state(sid)
+            # And the activity stamp eviction itself ranks by, or the
+            # next pass would rank a session that no longer exists.
             self._forget_session_activity(sid)
             # The image side table holds whole base64 payloads; evicting
             # the transcript without it would leak megabytes per session.
@@ -4258,6 +4495,7 @@ class Orchestrator:
         self._last_proactive_check.pop(session_id, None)
         self._session_locks.pop(session_id, None)
         self._session_surfaces.pop(session_id, None)
+        self._forget_consolidation_state(session_id)
         self._forget_session_activity(session_id)
         self._forget_tool_images(session_id)
         self.tool_runner.clear_session(session_id)

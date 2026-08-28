@@ -40,6 +40,13 @@ def _bare_orchestrator(max_sessions: int = 5) -> Orchestrator:
     orch._conversation_max_per_session = 200
     orch._session_locks = {}
     orch._session_surfaces = {}
+    # The consolidation ladder's clocks. Eviction clears these too:
+    # the background tick iterates them, so a stale entry would be a
+    # compaction retried forever against a transcript that is gone.
+    orch._turns_since_compaction = {}
+    orch._pending_since = {}
+    orch._session_last_turn_at = {}
+    orch._compaction_inflight = {}
     orch._tool_result_images = {}
     orch._tool_image_order = {}
     orch._tool_image_rounds = {}

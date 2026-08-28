@@ -137,16 +137,41 @@ class TestContextPercentIsMeasuredAgainstTheRightBudget:
 class TestTheTurnStampIsRecordedBeforeTheEarlyReturn:
     def test_compaction_being_disabled_still_records_the_turn(self, monkeypatch):
         """`_maybe_auto_compact` returns early when compaction is off.
-        A turn still happened, so the stamp is taken first."""
+        A turn still happened, so the stamp is taken first.
+
+        Asserted on behaviour rather than on source order. The source
+        check this replaces looked for ``load_settings`` inside
+        ``_maybe_auto_compact``; the settings read has since moved into
+        ``_compaction_cfg`` so that the consolidation scheduler can
+        share it, and a test that fails on a refactor while the defect
+        it guards is still fixed is a test that measures the wrong
+        thing.
+        """
+        import config.loader as loader
+
         from agents.orchestrator import Orchestrator
 
-        src = inspect_source(Orchestrator, "_maybe_auto_compact")
-        stamp = src.index("_last_turn_at")
-        settings = src.index("load_settings")
-        assert stamp < settings, (
+        monkeypatch.setattr(
+            loader, "load_settings",
+            lambda: {"memory": {"compaction": {"enabled": False}}},
+        )
+
+        orch = Orchestrator.__new__(Orchestrator)
+        orch._last_turn_at = 0.0
+        orch._session_last_turn_at = {}
+        orch._turns_since_compaction = {}
+        orch._compaction_inflight = {}
+        orch._pending_since = {}
+
+        orch._maybe_auto_compact("s")
+
+        assert orch._last_turn_at > 0.0, (
             "the turn stamp is taken after the settings read, so a brain "
             "with compaction disabled would report that it has never run "
             "a turn"
+        )
+        assert orch._turns_since_compaction == {}, (
+            "compaction is disabled; the backlog counter must not advance"
         )
 
 

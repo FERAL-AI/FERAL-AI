@@ -1331,6 +1331,18 @@ class BrainState:
         except Exception as exc:
             logger.warning("MemoryDecayService.start() failed: %s", exc)
 
+        # F6: the idle rung of the consolidation ladder needs a
+        # background cadence, because by definition no turn arrives to
+        # trigger it. The backlog and deadline rungs are evaluated on
+        # the turn path itself, so a failure to start this loop degrades
+        # consolidation to "on backlog or deadline" rather than
+        # disabling it.
+        if self.orchestrator:
+            try:
+                await self.orchestrator.start_consolidation_scheduler()
+            except Exception as exc:
+                logger.warning("consolidation scheduler start failed: %s", exc)
+
         # v2026.5.35 (PR 2.5 F1): one-shot migration of legacy flat-
         # knowledge rows into the unified KG. The function is
         # idempotent — once a row carries ``kg_migrated_at`` the
