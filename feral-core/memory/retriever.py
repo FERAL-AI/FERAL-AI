@@ -46,6 +46,7 @@ Every record exposes:
 
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 from dataclasses import asdict, dataclass, field
@@ -148,7 +149,7 @@ class MemoryRetriever:
 
     # ── Public API ────────────────────────────────────────────────
 
-    def retrieve(self, query: str, *, top_k: int = 8) -> RetrievalResult:
+    async def retrieve(self, query: str, *, top_k: int = 8) -> RetrievalResult:
         result = RetrievalResult(query=query)
         if not query or not query.strip():
             return result
@@ -170,7 +171,7 @@ class MemoryRetriever:
             self._collect_about_me,
         ):
             try:
-                candidates.extend(tier_fn(query, query_tokens, query_vec))
+                candidates.extend(await tier_fn(query, query_tokens, query_vec))
             except Exception as exc:
                 logger.warning("retriever tier %s skipped: %s", tier_fn.__name__, exc)
                 result.skipped_tiers[tier_fn.__name__.replace("_collect_", "")] = str(exc)
@@ -193,13 +194,13 @@ class MemoryRetriever:
 
     # ── Tier collectors ───────────────────────────────────────────
 
-    def _collect_notes(
+    async def _collect_notes(
         self,
         query: str,
         query_tokens: set[str],
         query_vec: Optional[np.ndarray],
     ) -> list[MemoryRecord]:
-        rows = self._safe_call(self._memory, "search", query, self._per_tier_limit) or []
+        rows = await self._safe_call(self._memory, "search", query, self._per_tier_limit) or []
         out: list[MemoryRecord] = []
         for row in rows:
             content = row.get("content") or row.get("text") or ""
@@ -214,13 +215,13 @@ class MemoryRetriever:
             ))
         return out
 
-    def _collect_episodes(
+    async def _collect_episodes(
         self,
         query: str,
         query_tokens: set[str],
         query_vec: Optional[np.ndarray],
     ) -> list[MemoryRecord]:
-        rows = self._safe_call(self._memory, "episode_recent", self._per_tier_limit * 2) or []
+        rows = await self._safe_call(self._memory, "episode_recent", self._per_tier_limit * 2) or []
         out: list[MemoryRecord] = []
         for row in rows:
             content = (
@@ -243,7 +244,7 @@ class MemoryRetriever:
             ))
         return out[: self._per_tier_limit]
 
-    def _collect_knowledge(
+    async def _collect_knowledge(
         self,
         query: str,
         query_tokens: set[str],
@@ -251,7 +252,7 @@ class MemoryRetriever:
     ) -> list[MemoryRecord]:
         out: list[MemoryRecord] = []
         for token in sorted(query_tokens, key=len, reverse=True)[:4]:
-            rows = self._safe_call(
+            rows = await self._safe_call(
                 self._memory, "knowledge_query", token, "", self._per_tier_limit
             ) or []
             for row in rows:
@@ -272,13 +273,13 @@ class MemoryRetriever:
                 ))
         return out
 
-    def _collect_execution_log(
+    async def _collect_execution_log(
         self,
         query: str,
         query_tokens: set[str],
         query_vec: Optional[np.ndarray],
     ) -> list[MemoryRecord]:
-        rows = self._safe_call(self._memory, "log_recent", "", self._per_tier_limit * 2) or []
+        rows = await self._safe_call(self._memory, "log_recent", "", self._per_tier_limit * 2) or []
         out: list[MemoryRecord] = []
         for row in rows:
             content = (
@@ -299,7 +300,7 @@ class MemoryRetriever:
             ))
         return out[: self._per_tier_limit]
 
-    def _collect_about_me(
+    async def _collect_about_me(
         self,
         query: str,
         query_tokens: set[str],
@@ -477,11 +478,29 @@ class MemoryRetriever:
         return _TEXT_WEIGHT * lex + _VECTOR_WEIGHT * sem
 
     @staticmethod
-    def _safe_call(target: Any, method: str, *args, **kwargs):
+    async def _safe_call(target: Any, method: str, *args, **kwargs):
+        """Call a store method that may be sync or async, and await it.
+
+        Every method this is used with (`search`, `episode_recent`,
+        `knowledge_query`, `log_recent`) is `async def` on `MemoryStore`.
+        This returned the coroutine unawaited, so each caller's
+        `for row in rows` raised `TypeError: 'coroutine' object is not
+        iterable` straight into the broad `except` in `retrieve`, which
+        recorded it in `skipped_tiers` and moved on. Every tier failed
+        that way, for every query, so `retrieve()` had never returned a
+        single record. The tests all used a synchronous fake store,
+        which is why this was green.
+
+        Sync callables are still tolerated: the fakes are sync, and so is
+        anything a caller wires in that is not `MemoryStore`.
+        """
         fn = getattr(target, method, None)
         if fn is None:
             return None
-        return fn(*args, **kwargs)
+        result = fn(*args, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
 
 __all__ = ["MemoryRecord", "MemoryRetriever", "RetrievalResult"]

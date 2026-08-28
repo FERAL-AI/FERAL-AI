@@ -247,7 +247,14 @@ async def update_location(body: dict):
     if lat is None or lon is None:
         return {"error": "lat and lon (or lng) required"}
     try:
-        triggered = state.location_engine.update_location(
+        # `update_location` is async. Without the await this returned a
+        # coroutine, which was JSON-encoded into a `success: True` body
+        # while the engine never ran: no location was recorded and no
+        # geofence callback ever fired over REST. The paired-phone
+        # WebSocket path in api/server.py awaited it correctly, so
+        # geofences worked on one transport and had never worked on the
+        # other.
+        triggered = await state.location_engine.update_location(
             lat, lon, source=body.get("source", "unknown"),
         )
         return {"success": True, "triggered_fences": triggered}
