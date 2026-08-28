@@ -730,23 +730,60 @@ class Orchestrator:
         async def _run() -> None:
             self._compaction_inflight[session_id] = True
             try:
-                # Under the session lock. The body awaits a multi-second
-                # LLM summarization and then REPLACES
-                # ``conversation_history[session_id]``; unlocked it
-                # raced the turn write-back in both directions and
-                # could drop a whole turn. The lock is taken here (not
-                # by the scheduling turn) because ``_run`` is a
-                # separate task — the scheduling turn has released it
-                # by the time this body runs.
+                # Snapshot under the lock, summarize OUTSIDE it, then
+                # reconcile under the lock again.
+                #
+                # The lock exists because the body REPLACES
+                # ``conversation_history[session_id]``; held naively it
+                # raced the turn write-back and could drop a whole
+                # turn. But it used to wrap the summarization too, and
+                # ``handle_command`` / ``handle_command_stream`` take
+                # that same per-session lock for the whole turn. So a
+                # compaction that took twenty seconds on a local model
+                # blocked the operator's NEXT message for twenty
+                # seconds. The scheduling turn returned immediately,
+                # which is what made this look like it was off the hot
+                # path; the stall simply landed one turn later.
+                #
+                # Nothing about summarization needs the lock. It reads
+                # a list it was handed and returns a new one. Only the
+                # swap needs exclusivity, and the turns that arrive
+                # while the model is working are recoverable by
+                # position: everything past the snapshot length is new,
+                # and is re-appended after the compacted prefix.
                 async with self._get_session_lock(session_id):
                     history = list(self.conversation_history.get(session_id, []))
-                    if not history:
-                        return
-                    result = await self.memory.compact_session(
-                        session_id, history, llm=self.llm,
-                    )
+                    snapshot_len = len(history)
+                if not history:
+                    return
+
+                result = await self.memory.compact_session(
+                    session_id, history, llm=self.llm,
+                )
+
+                async with self._get_session_lock(session_id):
                     if result.get("compacted") and result.get("history"):
-                        self.conversation_history[session_id] = result["history"]
+                        current = self.conversation_history.get(session_id, [])
+                        if len(current) >= snapshot_len:
+                            # Turns that landed mid-compaction. They are
+                            # NOT in the summary, so they are carried
+                            # over verbatim rather than dropped.
+                            arrived_during = list(current[snapshot_len:])
+                            self.conversation_history[session_id] = (
+                                list(result["history"]) + arrived_during
+                            )
+                        else:
+                            # The transcript shrank under us (eviction,
+                            # a reset, another writer). Position-based
+                            # reconciliation is meaningless now, so the
+                            # live history is left exactly as it is.
+                            # The episode was still written, so the
+                            # consolidation is not lost.
+                            logger.warning(
+                                "auto-compact: transcript shrank during "
+                                "summarization (%d -> %d); keeping live history",
+                                snapshot_len, len(current),
+                            )
                     self._turns_since_compaction[session_id] = 0
                 logger.info(
                     "F2 auto-compact: session=%s episode_id=%s entities=%s",
