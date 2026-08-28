@@ -381,6 +381,12 @@ class CronService:
             self._timezone = ZoneInfo(local_timezone_name())
         self._max_concurrent: int = int(config.get("max_concurrent_jobs", 5))
         self._running_jobs: set[int] = set()
+        # Liveness bookkeeping. A scheduler that stops scheduling has to be
+        # visible somewhere other than the server log.
+        self._loop_started_at: float = 0.0
+        self._last_tick_at: float = 0.0
+        self._tick_failures: int = 0
+        self._revivals: int = 0
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._init_db()
@@ -991,16 +997,45 @@ class CronService:
         caught_up = 0
         for row in rows:
             job_id, name, next_run, _cron = row["id"], row["description"], row["next_run"], row["cron_expr"]
-            logger.info("Missed job '%s' (id=%d, was due %.0fs ago) — catching up", name, job_id, now - next_run)
+            logger.info("Missed job '%s' (id=%d, was due %.0fs ago), catching up", name, job_id, now - next_run)
             job = self.get_job(job_id)
             if job and self._callback:
-                try:
-                    self._callback(job)
+                if self._fire(job):
                     caught_up += 1
-                finally:
-                    self.mark_completed(job_id)
         if caught_up:
             logger.info("Caught up %d missed jobs", caught_up)
+
+    def _fire(self, job: ScheduledJob) -> bool:
+        """Run one job's callback and re-arm it. NEVER raises.
+
+        A raising callback used to unwind through ``_catchup_missed_jobs``
+        into ``_loop`` and kill the scheduler thread, which stops every
+        routine on the brain permanently while ``start()`` has already
+        returned and ``/api/routines`` still renders them as enabled. One
+        contended ``record_run_start`` sqlite3 INSERT was enough.
+
+        Returns True when the callback completed without raising.
+        """
+        ok = False
+        try:
+            self._callback(job)  # type: ignore[misc]
+            ok = True
+        except Exception:
+            logger.exception(
+                "Routine job %s ('%s') raised; the scheduler keeps running",
+                job.id, job.description,
+            )
+        finally:
+            # Re-arming is what stops a failed job from re-firing on every
+            # tick, so it must happen even when the callback blew up, and
+            # it must not be able to take the loop down either.
+            try:
+                self.mark_completed(job.id)
+            except Exception:
+                logger.exception(
+                    "Failed to re-arm routine job %s after its run", job.id,
+                )
+        return ok
 
     _MAX_POLL_SECONDS = 30.0
 
@@ -1030,34 +1065,108 @@ class CronService:
         except Exception:
             return self._MAX_POLL_SECONDS
 
+    def _tick(self) -> None:
+        """One due-job scan. Isolated so a failure cannot escape ``_loop``."""
+        if self._callback is None:
+            return
+        due = self.get_due_jobs()
+        for job in due:
+            if len(self._running_jobs) >= self._max_concurrent:
+                logger.warning(
+                    "Max concurrent jobs (%d) reached, deferring job %d",
+                    self._max_concurrent,
+                    job.id,
+                )
+                break
+            self._running_jobs.add(job.id)
+            try:
+                self._fire(job)
+            finally:
+                self._running_jobs.discard(job.id)
+
     def _loop(self) -> None:
-        self._catchup_missed_jobs()
+        """The scheduler thread body. It must not be able to return early.
+
+        Every statement that can raise is guarded. A scheduler thread that
+        exits is invisible: ``start()`` has already returned, the boot
+        report already said OK, and the routines list keeps rendering every
+        job as enabled with a ``next_run`` receding into the past.
+        """
+        self._loop_started_at = time.time()
+        try:
+            self._catchup_missed_jobs()
+        except Exception:
+            logger.exception("Missed-job catch-up failed; continuing to poll")
+
         while not self._stop.wait(self._poll_interval()):
-            if self._callback is None:
-                continue
-            due = self.get_due_jobs()
-            for job in due:
-                if len(self._running_jobs) >= self._max_concurrent:
-                    logger.warning(
-                        "Max concurrent jobs (%d) reached, deferring job %d",
-                        self._max_concurrent,
-                        job.id,
-                    )
-                    break
-                self._running_jobs.add(job.id)
-                try:
-                    self._callback(job)
-                finally:
-                    self._running_jobs.discard(job.id)
-                    self.mark_completed(job.id)
+            try:
+                self._tick()
+                self._last_tick_at = time.time()
+            except Exception:
+                # Nothing below _tick is expected to raise, so reaching here
+                # means an unknown failure mode. Log it and keep polling
+                # rather than taking every routine down with it.
+                self._tick_failures += 1
+                logger.exception("Scheduler tick failed; the loop keeps running")
+
+        if not self._stop.is_set():  # pragma: no cover - unreachable by design
+            logger.critical(
+                "Scheduler loop exited while still scheduled; routines have "
+                "stopped. Call ensure_running() to restart it.",
+            )
+
+    # -- liveness ------------------------------------------------------
+
+    def is_running(self) -> bool:
+        """True when the polling thread is actually alive.
+
+        The thing every surface reported before was "constructed OK", which
+        stayed true forever after the thread died.
+        """
+        return bool(self._thread is not None and self._thread.is_alive())
+
+    def ensure_running(self) -> bool:
+        """Restart the polling thread if it is dead but should be running.
+
+        Returns True when a scheduler is running on exit (whether it was
+        already, or this call revived it), False when there is nothing to
+        run (no callback registered, or a deliberate ``stop()``).
+        """
+        if self.is_running():
+            return True
+        if self._callback is None or self._stop.is_set():
+            return False
+        logger.warning(
+            "Scheduler thread was not running; restarting it (%d tick "
+            "failure(s) recorded)", self._tick_failures,
+        )
+        self._revivals += 1
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name="feral-cron-loop",
+        )
+        self._thread.start()
+        return self.is_running()
+
+    def health(self) -> dict[str, Any]:
+        """Machine-readable liveness, for the routines API and diagnostics."""
+        return {
+            "running": self.is_running(),
+            "scheduled": self._callback is not None and not self._stop.is_set(),
+            "started_at": self._loop_started_at,
+            "last_tick_at": self._last_tick_at,
+            "tick_failures": self._tick_failures,
+            "revivals": self._revivals,
+        }
 
     def start(self, callback: Callable[[ScheduledJob], None]) -> None:
-        """Poll every 30s for due jobs and invoke callback, then reschedule."""
+        """Poll for due jobs and invoke callback, then reschedule."""
         self._callback = callback
         self._stop.clear()
-        if self._thread and self._thread.is_alive():
+        if self.is_running():
             return
-        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name="feral-cron-loop",
+        )
         self._thread.start()
 
     def stop(self) -> None:
