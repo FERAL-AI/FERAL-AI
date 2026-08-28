@@ -1,10 +1,14 @@
 """Routine (cron job) CRUD endpoints."""
 
+import logging
+
 from fastapi import APIRouter
 from starlette.responses import JSONResponse
 
 from agents.scheduler import UnparseableCronExpression
 from api.state import state
+
+logger = logging.getLogger("feral.routines")
 
 router = APIRouter()
 
@@ -74,10 +78,25 @@ async def create_routine(body: dict):
 @router.get("/api/routines")
 async def list_routines(session_id: str = ""):
     if not state.scheduler:
-        return {"routines": []}
+        return {"routines": [], "scheduler": {"running": False, "scheduled": False}}
     sid = session_id or None
+    # A scheduler whose polling thread has died renders exactly the same as
+    # a healthy one: every routine still says enabled, and next_run just
+    # recedes into the past. Self-heal on the read that is meant to show
+    # the operator what their routines are doing, and report the result
+    # instead of implying health by omission.
+    ensure = getattr(state.scheduler, "ensure_running", None)
+    if ensure is not None:
+        try:
+            ensure()
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("scheduler ensure_running failed", exc_info=True)
     jobs = state.scheduler.list_jobs(sid)
-    return {"routines": [_job_to_dict(j) for j in jobs]}
+    health = getattr(state.scheduler, "health", None)
+    return {
+        "routines": [_job_to_dict(j) for j in jobs],
+        "scheduler": health() if health is not None else {},
+    }
 
 
 @router.get("/api/routines/{routine_id}")

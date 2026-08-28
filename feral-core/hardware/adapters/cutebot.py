@@ -8,7 +8,7 @@ import logging
 import time
 from typing import Any, Callable, Optional
 
-from hardware.async_io_lock import ThreadAsyncIOLock
+from hardware.async_io_lock import PriorityIOLock
 from hardware.protocol import (
     DeviceCapability,
     DeviceManifest,
@@ -35,6 +35,12 @@ TELEMETRY_FRESH_S = 10.0
 # Consecutive failed reads before the telemetry loop tears down the serial
 # connection and starts reconnect attempts.
 OFFLINE_DISCONNECT_THRESHOLD = 3
+# Longest single hold the telemetry drain may take on the serial port. It
+# bounds how long an emergency stop can sit behind a routine read: the
+# drain is chopped into slices this long and gives up the port between
+# them. Each slice is still a complete device call, so nothing partial is
+# ever left on the wire.
+IO_SLICE_SECONDS = 0.2
 
 
 def _offline_state() -> dict[str, Any]:
@@ -72,7 +78,10 @@ class CuteBotAdapter:
         # QtBot/CutebotClient are not thread-safe: the telemetry loop and
         # on-demand execute/read paths each run bot calls in worker threads,
         # and two concurrent readline()s on one Serial corrupt/raise.
-        self._io_lock = ThreadAsyncIOLock()
+        #
+        # Two lanes: normal, and an urgent lane the halt path uses so an
+        # emergency stop is handed the port ahead of everything queued.
+        self._io_lock = PriorityIOLock()
         self._last_good_state: Optional[dict[str, Any]] = None
         self._last_good_at = 0.0
         self._offline_streak = 0
@@ -391,7 +400,10 @@ class CuteBotAdapter:
                 data={"command": "halt", "ok": True, "offline": True},
             )
         try:
-            async with self._io_lock:
+            # The urgent lane. An emergency stop is handed the serial port
+            # ahead of every queued telemetry read and every queued
+            # actuator command, including the one it is meant to abort.
+            async with self._io_lock.urgent():
                 result = await asyncio.to_thread(self._bot.halt)
             ok = bool(result.get("ok", False))
             return HUPResult(
@@ -497,15 +509,43 @@ class CuteBotAdapter:
         return await self.execute(action)
 
     async def poll_events(self, seconds: float = 0.5) -> list[dict[str, Any]]:
+        """Drain queued device events for up to ``seconds``.
+
+        Split into short slices instead of one long hold. The telemetry
+        loop calls this with 1.0s once a second, forever, so holding the
+        port for the whole second put an emergency stop behind a routine
+        read: measured at 0.95s before this change. Each slice is a
+        complete ``poll_events`` call under the lock, so the wire never
+        sees a partial transaction; anything the firmware emits between
+        slices sits in the OS serial buffer and is picked up by the next
+        one. The drain gives up its remaining slices the moment a safety
+        command is waiting.
+        """
         bot = self._bot
         if bot is None:
             return []
+        remaining = max(0.0, float(seconds))
+        events: list[dict[str, Any]] = []
         try:
-            async with self._io_lock:
-                return await asyncio.to_thread(bot.poll_events, seconds)
+            while True:
+                slice_s = min(IO_SLICE_SECONDS, remaining)
+                async with self._io_lock:
+                    chunk = await asyncio.to_thread(bot.poll_events, slice_s)
+                if chunk:
+                    events.extend(chunk)
+                remaining -= slice_s
+                if remaining <= 0:
+                    break
+                if self._io_lock.preempt_requested:
+                    logger.debug(
+                        "CuteBot telemetry drain yielding the port to a "
+                        "safety command with %.2fs left", remaining,
+                    )
+                    break
         except Exception as exc:
             logger.debug("CuteBot poll_events failed: %s", exc)
-            return []
+            return events
+        return events
 
     async def _save_episode(
         self,
