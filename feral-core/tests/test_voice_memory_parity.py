@@ -44,6 +44,11 @@ def _orchestrator():
     orch.conversation_history = {}
     orch._session_locks = {}
     orch._conversation_max_per_session = 200
+    # Stamped by _append_voice_row so eviction can rank by real
+    # staleness. A live-voice session never reaches _finalize_turn,
+    # so without this stamp it would look idle forever and be the
+    # first thing evicted while the operator was still speaking.
+    orch._session_last_active = {}
     orch._background_tasks = set()
     saved: list[dict] = []
     orch._save_episode_async = lambda **kw: saved.append(kw)
