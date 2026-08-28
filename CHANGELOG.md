@@ -1,10 +1,133 @@
 # Changelog
 
-<!-- feral-version: 2026.8.26 -->
+<!-- feral-version: 2026.8.28 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.28] - 2026-08-28 - the things that had never worked
+
+Three independent audits of this codebase found forty defects. This
+release is all forty, plus the consolidation redesign that came out of
+the research pass behind them. Every fix carries a test that was first
+demonstrated to fail against the unfixed code; the suite moved from
+10185 to 10331.
+
+The audits were prompted by two questions from a developer on Reddit
+about consolidation quality. Both of his questions found real bugs, and
+looking for more of the same shape found the rest.
+
+### Things that had never worked once
+
+Four features shared one mistake: an `async def` called without `await`,
+whose `TypeError` landed in a broad handler that logged at debug or
+returned a 500. Each reported "unavailable" or "success" rather than
+failure.
+
+- `MemoryRetriever` returned zero records for every query, every tier,
+  always. Its tests all used a synchronous fake store, so the fakes
+  matched the broken caller instead of the real store and CI stayed
+  green.
+- Multi-hop graph traversal 500'd on every call. `traverse` itself was
+  correct; only its two callers were not.
+- Ambient knowledge-graph extraction raised on every ambient
+  conversation, so the graph learned nothing from anything overheard.
+- Geofences had never fired over REST. The route returned
+  `success: true` with a coroutine object in the body.
+
+### Retrieval
+
+- A nonsense query returned secrets. The entity tier thresholded on a
+  raw cosine at a hardcoded 0.3, the one tier the corpus-centring fix
+  never reached, and `"asdfgh zxcvbn qwerty"` returned a note reading
+  "the wifi password is stored in 1password" through `search_all` and
+  into the LLM context builder.
+- Below 200 chunks the indexed path applied no relevance floor at all,
+  so every new install and every demo scored nonsense at the maximum
+  possible value. The replacement floor was derived by measurement on
+  five small corpora rather than picked.
+- The FTS5 BM25 sign bug, already found and fixed for episodes, was
+  still live in the knowledge graph and reversed its ordering exactly.
+- Note search returned different results depending on the interpreter:
+  a floor documented as cosine was applied to `1 - L2` on the indexed
+  branch and to a real cosine on the numpy branch, which is
+  `cos >= 0.719` against `cos >= 0.25` for the same note.
+- `INSERT OR REPLACE` orphaned FTS rows forever across episodes, notes
+  and knowledge, retaining text the decay path had deliberately purged.
+  `REPLACE` fires neither the delete nor the update trigger.
+
+### Memory durability
+
+- Live voice wrote no episode at all. Realtime audio never enters
+  `handle_command_stream`, so the change that made transcripts outlive
+  compaction never reached it and a voice-only session was invisible to
+  search and the timeline.
+- Gemini truncated every stored transcript to 300 characters where the
+  OpenAI path stored the full text through the identical call.
+- Conversations silently ate their own history past 500 messages while
+  reporting the true count.
+- 19 of 20 concurrent `conversation_append` calls were lost to a
+  read-modify-write across two awaits.
+- Vector search switched itself off process-wide whenever one
+  connection failed to load the extension, which on a threaded app is
+  one cross-thread touch during one request.
+
+### Liveness and safety
+
+- A single raised job killed the scheduler thread permanently. Every
+  routine stopped while the UI kept rendering them as enabled with a
+  `next_run` receding into the past.
+- An emergency `halt` queued behind a one-second telemetry read and
+  behind the command it existed to abort. Preemption never interrupts
+  the thread holding the port, because a half-parsed frame on a robot
+  is worse than a slow one; a closed-loop move still blocks a halt, and
+  that wait is now logged rather than silent.
+- A health question waited out an in-flight background sync and then
+  ran a second full one, because the throttle read its timestamp
+  outside the lock and wrote it after the vendor calls.
+- Cron turns ran on a throwaway event loop that killed compaction
+  mid-flight, leaving the in-flight flag stuck true so that session
+  never compacted again for the life of the process.
+
+### Delivery
+
+- `send_to_session` returned `None` on every path, so a frame nobody
+  could receive was indistinguishable from one that arrived. Channels
+  additionally dropped any frame without `payload["text"]`, which is
+  exactly what a confirmation card is.
+- A permission request that reached nobody leaked its pending entry
+  forever, holding a grant open for a question the operator never saw.
+  It now fails closed.
+- The CLI had no branch for `permission_request` at all and sat out a
+  30 second timeout; its `sdui` branch printed `[UI Component: ?]` and
+  ended the turn before a card could be answered.
+
+### Configuration
+
+- Re-running the setup wizard replaced the whole settings file, erasing
+  `brain_id`, `relay_id`, Tailscale config, LLM fallbacks and every
+  paired Telegram, Discord and Slack sender. Merge semantics are now
+  RFC 7386 JSON Merge Patch, so the wizard can still clear a value by
+  saying so while silence leaves it alone.
+- Session eviction removed the newest session rather than the oldest,
+  because it sorted by transcript length. It now ranks by real
+  activity, stamped on the voice path too since a live-voice session
+  never runs `_finalize_turn`.
+- Snapshot debouncing dropped turns instead of deferring them, and the
+  shutdown force-save its own docstring promised did not exist.
+
+### Documentation and process
+
+- `WORK-ORDER.md` and `RESUME-HERE.md` are removed from the repository.
+  The former listed four P0 security findings with `file:line`
+  citations under a line reading "Nothing here is started", in a public
+  repository, months after all four were fixed.
+- The documentation leakage checker now scans every root-level markdown
+  file by default, with exemptions named and justified rather than
+  inclusions listed, and rejects severity-triage headings. A published
+  triage list reads as current, maps the gaps for anybody hostile, and
+  goes stale silently the moment the work lands.
 
 ### Changed
 
