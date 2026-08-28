@@ -1,4 +1,4 @@
-"""B7 — session eviction must drop the STALEST session, not the shortest.
+"""B7: session eviction must drop the STALEST session, not the shortest.
 
 ``Orchestrator._evict_stale_sessions`` is named for staleness and its
 docstring promised "evict oldest conversation sessions". It sorted by

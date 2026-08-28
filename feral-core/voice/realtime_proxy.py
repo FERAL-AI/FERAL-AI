@@ -1684,7 +1684,7 @@ class RealtimeProxy:
         # args + observed/expected fields that the LLM uses to narrate
         # recall ("yesterday at 10:32 you asked the cutebot to drive").
         #
-        # B4 — this was ``json.dumps(...)[:2000]``. A byte slice of a
+        # B4: this was ``json.dumps(...)[:2000]``. A byte slice of a
         # serialized document does not shorten the record, it destroys
         # it: the cut lands mid-token and the whole detail then fails
         # ``json.loads``. ``serialize_for_storage`` shrinks the structure

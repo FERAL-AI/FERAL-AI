@@ -77,7 +77,7 @@ class SessionSnapshotStore:
         self._max_entries = max(1, int(max_entries))
         self._last_save_ts: float = 0.0
         self._min_save_interval_s: float = 2.5  # debounce hot loops
-        # B9 — trailing-edge state. The debounce used to be leading-edge
+        # B9: trailing-edge state. The debounce used to be leading-edge
         # ONLY: the first call in a window wrote, every later call
         # returned False, and nothing was scheduled to write the state
         # those calls carried. That is not a deferred write, it is a lost

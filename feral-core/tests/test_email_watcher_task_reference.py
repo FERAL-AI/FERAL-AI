@@ -1,4 +1,4 @@
-"""B12 — an inbound email handler must not be garbage-collected mid-flight.
+"""B12: an inbound email handler must not be garbage-collected mid-flight.
 
 ``EmailWatcher._process_message`` dispatched the handler with
 

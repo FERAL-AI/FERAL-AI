@@ -815,7 +815,7 @@ class GeminiRealtimeProxy:
         )
         summary = f"{skill_id}: {endpoint_id} {verdict}"
 
-        # B4 — see the twin block in ``voice/realtime_proxy.py``. A byte
+        # B4: see the twin block in ``voice/realtime_proxy.py``. A byte
         # slice of serialized JSON leaves a row that ``json.loads``
         # rejects outright, so the whole detail is lost rather than its
         # tail. Shrink the structure instead.

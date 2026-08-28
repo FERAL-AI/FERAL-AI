@@ -1,4 +1,4 @@
-"""B8 — re-running the setup wizard must not erase settings it never saw.
+"""B8: re-running the setup wizard must not erase settings it never saw.
 
 ``POST /api/setup/complete`` calls ``ConfigLoader.save_user_settings``,
 which did ``open(path, "w")`` + ``json.dump(settings)`` with no read and

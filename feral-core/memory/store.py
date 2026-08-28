@@ -44,7 +44,7 @@ from uuid import uuid4
 
 import aiosqlite
 
-# B4 — the one place in the repo that knows how to bound a serialized
+# B4: the one place in the repo that knows how to bound a serialized
 # payload without breaking it. ``skills.result_budget`` imports only the
 # stdlib at module scope (config/agents are reached lazily), so this is
 # not a cycle.
@@ -3511,7 +3511,7 @@ class MemoryStore:
     ) -> str:
         """Write one ``execution_log`` row.
 
-        B4 — ``args`` used to be persisted as ``json.dumps(args)[:2000]``.
+        B4: ``args`` used to be persisted as ``json.dumps(args)[:2000]``.
         A byte slice of a serialized document does not shorten it, it
         breaks it: the cut lands mid-token and ``json.loads`` refuses the
         whole value with "Unterminated string". Since nothing else

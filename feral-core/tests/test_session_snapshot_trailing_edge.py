@@ -1,4 +1,4 @@
-"""B9 — the primary-thread snapshot debounce dropped turns permanently.
+"""B9: the primary-thread snapshot debounce dropped turns permanently.
 
 ``SessionSnapshotStore.save`` opened with
 

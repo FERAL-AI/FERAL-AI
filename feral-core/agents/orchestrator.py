@@ -303,7 +303,7 @@ class Orchestrator:
         # surface deny-lists fire on the actual invocation surface
         # instead of the historical "websocket" default.
         self._session_surfaces: dict[str, str] = {}
-        # B7 — wall-clock of the last activity on each session, the key
+        # B7: wall-clock of the last activity on each session, the key
         # ``_evict_stale_sessions`` sorts by.
         #
         # There was no per-session timestamp before, so the cap sorted by
@@ -1998,7 +1998,7 @@ class Orchestrator:
                 session_id[:8],
             )
 
-        # B7 — stamp BEFORE the cap runs, or this turn's own session is a
+        # B7: stamp BEFORE the cap runs, or this turn's own session is a
         # candidate for the eviction its own completion triggered.
         self._touch_session(session_id)
         self._evict_stale_sessions()
@@ -3077,7 +3077,7 @@ class Orchestrator:
 
         if session_id not in self.conversation_history:
             self.conversation_history[session_id] = []
-        # B7 — a turn in flight counts as activity. Without this a long
+        # B7: a turn in flight counts as activity. Without this a long
         # turn (slow provider, tool loop) looks idle to the cap for its
         # whole duration.
         self._touch_session(session_id)
@@ -3701,7 +3701,7 @@ class Orchestrator:
 
         if session_id not in self.conversation_history:
             self.conversation_history[session_id] = []
-        # B7 — a turn in flight counts as activity. Without this a long
+        # B7: a turn in flight counts as activity. Without this a long
         # turn (slow provider, tool loop) looks idle to the cap for its
         # whole duration.
         self._touch_session(session_id)
@@ -4184,7 +4184,7 @@ class Orchestrator:
     def _touch_session(self, session_id: str) -> None:
         """Stamp ``session_id`` as active now.
 
-        B7 — the input to :meth:`_evict_stale_sessions`. Called at the
+        B7: the input to :meth:`_evict_stale_sessions`. Called at the
         start of a turn as well as at its end so a session that is
         mid-turn when the cap fires is never the victim; a turn can run
         for minutes behind a slow provider, and the row that would prove
@@ -4200,7 +4200,7 @@ class Orchestrator:
         """Evict the LEAST RECENTLY ACTIVE sessions once the dict is over
         ``_conversation_max_sessions``.
 
-        B7 — this used to sort by ``len(conversation_history[sid])`` and
+        B7: this used to sort by ``len(conversation_history[sid])`` and
         delete the head, so it evicted the SHORTEST transcripts while
         claiming to evict the oldest. Measured with the cap at 5: five
         abandoned 50-row sessions and one 1-row session the operator had
@@ -5148,7 +5148,7 @@ class Orchestrator:
         """
         async with self._get_session_lock(session_id):
             history = self.conversation_history.setdefault(session_id, [])
-            # B7 — a live-voice session never runs ``_finalize_turn``, so
+            # B7: a live-voice session never runs ``_finalize_turn``, so
             # without a stamp here it looks permanently idle to the
             # eviction cap while the operator is speaking to it.
             self._touch_session(session_id)

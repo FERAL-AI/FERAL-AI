@@ -1,4 +1,4 @@
-"""B4 — a persisted tool-call argument blob must still be JSON.
+"""B4: a persisted tool-call argument blob must still be JSON.
 
 ``memory/store.py:log_execution`` wrote ``json.dumps(args)[:2000]``, and
 ``voice/realtime_proxy.py`` / ``voice/gemini_realtime.py`` wrote the same
@@ -99,7 +99,7 @@ async def test_log_execution_small_args_are_untouched(store):
 
 
 async def test_log_execution_stays_within_the_column_budget(store):
-    """The bound is still enforced — this is not "just stop truncating"."""
+    """The bound is still enforced, this is not "just stop truncating"."""
     await store.log_execution(
         session_id="s1",
         skill_id="coding_tools",

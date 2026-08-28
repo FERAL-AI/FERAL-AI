@@ -55,7 +55,7 @@ class EmailWatcher:
         # runs on an asyncio.to_thread worker which has no loop of its
         # own, so every hand-off back to the brain goes through this.
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        # B12 — strong references to the handler tasks dispatched from the
+        # B12: strong references to the handler tasks dispatched from the
         # worker thread. The loop holds tasks only WEAKLY, so a task that
         # is suspended on a future reachable solely through its own frame
         # is an unrooted cycle and ``gc.collect()`` destroys it. That
@@ -164,7 +164,7 @@ class EmailWatcher:
                 self._mail.logout()
             except Exception:
                 pass
-        # B12 — drain handlers that are still in flight. The messages
+        # B12: drain handlers that are still in flight. The messages
         # they describe are already gone from the server, so abandoning
         # them at shutdown loses exactly the mail this fix exists to
         # keep. Bounded, so a wedged handler cannot stall shutdown.

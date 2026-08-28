@@ -1725,7 +1725,7 @@ async def shutdown_event():
         except Exception as exc:
             logger.warning("Shutdown: %s stop failed: %s", bridge_name, exc)
 
-    # (a.2b) B9 — force the primary thread to disk.
+    # (a.2b) B9: force the primary thread to disk.
     #
     # ``BrainState.snapshot_primary_thread`` has documented since it was
     # written that it is "called from the orchestrator after each
