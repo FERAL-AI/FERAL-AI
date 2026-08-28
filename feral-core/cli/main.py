@@ -522,9 +522,45 @@ async def _repl_session(ws) -> bool:
                 if text_resp:
                     print(f"  FERAL: {text_resp}")
                 break
+            elif mtype == "permission_request":
+                # The loop had no branch for this, so a consent prompt
+                # fell through and the operator sat out the 30s timeout
+                # never knowing they had been asked. Ask in the
+                # terminal and answer over the same socket.
+                p = msg.get("payload", {})
+                op = p.get("operation", "access")
+                path = p.get("path", "")
+                reason = p.get("reason", "")
+                print(f"\n  Permission needed: {op} {path}")
+                if reason:
+                    print(f"  {reason}")
+                try:
+                    answer = input("  Allow? [y/N] ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    answer = ""
+                granted = answer in ("y", "yes")
+                await ws.send(json.dumps({
+                    "type": "ui_event",
+                    "payload": {
+                        "event": "permission_response",
+                        "request_id": p.get("request_id"),
+                        "granted": granted,
+                    },
+                }))
+                print("  Allowed." if granted else "  Denied.")
+                # Keep listening: the turn continues either way.
+                continue
             elif mtype == "sdui":
-                print(f"  [UI Component: {msg.get('payload', {}).get('component', '?')}]")
-                break
+                payload = msg.get("payload", {})
+                # Name the card rather than printing a bare "?". A
+                # component id is not useful on its own, and this branch
+                # also used to break the loop, so a confirmation card
+                # ended the turn before the operator could answer it.
+                label = payload.get("title") or payload.get("component") or "interactive card"
+                print(f"  [{label}] not renderable in the CLI; answer in words.")
+                if payload.get("text"):
+                    print(f"  {payload['text']}")
+                continue
             elif mtype == "error":
                 print(f"  Error: {msg.get('payload', {}).get('message', '?')}")
                 break
