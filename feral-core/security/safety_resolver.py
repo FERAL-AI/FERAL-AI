@@ -165,6 +165,30 @@ def _legacy_substring_level(tool_name: str, args: dict) -> tuple[str, str]:
         return LEVEL_DENY, "legacy_substring:robot_speed"
     if any(p in name_lower for p in _LEGACY_CONFIRM_TOKENS):
         return LEVEL_CONFIRM, "legacy_substring:confirm_token"
+    # An MCP tool never earns AUTO from its name.
+    #
+    # No `mcp_*` name is in TOOL_DANGER_MAP, so get_danger_level returns
+    # SAFE, meaning "the table says nothing", and resolution falls here.
+    # The unknown default below is CONFIRM, which is fail-closed and
+    # right. The auto-token branch is the hole: it hands AUTO to any name
+    # containing read/get/list/status/query/search, so a tool called
+    # `clipboard_read` executes with no approval in every autonomy mode
+    # including strict, and returns whatever the operator last copied.
+    #
+    # For a native skill those substrings sit behind a manifest that was
+    # reviewed. For an MCP tool there is no manifest, no review, and the
+    # name is chosen by whoever wrote the server. A name is not evidence.
+    #
+    # `agents/plan_mode.py` already draws exactly this line, refusing
+    # `mcp_*` by name because it "fails closed on everything that has no
+    # FERAL manifest behind it". This makes the safety resolver agree
+    # with plan mode instead of contradicting it.
+    #
+    # Deliberately narrow: only the AUTO shortcut is withdrawn. DENY and
+    # CONFIRM tokens above still fire, and the default is unchanged, so
+    # nothing that was refused becomes permitted.
+    if name_lower.startswith("mcp_"):
+        return LEVEL_CONFIRM, "mcp_tool:no_manifest_to_trust"
     if any(p in name_lower for p in _LEGACY_AUTO_TOKENS):
         return LEVEL_AUTO, "legacy_substring:auto_token"
     return LEVEL_CONFIRM, "legacy_substring:unknown_default"
@@ -223,6 +247,14 @@ def is_read_only(
     if trusted and endpoint.read_only_hint:
         return True
     name_lower = (tool_name or "").lower()
+    # Same reasoning as the auto-token guard in
+    # `_legacy_substring_level`, and this one is the sharper edge:
+    # `ToolRunner` skips the approval prompt outright in STRICT mode
+    # when this returns True, so a lenient answer here defeats the
+    # strictest setting an operator can choose. An MCP name is not
+    # evidence that the tool only reads.
+    if name_lower.startswith("mcp_"):
+        return False
     return any(p in name_lower for p in _LEGACY_READ_ONLY_TOKENS)
 
 
