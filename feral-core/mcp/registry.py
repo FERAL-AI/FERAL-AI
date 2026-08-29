@@ -114,6 +114,39 @@ KNOWN_SERVERS = {
         "install_hint": "npm install -g @modelcontextprotocol/server-sequential-thinking",
         "category": "reasoning",
     },
+    # The first known server that is NOT an npx package. It ships as a
+    # native binary, so `command` is the binary name and `args` is the
+    # subcommand that puts it into MCP-over-stdio mode. Both were read
+    # off `cua-driver mcp-config`, which is the tool's own answer to
+    # "how do I register you", rather than reconstructed from docs.
+    #
+    # `mcp-config` prints an ABSOLUTE path (e.g.
+    # /Users/<you>/.local/bin/cua-driver) because it knows where it was
+    # invoked from. A catalog shipped to every machine cannot, so the
+    # entry uses the bare name and leans on `_resolve_install_state`'s
+    # non-npx branch (`shutil.which`) to say whether it is reachable.
+    # An operator whose install dir is off PATH gets a row that says
+    # exactly that, and the remedy of pinning an absolute path in
+    # ~/.feral/mcp_servers.json.
+    #
+    # OPT-IN, like every other entry here: KNOWN_SERVERS is a catalog
+    # the Settings UI renders and `connect_server` reads on an explicit
+    # user action. Nothing in the boot path iterates it, so listing
+    # cua-driver costs an operator who has never heard of it exactly
+    # one greyed-out row and zero startup time.
+    "cua-driver": {
+        "id": "cua-driver",
+        "name": "Cua Driver",
+        "description": (
+            "GUI computer-use on this machine: read the accessibility tree, "
+            "click, type, drive apps and browsers"
+        ),
+        "command": "cua-driver",
+        "args": ["mcp"],
+        "env": {},
+        "install_hint": "curl -fsSL https://cua.ai/driver/install.sh | bash",
+        "category": "automation",
+    },
 }
 
 
