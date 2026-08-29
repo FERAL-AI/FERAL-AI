@@ -38,6 +38,7 @@ from .steps import (
     pairing,
     personality,
     tool_keys,
+    ready,
     welcome,
 )
 from .steps import memory as memory_step
@@ -80,6 +81,11 @@ async def _run_async(*, from_step: str = "") -> None:
             ("welcome", welcome.run),
             ("llm_provider", llm.run_provider_step),
             ("llm_model", llm.run_model_step),
+            # Not a numbered step. The operator has a working
+            # brain at this point and every step below can be
+            # declined, so this is where they are told so and
+            # offered the exit. See steps/ready.py.
+            ("ready", ready.run),
             ("voice_preflight", voice_preflight.run),
             ("audio", audio.run),
             ("identity", identity.run),
