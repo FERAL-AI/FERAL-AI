@@ -471,7 +471,9 @@ threat model as designed**, not a bypass: per "What FERAL is" above, the
 boundaries protect the single trusted operator from prompt injection and
 untrusted skill code, not from their own machine. A report showing the
 brain running a shell *outside* every grant, or running generated code on
-the host in any mode, **is** in scope.
+the host in any mode, **is** in scope, unless
+`execution.full_authority` is set. That key is documented immediately
+below and lifts both deliberately.
 
 ### The command deny floor, and turning it off
 
@@ -496,20 +498,97 @@ execution:
   full_authority: true
 ```
 
-The floor is then skipped entirely at every tier. Any
-`execution.denied_command_patterns` the operator wrote still apply:
-someone who granted full authority *and* wrote their own deny list meant
-both. The brain logs a warning naming the state once per policy load.
+### What `full_authority` lifts
 
-Two properties are deliberate. It defaults to off, so the floor stands
-for everyone who has not thought about it. And it is readable **only**
-from the policy file, never from an environment variable: an env var is
-something a script or a parent process can hand you, and this is
-something you have to sit down and mean.
+The tiers decide what FERAL asks about. `full_authority` decides what it
+**refuses outright**, which is a different thing: a refusal is not a
+prompt the operator can answer, so no tier and no approval could reach
+past these. All four are lifted together, because a key that lifted only
+some of them would not mean what it is called:
 
-A report that the floor can be bypassed *without* this key **is** in
-scope. A report that a machine with this key set ran a destructive
-command is not: that is the key working.
+| | default | under `full_authority` |
+|---|---|---|
+| the six deny-floor commands | refused at every tier | run |
+| generated code with no Docker | refused, `needs=docker` | runs on the host |
+| a cwd outside every grant | refused | the whole machine is the workspace |
+| a path argument outside `filesystem.*` | refused | reachable |
+
+The Docker one is the sharpest. Generated code (`code_interpreter`,
+`workspace_scripts`, tool-genesis output, any endpoint declaring
+`requires_sandbox: true`) requires the `docker` mode, and a workspace
+grant does not substitute. On a machine with no Docker that is a hard no
+at every autonomy tier by every means, so an operator who wanted it had
+no way to say so. This key is that way.
+
+Docker is still **preferred** wherever it is available: the key removes
+a refusal, not the sandbox. Under `full_authority`, generated code with
+a healthy Docker still resolves to `docker`.
+
+Strict autonomy accepts the key as the explicit act it asks for. Strict
+exists to reject a workspace *inherited* from a policy read path rather
+than named by the operator; a key written into the policy file by hand
+is not inherited.
+
+The path check itself is **not** skipped. It asks `can_read_path`, the
+same method the file tools ask, and that method answers `True` under the
+key. Both sides move together, which is the invariant the check exists
+for: skipping only the shell would let `cat` reach what
+`coding_tools__read_file` refuses.
+
+Still enforced under the key: `execution.allow_shell_commands=false`
+(a separate kill switch), `blocked_paths`, and any
+`execution.denied_command_patterns` the operator wrote. Someone who
+granted full authority *and* wrote their own deny list meant both.
+
+`blocked_paths` is the property that makes this key defensible rather
+than reckless, because the shipped policy blocks `~/.ssh/`, `~/.aws/`
+and `~/.gnupg/`. **An operator who grants full authority still does not
+hand the model their SSH keys, AWS credentials or GPG keyring.** It is
+also the only scope left that can carve anything out, so it is the way
+to say "everything except this".
+
+### What it costs
+
+**Under this key a prompt injection has the operator's authority.** The
+workspace grant and the path check are the two boundaries that stand
+between untrusted text and the rest of the machine; per "What FERAL is",
+that is the threat this model is built for. Lifting them is coherent for
+an operator who has decided it, and it is not a free choice.
+
+Two properties are deliberate. It defaults to off, so all four
+boundaries stand for everyone who has not thought about it, and the
+model's ability to emit a format command for its own reasons stays
+contained. And it is readable **only** from the policy file, never from
+an environment variable: an env var is something a script or a parent
+process can hand you, and this is something you have to sit down and
+mean.
+
+The brain logs a warning naming the state once per policy load.
+
+### It cannot be granted over the API
+
+`POST /api/policy/update` takes a whole policy document and persists it,
+so without a guard it would set this key, and injected text that reached
+that endpoint (a `curl` under `loose` autonomy is enough) could grant
+itself exactly the authority these boundaries withhold. That would make
+the key an escalation path rather than an operator's choice.
+
+The route refuses to turn it **on**, with
+`code: full_authority_not_settable_here`, and the refusal lands before
+the live policy is swapped. It is still allowed to turn it **off**:
+authority is given up over the API and only ever taken at the keyboard.
+
+`POST /api/config/update` cannot reach it at all; that route writes
+`~/.feral/settings.json` through `ConfigLoader`, while the policy is read
+from `~/.feral/policies/`.
+
+A request that succeeds in enabling this key over any HTTP surface **is**
+in scope, and is the most valuable report you could send about it.
+
+A report that any of these four can be bypassed *without* this key **is**
+in scope. A report that a machine with this key set ran a destructive
+command, reached an arbitrary path, or ran generated code on the host is
+not: that is the key working.
 
 `daemon://local/shell` remains separately gated by
 `SandboxPolicy.validate_shell_command` (argv[0] allowlist plus

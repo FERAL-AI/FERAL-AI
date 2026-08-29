@@ -362,6 +362,18 @@ class SandboxPolicy:
         fs = self._data.get("filesystem", {})
         if self._path_in_list(target, fs.get("blocked_paths", [])):
             return False
+        if self.full_authority():
+            # The file tools and the shell answer this question from the
+            # same method, and they have to keep agreeing. exec_mode's
+            # path check exists precisely so that a path the file tools
+            # refuse is not reachable by naming it on a command line; if
+            # the shell were lifted and this were not, that invariant
+            # would break in the other direction and ``cat`` would reach
+            # what ``read_file`` could not.
+            #
+            # blocked_paths above still wins. It is the operator's own
+            # list, and an operator who wrote both meant both.
+            return True
         if self._path_in_list(target, fs.get("read_paths", [])):
             return True
         if self._path_in_list(target, fs.get("write_paths", [])):
