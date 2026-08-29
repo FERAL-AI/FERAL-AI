@@ -141,6 +141,22 @@ ACTIONABLE_ACTIONS: frozenset[str] = frozenset({
 # themselves make it interactive.
 NOTEWORTHY_ACTIONS: frozenset[str] = ACTIONABLE_ACTIONS | {"AXShowMenu"}
 
+# Actions that ACTIVATE an element, i.e. a caller asking to "click" it
+# could plausibly have meant one of these.
+#
+# Narrower than ACTIONABLE_ACTIONS on purpose. AXIncrement and
+# AXDecrement make a stepper interactive and are worth reporting, but
+# nobody asking to click something means "nudge it up by one", so
+# offering them as a click substitute would be misleading.
+#
+# Used by ``_click`` to decide whether a cursor-free route exists before
+# falling back to a real mouse event. It never invokes them itself: a
+# coordinate click on a Finder row selects it and AXOpen opens it, and
+# this module cannot know which the caller meant.
+ACTIVATING_ACTIONS: frozenset[str] = frozenset({
+    "AXPress", "AXOpen", "AXConfirm", "AXPick",
+})
+
 # Roles whose AXRoleDescription ("cell", "group", "list") is a category
 # name rather than a label. When one of these resolves no better
 # attribute, the real name is usually in a child AXStaticText: Finder's
@@ -945,6 +961,7 @@ class MacOSAccessibilitySkill(BaseSkill):
             "list_windows": self._list_windows,
             "describe": self._describe,
             "click": self._click,
+            "activate": self._activate,
             "set_value": self._set_value,
             "perform_action": self._perform_action,
             "check_permission": self._check_permission,
@@ -1402,6 +1419,85 @@ class MacOSAccessibilitySkill(BaseSkill):
             )
         return entry, None
 
+    #: Order in which ``activate`` tries an element's actions.
+    #
+    #: AXPress first because it is the most specific activation and the
+    #: one almost every control publishes. The rest are the activations
+    #: that mean "do this element's primary thing" for the roles that do
+    #: not publish AXPress at all, chiefly Finder's AXCell rows, which
+    #: publish AXOpen.
+    _ACTIVATION_ORDER = ("AXPress", "AXOpen", "AXConfirm", "AXPick")
+
+    def _activate(self, args: dict) -> dict:
+        """Do this element's primary thing, whatever that is.
+
+        The capable counterpart to :meth:`_click`. ``click`` means the
+        click gesture and performs AXPress, which covers 44 of Finder's
+        261 interactive elements; the other 217 are AXCell rows
+        publishing AXOpen and ``click`` can only refuse them with a
+        pointer at ``perform_action``. Honest, but two calls where one
+        would do, and only if the model knows to take the round trip.
+
+        ``activate`` asks for the OUTCOME rather than the gesture, so
+        AXOpen is a correct answer here rather than a substitution. That
+        distinction is the whole reason this is a separate endpoint
+        instead of a looser ``click``: a caller that means "select this
+        row" still has ``click``, and a caller that means "open it" now
+        has one call that does not touch the cursor.
+
+        There is deliberately no coordinate fallback. An element with no
+        activating action has no primary thing to do, and saying so is
+        more useful than moving the operator's mouse and hoping.
+        """
+        entry, error = self._resolve_ref(args, purpose="the activation")
+        if entry is None:
+            return error or _fail("Unresolvable ref.", status=404)
+
+        ref = normalise_ref(args.get("ref"))
+        element = entry.element
+        actions = _actions(element)
+
+        if _enabled(element) is False:
+            return _fail(
+                f"{entry.role} \"{entry.label}\" is disabled, so activating it "
+                f"would do nothing. Nothing was activated.",
+                status=409,
+                data={"ref": ref, "enabled": False},
+            )
+
+        chosen = next((a for a in self._ACTIVATION_ORDER if a in actions), None)
+        if chosen is None:
+            return _fail(
+                f"{entry.role} \"{entry.label}\" publishes no activating action "
+                f"(it has: {', '.join(actions) or 'none'}), so there is nothing "
+                f"to activate. Use macos_ax__perform_action for a specific "
+                f"action, or macos_ax__click if you want a real mouse click.",
+                status=422,
+                data={"ref": ref, "actions": actions},
+            )
+
+        err = self._perform(element, chosen)
+        if err == 0:
+            return _ok({
+                "ref": ref,
+                "method": chosen,
+                "role": entry.role,
+                "label": entry.label,
+                "app": entry.app_name,
+                "text": (
+                    f"Activated {entry.role} \"{entry.label}\" in "
+                    f"{entry.app_name} via {chosen}."
+                ),
+            })
+        if _is_api_disabled(err):
+            return _tcc_denied(f"{chosen} on {ref} was refused by TCC.")
+        return _fail(
+            f"{chosen} on {entry.role} \"{entry.label}\" failed with AX error "
+            f"{err}; nothing was activated.",
+            status=502,
+            data={"ref": ref, "ax_error": err, "attempted": chosen},
+        )
+
     def _click(self, args: dict) -> dict:
         entry, error = self._resolve_ref(args, purpose="the click")
         if entry is None:
@@ -1441,15 +1537,47 @@ class MacOSAccessibilitySkill(BaseSkill):
                     status=502,
                     data={"ref": ref, "ax_error": err},
                 )
-        elif not allow_fallback:
-            return _fail(
-                f"{entry.role} \"{entry.label}\" publishes no AXPress action "
-                f"(it has: {', '.join(actions) or 'none'}) and "
-                f"allow_coordinate_fallback is false, so nothing was clicked. "
-                f"Use macos_ax__perform_action for a different action.",
-                status=422,
-                data={"ref": ref, "actions": actions},
-            )
+        else:
+            # No AXPress. Before reaching for the mouse, check whether
+            # the element publishes some OTHER action that activates it.
+            #
+            # Measured during the capability audit: of Finder's 261
+            # interactive elements only 44 publish AXPress. The other
+            # 217 are AXCell rows publishing AXOpen, so "click
+            # Applications in Finder" became a real mouse click in a
+            # module whose whole premise is that it does not touch the
+            # cursor.
+            #
+            # We deliberately do NOT press AXOpen on the caller's
+            # behalf. A coordinate click on a Finder row *selects* it
+            # and AXOpen *opens* it; those are different gestures and
+            # this function cannot know which was meant. Guessing would
+            # trade a cursor problem for a correctness problem.
+            #
+            # So: name the route and let the caller choose. This refusal
+            # already existed and was already well worded, it was just
+            # unreachable unless the caller had explicitly disabled the
+            # fallback, which is not the default.
+            usable = [a for a in actions if a in ACTIVATING_ACTIONS]
+            if usable or not allow_fallback:
+                if usable:
+                    detail = (
+                        f"publishes no AXPress but does publish "
+                        f"{', '.join(usable)}, which can be invoked without "
+                        f"moving the cursor"
+                    )
+                else:
+                    detail = (
+                        f"publishes no AXPress action "
+                        f"(it has: {', '.join(actions) or 'none'})"
+                    )
+                return _fail(
+                    f"{entry.role} \"{entry.label}\" {detail}, so nothing was "
+                    f"clicked. Use macos_ax__perform_action for a different "
+                    f"action.",
+                    status=422,
+                    data={"ref": ref, "actions": actions, "usable_actions": usable},
+                )
 
         return self._coordinate_click(entry, ref, actions)
 
@@ -1649,7 +1777,7 @@ class MacOSAccessibilitySkill(BaseSkill):
 # compare against without importing an event loop or a Mac.
 MACOS_AX_ENDPOINTS: frozenset[str] = frozenset({
     "snapshot", "find", "list_windows", "describe",
-    "click", "set_value", "perform_action", "check_permission",
+    "click", "activate", "set_value", "perform_action", "check_permission",
 })
 
 

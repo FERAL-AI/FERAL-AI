@@ -40,6 +40,19 @@ Issues = "https://github.com/feral-ai/feral-nodes/issues"
 [project.scripts]
 feral-node = "feral_node_sdk.cli:main"
 
+# Test dependencies. This project shipped a committed test suite and no
+# way to install what runs it, which is part of why nothing ran it: when
+# HUP moved to 1.4.0 these tests kept asserting 1.3.0 and failed on
+# every run for weeks, unseen.
+#
+# pytest-timeout is here because the CI job passes --timeout: a hung
+# websocket test should fail the job, not hold a runner for six hours.
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2,<9.0",
+  "pytest-timeout>=2.3,<3.0",
+]
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 
