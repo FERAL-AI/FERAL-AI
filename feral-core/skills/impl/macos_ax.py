@@ -141,6 +141,22 @@ ACTIONABLE_ACTIONS: frozenset[str] = frozenset({
 # themselves make it interactive.
 NOTEWORTHY_ACTIONS: frozenset[str] = ACTIONABLE_ACTIONS | {"AXShowMenu"}
 
+# Actions that ACTIVATE an element, i.e. a caller asking to "click" it
+# could plausibly have meant one of these.
+#
+# Narrower than ACTIONABLE_ACTIONS on purpose. AXIncrement and
+# AXDecrement make a stepper interactive and are worth reporting, but
+# nobody asking to click something means "nudge it up by one", so
+# offering them as a click substitute would be misleading.
+#
+# Used by ``_click`` to decide whether a cursor-free route exists before
+# falling back to a real mouse event. It never invokes them itself: a
+# coordinate click on a Finder row selects it and AXOpen opens it, and
+# this module cannot know which the caller meant.
+ACTIVATING_ACTIONS: frozenset[str] = frozenset({
+    "AXPress", "AXOpen", "AXConfirm", "AXPick",
+})
+
 # Roles whose AXRoleDescription ("cell", "group", "list") is a category
 # name rather than a label. When one of these resolves no better
 # attribute, the real name is usually in a child AXStaticText: Finder's
@@ -1441,15 +1457,47 @@ class MacOSAccessibilitySkill(BaseSkill):
                     status=502,
                     data={"ref": ref, "ax_error": err},
                 )
-        elif not allow_fallback:
-            return _fail(
-                f"{entry.role} \"{entry.label}\" publishes no AXPress action "
-                f"(it has: {', '.join(actions) or 'none'}) and "
-                f"allow_coordinate_fallback is false, so nothing was clicked. "
-                f"Use macos_ax__perform_action for a different action.",
-                status=422,
-                data={"ref": ref, "actions": actions},
-            )
+        else:
+            # No AXPress. Before reaching for the mouse, check whether
+            # the element publishes some OTHER action that activates it.
+            #
+            # Measured during the capability audit: of Finder's 261
+            # interactive elements only 44 publish AXPress. The other
+            # 217 are AXCell rows publishing AXOpen, so "click
+            # Applications in Finder" became a real mouse click in a
+            # module whose whole premise is that it does not touch the
+            # cursor.
+            #
+            # We deliberately do NOT press AXOpen on the caller's
+            # behalf. A coordinate click on a Finder row *selects* it
+            # and AXOpen *opens* it; those are different gestures and
+            # this function cannot know which was meant. Guessing would
+            # trade a cursor problem for a correctness problem.
+            #
+            # So: name the route and let the caller choose. This refusal
+            # already existed and was already well worded, it was just
+            # unreachable unless the caller had explicitly disabled the
+            # fallback, which is not the default.
+            usable = [a for a in actions if a in ACTIVATING_ACTIONS]
+            if usable or not allow_fallback:
+                if usable:
+                    detail = (
+                        f"publishes no AXPress but does publish "
+                        f"{', '.join(usable)}, which can be invoked without "
+                        f"moving the cursor"
+                    )
+                else:
+                    detail = (
+                        f"publishes no AXPress action "
+                        f"(it has: {', '.join(actions) or 'none'})"
+                    )
+                return _fail(
+                    f"{entry.role} \"{entry.label}\" {detail}, so nothing was "
+                    f"clicked. Use macos_ax__perform_action for a different "
+                    f"action.",
+                    status=422,
+                    data={"ref": ref, "actions": actions, "usable_actions": usable},
+                )
 
         return self._coordinate_click(entry, ref, actions)
 
