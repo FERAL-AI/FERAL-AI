@@ -1,12 +1,97 @@
 # Changelog
 
-<!-- feral-version: 2026.8.28 -->
+<!-- feral-version: 2026.8.29 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
 
+## [2026.8.29] - 2026-08-29 - a name is not evidence
+
+Four defects, three of them found by trying to answer a competitive
+question rather than by looking for bugs. Every fix carries a test first
+demonstrated to fail against the unfixed code.
+
+### Fixed
+
+- **Clicks landed at 57% of where the model aimed, on every Retina Mac.**
+  Three coordinate spaces are involved and the click path used the wrong
+  ratio between two of them: `screencapture` writes native pixels (3360
+  on a 1680-point display), `encode_for_vlm` resizes anything wider than
+  1920 and discards the ratio, and pyautogui clicks in logical points.
+  The model's coordinates live in the resized image, so the divisor is
+  1920/1680 = 1.143; the code divided by the display's backing factor,
+  2.0. Measured before the fix: a target at x=1900 was clicked at 950
+  instead of 1662, an error of 712 pixels that grows toward the screen
+  edge, which is where menus and buttons are. That made
+  `agentic_computer_use`, the screenshot-understand-act loop, unable to
+  reliably click anything on Retina hardware, while its manifest claimed
+  it "supports Retina/HiDPI scaling automatically". Non-Retina displays
+  were unaffected, because no resize happens and the two numbers
+  coincide, which is why it survived. Both halves were unit-tested and
+  both were individually correct; nothing tested the composition, which
+  is the only place the defect existed.
+
+- **An MCP tool earned auto-approval from its own name.** No `mcp_*`
+  name is in the danger map, so resolution fell to a substring heuristic
+  that awards AUTO to anything containing read, get, list, status, query
+  or search. A tool called `clipboard_read` therefore executed with no
+  approval in every autonomy mode including strict, returning whatever
+  the operator last copied. For a native skill those substrings sit
+  behind a reviewed manifest; for an MCP tool there is none, and the
+  name is chosen by whoever wrote the server. `plan_mode` already
+  refused `mcp_*` by name for exactly this reason, and the safety
+  resolver now agrees with it. Only the AUTO shortcut is withdrawn:
+  nothing that was refused becomes permitted.
+
+- **FERAL's MCP client silently discovered zero tools from any server
+  with a large tool list.** `create_subprocess_exec` was called with no
+  `limit=`, so the reader took asyncio's 64 KiB default, while MCP
+  frames one JSON-RPC message per line. A 141,876-byte `tools/list`
+  response overran it, `readline` raised into a generic handler, and
+  `connect()` still returned true with an empty toolset. The reader also
+  clears its buffer on that path while the rest of the line is still
+  arriving, so the stream desynchronised and the following request
+  failed with an unrelated JSON error. Verified against a live server:
+  0 tools before, 56 after.
+
+- **One MCP server evicted 56 native tools from the model's tool list.**
+  `skill_id_from_tool_name` splits on `__`, but MCP wire names use
+  single underscores, so every MCP tool became its own "skill" and each
+  claimed a per-skill coverage slot ahead of native depth. Measured
+  under the 128 cap: native tools dropped from 128 to 72. MCP tools are
+  now bucketed per server.
+
+- **`macos_ax__click` moved the cursor when a cursor-free route
+  existed.** Of Finder's 261 interactive elements only 44 publish
+  AXPress; the rest are AXCell rows publishing AXOpen, so "click
+  Applications" became a real mouse click in a module whose premise is
+  that it does not touch the cursor. It now names the element's
+  cursor-free actions and returns them as structured data rather than
+  guessing: a coordinate click on a row selects it and AXOpen opens it,
+  and the function cannot know which was meant.
+
 ### Added
+
+- **`macos_ax__activate`.** The capable counterpart to `click`: one
+  call, cursor-free, for any element publishing AXPress, AXOpen,
+  AXConfirm or AXPick. `click` means the click gesture; `activate` asks
+  for the outcome, which is why AXOpen is a correct answer there rather
+  than a substitution. No coordinate fallback, because an element with
+  no activating action has no primary thing to do.
+
+- **The agentic loop's inner actions are gated.** Its dispatcher called
+  the raw skill instance, so plan mode, approval and the hourly rate
+  limit never ran for any action inside the loop: one approved task
+  bought up to fifteen ungated iterations of clicking and typing. They
+  now route through `SkillExecutor`, so the operator's autonomy tier
+  applies as written.
+
+- **CI for `feral-nodes/python-node-sdk` and `feral-registry`.** Both
+  shipped committed test suites that no job ran. 138 tests were sitting
+  there unexecuted, which is why three files kept asserting HUP 1.3.0
+  for weeks after the bump, red on every run, in a repository where
+  every pull request looked green.
 
 - **cua-driver is a known MCP server.** New `KNOWN_SERVERS` entry in
   `mcp/registry.py` for [cua-driver](https://cua.ai/driver), a native
