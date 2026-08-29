@@ -407,25 +407,6 @@ def _actions(element) -> List[str]:
     return ordered
 
 
-
-def _backing_scale_factor() -> float:
-    """Display backing scale, for converting AX points to native pixels.
-
-    AXPosition/AXSize are logical points; cua-driver's click takes
-    native pixels. Returns 1.0 when it cannot be determined, which
-    leaves the point untranslated rather than multiplying by a guess.
-    """
-    try:
-        from AppKit import NSScreen  # type: ignore
-
-        screen = NSScreen.mainScreen()
-        if screen is None:
-            return 1.0
-        return float(screen.backingScaleFactor())
-    except Exception:
-        return 1.0
-
-
 def _bounds(element) -> Optional[Dict[str, float]]:
     """Screen bounds as plain numbers, or None.
 
@@ -970,20 +951,10 @@ class MacOSAccessibilitySkill(BaseSkill):
 
     def __init__(self):
         super().__init__(skill_id="macos_ax")
-        # Loop that owns the MCP transport. Handlers run on worker
-        # threads via asyncio.to_thread, so the background click
-        # bridge needs an explicit loop reference to schedule onto.
-        self._owning_loop = None
 
     async def execute(
         self, endpoint_id: str, args: Dict[str, Any], vault: Dict[str, str],
     ) -> Dict[str, Any]:
-        try:
-            import asyncio
-            self._owning_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._owning_loop = None
-
         dispatch = {
             "snapshot": self._snapshot,
             "find": self._find,
@@ -1630,49 +1601,6 @@ class MacOSAccessibilitySkill(BaseSkill):
             )
         x = bounds["x"] + bounds["width"] / 2.0
         y = bounds["y"] + bounds["height"] / 2.0
-
-        # Before reaching for the operator's actual mouse, see whether a
-        # background delivery backend is connected. cua-driver injects
-        # into the target process, so the same point can be clicked with
-        # no cursor movement, no window raise and no Space switch.
-        #
-        # We keep targeting the element semantically either way: the
-        # bounds come from the AX tree, so this needs no screenshot and
-        # no vision model. Only the delivery changes.
-        #
-        # Bounds are LOGICAL POINTS and the driver's click takes NATIVE
-        # PIXELS; `background_click` does that conversion explicitly.
-        # Getting it backwards would not merely offset the click, it
-        # would hit a different control, which is the failure mode that
-        # already cost this codebase once.
-        from skills.impl.background_input import (
-            background_click_available,
-            background_click_sync,
-        )
-
-        if background_click_available():
-            delivered, detail = background_click_sync(
-                self._owning_loop,
-                logical_x=x, logical_y=y, scale=_backing_scale_factor(),
-            )
-            if delivered:
-                return _ok({
-                    "ref": ref,
-                    "method": "background_click",
-                    "role": entry.role,
-                    "label": entry.label,
-                    "app": entry.app_name,
-                    "text": (
-                        f"Clicked {entry.role} \"{entry.label}\" in "
-                        f"{entry.app_name} without moving the cursor "
-                        f"({detail})."
-                    ),
-                })
-            logger.info(
-                "background click backend declined (%s); falling back to the "
-                "real cursor", detail,
-            )
-
         try:
             import Quartz  # type: ignore
         except ImportError as exc:  # pragma: no cover - depends on install
