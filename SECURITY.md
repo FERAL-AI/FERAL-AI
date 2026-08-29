@@ -418,6 +418,7 @@ points. Anything not listed here is not enforced anywhere:
 | `mcp.*` | `MCPClientManager.connect_server` and `connect_all` |
 | `filesystem.*` | the computer-use file tools and `security/exec_mode.py` |
 | `execution.allow_shell_commands`, `daemon.shell`, `daemon.applescript` | `validate_shell_command` / `validate_applescript` |
+| `execution.denied_command_patterns`, `execution.full_authority` | `SandboxPolicy.denied_command_patterns`, applied by `security/exec_mode.py`. See "The command deny floor" below |
 
 Two properties of that table are deliberate:
 
@@ -471,6 +472,44 @@ boundaries protect the single trusted operator from prompt injection and
 untrusted skill code, not from their own machine. A report showing the
 brain running a shell *outside* every grant, or running generated code on
 the host in any mode, **is** in scope.
+
+### The command deny floor, and turning it off
+
+`SandboxPolicy._COMMAND_DENY_FLOOR` refuses six command shapes outright:
+`rm -rf /` and `rm -rf ~`, `mkfs`, `dd of=/dev/…`, a redirect to a raw
+block device, the canonical fork bomb, and system power commands
+(`shutdown` / `reboot` / `halt` / `poweroff`). It is matched against the
+unwrapped command text, so an encoding does not walk past it, and
+`execution.denied_command_patterns` lets an operator add to it.
+
+The floor applies at **every** autonomy tier, `loose` included. That is
+deliberate but it is not absolute, because `loose` documents itself as
+"nothing needs approval" and a floor that silently outranks the tier is a
+second authority the operator was never told about. It exists because a
+model can spell `mkfs` for reasons that made sense to the model, not
+because the operator needs protecting from their own machine.
+
+So a human can take it off:
+
+```yaml
+execution:
+  full_authority: true
+```
+
+The floor is then skipped entirely at every tier. Any
+`execution.denied_command_patterns` the operator wrote still apply:
+someone who granted full authority *and* wrote their own deny list meant
+both. The brain logs a warning naming the state once per policy load.
+
+Two properties are deliberate. It defaults to off, so the floor stands
+for everyone who has not thought about it. And it is readable **only**
+from the policy file, never from an environment variable: an env var is
+something a script or a parent process can hand you, and this is
+something you have to sit down and mean.
+
+A report that the floor can be bypassed *without* this key **is** in
+scope. A report that a machine with this key set ran a destructive
+command is not: that is the key working.
 
 `daemon://local/shell` remains separately gated by
 `SandboxPolicy.validate_shell_command` (argv[0] allowlist plus
