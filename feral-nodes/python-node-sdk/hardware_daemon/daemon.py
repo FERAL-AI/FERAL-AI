@@ -168,12 +168,14 @@ class HardwareDaemon:
     async def _cmd_location_get(self, args: dict) -> dict:
         """Get GPS location. On macOS, use CoreLocation via subprocess."""
         try:
-            import subprocess
-            result = subprocess.run(
-                ["python3", "-c", "import CoreLocation; print('location')"],
-                capture_output=True, timeout=5,
-            )
-            # Fallback: use IP-based geolocation
+            # The CoreLocation probe that used to sit here spawned a
+            # subprocess with a 5 second timeout and threw the result
+            # away: nothing read it, and the method fell through to IP
+            # geolocation unconditionally either way. So it cost a
+            # process spawn and up to five seconds of latency on every
+            # location request while changing nothing. Removed rather
+            # than wired up, because wiring it up would mean writing the
+            # native path it only pretended to check for.
             import urllib.request
             resp = urllib.request.urlopen("https://ipinfo.io/json", timeout=5)
             data = json.loads(resp.read())
@@ -289,9 +291,9 @@ class HardwareDaemon:
         """Continuously push real system telemetry to the Brain via psutil."""
         try:
             import psutil
-            has_psutil = True
         except ImportError:
-            has_psutil = False
+            # No flag needed: this branch returns, so reaching the loop
+            # below already means psutil imported.
             logger.warning("psutil not installed — telemetry loop disabled. Install psutil for real system metrics.")
             return
 
