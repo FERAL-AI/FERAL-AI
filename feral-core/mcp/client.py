@@ -42,6 +42,19 @@ from config.loader import feral_home
 
 logger = logging.getLogger("feral.mcp.client")
 
+
+class _OversizedLine(Exception):
+    """One JSON-RPC line was longer than the stdio reader's limit.
+
+    Exists purely so that failure can be told apart from a malformed
+    message: ``StreamReader.readline`` signals it with a bare
+    ``ValueError``, and ``json.JSONDecodeError`` is also a ``ValueError``.
+    Catching ``ValueError`` around both would report a server that sent
+    broken JSON as a server that sent too much, and would tear down a
+    connection that only needed one request retried.
+    """
+
+
 # audit-r12 D6: MCP Streamable HTTP transport per spec rev 2025-06-18.
 # Pre-r12 the HTTP branch in :meth:`MCPServerConnection.connect` set
 # ``self._connected = True`` and never spoke protocol — every
@@ -200,6 +213,41 @@ class MCPServerConnection:
     # status payload that gets rendered in a Settings row.
     _STDERR_CAPTURE_LIMIT = 4000
 
+    # Max bytes in ONE JSON-RPC line from a stdio server.
+    #
+    # `asyncio.create_subprocess_exec` builds its StreamReader with the
+    # library default limit of 64 KiB, and MCP frames one message per
+    # line, so any server whose `tools/list` exceeds 64 KiB cannot be
+    # read at all. `readline()` raises
+    # `ValueError: Separator is not found, and chunk exceed the limit`,
+    # and - worse - clears its buffer while the rest of the oversized
+    # line is still arriving, so every subsequent read returns the tail
+    # of the previous message and fails to parse. The connection stays
+    # marked connected with zero tools.
+    #
+    # Measured against cua-driver 0.22.2 (56 tools): its `tools/list`
+    # response is a single 141,876-byte line, i.e. 2.2x the default. It
+    # is not an outlier - any server with a few dozen tools and real
+    # JSON Schemas lands in the same range, and `tools/call` responses
+    # carrying a screenshot are larger still.
+    #
+    # 16 MiB rather than "unlimited": the limit is a high-water mark, not
+    # a preallocation, so a well-behaved server costs nothing, while a
+    # runaway child that never emits a newline still hits a ceiling
+    # instead of consuming the brain's memory. Override with
+    # FERAL_MCP_STDIO_LINE_LIMIT for a server that needs more.
+    _STDIO_LINE_LIMIT_DEFAULT = 16 * 1024 * 1024
+
+    @property
+    def _stdio_line_limit(self) -> int:
+        try:
+            value = int(os.environ.get(
+                "FERAL_MCP_STDIO_LINE_LIMIT", self._STDIO_LINE_LIMIT_DEFAULT,
+            ))
+        except ValueError:
+            return self._STDIO_LINE_LIMIT_DEFAULT
+        return value if value > 0 else self._STDIO_LINE_LIMIT_DEFAULT
+
     async def _drain_stderr(self) -> str:
         """Read what the child wrote to stderr, bounded and non-blocking.
 
@@ -246,6 +294,9 @@ class MCPServerConnection:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                # See _STDIO_LINE_LIMIT_DEFAULT: the 64 KiB default makes
+                # any server with a large tools/list unreadable.
+                limit=self._stdio_line_limit,
             )
 
             init_result = await self._send_request("initialize", {
@@ -473,9 +524,17 @@ class MCPServerConnection:
             self._process.stdin.write(line.encode())
             await self._process.stdin.drain()
 
-            response_line = await asyncio.wait_for(
-                self._process.stdout.readline(), timeout=30,
-            )
+            try:
+                response_line = await asyncio.wait_for(
+                    self._process.stdout.readline(), timeout=30,
+                )
+            except ValueError as e:
+                # Raised (and re-raised as _OversizedLine) only by the
+                # reader itself. Scoped to this one call rather than the
+                # whole block because json.JSONDecodeError is also a
+                # ValueError, and a malformed message is a different
+                # fault with a different remedy from an oversized one.
+                raise _OversizedLine(str(e)) from e
             if response_line:
                 decoded = json.loads(response_line.decode().strip())
                 self._request_failures = 0
@@ -484,6 +543,24 @@ class MCPServerConnection:
         except asyncio.TimeoutError:
             logger.warning(f"MCP request timed out: {method}")
             self._request_failures += 1
+        except _OversizedLine as e:
+            # StreamReader.readline raises ValueError when one line
+            # exceeds the reader's limit, and clears its buffer while the
+            # remainder of that line is still in flight. The stream is
+            # desynchronised from here on: every later read returns the
+            # tail of a message nobody asked for. Drop the connection
+            # rather than serve garbage from it, and say what the fix is,
+            # because the raw message ("Separator is not found, and chunk
+            # exceed the limit") names neither the server nor the knob.
+            self.last_error = (
+                f"{self.name}: response to {method} exceeded the "
+                f"{self._stdio_line_limit}-byte stdio line limit ({e}). "
+                f"Raise FERAL_MCP_STDIO_LINE_LIMIT and reconnect."
+            )
+            logger.error(self.last_error)
+            self._request_failures += 1
+            self._connected = False
+            return None
         except Exception as e:
             logger.warning(f"MCP request error: {e}")
             self._request_failures += 1

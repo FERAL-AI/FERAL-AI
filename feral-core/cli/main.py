@@ -1638,6 +1638,103 @@ def _local_voice_selected() -> tuple[bool, bool]:
         return (False, False)
 
 
+# Doctor asks questions, it does not wait on daemons. Same budget shape
+# as TS_PROBE_BUDGET: two short subprocess calls, hard-capped, so a
+# wedged cua-driver cannot hang `feral doctor`.
+CUA_PROBE_BUDGET = 2.5
+
+
+def _cua_driver_probe(binary: str | None = None) -> dict:
+    """Describe the OPTIONAL cua-driver MCP server on this machine.
+
+    Returns ``{binary, version, daemon, permissions, detail}`` where:
+
+      ``binary``       absolute path, or ``None`` when not installed.
+      ``version``      e.g. ``"0.22.2"``, or ``""`` when unreadable.
+      ``daemon``       ``"running"`` / ``"stopped"`` / ``"unknown"``.
+      ``permissions``  ``{"accessibility": bool|None,
+                          "screen_recording": bool|None}``.
+      ``detail``       one-line reason when something could not be read.
+
+    Three deliberate choices:
+
+    * Only READ-ONLY subcommands are ever executed (``--version``,
+      ``status``, ``permissions status --json``). None of them move the
+      pointer, focus a window, or prompt. ``permissions grant`` is the
+      one that opens dialogs and doctor must never call it.
+    * Permissions come from ``permissions status --json``, which routes
+      the question through the running daemon so the answer carries
+      CuaDriver's own TCC identity (bundle id ``com.trycua.driver``).
+      The MCP-level ``check_permissions`` tool, called without a daemon,
+      reports the CALLER's grants instead, which for `feral doctor`
+      would be the terminal's - a different program's permissions
+      printed under cua-driver's name.
+    * Never raises. Every failure mode degrades to ``unknown`` plus a
+      detail string, because this is an opt-in feature and doctor
+      crashing on it would break rows that have nothing to do with it.
+    """
+    import subprocess
+
+    out: dict = {
+        "binary": None,
+        "version": "",
+        "daemon": "unknown",
+        "permissions": {"accessibility": None, "screen_recording": None},
+        "detail": "",
+    }
+
+    resolved = binary or shutil.which("cua-driver")
+    if not resolved:
+        return out
+    out["binary"] = resolved
+
+    def _run(args: list[str]) -> tuple[int | None, str]:
+        try:
+            proc = subprocess.run(
+                [resolved, *args],
+                capture_output=True,
+                text=True,
+                timeout=CUA_PROBE_BUDGET,
+            )
+        except subprocess.TimeoutExpired:
+            return (None, f"`cua-driver {' '.join(args)}` did not answer "
+                          f"within {CUA_PROBE_BUDGET}s")
+        except Exception as exc:
+            return (None, f"{type(exc).__name__}: {exc}")
+        return (proc.returncode, (proc.stdout or "").strip()
+                or (proc.stderr or "").strip())
+
+    rc, text = _run(["--version"])
+    if rc == 0 and text:
+        # "cua-driver 0.22.2" -> "0.22.2"
+        out["version"] = text.split()[-1]
+
+    # `status` exits 0 when the daemon socket answers and 1 when it does
+    # not. Verified against a live daemon and against a bogus --socket.
+    rc, text = _run(["status"])
+    if rc == 0:
+        out["daemon"] = "running"
+    elif rc == 1:
+        out["daemon"] = "stopped"
+    else:
+        out["detail"] = text
+
+    rc, text = _run(["permissions", "status", "--json"])
+    if rc == 0 and text:
+        try:
+            payload = json.loads(text)
+        except (ValueError, TypeError):
+            payload = {}
+        if isinstance(payload, dict):
+            for key in ("accessibility", "screen_recording"):
+                val = payload.get(key)
+                out["permissions"][key] = val if isinstance(val, bool) else None
+    elif rc not in (0, 1) and not out["detail"]:
+        out["detail"] = text
+
+    return out
+
+
 def cmd_doctor():
     """Run comprehensive diagnostics and report what's working."""
     try:
@@ -3112,6 +3209,75 @@ def cmd_doctor():
             f"import failed: {exc}",
             "Reinstall feral-ai; the driver lives in feral-core/agents/computer_use_driver.py",
         )
+
+    # ── cua-driver (OPTIONAL MCP server) ──
+    #
+    # Every row in this block is _pass or _info, never _warn and never
+    # _fail, and that is a deliberate contract rather than an oversight.
+    # cua-driver is opt-in: it is one catalog entry in KNOWN_SERVERS that
+    # nothing connects until the operator asks for it, and an operator
+    # who has never heard of it must see no yellow. The severity
+    # allowlist in tests/test_doctor_severity.py is therefore untouched
+    # by this section, and must stay that way.
+    #
+    # It still earns rows, because when it IS installed the two things
+    # that silently stop it working - a dead daemon and a missing macOS
+    # TCC grant - are both invisible until a tool call fails mid-turn.
+    _cua = _cua_driver_probe()
+    if not _cua["binary"]:
+        _info(
+            "cua-driver",
+            "not installed. Optional MCP server for GUI computer-use "
+            "(install: curl -fsSL https://cua.ai/driver/install.sh | bash), "
+            "then enable it in Settings → MCP",
+        )
+    else:
+        _pass(
+            "cua-driver",
+            f"{_cua['binary']}" + (f" (v{_cua['version']})" if _cua["version"] else ""),
+        )
+        if _cua["daemon"] == "running":
+            _pass("cua-driver daemon", "responding")
+        elif _cua["daemon"] == "stopped":
+            _info(
+                "cua-driver daemon",
+                "not running. `cua-driver mcp` starts one on demand, so this "
+                "is the normal idle state",
+            )
+        else:
+            _info(
+                "cua-driver daemon",
+                _cua["detail"] or "could not determine daemon state",
+            )
+
+        if platform.system() == "Darwin":
+            _perms = _cua["permissions"]
+            _granted = [k for k, v in _perms.items() if v is True]
+            _denied = [k for k, v in _perms.items() if v is False]
+            _unknown = [k for k, v in _perms.items() if v is None]
+            if _denied:
+                # _info, not _warn: cua-driver being unable to act is
+                # only a problem for someone who chose to use it, and
+                # the allowlist contract reserves yellow for degraded
+                # things the operator is already relying on.
+                _info(
+                    "cua-driver permissions",
+                    "not granted: " + ", ".join(sorted(_denied))
+                    + ". Run `cua-driver permissions grant` to request them "
+                    "(attributed to CuaDriver.app, bundle id com.trycua.driver)",
+                )
+            elif _unknown:
+                _info(
+                    "cua-driver permissions",
+                    "unknown (no daemon answered, so the grants could not be "
+                    "read under CuaDriver's own identity). "
+                    "`cua-driver permissions status` reports authoritatively",
+                )
+            elif _granted:
+                _pass(
+                    "cua-driver permissions",
+                    "granted: " + ", ".join(sorted(_granted)),
+                )
 
     # upload store: PR 10
     try:

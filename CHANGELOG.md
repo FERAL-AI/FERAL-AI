@@ -6,6 +6,87 @@ All notable changes to FERAL are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **cua-driver is a known MCP server.** New `KNOWN_SERVERS` entry in
+  `mcp/registry.py` for [cua-driver](https://cua.ai/driver), a native
+  binary that exposes GUI computer-use over MCP stdio: accessibility
+  tree reads, click, type, app control, and a browser suite (56 tools on
+  0.22.2). Command and args are the ones `cua-driver mcp-config` prints
+  for itself, so the registration cannot drift from the tool.
+
+  It is the first catalog entry that is not an npx package. Nothing in
+  the registry or the client needed changing for that: the launcher
+  execs `command` directly, and `_resolve_install_state` already had a
+  non-npx branch that resolves through `shutil.which`. The npx-specific
+  helpers (`_npx_package_name`, `_npx_package_roots`) are reached only
+  from the npx branch. The entry is stored as the bare binary name, not
+  the absolute path `mcp-config` prints, because the catalog ships to
+  every machine.
+
+  It is **opt-in**, like every other entry. `KNOWN_SERVERS` is a catalog
+  the Settings UI renders and `connect_server` reads on an explicit user
+  action; nothing in the boot path iterates it. An operator who has
+  never heard of cua-driver pays no startup cost and sees no error, and
+  a test now asserts that statically so a future startup hook cannot
+  quietly change it.
+
+- **`feral doctor` reports cua-driver.** Three rows when it is
+  installed: the binary and version, whether the daemon is answering,
+  and the macOS TCC grant state. Both of the things that silently stop
+  it working (a dead daemon, a missing Accessibility or Screen Recording
+  grant) were previously invisible until a tool call failed mid-turn.
+
+  Every row is `_pass` or `_info`, never `_warn` and never `_fail`. It
+  is an optional feature, so its absence is the expected state and must
+  not turn a clean install yellow. The severity allowlist in
+  `tests/test_doctor_severity.py` is unchanged.
+
+  Permissions are read via `cua-driver permissions status --json`, which
+  routes the question through the running daemon so the answer carries
+  CuaDriver's own TCC identity (`com.trycua.driver`). The MCP-level
+  `check_permissions` tool, called with no daemon up, reports the
+  caller's grants instead, which for doctor would be the terminal's. The
+  probe runs read-only subcommands only, on a 2.5s budget each, and
+  never raises.
+
+### Fixed
+
+- **An MCP stdio server with more than 64 KiB of tools was unreadable.**
+  MCP frames one JSON-RPC message per line, and
+  `asyncio.create_subprocess_exec` builds its `StreamReader` with the
+  library default limit of 64 KiB. `mcp/client.py` passed no `limit=`,
+  so `readline()` raised `ValueError: Separator is not found, and chunk
+  exceed the limit` on any server whose `tools/list` response exceeded
+  that.
+
+  The symptom was not an error. The generic `except Exception` logged it
+  at WARNING as "MCP request error", `_discover_tools` left `_tools`
+  empty, and `connect()` returned True, so the server rendered as
+  connected with zero tools. Worse, `readline` clears its buffer on that
+  path while the rest of the oversized line is still arriving, so the
+  stream desynchronised and the next request read the tail of the
+  previous message: `resources/list` (issued immediately after
+  `tools/list` during connect) died on `Expecting value: line 1
+  column 1`.
+
+  Measured against cua-driver 0.22.2: its `tools/list` response for 56
+  tools is a single 141,876-byte line, 2.2x the default. This is not an
+  exotic server; a few dozen tools with real JSON Schemas gets any
+  server there, and a `tools/call` returning a screenshot is larger
+  still.
+
+  The reader limit is now 16 MiB, overridable with
+  `FERAL_MCP_STDIO_LINE_LIMIT`. It is a high-water mark rather than a
+  preallocation, so a well-behaved server costs nothing while a runaway
+  child still hits a ceiling. A frame that overruns even the configured
+  limit is now reported as its own condition: the connection is marked
+  disconnected instead of serving garbage from a desynchronised stream,
+  and `last_error` names the server, the limit, and the env var.
+  `json.JSONDecodeError` is also a `ValueError`, so the new handling is
+  scoped to the read itself and a malformed message is still treated as
+  the different fault it is.
+
 ## [2026.8.28] - 2026-08-28 - the things that had never worked
 
 Three independent audits of this codebase found forty defects. This
