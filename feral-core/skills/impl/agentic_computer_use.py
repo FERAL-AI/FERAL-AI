@@ -19,6 +19,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -393,16 +394,104 @@ class AgenticComputerUseSkill(BaseSkill):
             return f"Unknown action: {action.action}"
         gui_args = gui_args_for(action)
 
-        from skills.impl import get_implementation
-
-        gui = get_implementation("gui_computer_use")
-        if gui is None:
+        result = await self._execute_gated(endpoint_id, gui_args)
+        if result is None:
             return (
                 "gui_computer_use skill is not registered; "
                 "agentic_computer_use cannot execute physical actions"
             )
+        return self._describe_gui_result(action, result)
 
-        result = await gui.execute(endpoint_id, gui_args, vault={})
+    async def _execute_gated(
+        self, endpoint_id: str, gui_args: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Run one inner action through the gates every tool passes.
+
+        This used to call ``get_implementation("gui_computer_use")``
+        and invoke the skill instance directly. ``SkillExecutor.execute``
+        is the chokepoint where plan mode, approval and the hourly rate
+        limit are enforced, and its docstring says why they live there:
+        "a gate the caller has to opt into fails open for every path
+        that does not know to ask". This was such a path.
+
+        The effect was that one approved ``execute_task`` bought up to
+        fifteen VLM iterations of clicking and typing that were never
+        gated and never counted against the budget, and that plan mode,
+        whose entire promise is that nothing acts, did not stop them.
+        The operator's autonomy tier is meant to own that decision, and
+        a tier governing the outer call but not the fifteen actions it
+        spawns is not governing much.
+
+        Routing through the executor means the tier applies as written:
+        strict prompts for each non-read-only action, hybrid prompts for
+        CONFIRM-level ones, loose prompts for none. That is not a new
+        policy, it is the configured one finally reaching this loop.
+
+        Falls back to the direct instance only when there is no brain to
+        gate against, which is offline tooling, the CLI and tests.
+        ``SkillExecutor._gate`` fails open in exactly that case and for
+        exactly that reason; refusing here would break those callers
+        without making a live session any safer.
+
+        Returns ``None`` when the GUI skill is not registered at all.
+        """
+        tool_name = f"gui_computer_use__{endpoint_id}"
+
+        state_mod = sys.modules.get("api.state")
+        state_obj = getattr(state_mod, "state", None)
+        executor = getattr(state_obj, "skill_executor", None)
+
+        if executor is not None:
+            manifest, endpoint = self._resolve_gui_endpoint(endpoint_id)
+            if manifest is not None and endpoint is not None:
+                from skills.call_context import bind_context, current_context
+
+                # Keep the parent's session and turn so the gate judges
+                # this against the same session that approved the task,
+                # and so a checkpoint revert groups the inner actions
+                # with the turn that caused them.
+                parent = current_context()
+                with bind_context(
+                    session_id=parent.session_id,
+                    surface=parent.surface,
+                    tool_name=tool_name,
+                    turn_id=parent.turn_id,
+                ):
+                    return await executor.execute(
+                        tool_name, gui_args, manifest, endpoint,
+                    )
+            logger.warning(
+                "gui_computer_use__%s is not in the registry; falling back to "
+                "the ungated direct path", endpoint_id,
+            )
+
+        from skills.impl import get_implementation
+
+        gui = get_implementation("gui_computer_use")
+        if gui is None:
+            return None
+        return await gui.execute(endpoint_id, gui_args, vault={})
+
+    @staticmethod
+    def _resolve_gui_endpoint(endpoint_id: str):
+        """``(manifest, endpoint)`` for a gui_computer_use endpoint."""
+        try:
+            state_mod = sys.modules.get("api.state")
+            state_obj = getattr(state_mod, "state", None)
+            registry = getattr(state_obj, "skill_registry", None)
+            manifest = getattr(registry, "skills", {}).get("gui_computer_use")
+            if manifest is None:
+                return None, None
+            for ep in getattr(manifest, "endpoints", []) or []:
+                if getattr(ep, "id", None) == endpoint_id:
+                    return manifest, ep
+            return manifest, None
+        except Exception:
+            logger.debug("could not resolve gui_computer_use endpoint", exc_info=True)
+            return None, None
+
+    def _describe_gui_result(self, action, result) -> str:
+        """Human-readable message the step log and tests expect."""
         if isinstance(result, dict):
             if not result.get("success"):
                 err = result.get("error") or result.get("reason") or "action failed"

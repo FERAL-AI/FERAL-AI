@@ -4,9 +4,12 @@ FERAL GUI Computer Use — Anthropic-Style Desktop Control
 Industry-standard computer-use skill providing individual GUI primitives:
 screenshot, mouse clicks, typing, key combos, scrolling, and window management.
 
-All coordinates from VLMs are in screenshot-space and automatically divided
-by the DPI scale factor before being passed to pyautogui, so Retina/HiDPI
-displays work correctly out of the box.
+All coordinates from VLMs are in screenshot-space and are converted to
+pyautogui's click space before use. The divisor comes from the screenshot
+pipeline (capture width, the resize in ``encode_for_vlm``, then the
+logical click space), NOT from the display's backing scale factor: the
+model's coordinates went through the resize, so the resize is the ratio
+that matters. See ``vlm_to_screen_divisor``.
 
 Hardened: action rate limiter (configurable), proper logger namespace.
 """
@@ -68,8 +71,54 @@ def detect_dpi_scale() -> float:
     return 1.0
 
 
+def vlm_to_screen_divisor(
+    logical_width: float,
+    backing_scale: float,
+    max_width: int = _SCREENSHOT_MAX_WIDTH,
+) -> float:
+    """Ratio between the image the model sees and the space we click in.
+
+    Three coordinate spaces are involved and the click path used the
+    wrong ratio between two of them:
+
+      1. native capture: ``screencapture`` writes physical pixels, so a
+         1680-point Retina screen produces a 3360-wide PNG.
+      2. what the model sees: ``encode_for_vlm`` resizes anything wider
+         than ``max_width`` and throws the ratio away.
+      3. where pyautogui clicks: logical points, 1680 wide.
+
+    Model coordinates live in space 2. The old code divided by the
+    display's backing scale factor (2.0), which is the ratio between
+    spaces 1 and 3 and describes a resize that already happened
+    differently. The correct divisor is ``1920 / 1680 = 1.143``, so
+    every click landed at about 57% of the intended position, with the
+    error growing toward the screen edge: a target at x=1900 was clicked
+    at 950 rather than 1662.
+
+    Deriving it from the pipeline rather than from the display also
+    fixes a case the old arithmetic could not express at all. On a 5K
+    Retina panel the capture is 5120 wide, the model sees 1920, and
+    pyautogui clicks in 2560, so the divisor is **below one** and
+    coordinates must scale UP. Dividing by a backing factor can only
+    ever scale down.
+    """
+    if logical_width <= 0:
+        return 1.0
+    if backing_scale <= 0:
+        backing_scale = 1.0
+    native_width = logical_width * backing_scale
+    seen_by_model = min(native_width, float(max_width))
+    divisor = seen_by_model / logical_width
+    return divisor if divisor > 0 else 1.0
+
+
 def scale_coordinates(x: int, y: int, scale: float) -> Tuple[int, int]:
-    """Convert VLM screenshot-space coords to physical screen coords."""
+    """Convert VLM screenshot-space coords to physical screen coords.
+
+    ``scale`` is the value from :func:`vlm_to_screen_divisor`, not the
+    display's backing scale factor. Passing the latter is the defect
+    this signature's caller was fixed for; see that function.
+    """
     if scale <= 0:
         scale = 1.0
     return int(x / scale), int(y / scale)
@@ -505,15 +554,59 @@ class GUIComputerUseSkill(BaseSkill):
     def __init__(self) -> None:
         super().__init__(skill_id="gui_computer_use")
         self._scale: Optional[float] = None
+        self._dpi_scale: Optional[float] = None
         max_actions = float(os.getenv("FERAL_GUI_MAX_ACTIONS_PER_S", "10"))
         self._rate_limiter = ActionRateLimiter(max_per_second=max_actions)
 
     @property
+    def dpi_scale(self) -> float:
+        """The display's backing scale factor, for reporting only.
+
+        Not the click divisor. Using it as one is what put every Retina
+        click at ~57% of the intended position; see
+        :func:`vlm_to_screen_divisor`.
+        """
+        if self._dpi_scale is None:
+            self._dpi_scale = detect_dpi_scale()
+            logger.info("DPI scale factor detected: %.1f", self._dpi_scale)
+        return self._dpi_scale
+
+    @property
     def scale(self) -> float:
+        """Divisor taking model coordinates to pyautogui coordinates.
+
+        Derived from the screenshot pipeline (capture, resize, click
+        space) rather than from the display, because the resize step is
+        what the model's coordinates actually went through.
+        """
         if self._scale is None:
-            self._scale = detect_dpi_scale()
-            logger.info("DPI scale factor detected: %.1f", self._scale)
+            logical_w = self._logical_screen_width()
+            self._scale = vlm_to_screen_divisor(logical_w, self.dpi_scale)
+            logger.info(
+                "click divisor %.3f (logical width %.0f, dpi scale %.1f)",
+                self._scale, logical_w, self.dpi_scale,
+            )
         return self._scale
+
+    @staticmethod
+    def _logical_screen_width() -> float:
+        """Width of the space pyautogui clicks in.
+
+        pyautogui is the authority here because it is what receives the
+        coordinates. Falling back to a probe-free default of 0 would
+        make the divisor 1.0, i.e. no correction, which is the safe
+        direction: it degrades to the pre-resize behaviour rather than
+        moving clicks somewhere new.
+        """
+        try:
+            import pyautogui
+            return float(pyautogui.size()[0])
+        except Exception:
+            logger.warning(
+                "could not read the screen size; clicks will not be "
+                "corrected for the screenshot resize"
+            )
+            return 0.0
 
     async def execute(
         self, endpoint_id: str, args: Dict[str, Any], vault: Dict[str, str],
@@ -570,7 +663,8 @@ class GUIComputerUseSkill(BaseSkill):
             "data": {
                 "image_base64": data,
                 "format": "jpeg",
-                "dpi_scale": self.scale,
+                "dpi_scale": self.dpi_scale,
+                "click_divisor": self.scale,
             },
             "error": None,
         }
@@ -645,7 +739,7 @@ class GUIComputerUseSkill(BaseSkill):
         pos = await asyncio.to_thread(self._get_cursor_pos)
         return {
             "success": True, "status_code": 200,
-            "data": {"x": pos[0], "y": pos[1], "dpi_scale": self.scale},
+            "data": {"x": pos[0], "y": pos[1], "dpi_scale": self.dpi_scale},
             "error": None,
         }
 
