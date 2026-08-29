@@ -46,9 +46,12 @@ from security.sandbox_policy import SandboxPolicy  # noqa: E402
 _WIPE_ROOT = "rm" + " -rf /"
 _WIPE_ROOT_FORCED = _WIPE_ROOT + " --no-preserve-root"
 _FORMAT = "mkfs" + ".ext4 /dev/sda1"
-_REBOOT = "sudo " + "reboot"
 
-FLOOR_COMMANDS = [_WIPE_ROOT, _WIPE_ROOT_FORCED, _FORMAT, _REBOOT]
+# The power commands used to be here. They left the floor: a restart is
+# reversible, ordinary work, so it is gated as a confirm-tier question
+# rather than refused outright. See
+# ``tests/test_power_commands_are_a_question.py``.
+FLOOR_COMMANDS = [_WIPE_ROOT, _WIPE_ROOT_FORCED, _FORMAT]
 
 
 def _policy(path, **execution) -> SandboxPolicy:
