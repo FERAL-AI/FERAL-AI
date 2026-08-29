@@ -105,9 +105,37 @@ MIN_TOOLS_PER_SKILL = 1
 
 
 def skill_id_from_tool_name(name: str) -> str:
-    """The owning skill for a wire tool name (``skill__endpoint``)."""
+    """The owning skill for a wire tool name (``skill__endpoint``).
+
+    MCP tools are bucketed per SERVER rather than per tool. Their wire
+    names are ``mcp_<server>_<tool>`` with single underscores, so the
+    ``__`` split returns the whole name and every MCP tool becomes its
+    own "skill". Each then claims a ``MIN_TOOLS_PER_SKILL`` coverage
+    slot in the breadth-first pass, ahead of native depth.
+
+    Measured against a 265-tool list under the 128 cap: connecting one
+    56-tool MCP server dropped native tools from 128 to 72. Native
+    breadth survived, every skill kept at least one endpoint, but 56
+    endpoints of depth were evicted one-for-one by tools from a single
+    server.
+
+    Bucketing by server gives that server one slot, which is what a
+    skill gets. Servers stay distinct from each other, so a second
+    server does not hide behind the first.
+    """
     if not name:
         return ""
+    if name.startswith("mcp_"):
+        # ``mcp_<server>_<tool>`` -> ``mcp_<server>``. A server id may
+        # itself contain underscores, and nothing can disambiguate that
+        # from the wire name alone, so the first segment is taken. The
+        # cost of over-merging two servers sharing a first segment is
+        # one shared coverage slot, which is the same outcome as today
+        # for a single server and far better than 56 slots each.
+        parts = name.split("_", 2)
+        if len(parts) >= 2:
+            return "_".join(parts[:2])
+        return name
     return name.split("__", 1)[0]
 
 
