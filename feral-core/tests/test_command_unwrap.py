@@ -332,8 +332,12 @@ def test_exec_mode_sees_a_denied_path_hidden_in_ansi_c_quoting(tmp_path):
 
 
 def test_exec_mode_refuses_the_deny_floor(tmp_path):
+    # Was ``shutdown -h now``. Power commands left the floor: a restart
+    # is reversible and ordinary, so it is gated as a confirm-tier
+    # question instead. This test is about the floor being consulted at
+    # all, so it uses a command that is still on it.
     decision = resolve_execution_mode(
-        "shutdown -h now",
+        "mkfs.ext4 /dev/sda1",
         policy=_granted_policy(tmp_path),
         cwd=str(tmp_path),
         autonomy_mode="hybrid",

@@ -477,12 +477,24 @@ below and lifts both deliberately.
 
 ### The command deny floor, and turning it off
 
-`SandboxPolicy._COMMAND_DENY_FLOOR` refuses six command shapes outright:
-`rm -rf /` and `rm -rf ~`, `mkfs`, `dd of=/dev/…`, a redirect to a raw
-block device, the canonical fork bomb, and system power commands
-(`shutdown` / `reboot` / `halt` / `poweroff`). It is matched against the
-unwrapped command text, so an encoding does not walk past it, and
-`execution.denied_command_patterns` lets an operator add to it.
+`SandboxPolicy._COMMAND_DENY_FLOOR` refuses five command shapes
+outright: `rm -rf /` and `rm -rf ~`, `mkfs`, `dd of=/dev/…`, a redirect
+to a raw block device, and the canonical fork bomb. It is matched
+against the unwrapped command text, so an encoding does not walk past
+it, and `execution.denied_command_patterns` lets an operator add to it.
+
+The floor's criterion is **catastrophic *and* never legitimate**: these
+destroy a filesystem or a device, and there is nothing to confirm
+because no operator wants them.
+
+System power commands (`shutdown` / `reboot` / `halt` / `poweroff`) were
+in the floor and are not any more. A restart is reversible and ordinary
+sysadmin, and asking an assistant to perform one is a reasonable
+request; refusing it at every tier with no override was a refusal
+standing in for a question. They are now gated as the question they are:
+`coding_tools__bash` is `safety_tier: confirm`, so **strict and hybrid
+ask the operator before running one**, and `loose` runs it without
+asking, which is what `loose` means.
 
 The floor applies at **every** autonomy tier, `loose` included. That is
 deliberate but it is not absolute, because `loose` documents itself as
@@ -508,7 +520,7 @@ some of them would not mean what it is called:
 
 | | default | under `full_authority` |
 |---|---|---|
-| the six deny-floor commands | refused at every tier | run |
+| the five deny-floor commands | refused at every tier | run |
 | generated code with no Docker | refused, `needs=docker` | runs on the host |
 | a cwd outside every grant | refused | the whole machine is the workspace |
 | a path argument outside `filesystem.*` | refused | reachable |

@@ -209,11 +209,13 @@ def _floor_hits(command: str) -> bool:
         "sudo rm -rf /",
         "mkfs.ext4 /dev/sda1",
         "dd if=/dev/zero of=/dev/sda",
-        "shutdown -h now",
-        "sudo reboot",
-        "ls; shutdown now",
-        "echo hi && sudo poweroff",
-        "make build\nreboot",          # the unwrapped form is multi-line
+        # _CMD_START must anchor after a separator, not only at the start
+        # of the string. These used to be spelled with power commands;
+        # those left the floor, so the same coverage is kept here with
+        # commands that are still on it.
+        "ls; mkfs.ext4 /dev/sda1",
+        "echo hi && rm -rf /",
+        "make build\nmkfs.ext4 /dev/sda1",   # the unwrapped form is multi-line
         "cat payload > /dev/sda",
     ],
 )
@@ -224,6 +226,15 @@ def test_floor_catches_destructive_commands(command):
 @pytest.mark.parametrize(
     "command",
     [
+        # Power commands are NOT on the floor. A restart is reversible
+        # and ordinary sysadmin, so it is gated as a confirm-tier
+        # question rather than refused at every tier with no override.
+        # See tests/test_power_commands_are_a_question.py.
+        "shutdown -h now",
+        "sudo reboot",
+        "ls; shutdown now",
+        "echo hi && sudo poweroff",
+        "make build\nreboot",
         "rm -rf /tmp/build",           # scoped delete is ordinary work
         "rm -rf node_modules",
         "rm file.txt",
