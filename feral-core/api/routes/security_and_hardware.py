@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 
 from api.state import state
 from hardware.protocol import HUPAction, HUPActionType
+from security.hardware_policy import capability_refusal, is_camera_capture
 from security.safe_regex import UnsafePatternError, compile_safe_regex
 from security.sandbox_policy import SandboxPolicy
 from security.vault import PermissionTier
@@ -121,35 +122,6 @@ async def get_hardware_device(device_id: str):
     return device.model_dump()
 
 
-# Capability ids that mean "take a picture". ``hardware/protocol.py``'s
-# reference glasses manifest calls it ``capture_photo`` and
-# ``hardware/mesh.py``'s phone node calls it ``camera_snap``; both declare
-# ``category="sensor"`` but neither uses the ``read_`` prefix, so the
-# sensor allowlist below never saw them. The suffix/substring forms cover
-# self-describing third-party devices that pick their own spelling.
-_CAMERA_CAPTURE_IDS: frozenset = frozenset({
-    "capture_photo", "camera_snap", "capture_image", "take_photo", "snapshot",
-})
-_CAMERA_CAPTURE_TOKENS: tuple = ("camera", "photo")
-
-# Capability categories that drive something physical. ``sensor`` is read
-# only and handled by the sensor allowlist; ``network`` / ``compute`` are
-# not actuation.
-_ACTUATOR_CATEGORIES: frozenset = frozenset({"actuator", "display", "audio"})
-
-# Capability ids that stop hardware. See ``SandboxPolicy.emergency_stop_enabled``.
-_EMERGENCY_STOP_IDS: frozenset = frozenset({"halt", "estop", "emergency_stop", "stop"})
-
-
-def _is_camera_capture(capability_id: str) -> bool:
-    cap = (capability_id or "").lower()
-    if cap in _CAMERA_CAPTURE_IDS:
-        return True
-    if cap.startswith("camera_") or cap.endswith("_camera"):
-        return True
-    return "capture" in cap and any(token in cap for token in _CAMERA_CAPTURE_TOKENS)
-
-
 def _policy_refusal(capability_id: str, reason: str) -> dict:
     """One refusal shape, naming the check and the capability.
 
@@ -168,53 +140,40 @@ def _policy_verdict(action: HUPAction) -> dict | None:
     ``hardware.actuators`` and ``hardware.cameras`` were configuration that
     did nothing. The capability's ``category`` comes from the device's own
     self-description, which is what decides which allowlist applies.
+
+    The routing itself now lives in ``security/hardware_policy``, because
+    this endpoint turned out to have no caller anywhere in the repo while
+    ``DeviceRegistry.execute_action`` had six, and the two had to be asking
+    the same question of the same policy rather than one of them asking
+    nothing at all.
     """
     policy = state.policy
     if policy is None:
         return None
     capability_id = action.capability_id or ""
 
-    # Preserved verbatim from the original call site: the ``read_<sensor>``
-    # naming convention is what the shipped sensor allowlist is written
-    # against, and it works without resolving the device manifest.
-    if capability_id.startswith("read_"):
-        if not policy.can_read_sensor(capability_id.replace("read_", "")):
-            return _policy_refusal(capability_id, "sensor is not in hardware.sensors.allowed")
-        return None
-
-    if _is_camera_capture(capability_id):
-        if not policy.can_capture_camera():
-            return _policy_refusal(capability_id, "hardware.cameras.allowed is false")
-        return None
-
-    # Everything else needs the device manifest to know whether it actuates.
+    # Resolve the device's declared category when we can. A ``read_``
+    # prefixed id and a camera capture are recognised without it, which is
+    # what the original call site relied on.
     device = state.device_registry.get_device(action.device_id) if state.device_registry else None
     capability = None
     if device is not None:
         capability = next(
             (c for c in device.capabilities if c.id == capability_id), None,
         )
-    if capability is None:
+    if capability is None and not (
+        capability_id.startswith("read_") or is_camera_capture(capability_id)
+    ):
         # Unknown device or unknown capability. Not a policy question:
         # ``DeviceRegistry.execute_action`` refuses both with a message
         # that says which, and inventing a policy refusal here would hide
         # the real reason.
         return None
 
-    category = (capability.category or "").lower()
-    if category == "sensor":
-        if not policy.can_read_sensor(capability_id):
-            return _policy_refusal(capability_id, "sensor is not in hardware.sensors.allowed")
-        return None
-
-    if category in _ACTUATOR_CATEGORIES:
-        if capability_id.lower() in _EMERGENCY_STOP_IDS and policy.emergency_stop_enabled():
-            return None
-        allowed, _needs_confirm = policy.can_use_actuator(capability_id)
-        if not allowed:
-            return _policy_refusal(
-                capability_id, "actuator is not in hardware.actuators.allowed",
-            )
+    category = (capability.category or "") if capability is not None else ""
+    reason = capability_refusal(policy, capability_id, category)
+    if reason is not None:
+        return _policy_refusal(capability_id, reason)
     return None
 
 
