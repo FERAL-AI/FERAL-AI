@@ -69,6 +69,19 @@ installed), static peers are used immediately.
 - **Notes / Knowledge:** Last-Writer-Wins by HLC timestamp
 - **Episodes:** Union merge (never delete remote episodes)
 - **Execution log:** Append-only (INSERT OR IGNORE)
+- **Deletes:** Tombstoned. A delete records the row id and the HLC of
+  the delete in `sync_tombstones` (inside `memory.db`), because the hard
+  DELETE removes the `hlc_string` the LWW comparison needs. Without the
+  tombstone the row is a blank slate again and the next peer that
+  replays its copy of the original insert re-creates it. An insert whose
+  HLC is newer than the tombstone is a legitimate re-creation: it
+  applies, and retires the tombstone.
+
+Tombstones are pruned after 90 days. That bounds the table, at the cost
+of one reopened window: a peer that has been offline since before the
+horizon still holds the original insert, and once the tombstone expires
+that insert can re-create the row. Re-pair such a node rather than
+letting it sync back in.
 
 ## Architecture
 

@@ -52,6 +52,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("feral.memory.sync_scheduler")
 
+# How often the cadence tick is allowed to prune expired deletion
+# tombstones. Six hours: the retention horizon is 90 days
+# (``memory.store.TOMBSTONE_MAX_AGE_SECONDS``), so GC precision costs
+# nothing and the DELETE stays off the 30-second tick.
+TOMBSTONE_GC_INTERVAL_SECONDS = 6 * 60 * 60
+
 
 def _metrics() -> dict:
     """Lazy accessor for the central D12 sync metrics. See decay.py
@@ -157,6 +163,13 @@ class SyncScheduler:
         # records a failure, and the operator sees a peer that never syncs.
         # Discard-on-done bounds the set to peers currently syncing.
         self._bg_tasks: set[asyncio.Task] = set()
+        # Deletion tombstones grow one row per delete and nothing else
+        # in the tree collects them. The cadence tick is the only
+        # periodic sync-owned callback that exists, so GC rides on it,
+        # rate-limited to TOMBSTONE_GC_INTERVAL_SECONDS rather than
+        # issuing a DELETE every 30 seconds for the sake of a handful
+        # of rows a week.
+        self._last_tombstone_gc: float = 0.0
 
     def _track_bg_task(self, task: asyncio.Task) -> asyncio.Task:
         """Hold a strong reference to a fire-and-forget sync. See F-06."""
@@ -217,6 +230,7 @@ class SyncScheduler:
 
         self._emit_active_peers_gauge(len(peer_ids))
         self._emit_wal_size_gauge()
+        await self._maybe_gc_tombstones()
 
         now = time.time()
         for peer_id in peer_ids:
@@ -235,6 +249,31 @@ class SyncScheduler:
                     name=f"sync-{peer_id}",
                 )
             )
+
+    async def _maybe_gc_tombstones(self) -> None:
+        """Prune expired deletion tombstones, at most once per
+        ``TOMBSTONE_GC_INTERVAL_SECONDS``.
+
+        Never fatal to a tick: a store that cannot prune keeps its
+        tombstones, which is the safe direction (correctness is
+        preserved, only the table size is not).
+        """
+        now = time.time()
+        if now - self._last_tombstone_gc < TOMBSTONE_GC_INTERVAL_SECONDS:
+            return
+        self._last_tombstone_gc = now
+        store = self.engine._memory
+        if store is None:
+            return
+        # Called directly rather than through ``getattr(store, name,
+        # None)``: a MagicMock answers every getattr, so the default
+        # would be dead code under test and the guard would prove
+        # nothing (repo trap 8). A store without the method raises here
+        # and the handler below reports it.
+        try:
+            await store.prune_tombstones()
+        except Exception as exc:
+            logger.warning("scheduler: tombstone GC failed: %s", exc)
 
     # ── Per-peer sync ───────────────────────────────────────────────────
 
