@@ -100,8 +100,20 @@ export async function saveKey(nodeId: string, apiKey: string): Promise<string> {
 }
 
 export function generateCode(): string {
-  const n = Math.floor(Math.random() * 1_000_000);
-  return n.toString().padStart(6, "0");
+  // crypto.randomInt, not Math.random. This is a pairing credential: it
+  // is the only thing standing between a stranger on the LAN and a
+  // registered node. Math.random is a fast non-cryptographic PRNG whose
+  // internal state is recoverable from a handful of outputs, so codes
+  // minted from it are predictable once an attacker has seen a few --
+  // and the Python SDK alongside this one already did it correctly with
+  // secrets.randbelow (python-node-sdk/.../pairing.py:96).
+  //
+  // `crypto` was already imported at the top of this file for the
+  // node-id digest, so this was a slip rather than a missing dependency.
+  //
+  // randomInt is uniform over [0, max) with no modulo bias, which
+  // matters here because 1_000_000 does not divide 2**32.
+  return crypto.randomInt(1_000_000).toString().padStart(6, "0");
 }
 
 function httpBase(brainUrl: string): string {
