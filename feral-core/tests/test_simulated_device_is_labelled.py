@@ -1,9 +1,10 @@
 """A simulated device must never answer like a real one.
 
-``hardware/mock_roomba.py`` is enabled by default (``is_enabled()``
-returns True unless ``FERAL_MOCK_ROOMBA`` is explicitly 0/false/no/off),
-is registered into ``HardwareMesh`` at boot by ``api/state.py``, and is
-reachable over HTTP at ``POST /api/hardware/mock_roomba/start``.
+``hardware/mock_roomba.py`` is opt-in (``is_enabled()`` returns True
+only when ``FERAL_MOCK_ROOMBA`` is explicitly 1/true/yes/on). When the
+operator does opt in it is registered into ``HardwareMesh`` at boot by
+``api/state.py`` and is reachable over HTTP at ``POST
+/api/hardware/mock_roomba/start`` — so it still has to say what it is.
 
 Its envelope was deliberately byte-identical to
 ``HomeAssistantIntegration.vacuum_start`` "so the orchestrator's tool
@@ -33,9 +34,14 @@ from hardware.mock_roomba import (  # noqa: E402
 )
 
 
-def test_the_mock_is_on_by_default(monkeypatch):
-    """Pins the reason this matters: it is not opt-in."""
+def test_the_mock_is_off_by_default(monkeypatch):
+    """It is opt-in now. A fresh install has no vacuum in its device list."""
     monkeypatch.delenv("FERAL_MOCK_ROOMBA", raising=False)
+    assert is_enabled() is False
+
+
+def test_the_mock_is_opt_in_by_explicit_env(monkeypatch):
+    monkeypatch.setenv("FERAL_MOCK_ROOMBA", "1")
     assert is_enabled() is True
 
 

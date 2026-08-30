@@ -753,9 +753,9 @@ async def mock_roomba_status():
     """Status of the brain-side mock Roomba (THESIS_SCENARIOS S5).
 
     Returns the mock's ``entity_id`` + ``is_running`` so the Lane 12
-    Devices page can render the demo node. Returns
-    ``{enabled: False}`` when the operator disabled the mock with
-    ``FERAL_MOCK_ROOMBA=0``.
+    Devices page can render the demo node. Returns ``{enabled: False}``
+    on any install that did not opt in with ``FERAL_MOCK_ROOMBA=1``,
+    which is the default.
     """
     mock = getattr(state, "mock_roomba", None)
     if mock is None:
@@ -777,10 +777,11 @@ async def mock_roomba_start(body: dict | None = None):
     "vacuum.start", duration_ms, simulated: True, note}}``
 
     ``simulated`` and ``note`` are the difference between shape parity
-    and impersonation: the mock is enabled by default
-    (``FERAL_MOCK_ROOMBA`` defaults to "1"), so without them a caller
-    cannot distinguish "a vacuum started cleaning" from "there is no
-    vacuum and nothing happened".
+    and impersonation: without them a caller cannot distinguish "a
+    vacuum started cleaning" from "there is no vacuum and nothing
+    happened". The mock is opt-in (``FERAL_MOCK_ROOMBA`` defaults to
+    "0"), so this route answers ``{"reason": "disabled"}`` unless the
+    operator asked for it.
 
     Lane 11 SLA: < 500 ms on commodity hardware. Live verify in PR
     body asserts the elapsed time fits inside this budget.
