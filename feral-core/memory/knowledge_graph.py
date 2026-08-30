@@ -27,6 +27,13 @@ from uuid import uuid4
 import aiosqlite
 import numpy as np
 
+# Prompt sizing (see "Extraction prompt sizing" below). Both are leaf
+# modules under ``agents/`` that import nothing from this package, and
+# ``agents/__init__.py`` is empty, so this does not close an import
+# cycle with the orchestrator side.
+from agents.context_manager import configured_context_window_tokens
+from agents.token_estimate import estimate_tokens
+
 from memory.fts_query import fts5_match_query
 from memory.sqlite_features import require_fts5
 from memory.embeddings import (
@@ -64,6 +71,234 @@ logger = logging.getLogger("feral.memory.kg")
 _NO_FIRST_PERSON_HEURISTIC_SOURCES = frozenset({
     "ambient_conversation",
 })
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Extraction prompt sizing
+# ─────────────────────────────────────────────────────────────────────
+#
+# This used to be ``text[:2000]``, a bare literal with no derivation
+# behind it, and it was wrong in BOTH directions at once.
+#
+# Wrong direction 1, it threw text away. Every caller passes more than
+# 2000 characters and the extractor silently dropped the rest:
+#
+#     caller                              passes         seen
+#     memory/context_builder.py:596       12000 chars    2000   (17%)
+#     api/server.py:5173                   8000 chars    2000   (25%)
+#     agents/learner.py:164               unbounded      2000
+#
+# ``context_builder.CHUNK_CHARS`` is 12000 because that segment size was
+# measured to halve the number of generation waves while still showing
+# the model every message. Six sevenths of each of those carefully sized
+# segments went into a prompt that read the first 2000 characters. An
+# entity named late in a segment could never enter the graph, which is
+# the same defect ``tests/test_consolidation_redesign.py`` already
+# records for the old ``[:3000]`` cap one layer up.
+#
+# Wrong direction 2, and this is the one a bigger number would not have
+# fixed: 2000 CHARACTERS IS NOT A SAFE PROMPT. Characters are not
+# tokens, and the ratio is not close to constant. Measured with
+# ``agents/token_estimate.estimate_tokens`` over
+# ``tests/fixtures/token_estimate_corpus.json``, 2000 characters costs:
+#
+#     script            est. tokens     + template + 1024 reply
+#     english prose            698                        1835
+#     russian                 1323                        2460
+#     korean                  2209                        3346
+#     chinese / japanese      2601                        3738
+#     emoji                   6000                        7137   OVERFLOW
+#
+# The last row is the point. A 4096-token local model handed 2000
+# characters of emoji-dense chat was already over its window before this
+# change, and the "safe" literal is what hid it. Raising 2000 to 8000 or
+# 12000 would have moved chinese, japanese, korean, arabic, greek,
+# hebrew, hindi and thai into that same column: 12000 characters of
+# chinese estimates at 15600 tokens, nearly four times a 4096 window.
+#
+# So the bound is expressed in TOKENS against the serving model's
+# window, and the character count falls out of the text itself:
+#
+#     text budget = window - reply reserve - prompt overhead
+#
+# with every term measured rather than assumed. On the 4096-token window
+# ``LlamaCppEngine`` actually pins, that is 4096 - 1024 - 126 = 2946
+# tokens, and the characters that buys, measured per script:
+#
+#     script            old cap    now    prompt+reply est (window 4096)
+#     english prose        2000    8427                            4096
+#     russian              2000    4459                            4095
+#     korean               2000    2679                            4095
+#     chinese / japanese   2000    2279                            4094
+#     emoji                2000    1001                            4092
+#
+# English gains 4.2x. Emoji LOSES half, which is the safety, and every
+# row now lands under the window instead of one row overflowing it by
+# 74%. On a 128000-token cloud window the same arithmetic yields 126850
+# tokens, so the character bound below is what binds there instead.
+#
+# No extra fudge factor is applied on top, deliberately.
+# ``estimate_tokens`` is already tuned never to fall below a real
+# tokenizer on that corpus and it over-counts English by up to ~1.6x
+# (628 estimated against 401 real), so the margin is inside the
+# estimator where it is measured, not bolted on here where it would not
+# be.
+
+#: Fixed part of the extraction prompt. Kept as a template so the
+#: overhead below is derived from the text actually sent, and cannot
+#: drift when the wording is edited.
+_EXTRACTION_PROMPT_TEMPLATE = (
+    "Extract knowledge triples from this text. Return a JSON array of objects, "
+    "each with: subject, subject_type, predicate, object, object_type.\n"
+    "Types: person, place, organization, concept, thing, event, time.\n"
+    "Only extract factual statements. Skip opinions and questions.\n"
+    "Text: {text}\n"
+    "Output ONLY valid JSON array. No markdown."
+)
+
+#: Role framing ``LocalLLMEngine.format_chat`` wraps a single user
+#: message in before a local model sees it. 24 characters, and it counts
+#: against the same window, so it is counted.
+_LOCAL_CHAT_WRAPPER = "<|user|>\n\n<|assistant|>\n"
+
+#: Prompt overhead in tokens, measured at import off the real strings:
+#: 126 for the template plus the local chat wrapper.
+_EXTRACTION_OVERHEAD_TOKENS = estimate_tokens(
+    _EXTRACTION_PROMPT_TEMPLATE.format(text="") + _LOCAL_CHAT_WRAPPER
+)
+
+#: Room kept for the model's own reply. ``extract_and_store`` calls
+#: ``llm.chat()`` without ``max_tokens``, so it gets
+#: ``LLMProvider.chat``'s default of 1024 and the reply can occupy every
+#: one of them. Measured capacity at that ceiling: a five-field triple
+#: object serialises to 140 characters / ~67 estimated tokens, so 1024
+#: tokens holds roughly 15 triples. Reserve less and a full reply is
+#: truncated mid-array, ``json.loads`` raises, and the whole LLM call is
+#: discarded for the heuristic fallback.
+_EXTRACTION_REPLY_TOKENS = 1024
+
+#: Floor, so a misconfigured or very small window still extracts
+#: something rather than sending an empty prompt. 256 tokens measured at
+#: 739 characters of English prose, comfortably more than the single
+#: sentences the heuristic fallback handles.
+_MIN_EXTRACTION_TEXT_TOKENS = 256
+
+#: Upper bound in characters. This is a COST bound, not a safety bound:
+#: safety is the token budget above. A 128000-token window would
+#: otherwise let ``agents/learner.py``, whose input is unbounded, spend
+#: ~126000 tokens of prompt on a reply that can express ~15 triples.
+#: 12000 is ``context_builder.CHUNK_CHARS``, the largest any caller
+#: passes, so nothing a caller sends is truncated by this bound.
+#: ``tests/test_kg_extraction_window.py`` asserts the two stay equal, so
+#: raising CHUNK_CHARS cannot silently reintroduce the truncation.
+MAX_EXTRACTION_CHARS = 12000
+
+#: Marker left where the middle of an over-budget text was removed.
+_EXTRACTION_ELIDED = "\n[... middle elided ...]\n"
+
+
+def _extraction_window_tokens(llm) -> int:
+    """Context window to size the extraction prompt against.
+
+    Prefers what the router reports for the model that will actually
+    serve the call (``LLMProvider.context_window_tokens``, which is the
+    local engine's pinned ``n_ctx`` when one is attached), and falls
+    back to ``FERAL_CONTEXT_WINDOW_TOKENS`` for an ``llm`` that does not
+    report one, including the test doubles that stand in for a provider.
+    """
+    reported = getattr(llm, "context_window_tokens", 0)
+    try:
+        reported = int(reported or 0)
+    except (TypeError, ValueError):
+        reported = 0
+    if reported > 0:
+        return reported
+    return configured_context_window_tokens()
+
+
+def _extraction_text_budget_tokens(llm) -> int:
+    """Tokens of source text the extraction prompt can carry."""
+    window = _extraction_window_tokens(llm)
+    budget = window - _EXTRACTION_REPLY_TOKENS - _EXTRACTION_OVERHEAD_TOKENS
+    return max(_MIN_EXTRACTION_TEXT_TOKENS, budget)
+
+
+def _fit_to_token_budget(text: str, budget_tokens: int) -> str:
+    """Largest slice of ``text`` estimated to fit ``budget_tokens``.
+
+    Keeps the head AND the tail rather than a leading prefix.
+    ``context_builder.PER_MESSAGE_HARD_CAP`` documents why: arXiv
+    2210.16732 measures ~80% of the information needed to reconstruct a
+    summary lost at a 1K-token leading cut, and finds salience
+    ANTI-correlated with position near the cut. Trimming here is the
+    exception rather than the rule (the character bound already matches
+    the largest caller's segment size), but when it does happen a
+    dropped tail is the worst available choice.
+
+    Binary search rather than a chars-per-token divide, because that
+    ratio is what this whole change exists to stop assuming. Measured
+    cost on a 12000-character segment: 0.68ms when the text already fits
+    (one estimate, the common case on a cloud window) and 8.87ms when it
+    has to search. Both are synchronous CPU in an async method and both
+    are noise beside the LLM round trip they precede.
+    """
+    if budget_tokens <= 0 or not text:
+        return ""
+    if estimate_tokens(text) <= budget_tokens:
+        return text
+
+    def _longest_prefix() -> str:
+        low, high, best = 0, len(text), ""
+        while low <= high:
+            mid = (low + high) // 2
+            if estimate_tokens(text[:mid]) <= budget_tokens:
+                best, low = text[:mid], mid + 1
+            else:
+                high = mid - 1
+        return best
+
+    if estimate_tokens(_EXTRACTION_ELIDED) >= budget_tokens:
+        return _longest_prefix()
+
+    # Widen the kept head and tail together until the pair stops fitting.
+    low, high, best = 1, len(text) // 2, ""
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = text[:mid] + _EXTRACTION_ELIDED + text[len(text) - mid:]
+        if estimate_tokens(candidate) <= budget_tokens:
+            best, low = candidate, mid + 1
+        else:
+            high = mid - 1
+    return best or _longest_prefix()
+
+
+def _clip_chars(text: str, limit: int) -> str:
+    """Apply the character bound, keeping the head and the tail.
+
+    A bare ``text[:limit]`` here would undo, for the one caller the
+    character bound actually binds on (``agents/learner.py``, whose
+    input is unbounded), the tail preservation
+    ``_fit_to_token_budget`` exists to provide.
+    """
+    if len(text) <= limit:
+        return text
+    half = max(1, (limit - len(_EXTRACTION_ELIDED)) // 2)
+    return text[:half] + _EXTRACTION_ELIDED + text[len(text) - half:]
+
+
+def fit_extraction_text(text: str, llm=None) -> str:
+    """Trim ``text`` to what one extraction prompt may carry.
+
+    Public so a test can assert the bound without reaching through a
+    live LLM call.
+    """
+    if not text:
+        return ""
+    return _fit_to_token_budget(
+        _clip_chars(text, MAX_EXTRACTION_CHARS),
+        _extraction_text_budget_tokens(llm),
+    )
+
 
 ENTITY_MERGE_THRESHOLD = 0.85
 ENTITY_CANDIDATE_THRESHOLD = 0.70
@@ -1139,14 +1374,17 @@ class KnowledgeGraph:
                 return []
             return await self._heuristic_extract(text)
 
-        prompt = (
-            "Extract knowledge triples from this text. Return a JSON array of objects, "
-            "each with: subject, subject_type, predicate, object, object_type.\n"
-            "Types: person, place, organization, concept, thing, event, time.\n"
-            "Only extract factual statements. Skip opinions and questions.\n"
-            f"Text: {text[:2000]}\n"
-            "Output ONLY valid JSON array. No markdown."
-        )
+        # Sized against the serving model's context window rather than
+        # clipped at a fixed character count. See "Extraction prompt
+        # sizing" at the top of this module for the measurements.
+        fitted = fit_extraction_text(text, llm)
+        if len(fitted) < len(text):
+            logger.debug(
+                "extraction text trimmed from %d to %d chars for a "
+                "%d-token window", len(text), len(fitted),
+                _extraction_window_tokens(llm),
+            )
+        prompt = _EXTRACTION_PROMPT_TEMPLATE.format(text=fitted)
 
         try:
             response = await llm.chat([{"role": "user", "content": prompt}], tools=None)

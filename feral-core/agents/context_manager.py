@@ -24,7 +24,16 @@ _DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
 _HISTORY_SHARE = 0.5
 
 
-def _env_context_window_tokens() -> int:
+def configured_context_window_tokens() -> int:
+    """Usable context window the operator has declared, in tokens.
+
+    Public because this is the only context size the process can
+    actually discover: it is read fresh from the environment on every
+    call, so a test or a relaunch that changes
+    ``FERAL_CONTEXT_WINDOW_TOKENS`` is honoured without a restart.
+    ``memory/knowledge_graph.py`` sizes its extraction prompt against it
+    rather than hard-coding a character cap.
+    """
     raw = os.environ.get("FERAL_CONTEXT_WINDOW_TOKENS", "")
     if not raw.strip():
         return _DEFAULT_CONTEXT_WINDOW_TOKENS
@@ -68,7 +77,7 @@ class ContextManager:
         # Hard ceiling so a few enormous tool payloads can't overflow
         # the model's real context window.
         self.context_window_tokens = (
-            context_window_tokens or _env_context_window_tokens()
+            context_window_tokens or configured_context_window_tokens()
         )
 
     @property

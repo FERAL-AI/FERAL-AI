@@ -66,6 +66,7 @@ from agents.multimodal_blocks import (
 )
 from agents.tool_list import OPENAI_TOOL_HARD_LIMIT, cap_tools_with_pins
 from agents.token_estimate import estimate_message_tokens
+from agents.context_manager import configured_context_window_tokens
 
 # Cost-budget surface (Wave 1 Lane 04). The runtime gate lives on the
 # public chat entry points — see ``_budget_check`` /
@@ -876,6 +877,40 @@ class LLMProvider:
         except Exception as e:
             logger.warning(f"Local LLM engine init failed: {e}")
             self._local_engine = None
+
+    @property
+    def context_window_tokens(self) -> int:
+        """Usable context window of the model this provider talks to.
+
+        The router had no way to answer this, so every caller that
+        needed to size a prompt invented a character cap instead. It
+        answers now, and it answers CONSERVATIVELY on purpose.
+
+        When a local engine is attached it wins, even in ``hybrid`` mode
+        where a given turn may go to the cloud instead. Hybrid routes by
+        turn, this property is read before the routing decision exists,
+        and the two errors are not symmetric: sizing a cloud prompt to
+        the local engine's 4096-token window under-fills a large window
+        and costs some context, while sizing a local prompt to a
+        128000-token window overflows the engine and the request fails
+        outright. ``agents/token_estimate.py`` states the same asymmetry
+        for the same reason.
+
+        Engines that do not know their own window report 0, and the
+        answer falls back to what the operator configured.
+        """
+        # ``getattr`` on self too: the attribute is assigned partway
+        # through __init__, and this must not raise for a provider that
+        # is still being built.
+        engine = getattr(self, "_local_engine", None)
+        engine_window = getattr(engine, "context_window_tokens", 0)
+        try:
+            engine_window = int(engine_window or 0)
+        except (TypeError, ValueError):
+            engine_window = 0
+        if engine_window > 0:
+            return engine_window
+        return configured_context_window_tokens()
 
     def _init_hybrid_cloud(self):
         """In hybrid mode, cloud is used for complex reasoning."""

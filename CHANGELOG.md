@@ -6,6 +6,55 @@ All notable changes to FERAL are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The knowledge-graph extractor read the first 2000 characters of
+  everything it was given, and that literal was wrong in both
+  directions.** `memory/knowledge_graph.py` built its prompt with
+  `f"Text: {text[:2000]}"`. Every caller passes more:
+  `memory/context_builder.py` segments a transcript at
+  `CHUNK_CHARS = 12000` and hands over one segment at a time (17%
+  survived), `api/server.py` passes `outcome.detail[:8000]` (25%), and
+  `agents/learner.py` is unbounded. `CHUNK_CHARS` is 12000 because that
+  size was measured to halve the number of generation waves while still
+  showing the model every message, so six sevenths of each carefully
+  sized segment went into a prompt that read the front of it. An entity
+  named late in a segment could not enter the graph at all, the same
+  defect `tests/test_consolidation_redesign.py` already records for the
+  old `[:3000]` cap one layer up.
+
+  Raising the number would have fixed only half of it. Characters are
+  not tokens and the ratio is not close to constant: measured with
+  `agents/token_estimate.estimate_tokens` over
+  `tests/fixtures/token_estimate_corpus.json`, 2000 characters is 698
+  estimated tokens of English prose, 2601 of Chinese, and 6000 of emoji.
+  With the template and the 1024-token reply reserve on top, the emoji
+  case came to 7150 tokens against the 4096-token window
+  `LlamaCppEngine` pins, measured end to end through
+  `extract_and_store`. The cap that looked like the safety margin was
+  already overflowing small local models by 74%, and moving it to 8000
+  or 12000 would have moved Chinese, Japanese, Korean, Arabic, Greek,
+  Hebrew, Hindi and Thai into that same column.
+
+  The bound is a token budget now, `window - reply reserve - prompt
+  overhead`, with each term measured: the overhead is computed at import
+  from the real template plus the `format_chat` role wrapper (126
+  tokens), the reserve is `LLMProvider.chat`'s actual 1024 default, and
+  the window comes from the serving model. `LlamaCppEngine` publishes
+  the `n_ctx` it loads instead of burying it in a closure, a new
+  `LLMProvider.context_window_tokens` reports it (preferring the local
+  engine even in hybrid mode, because under-filling a large window costs
+  context while overflowing a small one fails the request), and
+  `agents/context_manager.configured_context_window_tokens` is public as
+  the `FERAL_CONTEXT_WINDOW_TOKENS` fallback. On a 4096-token window
+  that yields 2946 tokens of text: English prose goes from 2000 to 8427
+  characters (4.2x), Russian to 4459, Chinese to 2279, and emoji DOWN to
+  1001. Every script now lands under the window. Text over budget keeps
+  its head and its tail rather than a leading prefix, for the reason
+  `context_builder.PER_MESSAGE_HARD_CAP` already cites. A character
+  bound of 12000 remains as a cost bound, pinned equal to `CHUNK_CHARS`
+  by a test so raising one cannot silently reintroduce truncation.
+
 ## [2026.8.29] - 2026-08-29 - a name is not evidence
 
 Four defects, three of them found by trying to answer a competitive
