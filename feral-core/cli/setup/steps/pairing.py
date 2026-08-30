@@ -20,6 +20,7 @@ from cli import ui_kit
 
 from .. import network
 from ..helpers import JumpToStep, QuitNavigation, get_console, _RICH_AVAILABLE
+from ..helpers import pick as helpers_pick
 from ..state import WizardState
 
 
@@ -100,7 +101,7 @@ async def run(state: WizardState) -> None:
         {"name": "← back (change network mode)", "value": "__back__"},
     ]
     try:
-        picked = ui_kit.pick("Phone pairing", choices, default="__continue__")
+        picked = helpers_pick("Phone pairing", choices, default="__continue__")
     except KeyboardInterrupt:
         raise QuitNavigation()
     if picked == "__back__":
