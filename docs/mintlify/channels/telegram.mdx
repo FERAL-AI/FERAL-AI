@@ -52,16 +52,25 @@ The Telegram channel lets you interact with FERAL through direct messages or gro
   <Step title="Configure bot settings (optional)">
     Customize behavior in `settings.json`:
 
+    <Warning>
+      Earlier versions of this page documented `allowed_user_ids`,
+      `allow_groups`, `group_trigger`, `max_message_length` and
+      `send_typing_indicator` as options here. The brain reads none of
+      those keys. Access control for every channel lives in the shared
+      keys below, and the defaults are **fail-closed**: with no allowlist
+      and no open pairing window, the channel accepts nothing. The old
+      table described `[]` as "(all)", which is the opposite of what the
+      code does (`channels/base.py:345-362`).
+    </Warning>
+
     ```json
     {
       "channels": {
         "telegram": {
           "enabled": true,
-          "allowed_user_ids": [123456789],
-          "allow_groups": true,
-          "group_trigger": "@feralbot",
-          "max_message_length": 4096,
-          "send_typing_indicator": true
+          "allowed_senders": ["123456789"],
+          "allowed_chats": ["-100987654321"],
+          "pairing_window_sec": 0
         }
       }
     }
@@ -69,10 +78,13 @@ The Telegram channel lets you interact with FERAL through direct messages or gro
 
     | Setting | Default | Description |
     |---------|---------|-------------|
-    | `allowed_user_ids` | `[]` (all) | Restrict access to specific Telegram user IDs |
-    | `allow_groups` | `false` | Whether the bot responds in group chats |
-    | `group_trigger` | `"@feralbot"` | Mention prefix required in groups |
-    | `send_typing_indicator` | `true` | Show "typing..." while the brain processes |
+    | `allowed_senders` | `[]` | Telegram user ids that may reach the brain. Empty means **none**. |
+    | `allowed_chats` | `[]` | Chat ids (groups included) that may reach the brain. Empty means **none**. |
+    | `pairing_window_sec` | `0` | Seconds to accept the next unknown sender and bind it as owner. `0` keeps the window shut. |
+
+    A sender that is not allowlisted is recorded and receives **no reply
+    at all**, so a stranger cannot learn whether a brain is listening
+    (`channels/base.py:345-362`).
   </Step>
 
   <Step title="Restart FERAL">
@@ -94,7 +106,7 @@ The Telegram channel lets you interact with FERAL through direct messages or gro
 
 ## Group Chat Usage
 
-When `allow_groups` is `true`, add the bot to any Telegram group. By default, the bot only responds when mentioned:
+Add the bot to a Telegram group, then put that group's chat id in `allowed_chats`. There is no separate group toggle: a group is allowed exactly when its chat id is allowlisted.
 
 ```
 @feralbot dim the lights to 20%
@@ -121,9 +133,9 @@ When `allow_groups` is `true`, add the bot to any Telegram group. By default, th
     Run `feral status` and verify the Telegram channel shows as connected. Check that `FERAL_TELEGRAM_BOT_TOKEN` is set and valid.
   </Accordion>
   <Accordion title="Bot responds in DMs but not groups">
-    Ensure `allow_groups` is `true` and the bot's privacy mode is disabled in BotFather.
+    Put the group's chat id in `allowed_chats`, and disable the bot's privacy mode in BotFather so it can see group messages.
   </Accordion>
   <Accordion title="Unauthorized user errors in logs">
-    If `allowed_user_ids` is set, only listed IDs can interact. Find your Telegram user ID by messaging [@userinfobot](https://t.me/userinfobot).
+    Only ids in `allowed_senders` (or chats in `allowed_chats`) can interact, and an empty allowlist accepts nobody. Find your Telegram user ID by messaging [@userinfobot](https://t.me/userinfobot), or open a `pairing_window_sec` window and message the bot once to bind yourself as owner.
   </Accordion>
 </AccordionGroup>

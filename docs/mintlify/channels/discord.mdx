@@ -67,15 +67,24 @@ FERAL's Discord channel uses the Gateway API with WebSocket to receive messages 
   </Step>
 
   <Step title="Configure channel restrictions (optional)">
+
+    <Warning>
+      Earlier versions of this page documented **`allowed_channel_ids`, `allowed_guild_ids`, `respond_to_mentions_only` and `prefix`** as
+      options here. The brain reads none of those keys. Access control
+      for every channel lives in the shared keys below, and the defaults
+      are **fail-closed**: with no allowlist and no open pairing window,
+      the channel accepts nothing. The old table described `[]` as
+      "(all)", which is the opposite of what the code does
+      (`channels/base.py:345-362`).
+    </Warning>
     ```json
     {
       "channels": {
         "discord": {
           "enabled": true,
-          "allowed_channel_ids": ["1123456789012345678"],
-          "allowed_guild_ids": ["9876543210987654321"],
-          "respond_to_mentions_only": false,
-          "prefix": "!feral"
+          "allowed_senders": ["1123456789012345678"],
+          "allowed_chats": ["9876543210987654321"],
+          "pairing_window_sec": 0
         }
       }
     }
@@ -83,10 +92,13 @@ FERAL's Discord channel uses the Gateway API with WebSocket to receive messages 
 
     | Setting | Default | Description |
     |---------|---------|-------------|
-    | `allowed_channel_ids` | `[]` (all) | Restrict to specific text channels |
-    | `allowed_guild_ids` | `[]` (all) | Restrict to specific servers |
-    | `respond_to_mentions_only` | `false` | Only respond when @mentioned |
-    | `prefix` | `null` | Command prefix (e.g., `!feral status`) |
+    | `allowed_senders` | `[]` | Sender ids that may reach the brain. Empty means **none**. |
+    | `allowed_chats` | `[]` | Chat / channel ids that may reach the brain. Empty means **none**. |
+    | `pairing_window_sec` | `0` | Seconds to accept the next unknown sender and bind it as owner. `0` keeps the window shut. |
+
+    A sender that is not allowlisted is recorded and receives **no reply
+    at all**, so a stranger cannot learn whether a brain is listening
+    (`channels/base.py:345-362`).
   </Step>
 
   <Step title="Restart and test">
@@ -125,20 +137,24 @@ FERAL requests these gateway intents when connecting:
 | DM to bot | Always responds |
 | `@FERAL` in channel | Responds with full context |
 | Prefix command (`!feral ...`) | Responds if prefix is configured |
-| Any message in allowed channel | Responds if `respond_to_mentions_only` is `false` |
+| Any message in an allowlisted channel | Responds |
 
 FERAL formats responses using Discord embeds for rich output — charts, health summaries, and SDUI cards are rendered as embedded messages.
 
 ## Slash Commands
 
-FERAL automatically registers these slash commands when it connects:
+<Warning>
+  Earlier versions of this page listed `/feral ask`, `/feral status`,
+  `/feral briefing` and `/feral health` as slash commands FERAL
+  "automatically registers when it connects". **It registers none.**
+  There is no application-command registration anywhere in the brain,
+  and the Discord gateway handler processes only `MESSAGE_CREATE`
+  (`channels/base.py:1150`).
+</Warning>
 
-| Command | Description |
-|---------|-------------|
-| `/feral ask <question>` | Ask FERAL anything |
-| `/feral status` | Show brain and hardware status |
-| `/feral briefing` | Get your morning briefing |
-| `/feral health` | Latest health metrics |
+Talk to the bot with ordinary messages. Anything an allowlisted sender
+writes is forwarded to the brain as a normal turn, so there is no command
+vocabulary to learn — ask for status or a briefing in plain language.
 
 ## Troubleshooting
 
