@@ -14,6 +14,7 @@ from cli import ui_kit
 
 from .. import network
 from ..helpers import BackNavigation, QuitNavigation, get_console, _RICH_AVAILABLE
+from ..helpers import pick as helpers_pick
 from ..state import WizardState
 
 
@@ -68,7 +69,7 @@ async def run(state: WizardState) -> None:
         # v2026.5.28 — pick (enter-on-cursor-position) instead of select
         # (mark-then-confirm). Network profile is a one-of-three choice
         # and operators expect arrow-keys-then-enter.
-        picked = ui_kit.pick(
+        picked = helpers_pick(
             "Pick the access profile",
             choices,
             default=default,

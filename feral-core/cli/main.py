@@ -3384,7 +3384,15 @@ def cmd_doctor():
     return 0
 
 
-def cmd_setup(*, browser: bool = False, terminal: bool = False, from_step: str = ""):
+def cmd_setup(
+    *,
+    browser: bool = False,
+    terminal: bool = False,
+    from_step: str = "",
+    quick: bool = False,
+    non_interactive: bool = False,
+    reset: bool = False,
+):
     """Launch the guided setup wizard, then auto-generate a session token.
 
     When ``browser=True`` the CLI opens http://localhost:9090/setup in
@@ -3404,15 +3412,24 @@ def cmd_setup(*, browser: bool = False, terminal: bool = False, from_step: str =
         # without a controlling TTY so the operator isn't surprised
         # when the arrow-key picker silently degrades to a numeric
         # prompt.
-        try:
-            from cli import ui_kit
+        if not non_interactive:
+            # The hint warns that the arrow-key picker will degrade
+            # without a TTY. Under --non-interactive that is intended,
+            # so the warning is noise.
+            try:
+                from cli import ui_kit
 
-            ui_kit.warn_non_interactive_setup_hint()
-        except Exception:
-            pass
+                ui_kit.warn_non_interactive_setup_hint()
+            except Exception:
+                pass
         try:
             from cli.setup import run_setup
-            run_setup(from_step=from_step)
+            run_setup(
+                from_step=from_step,
+                quick=quick,
+                non_interactive=non_interactive,
+                reset=reset,
+            )
         except ImportError:
             print("Setup wizard not available.")
             sys.exit(1)
@@ -3943,8 +3960,26 @@ def _main():
     # than walk through provider / voice / audio / channels again.
     setup_p.add_argument(
         "--from-step", dest="setup_from_step", default="",
-        help="Re-enter the wizard at the named step (e.g. llm_model, "
-             "audio, identity). Bypasses the resume prompt.",
+        help="Re-enter the wizard at one step. Accepts friendly names "
+             "(model, voice, memory, network, tools, phone, permissions) "
+             "or internal ids (llm_model, tcc_preflight). Bypasses the "
+             "resume prompt.",
+    )
+    setup_p.add_argument(
+        "--quick", action="store_true", dest="setup_quick",
+        help="Only ask about what is not configured yet; step over "
+             "anything already answered.",
+    )
+    setup_p.add_argument(
+        "--non-interactive", action="store_true", dest="setup_non_interactive",
+        help="Never prompt. Every question takes its default; a required "
+             "value with no default fails with a message naming it. For "
+             "scripted installs.",
+    )
+    setup_p.add_argument(
+        "--reset", action="store_true", dest="setup_reset",
+        help="Move existing provider, keys, identity and progress into "
+             "~/.feral/backups/ and start clean. Moves, never deletes.",
     )
 
     # feral doctor
@@ -4231,6 +4266,9 @@ def _main():
             browser=getattr(args, "setup_browser", False),
             terminal=getattr(args, "setup_terminal", False),
             from_step=getattr(args, "setup_from_step", "") or "",
+            quick=bool(getattr(args, "setup_quick", False)),
+            non_interactive=bool(getattr(args, "setup_non_interactive", False)),
+            reset=bool(getattr(args, "setup_reset", False)),
         )
     elif args.subcommand == "doctor":
         cmd_doctor()
