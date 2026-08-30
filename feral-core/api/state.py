@@ -596,7 +596,10 @@ class BrainState:
                 # manifest re-registers with real capabilities.
                 return
             gen_manifest = device_manifest_to_skill_manifest(manifest)
-            kg = getattr(self.memory, "knowledge_graph", None)
+            # ``kg``, not ``knowledge_graph``: the latter exists on
+            # neither the store nor the state, so the getattr default
+            # fired and every device was registered with no graph.
+            kg = getattr(self.memory, "kg", None)
             gen_skill = GenericHardwareSkill(
                 device_id=dev_id,
                 device_registry=self.device_registry,
@@ -1742,7 +1745,7 @@ class BrainState:
             # ``category=device`` entities. The KG is built earlier in
             # MemoryStore.__init__ but exposed lazily on the store.
             try:
-                kg = getattr(self.memory, "knowledge_graph", None)
+                kg = getattr(self.memory, "kg", None)
                 if kg is not None:
                     self.hardware_mesh.set_knowledge_graph(kg)
             except Exception:
