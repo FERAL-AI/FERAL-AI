@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from cli import ui_kit
 from cli.setup.helpers import JumpToStep, get_console
+from cli.setup.helpers import pick as helpers_pick
 from cli.setup.state import WizardState
 
 # What the operator is choosing to skip, in the order they would meet
@@ -81,7 +82,7 @@ def run(state: WizardState) -> None:
 
     while True:
         try:
-            choice = ui_kit.pick(
+            choice = helpers_pick(
                 "  What now?",
                 [
                     {

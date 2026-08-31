@@ -136,6 +136,14 @@ def ask_choice(
     if default:
         default_opt = next((o for o in options if o.id == default), None)
 
+    if _NON_INTERACTIVE:
+        if default_opt is not None:
+            return default_opt
+        # No declared default. Picking options[0] would be the wizard
+        # choosing the operator's LLM provider for them and calling it
+        # configuration.
+        raise MissingRequiredSetting(prompt)
+
     # Interactive arrow-key path — preferred.
     if ui_kit.is_inquirer_available() and ui_kit.is_interactive():
         choices: list = []
@@ -232,10 +240,79 @@ def ask_choice(
 # operator would get by pressing enter, and it never invents a secret.
 def _can_prompt() -> bool:
     """True when a human can actually answer."""
+    if _NON_INTERACTIVE:
+        return False
     try:
         return bool(ui_kit.is_interactive())
     except Exception:
         return False
+
+
+# ──────────────────────────────────────────────────────────────────
+# Non-interactive mode (``feral setup --non-interactive``)
+# ──────────────────────────────────────────────────────────────────
+#
+# Every prompt in the wizard funnels through four primitives:
+# ``confirm`` (33 call sites), ``ask_text`` (20), ``ask_choice`` (19)
+# and ``ui_kit.pick`` (3). Putting the mode here rather than threading
+# a flag through sixteen steps means a step cannot forget to honour it.
+#
+# The mode answers every question with its declared default. What it
+# must NOT do is invent an answer where there is no default: a wizard
+# that silently writes an empty API key has produced a broken install
+# and reported success. Those raise ``MissingRequiredSetting``, which
+# names the prompt, so a scripted install fails loudly and points at
+# the thing to set.
+#
+# Without this, a non-TTY run does not use defaults at all -- it hits
+# ``_prompt_raw``'s guard and raises ``QuitNavigation``, i.e. setup
+# aborts. That is correct for an accidental pipe and useless for a
+# deliberate headless install.
+
+_NON_INTERACTIVE = False
+
+
+class MissingRequiredSetting(Exception):
+    """A non-interactive run reached a question it cannot answer.
+
+    Carries the prompt text so the caller can tell the operator which
+    value to supply (in the environment or in ``settings.json``) before
+    re-running.
+    """
+
+    def __init__(self, prompt: str):
+        self.prompt = prompt
+        super().__init__(
+            f"--non-interactive cannot answer {prompt!r}: it has no default. "
+            f"Set it in the environment or ~/.feral/settings.json, then "
+            f"re-run."
+        )
+
+
+def set_non_interactive(value: bool) -> None:
+    """Turn the mode on or off. Called once, from ``cmd_setup``."""
+    global _NON_INTERACTIVE
+    _NON_INTERACTIVE = bool(value)
+
+
+def is_non_interactive() -> bool:
+    return _NON_INTERACTIVE
+
+
+def pick(message: str, choices, *, default=None, **kwargs):
+    """``ui_kit.pick`` that honours non-interactive mode.
+
+    The wizard's three ``pick`` call sites (network profile, phone
+    pairing, the post-model checkpoint) all declare a default, so the
+    mode has an answer for each. They go through here rather than
+    calling ``ui_kit`` directly so a fourth call site cannot quietly
+    reintroduce a prompt that ``--non-interactive`` hangs on.
+    """
+    if _NON_INTERACTIVE:
+        if default is None:
+            raise MissingRequiredSetting(message)
+        return default
+    return ui_kit.pick(message, choices, default=default, **kwargs)
 
 
 def ask_text(
@@ -253,6 +330,16 @@ def ask_text(
     feedback that their paste landed.
     """
     console = console or get_console()
+    if _NON_INTERACTIVE:
+        if default:
+            return default
+        if allow_empty:
+            return ""
+        # A required free-text value with no default. Guessing here is
+        # how a headless install ends up with an empty API key and a
+        # green "setup complete".
+        raise MissingRequiredSetting(prompt)
+
     if secret:
         return _ask_secret(prompt, allow_empty=allow_empty, console=console)
 
@@ -379,6 +466,10 @@ def confirm(prompt: str, *, default: bool = False, console=None) -> bool:
     legacy wizard navigation.
     """
     console = console or get_console()
+    if _NON_INTERACTIVE:
+        # Every ``confirm`` in the wizard is an offer ("set this up
+        # now?"), so its declared default is always a safe answer.
+        return default
     if ui_kit.is_inquirer_available() and ui_kit.is_interactive():
         try:
             return ui_kit.confirm(prompt, default=default)

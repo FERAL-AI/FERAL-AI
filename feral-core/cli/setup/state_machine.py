@@ -74,9 +74,16 @@ class StateMachine:
         state: WizardState,
         steps: Sequence[tuple[str, StepFn]],
         from_step: str = "",
+        quick: bool = False,
     ):
         self.state = state
         self.steps = list(steps)
+        # ``--quick``: only ask about what has not been answered yet.
+        # Distinct from resume, which jumps to the first un-completed
+        # step and then walks everything after it. Quick keeps walking
+        # but steps over anything already in ``completed_steps``, so a
+        # later gap still gets asked about.
+        self.quick = bool(quick)
         self.console = get_console()
         # Lane U1 — explicit re-entry point. When set, skip the
         # resume-sidecar prompt entirely and jump straight to the
@@ -127,6 +134,19 @@ class StateMachine:
 
         while idx < len(self.steps):
             name, fn = self.steps[idx]
+
+            # ``--quick`` steps over anything already answered. ``finish``
+            # is never skipped: it writes the config and prints the
+            # summary, and a quick run that skipped it would leave the
+            # install unmarked.
+            if (
+                self.quick
+                and name != "finish"
+                and name in self.state.completed_steps
+            ):
+                idx += 1
+                continue
+
             if name not in _NO_INDICATOR_STEPS and not reprompting:
                 visible_idx = visible_steps.index(name) + 1
                 self._announce_step(name, visible_idx, total_visible)
