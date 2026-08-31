@@ -36,6 +36,16 @@ RECOMMENDED_MODELS: dict[str, str] = {
     "ollama-default": "llama3.2:3b",
 }
 
+# Context window llama.cpp is asked for when a GGUF model is loaded.
+#
+# This is the one context size this repo actually pins, and it used to be
+# a bare literal inside ``LlamaCppEngine.load_model``'s closure, visible
+# to nothing outside it. Callers that need to size a prompt against the
+# serving model had no way to read it and guessed instead. It is a
+# module constant now, and ``LlamaCppEngine.context_window_tokens``
+# publishes it, so the value is stated once and derived everywhere else.
+LLAMA_CPP_N_CTX = 4096
+
 
 class LocalLLMEngine(ABC):
     """Abstract interface for local inference engines."""
@@ -44,6 +54,16 @@ class LocalLLMEngine(ABC):
         self.model_id = model_id
         self.loaded = False
         self.supports_vision = False
+        # Usable context window of this engine's model, in tokens.
+        #
+        # 0 means UNKNOWN, not unlimited. Only llama.cpp pins a window in
+        # this file; MLX and Ollama take theirs from the model's own
+        # config or the daemon's ``num_ctx``, neither of which this
+        # process reads, and inventing a number for them would be exactly
+        # the guess this attribute exists to remove. Callers treat 0 as
+        # "fall back to the configured window"
+        # (``FERAL_CONTEXT_WINDOW_TOKENS``).
+        self.context_window_tokens = 0
 
     @abstractmethod
     async def load_model(self):
@@ -250,6 +270,8 @@ class LlamaCppEngine(LocalLLMEngine):
         super().__init__(model_id)
         self._llm = None
         self._model_path = None
+        # Known, not guessed: load_model asks for exactly this window.
+        self.context_window_tokens = LLAMA_CPP_N_CTX
 
     async def load_model(self):
         def _load():
@@ -263,7 +285,7 @@ class LlamaCppEngine(LocalLLMEngine):
 
             return Llama(
                 model_path=str(model_path),
-                n_ctx=4096,
+                n_ctx=LLAMA_CPP_N_CTX,
                 n_gpu_layers=n_gpu,
                 verbose=False,
             )
