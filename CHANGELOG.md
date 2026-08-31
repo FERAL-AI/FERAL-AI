@@ -1,10 +1,12 @@
 # Changelog
 
-<!-- feral-version: 2026.8.29 -->
+<!-- feral-version: 2026.8.30 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.8.30] - 2026-08-30 - what the code already did, and what it only claimed
 
 ### Fixed
 
