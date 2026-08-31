@@ -70,10 +70,22 @@ jobs:
   # WITHOUT making PR authors do the bookkeeping. Push-to-main only.
   # ---------------------------------------------------------------------
   readme-test-counts-autobump:
-    name: README test-count auto-bump (push-to-main only)
+    # Named for what it does. It used to be indistinguishable from the
+    # version-literal gate in a notification, so a README counter race
+    # arrived as "Version coherence failed" and cost a real diagnosis.
+    name: README test-count marker (push-to-main only)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # This job PUSHES to main, so two of them can never run at once.
+    # Merging a batch of PRs starts one per merge; each checks out main,
+    # bumps, and pushes into a ref that has already moved, and every one
+    # after the first fails non-fast-forward. Serialising them is the
+    # fix; cancel-in-progress is deliberately false because a cancelled
+    # bump would leave the marker stale rather than merely late.
+    concurrency:
+      group: readme-test-count-bump
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -265,9 +277,43 @@ jobs:
               "workflow; PR authors don't bump it."
           )
           subprocess.run(["git", "commit", "-m", msg], check=True)
-          subprocess.run(
-              ["git", "push", "origin", "HEAD:main"],
-              check=True,
-          )
-          print("pushed README bump to main.")
+
+          # Rebase-and-retry. The concurrency group above stops two of
+          # these racing each other, but it does not stop main moving
+          # underneath us for any other reason between checkout and
+          # push. A rejected push here is ordinary, not an error worth
+          # failing a release-adjacent workflow over, and the commit is
+          # a one-line marker bump that always rebases cleanly.
+          for attempt in range(1, 4):
+              push = subprocess.run(
+                  ["git", "push", "origin", "HEAD:main"],
+                  capture_output=True, text=True,
+              )
+              if push.returncode == 0:
+                  print("pushed README bump to main.")
+                  break
+              print(f"push attempt {attempt} rejected: {push.stderr.strip()}")
+              subprocess.run(["git", "fetch", "origin", "main"], check=True)
+              rebase = subprocess.run(
+                  ["git", "rebase", "origin/main"],
+                  capture_output=True, text=True,
+              )
+              if rebase.returncode != 0:
+                  subprocess.run(["git", "rebase", "--abort"])
+                  print(
+                      "::warning::README marker bump could not be rebased "
+                      "onto main; leaving the marker stale. The next "
+                      "push to main will recompute and bump it."
+                  )
+                  break
+          else:
+              # Three rejections means something is holding main. The
+              # marker is a derived artifact, so going stale is the
+              # correct failure: it self-heals on the next push, and a
+              # red workflow here would only ever be noise.
+              print(
+                  "::warning::README marker bump gave up after 3 attempts; "
+                  "the marker is stale and will be recomputed on the next "
+                  "push to main."
+              )
           PY
