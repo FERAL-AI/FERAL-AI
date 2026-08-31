@@ -335,7 +335,7 @@ class _CenteredCorpus:
     centroid: "np.ndarray"
     fingerprint: tuple
 
-_SCHEMA_VERSION = 6  # v2026.5.34: D11 decay + D12 sync HLC columns
+_SCHEMA_VERSION = 7  # sync_tombstones (deletes survive a peer replay)
 
 
 def _message_text(content: Any) -> str:
@@ -496,6 +496,11 @@ RECENCY_PRIOR_WEIGHT = 0.05
 # ``tests/test_memory_ranking.py`` pins the two together so they cannot
 # drift again.
 DEFAULT_DECAY_RATE = 0.001
+
+# How long a deletion tombstone is retained before
+# ``MemoryStore.prune_tombstones`` may drop it. See that method for the
+# trade-off this number encodes.
+TOMBSTONE_MAX_AGE_SECONDS = 90 * 24 * 60 * 60
 
 
 class MemoryStore:
@@ -765,7 +770,7 @@ class MemoryStore:
         if not self._sync_engine:
             return ""
         try:
-            return (
+            hlc = (
                 await self._sync_engine.log_operation_async(
                     table, op_type, row_id, data
                 )
@@ -774,6 +779,107 @@ class MemoryStore:
         except Exception as exc:
             logger.debug("_log_sync_async swallowed exception: %s", exc)
             return ""
+        if op_type == "delete":
+            # Every local hard-delete emitter routes through here
+            # (notes_legacy.delete_note, store.delete_conversation,
+            # decay's forget sweep), so this is the one place that has
+            # to record the tombstone for locally originated deletes.
+            # Without it the delete replicates outward correctly but
+            # THIS node stays vulnerable: a peer still holding the
+            # original insert re-sends it on the next handshake and the
+            # row the user just deleted comes straight back.
+            await self._record_tombstone(table, row_id, hlc)
+        return hlc
+
+    async def _record_tombstone(self, table: str, row_id: str, hlc: str) -> None:
+        """Mark ``(table, row_id)`` as deleted at HLC ``hlc``.
+
+        Uses its own short-lived connection rather than the pool. The
+        decay sweep calls ``_log_sync_async`` while it is still holding
+        a pooled connection, and ``conn_pool_size`` can legitimately be
+        1, so borrowing a second one here would deadlock the sweep.
+        Deletes are rare (386 note deletes total on the reference store)
+        so the connect cost does not sit on any hot path.
+
+        Never raises: a tombstone that fails to land degrades to the old
+        behaviour for that one row, which must not take the delete with
+        it (the row is already gone locally by the time we get here).
+        """
+        try:
+            conn = await aiosqlite.connect(self.db_path)
+            try:
+                await conn.execute(
+                    "INSERT INTO sync_tombstones "
+                    "(table_name, row_id, hlc_string, deleted_at) "
+                    "VALUES (?,?,?,?) "
+                    "ON CONFLICT(table_name, row_id) DO UPDATE SET "
+                    "hlc_string = excluded.hlc_string, "
+                    "deleted_at = excluded.deleted_at",
+                    (table, row_id, hlc or "", time.time()),
+                )
+                await conn.commit()
+            finally:
+                await conn.close()
+        except Exception as exc:
+            logger.warning(
+                "memory.tombstone_write_failed table=%s row=%s: %s",
+                table, row_id, exc,
+            )
+
+    async def tombstone_count(self) -> int:
+        """Number of live deletion tombstones. Surfaced for the CLI /
+        metrics so unbounded growth is observable rather than silent."""
+        conn = await self._conn()
+        try:
+            async with conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_tombstones"
+            ) as cur:
+                return (await cur.fetchone())["n"]
+        finally:
+            await self._release(conn)
+
+    async def prune_tombstones(
+        self, max_age_seconds: float = TOMBSTONE_MAX_AGE_SECONDS
+    ) -> int:
+        """Drop tombstones older than ``max_age_seconds``. Returns the
+        number removed.
+
+        THE TRADE-OFF, stated plainly. Tombstones are the only record
+        that a row was deleted, so keeping them forever is the only
+        scheme with no resurrection window at all, and it grows one row
+        per delete for the lifetime of the store, unbounded. Garbage
+        collecting them bounds the table and reopens exactly one hole: a
+        peer that has been offline since before the horizon still holds
+        the original insert, and once the tombstone is gone that insert
+        materialises again on the next handshake.
+
+        90 days is chosen because the threat this defends against is a
+        device in the user's OWN fleet (phone, laptop, desktop) that was
+        off for a while, and a personal device offline for a full
+        quarter is a device being re-paired, not a device syncing. At
+        one 48-byte row per delete, 90 days of even 100 deletes a day is
+        under half a megabyte.
+
+        Deliberately NOT implemented: pruning by "every peer has
+        acknowledged this delete". It is the theoretically correct rule
+        and it needs a peer roster with liveness, which this codebase
+        does not have (``sync_wal.synced_to`` records who received an
+        op, not who is still a peer), and it never terminates for a peer
+        that leaves the fleet without being deregistered.
+        """
+        cutoff = time.time() - max_age_seconds
+        conn = await self._conn()
+        try:
+            cur = await conn.execute(
+                "DELETE FROM sync_tombstones WHERE deleted_at < ?", (cutoff,)
+            )
+            await conn.commit()
+            removed = cur.rowcount or 0
+        finally:
+            await self._release(conn)
+        if removed:
+            logger.info("memory.tombstones_pruned count=%d", removed)
+        return removed
 
     async def _conn(self) -> aiosqlite.Connection:
         """Acquire a pooled aiosqlite connection.
@@ -1402,6 +1508,45 @@ class MemoryStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_compaction_sources_source "
                 "ON compaction_sources(source_episode_id)"
+            )
+
+            # Deletion tombstones for federated sync.
+            #
+            # ``SyncEngine._apply_to_memory`` gates every arriving op on
+            # the target row's ``hlc_string``. A hard DELETE removes the
+            # only copy of that value, so after a delete the gate reads
+            # ``existing_row is None`` and waves through ANY later insert
+            # for that id, however old its HLC. Peers keep the original
+            # insert in their WAL forever (``get_changes_since`` selects
+            # on HLC alone and nothing prunes it), so the next handshake
+            # with a peer that never saw the delete re-materialised the
+            # row. Deleted memories came back.
+            #
+            # One row per deleted (table_name, row_id), holding the HLC of
+            # the winning delete. The insert path consults it when the
+            # live row is absent, and clears it when a genuinely newer
+            # insert re-creates the row, so a tombstone is a version
+            # marker, not a permanent ban.
+            #
+            # This table lives in memory.db rather than sync_wal.db on
+            # purpose. On the sync apply path it is written on the same
+            # pooled connection that performs the DELETE, so the delete
+            # and its tombstone commit in one transaction and a crash
+            # cannot separate them. It also inherits memory.db's at-rest
+            # encryption envelope and integrity checks. It stores no row
+            # content, only ids.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sync_tombstones (
+                    table_name TEXT NOT NULL,
+                    row_id TEXT NOT NULL,
+                    hlc_string TEXT NOT NULL DEFAULT '',
+                    deleted_at REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY (table_name, row_id)
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sync_tombstones_deleted_at "
+                "ON sync_tombstones(deleted_at)"
             )
 
             # D11 indexes:
