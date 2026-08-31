@@ -4173,9 +4173,12 @@ async def sync_peer_endpoint(ws: WebSocket):
                     logger.warning("Sync apply aborted: %s", exc)
                     break
 
-                incoming = {"type": "sync_data", "changes": incoming_changes}
                 applied = 0
-                if incoming.get("type") == "sync_data" and state.sync_engine:
+                # Unconditional on the engine, not on there being
+                # changes: the refresh gate below is the shipped
+                # behaviour for every handshake and narrowing it here
+                # would be a separate change.
+                if state.sync_engine:
                     # v2026.5.34 (PR 2 D12): refresh-gate the apply.
                     # If the on-disk store has been corrupted /
                     # restored / rotated since boot, the in-memory
@@ -4203,7 +4206,7 @@ async def sync_peer_endpoint(ws: WebSocket):
                         logger.warning("Sync apply aborted: memory.refresh() raised %s", exc)
                         break
                     applied = await state.sync_engine.apply_remote_changes(
-                        incoming.get("changes", [])
+                        incoming_changes
                     )
 
                 my_changes = []
