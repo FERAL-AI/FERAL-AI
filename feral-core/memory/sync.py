@@ -573,6 +573,13 @@ class SyncEngine:
         self._hlc = HybridLogicalClock(node_id)
         self._vector_clock = VectorClock()
 
+        # Inbound ops dropped by the clock-drift and malformed-HLC
+        # gates in ``apply_remote_changes``. Surfaced via ``stats``
+        # so an operator can alert on a peer with a broken clock rather
+        # than discovering it later as silently lost writes.
+        self._hlc_drift_rejections = 0
+        self._hlc_malformed_rejections = 0
+
         wal_path = db_path or str(feral_data_home() / "sync_wal.db")
         self._wal = SyncWAL(wal_path)
 
@@ -758,7 +765,38 @@ class SyncEngine:
         for change_dict in changes:
             op = SyncOperation.from_dict(change_dict)
 
-            remote_hlc = HLCTimestamp.from_string(op.hlc)
+            # Malformed HLC. ``from_string`` raises on junk, and an
+            # unguarded raise here aborts the whole batch: one bad op
+            # from a peer would drop every later op in the same
+            # message. Skip the op, keep the batch.
+            try:
+                remote_hlc = HLCTimestamp.from_string(op.hlc)
+            except (ValueError, IndexError):
+                self._hlc_malformed_rejections += 1
+                logger.warning(
+                    "sync rejected: malformed HLC %r from node=%s table=%s id=%s",
+                    op.hlc, op.origin_node, op.table, op.row_id,
+                )
+                continue
+
+            # Clock-drift gate. This must reject the *operation*, not
+            # merely decline to advance the local clock: the LWW gate
+            # in ``_apply_to_memory`` compares ``op.hlc`` directly, so
+            # an op carrying a far-future timestamp would win every
+            # conflict for that row and keep winning. Guarding only the
+            # clock leaves that hole wide open.
+            if not self._hlc.is_within_drift(remote_hlc):
+                self._hlc_drift_rejections += 1
+                logger.error(
+                    "sync rejected: HLC %s from node=%s is beyond the max "
+                    "clock drift (%dms), op dropped for table=%s id=%s. "
+                    "Check NTP on the peer, or tune "
+                    "FERAL_SYNC_MAX_CLOCK_DRIFT_MS.",
+                    op.hlc, op.origin_node, self._hlc.max_drift_ms,
+                    op.table, op.row_id,
+                )
+                continue
+
             self._hlc.receive(remote_hlc)
             self._vector_clock.update(op.origin_node, op.hlc)
 
@@ -1618,4 +1656,7 @@ class SyncEngine:
             "wal_entries": self._wal.count,
             "vector_clock": self.get_vector_clock(),
             "running": self._running,
+            "clock": self._hlc.health,
+            "hlc_drift_rejections": self._hlc_drift_rejections,
+            "hlc_malformed_rejections": self._hlc_malformed_rejections,
         }
