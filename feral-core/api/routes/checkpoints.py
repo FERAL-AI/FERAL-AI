@@ -17,6 +17,7 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException
 
+from api.state import state
 from skills.checkpoints import BASH_NOT_COVERED_NOTE, get_store
 
 router = APIRouter(tags=["checkpoints"])
@@ -99,9 +100,22 @@ async def revert(body: dict):
 
     # SQLite plus a restore per file. Blocking, so it goes to a thread
     # rather than stalling every other request on this loop.
-    return await asyncio.to_thread(
+    dry_run = bool((body or {}).get("dry_run", False))
+    result = await asyncio.to_thread(
         store.revert_turn,
         turn_id,
         force=bool((body or {}).get("force", False)),
-        dry_run=bool((body or {}).get("dry_run", False)),
+        dry_run=dry_run,
     )
+
+    # A real revert withdraws earned autonomy. The operator is telling
+    # us an action FERAL may have auto-approved was not wanted, which is
+    # a stronger signal than a failed execution: the tool reported
+    # success and the human disagreed. A dry run asks what would happen
+    # and changes nothing, so it must not revoke.
+    if not dry_run and not (result or {}).get("refused"):
+        runner = getattr(getattr(state, "orchestrator", None), "tool_runner", None)
+        if runner is not None and hasattr(runner, "revoke_trust"):
+            runner.revoke_trust(reason=f"turn {turn_id} reverted")
+
+    return result

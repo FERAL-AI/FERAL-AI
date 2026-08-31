@@ -82,6 +82,32 @@ async def _resolve_request(request_id: str, *, approved: bool, body: dict | None
     return outcome
 
 
+@router.get("/api/approvals/trust")
+async def trust_state():
+    """Which tools have stopped asking, and why.
+
+    "It stopped asking" is only an acceptable behaviour if the operator
+    can find out why, and take it back. This is the receipt: every tool
+    eligible for earned autonomy, how many consecutive clean runs it
+    has, the threshold, and whether it is currently trusted.
+
+    Only tools ``skills/checkpoints.py`` can revert are ever eligible,
+    so the list is deliberately short -- latitude never exceeds undo.
+    See ``security/trust_ledger.py``.
+    """
+    orch = _require_orchestrator()
+    rows = orch.tool_runner.trust_snapshot()
+    return {
+        "count": len(rows),
+        "autonomy_mode": getattr(orch.tool_runner, "_autonomy_mode", ""),
+        # Earned autonomy applies under hybrid only: strict always asks,
+        # loose never does. Saying so here stops a reader concluding the
+        # feature is broken when it is simply not in play.
+        "active": getattr(orch.tool_runner, "_autonomy_mode", "") == "hybrid",
+        "tools": rows,
+    }
+
+
 @router.post("/api/approvals/{request_id}/approve")
 async def approve_request(request_id: str, body: dict | None = None):
     outcome = await _resolve_request(request_id, approved=True, body=body)
