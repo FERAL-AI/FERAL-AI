@@ -35,7 +35,14 @@ StepFn = Callable[[WizardState], "Awaitable[None] | None"]
 
 # Steps that handle their own framing (welcome panel, finish summary)
 # get no auto step header — the indicator would only add noise.
-_NO_INDICATOR_STEPS = frozenset({"welcome", "finish"})
+_NO_INDICATOR_STEPS = frozenset({"welcome", "finish", "ready"})
+
+# Steps that render nothing when re-entered, because they guard on
+# ``completed_steps``. Landing on one prints nothing and immediately
+# advances, so navigation has to step over them rather than onto them.
+# ``finish`` is framing but is NOT here: it renders every time, and
+# jumping to it is how an operator wraps up early.
+_INERT_ON_REENTRY = frozenset({"welcome"})
 
 
 _STEP_TITLES = {
@@ -67,9 +74,16 @@ class StateMachine:
         state: WizardState,
         steps: Sequence[tuple[str, StepFn]],
         from_step: str = "",
+        quick: bool = False,
     ):
         self.state = state
         self.steps = list(steps)
+        # ``--quick``: only ask about what has not been answered yet.
+        # Distinct from resume, which jumps to the first un-completed
+        # step and then walks everything after it. Quick keeps walking
+        # but steps over anything already in ``completed_steps``, so a
+        # later gap still gets asked about.
+        self.quick = bool(quick)
         self.console = get_console()
         # Lane U1 — explicit re-entry point. When set, skip the
         # resume-sidecar prompt entirely and jump straight to the
@@ -112,11 +126,31 @@ class StateMachine:
             # the provider / model / audio prompts.
             idx = self._maybe_resume()
 
+        # Set when we are re-entering the step we are already on, rather
+        # than arriving at a new one. Re-printing the "Step N of M"
+        # header in that case is what made a refused ``back`` look like
+        # the wizard had glitched and redrawn itself.
+        reprompting = False
+
         while idx < len(self.steps):
             name, fn = self.steps[idx]
-            if name not in _NO_INDICATOR_STEPS:
+
+            # ``--quick`` steps over anything already answered. ``finish``
+            # is never skipped: it writes the config and prints the
+            # summary, and a quick run that skipped it would leave the
+            # install unmarked.
+            if (
+                self.quick
+                and name != "finish"
+                and name in self.state.completed_steps
+            ):
+                idx += 1
+                continue
+
+            if name not in _NO_INDICATOR_STEPS and not reprompting:
                 visible_idx = visible_steps.index(name) + 1
                 self._announce_step(name, visible_idx, total_visible)
+            reprompting = False
             try:
                 result = fn(self.state)
                 if inspect.isawaitable(result):
@@ -133,10 +167,27 @@ class StateMachine:
                 self._persist_resume_marker(name)
                 idx += 1
             except BackNavigation:
-                if idx == 0:
-                    self.console.print("(can't go back from the first step)")
+                # Walk back past framing-only steps rather than landing
+                # on one.
+                #
+                # ``welcome`` is index 0 and renders nothing on re-entry
+                # (it returns early once it is in ``completed_steps``, so
+                # the banner is not shown twice). So ``back`` from step 1
+                # used to move to welcome, print nothing, and bounce
+                # straight forward again -- and the operator saw a second
+                # identical "Step 1 of N" header with no cause on screen.
+                # The ``idx == 0`` guard below never fired for that,
+                # because the operator is at index 1 when they press it.
+                target = idx - 1
+                while target >= 0 and self.steps[target][0] in _NO_INDICATOR_STEPS:
+                    target -= 1
+                if target < 0:
+                    self.console.print(
+                        "(this is the first step, there is nothing behind it)"
+                    )
+                    reprompting = True
                     continue
-                idx -= 1
+                idx = target
             except JumpToStep as jump:
                 # Lane U2 follow-up — non-linear hop back to an earlier
                 # step. The operator typed ``menu`` or picked the "↺
@@ -156,6 +207,10 @@ class StateMachine:
                 if target_idx is None:
                     # Operator cancelled the jump picker — stay on the
                     # current step and re-prompt instead of advancing.
+                    # Without ``reprompting`` this reprinted the step
+                    # header, so cancelling a jump looked like the
+                    # wizard had restarted the step.
+                    reprompting = True
                     continue
                 idx = target_idx
             except SkipStep:
@@ -274,6 +329,22 @@ class StateMachine:
         if target:
             for i, name in enumerate(names):
                 if name == target:
+                    # ``welcome`` renders nothing once it has run, so
+                    # jumping to it lands the operator on a step that
+                    # prints nothing and immediately advances, which
+                    # reads as the jump having been ignored.
+                    #
+                    # ``finish`` is deliberately NOT blocked even though
+                    # it is also framing: it renders, and jumping to it
+                    # is how an operator wraps up early. The fast-path
+                    # checkpoint after the model step uses exactly that.
+                    if name in _INERT_ON_REENTRY:
+                        self.console.print(
+                            f"[yellow]{name!r} is not a step you can jump to.[/]"
+                            if _RICH_AVAILABLE
+                            else f"{name!r} is not a step you can jump to."
+                        )
+                        return None
                     return i
             self.console.print(
                 f"[yellow]Unknown step {target!r} — staying put.[/]"

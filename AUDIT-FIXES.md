@@ -2409,8 +2409,19 @@ same change.
 
 New tests: 8.
 
+**Follow-up:** labelling made the mock honest once you called it; it was
+still asserted on every install that never asked for it. `is_enabled()`
+now defaults to **off** — `FERAL_MOCK_ROOMBA=1` opts in — so a fresh
+install no longer advertises `vacuum.mock_roomba` in
+`/api/hardware/mesh` or on the Devices page beside the operator's real
+hardware. Only `1/true/yes/on` enable it; anything else, including a
+typo, leaves it off. `SIMULATED_NOTE`, the `api/state.py` boot comment
+and the two route docstrings were updated to say opt-in, and the two
+tests that pinned default-on now pin default-off.
+
 **Files:** `hardware/mock_roomba.py`,
-`api/routes/security_and_hardware.py`, `tests/test_mock_roomba.py`,
+`api/routes/security_and_hardware.py`, `api/state.py`,
+`tests/test_mock_roomba.py`,
 `tests/test_simulated_device_is_labelled.py` (new).
 
 ---

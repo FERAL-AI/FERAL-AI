@@ -3636,6 +3636,16 @@ class Orchestrator:
                     tool_success = audit_status == "success"
                     await self._emit_brain_event(session_id, "tool_exec", {"tool": tc["name"], "success": tool_success})
 
+                    # Earned autonomy. A pending approval is a question,
+                    # not an outcome, so it must not count either way --
+                    # recording it as a failure would punish a tool for
+                    # being gated, and as a success would promote one
+                    # that never ran.
+                    if not tool_pending:
+                        self.tool_runner.record_trust_outcome(
+                            tc["name"], success=tool_success,
+                        )
+
                     if self._tool_genesis:
                         self._tool_genesis.record_tool_call(session_id, tc["name"], tc.get("args", {}))
 
@@ -4275,6 +4285,11 @@ class Orchestrator:
                         session_id, "tool_exec",
                         {"tool": tc["name"], "success": stream_tool_success},
                     )
+
+                    if stream_audit_status != "pending_approval":
+                        self.tool_runner.record_trust_outcome(
+                            tc["name"], success=stream_tool_success,
+                        )
 
                     if self._tool_genesis:
                         self._tool_genesis.record_tool_call(

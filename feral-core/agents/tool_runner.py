@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from security.content_defense import screen_content, wrap_external_content
 from security.exec_approvals import ApprovalManager
+from security.trust_ledger import TrustLedger, get_ledger
 from security.safety_resolver import (
     LEVEL_AUTO,
     LEVEL_CONFIRM,
@@ -219,6 +220,7 @@ class ToolRunner:
         self,
         orchestrator: "Orchestrator",
         autonomy_mode: str = "hybrid",
+        trust_ledger: Optional[TrustLedger] = None,
         approval_manager: Optional[ApprovalManager] = None,
     ):
         self._orch = orchestrator
@@ -239,6 +241,9 @@ class ToolRunner:
         # ToolRunner. If no manager is injected (legacy/tests), fall back
         # to local construction.
         self._approval_mgr = approval_manager or ApprovalManager()
+        # Read synchronously by ``enforce_safety``; updated from the
+        # orchestrator's execution path. See security/trust_ledger.py.
+        self._trust = trust_ledger or get_ledger()
         self._dispatch_validator: Optional[ToolDispatchValidator] = None
         # Fallback turn ids for dispatch paths with no orchestrator turn
         # record behind them (cron, taskflows). See `_turn_id_for`.
@@ -484,6 +489,26 @@ class ToolRunner:
             needs_approval = level == SafetyLevel.CONFIRM
         # loose: nothing needs approval
 
+        # Earned autonomy. A tool that has run cleanly `promote_after`
+        # times in a row stops asking -- but only under hybrid, only at
+        # CONFIRM, and only for actions `skills/checkpoints.py` can
+        # revert. See security/trust_ledger.py for why each of those
+        # three is load-bearing.
+        #
+        # strict is deliberately excluded: an operator who chose it
+        # asked to be consulted, and a track record is not consent.
+        if (
+            needs_approval
+            and self._autonomy_mode == "hybrid"
+            and level == SafetyLevel.CONFIRM
+            and self._trust.is_trusted(tool_name)
+        ):
+            needs_approval = False
+            logger.info(
+                "Earned autonomy: %s auto-approved after %d clean runs",
+                tool_name, self._trust.state(tool_name)["clean_runs"],
+            )
+
         if not needs_approval:
             if self._autonomy_mode == "loose" and level == SafetyLevel.CONFIRM:
                 logger.info(f"Safety CONFIRM (loose mode auto-exec): {tool_name}")
@@ -521,6 +546,45 @@ class ToolRunner:
         self._pending_approvals[request_id] = pending
         logger.info(f"Approval required ({self._autonomy_mode}): {tool_name} → request_id={request_id}")
         return pending
+
+    # ─── Earned autonomy ───
+
+    def record_trust_outcome(self, tool_name: str, *, success: bool) -> None:
+        """Fold one execution outcome into the trust ledger.
+
+        Called from both orchestrator execution paths. Kept here rather
+        than having the orchestrator reach into ``_trust`` so the ledger
+        stays an implementation detail of the gate that reads it.
+        """
+        try:
+            self._trust.record(tool_name, success=success)
+        except Exception:
+            # Trust is an optimisation over asking. Losing an update
+            # means more prompts, never fewer, so it must never be able
+            # to break a turn.
+            logger.debug("trust ledger update failed for %s", tool_name, exc_info=True)
+
+    def revoke_trust(self, tool_name: str = "", *, reason: str = "") -> None:
+        """Drop earned latitude, immediately.
+
+        A revert is the strongest negative signal there is: the tool
+        reported success and the operator disagreed. That is worse than
+        a failed execution, which at least announced itself.
+        """
+        try:
+            if tool_name:
+                self._trust.revoke(tool_name, reason=reason)
+            else:
+                self._trust.revoke_all(reason=reason)
+        except Exception:
+            logger.debug("trust revoke failed", exc_info=True)
+
+    def trust_snapshot(self) -> list[dict]:
+        """Every tool eligible for trust and where it stands."""
+        try:
+            return self._trust.snapshot()
+        except Exception:
+            return []
 
     # ─── Approval lifecycle ───
 

@@ -1,0 +1,12 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/FERAL-AI/FERAL-AI/security/advisories/new
+    about: >-
+      Please report privately rather than in a public issue. FERAL runs
+      on people's own machines with access to their files, apps and
+      accounts, so a public report is a working exploit until it is
+      patched.
+  - name: Question or idea
+    url: https://github.com/FERAL-AI/FERAL-AI/discussions
+    about: For usage questions and feature discussion.

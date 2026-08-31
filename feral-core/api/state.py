@@ -596,7 +596,10 @@ class BrainState:
                 # manifest re-registers with real capabilities.
                 return
             gen_manifest = device_manifest_to_skill_manifest(manifest)
-            kg = getattr(self.memory, "knowledge_graph", None)
+            # ``kg``, not ``knowledge_graph``: the latter exists on
+            # neither the store nor the state, so the getattr default
+            # fired and every device was registered with no graph.
+            kg = getattr(self.memory, "kg", None)
             gen_skill = GenericHardwareSkill(
                 device_id=dev_id,
                 device_registry=self.device_registry,
@@ -1742,7 +1745,7 @@ class BrainState:
             # ``category=device`` entities. The KG is built earlier in
             # MemoryStore.__init__ but exposed lazily on the store.
             try:
-                kg = getattr(self.memory, "knowledge_graph", None)
+                kg = getattr(self.memory, "kg", None)
                 if kg is not None:
                     self.hardware_mesh.set_knowledge_graph(kg)
             except Exception:
@@ -1793,8 +1796,9 @@ class BrainState:
 
         with boot_subsystem(self._boot_report, "MockRoomba"):
             # Closes THESIS_SCENARIOS S5 on demo machines without HA.
-            # Default-on; operator can disable with FERAL_MOCK_ROOMBA=0
-            # once a real Roomba is wired through HA.
+            # Opt-in: FERAL_MOCK_ROOMBA=1 enables it. Default-off, because
+            # a default-on mock put a vacuum that does not exist into
+            # /api/hardware/mesh and the Devices page of every install.
             from hardware.mock_roomba import (
                 MockRoomba,
                 is_enabled as _mock_roomba_enabled,

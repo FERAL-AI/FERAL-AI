@@ -54,6 +54,41 @@ All notable changes to FERAL are documented here.
   `context_builder.PER_MESSAGE_HARD_CAP` already cites. A character
   bound of 12000 remains as a cost bound, pinned equal to `CHUNK_CHARS`
   by a test so raising one cannot silently reintroduce truncation.
+- **Deleted memories came back.** `SyncEngine._apply_to_memory` gates
+  every arriving sync op against the target row's `hlc_string`, but the
+  delete branch ran a bare `DELETE FROM {table} WHERE id = ?` and
+  recorded nothing. The hard delete takes that column with it, so on the
+  next arrival for the same id the gate read `existing_row is None`,
+  `existing_tuple` fell back to `(0, 0, "")`, and the whole
+  last-writer-wins comparison was skipped: any insert re-materialised
+  the row, however old its HLC. Peers hold the original insert forever
+  (`get_changes_since` selects on HLC alone and nothing prunes the sync
+  WAL), so a note deleted on one brain came back on the next handshake
+  with a peer that had not seen the delete. Both directions were
+  affected: a remotely applied delete and a locally originated one
+  (`notes_legacy.delete_note`, `store.delete_conversation`, the decay
+  sweep's hard delete), because the local paths announced the delete to
+  peers without recording anything on the node that issued it.
+
+  Deletes now write a tombstone to `sync_tombstones` in `memory.db`,
+  holding the row id and the HLC of the delete, in the same transaction
+  as the DELETE. The tombstone stands in for the row's `hlc_string`
+  after the row is gone, so the same strictly-greater rule applies; an
+  insert newer than the tombstone is a legitimate re-creation and
+  retires it. Tombstones are pruned after 90 days by the sync
+  scheduler's cadence tick (rate-limited to every 6 hours), which bounds
+  the table and reopens exactly one window: a peer offline since before
+  the horizon can still resurrect a row.
+
+  The CRDT fuzz suite could not see any of this. Every convergence
+  assertion in `tests/test_sync_fuzz.py` compares `_final_state`, which
+  is derived from the sync WAL op log and never from the materialised
+  `notes` / `knowledge` tables. Two nodes converge on the same set of
+  WAL ops regardless of what happened to the rows, so drops, flaps and
+  the 3-node topology all passed over a store that was resurrecting
+  deleted rows. The new `tests/test_sync_tombstone.py` asserts on row
+  counts in the tables instead; 6 of its 7 tests fail against the
+  unfixed code.
 
 ## [2026.8.29] - 2026-08-29 - a name is not evidence
 

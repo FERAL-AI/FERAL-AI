@@ -247,17 +247,27 @@ def resolve_execution_mode(
                     f"executing in the Docker sandbox"
                 ),
             )
-        return ExecutionDecision(
-            mode=MODE_REFUSED,
-            needs=NEEDS_DOCKER,
-            reason=(
-                f"'{skill_id or 'endpoint'}' runs generated code and requires "
-                f"the '{MODE_DOCKER}' execution mode, but the Docker sandbox "
-                f"is not available. A workspace grant does not substitute: "
-                f"grants authorise the operator's own shell, not generated "
-                f"programs."
-            ),
-        )
+        if not policy.full_authority():
+            return ExecutionDecision(
+                mode=MODE_REFUSED,
+                needs=NEEDS_DOCKER,
+                reason=(
+                    f"'{skill_id or 'endpoint'}' runs generated code and "
+                    f"requires the '{MODE_DOCKER}' execution mode, but the "
+                    f"Docker sandbox is not available. A workspace grant does "
+                    f"not substitute: grants authorise the operator's own "
+                    f"shell, not generated programs."
+                ),
+            )
+        # execution.full_authority. Docker is still preferred above when it
+        # is there; this is the operator saying that its absence is not a
+        # reason to refuse. Falls through to the host path below.
+        #
+        # This is the sharpest thing the key does. A refusal here is not a
+        # prompt the operator can answer, it is a hard no, so an operator
+        # on a machine without Docker could not run generated code at any
+        # autonomy tier by any means. That is a real capability, and
+        # somebody who set this key asked for it.
 
     # 2. Operator-level kill switch, shared with ``daemon://local/shell``.
     if not policy.can_execute_shell():
@@ -290,6 +300,17 @@ def resolve_execution_mode(
         )
 
     workspace, source = policy.resolve_workspace(resolved_cwd)
+    if workspace is None and source != "blocked" and policy.full_authority():
+        # The operator declared the whole machine their workspace. Report
+        # the cwd as the workspace so downstream callers, which use this
+        # field to decide where to run, are not handed None.
+        #
+        # ``blocked_paths`` is excluded deliberately: it is the operator's
+        # own list, not part of the floor, and someone who wrote both a
+        # block list and this key meant both. It is also the one scope
+        # that stays meaningful under the key, so silently overriding it
+        # would leave them with no way to carve anything out at all.
+        workspace, source = resolved_cwd, "full_authority"
     if workspace is None:
         detail = (
             "it is on the policy's blocked_paths list"
@@ -307,7 +328,16 @@ def resolve_execution_mode(
             ),
         )
 
-    if autonomy == _GRANT_ONLY_AUTONOMY and source != "grant":
+    # ``full_authority`` counts as the explicit act strict is asking for.
+    # Strict demands the operator have named the folder rather than
+    # inheriting it from a policy read path; someone who wrote
+    # ``full_authority`` into the policy file has named all of them, and
+    # more deliberately than a grant.
+    if (
+        autonomy == _GRANT_ONLY_AUTONOMY
+        and source != "grant"
+        and not policy.full_authority()
+    ):
         return ExecutionDecision(
             mode=MODE_REFUSED,
             needs=NEEDS_WORKSPACE_GRANT,
@@ -379,6 +409,14 @@ def resolve_execution_mode(
     #    refuse must not be reachable by naming it on the command line.
     #    Run over the unwrapped form too, so ``cat $(echo ~/.ssh/id_rsa)``
     #    and its ANSI-C spelling are caught alongside the direct one.
+    #    Left running under ``full_authority``. It asks ``can_read_path``,
+    #    which is the same method the file tools ask, and that method
+    #    answers True under the key for everything except
+    #    ``blocked_paths``. So the two sides still agree, and an operator
+    #    who carved something out with ``blocked_paths`` keeps it carved
+    #    out from the shell as well. Skipping the loop here instead would
+    #    have made ``cat`` reach what ``read_file`` refuses, which is the
+    #    exact inconsistency this check was written to prevent.
     for form in forms:
         for candidate in command_argument_paths(form, resolved_cwd):
             if not policy.can_read_path(candidate):

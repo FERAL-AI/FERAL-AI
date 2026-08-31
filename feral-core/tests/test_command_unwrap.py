@@ -13,9 +13,14 @@ differently. Before ``security/command_unwrap.py`` all of these ran
     sh <<'EOF' ... rm -rf / ... EOF
     bash -c "bash -c 'rm -rf /'"
 
-``coding_tools.DANGEROUS_COMMANDS`` is a regex over the raw string and
-matches none of them. ``exec_mode.command_argument_paths`` shlex-splits
-the raw string and sees no denied path in any of them.
+``sandbox_policy._COMMAND_DENY_FLOOR`` is a set of regexes over the raw
+string and matches none of them. ``exec_mode.command_argument_paths``
+shlex-splits the raw string and sees no denied path in any of them.
+
+(A second blocklist, ``coding_tools.DANGEROUS_COMMANDS``, also used to
+sit in front of the floor. It was removed rather than repaired: it was
+broken in two independent ways and blocked nothing the floor did not
+already block. See ``tests/test_dangerous_command_regex.py``.)
 
 The tests below assert the unwrapper reveals each shape, that it does
 NOT fire on ordinary commands, and that the two policy call sites
@@ -327,8 +332,12 @@ def test_exec_mode_sees_a_denied_path_hidden_in_ansi_c_quoting(tmp_path):
 
 
 def test_exec_mode_refuses_the_deny_floor(tmp_path):
+    # Was ``shutdown -h now``. Power commands left the floor: a restart
+    # is reversible and ordinary, so it is gated as a confirm-tier
+    # question instead. This test is about the floor being consulted at
+    # all, so it uses a command that is still on it.
     decision = resolve_execution_mode(
-        "shutdown -h now",
+        "mkfs.ext4 /dev/sda1",
         policy=_granted_policy(tmp_path),
         cwd=str(tmp_path),
         autonomy_mode="hybrid",

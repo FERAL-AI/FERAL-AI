@@ -74,14 +74,24 @@ FERAL's Slack channel uses Socket Mode (WebSocket) to receive events without exp
   </Step>
 
   <Step title="Configure channel behavior (optional)">
+
+    <Warning>
+      Earlier versions of this page documented **`allowed_channels`, `respond_to_mentions_only` and `thread_replies`** as
+      options here. The brain reads none of those keys. Access control
+      for every channel lives in the shared keys below, and the defaults
+      are **fail-closed**: with no allowlist and no open pairing window,
+      the channel accepts nothing. The old table described `[]` as
+      "(all)", which is the opposite of what the code does
+      (`channels/base.py:345-362`).
+    </Warning>
     ```json
     {
       "channels": {
         "slack": {
           "enabled": true,
-          "allowed_channels": ["C01ABCDEF", "C02GHIJKL"],
-          "respond_to_mentions_only": true,
-          "thread_replies": true
+          "allowed_senders": ["U01ABCDEF"],
+          "allowed_chats": ["C01ABCDEF"],
+          "pairing_window_sec": 0
         }
       }
     }
@@ -89,9 +99,13 @@ FERAL's Slack channel uses Socket Mode (WebSocket) to receive events without exp
 
     | Setting | Default | Description |
     |---------|---------|-------------|
-    | `allowed_channels` | `[]` (all) | Restrict to specific channel IDs |
-    | `respond_to_mentions_only` | `true` | Only respond when @mentioned in channels |
-    | `thread_replies` | `true` | Reply in threads instead of top-level |
+    | `allowed_senders` | `[]` | Sender ids that may reach the brain. Empty means **none**. |
+    | `allowed_chats` | `[]` | Chat / channel ids that may reach the brain. Empty means **none**. |
+    | `pairing_window_sec` | `0` | Seconds to accept the next unknown sender and bind it as owner. `0` keeps the window shut. |
+
+    A sender that is not allowlisted is recorded and receives **no reply
+    at all**, so a stranger cannot learn whether a brain is listening
+    (`channels/base.py:345-362`).
   </Step>
 
   <Step title="Restart and test">
@@ -120,8 +134,8 @@ Socket Mode means FERAL doesn't need a public URL or ngrok tunnel. The brain mai
 | Context | Trigger | Response Style |
 |---------|---------|----------------|
 | **DM** | Any message | Full conversational response |
-| **Channel** | `@FERAL` mention | Threaded reply (if `thread_replies` is on) |
-| **Channel** | Direct message (if `respond_to_mentions_only` is off) | Top-level reply |
+| **Channel** | `@FERAL` mention | Reply |
+| **Channel** | Any message from an allowlisted sender | Reply |
 
 <Note>
   Invite the bot to a channel with `/invite @FERAL` before it can read or respond there.

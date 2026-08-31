@@ -274,9 +274,11 @@ contract, and point it at the brain.
 - `feral-nodes/python-node-sdk/w300_daemon.py` — W300 smart-glasses video
   bridge.
 - `feral-nodes/python-node-sdk/robot_template.py` — serial / ROS robot
-  starter.
+  starter. It refuses every actuator command until you implement its
+  `RobotTransport`, and verifies each command against a telemetry
+  read-back before reporting success. Both are deliberate: copy them.
 
-All three are ~200 lines each; use them as the shape of your own daemon.
+Use them as the shape of your own daemon.
 
 ---
 

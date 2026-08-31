@@ -28,6 +28,11 @@ from typing import Optional, Any
 from pydantic import BaseModel, Field
 from uuid import uuid4
 
+# The "Sandbox Policy Check" the architecture line above has always
+# described. ``security/hardware_policy`` imports nothing from the rest of
+# FERAL precisely so this module can reach it without closing a cycle.
+from security.hardware_policy import capability_refusal, live_policy
+
 logger = logging.getLogger("feral.hup")
 
 
@@ -365,6 +370,42 @@ class DeviceRegistry:
             return HUPResult(
                 action_id=action.action_id, device_id=action.device_id,
                 status="failure", error=f"Capability not found: {action.capability_id}"
+            )
+
+        # The operator's actuator allowlist, asked HERE rather than only at
+        # the one route that used to ask it.
+        #
+        # ``SandboxPolicy.can_use_actuator`` had a single production caller,
+        # ``api/routes/security_and_hardware._policy_verdict``, reachable
+        # only from ``POST /api/hardware/execute`` - an endpoint with no
+        # caller anywhere in the repo: no client, no SDK, no desktop app.
+        # This method is reached from six places that never asked
+        # (``gateway/protocol.py``, ``mcp/server.py`` x3,
+        # ``hardware/orchestrator.py``, ``hardware/capability_skill.py``,
+        # ``skills/impl/cutebot_skill.py``), and ``mcp/server.py`` exposes
+        # ``feral_execute_action`` to external MCP clients, so the operator's
+        # allowlist governed nothing that could actually move hardware.
+        # One check on the chokepoint covers all of them.
+        #
+        # Deliberately narrower than the approval question in
+        # ``security/safety_resolver``: this asks only "may it happen at
+        # all", so it enforces the ALLOW list and leaves
+        # ``requires_confirmation`` to the resolver, and it exempts
+        # emergency stops via ``hardware.movement.emergency_stop_enabled``
+        # because a refused stop leaves the hardware running.
+        #
+        # Fails OPEN on a missing policy, matching ``_policy_verdict``.
+        # ``AppState.policy`` is None until ``AppState.initialize`` and
+        # absent entirely for library users of ``DeviceRegistry``; denying
+        # all hardware in those cases would be a new outage, not a fix.
+        # The resolver fails CLOSED on the same input, so the LLM path is
+        # still gated during startup.
+        refusal = capability_refusal(live_policy(), cap.id, cap.category or "")
+        if refusal is not None:
+            return HUPResult(
+                action_id=action.action_id, device_id=action.device_id,
+                status="denied",
+                error=f"Blocked by sandbox policy: {refusal} ('{cap.id}').",
             )
 
         if (cap.requires_confirmation or action.requires_confirmation) and not action.confirmed:

@@ -60,12 +60,33 @@ machine.
 
 To handle the incoming payload, modify your daemon code (e.g. `robot_template.py`) to map against the `skill_id` endpoints.
 
+Drive the hardware, then **read it back and report what it says** — never
+report the command you were given as though it were the outcome. This is
+the same rule `feral-core/hardware/capability_skill.py` applies on the
+brain side: on a telemetry mismatch it returns `success=False` with "Do
+NOT claim it worked — report the device's actual state."
+
 ```python
         if executor == "set_color":
             hex_color = args.get("rgb_hex", "FFFFFF")
-            # --- Insert GPIO/Serial Code Here ---
-            set_bulb_color(hex_color)
-            result_msg = f"Bulb changed to {hex_color}"
+            if self.transport is None:
+                # No hardware attached: refuse. Do not acknowledge.
+                return self._envelope(msg_id, status="error",
+                                      error="no transport; nothing was commanded")
+            await self.transport.set_bulb_color(hex_color)
+            observed = (await self._safe_read_state() or {}).get("rgb_hex")
+            if observed is None:
+                # Accepted, but unverifiable. "Unknown" is not "success".
+                return self._envelope(msg_id, status="success", verified=None,
+                                      stdout="set_color accepted; bulb state unreadable")
+            if observed.upper() != hex_color.upper():
+                return self._envelope(
+                    msg_id, status="error", verified=False, observed=observed,
+                    error=f"bulb reads {observed}, expected {hex_color}. "
+                          f"Do NOT claim it worked — report the device's actual state.")
+            return self._envelope(msg_id, status="success", verified=True,
+                                  observed=observed,
+                                  stdout=f"bulb confirmed at {observed}")
 ```
 
 ## Defining Pure Python Cloud Skills

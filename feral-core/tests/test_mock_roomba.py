@@ -185,7 +185,13 @@ def test_is_enabled_honors_env(monkeypatch, value, expected):
     assert is_enabled() is expected
 
 
-def test_is_enabled_defaults_on(monkeypatch):
-    """Default-on so a fresh demo machine works without configuration."""
+def test_is_enabled_defaults_off(monkeypatch):
+    """Opt-in: a fresh install must not advertise a vacuum that does not exist.
+
+    The mock used to default on, so every install shipped a
+    ``vacuum.mock_roomba`` in ``/api/hardware/mesh`` and on the Devices
+    page. A fake device sitting next to the real ones costs the real ones
+    their credibility. Demo machines set ``FERAL_MOCK_ROOMBA=1``.
+    """
     monkeypatch.delenv("FERAL_MOCK_ROOMBA", raising=False)
-    assert is_enabled() is True
+    assert is_enabled() is False

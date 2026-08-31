@@ -15,6 +15,10 @@ Conflict resolution:
   - Notes/Knowledge: last-writer-wins (by HLC timestamp)
   - Episodes: union (never delete remote episodes)
   - Execution log: append-only
+  - Deletes: tombstoned in ``memory.db``'s ``sync_tombstones``. The
+    hard DELETE takes the row's ``hlc_string`` with it, so the
+    tombstone is what the LWW gate compares against afterwards. See
+    ``MemoryStore.prune_tombstones`` for the retention trade-off.
 """
 
 from __future__ import annotations
@@ -817,14 +821,33 @@ class SyncEngine:
                 )
                 return False
 
+            # Tombstone gate. When the live row is absent the LWW check
+            # above has nothing to compare against: ``existing_tuple``
+            # falls back to ``(0, 0, "")`` and every arriving op wins.
+            # That is the resurrection hole. The tombstone carries the
+            # HLC of the delete that removed the row, so it stands in
+            # for the row's ``hlc_string`` after the row itself is gone
+            # and the same strictly-greater rule applies to it.
+            tombstone_tuple: Optional[tuple] = None
+            if existing_row is None:
+                tombstone_tuple = await self._read_tombstone(
+                    conn, op.table, op.row_id
+                )
+                if tombstone_tuple is not None and remote_tuple <= tombstone_tuple:
+                    logger.debug(
+                        "sync tombstone skip: table=%s id=%s remote=%s op=%s",
+                        op.table, op.row_id, op.hlc, op.op_type,
+                    )
+                    return False
+
             if op.op_type == "delete":
-                # Honour LWW for deletes too — a delete with an older
-                # HLC than the surviving row's last-write is stale.
-                # The placeholder row (id-only) was created above by
-                # the gating SELECT so the check already ran.
+                # Honour LWW for deletes too: a delete with an older
+                # HLC than the surviving row's last-write is stale, and
+                # the gate above has already rejected that case.
                 await conn.execute(
                     f"DELETE FROM {op.table} WHERE id = ?", (op.row_id,)
                 )
+                await self._write_tombstone(conn, op.table, op.row_id, op.hlc)
                 await conn.commit()
                 return True
 
@@ -1008,10 +1031,73 @@ class SyncEngine:
                 )
                 return False
 
+            if tombstone_tuple is not None:
+                # The row was deleted and has now been legitimately
+                # re-created by a strictly newer write. Retire the
+                # tombstone in the same transaction as the insert, so
+                # the row's own hlc_string is the gate from here on and
+                # the tombstone table does not accumulate entries for
+                # ids that are live again.
+                await conn.execute(
+                    "DELETE FROM sync_tombstones "
+                    "WHERE table_name = ? AND row_id = ?",
+                    (op.table, op.row_id),
+                )
+
             await conn.commit()
             return True
         finally:
             await self._memory._release(conn)
+
+    @staticmethod
+    async def _read_tombstone(conn, table: str, row_id: str) -> Optional[tuple]:
+        """Return the HLC tuple of the delete that removed ``row_id``,
+        or ``None`` when no tombstone is on file.
+
+        A missing ``sync_tombstones`` table (a memory.db written by a
+        build older than this one and never reopened through
+        ``MemoryStore._init_db``) reports "no tombstone" rather than
+        failing the op: that is the pre-tombstone behaviour, which is
+        wrong but not worse than refusing to sync at all.
+        """
+        try:
+            async with conn.execute(
+                "SELECT hlc_string FROM sync_tombstones "
+                "WHERE table_name = ? AND row_id = ?",
+                (table, row_id),
+            ) as cur:
+                row = await cur.fetchone()
+        except sqlite3.OperationalError as exc:
+            logger.warning("sync: tombstone lookup failed (%s)", exc)
+            return None
+        if row is None:
+            return None
+        return _parse_hlc(row["hlc_string"] or "")
+
+    @staticmethod
+    async def _write_tombstone(conn, table: str, row_id: str, hlc: str) -> None:
+        """Record that ``row_id`` was deleted at ``hlc``.
+
+        Failures are logged, never raised. The caller has already issued
+        the DELETE on this connection and is about to commit it; letting
+        a tombstone problem propagate would roll the delete back and
+        leave the row alive, which is the worse of the two outcomes.
+        """
+        try:
+            await conn.execute(
+                "INSERT INTO sync_tombstones "
+                "(table_name, row_id, hlc_string, deleted_at) "
+                "VALUES (?,?,?,?) "
+                "ON CONFLICT(table_name, row_id) DO UPDATE SET "
+                "hlc_string = excluded.hlc_string, "
+                "deleted_at = excluded.deleted_at",
+                (table, row_id, hlc, time.time()),
+            )
+        except sqlite3.OperationalError as exc:
+            logger.warning(
+                "sync: tombstone write failed table=%s id=%s (%s)",
+                table, row_id, exc,
+            )
 
     def get_vector_clock(self) -> dict:
         return self._vector_clock.to_dict()

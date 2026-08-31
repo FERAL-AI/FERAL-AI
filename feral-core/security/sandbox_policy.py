@@ -38,6 +38,7 @@ class SandboxPolicy:
 
     def __init__(self, policy_data: Optional[dict] = None):
         self._data = policy_data or self._default_policy()
+        self._full_authority_logged = False
 
     @staticmethod
     def _default_policy() -> dict:
@@ -84,10 +85,34 @@ class SandboxPolicy:
             },
 
             "hardware": {
+                # The same lesson the actuator list below records, applied
+                # to sensors. Entries are matched against the HUP
+                # capability id the caller sends (tolerating a ``read_``
+                # prefix, see ``security/hardware_policy._sensor_allowed``),
+                # and five shipped sensor capability ids were absent:
+                # ``read_position`` (hardware/adapters/robot_arm.py),
+                # ``skin_temp`` (wristband), ``gps_location`` and
+                # ``health_sensors`` (hardware/mesh.py phone node) and
+                # ``thermostat_read`` (smart_home). That did not matter
+                # while the only reader was an endpoint nothing calls; it
+                # matters now that the resolver asks this list whether a
+                # device tool may run unattended, because a missing entry
+                # is an approval card in front of the robot arm reading
+                # its own joint angles.
+                # ``test_default_policy_permits_every_shipped_sensor``
+                # fails if an adapter grows a capability this misses.
                 "sensors": {
                     "allowed": ["heart_rate", "spo2", "temperature", "uv", "steps",
                                 "accelerometer", "gyroscope", "ambient_light", "gps",
-                                "telemetry"],
+                                "telemetry",
+                                # hardware/adapters/robot_arm.py
+                                "position",
+                                # hardware/adapters/wristband.py
+                                "skin_temp",
+                                # hardware/mesh.py phone node
+                                "gps_location", "health_sensors",
+                                # hardware/adapters/smart_home.py
+                                "thermostat_read"],
                     "blocked": [],
                     "max_read_rate_per_second": {
                         "heart_rate": 1,
@@ -361,6 +386,18 @@ class SandboxPolicy:
         fs = self._data.get("filesystem", {})
         if self._path_in_list(target, fs.get("blocked_paths", [])):
             return False
+        if self.full_authority():
+            # The file tools and the shell answer this question from the
+            # same method, and they have to keep agreeing. exec_mode's
+            # path check exists precisely so that a path the file tools
+            # refuse is not reachable by naming it on a command line; if
+            # the shell were lifted and this were not, that invariant
+            # would break in the other direction and ``cat`` would reach
+            # what ``read_file`` could not.
+            #
+            # blocked_paths above still wins. It is the operator's own
+            # list, and an operator who wrote both meant both.
+            return True
         if self._path_in_list(target, fs.get("read_paths", [])):
             return True
         if self._path_in_list(target, fs.get("write_paths", [])):
@@ -634,21 +671,73 @@ class SandboxPolicy:
     _COMMAND_DENY_FLOOR: tuple[re.Pattern[str], ...] = (
         # ``rm -rf /`` and ``rm -fr ~`` only. ``rm -rf /tmp/build`` and
         # ``rm -rf node_modules`` are ordinary work and stay allowed.
+        #
+        # Trailing flags are matched as well as a bare end of line. The
+        # anchor used to be `\s*$` immediately after the path, so
+        # ``rm -rf / --no-preserve-root`` did not match: anything after
+        # the slash ended the pattern. That is the wrong one to miss.
+        # GNU coreutils refuses ``rm -rf /`` on its own and requires
+        # exactly that flag to proceed, so the only spelling that
+        # actually destroys a Linux filesystem was the only spelling
+        # this floor let through.
+        #
+        # Only flag-shaped tokens are allowed after the path, never
+        # another operand, so ``rm -rf / tmp`` and ``rm -rf /tmp/build``
+        # stay outside the pattern and remain ordinary work.
         re.compile(
-            _CMD_START + r"rm\s+(?:-[a-zA-Z]*\s+)*-?[a-zA-Z]*[rR][a-zA-Z]*f?\s+[/~]\s*$",
+            _CMD_START
+            + r"rm\s+(?:-[a-zA-Z]*\s+)*-?[a-zA-Z]*[rR][a-zA-Z]*f?\s+[/~]"
+            + r"(?:\s+--?[a-zA-Z][\w-]*)*\s*$",
             re.I | re.M,
         ),
         re.compile(_CMD_START + r"mkfs(?:\.\w+)?\b", re.I | re.M),
         re.compile(_CMD_START + r"dd\s[^\n]*\bof=/dev/", re.I | re.M),
-        re.compile(_CMD_START + r"(?:shutdown|reboot|halt|poweroff)\b", re.I | re.M),
+        # shutdown / reboot / halt / poweroff are deliberately NOT here.
+        #
+        # The floor is for commands that are catastrophic and never
+        # legitimate work: they destroy a filesystem or a device and
+        # there is nothing to confirm because no operator wants them.
+        # Restarting your own machine is neither. It is reversible, it is
+        # ordinary sysadmin, and asking an assistant to do it is a
+        # reasonable request.
+        #
+        # In the floor they were refused at every autonomy tier with no
+        # override, so the answer to "reboot my machine" was no, and the
+        # operator had no way to say otherwise short of lifting the whole
+        # floor. That is a refusal standing in for a question.
+        #
+        # They are gated as the question they are instead. The bash
+        # endpoint is safety_tier "confirm", so strict and hybrid ask
+        # before running one. loose runs it without asking, which is what
+        # loose means and what the operator chose it for.
         # Fork bomb, in its canonical spelling.
         re.compile(r":\s*\(\s*\)\s*\{.*\|.*&\s*\}\s*;", re.S),
         # Writing to a raw block device is never a workspace operation.
         re.compile(r">\s*/dev/(?:sd|nvme|disk)", re.I),
     )
 
+    def full_authority(self) -> bool:
+        """Has a human explicitly taken the floor off?
+
+        ``execution.full_authority: true`` in the policy file. Off unless
+        somebody sets it, and deliberately not readable from an
+        environment variable: an env var is something you can be handed,
+        and this is something you have to sit down and mean.
+
+        It is their computer. The floor exists because a model can spell
+        ``mkfs`` for reasons that made sense to the model, not because
+        the operator needs protecting from themselves. Somebody who
+        writes this key down has said which of those two they are.
+        """
+        return bool(self._data.get("execution", {}).get("full_authority", False))
+
     def denied_command_patterns(self) -> list[re.Pattern[str]]:
         """Deny patterns for a workspace shell: the floor plus operator rules.
+
+        The floor is skipped entirely when :meth:`full_authority` is on.
+        Operator rules still apply: somebody who granted full authority
+        and *also* wrote their own deny list meant both, and the second
+        one is theirs.
 
         Operator rules live at ``execution.denied_command_patterns`` in
         the policy file and are compiled with
@@ -658,7 +747,22 @@ class SandboxPolicy:
         brain down, and dropping it is visible in the log while still
         leaving the floor in place.
         """
-        patterns = list(self._COMMAND_DENY_FLOOR)
+        if self.full_authority():
+            # Once per policy object, not once per command: this is a
+            # standing state of the machine and it should be findable in
+            # the log afterwards, not a line that scrolls past on every
+            # call and trains the reader to skip it.
+            if not self._full_authority_logged:
+                logger.warning(
+                    "execution.full_authority is set: the built-in command "
+                    "deny floor is OFF. rm -rf /, mkfs and dd to a raw "
+                    "device will run. Remove the key from the policy file "
+                    "to restore the floor."
+                )
+                self._full_authority_logged = True
+            patterns: list[re.Pattern[str]] = []
+        else:
+            patterns = list(self._COMMAND_DENY_FLOOR)
         raw = self._data.get("execution", {}).get("denied_command_patterns", [])
         if not isinstance(raw, list):
             return patterns

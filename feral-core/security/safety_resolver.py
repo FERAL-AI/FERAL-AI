@@ -33,10 +33,15 @@ finding P0.1: a skill installed from the marketplace into
 no confirmation on every surface, forever. Escalation
 (``confirm`` / ``deny`` / ``requires_user_approval``) is honoured from
 anyone; **de-escalation** (``safe`` / ``read_only_hint``) is honoured only
-from a manifest that ships in this repo or is generated at runtime from a
-paired device (:func:`_manifest_may_de_escalate`). The same trust boundary
-already governed a strictly less important field, the declared
-``result_budget`` in ``skills/result_budget.py``.
+from a manifest that ships in this repo (:func:`_manifest_may_de_escalate`).
+The same trust boundary already governed a strictly less important field,
+the declared ``result_budget`` in ``skills/result_budget.py``.
+
+A manifest generated at runtime from a paired device
+(``hwdev_*``) is a third case and gets a narrower answer: the generating
+code is first-party but its inputs are strings the device sent, so
+de-escalation there additionally requires the OPERATOR's sandbox policy to
+permit that capability unattended. See :func:`_device_may_de_escalate`.
 
 The output is a :class:`PolicyDecision` rather than a bare string so
 callers can render an explainable approval card ("Why is this CONFIRM?
@@ -56,6 +61,7 @@ from security.dangerous_tools import (
     get_danger_level,
     is_tool_allowed,
 )
+from security.hardware_policy import live_policy, permits_unattended
 from skills.result_budget import builtin_skill_ids
 
 
@@ -233,7 +239,7 @@ def is_read_only(
     """
     endpoint = _find_endpoint(tool_name, registry)
     trusted = endpoint is not None and _manifest_may_de_escalate(
-        _split_tool_name(tool_name)[0],
+        *_split_tool_name(tool_name),
     )
     if strict:
         if endpoint is None or not trusted:
@@ -284,11 +290,16 @@ def _is_live_device_skill(skill_id: str) -> bool:
     """True when ``skill_id`` belongs to a currently registered device.
 
     The generic HUP path turns any paired ``DeviceManifest`` into a
-    ``SkillManifest`` at runtime, and ``hardware/capability_skill._safety_for``
-    derives ``safety_tier`` / ``read_only_hint`` from the capability's own
-    ``category`` and ``permission_tier``. That mapping is in-repo code, so
-    those declarations are first-party even though no manifest file ships
-    for them and ``builtin_skill_ids()`` cannot see them.
+    ``SkillManifest`` at runtime, so no manifest file ships for these and
+    ``builtin_skill_ids()`` cannot see them.
+
+    This answers PROVENANCE only, and used to be the whole de-escalation
+    test on the reasoning that ``hardware/capability_skill._safety_for`` is
+    in-repo code. It is, but every value it reads
+    (``category`` / ``permission_tier`` / ``requires_confirmation``) is a
+    string the device sent, so a True here means "a real paired device said
+    this", not "this is safe". :func:`_device_may_de_escalate` is the rest
+    of the answer.
 
     The prefix alone is NOT the test. A marketplace package declares its own
     ``skill_id`` and could simply call itself ``hwdev_anything``, so the
@@ -323,7 +334,88 @@ def _is_live_device_skill(skill_id: str) -> bool:
     )
 
 
-def _manifest_may_de_escalate(skill_id: str) -> bool:
+def _device_capability(skill_id: str, endpoint_id: str):
+    """The live ``DeviceCapability`` behind a ``hwdev_*`` tool, or ``None``.
+
+    ``hardware/capability_skill._capability_to_endpoint`` uses ``cap.id``
+    verbatim as the endpoint id, so the endpoint id IS the HUP capability
+    id and the manifest can be looked up by it.
+    """
+    state_module = sys.modules.get("api.state")
+    if state_module is None:
+        return None
+    device_registry = getattr(getattr(state_module, "state", None), "device_registry", None)
+    if device_registry is None:
+        return None
+    try:
+        from hardware.capability_skill import skill_id_for_device
+
+        for device in device_registry.list_devices() or []:
+            if skill_id != skill_id_for_device(getattr(device, "device_id", "") or ""):
+                continue
+            for cap in getattr(device, "capabilities", None) or []:
+                if getattr(cap, "id", None) == endpoint_id:
+                    return cap
+            return None
+    except Exception as exc:                      # registry mid-swap, import cycle
+        logger.debug("device capability lookup failed for %r: %s", skill_id, exc)
+    return None
+
+
+def _device_may_de_escalate(skill_id: str, endpoint_id: str) -> bool:
+    """Whether a live device's own declaration may lower ITS verdict.
+
+    The original exemption here was ``_is_live_device_skill(skill_id)`` and
+    nothing else, on the reasoning that ``hwdev_*`` manifests come out of
+    in-repo code (``hardware/capability_skill._safety_for``) and are
+    therefore first-party. The code is first-party. The *inputs* are not:
+    ``_safety_for`` reads ``category``, ``permission_tier`` and
+    ``requires_confirmation`` straight off the capability, and
+    ``hardware/protocol.device_capability_from_action`` fills the absent
+    ones in with ``actuator`` / ``passive`` / ``False``, which
+    ``_safety_for`` maps to ``safe``. So a node that paired itself and sent
+    ``{"name": "unlock_door", "category": "actuator"}`` produced an
+    auto-executing LLM tool, from the same three lines of trust this
+    function's own docstring was written to close.
+
+    Nothing in the self-description separates that from the CuteBot's
+    ``halt``, which is declared ``permission_tier="passive"`` for the good
+    reason that prompting before an emergency stop leaves the hardware
+    moving. Both are actuator capabilities a device called passive, and the
+    device is the only source. So the answer cannot come from the device at
+    all: it comes from the operator, via
+    ``security/hardware_policy.permits_unattended`` reading
+    ``hardware.actuators.allowed`` /
+    ``hardware.actuators.requires_confirmation`` /
+    ``hardware.sensors.allowed`` /
+    ``hardware.movement.emergency_stop_enabled``. ``halt`` keeps its auto
+    verdict from the operator's stop carve-out, ``set_lights`` and
+    ``read_telemetry`` from the shipped allowlists, and ``unlock_door``
+    gets an approval card because no operator ever named it.
+
+    The trade this makes: a device that names a capability ``halt`` still
+    gets the stop carve-out without proving it stops anything. That is
+    deliberate. Trusting a name is a far smaller surface than trusting a
+    self-declared tier, and it fails in the direction where the worst case
+    is an unattended stop rather than an unattended actuation.
+
+    The provenance check is unchanged and still comes first: the skill id
+    must be the one ``skill_id_for_device`` derives for a device that is
+    registered right now, because a marketplace package can call itself
+    ``hwdev_anything``.
+    """
+    if not _is_live_device_skill(skill_id):
+        return False
+    cap = _device_capability(skill_id, endpoint_id)
+    if cap is None:
+        # Registered device, unknown capability. Not something to guess at.
+        return False
+    return permits_unattended(
+        live_policy(), endpoint_id, getattr(cap, "category", "") or "",
+    )
+
+
+def _manifest_may_de_escalate(skill_id: str, endpoint_id: str = "") -> bool:
     """Whether ``skill_id``'s manifest is allowed to LOWER a safety verdict.
 
     audit P0.1. ``_safety_from_manifest`` used to return the manifest's own
@@ -338,10 +430,17 @@ def _manifest_may_de_escalate(skill_id: str) -> bool:
     not ship in this repo does not get to set it. That clamp governs how
     many characters of a result reach the model; this one governs whether
     the operator is asked before the code runs.
+
+    A manifest that ships in this repo was written by someone who could
+    have changed this file instead, so it still de-escalates outright. A
+    live device's manifest was written by the device, and goes through
+    :func:`_device_may_de_escalate`.
     """
     if not skill_id:
         return False
-    return skill_id in builtin_skill_ids() or _is_live_device_skill(skill_id)
+    if skill_id in builtin_skill_ids():
+        return True
+    return _device_may_de_escalate(skill_id, endpoint_id)
 
 
 def _find_endpoint(tool_name: str, registry: Optional["SkillRegistry"]):
@@ -407,13 +506,25 @@ def _safety_from_manifest(endpoint, skill_id: str = "") -> Optional[str]:
     claims_auto = tier == "safe" or bool(getattr(endpoint, "read_only_hint", False))
     if not claims_auto:
         return None
-    if not _manifest_may_de_escalate(skill_id):
+    endpoint_id = str(getattr(endpoint, "id", "") or "")
+    if not _manifest_may_de_escalate(skill_id, endpoint_id):
         logger.info(
             "Skill %r is not a built-in manifest; ignoring its declared "
             "safety_tier=%r / read_only_hint=%r and resolving %r from policy",
             skill_id, tier or None, bool(getattr(endpoint, "read_only_hint", False)),
-            getattr(endpoint, "id", ""),
+            endpoint_id,
         )
+        # A live device's clamped claim is CONFIRM, not "fall through".
+        # For an arbitrary third-party skill, None is right: we genuinely
+        # do not know what the endpoint does, so it deserves exactly the
+        # treatment an unannotated manifest gets. For a device capability
+        # we DO know: it is hardware the operator has not permitted to run
+        # unattended. Falling through would hand that verdict to
+        # ``_LEGACY_READ_ONLY_TOKENS``, which auto-approves any name
+        # containing "status", "get" or "current" and would let
+        # ``get_door_open`` back through the hole this closes.
+        if _is_live_device_skill(skill_id):
+            return LEVEL_CONFIRM
         return None
     return LEVEL_AUTO
 

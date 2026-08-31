@@ -5167,7 +5167,14 @@ async def _process_ambient_transcript(
             # People and relations go through the one extractor rather
             # than a second entity prompt; that consolidation was
             # deliberate (agents/learner.py:120-133).
-            kg = getattr(memory, "knowledge_graph", None) or getattr(state, "knowledge_graph", None)
+            # ``MemoryStore`` exposes the graph as ``kg`` (a property over
+            # ``_kg``, built in ``__init__``). This read used to ask for
+            # ``knowledge_graph``, which exists on neither the store nor
+            # the state, so the getattr default fired every time and the
+            # block below was dead: ambient conversations never reached
+            # the knowledge graph at all, silently, because the guard is
+            # ``is not None`` and there was nothing to raise.
+            kg = getattr(memory, "kg", None)
             if kg is not None and outcome.people:
                 try:
                     await kg.extract_and_store(outcome.detail[:8000], source="ambient_conversation")

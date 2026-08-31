@@ -28,10 +28,20 @@ This module ships a brain-side mock that:
 No real HUP WebSocket loop — the mock lives in the brain process. The
 abstraction it presents matches Lane 10's contract so the orchestrator
 tool-dispatch path (Lane 08) can ask either backend and get the same
-shape. The boot wiring is the user-visible feature flag: when
-``MOCK_ROOMBA_ENABLED`` defaults to True (demo mode), the brain
-auto-registers; operators can set ``FERAL_MOCK_ROOMBA=0`` to disable
-when wiring up real HA.
+shape.
+
+**The mock is opt-in.** ``FERAL_MOCK_ROOMBA`` defaults to ``0``: set it
+to ``1`` on the demo machine that needs S5. It used to default on, which
+meant a fresh install advertised ``vacuum.mock_roomba`` in
+``/api/hardware/mesh`` and on the Devices page next to the operator's
+real hardware. FERAL's whole claim about devices is that it re-reads
+telemetry and refuses to say an actuator worked when the device
+disagrees (``hardware/capability_skill.py``), and that an adapter with
+no transport reports itself not connected rather than faking acks
+(``hardware/adapters/robot_arm.py``). A device in the list that nothing
+in the house corresponds to spends the credibility those two paths earn.
+Being labelled ``simulated`` makes the mock honest once you call it;
+being off by default is what keeps it from being asserted at all.
 
 The Lane 11 acceptance criterion is:
 
@@ -57,16 +67,26 @@ DEFAULT_ENTITY_ID = "vacuum.mock_roomba"
 # Stamped into every response this class produces. The mock exists so the
 # demo has a vacuum; it must never be mistaken for one.
 SIMULATED_NOTE = (
-    "Simulated device. No physical vacuum was commanded. Set "
-    "FERAL_MOCK_ROOMBA=0 to remove it, or connect a real vacuum through "
-    "Home Assistant."
+    "Simulated device. No physical vacuum was commanded. This entity "
+    "exists only because FERAL_MOCK_ROOMBA=1 was set; unset it to remove "
+    "it, or connect a real vacuum through Home Assistant."
 )
+
+# Values that turn the mock ON. Everything else — including the unset
+# default and any typo — leaves it off, because the failure mode of
+# guessing wrong is a device that does not exist showing up in the
+# operator's device list.
+_TRUTHY = {"1", "true", "yes", "on"}
 
 
 def is_enabled() -> bool:
-    """Honor ``FERAL_MOCK_ROOMBA`` (default on for demo reliability)."""
-    raw = os.getenv("FERAL_MOCK_ROOMBA", "1").strip().lower()
-    return raw not in {"0", "false", "no", "off", ""}
+    """Honor ``FERAL_MOCK_ROOMBA``. Opt-in: defaults to OFF.
+
+    Default-off is the honest default. A fresh install has no vacuum, so
+    the brain must not claim one; the demo machine that wants
+    THESIS_SCENARIOS S5 sets ``FERAL_MOCK_ROOMBA=1`` deliberately.
+    """
+    return os.getenv("FERAL_MOCK_ROOMBA", "0").strip().lower() in _TRUTHY
 
 
 class MockRoomba:
@@ -143,10 +163,10 @@ class MockRoomba:
                 # the point of this class, and it is also the hazard: without
                 # these two fields the envelope for "a vacuum in this house
                 # started cleaning" is byte-identical to the envelope for
-                # "nothing happened, there is no vacuum". The mock is on by
-                # default (FERAL_MOCK_ROOMBA defaults to "1") and is reachable
-                # from POST /api/hardware/mock_roomba/start, so a caller that
-                # cannot tell the two apart is the normal case.
+                # "nothing happened, there is no vacuum". The mock is opt-in
+                # now (FERAL_MOCK_ROOMBA defaults to "0"), but once enabled it
+                # is reachable from POST /api/hardware/mock_roomba/start, and
+                # whoever set the flag is not necessarily whoever reads this.
                 "simulated": True,
                 "note": SIMULATED_NOTE,
             },
