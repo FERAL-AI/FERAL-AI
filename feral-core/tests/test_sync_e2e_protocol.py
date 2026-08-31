@@ -428,6 +428,92 @@ class TestOversizeChangeSet:
             await _stop_node(b)
 
 
+class TestFraming:
+    """The chunking contract itself, away from the wire.
+
+    The end-to-end tests above prove a large change set arrives. These
+    pin WHY, so a future change that quietly raises the budget back to
+    one frame per exchange fails here rather than on someone's laptop.
+    """
+
+    def test_frames_stay_inside_the_budget(self):
+        ops = [
+            sync_mod.SyncOperation(
+                op_id=f"op{i}", table="notes", op_type="insert", row_id=f"r{i}",
+                data={"id": f"r{i}", "content": "x" * 5_000},
+                hlc=f"{1000 + i}:0:n", origin_node="n",
+            )
+            for i in range(320)
+        ]
+        frames = sync_mod.sync_data_frames(ops)
+
+        sizes = [len(json.dumps(f)) for f in frames]
+        assert max(sizes) <= sync_mod.SYNC_MAX_FRAME_BYTES, max(sizes)
+        assert len(frames) > 1, "1.6 MiB of ops must not fit in one frame"
+        assert sum(len(f["changes"]) for f in frames) == len(ops), "ops lost in framing"
+        assert [f["more"] for f in frames] == [True] * (len(frames) - 1) + [False]
+
+    def test_empty_change_set_is_still_a_terminal_frame(self):
+        """"I have nothing for you" has to be said out loud, or the
+        reader waits for a frame that never comes."""
+        frames = sync_mod.sync_data_frames([])
+        assert len(frames) == 1
+        assert frames[0]["changes"] == []
+        assert frames[0]["more"] is False
+
+    def test_single_op_over_the_budget_gets_its_own_frame(self):
+        """Operations are indivisible. The alternative to shipping one
+        oversize frame is dropping the op, which is why the reader's
+        ceiling is well above the sender's budget."""
+        huge = sync_mod.SyncOperation(
+            op_id="op", table="notes", op_type="insert", row_id="r",
+            data={"id": "r", "content": "x" * (sync_mod.SYNC_MAX_FRAME_BYTES * 2)},
+            hlc="1000:0:n", origin_node="n",
+        )
+        frames = sync_mod.sync_data_frames([huge])
+        assert len(frames) == 1
+        assert len(frames[0]["changes"]) == 1
+        assert len(json.dumps(frames[0])) < sync_mod.SYNC_MAX_RECV_BYTES
+
+    async def test_reader_accepts_a_pre_chunking_peer(self):
+        """Backward compatibility, stated as a test.
+
+        A peer on the old build sends ONE ``sync_data`` message with no
+        ``more`` key at all. That reads as falsy, so the loop stops
+        after one frame instead of blocking forever on a second.
+        """
+        old_style = [{
+            "type": "sync_data",
+            "changes": [{"op_id": "a", "table": "notes", "op_type": "insert",
+                         "row_id": "r", "data": {}, "hlc": "1:0:n",
+                         "origin_node": "n", "timestamp": 0.0}],
+        }]
+        pending = iter(old_style)
+
+        async def _recv():
+            return next(pending)
+
+        got = await sync_mod.recv_sync_data(_recv)
+        assert len(got) == 1
+
+    async def test_reader_reassembles_a_chunked_stream(self):
+        ops = [
+            sync_mod.SyncOperation(
+                op_id=f"op{i}", table="notes", op_type="insert", row_id=f"r{i}",
+                data={"id": f"r{i}", "content": "x" * 5_000},
+                hlc=f"{1000 + i}:0:n", origin_node="n",
+            )
+            for i in range(320)
+        ]
+        pending = iter(sync_mod.sync_data_frames(ops))
+
+        async def _recv():
+            return next(pending)
+
+        got = await sync_mod.recv_sync_data(_recv)
+        assert [c["op_id"] for c in got] == [op.op_id for op in ops]
+
+
 # ---------------------------------------------------------------------------
 # 2. WAL retention and the query that reads it
 # ---------------------------------------------------------------------------
