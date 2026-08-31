@@ -42,6 +42,12 @@ from security.trust_ledger import (  # noqa: E402
 
 WRITE = "coding_tools__write_file"
 EDIT = "coding_tools__edit_file"
+# Undone by a compensating call rather than by restoring bytes. Nothing
+# existed before them, so there is no prior state to keep; the checkpoint
+# stores the inverse call, taken from the create's result.
+CAL_CREATE = "calendar_google__create_event"
+REMINDER_CREATE = "feral_reminders__create"
+ROUTINE_CREATE = "feral_routines__create"
 # Real, confirm-tier, and NOT revertible: bash can rewrite anything and
 # checkpoints explicitly do not cover it (skills/checkpoints.py:72).
 BASH = "coding_tools__bash"
@@ -68,18 +74,50 @@ def test_the_undoable_set_matches_what_checkpoints_actually_covers():
     reverted. If checkpoints stops covering one, or this set gains a name
     checkpoints never covered, the feature starts granting latitude over
     actions nobody can take back.
+
+    Checked structurally against what ``skills/checkpoints.py`` declares
+    it can take back, in both of its shapes, rather than by grepping its
+    source for endpoint names. The two lists are still written out
+    separately, so widening the set is a deliberate edit in the security
+    module and not a side effect of adding a skill.
     """
-    note = (ROOT / "skills" / "checkpoints.py").read_text()
-    for tool in UNDOABLE_TOOLS:
-        endpoint = tool.split("__", 1)[1]
-        assert endpoint in note, (
-            f"{tool} is treated as undoable but {endpoint} is not named in "
-            "skills/checkpoints.py"
-        )
-    assert UNDOABLE_TOOLS == {WRITE, EDIT}, (
+    from skills.checkpoints import CHECKPOINTED_FILE_TOOLS, REVERSIBLE_ACTIONS
+
+    assert UNDOABLE_TOOLS == CHECKPOINTED_FILE_TOOLS | set(REVERSIBLE_ACTIONS), (
+        "UNDOABLE_TOOLS and skills/checkpoints.py disagree about what can "
+        "be taken back"
+    )
+    assert UNDOABLE_TOOLS == {WRITE, EDIT, CAL_CREATE, REMINDER_CREATE, ROUTINE_CREATE}, (
         "the undoable set changed; confirm checkpoints really covers the "
         "new members before widening trust to them"
     )
+
+
+def test_every_undoable_action_names_the_call_that_undoes_it():
+    """A name in the set is only honest if something can actually reverse
+    it. Files are reversed from stashed bytes; the rest have to name an
+    inverse tool and the parameter it takes the id in."""
+    from skills.checkpoints import CHECKPOINTED_FILE_TOOLS, REVERSIBLE_ACTIONS
+
+    for tool in UNDOABLE_TOOLS - CHECKPOINTED_FILE_TOOLS:
+        spec = REVERSIBLE_ACTIONS[tool]
+        assert spec.inverse_tool and spec.inverse_arg and spec.id_path, (
+            f"{tool} is treated as undoable but names no way to undo it"
+        )
+
+
+@pytest.mark.parametrize("tool", [
+    "email__send", "messaging_channels__send", "shopping__buy_groceries",
+    "browser_use__start_recording", "coding_tools__bash",
+])
+def test_what_cannot_be_taken_back_is_not_in_the_set(tool):
+    """Named individually rather than left to the equality check above,
+    because each is a case somebody has argued for and the reason it is
+    excluded is different every time: no unsend, time-bounded and
+    provider-specific retraction that does not un-notify, money, a
+    lifecycle pair that is not an inverse, and a shell that can change
+    anything."""
+    assert tool not in UNDOABLE_TOOLS
 
 
 def test_an_unrevertible_tool_is_never_trusted(ledger):

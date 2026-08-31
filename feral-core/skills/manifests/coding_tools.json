@@ -403,7 +403,7 @@
       "id": "revert_turn",
       "method": "PYTHON",
       "url": "",
-      "description": "Undo the file writes made while answering one user message. Restores each file to the content it had before the turn started, from FERAL's own content-addressed checkpoints (no git involved, so the user's index and stash are untouched). Files that changed after FERAL wrote them are listed and skipped unless force is set. Shell commands are NOT checkpointed, so anything coding_tools__bash changed is not reverted.",
+      "description": "Undo what FERAL did while answering one user message. Restores each file the turn wrote to the content it had before the turn started, from FERAL's own content-addressed checkpoints (no git involved, so the user's index and stash are untouched). Also undoes the things the turn created that have an inverse call: calendar events, reminders and routines are deleted again. Files that changed after FERAL wrote them are listed and skipped unless force is set, and that refusal covers the whole turn, so nothing is half-undone. An item the user already deleted is reported as already reverted, not as a failure. Shell commands are NOT checkpointed, so anything coding_tools__bash changed is not reverted, and neither is anything sent: email, chat messages and purchases have no undo.",
       "params": [
         {
           "name": "turn_id",
@@ -415,16 +415,16 @@
           "name": "force",
           "type": "boolean",
           "required": false,
-          "description": "Revert files that changed after FERAL wrote them, discarding those changes. Off by default."
+          "description": "Revert files that changed after FERAL wrote them, discarding those changes. Off by default. Does not affect actions, which have no drift check."
         },
         {
           "name": "dry_run",
           "type": "boolean",
           "required": false,
-          "description": "Report what would be reverted without touching any file."
+          "description": "Report what would be reverted without touching any file and without making any compensating call."
         }
       ],
-      "returns_description": "{turn_id, reverted[], reverted_count, skipped[], drifted[], files[], bash_not_covered, note}",
+      "returns_description": "{turn_id, reverted[], reverted_actions[], reverted_count, partial, skipped[], drifted[], files[], actions[], entries[], bash_not_covered, note}",
       "ui_hint": "detail_card",
       "safety_tier": "confirm",
       "emit_result_preview": true

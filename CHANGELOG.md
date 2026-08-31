@@ -6,6 +6,92 @@ All notable changes to FERAL are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Undo now covers three things that are not files, and earned autonomy
+  widens with it.** `skills/checkpoints.py` was byte-oriented: `capture`
+  stashed a file's prior bytes and `revert_turn` put them back. That
+  shape cannot express undo for something that did not exist before, so
+  the store now holds a second kind of record. A calendar event, a
+  reminder and a routine are reverted by a **compensating call** rather
+  than a snapshot, saga-style:
+
+  | Created by | Undone by | Id read from |
+  |---|---|---|
+  | `calendar_google__create_event` | `calendar_google__delete_event(event_id)` | `data.id` |
+  | `feral_reminders__create` | `feral_reminders__delete(id)` | `data.reminder.id` |
+  | `feral_routines__create` | `feral_routines__delete(routine_id)` | `data.routine.id` |
+
+  The compensation is derived from the tool's **result**, never from its
+  arguments, and it is recorded at `SkillExecutor.execute` rather than in
+  `ToolRunner`. Both choices are load-bearing. The id does not exist
+  until the call has succeeded, and a call that failed created nothing to
+  compensate. Five of the executor's seven production callers never touch
+  `ToolRunner` (`mcp/server.py`, `api/routes/tools.py`, both voice
+  realtime proxies, `agents/multi_agent.py`), so recording anywhere else
+  would leave undo working on some dispatch lanes and not others while
+  trust widened on all of them.
+
+  Because `security/trust_ledger.py` bounds earned autonomy by exactly
+  what checkpoints can revert, those three tools join `UNDOABLE_TOOLS`
+  and become eligible to stop asking for approval under `hybrid` after
+  five clean runs. `tests/test_earned_autonomy.py` now asserts
+  `UNDOABLE_TOOLS == CHECKPOINTED_FILE_TOOLS | REVERSIBLE_ACTIONS`
+  structurally rather than grepping the checkpoint module for endpoint
+  names, so the two cannot drift apart in either direction. The two lists
+  are still written out separately: deriving one from the other would let
+  a change to a skills module silently widen what runs without asking,
+  with nothing in the security module to review.
+
+  **What is deliberately still not undoable, and why.** Email has no
+  unsend, and a provider-side "undo send" is a delay before sending
+  rather than a reversal of one. Retraction on Slack, Telegram, WhatsApp
+  and iMessage is time-bounded, provider-specific, and does not un-notify
+  or un-read; that is a weaker guarantee than restoring bytes and must
+  not be sold as undo. `buy_groceries` moves money and has no inverse
+  call. `browser_use__start_recording` / `stop_recording` is a lifecycle
+  pair, not an inverse: stopping a recording does not unmake it. `bash`
+  remains uncheckpointed for the reason it always was.
+
+  **A revert can now be partial, and says so.** One compensating call can
+  fail while the file restores succeed. `success` is true only when every
+  item was handled; the new `partial` is true when some came back and
+  some did not; `error_code` is `revert_incomplete`. A caller reading
+  `success` alone would report a half-done revert as done, which is the
+  failure that key exists to prevent. The whole-turn drift refusal is
+  unchanged and now also suppresses the compensating calls, so a refused
+  revert leaves nothing half-undone.
+
+  **An object the user already deleted is not a failure.** The inverse
+  call comes back 404 or 410, the entry reports `already_reverted`, and
+  the row is marked done so a second revert does not call again. This is
+  strict about what counts as gone (an explicit `status_code` of 404/410,
+  or an error string in the `HTTP 404: ...` shape
+  `integrations/_http_errors` produces). A timeout, a 401 or a 500 is a
+  failure, because reading an unreachable provider as "already gone"
+  would report a revert that never happened.
+
+  Two smaller consequences worth knowing. `feral checkpoints revert`
+  restores files and **cannot** undo actions: it deliberately runs
+  without the brain, and deleting a calendar event needs the user's OAuth
+  token. Those entries are reported as `unrecoverable` naming that
+  reason, never dropped. And a compensating call placed by `revert_turn`
+  is exempt from the executor's approval and plan-mode gates for the
+  duration of that one call, because all three inverses resolve to
+  CONFIRM: without the exemption every action revert under strict or
+  hybrid returned `pending_approval` from a call that never passed
+  through `ToolRunner` and so had no resume path. The exemption widens
+  nothing. The tool and the id both come from a `reversals` row FERAL
+  wrote itself, no model-supplied argument reaches the call, and the
+  operator has already approved the confirm-tier revert that is making
+  it.
+
+  Finally, a create that succeeds but yields no id records no undo, logs
+  a warning, and **drops that tool's trust streak on the spot**.
+  `UNDOABLE_TOOLS` is a promise that the record exists; if the result
+  shape ever drifts, the tool goes back to asking rather than keep
+  auto-approving on a promise it is no longer keeping.
+
 ## [2026.8.30] - 2026-08-30 - what the code already did, and what it only claimed
 
 ### Fixed

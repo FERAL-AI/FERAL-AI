@@ -3614,6 +3614,17 @@ def cmd_marketplace(action: str, query: str, registry: str | None = None):
             print(f"  {s.get('name', s.get('skill_id', '?'))} v{s.get('version', '?')}")
 
 
+def _print_checkpoint_entry(entry: dict) -> None:
+    """One line per thing a revert would do, files and actions alike."""
+    if entry.get("kind") == "action":
+        subject = f"{entry.get('label') or 'action'} {entry.get('target') or ''}".strip()
+    else:
+        subject = entry.get("path", "")
+    print(f"    [{entry['status']:16s}] {entry['action']:10s} {subject}")
+    if entry.get("detail"):
+        print(f"        {entry['detail']}")
+
+
 def cmd_checkpoints(args) -> int:
     """`feral checkpoints list|show|revert`.
 
@@ -3622,6 +3633,13 @@ def cmd_checkpoints(args) -> int:
     to undo what the agent wrote is the moment the brain is wedged, mid
     restart, or answering nothing at all. A recovery tool that depends on
     the thing you are recovering from is not a recovery tool.
+
+    The cost of that choice is that this command restores files and
+    cannot undo actions. Deleting a calendar event means holding the
+    user's OAuth token and placing an HTTP call, which is the brain's job
+    and not a recovery tool's. Actions in a reverted turn are listed as
+    ``unrecoverable`` with that reason, never dropped, so the operator
+    can finish the job through the brain.
     """
     from skills.checkpoints import BASH_NOT_COVERED_NOTE, CheckpointStore, checkpoint_root
 
@@ -3639,11 +3657,11 @@ def cmd_checkpoints(args) -> int:
         if not turns:
             print("  No checkpointed turns.")
             return 0
-        print(f"  {'TURN':24s} {'FILES':>5s} {'WRITES':>6s}  SESSION")
+        print(f"  {'TURN':24s} {'FILES':>5s} {'WRITES':>6s} {'ACTIONS':>7s}  SESSION")
         for row in turns:
             print(
-                f"  {row['turn_id']:24s} {row['files']:5d} {row['writes']:6d}  "
-                f"{row['session_id'] or '-'}"
+                f"  {row['turn_id']:24s} {row['files']:5d} {row['writes']:6d} "
+                f"{row.get('actions', 0):7d}  {row['session_id'] or '-'}"
             )
         print(f"\n  {BASH_NOT_COVERED_NOTE}")
         return 0
@@ -3656,28 +3674,29 @@ def cmd_checkpoints(args) -> int:
     if action == "show":
         plan = store.plan_revert(turn_id)
         print(f"  Turn {turn_id}")
-        for entry in plan["files"]:
-            print(f"    [{entry['status']:16s}] {entry['action']:8s} {entry['path']}")
-            if entry["detail"]:
-                print(f"        {entry['detail']}")
+        for entry in plan["entries"]:
+            _print_checkpoint_entry(entry)
         print(f"\n  {BASH_NOT_COVERED_NOTE}")
         return 0
 
     if action == "revert":
+        # No compensator: this command deliberately runs without the
+        # brain, so it cannot place the inverse call an action needs. The
+        # store reports those entries as unrecoverable and says so.
         result = store.revert_turn(
             turn_id,
             force=bool(getattr(args, "force", False)),
             dry_run=bool(getattr(args, "cp_dry_run", False)),
         )
-        for entry in result["files"]:
-            print(f"    [{entry['status']:16s}] {entry['action']:8s} {entry['path']}")
-            if entry["detail"]:
-                print(f"        {entry['detail']}")
+        for entry in result["entries"]:
+            _print_checkpoint_entry(entry)
+        verb = "Would revert" if result["dry_run"] else "Reverted"
+        print(
+            f"\n  {verb} {len(result.get('reverted') or [])} file(s) and "
+            f"{len(result.get('reverted_actions') or [])} action(s)."
+        )
         if result.get("error"):
-            print(f"\n  {result['error']}")
-        else:
-            verb = "Would revert" if result["dry_run"] else "Reverted"
-            print(f"\n  {verb} {result['reverted_count']} file(s).")
+            print(f"  {result['error']}")
         print(f"  {BASH_NOT_COVERED_NOTE}")
         return 0 if result.get("success") else 1
 

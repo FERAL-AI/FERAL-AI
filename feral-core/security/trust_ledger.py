@@ -42,18 +42,28 @@ The boundary: trust never exceeds undo
 Latitude is granted only for actions FERAL can take back. You cannot
 honestly stop asking about something you cannot reverse.
 
-Today that is exactly the checkpoint-covered file writes
-(``skills/checkpoints.py``): ``coding_tools__write_file`` and
-``coding_tools__edit_file`` stash their prior contents and are restorable
-by ``revert_turn``. Sent email, calendar mutations, smart-home actions
-and purchases have no undo, so they are never trusted here regardless of
-track record.
+Today that is exactly what ``skills/checkpoints.py`` can take back, in
+two shapes:
+
+* **Restored from stashed bytes.** ``coding_tools__write_file`` and
+  ``coding_tools__edit_file``. The prior state was knowable, so it was
+  kept, and the undo is exact.
+* **Undone by a compensating call.** ``calendar_google__create_event``,
+  ``feral_reminders__create`` and ``feral_routines__create``. Nothing
+  existed before, so there is no state to keep; the checkpoint stores the
+  inverse call instead and the revert makes it.
+
+Sent email, chat messages, smart-home actions and purchases are still
+never trusted here regardless of track record. Email has no unsend.
+Retraction on Slack, Telegram, WhatsApp and iMessage is time-bounded and
+provider-specific and does not un-notify anybody, which is a weaker
+guarantee than restoring bytes and must not be sold as undo. A purchase
+moves money and has no inverse call at all.
 
 That is a feature boundary rather than a caveat. When checkpoints extend
-to another domain, that domain becomes eligible automatically by being
-added to ``UNDOABLE_TOOLS`` -- and until it does, the honest answer to
-"why does it still ask about sending email?" is "because it cannot
-unsend it."
+to another domain, that domain becomes eligible by being added to
+``UNDOABLE_TOOLS`` -- and until it does, the honest answer to "why does
+it still ask about sending email?" is "because it cannot unsend it."
 
 What this does not do
 =====================
@@ -86,13 +96,28 @@ __all__ = [
     "get_ledger",
 ]
 
-# Exactly the tools ``skills/checkpoints.py`` can restore. Adding a name
+# Exactly the tools ``skills/checkpoints.py`` can take back. Adding a name
 # here without extending checkpoints would grant latitude over an action
 # nobody can take back, which is the one thing this module exists to
-# prevent -- ``test_trust_ledger.py`` asserts the two stay in step.
+# prevent -- ``test_earned_autonomy.py`` asserts this set equals
+# ``CHECKPOINTED_FILE_TOOLS | REVERSIBLE_ACTIONS`` over there, so the two
+# cannot drift apart in either direction.
+#
+# Written out rather than imported and unioned, deliberately. Deriving it
+# would mean a change to a skills module silently widened what runs
+# without asking, with nothing in the security module to review. Two
+# places and a test that binds them is the cost of making that a decision
+# somebody has to make on purpose.
 UNDOABLE_TOOLS = frozenset({
+    # Reverted by restoring the bytes the checkpoint stashed.
     "coding_tools__write_file",
     "coding_tools__edit_file",
+    # Reverted by the compensating call the checkpoint recorded from the
+    # create's result: delete_event(event_id), delete(id),
+    # delete(routine_id) respectively.
+    "calendar_google__create_event",
+    "feral_reminders__create",
+    "feral_routines__create",
 })
 
 # Consecutive clean executions before a tool stops asking. Five is a

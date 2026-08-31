@@ -3300,6 +3300,11 @@
 }
 .v2-cp-turn-session { opacity: 0.75; }
 .v2-cp-turn-writes { color: var(--v2-text-tertiary); }
+/* Turns can now change things that are not files (a calendar event, a
+   reminder, a routine), undone by calling the inverse rather than by
+   restoring bytes. Counted separately because they are a different
+   promise: the file count says what comes back exactly. */
+.v2-cp-turn-actioncount { color: var(--v2-text-tertiary); font-size: var(--v2-size-xs); }
 
 /* A stoppable job gets a real control. This was a span reading
    "stoppable": the cancel route was computed and then rendered as a

@@ -53,6 +53,21 @@ SANDBOX_REQUIRED_SKILL_IDS = {"workspace_scripts", "code_interpreter"}
 SKILL_KEY_NAMESPACE = "skill_keys"
 
 
+def _record_action_reversal(tool_name: str, result) -> None:
+    """Store the compensating call for a creation this executor just made.
+
+    Imported lazily so ``skills/executor.py`` keeps its import graph and
+    so a checkpoint store that cannot even be imported does not stop tool
+    execution. Bookkeeping never fails a call.
+    """
+    try:
+        from skills.checkpoint_actions import record_reversal
+
+        record_reversal(tool_name, result)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.warning("action checkpoint failed for %s: %s", tool_name, exc)
+
+
 class SkillExecutor:
     """
     Executes tool calls against skill endpoints.
@@ -332,6 +347,22 @@ class SkillExecutor:
         # load_vault_from_env), so read it the same way.
         return self._vault.get(skill_id.lower())
 
+    @staticmethod
+    def _is_compensating_call(tool_name: str) -> bool:
+        """Is this the inverse call a checkpoint revert is making?
+
+        Fails CLOSED: any import or lookup problem answers False, so the
+        gates run. The cost of a false negative is one pending approval;
+        the cost of a false positive is an ungated call.
+        """
+        try:
+            from skills.checkpoint_actions import compensating_call
+
+            current = compensating_call()
+        except Exception:  # noqa: BLE001 - see docstring
+            return False
+        return bool(current) and current[0] == tool_name
+
     def _gate(self, tool_name: str, args: dict) -> Optional[dict]:
         """Plan mode and approval, enforced where they cannot be skipped.
 
@@ -352,7 +383,24 @@ class SkillExecutor:
         Plan mode is checked first on purpose: a tool can be plan-unsafe
         and still auto-approved under a loose autonomy mode, so checking
         approval first would let it through.
+
+        The one exemption is a compensating call placed by ``revert_turn``
+        to undo something FERAL itself created. See
+        ``skills/checkpoint_actions.compensating_call`` for why that
+        widens nothing: the tool and the id both come from a row FERAL
+        wrote, no model-supplied argument reaches the call, and the
+        operator already approved the confirm-tier revert that is making
+        it. Without it every action revert under strict or hybrid comes
+        back ``pending_approval`` with no resume path, because the call
+        never passed through ``ToolRunner``.
         """
+        if self._is_compensating_call(tool_name):
+            logger.info(
+                "executor: %s is a checkpoint compensation, gates skipped",
+                tool_name,
+            )
+            return None
+
         state_mod = sys.modules.get("api.state")
         state_obj = getattr(state_mod, "state", None)
         runner = getattr(state_obj, "tool_runner", None)
@@ -597,6 +645,19 @@ class SkillExecutor:
         _result: dict = {}
         try:
             _result = await self._execute_inner(tool_name, args, skill, endpoint)
+            # Undo bookkeeping, at the chokepoint and from the RESULT.
+            #
+            # Here rather than in ToolRunner for the same reason the gate
+            # and the audit row are here: five of the seven production
+            # dispatch paths never touch ToolRunner, and an undo record
+            # only some lanes write is worse than none, because
+            # `security/trust_ledger.py` widens what auto-executes on the
+            # promise that the record exists.
+            #
+            # From the result and not `args` because the created object's
+            # id does not exist until the call has succeeded, and a call
+            # that failed created nothing to take back.
+            _record_action_reversal(tool_name, _result)
             return _result
         finally:
             _elapsed_ms = (_time.time() - _t0) * 1000

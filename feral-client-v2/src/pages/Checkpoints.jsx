@@ -33,14 +33,50 @@ import { apiJson, apiFetch } from '../lib/api';
  * Refusal is all-or-nothing by design: a turn with one drifted file
  * restores none of its files, which was verified directly (the
  * untouched, restorable file was still on disk after the refusal).
+ *
+ * A turn can also contain things undone by a compensating call rather
+ * than by restoring bytes: a calendar event, a reminder, a routine.
+ * Those arrive under `actions`, files stay under `files`, and `entries`
+ * is both. Two consequences for this page:
+ *
+ *   3. A revert is no longer all-or-nothing once actions are involved. A
+ *      failed compensation and a successful file restore come back
+ *      together as {success: false, partial: true, error_code:
+ *      'revert_incomplete'}. That is a 200 carrying `error`, so apiFetch
+ *      throws it like the refusal does, and it has to be read as an
+ *      answer rather than a failed request.
+ *   4. There is no drift check for actions and there cannot be: the
+ *      store never held a copy of the created object. An object the user
+ *      already deleted comes back as `already_reverted`, not an error.
  */
 
-/** What a revert will do to one file, in words rather than an enum. */
+/** A stable list key for an entry, file or action. */
+export function entryKey(entry) {
+  if (entry?.kind === 'action') return `${entry.inverse_tool}:${entry.target}`;
+  return entry?.path || '';
+}
+
+/** What a revert will do to one entry, in words rather than an enum. */
 export function describeAction(file) {
+  if (file?.kind === 'action') {
+    const name = `${file?.label || 'action'} ${file?.target || ''}`.trim();
+    if (file?.action === 'compensate') return `${name} will be deleted (the turn created it)`;
+    if (file?.status === 'already_reverted') return `${name} is already gone; nothing to undo`;
+    return `${name} will be left alone${file?.detail ? `: ${file.detail}` : ''}`;
+  }
   const name = String(file?.path || '').split('/').pop() || file?.path || '';
   if (file?.action === 'delete') return `${name} will be deleted (the turn created it)`;
   if (file?.action === 'skip') return `${name} will be left alone${file?.detail ? `: ${file.detail}` : ''}`;
   return `${name} will be restored to what it was before the turn`;
+}
+
+/** "2 files restored, 1 action undone", counted from the envelope's own lists. */
+export function describeUndone(body) {
+  const files = Array.isArray(body?.reverted) ? body.reverted.length : 0;
+  const actions = Array.isArray(body?.reverted_actions) ? body.reverted_actions.length : 0;
+  const parts = [`${files} file(s) restored`];
+  if (actions) parts.push(`${actions} action(s) undone`);
+  return parts.join(', ');
 }
 
 /** Files a revert would overwrite, from a plan or a refusal alike. */
@@ -141,7 +177,7 @@ export default function Checkpoints() {
         // version put the confirmation there and it vanished on the
         // same tick it was created, so a successful undo gave the user
         // no feedback at all. It lives at page level instead.
-        setDone(`Undone. ${body.reverted_count || 0} file(s) restored.`);
+        setDone(`Undone. ${describeUndone(body)}.`);
         await loadTurns();
         setOpenTurn('');
         setDetail(null);
@@ -149,9 +185,23 @@ export default function Checkpoints() {
     } catch (e) {
       // A refusal arrives here as a thrown ApiError carrying the whole
       // envelope on `.raw`. It is an answer, not a failure.
+      //
+      // So is an incomplete revert. A turn can contain actions undone by
+      // a compensating call, and one of those can fail while the file
+      // restores succeed. That envelope is a 200 carrying `error`, so it
+      // lands here too, and reporting it as a generic request failure
+      // would tell the user nothing came back when half of it did.
       const envelope = e?.raw;
-      if (envelope && typeof envelope === 'object' && envelope.refused) {
+      const answered = envelope && typeof envelope === 'object'
+        && (envelope.refused || envelope.error_code === 'revert_incomplete');
+      if (answered) {
         setResult(envelope);
+        if (envelope.partial) {
+          setDone(`Partly undone. ${describeUndone(envelope)}. ${envelope.error || ''}`.trim());
+          await loadTurns();
+        } else if (!envelope.refused) {
+          setError(envelope.error || 'nothing could be undone');
+        }
       } else {
         setError(e?.message || 'revert failed');
       }
@@ -161,7 +211,11 @@ export default function Checkpoints() {
   }, [loadTurns]);
 
   const plan = detail?.plan;
-  const planFiles = Array.isArray(plan?.files) ? plan.files : [];
+  // `entries` is files plus the actions undone by a compensating call.
+  // Falls back to `files` so an older brain still renders.
+  const planFiles = Array.isArray(plan?.entries)
+    ? plan.entries
+    : (Array.isArray(plan?.files) ? plan.files : []);
 
   return (
     <div className="v2-page v2-checkpoints">
@@ -180,7 +234,7 @@ export default function Checkpoints() {
           <EmptyState
             icon={<Undo2 size={22} aria-hidden="true" />}
             title="Nothing to undo"
-            hint="Turns where FERAL wrote or edited a file show up here."
+            hint="Turns where FERAL wrote a file, or created a calendar event, reminder or routine, show up here."
           />
         )}
 
@@ -209,6 +263,11 @@ export default function Checkpoints() {
                         </span>
                       )}
                     </span>
+                    {t.actions > 0 && (
+                      <span className="v2-cp-turn-actioncount">
+                        {t.actions === 1 ? '1 action' : `${t.actions} actions`}
+                      </span>
+                    )}
                     <span className="v2-cp-turn-when">{formatWhen(t.started_at)}</span>
                     {/* Undo is destructive and irreversible, and the two
                         things rendered above it identify nothing: "1 file"
@@ -238,10 +297,11 @@ export default function Checkpoints() {
                         <ul className="v2-cp-files">
                           {planFiles.map((f) => (
                             <li
-                              key={f.path}
+                              key={entryKey(f)}
                               className="v2-cp-file"
                               data-status={f.status}
-                              title={f.path}
+                              data-kind={f.kind || 'file'}
+                              title={f.path || f.target}
                             >
                               {describeAction(f)}
                             </li>

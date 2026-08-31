@@ -345,8 +345,8 @@ feral twin pending
 
 ### `feral checkpoints`
 
-Inspect or undo the file writes FERAL made, grouped by the user message
-(the "turn") that caused them.
+Inspect or undo what FERAL did, grouped by the user message (the "turn")
+that caused it.
 
 ```bash
 feral checkpoints list [--session SESSION_ID] [--limit 20]
@@ -362,10 +362,22 @@ as `drifted` and the revert refuses outright. `--force` overrides that and
 discards the newer content.
 
 <Warning>
-Checkpoints cover `coding_tools__write_file` and `coding_tools__edit_file` only.
-Anything `coding_tools__bash` changed (shell redirects, `sed -i`, formatters,
-package installs, git commands) is **not** reverted and is not tracked. Every
+Checkpoints cover file writes (`coding_tools__write_file`,
+`coding_tools__edit_file`) and three creations undone by their inverse call
+(`calendar_google__create_event`, `feral_reminders__create`,
+`feral_routines__create`). Anything `coding_tools__bash` changed (shell
+redirects, `sed -i`, formatters, package installs, git commands) is **not**
+reverted and is not tracked, and neither is anything sent: email cannot be
+unsent, chat messages cannot be un-notified, purchases cannot be undone. Every
 command here prints that caveat on every invocation.
+</Warning>
+
+<Warning>
+**This command restores files and cannot undo actions.** Deleting a calendar
+event means holding your OAuth token and placing an HTTP call, which is the
+brain's job and not a recovery tool's. Actions in a reverted turn are listed as
+`unrecoverable` with that reason and never dropped; finish the job through
+`POST /api/checkpoints/revert` or by asking FERAL to revert the turn.
 </Warning>
 
 This command reads `$FERAL_HOME/checkpoints/index.db` directly and never calls

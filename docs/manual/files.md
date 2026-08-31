@@ -31,17 +31,25 @@ needs.
 ## Undoing what FERAL wrote
 
 Every turn where FERAL wrote or edited a file is recorded, with the
-previous contents kept. Open the command palette and pick **Undo**, or:
+previous contents kept. So is every turn where it made a calendar event,
+a reminder or a routine, which are undone by deleting them again. Open
+the command palette and pick **Undo**, or:
 
 ```
-feral checkpoints list              # turns that wrote files
+feral checkpoints list              # turns that changed something
 feral checkpoints show <turn>       # what a revert would do, before doing it
 feral checkpoints revert <turn>     # put the files back
 ```
 
 The page shows you what will happen before anything happens: which files
-go back to their previous contents, and which get deleted because the
-turn created them.
+go back to their previous contents, which get deleted because the turn
+created them, and which calendar events, reminders or routines get
+deleted for the same reason.
+
+`feral checkpoints revert` in a terminal puts files back but cannot
+delete a calendar event: that needs your account, which the command
+deliberately does not touch. It tells you what it left behind. Undoing
+from the page, or by asking FERAL, does the whole job.
 
 ### If you changed a file yourself afterwards
 
@@ -53,9 +61,19 @@ neither you nor FERAL has ever seen. The refusal names the files that
 changed, and offers to go ahead anyway, which discards your newer
 edits. Nothing is lost unless you choose that.
 
+### If somebody already deleted it
+
+If you deleted the calendar event yourself before undoing the turn, that
+is not an error. Undo notices it is already gone and moves on.
+
+If FERAL cannot reach your calendar at all, that **is** an error, and it
+says so: the files came back, the event did not, and it names which. It
+never reports a half-finished undo as finished.
+
 ## What undo does not cover
 
-Only files written through FERAL's file tools are tracked.
+Files written through FERAL's file tools are tracked, and so are calendar
+events, reminders and routines it created. Nothing else is.
 
 Anything a shell command changed is **not** recorded and will **not**
 come back: shell redirects, `sed -i`, formatters, package installs, git
@@ -64,6 +82,12 @@ most important sentence on it.
 
 If a turn ran a shell command that changed files, undo cannot help you.
 Use your own version control.
+
+Neither can it unsend. An email is gone the moment it is sent. A Slack,
+Telegram, WhatsApp or iMessage message can sometimes be deleted, but only
+for a while, only on some services, and never before the other person's
+phone has already buzzed, so FERAL does not offer that as undo. A
+purchase moves money and has no reverse.
 
 ## See also
 
