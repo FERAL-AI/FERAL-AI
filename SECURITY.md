@@ -548,9 +548,32 @@ for: skipping only the shell would let `cat` reach what
 `coding_tools__read_file` refuses.
 
 Still enforced under the key: `execution.allow_shell_commands=false`
-(a separate kill switch), `blocked_paths`, and any
-`execution.denied_command_patterns` the operator wrote. Someone who
-granted full authority *and* wrote their own deny list meant both.
+(a separate kill switch), `blocked_paths`, any
+`execution.denied_command_patterns` the operator wrote, and the
+**hardware allowlist** (see below). Someone who granted full authority
+*and* wrote their own deny list meant both.
+
+### It does not reach hardware
+
+`full_authority` governs shell execution and the filesystem. It does
+**not** lift `hardware.actuators.allowed` / `hardware.sensors.allowed`,
+which gate physical actuation and are enforced separately at
+`DeviceRegistry.execute_action`.
+
+That is deliberate, and the name overpromises. An actuator moves
+something in the world: a lock opens, a motor turns, a vacuum leaves the
+dock. Those consequences are a different category from a shell command
+on a machine the operator already owns, and they are not undoable by
+restoring a file. So the two decisions are kept separate, and granting
+one does not grant the other.
+
+An operator who wants the model to drive hardware unattended names the
+capability in `hardware.actuators.allowed`. That is a per-capability
+decision rather than a single switch, which is the point.
+
+(The two keys were added independently and this paragraph records the
+interaction, so the next reader does not have to infer it from the
+absence of a code path.)
 
 `blocked_paths` is the property that makes this key defensible rather
 than reckless, because the shipped policy blocks `~/.ssh/`, `~/.aws/`
