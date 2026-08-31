@@ -85,10 +85,34 @@ class SandboxPolicy:
             },
 
             "hardware": {
+                # The same lesson the actuator list below records, applied
+                # to sensors. Entries are matched against the HUP
+                # capability id the caller sends (tolerating a ``read_``
+                # prefix, see ``security/hardware_policy._sensor_allowed``),
+                # and five shipped sensor capability ids were absent:
+                # ``read_position`` (hardware/adapters/robot_arm.py),
+                # ``skin_temp`` (wristband), ``gps_location`` and
+                # ``health_sensors`` (hardware/mesh.py phone node) and
+                # ``thermostat_read`` (smart_home). That did not matter
+                # while the only reader was an endpoint nothing calls; it
+                # matters now that the resolver asks this list whether a
+                # device tool may run unattended, because a missing entry
+                # is an approval card in front of the robot arm reading
+                # its own joint angles.
+                # ``test_default_policy_permits_every_shipped_sensor``
+                # fails if an adapter grows a capability this misses.
                 "sensors": {
                     "allowed": ["heart_rate", "spo2", "temperature", "uv", "steps",
                                 "accelerometer", "gyroscope", "ambient_light", "gps",
-                                "telemetry"],
+                                "telemetry",
+                                # hardware/adapters/robot_arm.py
+                                "position",
+                                # hardware/adapters/wristband.py
+                                "skin_temp",
+                                # hardware/mesh.py phone node
+                                "gps_location", "health_sensors",
+                                # hardware/adapters/smart_home.py
+                                "thermostat_read"],
                     "blocked": [],
                     "max_read_rate_per_second": {
                         "heart_rate": 1,
