@@ -22,21 +22,20 @@ Push notifications let FERAL send proactive alerts to your phone — health warn
   <Step title="Configure FERAL">
     <CodeGroup>
     ```bash Environment variable
-    export FERAL_FCM_SERVICE_ACCOUNT_PATH="/path/to/firebase-service-account.json"
+    export FERAL_FIREBASE_CREDENTIALS="/path/to/firebase-service-account.json"
     ```
     ```json settings.json
-    {
-      "channels": {
-        "push": {
-          "fcm": {
-            "enabled": true,
-            "service_account_path": "/path/to/firebase-service-account.json"
-          }
-        }
-      }
-    }
     ```
     </CodeGroup>
+
+    <Warning>
+      Earlier versions of this page also showed a `channels.push.fcm`
+      block in `settings.json`, and named the variable
+      `FERAL_FCM_SERVICE_ACCOUNT_PATH`. Neither exists. `PushChannel`
+      takes no config argument at all (`channels/push.py:62-77`) and
+      reads **only** environment variables; the Firebase one is
+      `FERAL_FIREBASE_CREDENTIALS`.
+    </Warning>
 
     <Warning>
       The service account JSON contains sensitive credentials. Store it outside your project directory and never commit it to version control.
@@ -90,20 +89,6 @@ Push notifications let FERAL send proactive alerts to your phone — health warn
     export FERAL_APNS_ENVIRONMENT="production"  # or "sandbox"
     ```
     ```json settings.json
-    {
-      "channels": {
-        "push": {
-          "apns": {
-            "enabled": true,
-            "key_path": "/path/to/AuthKey_XXXXXXXXXX.p8",
-            "key_id": "XXXXXXXXXX",
-            "team_id": "YYYYYYYYYY",
-            "bundle_id": "com.feral.app",
-            "environment": "production"
-          }
-        }
-      }
-    }
     ```
     </CodeGroup>
 
