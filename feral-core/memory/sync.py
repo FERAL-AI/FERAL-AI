@@ -2028,12 +2028,18 @@ class SyncEngine:
             # ours. Failures here are logged, never fatal: the exchange
             # itself already succeeded and HLC, not this column, is what
             # drives what gets sent next time.
+            # Recorded under the peer's REAL node_id, for the same
+            # reason ``exclude_node`` uses it: a statically configured
+            # peer's local key is ``static-{host}:{port}``, and a
+            # delivery record keyed on host and port answers "which
+            # address did I send this to", not "which brain has it".
+            # The address changes with DHCP; the node_id does not.
             if changes_for_peer:
                 try:
                     await asyncio.to_thread(
                         self._wal.mark_synced_many,
                         [op.op_id for op in changes_for_peer],
-                        peer_id,
+                        remote_node_id or peer_id,
                     )
                 except Exception as exc:
                     logger.warning(

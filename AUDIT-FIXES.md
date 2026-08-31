@@ -2687,8 +2687,17 @@ the `memory` action list so `forgotten` is reachable).
    wire them or delete them.
 4. Working memory persists for `primary_session_id` only. Every other
    session loses it on restart.
-5. `sync_wal` has no prune path and grows without bound (16,184 ops,
-   12MB). `synced_to` is now written, so a prune finally has a basis.
+5. ~~`sync_wal` has no prune path and grows without bound (16,184 ops,
+   12MB). `synced_to` is now written, so a prune finally has a basis.~~
+   FIXED on `fix/sync-protocol`. `SyncWAL.prune` drops operations past a
+   90-day horizon on the scheduler's maintenance tick, matching
+   `MemoryStore.prune_tombstones` so the resurrection window stays one
+   number. The policy is age-based, not delivery-based: `synced_to`
+   records who received an op but nothing records who is still a peer,
+   so an ack-based rule never terminates for a device that leaves the
+   fleet. A superseded-ops rule was measured and rejected, it reclaims
+   346 of 16,324 ops (0.07 of 6.24 MiB) because the table is 92%
+   append-only `episodes`. See the docstring for the cost.
 6. `memory.kg.unified=false` routes reads to the empty flat `knowledge`
    table and hides all 29 migrated facts.
 
