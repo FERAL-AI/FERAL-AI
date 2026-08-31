@@ -39,7 +39,7 @@ import json
 import socket
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import pytest
@@ -74,11 +74,6 @@ class _Node:
     server: uvicorn.Server
     task: asyncio.Task
     state: object
-
-    # Every frame this node's *server* side received, in bytes. Filled in
-    # by the recording hook in :func:`_start_node`; used to pin the
-    # chunking invariant without reaching into the protocol.
-    inbound_frame_bytes: list[int] = field(default_factory=list)
 
 
 def _free_port() -> int:
@@ -236,7 +231,7 @@ async def notes_table(node: _Node) -> dict[str, str]:
     """The materialised ``notes`` table as ``{id: content}``.
 
     This, and only this, is what convergence means. The WAL agreeing is
-    not convergence — ``_apply_to_memory`` rejects ops the WAL happily
+    not convergence: ``_apply_to_memory`` rejects ops the WAL happily
     holds (any ``op_type`` outside insert/delete, any table outside
     ``_SYNC_ALLOWED_TABLES``), so a WAL-derived assertion passes on data
     that never reached the user's store.
@@ -549,9 +544,9 @@ class TestRelayWatermark:
         Ordering is what makes this deterministic:
           1. A writes ``from-a``   (HLC t1)
           2. B writes ``from-b``   (HLC t2 > t1)
-          3. B <-> C  — C now has ``from-b``, so C's clock for B is t2
-          4. A <-> B  — B now holds ``from-a`` at t1
-          5. B <-> C  — B must send ``from-a``
+          3. B <-> C, so C now has ``from-b`` and C's clock for B is t2
+          4. A <-> B, so B now holds ``from-a`` at t1
+          5. B <-> C, and B must send ``from-a``
 
         At step 5 the old cutoff is C's mark for B's writes, t2. A's op
         is older than that, so it is filtered out and C never sees it.
@@ -581,7 +576,7 @@ class TestRelayWatermark:
 
         A never writes anything of its own; it only relays C's op. So
         ``remote_vc[A.node_id]`` is absent on B and the cutoff falls
-        back to ``"0:0:"`` — A ships its ENTIRE WAL on every handshake,
+        back to ``"0:0:"``, so A ships its ENTIRE WAL on every handshake,
         forever, no matter how much of it B already has.
 
         A two-node version of this cannot fail: with only A and B in
@@ -603,6 +598,96 @@ class TestRelayWatermark:
         second = await exchange(a, b)
         assert second["success"] is True, second
         assert second["sent"] == 0, "relay re-sent an op the peer already had"
+
+    async def test_three_node_line_converges(self, three_nodes):
+        """The full A <-> B <-> C topology, which is the shape the
+        owner actually runs (laptop, desktop, phone, only some pairs
+        ever in range of each other at once).
+
+        A and C never speak. Everything either of them learns about the
+        other has to cross B. Two rounds is what a line of three needs:
+        the first moves each end's writes into B, the second moves them
+        out to the far end.
+
+        Stated plainly: this one PASSES against the pre-fix code, and it
+        is kept as a regression guard rather than as evidence. Symmetric
+        rounds over three fresh nodes do not order B's own write after
+        the op it has to relay, which is the condition the watermark
+        defect needs. ``test_relay_forwards_third_party_ops`` and
+        ``test_three_node_delete_propagates_transitively`` construct
+        that ordering deliberately and are the ones that fail.
+        """
+        a, b, c = three_nodes
+        await write_note(a, "from-a", "a content")
+        await write_note(b, "from-b", "b content")
+        await write_note(c, "from-c", "c content")
+
+        for _ in range(2):
+            assert (await exchange(a, b))["success"] is True
+            assert (await exchange(b, c))["success"] is True
+
+        expected = {
+            "from-a": "a content",
+            "from-b": "b content",
+            "from-c": "c content",
+        }
+        assert await notes_table(a) == expected
+        assert await notes_table(b) == expected
+        assert await notes_table(c) == expected
+
+    async def test_three_node_delete_propagates_transitively(self, three_nodes):
+        """The watermark defect applied to a delete, which is its worst
+        face.
+
+        A dropped insert looks like missing data and a user might
+        notice. A dropped delete looks like the row is fine, so the
+        note the user deleted on their laptop is still on their phone
+        and nothing anywhere reports a problem.
+
+        Same ordering trick as ``test_relay_forwards_third_party_ops``:
+        B's own write lands AFTER A's delete, so under the old single
+        cutoff the delete is older than C's mark for B and never
+        crosses the relay.
+        """
+        a, b, c = three_nodes
+        await write_note(a, "doomed", "delete me")
+        for _ in range(2):
+            await exchange(a, b)
+            await exchange(b, c)
+        assert set(await notes_table(c)) == {"doomed"}
+
+        # Delete on A, recording the tombstone the way a real local
+        # delete records it (``MemoryStore._log_sync_async``).
+        hlc = await a.engine.log_operation_async(
+            "notes", "delete", "doomed", {"id": "doomed"}
+        )
+        conn = await a.store._conn()
+        try:
+            await conn.execute("DELETE FROM notes WHERE id = 'doomed'")
+            await conn.commit()
+        finally:
+            await a.store._release(conn)
+        await a.store._record_tombstone("notes", "doomed", hlc)
+
+        # B writes AFTER the delete, and gets that write to C first.
+        await write_note(b, "b-marker", "b content")
+        assert (await exchange(b, c))["success"] is True
+        assert set(await notes_table(c)) == {"doomed", "b-marker"}
+
+        assert (await exchange(a, b))["success"] is True
+        assert set(await notes_table(b)) == {"b-marker"}
+
+        assert (await exchange(b, c))["success"] is True
+        assert await notes_table(c) == {"b-marker": "b content"}, (
+            "the delete never crossed the relay: the row the user deleted "
+            "is still live on the far node"
+        )
+
+        # A further round must not resurrect it out of anyone's WAL.
+        assert (await exchange(b, c))["success"] is True
+        assert (await exchange(a, b))["success"] is True
+        assert "doomed" not in await notes_table(c)
+        assert "doomed" not in await notes_table(a)
 
     async def test_static_peer_ops_are_not_echoed(self, two_nodes):
         """``_load_static_peers`` mints ``peer_id = f"static-{host}:{port}"``,
