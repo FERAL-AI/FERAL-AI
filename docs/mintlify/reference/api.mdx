@@ -287,8 +287,8 @@ invoked. See [Coding Harness](/guides/coding-harness#3-checkpoints-and-revert).
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/checkpoints/turns` | Turns that wrote at least one file, most recent first. Query: `session_id`, `limit` (1 to 200, default 20) |
-| `GET` | `/api/checkpoints/turns/{turn_id}` | Per-write rows for one turn, plus the revert plan. `404` when the turn has no checkpoints |
+| `GET` | `/api/checkpoints/turns` | Turns that changed something, most recent first. `writes` and `files` count file writes, `actions` counts compensated creations. Query: `session_id`, `limit` (1 to 200, default 20) |
+| `GET` | `/api/checkpoints/turns/{turn_id}` | Per-write and per-action rows for one turn, plus the revert plan. `404` when the turn has no checkpoints |
 | `POST` | `/api/checkpoints/revert` | Revert a turn. Body: `{turn_id?, session_id?, force?, dry_run?}` |
 
 Omit `turn_id` on the revert and the most recent checkpointed turn for

@@ -17,37 +17,57 @@ vi.mock('../../lib/api', () => ({
 }));
 import { apiJson, apiFetch } from '../../lib/api';
 import Checkpoints, {
-  describeAction, driftedPaths, isDriftRefusal, formatWhen,
+  describeAction, describeUndone, driftedPaths, isDriftRefusal, formatWhen,
 } from '../../pages/Checkpoints';
 
 const A = '/tmp/cpwork/a.txt';
 const B = '/tmp/cpwork/b.txt';
+const C = '/tmp/cpwork/c.txt';
 
 const NOTE =
-  'Checkpoints cover coding_tools__write_file and coding_tools__edit_file only. ' +
-  'Anything coding_tools__bash changed in this turn (shell redirects, sed -i, ' +
-  'formatters, package installs, git commands) is NOT reverted and is not tracked here.';
+  'Checkpoints cover file writes (coding_tools__write_file, ' +
+  'coding_tools__edit_file), restored from stashed bytes, and three creations ' +
+  'undone by their inverse call (calendar_google__create_event, ' +
+  'feral_reminders__create, feral_routines__create). Anything ' +
+  'coding_tools__bash changed in this turn (shell redirects, sed -i, ' +
+  'formatters, package installs, git commands) is NOT reverted and is not ' +
+  'tracked here. Neither is any other action: sent email cannot be unsent, ' +
+  'chat messages cannot be un-notified, and purchases cannot be undone.';
 
 const TURNS = {
   count: 1,
   turns: [{
-    turn_id: 'turn1', session_id: 's1', writes: 2, files: 2,
+    turn_id: 'turn1', session_id: 's1', writes: 2, files: 2, actions: 1,
     started_at: 1787283850.725763, ended_at: 1787283850.72709,
   }],
   note: NOTE,
+};
+
+const FILE_A = { path: A, status: 'restorable', action: 'restore', detail: '', kind: 'file' };
+const FILE_B = { path: B, status: 'restorable', action: 'delete', detail: '', kind: 'file' };
+
+/** The turn also created a calendar event, undone by a compensating call. */
+const EVENT_ROW = {
+  path: '', status: 'reversible', action: 'compensate',
+  detail: 'calls calendar_google__delete_event to undo it.',
+  kind: 'action', target: 'evt_9x',
+  tool_name: 'calendar_google__create_event',
+  inverse_tool: 'calendar_google__delete_event',
+  label: 'calendar event',
 };
 
 /** plan_revert on a clean turn. */
 const CLEAN_PLAN = {
   turn_id: 'turn1',
   writes: [],
+  actions: [],
   plan: {
     success: true, turn_id: 'turn1', dry_run: true, refused: false, error_code: '',
-    forced: false, reverted: [], reverted_count: 0, skipped: [], drifted: [],
-    files: [
-      { path: A, status: 'restorable', action: 'restore', detail: '' },
-      { path: B, status: 'restorable', action: 'delete', detail: '' },
-    ],
+    forced: false, reverted: [], reverted_actions: [], reverted_count: 0,
+    partial: false, skipped: [], drifted: [],
+    files: [FILE_A, FILE_B],
+    actions: [EVENT_ROW],
+    entries: [FILE_A, FILE_B, EVENT_ROW],
     bash_not_covered: true, note: NOTE,
   },
 };
@@ -55,19 +75,19 @@ const CLEAN_PLAN = {
 const DRIFT_ROW = {
   path: A, status: 'drifted', action: 'restore',
   detail: 'file changed after the agent wrote it; reverting would discard that change.',
+  kind: 'file',
 };
 
 /** plan_revert once a.txt has drifted. Note refused is FALSE here. */
 const DRIFTED_PLAN = {
   turn_id: 'turn1',
   writes: [],
+  actions: [],
   plan: {
     ...CLEAN_PLAN.plan,
     drifted: [DRIFT_ROW],
-    files: [
-      DRIFT_ROW,
-      { path: B, status: 'restorable', action: 'delete', detail: '' },
-    ],
+    files: [DRIFT_ROW, FILE_B],
+    entries: [DRIFT_ROW, FILE_B, EVENT_ROW],
   },
 };
 
@@ -75,14 +95,36 @@ const DRIFTED_PLAN = {
 const REFUSAL = {
   success: false, turn_id: 'turn1', dry_run: false, refused: true,
   error_code: 'revert_refused_drift', forced: false,
-  reverted: [], reverted_count: 0, skipped: [], drifted: [DRIFT_ROW],
+  reverted: [], reverted_actions: [], reverted_count: 0, partial: false,
+  skipped: [], drifted: [DRIFT_ROW],
+  files: [DRIFT_ROW, FILE_B], actions: [EVENT_ROW],
+  entries: [DRIFT_ROW, FILE_B, EVENT_ROW],
   error: '1 file(s) changed after the agent wrote them. Refusing to overwrite them. ' +
          'Re-run with force to revert anyway (their newer content will be lost).',
 };
 
 const FORCED_OK = {
   success: true, turn_id: 'turn1', dry_run: false, refused: false,
-  error_code: '', forced: true, reverted_count: 2, skipped: [], drifted: [DRIFT_ROW],
+  error_code: '', forced: true, reverted: [A, B],
+  reverted_actions: [{ ...EVENT_ROW, status: 'reverted', detail: '' }],
+  reverted_count: 3, partial: false, skipped: [], drifted: [DRIFT_ROW],
+};
+
+/**
+ * A revert that restored the file and could not undo the event. Captured
+ * the same way as the rest: a 200 body carrying `error`, so apiFetch
+ * throws it exactly like the refusal.
+ */
+const PARTIAL = {
+  success: false, turn_id: 'turn1', dry_run: false, refused: false,
+  error_code: 'revert_incomplete', forced: false,
+  reverted: [C], reverted_actions: [], reverted_count: 1, partial: true,
+  skipped: [{ ...EVENT_ROW, status: 'failed', action: 'skip', detail: 'Internal Server Error' }],
+  drifted: [],
+  files: [{ path: C, status: 'restorable', action: 'restore', detail: '', kind: 'file' }],
+  actions: [{ ...EVENT_ROW, status: 'failed', action: 'skip', detail: 'Internal Server Error' }],
+  entries: [],
+  error: '1 action(s) could not be reverted.',
 };
 
 beforeEach(() => {
@@ -125,6 +167,31 @@ describe('pure helpers read the shapes the store actually emits', () => {
     expect(isDriftRefusal(DRIFTED_PLAN.plan)).toBe(false);
     expect(isDriftRefusal(FORCED_OK)).toBe(false);
     expect(isDriftRefusal({})).toBe(false);
+  });
+
+  it('describes an action by what it is, not by a path it does not have', () => {
+    // Actions carry an empty `path`. A page that reads `path` renders a
+    // blank row and tells the user nothing is going to happen.
+    expect(describeAction(EVENT_ROW)).toMatch(/calendar event evt_9x will be deleted/);
+    expect(describeAction({ ...EVENT_ROW, status: 'already_reverted', action: 'skip' }))
+      .toMatch(/calendar event evt_9x is already gone/);
+    expect(describeAction({
+      ...EVENT_ROW, status: 'failed', action: 'skip', detail: 'Internal Server Error',
+    })).toMatch(/will be left alone: Internal Server Error/);
+  });
+
+  it('counts files and actions separately, from the envelope lists', () => {
+    // reverted_count is the total. Reporting it as "file(s) restored"
+    // would claim a file came back when an event was deleted instead.
+    expect(describeUndone(FORCED_OK)).toBe('2 file(s) restored, 1 action(s) undone');
+    expect(describeUndone(PARTIAL)).toBe('1 file(s) restored');
+    expect(describeUndone({})).toBe('0 file(s) restored');
+  });
+
+  it('does not read a partial revert as a refusal', () => {
+    expect(isDriftRefusal(PARTIAL)).toBe(false);
+    expect(PARTIAL.partial).toBe(true);
+    expect(PARTIAL.error_code).toBe('revert_incomplete');
   });
 
   it('formats a timestamp and survives a missing one', () => {
@@ -312,5 +379,33 @@ describe('the refusal path as the real apiFetch delivers it', () => {
     await waitFor(() => expect(screen.getByText(/Undone\. 2 file\(s\) restored/)).toBeInTheDocument());
     // And the turn really did collapse, so this is not passing by accident.
     expect(screen.queryByText('Undo this turn')).not.toBeInTheDocument();
+  });
+
+  it('shows the actions a turn created alongside its files', async () => {
+    routeJson();
+    render(<Checkpoints />);
+    await waitFor(() => expect(screen.getByText('1 action')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('2 files'));
+
+    await waitFor(() => expect(
+      screen.getByText(/calendar event evt_9x will be deleted/),
+    ).toBeInTheDocument());
+  });
+
+  it('reports a partial revert as partly done, not as a failed request', async () => {
+    // The dangerous shape. A 200 carrying `error` is thrown by apiFetch
+    // exactly like the refusal is, and reporting it as a generic failure
+    // tells the user nothing came back when the file restore did.
+    routeJson();
+    apiFetch.mockRejectedValue(new FakeApiError(PARTIAL));
+    render(<Checkpoints />);
+    await waitFor(() => expect(screen.getByText('2 files')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('2 files'));
+    await waitFor(() => expect(screen.getByText('Undo this turn')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Undo this turn'));
+
+    await waitFor(() => expect(
+      screen.getByText(/Partly undone\. 1 file\(s\) restored\. 1 action\(s\) could not be reverted\./),
+    ).toBeInTheDocument());
   });
 });

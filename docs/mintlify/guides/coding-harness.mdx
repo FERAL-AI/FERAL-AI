@@ -217,10 +217,45 @@ diagnostics deliberately run *outside* that lock.
 
 ## 3. Checkpoints and revert
 
-Every `coding_tools__write_file` and `coding_tools__edit_file` stashes the
-file's pre-write bytes in a content-addressed blob store and records a row keyed
-by `turn_id`. `revert_turn` puts the files back the way they were before that
-user message was answered.
+`revert_turn` puts things back the way they were before one user message was
+answered. It undoes two shapes of change, and the difference between them is
+the whole design.
+
+**Reversal by state.** Every `coding_tools__write_file` and
+`coding_tools__edit_file` stashes the file's pre-write bytes in a
+content-addressed blob store and records a row keyed by `turn_id`. Reverting is
+restoring those bytes, so the undo is exact.
+
+**Reversal by compensation.** A calendar event, a reminder or a routine has no
+prior bytes to keep: the thing did not exist, and "undo" means a second call
+that destroys it. The store records the *inverse call* instead of a snapshot,
+saga-style, and reverting means making that call.
+
+| Created by | Undone by | Id taken from |
+|:--|:--|:--|
+| `calendar_google__create_event` | `calendar_google__delete_event(event_id)` | `data.id` |
+| `feral_reminders__create` | `feral_reminders__delete(id)` | `data.reminder.id` |
+| `feral_routines__create` | `feral_routines__delete(routine_id)` | `data.routine.id` |
+
+The compensation is derived from the tool's **result**, never from its
+arguments. The id does not exist until the call has succeeded, and a call that
+failed created nothing to compensate. One turn can contain both kinds and
+`revert_turn` handles the lot in one envelope.
+
+### What is not covered, and why
+
+Only those three creations are compensated. Everything else that leaves the
+machine is deliberately absent, because the list bounds
+[earned autonomy](/guides/autonomy): a tool is only allowed to stop asking for
+approval if this layer can take it back.
+
+| Not covered | Why |
+|:--|:--|
+| Email | There is no unsend. A provider-side "undo send" is a delay before sending, not a reversal of one |
+| Slack, Telegram, WhatsApp, iMessage | Retraction is time-bounded, provider-specific, and does not un-notify or un-read. That is a weaker guarantee than restoring bytes and must not be sold as undo |
+| Purchases (`buy_groceries`) | Moves money. No inverse call exists |
+| `coding_tools__bash` | See below |
+| `browser_use__start_recording` / `stop_recording` | A lifecycle pair, not an inverse. Stopping a recording does not unmake it |
 
 ### Storage layout
 
@@ -229,13 +264,19 @@ $FERAL_HOME/checkpoints/index.db
 $FERAL_HOME/checkpoints/blobs/<first-2-hex-of-sha256>/<sha256>
 ```
 
-`index.db` is SQLite with one row per write: `checkpoint_id`, `turn_id`,
-`session_id`, `surface`, `tool_name`, `call_id`, `path`, `created_at`,
-`existed`, and the before/after hash and size. Connections are short-lived and
-per-operation rather than pooled, because the store is touched from the event
-loop, from the REST route, and from `feral checkpoints` in a separate process,
-and SQLite's own file locking is the only coordination that works across all
-three.
+`index.db` is SQLite with two tables. `checkpoints` holds one row per write:
+`checkpoint_id`, `turn_id`, `session_id`, `surface`, `tool_name`, `call_id`,
+`path`, `created_at`, `existed`, and the before/after hash and size.
+`reversals` holds one row per compensated creation: `reversal_id`, the same
+identity columns, plus `target_id`, `inverse_tool`, `inverse_arg`, `label` and
+`reverted_at`. Two tables rather than nullable columns on one, because the
+shapes share nothing but the turn they belong to and because every
+already-installed `index.db` keeps working with no migration.
+
+Connections are short-lived and per-operation rather than pooled, because the
+store is touched from the event loop, from the REST route, and from `feral
+checkpoints` in a separate process, and SQLite's own file locking is the only
+coordination that works across all three.
 
 `FERAL_CHECKPOINT_DIR` (`coding.checkpoint_dir`) overrides the root outright.
 Retention defaults to 14 days; the prune runs at most hourly, deletes expired
@@ -275,13 +316,44 @@ edited that file after the agent did, and restoring the pre-agent bytes would
 destroy that work. `force` overrides, and the error text says the newer content
 will be lost.
 
+The refusal is whole-turn, so a refused revert makes no compensating call
+either. Nothing is half-undone.
+
+**There is no drift check for compensations, and there cannot be one.** The
+store never held a copy of the created object, so it cannot tell an untouched
+calendar event from one the user has since rewritten. What it can tell is that
+the object is already gone, and that is treated as success: the inverse call
+comes back 404 or 410, the entry reports `already_reverted`, and the row is
+marked done so a second revert does not call again. This is deliberately strict
+about what counts as gone (an explicit `status_code` of 404/410, or an error
+string in the `HTTP 404: ...` shape). A timeout, a 401 or a 500 is a failure,
+because treating an unreachable provider as "already gone" would report a
+revert that never happened.
+
+### Partial reverts
+
+A revert is no longer all-or-nothing once compensations are involved. One
+inverse call can fail while the file restores succeed.
+
+| Key | Meaning |
+|:--|:--|
+| `success` | True only when every item was handled |
+| `partial` | True when some items were reverted and some were not. A caller that reads `success` alone reports a half-done revert as done |
+| `error_code` | `revert_incomplete` on any unfinished revert, `revert_refused_drift` on a whole-turn drift refusal. Key a UI off these, never off parsing `error` |
+| `files` / `actions` / `entries` | File entries, compensation entries, and both. `files` keeps its exact old meaning |
+| `reverted` / `reverted_actions` | Restored paths, and the compensations that were made. `reverted_count` is the sum |
+
+Every entry carries its own `status` and `detail`, so "what was not undone, and
+why" is answerable per item.
+
 ### `bash` changes are not covered
 
 **Shell commands are not checkpointed.** There is no sound way to know what a
 shell command touched, so pretending otherwise would produce a revert that
 claims a completeness it does not have. Anything `coding_tools__bash` changed
 in a turn (shell redirects, `sed -i`, formatters, package installs, git
-commands) is not reverted and is not tracked.
+commands) is not reverted and is not tracked. The same `note` also names what
+has no undo at all: sent email, chat messages, and purchases.
 
 Every response from the checkpoint layer says so out loud, on success as well as
 failure: `bash_not_covered: true` plus a `note` field. That is deliberate.
@@ -297,7 +369,14 @@ feral checkpoints revert [TURN_ID] [--force] [--dry-run]
 
 `TURN_ID` defaults to the most recent checkpointed turn. `show` prints the
 revert plan without touching a file; `revert --dry-run` does the same through
-the revert path. Without `--force`, a drifted file refuses the revert.
+the revert path and makes no compensating call. Without `--force`, a drifted
+file refuses the revert.
+
+The CLI **restores files and cannot undo actions**. Deleting a calendar event
+means holding the user's OAuth token and placing an HTTP call, which is the
+brain's job and not a recovery tool's. Actions in a reverted turn are listed as
+`unrecoverable` with that reason and never dropped, so you can finish the job
+through `POST /api/checkpoints/revert` or `coding_tools__revert_turn`.
 
 The CLI reads `$FERAL_HOME/checkpoints/index.db` directly rather than calling
 the brain's REST API. That is deliberate: the moment you most want to undo what
@@ -309,8 +388,8 @@ from is not a recovery tool.
 
 | Method | Path | Description |
 |:--|:--|:--|
-| `GET` | `/api/checkpoints/turns` | Turns that wrote at least one file, most recent first. Query: `session_id`, `limit` (1 to 200, default 20) |
-| `GET` | `/api/checkpoints/turns/{turn_id}` | Per-write rows for one turn, plus the revert plan. 404 when the turn has no checkpoints |
+| `GET` | `/api/checkpoints/turns` | Turns that changed something, most recent first. `writes` and `files` count file writes, `actions` counts compensated creations. Query: `session_id`, `limit` (1 to 200, default 20) |
+| `GET` | `/api/checkpoints/turns/{turn_id}` | Per-write and per-action rows for one turn, plus the revert plan. 404 when the turn has no checkpoints |
 | `POST` | `/api/checkpoints/revert` | Revert a turn. Body: `{turn_id?, session_id?, force?, dry_run?}` |
 
 Omit `turn_id` on the revert and the most recent checkpointed turn for

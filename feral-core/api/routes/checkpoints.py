@@ -18,6 +18,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException
 
 from api.state import state
+from skills.checkpoint_actions import make_compensator
 from skills.checkpoints import BASH_NOT_COVERED_NOTE, get_store
 
 router = APIRouter(tags=["checkpoints"])
@@ -34,7 +35,12 @@ def _store():
 
 @router.get("/api/checkpoints/turns")
 async def list_turns(session_id: str = "", limit: int = 20):
-    """Turns that wrote at least one file, most recent first."""
+    """Turns that changed something, most recent first.
+
+    ``writes`` and ``files`` count file writes; ``actions`` counts the
+    creations that are undone by a compensating call. A turn that only
+    created a calendar event has ``writes: 0`` and is still listed.
+    """
     store = _store()
     rows = await asyncio.to_thread(
         store.list_turns,
@@ -46,16 +52,18 @@ async def list_turns(session_id: str = "", limit: int = 20):
 
 @router.get("/api/checkpoints/turns/{turn_id}")
 async def turn_detail(turn_id: str):
-    """Per-write rows for one turn, plus the revert plan for it."""
+    """Per-write and per-action rows for one turn, plus its revert plan."""
     store = _store()
     entries = await asyncio.to_thread(store.entries_for_turn, turn_id)
-    if not entries:
+    reversals = await asyncio.to_thread(store.reversals_for_turn, turn_id)
+    if not entries and not reversals:
         raise HTTPException(
             status_code=404, detail=f"No checkpoints recorded for turn '{turn_id}'",
         )
     return {
         "turn_id": turn_id,
         "writes": entries,
+        "actions": reversals,
         "plan": await asyncio.to_thread(store.plan_revert, turn_id),
     }
 
@@ -89,6 +97,21 @@ async def revert(body: dict):
     * ``skipped`` is not where drifted files go. It only ever holds
       entries whose ``action`` is ``skip``; drift lands in ``drifted``
       while keeping ``action: "restore"``.
+
+    A turn can also contain actions that are undone by a compensating
+    call rather than by restoring bytes (a calendar event, a reminder, a
+    routine). Those come back under ``actions``, files stay under
+    ``files``, and ``entries`` is both. Three things about them:
+
+    * The drift refusal above is whole-turn. A refused revert makes no
+      compensating call either, so nothing is half-undone.
+    * A compensation that fails does NOT fail the file restores. Read
+      ``partial``: true means some of the turn came back and some did
+      not, with ``error_code: "revert_incomplete"`` and a per-entry
+      ``status`` and ``detail`` saying which was which. ``success: false``
+      with ``partial: false`` means nothing came back.
+    * An object the user already deleted is not a failure. The entry
+      reports ``already_reverted`` and the revert stays successful.
     """
     store = _store()
     turn_id = str((body or {}).get("turn_id") or "").strip()
@@ -101,11 +124,15 @@ async def revert(body: dict):
     # SQLite plus a restore per file. Blocking, so it goes to a thread
     # rather than stalling every other request on this loop.
     dry_run = bool((body or {}).get("dry_run", False))
+    # Built on the loop, used from the worker thread: each inverse call is
+    # marshalled back here with run_coroutine_threadsafe. A dry run never
+    # reaches it, so previewing a revert calls no provider.
     result = await asyncio.to_thread(
         store.revert_turn,
         turn_id,
         force=bool((body or {}).get("force", False)),
         dry_run=dry_run,
+        compensate=make_compensator(),
     )
 
     # A real revert withdraws earned autonomy. The operator is telling

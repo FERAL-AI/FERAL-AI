@@ -33,6 +33,7 @@ from security.exec_mode import (
 from security.fetch_guard import html_to_markdown, safe_fetch
 from security.safe_regex import UnsafePatternError, compile_safe_regex
 from security.sandbox_policy import SandboxPolicy
+from skills import checkpoint_actions
 from skills import checkpoints as checkpoint_store
 from skills import diagnostics as diagnostics_mod
 from skills import edit_matchers
@@ -1931,7 +1932,13 @@ class CodingToolsSkill(BaseSkill):
     # ── revert_turn ───────────────────────────────────────────────
 
     async def _revert_turn(self, args: dict) -> dict:
-        """Undo the file writes made while answering one user message.
+        """Undo what was done while answering one user message.
+
+        Restores the turn's file writes from their stashed bytes, and
+        undoes the creations it checkpointed (calendar event, reminder,
+        routine) by calling their inverse. Both kinds come back in one
+        envelope; see ``skills/checkpoints.py`` for what a partial revert
+        reports.
 
         Exposed as a normal endpoint with ``safety_tier: "confirm"`` so
         FERAL's existing autonomy mode governs it: strict and hybrid ask
@@ -1947,6 +1954,12 @@ class CodingToolsSkill(BaseSkill):
                 "error": f"Checkpoint store unavailable: {exc}",
             }
 
+        # Built on the loop and handed to the worker thread, which calls
+        # back onto this loop for each inverse call. Built here because
+        # `asyncio.get_running_loop()` inside the thread would not find
+        # one.
+        compensate = checkpoint_actions.make_compensator()
+
         # SQLite queries, blob reads and the restores themselves are all
         # blocking, and a revert can touch every file a turn wrote. One
         # thread hop for the lot, for the same reason the writers use one.
@@ -1960,6 +1973,7 @@ class CodingToolsSkill(BaseSkill):
                 turn_id,
                 force=bool(args.get("force", False)),
                 dry_run=bool(args.get("dry_run", False)),
+                compensate=compensate,
             )
 
         turn_id, result = await asyncio.to_thread(_resolve_and_revert)

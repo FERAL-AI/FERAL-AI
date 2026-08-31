@@ -128,13 +128,49 @@ care about the shell policy.
 
 ### `coding_tools__revert_turn` is governed by it
 
-Undoing the file writes a turn made is declared `safety_tier: "confirm"` in the
+Undoing what a turn did is declared `safety_tier: "confirm"` in the
 `coding_tools` manifest, so it lands on gate 1 like any other confirm-tier tool:
 **strict and hybrid ask you, loose runs it.** That is deliberately the
 operator's call rather than the tool's. See
 [Coding Harness](/guides/coding-harness#3-checkpoints-and-revert) for what a
 revert covers, and in particular for what it does not
 (`coding_tools__bash` changes are never checkpointed).
+
+## Earned autonomy
+
+Under **hybrid** only, a tool that has run cleanly five times in a row stops
+raising the confirm-tier prompt. A single failure resets the streak to zero, and
+reverting a turn resets every tool: the tool reported success and you disagreed,
+which is a stronger signal than a failed execution.
+
+### Trust never exceeds undo
+
+Latitude is granted only for actions FERAL can take back, which is exactly what
+`skills/checkpoints.py` covers:
+
+| Tool | Taken back by |
+|:--|:--|
+| `coding_tools__write_file` | Restoring the stashed pre-write bytes |
+| `coding_tools__edit_file` | Restoring the stashed pre-write bytes |
+| `calendar_google__create_event` | `calendar_google__delete_event` |
+| `feral_reminders__create` | `feral_reminders__delete` |
+| `feral_routines__create` | `feral_routines__delete` |
+
+Nothing else is ever promoted, however long its record. Sending email has no
+unsend; retraction on Slack, Telegram, WhatsApp and iMessage is time-bounded,
+provider-specific and does not un-notify anybody; a purchase moves money;
+`coding_tools__bash` can change anything and is not checkpointed at all. That
+is the answer to "why does it still ask about sending email?" - because it
+cannot unsend it.
+
+Three boundaries hold regardless of track record: **strict** is never
+overridden (choosing it is a request to be consulted, and a record is not
+consent), a `DENY` verdict is never promoted, and no tool gets credit for runs
+the ledger did not itself observe.
+
+`GET /api/approvals/trust` reports where every eligible tool stands.
+`FERAL_TRUST_PROMOTE_AFTER` changes the threshold; `FERAL_TRUST_DISABLED=1`
+turns the whole thing off.
 
 ## Configuration
 
