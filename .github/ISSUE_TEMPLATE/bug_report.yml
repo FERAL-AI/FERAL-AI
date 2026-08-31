@@ -1,0 +1,88 @@
+name: Bug report
+description: Something FERAL does that it should not, or does not do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing. Two fields below do most of the work: the
+        `feral doctor` output and the version pair.
+
+        FERAL runs on your machine, so we cannot reproduce anything from
+        our side. `feral doctor` reports real runtime state rather than
+        what the config claims, which is usually where the answer is.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+      placeholder: |
+        I asked it to ... and expected ..., but it ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`feral doctor` output"
+      description: |
+        Paste the whole thing. It reports the interpreter, SQLite FTS5
+        and loadable-extension support, pairing and access state, and
+        which subsystems are actually live. Redact tokens and paths you
+        would rather not share.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Running version and installed version
+      description: |
+        `feral update --check` prints both. They are frequently
+        different: a Python process holds its source in memory from the
+        moment it starts and never reloads it, so `pip install
+        --upgrade` succeeds and changes nothing until the brain is
+        restarted. If they differ, restart and check whether the problem
+        survives before filing.
+      placeholder: "running 2026.8.29, installed 2026.8.29"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface
+      description: The same brain behaves differently across these, and it matters.
+      multiple: true
+      options:
+        - Web UI
+        - CLI
+        - Voice
+        - A paired phone
+        - A channel (Telegram / Discord / Slack)
+        - A routine or scheduled job
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: |
+        If it only happens sometimes, say so and describe when. An
+        intermittent report with honest conditions is more useful than a
+        clean one that does not reproduce.
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Errors, tracebacks, or the surrounding lines.
+      render: text
+    validations:
+      required: false
