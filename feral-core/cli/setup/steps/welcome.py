@@ -60,13 +60,32 @@ def run(state: WizardState) -> None:
             style="bold",
         )
         body = Text.from_markup(
-            "Welcome — this wizard sets up your local brain in a few steps:\n\n"
-            "  [bold]1.[/]  LLM provider + model (any cloud or local)\n"
-            "  [bold]2.[/]  Speech in / out (cloud or fully local)\n"
-            "  [bold]3.[/]  Identity + personality\n"
-            "  [bold]4.[/]  Network access (localhost / LAN / Tailscale)\n"
-            "  [bold]5.[/]  Capabilities (vision, autonomy, workspace access)\n"
-            "  [bold]6.[/]  Optional: integrations, tool keys, channels\n\n"
+            # This list is ordered by, and numbered with, the step
+            # indices the operator will actually see in the "Step N of
+            # M" header. The previous version listed six unnumbered
+            # groups in a different order from the wizard (it put
+            # network fourth; network is step 9) and omitted memory and
+            # system permissions entirely, so the first screen
+            # contradicted the second.
+            "Welcome — this wizard sets up your local brain.\n\n"
+            "[bold]Steps 1-2 get you a working brain.[/] Everything after "
+            "is optional:\nskip it now, come back later with "
+            "[bold]feral setup --from-step <name>[/].\n\n"
+            "  [bold] 1-2 [/]  LLM provider + model  [dim](any cloud or "
+            "local)[/]\n"
+            "  [bold] 3-4 [/]  Speech in / out  [dim](cloud or fully "
+            "local)[/]\n"
+            "  [bold] 5-6 [/]  Identity + personality\n"
+            "  [bold] 7   [/]  Capabilities  [dim](vision, autonomy, "
+            "workspace access)[/]\n"
+            "  [bold] 8   [/]  Memory + semantic search\n"
+            "  [bold] 9   [/]  Network access  [dim](localhost / LAN / "
+            "Tailscale)[/]\n"
+            "  [bold]10-16[/]  Integrations, Home Assistant, tool keys, "
+            "coding\n           agents, messaging channels, phone, "
+            "permissions\n\n"
+            "[dim]After step 2 you can stop and start using FERAL, or keep "
+            "going.[/]\n\n"
             # The pickers are enter-on-highlight (ui_kit.pick), not the
             # space-to-mark ui_kit.select — telling operators to press
             # space made them think the wizard was stuck.
