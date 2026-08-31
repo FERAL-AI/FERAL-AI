@@ -1796,8 +1796,9 @@ class BrainState:
 
         with boot_subsystem(self._boot_report, "MockRoomba"):
             # Closes THESIS_SCENARIOS S5 on demo machines without HA.
-            # Default-on; operator can disable with FERAL_MOCK_ROOMBA=0
-            # once a real Roomba is wired through HA.
+            # Opt-in: FERAL_MOCK_ROOMBA=1 enables it. Default-off, because
+            # a default-on mock put a vacuum that does not exist into
+            # /api/hardware/mesh and the Devices page of every install.
             from hardware.mock_roomba import (
                 MockRoomba,
                 is_enabled as _mock_roomba_enabled,
