@@ -2,42 +2,58 @@
 title: "Smart Glasses"
 status: "Beta"
 sidebarTitle: "Smart Glasses"
-description: "Stream video from smart glasses for scene analysis, AR overlays, and hands-free voice interaction."
+description: "Ingest first-person camera frames over HUP for scene analysis and conversational context."
 ---
 
 ## Overview
 
-FERAL's smart glasses integration enables real-time video streaming, scene analysis via the vision pipeline, AR overlay commands, and hands-free voice interaction. The glasses act as a first-person sensor for the brain — providing continuous visual context about your environment.
+FERAL ingests first-person camera frames over HUP and feeds them to the
+vision pipeline for scene analysis and conversational context.
 
-## Supported Devices
+## What ships today
 
-| Device | Connection | Features |
-|--------|-----------|----------|
-| FERAL Glasses (reference) | BLE + Wi-Fi | Video, audio, AR overlay, touch |
-| Meta Ray-Ban | Companion app bridge | Photo capture, audio, voice |
-| Vuzix Blade 2 | Wi-Fi direct | Video, AR overlay |
-| Custom ESP32-CAM builds | BLE / Wi-Fi | Video stream, basic audio |
+**FERAL does not ship a driver for any glasses vendor.** What it ships is
+the *receiving* half: any node that can send a `glasses_frame` over HUP
+becomes a first-person camera for the brain.
 
-<Note>
-  Third-party glasses support varies. The FERAL reference glasses support the full feature set. Other devices may only support a subset.
-</Note>
+| Piece | Status |
+|---|---|
+| `glasses_frame` ingest over HUP | Ships — `api/server.py:4471` |
+| Frame ring buffer per device | Ships — `perception/glasses_buffer.py` |
+| Scene analysis + context attach | Ships — `perception/scene.py`, `context_attach.py` |
+| Phone camera as the frame source | Ships — via the companion app node |
+| A driver for any specific glasses product | **Does not ship** |
+
+<Warning>
+  Earlier versions of this page listed Meta Ray-Ban, Vuzix Blade 2 and a
+  "FERAL Glasses (reference)" device as supported, and documented a
+  `hardware.glasses` settings block with `ar_overlay`,
+  `stream_resolution` and `stream_fps`. **None of that existed.** No code
+  in this repository implements any of those vendors or reads any of
+  those settings keys. The table above is what the code actually does.
+</Warning>
+
+## Connecting glasses
+
+Because the brain accepts frames rather than driving hardware, the
+integration point is a **node**, not a FERAL-side driver. Write (or use)
+a node that owns the Bluetooth or Wi-Fi connection to the glasses and
+forwards frames as `glasses_frame` messages. The node SDKs
+(`feral-nodes/python-node-sdk`, `ts-node-sdk`, Swift, Kotlin) all speak
+the envelope.
+
+The practical path today is a phone: the companion app already holds the
+BLE connection to a wearable and is already a registered node, so it
+forwards frames without any new transport work.
 
 ## Connection Setup
 
 <Steps>
-  <Step title="Enable the glasses adapter">
-    ```json settings.json
-    {
-      "hardware": {
-        "glasses": {
-          "enabled": true,
-          "stream_resolution": "720p",
-          "stream_fps": 15,
-          "ar_overlay": true
-        }
-      }
-    }
-    ```
+  <Step title="Register a node that sends frames">
+    There is no `hardware.glasses` settings block — the brain reads no
+    such keys. A node registers over HUP like any other, declaring a
+    camera capability, and then sends `glasses_frame` messages. See the
+    node SDK README for the registration handshake.
   </Step>
 
   <Step title="Pair the glasses">
@@ -68,22 +84,24 @@ FERAL's smart glasses integration enables real-time video streaming, scene analy
 
 ## Video Streaming Protocol
 
-Glasses stream video to the brain over Wi-Fi using a lightweight protocol:
+Frames reach the vision pipeline as discrete HUP messages, not as a
+video stream the brain connects to:
 
 ```
-Glasses → Wi-Fi (MJPEG/H.264) → FERAL Brain → Vision Pipeline → LLM Context
+glasses → node (owns the BLE/Wi-Fi link) → HUP glasses_frame
+        → GlassesBuffer → scene analysis → LLM context
 ```
 
-| Setting | Default | Options |
-|---------|---------|---------|
-| `stream_resolution` | `720p` | `480p`, `720p`, `1080p` |
-| `stream_fps` | `15` | `5` – `30` |
-| `codec` | `mjpeg` | `mjpeg`, `h264` |
-| `vision_interval` | `2s` | How often frames are sent to the vision model |
+The brain never opens a stream. It receives whatever the node chooses to
+send, so resolution, frame rate and codec are the **node's** decisions,
+not FERAL settings.
 
-<Tip>
-  Lower resolution and FPS extend battery life. Use `480p` at `10fps` for all-day wear.
-</Tip>
+<Warning>
+  This section previously documented `stream_resolution`, `stream_fps`,
+  `codec` and `vision_interval` as configurable settings. The brain reads
+  none of those keys — they exist in no source file. Set the capture rate
+  in the node that owns the camera.
+</Warning>
 
 ## Scene Analysis Pipeline
 
@@ -176,13 +194,20 @@ With glasses connected, FERAL's voice pipeline uses the glasses microphone and s
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="Video stream not connecting">
-    Ensure the glasses and FERAL host are on the same Wi-Fi network. Check firewall rules for the streaming port.
+  <Accordion title="No frames reaching the brain">
+    Frames arrive as HUP `glasses_frame` messages from a registered node,
+    so check the node first: is it connected to `/v1/node`, did
+    `node_register` succeed, and is it actually sending? A node that
+    connects but never sends looks identical to glasses that are off.
   </Accordion>
   <Accordion title="High latency on scene analysis">
-    Reduce `stream_fps` and `stream_resolution`. If using a cloud vision model, latency depends on your internet connection — switch to a local model for faster results.
+    Lower the capture rate **in the node** — the brain has no frame-rate
+    setting. If the vision model is a cloud one, latency also tracks your
+    connection; a local model removes that leg.
   </Accordion>
   <Accordion title="AR overlay not displaying">
-    Verify `ar_overlay` is `true` in settings and that your glasses model supports overlays.
+    FERAL has no AR overlay feature. Nothing in the brain renders to a
+    glasses display, and there is no `ar_overlay` setting. Drawing on the
+    lens is the node's and the vendor SDK's job.
   </Accordion>
 </AccordionGroup>

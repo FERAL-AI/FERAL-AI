@@ -40,6 +40,27 @@ _shutdown_tasks: set = set()
 
 PHONE_BRIDGE_SERVICE_TYPE = "_feral-phone._tcp.local."
 
+# The brain advertises under BOTH names, deliberately.
+#
+# ``_feral._tcp.local.`` is what actually shipped and is load-bearing:
+# ``memory/sync.py:44`` browses it to find peer brains for CRDT memory
+# replication, and the Theora iOS app declares it in
+# ``NSBonjourServices``. Dropping it would break federated sync and
+# phone discovery.
+#
+# ``_feral-brain._tcp.local.`` is what HUP_SPEC.md:178 tells brains to
+# advertise, and what both node SDKs browse for
+# (``python-node-sdk/.../discovery.py:16``, ``ts-node-sdk/src/discovery.ts``).
+# Nothing advertised it, so zero-config discovery was dead in every SDK.
+#
+# Advertising both costs one extra mDNS record and makes the SDKs work
+# without breaking the two consumers that already depend on the legacy
+# name. Renaming one side to match the other would have fixed one of
+# those groups by breaking the other.
+LEGACY_SERVICE_TYPE = "_feral._tcp.local."
+SPEC_SERVICE_TYPE = "_feral-brain._tcp.local."
+BRAIN_SERVICE_TYPES = (LEGACY_SERVICE_TYPE, SPEC_SERVICE_TYPE)
+
 
 def _resolve_addresses() -> list[str]:
     """Return the list of IPv4 addresses to advertise the brain on.
@@ -177,24 +198,30 @@ def _build_service_info(port: int, name: str):
     hostname = socket.gethostname()
     addresses = _resolve_addresses()
     primary = addresses[-1] if len(addresses) > 1 else addresses[0]
-    info = ServiceInfo(
-        "_feral._tcp.local.",
-        f"{name}._feral._tcp.local.",
-        addresses=[socket.inet_aton(addr) for addr in addresses],
-        port=port,
-        properties=_txt_properties(name, hostname, port),
-    )
-    return info, primary
+    props = _txt_properties(name, hostname, port)
+    packed = [socket.inet_aton(addr) for addr in addresses]
+    infos = [
+        ServiceInfo(
+            service_type,
+            f"{name}.{service_type}",
+            addresses=packed,
+            port=port,
+            properties=props,
+        )
+        for service_type in BRAIN_SERVICE_TYPES
+    ]
+    return infos, primary
 
 
 def _register_blocking(port: int, name: str):
     """Synchronous register path. Safe to run inside a thread executor."""
     from zeroconf import Zeroconf
 
-    info, ip = _build_service_info(port, name)
+    infos, ip = _build_service_info(port, name)
     zc = Zeroconf()
-    zc.register_service(info)
-    return zc, info, ip
+    for info in infos:
+        zc.register_service(info)
+    return zc, infos, ip
 
 
 def advertise_brain(port: int = 9090, name: str = "FERAL Brain") -> bool:
@@ -229,11 +256,11 @@ def advertise_brain(port: int = 9090, name: str = "FERAL Brain") -> bool:
             t.join()
             if "error" in result:
                 raise result["error"]
-            zc, info, ip = result["value"]
+            zc, infos, ip = result["value"]
         else:
-            zc, info, ip = _register_blocking(port, name)
+            zc, infos, ip = _register_blocking(port, name)
 
-        _registration = (zc, info)
+        _registration = (zc, infos)
         logger.info(f"mDNS: Advertising {name} on {ip}:{port}")
         return True
     except ImportError:
@@ -290,24 +317,28 @@ async def advertise_brain_async(
         loop = asyncio.get_running_loop()
 
         if have_async:
-            info, ip = _build_service_info(port, name)
-            async_info = AsyncServiceInfo(
-                info.type,
-                info.name,
-                addresses=list(info.addresses),
-                port=info.port,
-                properties=info.properties,
-            )
+            infos, ip = _build_service_info(port, name)
+            async_infos = [
+                AsyncServiceInfo(
+                    info.type,
+                    info.name,
+                    addresses=list(info.addresses),
+                    port=info.port,
+                    properties=info.properties,
+                )
+                for info in infos
+            ]
             zc = AsyncZeroconf()
-            await zc.async_register_service(async_info)
-            _async_registration = (zc, async_info)
+            for async_info in async_infos:
+                await zc.async_register_service(async_info)
+            _async_registration = (zc, async_infos)
             logger.info(f"mDNS: Advertising {name} on {ip}:{port} (async)")
             return True
 
-        zc, info, ip = await loop.run_in_executor(
+        zc, infos, ip = await loop.run_in_executor(
             None, _register_blocking, port, name
         )
-        _registration = (zc, info)
+        _registration = (zc, infos)
         logger.info(f"mDNS: Advertising {name} on {ip}:{port}")
         return True
     except ImportError:
@@ -342,9 +373,10 @@ def stop_advertisement():
     """Stop advertising and clean up zeroconf resources."""
     global _registration, _async_registration
     if _registration:
-        zc, info = _registration
+        zc, infos = _registration
         try:
-            zc.unregister_service(info)
+            for info in infos:
+                zc.unregister_service(info)
             zc.close()
         except Exception as exc:
             logger.debug("mDNS sync unregister failed: %s: %r", type(exc).__name__, exc)
@@ -353,22 +385,24 @@ def stop_advertisement():
     if _async_registration:
         # We can't await here; schedule the async close on any running loop,
         # or fall back to the sync underlying zeroconf close().
-        zc, info = _async_registration
+        zc, async_infos = _async_registration
         try:
             try:
                 loop = asyncio.get_running_loop()
                 _task = loop.create_task(
-                    _stop_async_registration(zc, info), name="mdns-unregister",
+                    _stop_async_registration(zc, async_infos),
+                    name="mdns-unregister",
                 )
                 _shutdown_tasks.add(_task)
                 _task.add_done_callback(_shutdown_tasks.discard)
             except RuntimeError:
                 inner = getattr(zc, "zeroconf", None)
                 if inner is not None:
-                    try:
-                        inner.unregister_service(info)
-                    except Exception:
-                        pass
+                    for info in async_infos:
+                        try:
+                            inner.unregister_service(info)
+                        except Exception:
+                            pass
                     try:
                         inner.close()
                     except Exception:
@@ -378,9 +412,10 @@ def stop_advertisement():
             logger.info("mDNS: Async advertisement stopped")
 
 
-async def _stop_async_registration(zc, info) -> None:
+async def _stop_async_registration(zc, infos) -> None:
     try:
-        await zc.async_unregister_service(info)
+        for info in infos:
+            await zc.async_unregister_service(info)
     except Exception as exc:
         logger.debug("mDNS async unregister failed: %s: %r", type(exc).__name__, exc)
     try:
