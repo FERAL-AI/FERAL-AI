@@ -13,9 +13,14 @@ differently. Before ``security/command_unwrap.py`` all of these ran
     sh <<'EOF' ... rm -rf / ... EOF
     bash -c "bash -c 'rm -rf /'"
 
-``coding_tools.DANGEROUS_COMMANDS`` is a regex over the raw string and
-matches none of them. ``exec_mode.command_argument_paths`` shlex-splits
-the raw string and sees no denied path in any of them.
+``sandbox_policy._COMMAND_DENY_FLOOR`` is a set of regexes over the raw
+string and matches none of them. ``exec_mode.command_argument_paths``
+shlex-splits the raw string and sees no denied path in any of them.
+
+(A second blocklist, ``coding_tools.DANGEROUS_COMMANDS``, also used to
+sit in front of the floor. It was removed rather than repaired: it was
+broken in two independent ways and blocked nothing the floor did not
+already block. See ``tests/test_dangerous_command_regex.py``.)
 
 The tests below assert the unwrapper reveals each shape, that it does
 NOT fire on ordinary commands, and that the two policy call sites

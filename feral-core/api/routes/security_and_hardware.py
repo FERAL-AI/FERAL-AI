@@ -396,6 +396,12 @@ _POLICY_SPEC: dict = {
         "allow_file_write": ("bool",),
         "allow_network_requests": ("bool",),
         "denied_command_patterns": ("regex_list",),
+        # Known so a policy that has it round-trips through GET/POST and
+        # so it can be turned *off* here. Turning it on is refused in
+        # ``update_policy``, not by this spec: an unknown-key rejection
+        # would also block de-escalation, which is the one direction this
+        # route should always allow.
+        "full_authority": ("bool",),
     },
     "daemon": {
         "shell": {
@@ -628,6 +634,38 @@ async def update_policy(body: dict):
                          f"{'s' if len(errors) > 2 else ''} in this document.)"
                 ),
                 "errors": errors,
+            },
+        )
+
+    # ``execution.full_authority`` is the one key this route may not turn
+    # on. It lifts the deny floor, the Docker requirement for generated
+    # code, the workspace confinement and the path check all at once,
+    # which is precisely the set of boundaries that contain a prompt
+    # injection. A request that could set it would let injected text
+    # grant itself the authority those boundaries withhold, and the key
+    # would be an escalation path rather than an operator's choice.
+    #
+    # It is documented as settable only by editing the policy file by
+    # hand, so this enforces that rather than trusting the sentence.
+    #
+    # De-escalation is still allowed: a body that turns it off is
+    # honoured. Authority can always be given up over the API, and only
+    # ever taken at the keyboard.
+    current = state.policy.full_authority() if state.policy else False
+    requested = bool(body.get("execution", {}).get("full_authority", False))
+    if requested and not current:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "full_authority_not_settable_here",
+                "field": "execution.full_authority",
+                "message": (
+                    "execution.full_authority cannot be enabled over the "
+                    "API. It removes the boundaries that contain prompt "
+                    "injection, so it is set only by editing "
+                    "~/.feral/policies/default.yaml by hand. It can be "
+                    "turned off here."
+                ),
             },
         )
 
