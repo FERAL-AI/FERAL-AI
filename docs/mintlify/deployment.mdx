@@ -234,4 +234,4 @@ feral start
 0 3 * * * tar czf /backups/feral-$(date +\%F).tar.gz -C ~/.feral .
 ```
 
-The directory includes `memory.db` (or `memory.db.enc` if you ran `feral memory encrypt`), `settings.json`, `USER.md`, `SOUL.md`, `credentials.enc` (ChaCha20-Poly1305 encrypted vault), wiki pages, and skill manifests.
+The directory includes `memory.db` and `sync_wal.db` (or `memory.db.enc` and `sync_wal.db.enc` if you ran `feral memory encrypt`, which covers both files), `settings.json`, `USER.md`, `SOUL.md`, `credentials.enc` (ChaCha20-Poly1305 encrypted vault), wiki pages, and skill manifests.

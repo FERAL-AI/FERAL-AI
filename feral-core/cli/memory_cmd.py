@@ -345,11 +345,16 @@ def cmd_memory(action: str, backend_id: str | None, *, flags=None) -> None:
 
         from config.loader import feral_data_home
         from security.vault import get_vault
-        from memory.at_rest import encrypt_memory_db
+        from memory.at_rest import (
+            encrypt_memory_db,
+            encrypt_sync_wal_db,
+            sync_wal_path,
+        )
 
         force = bool(getattr(flags, "force", False))
         no_shred = bool(getattr(flags, "no_shred", False))
         db_path = feral_data_home() / "memory.db"
+        wal_path = sync_wal_path(db_path)
 
         try:
             vault = get_vault()
@@ -361,32 +366,56 @@ def cmd_memory(action: str, backend_id: str | None, *, flags=None) -> None:
             )
             sys.exit(1)
 
-        try:
-            result = encrypt_memory_db(
-                vault=vault,
-                db_path=db_path,
-                shred_plaintext=not no_shred,
-                force=force,
-            )
-        except FileExistsError as exc:
-            print(f"  {exc}")
-            sys.exit(1)
-        except FileNotFoundError as exc:
-            print(f"  {exc}")
-            sys.exit(1)
-        except Exception as exc:
-            print(f"  Encrypt failed: {exc}")
-            sys.exit(1)
-
-        print(
-            f"  Encrypted {result['ciphertext_path']} "
-            f"({result['bytes']} bytes)"
+        # Two legs, because there are two files holding memory
+        # contents. sync_wal.db carries the full note body and episode
+        # text of every local write as JSON, so encrypting memory.db
+        # alone left a plaintext copy of the same memories next to the
+        # ciphertext. Each leg is independently skippable: an install
+        # that was encrypted before the WAL leg existed has no
+        # plaintext memory.db left, and must still be able to encrypt
+        # its WAL.
+        legs = (
+            ("memory.db", db_path, encrypt_memory_db, {"db_path": db_path}),
+            ("sync_wal.db", wal_path, encrypt_sync_wal_db,
+             {"wal_path": wal_path}),
         )
-        if result.get("backup_path"):
+        encrypted_any = False
+        for label, path, fn, kwargs in legs:
+            enc_path = path.with_name(path.name + ".enc")
+            if not path.exists():
+                if enc_path.exists():
+                    print(f"  {label}: already encrypted ({enc_path})")
+                else:
+                    print(f"  {label}: nothing to encrypt (no {path})")
+                continue
+            try:
+                result = fn(
+                    vault=vault,
+                    shred_plaintext=not no_shred,
+                    force=force,
+                    **kwargs,
+                )
+            except FileExistsError as exc:
+                print(f"  {exc}")
+                sys.exit(1)
+            except Exception as exc:
+                print(f"  Encrypt failed for {label}: {exc}")
+                sys.exit(1)
+            encrypted_any = True
             print(
-                f"  Plaintext backup retained at {result['backup_path']} — "
-                f"delete manually when verified."
+                f"  Encrypted {result['ciphertext_path']} "
+                f"({result['bytes']} bytes)"
             )
+            if result.get("backup_path"):
+                print(
+                    f"  Plaintext backup retained at "
+                    f"{result['backup_path']}, delete manually when "
+                    f"verified."
+                )
+
+        if not encrypted_any:
+            print("  Nothing to do.")
+            sys.exit(1)
 
         settings = _load_settings()
         mem = settings.setdefault("memory", {})
@@ -511,6 +540,21 @@ def cmd_memory(action: str, backend_id: str | None, *, flags=None) -> None:
             print(f"  Ciphertext:            {enc['ciphertext_path']}")
         if enc.get("backup_path"):
             print(f"  Plaintext backup:      {enc['backup_path']}")
+        # The sync WAL is the other file holding memory contents. Report
+        # it separately so "encrypted at rest: yes" can never stand
+        # alone over a plaintext copy of the same data.
+        print(
+            f"  Sync WAL encrypted:    "
+            f"{'yes' if enc['sync_wal_encrypted_at_rest'] else 'no'}"
+        )
+        if enc.get("sync_wal_backup_path"):
+            print(f"  Sync WAL backup:       {enc['sync_wal_backup_path']}")
+        if enc["encrypted_at_rest"] and enc["sync_wal_plaintext_present"]:
+            print(
+                f"  WARNING: {enc['sync_wal_path']} is still plaintext. It "
+                f"holds note and episode content. Stop the brain and run "
+                f"`feral memory encrypt`."
+            )
 
         _print_vector_health(db_path)
         return
