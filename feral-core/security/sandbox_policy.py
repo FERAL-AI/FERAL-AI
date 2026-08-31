@@ -668,7 +668,24 @@ class SandboxPolicy:
         ),
         re.compile(_CMD_START + r"mkfs(?:\.\w+)?\b", re.I | re.M),
         re.compile(_CMD_START + r"dd\s[^\n]*\bof=/dev/", re.I | re.M),
-        re.compile(_CMD_START + r"(?:shutdown|reboot|halt|poweroff)\b", re.I | re.M),
+        # shutdown / reboot / halt / poweroff are deliberately NOT here.
+        #
+        # The floor is for commands that are catastrophic and never
+        # legitimate work: they destroy a filesystem or a device and
+        # there is nothing to confirm because no operator wants them.
+        # Restarting your own machine is neither. It is reversible, it is
+        # ordinary sysadmin, and asking an assistant to do it is a
+        # reasonable request.
+        #
+        # In the floor they were refused at every autonomy tier with no
+        # override, so the answer to "reboot my machine" was no, and the
+        # operator had no way to say otherwise short of lifting the whole
+        # floor. That is a refusal standing in for a question.
+        #
+        # They are gated as the question they are instead. The bash
+        # endpoint is safety_tier "confirm", so strict and hybrid ask
+        # before running one. loose runs it without asking, which is what
+        # loose means and what the operator chose it for.
         # Fork bomb, in its canonical spelling.
         re.compile(r":\s*\(\s*\)\s*\{.*\|.*&\s*\}\s*;", re.S),
         # Writing to a raw block device is never a workspace operation.
