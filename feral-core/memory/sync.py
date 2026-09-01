@@ -506,6 +506,17 @@ class SyncWAL:
         self._init_wal()
 
     def _init_wal(self):
+        # This file holds full note bodies and episode text as JSON row
+        # payloads, so it is inside the at-rest envelope with
+        # memory.db. Decrypt a sync_wal.db.enc if that is all there is,
+        # then chmod 0600 whatever we end up opening. Both calls are
+        # best-effort by contract: prepare_sync_wal_for_boot never
+        # raises, and harden_db_mode logs rather than blocking the
+        # open. See memory/at_rest.py for the failure posture.
+        from memory.at_rest import harden_db_mode, prepare_sync_wal_for_boot
+
+        wal_file = Path(self._db_path)
+        prepare_sync_wal_for_boot(wal_file)
         conn = sqlite3.connect(self._db_path)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sync_wal (
@@ -576,6 +587,10 @@ class SyncWAL:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_wal_timestamp ON sync_wal(timestamp)")
         conn.commit()
         conn.close()
+        # After the file exists. SQLite creates it 0666 & ~umask, which
+        # is 0644 on a default install: two audits found this file
+        # world readable with 6.24 MB of plaintext row payloads in it.
+        harden_db_mode(wal_file)
 
     def append(self, op: SyncOperation):
         """Synchronous WAL append. Used by the boot path and the few
