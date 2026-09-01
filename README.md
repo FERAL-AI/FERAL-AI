@@ -25,6 +25,8 @@
   <!-- sync-versions:badge -->
   <img src="https://img.shields.io/badge/version-2026.9.1-06b6d4?style=flat-square" alt="Version" />
   <!-- /sync-versions:badge -->
+  <a href="https://pepy.tech/projects/feral-ai"><img src="https://img.shields.io/pepy/dt/feral-ai?style=flat-square&color=06b6d4&label=downloads" alt="PyPI Downloads" /></a>
+  <a href="https://pypi.org/project/feral-ai/"><img src="https://img.shields.io/pypi/v/feral-ai?style=flat-square&color=06b6d4&label=pypi" alt="PyPI" /></a>
   <a href="https://github.com/FERAL-AI/FERAL-AI/stargazers"><img src="https://img.shields.io/github/stars/FERAL-AI/FERAL-AI?style=flat-square&color=06b6d4" alt="Stars" /></a>
   <a href="https://github.com/FERAL-AI/FERAL-AI/commits/main"><img src="https://img.shields.io/github/last-commit/FERAL-AI/FERAL-AI?style=flat-square&color=06b6d4" alt="Last Commit" /></a>
   <img src="https://img.shields.io/badge/license-Apache%202.0-06b6d4?style=flat-square" alt="License" />
