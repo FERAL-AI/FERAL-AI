@@ -69,6 +69,55 @@ SYNC_PEERS = [p.strip() for p in os.getenv("FERAL_SYNC_PEERS", "").split(",") if
 _MDNS_DISCOVERY_TIMEOUT = 30  # seconds before falling back to static peers
 
 
+# ── Wire framing ────────────────────────────────────────────────────────
+#
+# The change set used to go out as ONE websocket frame. ``websockets``
+# defaults ``max_size`` to 1 MiB on both ends, so any peer holding more
+# than a megabyte of history was unsyncable: the reader closed the
+# connection with 1009 (message too big), sync_with_peer burned its
+# retries, backed off, and retried forever. Measured on the owner's live
+# WAL at the time of the fix: 16,324 operations, 6.24 MiB in the ``data``
+# column alone, before the per-op envelope.
+#
+# Raising ``max_size`` alone is not a fix. The WAL grows with every
+# write, so any constant is a deadline rather than a bound. The exchange
+# is chunked instead, and the limits below are the belt to that braces.
+#
+# SYNC_MAX_FRAME_BYTES is the SENDER's budget per frame. 256 KiB sits an
+# order of magnitude under the stock 1 MiB reader default, which means a
+# FERAL brain can still sync with a peer that never raised its own
+# receive limit, including an older build of FERAL itself.
+SYNC_MAX_FRAME_BYTES = int(os.getenv("FERAL_SYNC_MAX_FRAME_BYTES", str(256 * 1024)))
+
+# The RECEIVER's per-frame ceiling, passed to ``websockets.connect``.
+# Larger than the sender's budget because one operation is indivisible:
+# a single episode with a multi-megabyte ``detail`` has to cross in one
+# frame or not at all. An op larger than this is undeliverable and says
+# so in the log rather than wedging the exchange.
+SYNC_MAX_RECV_BYTES = int(os.getenv("FERAL_SYNC_MAX_RECV_BYTES", str(8 * 1024 * 1024)))
+
+# Cap on how many operations one exchange will accept before it gives
+# up. Chunking means the reader now loops on ``recv``; without a bound a
+# peer could stream frames at it indefinitely. 500k is ~30x the owner's
+# entire WAL, so it can only be reached by something pathological.
+SYNC_MAX_OPS_PER_EXCHANGE = int(
+    os.getenv("FERAL_SYNC_MAX_OPS_PER_EXCHANGE", str(500_000))
+)
+
+# ── WAL retention ───────────────────────────────────────────────────────
+#
+# See :meth:`SyncWAL.prune` for the trade-off this number encodes.
+WAL_MAX_AGE_SECONDS = float(
+    os.getenv("FERAL_SYNC_WAL_MAX_AGE_SECONDS", str(90 * 24 * 60 * 60))
+)
+
+# How many origins a peer's vector clock may carry before
+# ``SyncWAL.get_changes_for_peer`` stops expressing one SQL clause per
+# origin. 150 origins is 750 bind variables, still inside the 999
+# SQLITE_MAX_VARIABLE_NUMBER floor, with room for the rest of the query.
+_MAX_VC_CLAUSES = 150
+
+
 def ensure_sync_passphrase() -> str:
     """Resolve the federated-sync shared secret, generating + persisting
     it on first boot when none exists yet.
@@ -341,6 +390,97 @@ class VectorClock:
         return VectorClock(clocks=dict(d))
 
 
+class SyncFrameOverflowError(RuntimeError):
+    """A peer streamed more operations in one exchange than
+    ``SYNC_MAX_OPS_PER_EXCHANGE`` allows."""
+
+
+def sync_data_frames(ops: list) -> list[dict]:
+    """Split a change set into ``sync_data`` messages, none of which
+    serialises above :data:`SYNC_MAX_FRAME_BYTES`.
+
+    Always returns at least one message, so "I have nothing for you" is
+    still an explicit end-of-stream rather than a silence the reader has
+    to time out on.
+
+    ``more`` marks every message but the last. A peer running the
+    pre-chunking build sends one message with no ``more`` key at all,
+    which reads as falsy and terminates the loop after one frame, so
+    new and old builds still interoperate, at the old capacity.
+
+    An operation that alone exceeds the budget gets a frame to itself.
+    Operations are indivisible, so the alternative is to drop it. The
+    reader's ``max_size`` is :data:`SYNC_MAX_RECV_BYTES`, well above the
+    sender's budget, precisely to leave room for this case.
+    """
+    batches: list[list[dict]] = []
+    current: list[dict] = []
+    # {"type":"sync_data","changes":[],"seq":0,"more":false} and slack
+    # for a 6-digit seq.
+    envelope = 64
+    size = envelope
+    for op in ops:
+        d = op.to_dict() if hasattr(op, "to_dict") else op
+        cost = len(json.dumps(d)) + 1
+        if current and size + cost > SYNC_MAX_FRAME_BYTES:
+            batches.append(current)
+            current = []
+            size = envelope
+        current.append(d)
+        size += cost
+    batches.append(current)
+
+    last = len(batches) - 1
+    return [
+        {"type": "sync_data", "changes": b, "seq": i, "more": i < last}
+        for i, b in enumerate(batches)
+    ]
+
+
+class SyncProtocolMessage(Exception):
+    """A non-``sync_data`` message interrupted a chunked read.
+
+    Carries the message so the caller can report the peer's own error
+    text rather than a generic protocol failure.
+    """
+
+    def __init__(self, message):
+        self.message = message
+        super().__init__(str(message))
+
+
+async def recv_sync_data(recv_message) -> list[dict]:
+    """Read a chunked change set: keep receiving until a message that
+    does not set ``more``.
+
+    ``recv_message`` is an awaitable callable returning one already
+    decoded message dict, so this works for both the client
+    (``json.loads(await ws.recv())``) and the FastAPI server
+    (``await ws.receive_json()``).
+
+    Anything that is not a ``sync_data`` message ends the read and is
+    returned to the caller's own handling via
+    :class:`SyncProtocolMessage`; in practice that is ``sync_error``.
+    """
+    changes: list[dict] = []
+    while True:
+        msg = await recv_message()
+        if not isinstance(msg, dict):
+            raise SyncProtocolMessage(msg)
+        if msg.get("type") not in (None, "sync_data"):
+            raise SyncProtocolMessage(msg)
+        batch = msg.get("changes") or []
+        if not isinstance(batch, list):
+            batch = []
+        changes.extend(batch)
+        if len(changes) > SYNC_MAX_OPS_PER_EXCHANGE:
+            raise SyncFrameOverflowError(
+                f"peer streamed more than {SYNC_MAX_OPS_PER_EXCHANGE} ops in one exchange"
+            )
+        if not msg.get("more"):
+            return changes
+
+
 class SyncDiskFullError(OSError):
     """Raised when a WAL write fails because the underlying disk is full.
 
@@ -380,8 +520,60 @@ class SyncWAL:
                 synced_to TEXT DEFAULT '[]'
             )
         """)
+        # The HLC's numeric parts, split out of the string.
+        #
+        # ``hlc`` is "wall_ms:counter:node_id", and lexicographic order
+        # over that is NOT HLC order: "999:0:n" sorts above "1000:0:n"
+        # because wall_ms is variable width. That is why the original
+        # ``get_changes_since`` pulled the whole table and filtered in
+        # Python: ``idx_wal_hlc`` was on the string and unusable for a
+        # range scan. Measured cost of that choice: 2,961 ms to return
+        # ZERO new operations at 500k rows.
+        #
+        # Splitting the two integers out makes the comparison numeric,
+        # which SQLite can index. Within one ``origin_node`` the HLC's
+        # own node_id is constant, so (wall, counter) is the complete
+        # ordering: the third tuple element only ever breaks ties
+        # BETWEEN nodes, which a per-origin range never spans.
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(sync_wal)")}
+        if "hlc_wall" not in existing:
+            conn.execute("ALTER TABLE sync_wal ADD COLUMN hlc_wall INTEGER NOT NULL DEFAULT 0")
+        if "hlc_counter" not in existing:
+            conn.execute("ALTER TABLE sync_wal ADD COLUMN hlc_counter INTEGER NOT NULL DEFAULT 0")
+        if "hlc_wall" not in existing or "hlc_counter" not in existing:
+            # Backfill. An existing WAL has every row at the 0 default,
+            # which would make every op look older than every watermark
+            # and silently stop replication. Done in one statement so a
+            # crash mid-backfill leaves the transaction unapplied and
+            # the next boot retries it.
+            conn.execute(
+                "UPDATE sync_wal SET "
+                "hlc_wall = CAST(substr(hlc, 1, instr(hlc, ':') - 1) AS INTEGER), "
+                "hlc_counter = CAST("
+                "  substr(hlc, instr(hlc, ':') + 1,"
+                "         instr(substr(hlc, instr(hlc, ':') + 1), ':') - 1)"
+                " AS INTEGER) "
+                "WHERE instr(hlc, ':') > 0"
+            )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_wal_hlc ON sync_wal(hlc)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_wal_origin ON sync_wal(origin_node)")
+        # The index the exchange path actually uses: a per-origin range
+        # scan over the numeric HLC.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wal_origin_hlc "
+            "ON sync_wal(origin_node, hlc_wall, hlc_counter)"
+        )
+        # Global HLC order, for the single-watermark query and to let
+        # both queries satisfy ORDER BY from the index instead of a temp
+        # B-tree. Verified with EXPLAIN QUERY PLAN on the live WAL:
+        # without it, "what is new since X" is
+        # ``SCAN sync_wal`` + ``USE TEMP B-TREE FOR ORDER BY``; with it,
+        # ``SEARCH sync_wal USING INDEX idx_wal_hlc_num (hlc_wall>?)``.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wal_hlc_num ON sync_wal(hlc_wall, hlc_counter)"
+        )
+        # Retention sweeps by age.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_wal_timestamp ON sync_wal(timestamp)")
         conn.commit()
         conn.close()
 
@@ -397,9 +589,10 @@ class SyncWAL:
             conn = sqlite3.connect(self._db_path)
             try:
                 try:
+                    wall, counter, _ = _parse_hlc(op.hlc)
                     conn.execute(
-                        "INSERT OR REPLACE INTO sync_wal (op_id, table_name, op_type, row_id, data, hlc, origin_node, timestamp) VALUES (?,?,?,?,?,?,?,?)",
-                        (op.op_id, op.table, op.op_type, op.row_id, json.dumps(op.data), op.hlc, op.origin_node, op.timestamp),
+                        "INSERT OR REPLACE INTO sync_wal (op_id, table_name, op_type, row_id, data, hlc, origin_node, timestamp, hlc_wall, hlc_counter) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (op.op_id, op.table, op.op_type, op.row_id, json.dumps(op.data), op.hlc, op.origin_node, op.timestamp, wall, counter),
                     )
                     conn.commit()
                 except (OSError, sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
@@ -463,32 +656,220 @@ class SyncWAL:
         finally:
             conn.close()
 
+    _SELECT_COLS = (
+        "SELECT op_id, table_name, op_type, row_id, data, hlc, origin_node, timestamp "
+        "FROM sync_wal"
+    )
+
+    @staticmethod
+    def _rows_to_ops(rows) -> list[SyncOperation]:
+        return [
+            SyncOperation(
+                op_id=r[0], table=r[1], op_type=r[2], row_id=r[3],
+                data=json.loads(r[4]), hlc=r[5], origin_node=r[6], timestamp=r[7],
+            )
+            for r in rows
+        ]
+
     def get_changes_since(self, hlc: str, exclude_node: str = "") -> list[SyncOperation]:
-        threshold = _parse_hlc(hlc)
+        """Every operation strictly newer than one global HLC watermark.
+
+        A single watermark across all origins is only correct when the
+        caller genuinely means "everything after this point in my own
+        log", which is bundle export and the tests. The exchange wants
+        :meth:`get_changes_for_peer` instead, because one watermark
+        cannot express what a peer has of each *other* node's writes.
+
+        The filter runs in SQL against the numeric HLC columns. It used
+        to be a Python comprehension over ``fetchall()`` of the entire
+        table: 2,961 ms to return zero rows at 500k rows in the WAL,
+        every 30 seconds, per peer.
+        """
+        wall, counter, _ = _parse_hlc(hlc)
+        # The leading ``hlc_wall >= ?`` is what makes this seekable. A
+        # bare ``(a > ? OR (a = ? AND b > ?))`` is opaque to the query
+        # planner and degrades to a full scan; the redundant lower bound
+        # gives it a range to open the index on. Confirmed against the
+        # live WAL with EXPLAIN QUERY PLAN.
+        sql = (
+            f"{self._SELECT_COLS} "
+            "WHERE hlc_wall >= ? AND (hlc_wall > ? OR hlc_counter > ?)"
+        )
+        params: list = [wall, wall, counter]
+        if exclude_node:
+            sql += " AND origin_node != ?"
+            params.append(exclude_node)
+        sql += " ORDER BY hlc_wall, hlc_counter"
         conn = sqlite3.connect(self._db_path)
         try:
-            if exclude_node:
-                rows = conn.execute(
-                    "SELECT op_id, table_name, op_type, row_id, data, hlc, origin_node, timestamp FROM sync_wal WHERE origin_node != ?",
-                    (exclude_node,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT op_id, table_name, op_type, row_id, data, hlc, origin_node, timestamp FROM sync_wal",
-                ).fetchall()
-
-            ops = [
-                SyncOperation(
-                    op_id=r[0], table=r[1], op_type=r[2], row_id=r[3],
-                    data=json.loads(r[4]), hlc=r[5], origin_node=r[6], timestamp=r[7],
-                )
-                for r in rows
-                if _parse_hlc(r[5]) > threshold
-            ]
-            ops.sort(key=lambda op: _parse_hlc(op.hlc))
-            return ops
+            return self._rows_to_ops(conn.execute(sql, params).fetchall())
         finally:
             conn.close()
+
+    def get_changes_for_peer(
+        self,
+        remote_vc: dict,
+        *,
+        exclude_node: str = "",
+        limit: Optional[int] = None,
+    ) -> list[SyncOperation]:
+        """Every operation the peer is missing, judged PER ORIGIN.
+
+        This is the correct reading of a vector clock and the fix for a
+        defect that lost data silently. The exchange used to cut the
+        change set at ``remote_vc[self.node_id]``, the peer's high-water
+        mark for MY OWN writes, and apply it as the cutoff for
+        operations of every origin. Two consequences, both measured:
+
+        - A relay node that also writes locally never forwarded a
+          third party's operation older than its own last write. The
+          op was not delayed; it was filtered out of every future
+          exchange, permanently, with nothing logged.
+        - A node that rarely writes has no entry in the peer's clock,
+          so its cutoff stayed at ``"0:0:"`` and it re-sent its entire
+          WAL every 30 seconds forever.
+
+        ``remote_vc`` maps origin node_id to the newest HLC that peer
+        has seen from that origin. An origin absent from the map is one
+        the peer has never heard of, so everything from it is new.
+
+        ``exclude_node`` must be the peer's REAL node_id, from the
+        handshake response. ``_load_static_peers`` keys peers as
+        ``f"static-{host}:{port}"``, which matches no ``origin_node``,
+        so passing the local dictionary key made the filter a no-op and
+        echoed the peer's own operations back at it.
+        """
+        watermarks: dict[str, tuple] = {}
+        for origin, watermark in (remote_vc or {}).items():
+            if not isinstance(origin, str) or not isinstance(watermark, str):
+                continue
+            wall, counter, _ = _parse_hlc(watermark)
+            watermarks[origin] = (wall, counter)
+
+        if not watermarks:
+            return self.get_changes_since("0:0:", exclude_node=exclude_node)[
+                : limit if limit is not None else None
+            ]
+
+        # Each origin costs 5 bind variables (4 in its own clause, 1 in
+        # the catch-all NOT IN), so the clause form is only viable while
+        # the peer's clock stays well inside SQLITE_MAX_VARIABLE_NUMBER,
+        # which is 999 on the conservative builds this ships against.
+        # A long-lived fleet accumulates node ids: the owner's live WAL
+        # carries 113 distinct origins because a regenerated
+        # ``sync_node_id`` mints a new one. Past the threshold, fall
+        # back to a coarse SQL prefilter at the OLDEST watermark and
+        # apply the exact per-origin rule in Python. That is a superset
+        # narrowed correctly, never a different answer.
+        if len(watermarks) > _MAX_VC_CLAUSES:
+            floor = min(watermarks.values())
+            coarse = self.get_changes_since(
+                f"{floor[0]}:{floor[1]}:", exclude_node=exclude_node
+            )
+            out = []
+            for op in coarse:
+                wall, counter, _ = _parse_hlc(op.hlc)
+                mark = watermarks.get(op.origin_node)
+                if mark is None or (wall, counter) > mark:
+                    out.append(op)
+                    if limit is not None and len(out) >= limit:
+                        break
+            return out
+
+        clauses: list[str] = []
+        params: list = []
+        for origin, (wall, counter) in watermarks.items():
+            clauses.append(
+                "(origin_node = ? AND hlc_wall >= ? AND (hlc_wall > ? OR hlc_counter > ?))"
+            )
+            params.extend([origin, wall, wall, counter])
+
+        known = list(watermarks)
+        placeholders = ",".join("?" * len(known))
+        clauses.append(f"origin_node NOT IN ({placeholders})")
+        params.extend(known)
+
+        sql = f"{self._SELECT_COLS} WHERE ({' OR '.join(clauses)})"
+        if exclude_node:
+            sql += " AND origin_node != ?"
+            params.append(exclude_node)
+        sql += " ORDER BY hlc_wall, hlc_counter"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+
+        conn = sqlite3.connect(self._db_path)
+        try:
+            return self._rows_to_ops(conn.execute(sql, params).fetchall())
+        finally:
+            conn.close()
+
+    def prune(self, max_age_seconds: float = WAL_MAX_AGE_SECONDS) -> int:
+        """Drop WAL operations older than ``max_age_seconds``. Returns
+        the number removed.
+
+        THE TRADE-OFF, stated plainly. Nothing pruned this table before
+        this method existed. There was no ``DELETE FROM sync_wal``
+        anywhere in the tree, and the owner's live WAL had reached
+        16,324 operations and 12 MB across 132 days, growing without
+        limit for as long as the brain keeps writing.
+
+        Pruning does NOT delete the user's data. The materialised row
+        is in ``memory.db`` with its ``hlc_string`` intact; what a prune
+        discards is the ability to REPLICATE that row incrementally.
+        The hole it opens is precise: a peer whose watermark predates
+        the horizon will never be sent the pruned operations, so a row
+        written more than ``max_age_seconds`` ago and never delivered
+        to that peer stays undelivered. Recovery is
+        ``export_to_bundle`` / ``import_from_bundle`` over a channel
+        the operator picks, which is the same answer as for a device
+        being re-paired.
+
+        90 days, matching ``MemoryStore.prune_tombstones``, and the
+        match is the point rather than a coincidence. A tombstone is
+        what stops a peer's stale insert from resurrecting a deleted
+        row. If the WAL outlived tombstones, a peer could still be
+        shipped a delete whose tombstone this side had already dropped;
+        if tombstones outlived the WAL, they would be defending against
+        operations no longer capable of arriving. One horizon for both
+        keeps the resurrection window a single number.
+
+        What it costs at the observed write rate: 90 days of the
+        owner's history is roughly 11,500 operations and 4.3 MiB of
+        payload, against 16,324 and 6.24 MiB unbounded-and-climbing.
+        The bound is on ninety days of writes, not on the lifetime of
+        the brain, which is the property that was missing.
+
+        Deliberately NOT the policy: "prune what every peer has
+        acknowledged". ``synced_to`` now records who received an
+        operation, but nothing records who is still a peer, so the rule
+        never terminates for a device that leaves the fleet. It is the
+        same reason ``prune_tombstones`` rejected it, and the same
+        missing peer roster.
+
+        Also deliberately NOT the policy: "prune only operations
+        superseded by a newer write to the same row". That rule is
+        lossless (last-writer-wins means a superseded op can never
+        change any peer's state) and it reclaims almost nothing here.
+        Measured on the live WAL: 346 of 16,324 operations are
+        superseded, 0.07 MiB of 6.24 MiB. The table is 92% ``episodes``,
+        which are append-only with unique ids and therefore never
+        supersede anything. A lossless rule that frees 2% is not a
+        retention policy, so the age horizon is the one that ships and
+        the paragraph above is the price of it.
+        """
+        cutoff = time.time() - max_age_seconds
+        with self._write_lock:
+            conn = sqlite3.connect(self._db_path)
+            try:
+                cur = conn.execute("DELETE FROM sync_wal WHERE timestamp < ?", (cutoff,))
+                conn.commit()
+                removed = cur.rowcount or 0
+            finally:
+                conn.close()
+        if removed:
+            logger.info("sync.wal_pruned count=%d horizon_s=%.0f", removed, max_age_seconds)
+        return removed
 
     def mark_synced(self, op_id: str, peer_node: str):
         conn = sqlite3.connect(self._db_path)
@@ -798,13 +1179,24 @@ class SyncEngine:
                 continue
 
             self._hlc.receive(remote_hlc)
-            self._vector_clock.update(op.origin_node, op.hlc)
 
             try:
                 self._wal.append(op)
-            except Exception as exc:  # pragma: no cover — WAL failure is rare
+            except Exception as exc:  # pragma: no cover, WAL failure is rare
                 logger.warning("apply_remote_changes WAL append failed: %s", exc)
                 continue
+
+            # Advance the clock only once the op is durably in our WAL.
+            #
+            # This used to run BEFORE the append, so an append that
+            # raised left the watermark already moved past an op we do
+            # not have. The peer's next change set is cut at that
+            # watermark, so it never re-sends it: one transient sqlite
+            # error and the operation is gone from this node for good,
+            # with a warning that reads like it was retried. The
+            # watermark's meaning is "everything up to here is on my
+            # disk", and it has to be written when that becomes true.
+            self._vector_clock.update(op.origin_node, op.hlc)
 
             if self._memory:
                 try:
@@ -1554,8 +1946,15 @@ class SyncEngine:
         scheme = "wss" if client_ssl else "ws"
         uri = f"{scheme}://{addr}:{port}/sync"
 
+        # ``max_size`` is mandatory here, not a tuning knob. The library
+        # default is 1 MiB and the peer's change set arrives as frames
+        # this connection has to read; a first sync against a fresh peer
+        # ships that peer's entire history. Chunking (see
+        # ``sync_data_frames``) keeps ordinary frames two orders of
+        # magnitude below this, and this ceiling covers the one case
+        # chunking cannot help with: a single indivisible operation.
         ws = await asyncio.wait_for(
-            websockets.connect(uri, ssl=client_ssl),
+            websockets.connect(uri, ssl=client_ssl, max_size=SYNC_MAX_RECV_BYTES),
             timeout=connect_timeout,
         )
 
@@ -1577,20 +1976,44 @@ class SyncEngine:
                 return {"success": False, "error": resp.get("message", "rejected")}
 
             remote_vc = resp.get("vector_clock", {})
-            peer_has = remote_vc.get(self.node_id, "0:0:")
-            changes_for_peer = self._wal.get_changes_since(peer_has, exclude_node=peer_id)
 
-            await asyncio.wait_for(
-                ws.send(json.dumps({
-                    "type": "sync_data",
-                    "changes": [op.to_dict() for op in changes_for_peer],
-                })),
-                timeout=handshake_timeout,
+            # The peer's REAL node_id, off the handshake, not the local
+            # dictionary key. ``_load_static_peers`` keys peers as
+            # ``static-{host}:{port}``, which matches no ``origin_node``,
+            # so the old ``exclude_node=peer_id`` was a no-op for every
+            # statically configured peer and echoed its own writes back.
+            remote_node_id = resp.get("node_id") or ""
+
+            # Per-origin cutoffs. The old single cutoff was
+            # ``remote_vc[self.node_id]``, what the peer has of MY
+            # writes, applied to ops of every origin. See
+            # ``SyncWAL.get_changes_for_peer``.
+            # Off the loop: this is a synchronous sqlite3 query whose
+            # cost scales with the WAL, and it runs once per peer per
+            # cadence tick.
+            changes_for_peer = await asyncio.to_thread(
+                self._wal.get_changes_for_peer,
+                remote_vc,
+                exclude_node=remote_node_id or peer_id,
             )
 
-            remote_raw = await asyncio.wait_for(ws.recv(), timeout=handshake_timeout)
-            remote_changes_msg = json.loads(remote_raw)
-            remote_changes = remote_changes_msg.get("changes", [])
+            for frame in sync_data_frames(changes_for_peer):
+                await asyncio.wait_for(
+                    ws.send(json.dumps(frame)), timeout=handshake_timeout,
+                )
+
+            async def _recv_one():
+                return json.loads(
+                    await asyncio.wait_for(ws.recv(), timeout=handshake_timeout)
+                )
+
+            try:
+                remote_changes = await recv_sync_data(_recv_one)
+            except SyncProtocolMessage as interrupt:
+                msg = interrupt.message
+                if isinstance(msg, dict) and msg.get("type") == "sync_error":
+                    return {"success": False, "error": msg.get("message", "rejected")}
+                raise
             applied = await self.apply_remote_changes(remote_changes)
 
             # Record per-peer delivery. ``SyncWAL.mark_synced`` had zero
@@ -1605,12 +2028,18 @@ class SyncEngine:
             # ours. Failures here are logged, never fatal: the exchange
             # itself already succeeded and HLC, not this column, is what
             # drives what gets sent next time.
+            # Recorded under the peer's REAL node_id, for the same
+            # reason ``exclude_node`` uses it: a statically configured
+            # peer's local key is ``static-{host}:{port}``, and a
+            # delivery record keyed on host and port answers "which
+            # address did I send this to", not "which brain has it".
+            # The address changes with DHCP; the node_id does not.
             if changes_for_peer:
                 try:
                     await asyncio.to_thread(
                         self._wal.mark_synced_many,
                         [op.op_id for op in changes_for_peer],
-                        peer_id,
+                        remote_node_id or peer_id,
                     )
                 except Exception as exc:
                     logger.warning(

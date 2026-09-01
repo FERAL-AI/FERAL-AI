@@ -4150,9 +4150,35 @@ async def sync_peer_endpoint(ws: WebSocket):
                     "vector_clock": state.sync_engine.get_vector_clock() if state.sync_engine else {},
                 })
 
-                incoming = await ws.receive_json()
+                # Chunked read. The change set used to arrive as one
+                # frame, which capped a peer's entire history at the
+                # websocket max_size; see ``memory.sync.recv_sync_data``
+                # and ``sync_data_frames``. A peer on the pre-chunking
+                # build sends one message with no ``more`` key, which
+                # this loop terminates on after one frame.
+                from memory.sync import (
+                    recv_sync_data as _recv_sync_data,
+                    sync_data_frames as _sync_data_frames,
+                    SyncFrameOverflowError as _SyncFrameOverflowError,
+                    SyncProtocolMessage as _SyncProtocolMessage,
+                )
+
+                try:
+                    incoming_changes = await _recv_sync_data(ws.receive_json)
+                except _SyncProtocolMessage:
+                    logger.warning("Sync peer sent an unexpected message mid-stream")
+                    break
+                except _SyncFrameOverflowError as exc:
+                    await ws.send_json({"type": "sync_error", "message": str(exc)})
+                    logger.warning("Sync apply aborted: %s", exc)
+                    break
+
                 applied = 0
-                if incoming.get("type") == "sync_data" and state.sync_engine:
+                # Unconditional on the engine, not on there being
+                # changes: the refresh gate below is the shipped
+                # behaviour for every handshake and narrowing it here
+                # would be a separate change.
+                if state.sync_engine:
                     # v2026.5.34 (PR 2 D12): refresh-gate the apply.
                     # If the on-disk store has been corrupted /
                     # restored / rotated since boot, the in-memory
@@ -4180,19 +4206,30 @@ async def sync_peer_endpoint(ws: WebSocket):
                         logger.warning("Sync apply aborted: memory.refresh() raised %s", exc)
                         break
                     applied = await state.sync_engine.apply_remote_changes(
-                        incoming.get("changes", [])
+                        incoming_changes
                     )
 
                 my_changes = []
                 if state.sync_engine and hasattr(state.sync_engine, '_wal'):
-                    my_changes = state.sync_engine._wal.get_changes_since(
-                        remote_vc.get(state.sync_engine.node_id, "0:0:"),
+                    # Per-origin cutoffs, from the peer's whole vector
+                    # clock. The old code cut at
+                    # ``remote_vc[state.sync_engine.node_id]``, the
+                    # peer's high-water mark for THIS brain's own
+                    # writes, and applied it to ops of every origin, so
+                    # a relay silently stopped forwarding anything older
+                    # than its own last local write. See
+                    # ``SyncWAL.get_changes_for_peer``.
+                    #
+                    # Off the loop: a synchronous sqlite3 query whose
+                    # cost scales with the WAL, on a path a peer can
+                    # reach every 30 seconds.
+                    my_changes = await asyncio.to_thread(
+                        state.sync_engine._wal.get_changes_for_peer,
+                        remote_vc,
                         exclude_node=peer_id,
                     )
-                await ws.send_json({
-                    "type": "sync_data",
-                    "changes": [op.to_dict() for op in my_changes] if my_changes else [],
-                })
+                for _frame in _sync_data_frames(my_changes):
+                    await ws.send_json(_frame)
                 _log_activity("sync", f"Synced with {peer_id}: received {applied} ops")
                 break
 

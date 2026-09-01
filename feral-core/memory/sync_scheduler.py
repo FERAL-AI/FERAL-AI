@@ -170,6 +170,13 @@ class SyncScheduler:
         # issuing a DELETE every 30 seconds for the sake of a handful
         # of rows a week.
         self._last_tombstone_gc: float = 0.0
+        # The WAL had no collector at all before this: no
+        # ``DELETE FROM sync_wal`` existed anywhere in the tree and the
+        # owner's live file had reached 16,324 ops / 12 MB across 132
+        # days. It rides the same tick, on the same interval and for the
+        # same reason as the tombstone GC, and on the same 90-day
+        # horizon deliberately. See ``SyncWAL.prune``.
+        self._last_wal_gc: float = 0.0
 
     def _track_bg_task(self, task: asyncio.Task) -> asyncio.Task:
         """Hold a strong reference to a fire-and-forget sync. See F-06."""
@@ -231,6 +238,7 @@ class SyncScheduler:
         self._emit_active_peers_gauge(len(peer_ids))
         self._emit_wal_size_gauge()
         await self._maybe_gc_tombstones()
+        await self._maybe_gc_wal()
 
         now = time.time()
         for peer_id in peer_ids:
@@ -274,6 +282,31 @@ class SyncScheduler:
             await store.prune_tombstones()
         except Exception as exc:
             logger.warning("scheduler: tombstone GC failed: %s", exc)
+
+    async def _maybe_gc_wal(self) -> None:
+        """Prune WAL operations past the retention horizon, at most once
+        per ``TOMBSTONE_GC_INTERVAL_SECONDS``.
+
+        Off-loaded to a thread: ``SyncWAL.prune`` is a synchronous
+        ``sqlite3`` DELETE and the first sweep on an unpruned 12 MB WAL
+        has real work to do. Never fatal to a tick, for the same reason
+        as the tombstone sweep: a WAL that cannot be pruned is a WAL
+        that is merely too big, which is where this started.
+        """
+        now = time.time()
+        if now - self._last_wal_gc < TOMBSTONE_GC_INTERVAL_SECONDS:
+            return
+        self._last_wal_gc = now
+        wal = getattr(self.engine, "_wal", None)
+        if wal is None:
+            return
+        try:
+            removed = await asyncio.to_thread(wal.prune)
+        except Exception as exc:
+            logger.warning("scheduler: WAL GC failed: %s", exc)
+            return
+        if removed:
+            logger.info("scheduler: pruned %d WAL op(s) past the retention horizon", removed)
 
     # ── Per-peer sync ───────────────────────────────────────────────────
 
