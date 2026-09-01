@@ -6,7 +6,9 @@ No cloud relay — all sync is peer-to-peer via mDNS discovery.
 
 Protocol:
   1. mDNS discovery: find peers advertising _feral._tcp.local.
-  2. WebSocket handshake with shared passphrase
+  2. WebSocket handshake with a per-peer grant when one has been
+     enrolled (``security/peer_roster.py``), falling back to the shared
+     passphrase for peers that have not migrated yet
   3. Exchange vector clocks to determine missing operations
   4. Send missing ops → merge via CRDT rules
   5. Periodic heartbeat to detect disconnections
@@ -138,6 +140,12 @@ def ensure_sync_passphrase() -> str:
     so that brain boot never blocks on the federation key. A loud
     warning is emitted in that path because the next boot will mint
     a fresh secret and existing peers will need to be re-paired.
+
+    This is ONE secret shared by every peer, which is the whole reason
+    ``security/peer_roster.py`` exists. It remains the fallback so an
+    existing two-brain setup keeps working across the upgrade; enrol
+    each peer with ``feral sync peer invite`` and then set
+    ``FERAL_SYNC_REQUIRE_PEER_IDENTITY=1`` to retire it.
     """
     global SYNC_PASSPHRASE
 
@@ -956,6 +964,113 @@ class SyncWAL:
             conn.close()
 
 
+class PeerListener:
+    """mDNS listener for the sync service.
+
+    Defined at module level rather than inside ``start_discovery``. It
+    used to be a closure over ``engine``, which meant the only way to
+    exercise arrival and departure was to bring up real zeroconf on a
+    real network, and that is a large part of why ``remove_service``
+    could sit as a bare ``pass`` for as long as it did.
+
+    ``zc.get_service_info(...)`` is blocking; this class is the sync-API
+    fallback used only when ``AsyncServiceBrowser`` is unavailable, and
+    zeroconf calls it from its own thread.
+    """
+
+    def __init__(self, engine: "SyncEngine"):
+        self.engine = engine
+
+    def add_service(self, zc, type_, name):
+        try:
+            info = zc.get_service_info(type_, name)
+        except Exception as exc:
+            logger.warning("mDNS get_service_info failed for %s: %s", name, exc)
+            return
+        self._record(info)
+
+    def remove_service(self, zc, type_, name):
+        """A peer left the network.
+
+        This was ``pass``. The consequences were not cosmetic: the peer
+        stayed in ``SyncEngine._peers`` forever, so the scheduler kept
+        dialling a brain that had gone, its per-peer lock leaked, and
+        nothing anywhere recorded when it was last seen. "Who is still a
+        peer" had no answer, which is the gap
+        ``MemoryStore.prune_tombstones`` names in its own docstring.
+
+        Departure is NOT revocation: the peer's grant stays valid and it
+        rejoins on the next advertisement. What changes is that the fact
+        is now written down, and it survives a restart.
+        """
+        peer_id = self.engine._service_names.pop(name, "")
+        if not peer_id:
+            # Either a service we never resolved, or our own
+            # advertisement. Nothing to forget.
+            return
+        self.engine.forget_peer(peer_id, reason="mdns_departure")
+
+    def update_service(self, zc, type_, name):
+        pass
+
+    def _record(self, info):
+        import socket
+
+        if not info or not info.properties:
+            return
+        peer_id = info.properties.get(b"node_id", b"").decode()
+        if not peer_id or peer_id == self.engine.node_id:
+            return
+        peer_addr = (
+            socket.inet_ntoa(info.addresses[0]) if info.addresses else ""
+        )
+        self.engine._peers[peer_id] = {
+            "address": peer_addr,
+            "port": info.port,
+            "discovered_at": time.time(),
+            "source": "mdns",
+        }
+        # Remember which mDNS service name maps to which peer, because
+        # ``remove_service`` is handed the NAME and nothing else. Without
+        # this map a departure cannot be attributed to a peer at all.
+        service_name = getattr(info, "name", "") or ""
+        if service_name:
+            self.engine._service_names[service_name] = peer_id
+        self.engine.note_peer_seen(peer_id, peer_addr)
+        logger.info(
+            "Discovered peer: %s at %s:%s", peer_id, peer_addr, info.port,
+        )
+
+
+class AsyncPeerListener(PeerListener):
+    """Async-API listener: zeroconf calls back via ``add_service`` on an
+    asyncio task, so the resolve happens through the async API and the
+    loop stays responsive on slow networks."""
+
+    def add_service(self, zc, type_, name):
+        self.engine._track_bg_task(
+            asyncio.create_task(
+                self._async_resolve(zc, type_, name),
+                name=f"mdns-resolve-{name}",
+            )
+        )
+
+    async def _async_resolve(self, zc, type_, name):
+        # ``zc`` here is the inner sync ``Zeroconf`` instance that
+        # ``AsyncServiceBrowser`` passes to handler callbacks.
+        # ``AsyncServiceInfo.async_request`` takes that Zeroconf
+        # directly.
+        try:
+            from zeroconf.asyncio import AsyncServiceInfo
+
+            info = AsyncServiceInfo(type_, name)
+            ok = await info.async_request(zc, 3000)
+            if ok:
+                self._record(info)
+        except Exception as exc:
+            logger.warning("mDNS async resolve failed for %s: %s", name, exc)
+
+
 class SyncEngine:
     """
     Manages peer-to-peer memory replication.
@@ -980,6 +1095,11 @@ class SyncEngine:
         self._wal = SyncWAL(wal_path)
 
         self._peers: dict[str, dict] = {}
+        # mDNS service name -> peer node_id. ``remove_service`` is
+        # handed only the service name, so without this map a departure
+        # cannot be attributed to a peer and the entry can never be
+        # dropped. See ``PeerListener.remove_service``.
+        self._service_names: dict[str, str] = {}
         self._running = False
         self._zeroconf = None
         self._service_info = None
@@ -1547,6 +1667,67 @@ class SyncEngine:
     def get_vector_clock(self) -> dict:
         return self._vector_clock.to_dict()
 
+    # -- Membership -----------------------------------------------------
+
+    @staticmethod
+    def _roster():
+        """The persistent peer roster, or ``None`` if it cannot be opened.
+
+        Never fatal. Sync predates the roster and must keep working on a
+        brain where the roster DB is unwritable; what is lost in that
+        case is the durability of membership, not the exchange itself.
+        """
+        try:
+            from security.peer_roster import get_peer_roster
+            return get_peer_roster()
+        except Exception as exc:  # noqa: BLE001, roster is advisory here
+            logger.warning("sync: peer roster unavailable: %s", exc)
+            return None
+
+    def note_peer_seen(self, peer_id: str, address: str = "") -> None:
+        """Persist liveness for a peer we just heard from.
+
+        Seeing an advertisement is evidence the brain exists, which is
+        what ``last_seen`` means. It is deliberately NOT evidence that it
+        holds a valid grant, so this never extends a grant window.
+        """
+        roster = self._roster()
+        if roster is None:
+            return
+        try:
+            roster.mark_seen(peer_id, address=address)
+        except Exception as exc:  # noqa: BLE001, liveness is advisory
+            logger.warning("sync: mark_seen failed for %s: %s", peer_id, exc)
+
+    def forget_peer(self, peer_id: str, *, reason: str = "departure") -> bool:
+        """Drop a peer from the live set and record the departure.
+
+        Returns True when the peer was actually present. Idempotent, so
+        a duplicate zeroconf callback is harmless.
+        """
+        record = self._peers.pop(peer_id, None)
+        # The per-peer lock is keyed by peer id and would otherwise
+        # accumulate one entry per brain that has ever been on the
+        # network.
+        self._peer_locks.pop(peer_id, None)
+        for name, mapped in list(self._service_names.items()):
+            if mapped == peer_id:
+                self._service_names.pop(name, None)
+        address = (record or {}).get("address", "") or ""
+        roster = self._roster()
+        if roster is not None:
+            try:
+                roster.mark_departed(peer_id, address=address)
+            except Exception as exc:  # noqa: BLE001, membership is advisory
+                logger.warning(
+                    "sync: mark_departed failed for %s: %s", peer_id, exc,
+                )
+        if record is not None:
+            logger.info(
+                "Peer left: %s at %s (%s)", peer_id, address or "-", reason,
+            )
+        return record is not None
+
     @staticmethod
     def _get_lan_ip() -> str:
         """Get the real LAN IP address, not loopback."""
@@ -1632,79 +1813,6 @@ class SyncEngine:
                 },
             )
 
-            engine = self
-
-            class PeerListener:
-                def __init__(self):
-                    pass
-
-                # Sync-API listener: used when AsyncServiceBrowser is
-                # unavailable. Critically, `zc.get_service_info(...)`
-                # is a blocking call; we offload it to a thread via
-                # asyncio.run_coroutine_threadsafe so the listener
-                # callback (which runs on a zeroconf-internal thread)
-                # never blocks the asyncio loop.
-                def add_service(self, zc, type_, name):
-                    try:
-                        info = zc.get_service_info(type_, name)
-                    except Exception as exc:
-                        logger.warning("mDNS get_service_info failed for %s: %s", name, exc)
-                        return
-                    self._record(info)
-
-                def remove_service(self, zc, type_, name):
-                    pass
-
-                def update_service(self, zc, type_, name):
-                    pass
-
-                def _record(self, info):
-                    if info and info.properties:
-                        peer_id = info.properties.get(b"node_id", b"").decode()
-                        if peer_id and peer_id != engine.node_id:
-                            peer_addr = (
-                                socket.inet_ntoa(info.addresses[0])
-                                if info.addresses else ""
-                            )
-                            engine._peers[peer_id] = {
-                                "address": peer_addr,
-                                "port": info.port,
-                                "discovered_at": time.time(),
-                                "source": "mdns",
-                            }
-                            logger.info(
-                                "Discovered peer: %s at %s:%d",
-                                peer_id, peer_addr, info.port,
-                            )
-
-            class AsyncPeerListener(PeerListener):
-                # Async-API listener: zeroconf calls back via
-                # `add_service` on an asyncio task. We resolve the
-                # service info via the async API so the loop stays
-                # responsive even on slow networks.
-                def add_service(self, zc, type_, name):
-                    engine._track_bg_task(
-                        asyncio.create_task(
-                            self._async_resolve(zc, type_, name),
-                            name=f"mdns-resolve-{name}",
-                        )
-                    )
-
-                async def _async_resolve(self, zc, type_, name):
-                    # `zc` here is the inner sync `Zeroconf` instance
-                    # that `AsyncServiceBrowser` passes to handler
-                    # callbacks. `AsyncServiceInfo.async_request` takes
-                    # that Zeroconf directly.
-                    try:
-                        info = AsyncServiceInfo(type_, name)
-                        ok = await info.async_request(zc, 3000)
-                        if ok:
-                            self._record(info)
-                    except Exception as exc:
-                        logger.warning(
-                            "mDNS async resolve failed for %s: %s", name, exc,
-                        )
-
             if have_async:
                 self._zeroconf = AsyncZeroconf()
                 async_info = AsyncServiceInfo(
@@ -1722,7 +1830,7 @@ class SyncEngine:
                 self._service_browser = AsyncServiceBrowser(
                     self._zeroconf.zeroconf,
                     SERVICE_TYPE,
-                    handlers=AsyncPeerListener(),
+                    handlers=AsyncPeerListener(self),
                 )
             else:
                 # Sync zeroconf via executor — the registration call
@@ -1743,7 +1851,7 @@ class SyncEngine:
                     self.node_id, ip, SYNC_PORT,
                 )
                 self._service_browser = ServiceBrowser(
-                    self._zeroconf, SERVICE_TYPE, PeerListener(),
+                    self._zeroconf, SERVICE_TYPE, PeerListener(self),
                 )
 
             mdns_ok = True
@@ -1973,14 +2081,35 @@ class SyncEngine:
             timeout=connect_timeout,
         )
 
+        # Per-peer grant, when this brain holds one for the peer it is
+        # dialling. Sent ALONGSIDE the shared passphrase, never instead
+        # of it, so a peer still on the old build keeps authenticating
+        # us the way it always did. The receiving side decides which one
+        # it honours (see ``security.peer_roster.authenticate_sync_peer``),
+        # and a peer that has enrolled us will ignore the passphrase.
+        peer_grant = ""
+        try:
+            from security.peer_roster import resolve_outbound_grant
+
+            peer_grant = resolve_outbound_grant(
+                peer_id=peer_id, address=addr, port=port,
+            )
+        except Exception as exc:  # noqa: BLE001, fall back to the shared secret
+            logger.warning(
+                "sync: outbound grant lookup failed for %s: %s", peer_id, exc,
+            )
+
         async with ws:
+            handshake = {
+                "type": "sync_request",
+                "node_id": self.node_id,
+                "vector_clock": self.get_vector_clock(),
+                "passphrase": SYNC_PASSPHRASE,
+            }
+            if peer_grant:
+                handshake["peer_grant"] = peer_grant
             await asyncio.wait_for(
-                ws.send(json.dumps({
-                    "type": "sync_request",
-                    "node_id": self.node_id,
-                    "vector_clock": self.get_vector_clock(),
-                    "passphrase": SYNC_PASSPHRASE,
-                })),
+                ws.send(json.dumps(handshake)),
                 timeout=handshake_timeout,
             )
 

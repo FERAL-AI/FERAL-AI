@@ -203,6 +203,46 @@ feral sync now
 feral sync peers
 ```
 
+### Peer identity
+
+A peer brain is a fuller principal than a paired device: it can write
+AND delete into your store. Each peer therefore gets its own credential
+rather than sharing one passphrase.
+
+```bash
+# On the brain that will ACCEPT the connection:
+feral sync peer invite laptop        # prints the grant ONCE
+
+# On the brain that will DIAL it, with the grant you just copied:
+feral sync peer accept homeserver.local:9090 <grant>
+
+feral sync peer list                 # roster + who is still on the shared secret
+feral sync peer revoke <peer_row_id>
+```
+
+The grant is stored argon2id-hashed on the accepting side (the same
+scheme as device pairing) and encrypted in the vault on the dialling
+side. It binds to the dialling brain's `node_id` the first time it is
+used, so the same grant presented by a second brain is refused. Invites
+must be redeemed within an hour; a redeemed grant lives in a sliding
+7-day window that renews on every successful sync, so a peer that stops
+talking lapses without anyone having to revoke it.
+`FERAL_SYNC_PEER_TTL_SECONDS` and `FERAL_SYNC_PEER_INVITE_TTL_SECONDS`
+override both.
+
+**Migration.** Existing installs keep working: the shared
+`FERAL_SYNC_PASSPHRASE` is still accepted, every use of it is recorded,
+and `feral sync status` names the brains that are still relying on it.
+Until you set `FERAL_SYNC_REQUIRE_PEER_IDENTITY=1`, the identity mode
+reads `mixed`, never `per_peer`, because the passphrase would still let
+anything that knows it in. Enrol every brain in the straggler list, then
+set that variable to retire the shared secret.
+
+**What revoking does and does not do.** It stops future exchanges. It
+cannot recall memory the peer has already replicated, and it cannot
+delete their copy. Prefer letting a grant lapse over relying on
+revocation for anything that has already synced.
+
 ## API Reference
 
 | Endpoint | Method | Description |
@@ -214,3 +254,7 @@ feral sync peers
 | `/api/memory/wiki/{topic}` | GET | Read a wiki page |
 | `/api/memory/stats` | GET | Memory size, tier counts, index health |
 | `/sync` | WebSocket | P2P memory sync between nodes |
+| `/api/sync/roster` | GET | Peer identity roster + identity mode |
+| `/api/sync/roster/invite` | POST | Mint a grant for one peer (returned once) |
+| `/api/sync/roster/accept` | POST | Store a grant another brain issued us |
+| `/api/sync/roster/{peer_row_id}` | DELETE | Revoke a peer's grant |

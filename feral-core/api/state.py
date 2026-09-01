@@ -75,6 +75,7 @@ from agents.app_registry import (
     default_hybrid_cache_dir,
 )
 from security.device_pairing import DevicePairingStore
+from security.peer_roster import PeerRoster
 from api.boot_report import BootReport, boot_subsystem
 
 logger = logging.getLogger("feral.brain")
@@ -483,6 +484,12 @@ class BrainState:
         self.mqtt_bridge = None
         self.email_watcher: Optional[EmailWatcher] = None
         self.device_pairing_store: DevicePairingStore = DevicePairingStore()
+        # Per-peer identity for federated memory sync. Constructed
+        # eagerly for the same reason the pairing store is: the /sync
+        # websocket needs it on the first handshake, and a lazily
+        # created credential store is a credential store that can fail
+        # to exist at the moment it is asked a security question.
+        self.peer_roster: PeerRoster = PeerRoster()
         self._boot_report: BootReport = BootReport()
         # First-party agent personas and workflow packs loaded from
         # feral-core/agents/personas/ and feral-core/workflows/ at boot.

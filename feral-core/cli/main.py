@@ -3704,8 +3704,132 @@ def cmd_checkpoints(args) -> int:
     return 1
 
 
-def cmd_sync(action: str, file_path: str):
+def _sync_post(path: str, body: dict, *, timeout: float = 15.0) -> dict:
+    """POST JSON to the brain and return the decoded body.
+
+    Errors come back as ``{"ok": False, "error": ...}`` so the callers
+    below can print one line instead of each growing its own try/except.
+    """
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"{HTTP_BASE}{path}",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _cmd_sync_peer(argv: list[str]) -> None:
+    """`feral sync peer ...` - per-peer sync identity.
+
+    invite <name>            mint a grant for another brain (shown ONCE)
+    accept <label> <grant>   store a grant another brain issued us
+    list                     roster + identity mode
+    revoke <peer_row_id>     stop accepting one peer's grant
+    """
+    verb = argv[0] if argv else "list"
+    rest = argv[1:]
+
+    if verb == "list":
+        data = _http_get("/api/sync/roster")
+        if not data.get("ok"):
+            print(f"  Error: {data.get('error', 'unknown')}")
+            return
+        print(f"  Identity mode: {data.get('identity_mode', '?')}")
+        peers = data.get("peers", [])
+        if not peers:
+            print("  No peers enrolled.")
+        for p in peers:
+            print(
+                f"  {p['peer_row_id']}  {p['name']:20s} "
+                f"status={p['status']:14s} node={p.get('node_id') or '-'}"
+            )
+        stragglers = data.get("shared_secret_peers", [])
+        if stragglers:
+            print("")
+            print("  STILL ON THE SHARED PASSPHRASE (not identity-authenticated):")
+            for s in stragglers:
+                print(f"    {s['node_id']}  uses={s['uses']} addr={s.get('address') or '-'}")
+            print("  Enrol each of these, then set FERAL_SYNC_REQUIRE_PEER_IDENTITY=1.")
+        grants = data.get("outbound_grants", [])
+        if grants:
+            print("")
+            print("  Grants this brain presents when dialling:")
+            for g in grants:
+                print(f"    {g['label']}  addr={g.get('address') or '-'}")
+        return
+
+    if verb == "invite":
+        name = " ".join(rest).strip()
+        if not name:
+            print("  Usage: feral sync peer invite <name>")
+            return
+        r = _sync_post("/api/sync/roster/invite", {"name": name})
+        if not r.get("ok"):
+            print(f"  Invite failed: {r.get('error', '?')}")
+            return
+        print(f"  Grant for '{r['name']}' (shown once, it cannot be recovered):")
+        print("")
+        print(f"    {r['secret']}")
+        print("")
+        print(f"  Redeem within {r['invite_ttl_seconds']}s on the other brain:")
+        print("    feral sync peer accept <this-brain-host:port> <grant>")
+        return
+
+    if verb == "accept":
+        if len(rest) < 2:
+            print("  Usage: feral sync peer accept <host:port|node_id> <grant>")
+            return
+        label, secret = rest[0], rest[1]
+        r = _sync_post(
+            "/api/sync/roster/accept",
+            {"label": label, "secret": secret, "address": label},
+        )
+        print(
+            f"  Stored grant for {label}"
+            if r.get("ok") else f"  Accept failed: {r.get('error', '?')}"
+        )
+        return
+
+    if verb == "revoke":
+        if not rest:
+            print("  Usage: feral sync peer revoke <peer_row_id>")
+            return
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"{HTTP_BASE}/api/sync/roster/{rest[0]}", method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                r = json.loads(resp.read())
+        except Exception as e:
+            print(f"  Revoke failed: {e}")
+            return
+        print(f"  Revoked: {r.get('ok', False)}")
+        print(f"  {r.get('note', '')}")
+        return
+
+    print(f"  Unknown `peer` verb: {verb}. Try list | invite | accept | revoke.")
+
+
+def cmd_sync(action: str, file_path: str, extra: list | None = None):
     """Federated sync CLI commands."""
+    extra = list(extra or [])
+    if action == "peer":
+        _cmd_sync_peer(([file_path] if file_path else []) + extra)
+        return
+    if extra and action == "peers":
+        # `feral sync peers add 1.2.3.4:8080` (unquoted) reaches here as
+        # file_path="add", extra=["1.2.3.4:8080"]. Rejoin so the
+        # existing prefix matching below sees the shape it expects.
+        file_path = " ".join([file_path, *extra]).strip()
     if action == "status":
         data = _http_get("/api/sync/status")
         if "error" in data:
@@ -3715,6 +3839,13 @@ def cmd_sync(action: str, file_path: str):
         print(f"  Running:     {data.get('running', False)}")
         print(f"  Node ID:     {data.get('node_id', '?')}")
         print(f"  Peers:       {data.get('peer_count', 0)}")
+        if data.get("identity_mode"):
+            print(f"  Identity:    {data['identity_mode']} ({data.get('enrolled_peers', 0)} enrolled)")
+            stragglers = data.get("shared_secret_peers") or []
+            if stragglers:
+                names = ", ".join(s.get("node_id", "?") for s in stragglers)
+                print(f"  WARNING:     still on the shared passphrase: {names}")
+                print(f"               {data.get('identity_note', '')}")
         sched = data.get("scheduler") or {}
         if sched:
             print(f"  Scheduler:   enabled={sched.get('enabled', False)} cadence={sched.get('cadence_seconds', 0)}s")
@@ -4058,10 +4189,11 @@ def _main():
         "action",
         nargs="?",
         default="status",
-        choices=["status", "peers", "export", "import", "now", "node-id"],
+        choices=["status", "peers", "peer", "export", "import", "now", "node-id"],
         help=(
             "status: show engine + per-peer health | "
             "peers [list|add <host:port>|remove <peer_id>] | "
+            "peer [list|invite <name>|accept <label> <grant>|revoke <row_id>] | "
             "now [<peer_id>]: trigger immediate sync | "
             "node-id: print persistent HLC id | "
             "export/import <file>: bundle round-trip"
@@ -4071,7 +4203,17 @@ def _main():
         "file",
         nargs="?",
         default="",
-        help="File path for export/import, peer_id for `now`, or subcommand for `peers`",
+        help="File path for export/import, peer_id for `now`, or subcommand for `peers`/`peer`",
+    )
+    # Trailing words for the sub-verbs. Without this, the shipped
+    # `peers add <host:port>` form only worked when the operator quoted
+    # the whole thing ("add 1.2.3.4:8080"), because argparse had nowhere
+    # to put the second word and errored out. Both forms work now.
+    sp.add_argument(
+        "extra",
+        nargs="*",
+        default=[],
+        help="Trailing arguments for `peers` / `peer` sub-verbs",
     )
 
     # feral memory — backend selector + v2026.5.34 decay/forget/recall/compact
@@ -4329,7 +4471,11 @@ def _main():
         else:
             cmd_publisher_register(registry=getattr(args, "registry", None))
     elif args.subcommand == "sync":
-        cmd_sync(args.action, getattr(args, "file", ""))
+        cmd_sync(
+            args.action,
+            getattr(args, "file", ""),
+            extra=list(getattr(args, "extra", []) or []),
+        )
     elif args.subcommand == "memory":
         from cli.memory_cmd import cmd_memory
         cmd_memory(args.action, getattr(args, "backend_id", None), flags=args)

@@ -4108,22 +4108,45 @@ async def sync_peer_endpoint(ws: WebSocket):
                 # made /sync a zero-auth endpoint on fresh installs).
                 # ``ensure_sync_passphrase`` runs at boot so a fresh
                 # install always has a value (auto-generated + printed
-                # to the operator banner). The remote-side mismatch
-                # check below stays identical.
+                # to the operator banner).
+                #
+                # Per-peer identity: the credential check now lives in
+                # ``security.peer_roster.authenticate_sync_peer`` so it
+                # is unit-testable without a websocket and so there is
+                # one place that knows the precedence rules. A peer that
+                # presents a grant is judged on the grant alone (no
+                # silent downgrade to the shared secret); otherwise the
+                # shared passphrase is compared with
+                # ``hmac.compare_digest`` rather than the old ``!=``.
                 from memory.sync import SYNC_PASSPHRASE as _local_pass
+                from security.peer_roster import (
+                    authenticate_sync_peer as _authenticate_sync_peer,
+                    get_peer_roster as _get_peer_roster,
+                )
                 expected_pass = os.getenv("FERAL_SYNC_PASSPHRASE", "") or _local_pass
-                remote_pass = raw.get("passphrase", "")
-                if not expected_pass:
+                peer_address = ""
+                try:
+                    if ws.client is not None:
+                        peer_address = f"{ws.client.host}:{ws.client.port}"
+                except Exception as exc:  # noqa: BLE001, address is advisory
+                    logger.debug("sync: peer address unavailable: %s", exc)
+                roster = getattr(state, "peer_roster", None)
+                if roster is None:
+                    roster = _get_peer_roster()
+                auth = _authenticate_sync_peer(
+                    node_id=peer_id,
+                    secret=raw.get("peer_grant", "") or "",
+                    passphrase=raw.get("passphrase", "") or "",
+                    expected_passphrase=expected_pass,
+                    roster=roster,
+                    address=peer_address,
+                )
+                if not auth.ok:
                     await ws.send_json({
                         "type": "sync_error",
-                        "message": (
-                            "Local sync passphrase unset — set "
-                            "FERAL_SYNC_PASSPHRASE on this brain and retry."
-                        ),
+                        "message": auth.message,
+                        "reason": auth.reason,
                     })
-                    break
-                if remote_pass != expected_pass:
-                    await ws.send_json({"type": "sync_error", "message": "Invalid passphrase"})
                     break
 
                 # v2026.5.34 (PR 2 D12): refuse the handshake when a
