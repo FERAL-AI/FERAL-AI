@@ -30,6 +30,33 @@ def _version() -> str:
         return ""
 
 
+def _navigation_hint() -> str:
+    """Describe the navigation this session will really honour.
+
+    Two different input paths exist and they take different gestures.
+    ``ask_choice`` uses an InquirerPy arrow-key picker when one is
+    available and the shell is a TTY, and a typed prompt otherwise. Only
+    the typed prompt parses ``back`` / ``menu`` / ``quit`` as words; the
+    picker offers them as selectable rows instead.
+    """
+    try:
+        arrow_keys = ui_kit.is_inquirer_available() and ui_kit.is_interactive()
+    except Exception:
+        arrow_keys = False
+
+    if arrow_keys:
+        return (
+            "[dim]The last rows of every list are [/][bold]jump to a "
+            "previous step[/][dim], [/][bold]back[/][dim] and [/]"
+            "[bold]quit setup[/][dim] - select one to use it.[/]"
+        )
+    return (
+        "[dim]Type [/][bold]back[/][dim] for the previous step, "
+        "[/][bold]menu[/][dim] to jump to any step, "
+        "[/][bold]quit[/][dim] to stop and keep what you've entered.[/]"
+    )
+
+
 def run(state: WizardState) -> None:
     # Bug 4 — render exactly once per ``feral setup`` invocation.
     # The state machine re-enters the welcome step on BackNavigation
@@ -97,9 +124,18 @@ def run(state: WizardState) -> None:
             # sixteen steps in; `menu` jumps straight to any step. An
             # operator who feels stuck reaches for the exit they know
             # exists, so the exits have to be named.
-            "[dim]Type [/][bold]back[/][dim] for the previous step, "
-            "[/][bold]menu[/][dim] to jump to any step, "
-            "[/][bold]quit[/][dim] to stop and keep what you've entered.[/]"
+            #
+            # But name them the way THIS session can actually use them.
+            # ``back`` / ``menu`` / ``quit`` are parsed only on the typed
+            # fallback in ``helpers.ask_choice`` (the branch whose own
+            # comment reads "the path the existing tests drive"). On the
+            # arrow-key picker, which is what an operator with a TTY and
+            # InquirerPy actually gets, typing those words does nothing:
+            # the equivalents are rows at the bottom of the list. Telling
+            # someone to type at a prompt with no text field is the same
+            # class of error as the old "press space" hint this block
+            # already exists to correct.
+            + _navigation_hint()
         )
         block = Group(Align.center(logo), Align.center(subtitle), Text(""), body)
         console.print(
