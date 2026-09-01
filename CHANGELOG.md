@@ -1,10 +1,12 @@
 # Changelog
 
-<!-- feral-version: 2026.8.30 -->
+<!-- feral-version: 2026.9.1 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.9.1] - 2026-09-01 - the replication nobody else ships, working
 
 ### Added
 
