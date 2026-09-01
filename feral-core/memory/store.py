@@ -860,12 +860,23 @@ class MemoryStore:
         one 48-byte row per delete, 90 days of even 100 deletes a day is
         under half a megabyte.
 
-        Deliberately NOT implemented: pruning by "every peer has
-        acknowledged this delete". It is the theoretically correct rule
-        and it needs a peer roster with liveness, which this codebase
-        does not have (``sync_wal.synced_to`` records who received an
-        op, not who is still a peer), and it never terminates for a peer
-        that leaves the fleet without being deregistered.
+        Still NOT implemented here: pruning by "every peer has
+        acknowledged this delete". Half of what blocked it is now gone.
+        ``security/peer_roster.py`` supplies the missing roster:
+        ``PeerRoster.active_peer_ids()`` answers "who is still a peer"
+        with real liveness, bounded by a sliding grant window, an
+        explicit ``departed_at`` written by
+        ``PeerListener.remove_service``, and revocation, so the rule now
+        terminates for a peer that leaves without being deregistered.
+
+        What is left is the join, and it is a separate change rather
+        than a smaller one: ``synced_to`` lives in ``sync_wal.db`` while
+        tombstones live here in ``memory.db``, so the acknowledgement
+        rule has to correlate a tombstone (``table``, ``row_id``) with
+        the delete operation that produced it across two databases, and
+        get the answer right in the presence of WAL pruning, which drops
+        the very op the tombstone would be matched against. Age-based
+        retention stays the default until that is built and tested.
         """
         cutoff = time.time() - max_age_seconds
         conn = await self._conn()

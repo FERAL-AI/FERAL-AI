@@ -49,6 +49,8 @@ import api.server as api_server
 import memory.sync as sync_mod
 from memory.store import MemoryStore
 from memory.sync import SyncEngine
+from security import peer_roster as peer_roster_mod
+from security.peer_roster import PeerRoster, store_outbound_grant
 
 pytestmark = pytest.mark.timeout(120)
 
@@ -74,6 +76,7 @@ class _Node:
     server: uvicorn.Server
     task: asyncio.Task
     state: object
+    roster: PeerRoster
 
 
 def _free_port() -> int:
@@ -86,11 +89,18 @@ def _free_port() -> int:
 
 
 class _FakeState:
-    """The two attributes ``sync_peer_endpoint`` actually reads."""
+    """The three attributes ``sync_peer_endpoint`` actually reads.
 
-    def __init__(self, engine: SyncEngine, store: MemoryStore):
+    ``peer_roster`` is per-node on purpose: the roster is what makes a
+    peer's identity local to the brain that enrolled it, so a shared one
+    would let a grant minted on A authenticate against B and quietly
+    turn the property under test back into a global secret.
+    """
+
+    def __init__(self, engine: SyncEngine, store: MemoryStore, roster: PeerRoster):
         self.sync_engine = engine
         self.memory = store
+        self.peer_roster = roster
 
 
 async def _start_node(
@@ -114,6 +124,7 @@ async def _start_node(
     store = MemoryStore(db_path=str(db))
     engine = SyncEngine(node_id=node_id, memory_store=store, db_path=str(wal))
     store.set_sync_engine(engine)
+    roster = PeerRoster(db_path=str(tmp_path / f"{node_id}_roster.db"))
 
     port = _free_port()
     kwargs = dict(
@@ -142,7 +153,8 @@ async def _start_node(
         port=port,
         server=server,
         task=task,
-        state=_FakeState(engine, store),
+        state=_FakeState(engine, store, roster),
+        roster=roster,
     )
 
 
@@ -269,6 +281,35 @@ def _passphrase(monkeypatch):
     monkeypatch.setattr(sync_mod, "SYNC_TLS_CERT", "")
     monkeypatch.setattr(sync_mod, "SYNC_TLS_KEY", "")
     monkeypatch.setattr(sync_mod, "SYNC_TLS_CA", "")
+
+
+class _FakeVault:
+    """Stands in for the BlindVault. Outbound grants must never be
+    written into the operator's real ``~/.feral`` vault by a test run."""
+
+    def __init__(self):
+        self.data: dict[str, dict[str, str]] = {}
+
+    def put(self, namespace, key, value, *, stored_by="user"):
+        self.data.setdefault(namespace, {})[key] = value
+
+    def get(self, namespace, key, *, requester="executor"):
+        return self.data.get(namespace, {}).get(key)
+
+    def remove_from(self, namespace, key, *, removed_by="user"):
+        return self.data.get(namespace, {}).pop(key, None) is not None
+
+    def list_namespace(self, namespace):
+        return list(self.data.get(namespace, {}).keys())
+
+
+@pytest.fixture(autouse=True)
+def _peer_grants(monkeypatch):
+    """Per-test grant storage, and strict mode off unless a test asks."""
+    monkeypatch.setattr(peer_roster_mod, "_VAULT_OVERRIDE", _FakeVault())
+    monkeypatch.setattr(peer_roster_mod, "_GRANT_CACHE", {})
+    monkeypatch.setattr(peer_roster_mod, "_GRANT_CACHE_LOADED", False)
+    monkeypatch.delenv("FERAL_SYNC_REQUIRE_PEER_IDENTITY", raising=False)
 
 
 @pytest.fixture
@@ -804,3 +845,214 @@ class TestRelayWatermark:
             "A echoed B's own operations back to B: exclude_node did not "
             "resolve to the peer's real node_id"
         )
+
+
+# ---------------------------------------------------------------------------
+# 5. Per-peer identity
+# ---------------------------------------------------------------------------
+
+
+def enrol(client: _Node, server: _Node, name: str = "") -> dict:
+    """``server`` invites ``client``; ``client`` stores the grant.
+
+    This is the real two-step operator flow, not a shortcut: the grant
+    is minted on the brain that will ACCEPT the connection, carried by
+    hand, and stored on the brain that will DIAL. The dialling side is
+    keyed by ``host:port`` because that is what an operator knows at the
+    moment they paste it.
+    """
+    grant = server.roster.invite_peer(name or client.node_id)
+    store_outbound_grant(
+        f"127.0.0.1:{server.port}",
+        grant["secret"],
+        address=f"127.0.0.1:{server.port}",
+        name=server.node_id,
+    )
+    return grant
+
+
+class TestPerPeerIdentity:
+    """``/sync`` authenticated every peer with one shared plaintext
+    passphrase compared with ``!=``. These drive the real endpoint with
+    real credentials, because the property that matters is not "the
+    roster returns a row" but "a brain with the wrong credential does
+    not get memory".
+    """
+
+    async def test_enrolled_peer_syncs_without_the_shared_passphrase(
+        self, two_nodes, monkeypatch,
+    ):
+        """The end state this whole change exists for: A holds a grant B
+        issued, and syncs even though it no longer knows B's passphrase.
+        """
+        a, b = two_nodes
+        enrol(a, b)
+        await write_note(a, "n1", "authenticated by identity")
+
+        import os
+
+        os.environ["FERAL_SYNC_PASSPHRASE"] = "b-side-secret"
+        try:
+            monkeypatch.setattr(sync_mod, "SYNC_PASSPHRASE", "a-knows-nothing")
+            result = await exchange(a, b)
+        finally:
+            os.environ.pop("FERAL_SYNC_PASSPHRASE", None)
+
+        assert result["success"] is True, result
+        assert await notes_table(b) == {"n1": "authenticated by identity"}
+
+    async def test_the_grant_binds_to_the_dialling_brain(self, two_nodes):
+        """First successful handshake pins the grant to A's node_id, so
+        the roster can answer "which brain is this" afterwards."""
+        a, b = two_nodes
+        enrol(a, b)
+        await write_note(a, "n1", "hello")
+
+        assert (await exchange(a, b))["success"] is True
+
+        rows = b.roster.list_peers()
+        assert len(rows) == 1
+        assert rows[0]["node_id"] == a.node_id
+        assert rows[0]["status"] == "active"
+        assert b.roster.active_peer_ids() == [a.node_id]
+
+    async def test_revoking_one_peer_stops_its_sync(self, two_nodes):
+        """Expressible for the first time. Under the shared passphrase
+        the only way to stop one peer was to rotate the secret, which
+        re-paired every peer at once."""
+        a, b = two_nodes
+        enrol(a, b)
+        await write_note(a, "before", "lands")
+        assert (await exchange(a, b))["success"] is True
+
+        b.roster.revoke_peer(b.roster.list_peers()[0]["peer_row_id"])
+        await write_note(a, "after", "must not land")
+        result = await exchange(a, b)
+
+        assert result["success"] is False
+        assert await notes_table(b) == {"before": "lands"}
+
+    async def test_a_bad_grant_does_not_fall_back_to_the_passphrase(
+        self, two_nodes,
+    ):
+        """The downgrade guard, over the wire. A knows B's passphrase and
+        presents a wrong grant; if the endpoint fell through, the
+        per-peer layer would be strippable at will.
+        """
+        a, b = two_nodes
+        store_outbound_grant(
+            f"127.0.0.1:{b.port}", "not-a-real-grant",
+            address=f"127.0.0.1:{b.port}",
+        )
+        await write_note(a, "n1", "must not land")
+
+        result = await exchange(a, b)
+
+        assert result["success"] is False
+        assert "invalid_peer_grant" in str(result.get("error", ""))
+        assert await notes_table(b) == {}
+
+    async def test_a_lapsed_grant_stops_syncing(self, two_nodes):
+        """Short-expiry grants that lapse are the defence that survives
+        the fact that revocation cannot recall replicated data."""
+        a, b = two_nodes
+        grant = b.roster.invite_peer(a.node_id, ttl_seconds=1)
+        store_outbound_grant(
+            f"127.0.0.1:{b.port}", grant["secret"],
+            address=f"127.0.0.1:{b.port}",
+        )
+        await write_note(a, "before", "lands")
+        assert (await exchange(a, b))["success"] is True
+
+        await asyncio.sleep(1.1)
+        await write_note(a, "after", "must not land")
+        result = await exchange(a, b)
+
+        assert result["success"] is False
+        assert await notes_table(b) == {"before": "lands"}
+
+    async def test_strict_mode_refuses_a_correct_shared_passphrase(
+        self, two_nodes, monkeypatch,
+    ):
+        """``FERAL_SYNC_REQUIRE_PEER_IDENTITY=1`` is the operator's
+        switch for retiring the shared secret. Until they flip it, the
+        passphrase keeps working, which is what stops the upgrade from
+        breaking a live two-brain setup."""
+        a, b = two_nodes
+        await write_note(a, "n1", "must not land")
+
+        assert (await exchange(a, b))["success"] is True, (
+            "baseline: the shared passphrase works before strict mode"
+        )
+        await write_note(a, "n2", "must not land either")
+        monkeypatch.setenv("FERAL_SYNC_REQUIRE_PEER_IDENTITY", "1")
+        result = await exchange(a, b)
+
+        assert result["success"] is False
+        assert "peer_identity_required" in str(result.get("error", ""))
+        assert "n2" not in await notes_table(b)
+
+    async def test_an_enrolled_peer_still_syncs_under_strict_mode(
+        self, two_nodes, monkeypatch,
+    ):
+        a, b = two_nodes
+        enrol(a, b)
+        await write_note(a, "n1", "identity wins")
+        monkeypatch.setenv("FERAL_SYNC_REQUIRE_PEER_IDENTITY", "1")
+
+        result = await exchange(a, b)
+
+        assert result["success"] is True, result
+        assert await notes_table(b) == {"n1": "identity wins"}
+
+    async def test_shared_passphrase_peers_are_recorded_for_the_operator(
+        self, two_nodes,
+    ):
+        """The migration ledger. An operator must be able to see WHICH
+        brains are still on the shared secret, or "are my peers
+        authenticated?" has no truthful answer."""
+        a, b = two_nodes
+        await write_note(a, "n1", "lands on the shared secret")
+
+        assert (await exchange(a, b))["success"] is True
+
+        ledger = b.roster.shared_secret_peers()
+        assert [e["node_id"] for e in ledger] == [a.node_id]
+        from security.peer_roster import identity_mode
+
+        assert identity_mode(b.roster, strict=False) == "shared_passphrase"
+
+    async def test_enrolling_moves_the_brain_off_the_straggler_list(
+        self, two_nodes,
+    ):
+        a, b = two_nodes
+        await write_note(a, "n1", "shared")
+        await exchange(a, b)
+        assert len(b.roster.shared_secret_peers()) == 1
+
+        enrol(a, b)
+        await write_note(a, "n2", "identity")
+        assert (await exchange(a, b))["success"] is True
+
+        assert b.roster.shared_secret_peers() == []
+        assert await notes_table(b) == {"n1": "shared", "n2": "identity"}
+
+    async def test_a_grant_issued_by_one_brain_does_not_work_on_another(
+        self, three_nodes,
+    ):
+        """Bilateral and explicitly pinned, not open federation. C's
+        grant is C's; presenting it to B must fail even though all three
+        brains are on the same LAN and share a passphrase.
+        """
+        a, b, c = three_nodes
+        grant = c.roster.invite_peer("node-a")
+        store_outbound_grant(
+            f"127.0.0.1:{b.port}", grant["secret"],
+            address=f"127.0.0.1:{b.port}",
+        )
+        await write_note(a, "n1", "must not land on b")
+
+        result = await exchange(a, b)
+
+        assert result["success"] is False
+        assert await notes_table(b) == {}

@@ -6,6 +6,94 @@ All notable changes to FERAL are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Federated sync peers have identities.** `/sync` authenticated every
+  peer with one shared plaintext passphrase, read at
+  `api/server.py` as `raw.get("passphrase", "")` and compared with a
+  plain `!=`. Three things followed. No peer was distinguishable from
+  another, so "stop syncing with that one brain" could only be expressed
+  by rotating the secret, which re-paired every peer at once (the
+  docstring of `ensure_sync_passphrase` already admitted this). The
+  comparison short-circuited on the first differing byte, on a
+  credential that is an operator-visible string in the common case.
+  And there was no membership list at all, which is the reason
+  `MemoryStore.prune_tombstones` states verbatim that it cannot prune by
+  "every peer has acknowledged this delete".
+
+  `security/peer_roster.py` is `security/device_pairing.py` applied to
+  the other side of the brain, not a new mechanism: the same
+  argon2id-primary / bcrypt-fallback backend (imported from that module,
+  so the algorithm choice is still made and logged in one place), the
+  same SHA-256 `token_lookup` O(1) index, the same "plaintext returned
+  exactly once at issue time", and the same rotation ledger used as the
+  migration path off a legacy plaintext secret.
+
+  A peer brain is a fuller principal than a device, since it replicates
+  deletes as well as inserts, so the defaults are tighter than device
+  pairing's. An invite must be redeemed within an hour on a hard,
+  non-sliding deadline. A redeemed grant lives in a sliding 7-day window
+  renewed by each successful handshake, so a peer that stops talking
+  lapses without anyone having to revoke it. The grant binds to the
+  `node_id` that first redeems it, so the same secret presented by a
+  second brain is refused, and the binding check is `hmac.compare_digest`
+  rather than `==`.
+
+  A presented grant is judged on the grant alone. It never falls through
+  to the shared passphrase, because a fall-through would let anyone
+  holding the passphrase strip the per-peer layer at will, and would
+  also render a genuinely lapsed grant as a working sync.
+
+- `PeerListener.remove_service` has a body. It was `pass`, so a peer that
+  left the network stayed in `SyncEngine._peers` forever, its per-peer
+  `asyncio.Lock` leaked, and its last-seen was written nowhere that
+  survives a restart. Departure is now persisted in the roster and is
+  explicitly not revocation: the grant stays valid and the peer rejoins
+  on its next advertisement. `PeerListener` and `AsyncPeerListener` moved
+  out of the `start_discovery` closure to module level, which is what
+  makes arrival and departure drivable without standing up zeroconf on a
+  real network.
+
+- `feral sync peer invite|accept|list|revoke`, plus `/api/sync/roster`,
+  `/api/sync/roster/invite`, `/api/sync/roster/accept` and
+  `DELETE /api/sync/roster/{peer_row_id}`. `feral sync peers add
+  <host:port>` also works unquoted now; argparse had nowhere to put the
+  second word, so only the quoted form ever parsed.
+
+### Changed
+
+- `/api/sync/status` reports `identity_mode`, `enrolled_peers`,
+  `shared_secret_peers` and an `identity_note`. The mode is
+  `shared_passphrase` until a peer is enrolled, then `mixed`, and only
+  `per_peer` once `FERAL_SYNC_REQUIRE_PEER_IDENTITY=1` refuses the
+  shared secret outright. It is deliberately never reported as
+  `per_peer` on the strength of enrolments alone: while the passphrase
+  would still be accepted, calling the setup identity-authenticated
+  would be a lie in the reassuring direction. Promotion is operator-
+  driven, never automatic, because auto-promotion is exactly how a
+  working two-brain setup would break in silence.
+
+### Migration
+
+- Nothing breaks on upgrade. `FERAL_SYNC_PASSPHRASE` keeps working; each
+  use is recorded in the roster's `shared_secret_log` and logged at
+  WARNING, and `feral sync status` names the brains still relying on it.
+  Enrol each of them, confirm the list is empty, then set
+  `FERAL_SYNC_REQUIRE_PEER_IDENTITY=1`.
+
+### Known limits
+
+- Revocation stops future exchanges. It cannot recall memory a peer has
+  already replicated, and cannot delete their copy. The API response and
+  the docs say so rather than letting the word imply otherwise; prefer
+  the lapsing window over the revocation list.
+- Tombstone pruning by acknowledgement is still not implemented.
+  `PeerRoster.active_peer_ids()` supplies the roster half that
+  `prune_tombstones` named as missing, but `synced_to` lives in
+  `sync_wal.db` while tombstones live in `memory.db`, and WAL pruning can
+  drop the very operation a tombstone would be matched against. That
+  join is a separate change; age-based retention remains the default.
+
 ## [2026.9.1] - 2026-09-01 - the replication nobody else ships, working
 
 ### Added
