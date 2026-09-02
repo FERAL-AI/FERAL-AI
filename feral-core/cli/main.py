@@ -3725,6 +3725,82 @@ def _sync_post(path: str, body: dict, *, timeout: float = 15.0) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def _cmd_sync_scope(argv: list[str]) -> None:
+    """`feral sync peer scope ...` - what a peer actually receives.
+
+    list                       every grant on this brain
+    grant <node_id> <scope>    share one named scope with one peer
+    revoke <node_id> <scope>   stop sharing one named scope
+
+    Enrolling a peer decides WHETHER it may connect. A scope grant
+    decides WHAT it gets, and nothing is granted by default: memory
+    written without a scope is private and replicates to no one.
+    """
+    verb = argv[0] if argv else "list"
+    rest = argv[1:]
+
+    if verb == "list":
+        data = _http_get("/api/sync/scopes")
+        if not data.get("ok"):
+            print(f"  Error: {data.get('error', 'unknown')}")
+            return
+        grants = data.get("grants", [])
+        if not grants:
+            print("  No scopes granted. No memory replicates to any peer.")
+            print("  Grant one: feral sync peer scope grant <node_id> <scope>")
+            return
+        for g in grants:
+            note = f"  ({g['note']})" if g.get("note") else ""
+            print(f"  {g['node_id']:40s} {g['scope']}{note}")
+        print("")
+        print(f"  {data.get('note', '')}")
+        return
+
+    if verb == "grant":
+        if len(rest) < 2:
+            print("  Usage: feral sync peer scope grant <node_id> <scope>")
+            return
+        r = _sync_post(
+            "/api/sync/scopes",
+            {"node_id": rest[0], "scope": rest[1], "note": " ".join(rest[2:])},
+        )
+        if not r.get("ok"):
+            print(f"  Grant failed: {r.get('error', '?')}")
+            return
+        print(f"  Granted '{r['scope']}' to {r['node_id']}.")
+        print(f"  {r.get('note', '')}")
+        return
+
+    if verb == "revoke":
+        if len(rest) < 2:
+            print("  Usage: feral sync peer scope revoke <node_id> <scope>")
+            return
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"{HTTP_BASE}/api/sync/scopes/{rest[0]}/{rest[1]}", method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                r = json.loads(resp.read())
+        except Exception as e:
+            print(f"  Revoke failed: {e}")
+            return
+        if not r.get("ok"):
+            print(f"  No grant of '{rest[1]}' to {rest[0]} to revoke.")
+            return
+        print(f"  Revoked '{rest[1]}' from {rest[0]}.")
+        # Stated here, not only in the docs. An operator reading this
+        # line is deciding whether the leak is contained, and the
+        # honest answer is that it is contained going forward only.
+        print("  Future exchanges in this scope are refused, both directions.")
+        print("  Operations already replicated under it remain on that peer's")
+        print("  disk and cannot be recalled. Revocation is not recall.")
+        return
+
+    print(f"  Unknown `scope` verb: {verb}. Try list | grant | revoke.")
+
+
 def _cmd_sync_peer(argv: list[str]) -> None:
     """`feral sync peer ...` - per-peer sync identity.
 
@@ -3732,9 +3808,14 @@ def _cmd_sync_peer(argv: list[str]) -> None:
     accept <label> <grant>   store a grant another brain issued us
     list                     roster + identity mode
     revoke <peer_row_id>     stop accepting one peer's grant
+    scope ...                per-peer scope grants (what a peer receives)
     """
     verb = argv[0] if argv else "list"
     rest = argv[1:]
+
+    if verb == "scope":
+        _cmd_sync_scope(rest)
+        return
 
     if verb == "list":
         data = _http_get("/api/sync/roster")
@@ -3746,9 +3827,17 @@ def _cmd_sync_peer(argv: list[str]) -> None:
         if not peers:
             print("  No peers enrolled.")
         for p in peers:
+            scopes = p.get("scopes") or []
             print(
                 f"  {p['peer_row_id']}  {p['name']:20s} "
                 f"status={p['status']:14s} node={p.get('node_id') or '-'}"
+            )
+            # Printed even when empty. "enrolled" and "receives
+            # something" are different states and an operator who
+            # cannot see the difference will assume the first implies
+            # the second.
+            print(
+                f"      scopes: {', '.join(scopes) if scopes else 'none (receives nothing)'}"
             )
         stragglers = data.get("shared_secret_peers", [])
         if stragglers:
@@ -4193,7 +4282,8 @@ def _main():
         help=(
             "status: show engine + per-peer health | "
             "peers [list|add <host:port>|remove <peer_id>] | "
-            "peer [list|invite <name>|accept <label> <grant>|revoke <row_id>] | "
+            "peer [list|invite <name>|accept <label> <grant>|revoke <row_id>|"
+            "scope [list|grant <node_id> <scope>|revoke <node_id> <scope>]] | "
             "now [<peer_id>]: trigger immediate sync | "
             "node-id: print persistent HLC id | "
             "export/import <file>: bundle round-trip"

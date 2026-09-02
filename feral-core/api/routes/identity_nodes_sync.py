@@ -9,6 +9,7 @@ from security.peer_roster import (
     load_outbound_grants,
     store_outbound_grant,
 )
+from security.sync_scopes import InvalidScopeError
 
 router = APIRouter()
 
@@ -219,6 +220,78 @@ async def sync_roster_accept(body: dict):
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True, **stored}
+
+
+@router.get("/api/sync/scopes")
+async def sync_scope_list():
+    """Every per-peer scope grant on this brain.
+
+    Grants are what a peer actually RECEIVES. ``/api/sync/roster``
+    answers whether a peer may connect; this answers what it gets once
+    it has, and the default is nothing.
+    """
+    roster = _roster()
+    if roster is None:
+        return {"ok": False, "error": "peer roster unavailable", "grants": []}
+    return {
+        "ok": True,
+        "grants": roster.list_scope_grants(),
+        "note": (
+            "A grant governs FUTURE exchanges only, in both directions: "
+            "operations in a granted scope are sent to that peer and "
+            "accepted from it. Anything unscoped stays private."
+        ),
+    }
+
+
+@router.post("/api/sync/scopes")
+async def sync_scope_grant(body: dict):
+    """Share one named scope with one peer brain, by node_id."""
+    roster = _roster()
+    if roster is None:
+        return {"ok": False, "error": "peer roster unavailable"}
+    payload = body or {}
+    node_id = (payload.get("node_id") or "").strip()
+    scope = (payload.get("scope") or "").strip()
+    if not node_id or not scope:
+        return {"ok": False, "error": "node_id and scope are required"}
+    try:
+        granted = roster.grant_scope(node_id, scope, note=payload.get("note", ""))
+    except (ValueError, InvalidScopeError) as exc:
+        return {"ok": False, "error": str(exc)}
+    return {
+        "ok": True,
+        "node_id": node_id,
+        "scope": granted,
+        "note": (
+            "Operations written into this scope from now on will replicate "
+            "to and from that brain. Memory already written under another "
+            "scope is unaffected: this does not reclassify anything."
+        ),
+    }
+
+
+@router.delete("/api/sync/scopes/{node_id}/{scope}")
+async def sync_scope_revoke(node_id: str, scope: str):
+    """Stop sharing one scope with one peer.
+
+    Says plainly what revocation is not. The peer keeps every operation
+    that already crossed, on a disk this brain does not control.
+    """
+    roster = _roster()
+    if roster is None:
+        return {"ok": False, "error": "peer roster unavailable"}
+    removed = roster.revoke_scope(node_id, scope)
+    return {
+        "ok": removed,
+        "node_id": node_id,
+        "scope": scope,
+        "note": (
+            "Future exchanges in this scope are refused in both directions. "
+            "Operations already replicated under it stay on that peer's disk. "
+            "Revocation is not recall."
+        ),
+    }
 
 
 @router.delete("/api/sync/roster/{peer_row_id}")

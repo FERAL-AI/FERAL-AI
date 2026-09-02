@@ -4324,8 +4324,15 @@ async def sync_peer_endpoint(ws: WebSocket):
                         })
                         logger.warning("Sync apply aborted: memory.refresh() raised %s", exc)
                         break
-                    applied = await state.sync_engine.apply_remote_changes(
-                        incoming_changes
+                    # Scoped sharing, receive side. Routed through the
+                    # peer-aware entry point so the grant set comes off
+                    # THIS brain's roster and is applied to operations
+                    # a peer we do not control constructed. Never call
+                    # the bare ``apply_remote_changes`` here: that form
+                    # exists for local bundle import and has no peer
+                    # boundary at all.
+                    applied = await state.sync_engine.apply_remote_changes_from_peer(
+                        incoming_changes, peer_node_id=peer_id,
                     )
 
                 my_changes = []
@@ -4342,9 +4349,15 @@ async def sync_peer_endpoint(ws: WebSocket):
                     # Off the loop: a synchronous sqlite3 query whose
                     # cost scales with the WAL, on a path a peer can
                     # reach every 30 seconds.
+                    #
+                    # Scoped sharing, send side. ``allowed_scopes`` is
+                    # mandatory on ``get_changes_for_peer``; an
+                    # authenticated peer with no grants legitimately
+                    # resolves to the empty set and receives nothing.
                     my_changes = await asyncio.to_thread(
                         state.sync_engine._wal.get_changes_for_peer,
                         remote_vc,
+                        allowed_scopes=state.sync_engine.scopes_for_peer(peer_id),
                         exclude_node=peer_id,
                     )
                 for _frame in _sync_data_frames(my_changes):

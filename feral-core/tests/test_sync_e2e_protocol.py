@@ -21,6 +21,20 @@ on MATERIALISED TABLE CONTENTS on the receiving side. Never on the op
 log: the op log is what both sides already agree on by construction, so
 an assertion against it cannot fail for the reasons that matter.
 
+Scoped sharing
+--------------
+Replication is scoped: an operation crosses only if its scope is in the
+grant set the receiving brain holds for the sender, and the default
+everywhere is ``private``, which never crosses. That is orthogonal to
+every defect above, so the harness opts in once, in one place:
+:func:`share` grants :data:`E2E_SCOPE` in both directions and the
+fixtures call it for every pair, while :func:`write_note` writes into
+that scope by default. Each test above therefore keeps proving exactly
+what it proved before, inside a granted scope.
+
+:class:`TestScopedSharing` is where the scope boundary itself is under
+test, and it writes personal notes with ``scope=None`` on purpose.
+
 Harness shape
 -------------
 ``sync_peer_endpoint`` reads the process-global ``api.server.state`` for
@@ -55,6 +69,11 @@ from security.peer_roster import PeerRoster, store_outbound_grant
 pytestmark = pytest.mark.timeout(120)
 
 _PASSPHRASE = "e2e-harness-passphrase"
+
+#: The scope the fixtures grant between every pair of nodes. Tests that
+#: are not about the scope boundary write into it so they exercise the
+#: same code path a real shared feed does.
+E2E_SCOPE = "e2e-shared"
 
 # One frame of the old protocol had to carry the entire change set. The
 # websockets client default receive limit is this many bytes, and it is
@@ -125,6 +144,13 @@ async def _start_node(
     engine = SyncEngine(node_id=node_id, memory_store=store, db_path=str(wal))
     store.set_sync_engine(engine)
     roster = PeerRoster(db_path=str(tmp_path / f"{node_id}_roster.db"))
+    # The engine enforces scope grants off ITS roster, and a roster is
+    # per brain. Without this the engine falls back to the process
+    # global, which two nodes in one process would share: a grant made
+    # on A would silently apply on B and the per-peer boundary would be
+    # global again, which is the exact property this module exists to
+    # catch.
+    engine.set_peer_roster(roster)
 
     port = _free_port()
     kwargs = dict(
@@ -180,6 +206,21 @@ def _serving_as(node: _Node):
         api_server.state = original
 
 
+def share(*nodes: _Node, scope: str = E2E_SCOPE) -> None:
+    """Grant ``scope`` between every pair of ``nodes``, both ways.
+
+    Grants are per brain and per direction of enforcement: each node's
+    own roster governs both what it sends to a peer and what it accepts
+    from one, so a one-sided grant shares nothing. Written out as the
+    full cross product rather than hidden inside :func:`exchange` so a
+    test that wants an ungranted peer simply does not call this.
+    """
+    for node in nodes:
+        for other in nodes:
+            if other is not node:
+                node.roster.grant_scope(other.node_id, scope)
+
+
 async def exchange(client: _Node, server: _Node, **kwargs) -> dict:
     """One real handshake: ``client`` dials ``server`` over a websocket.
 
@@ -206,13 +247,20 @@ async def exchange(client: _Node, server: _Node, **kwargs) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def write_note(node: _Node, note_id: str, content: str) -> str:
+async def write_note(
+    node: _Node, note_id: str, content: str, *, scope: str | None = E2E_SCOPE,
+) -> str:
     """Write a note the way the real store does: WAL op first so the
     HLC lands in the row, then the row.
 
     ``notes_legacy.save_note`` also enqueues embeddings and writes a
     knowledge triple; neither is under test here and both cost seconds
     at the volumes defect 1 needs.
+
+    ``scope`` defaults to :data:`E2E_SCOPE` so the tests that are not
+    about the boundary keep exercising replication. Pass ``scope=None``
+    for a personal note, which is what ``notes_legacy.save_note``
+    produces when nobody names a scope, and which must never cross.
     """
     now = time.time()
     data = {
@@ -223,7 +271,9 @@ async def write_note(node: _Node, note_id: str, content: str) -> str:
         "source": node.node_id,
         "created_at": now,
     }
-    hlc = await node.engine.log_operation_async("notes", "insert", note_id, data)
+    hlc = await node.engine.log_operation_async(
+        "notes", "insert", note_id, data, scope,
+    )
     conn = await node.store._conn()
     try:
         await conn.execute(
@@ -316,6 +366,7 @@ def _peer_grants(monkeypatch):
 async def two_nodes(tmp_path):
     a = await _start_node(tmp_path, "node-a")
     b = await _start_node(tmp_path, "node-b")
+    share(a, b)
     try:
         yield a, b
     finally:
@@ -329,6 +380,7 @@ async def three_nodes(tmp_path):
     a = await _start_node(tmp_path, "node-a")
     b = await _start_node(tmp_path, "node-b")
     c = await _start_node(tmp_path, "node-c")
+    share(a, b, c)
     try:
         yield a, b, c
     finally:
@@ -457,6 +509,7 @@ class TestOversizeChangeSet:
         """
         a = await _start_node(tmp_path, "node-a")
         b = await _start_node(tmp_path, "node-b", ws_max_size=WS_DEFAULT_MAX_SIZE)
+        share(a, b)
         try:
             expected = await _fill(a, 320, 5_000, "big")
 
@@ -640,6 +693,7 @@ class TestWalRetention:
         a peer that syncs after a prune still converges."""
         a = await _start_node(tmp_path, "node-a")
         b = await _start_node(tmp_path, "node-b")
+        share(a, b)
         try:
             expected = await _fill(a, 10, 50, "recent")
             assert a.engine._wal.prune() == 0
@@ -785,8 +839,12 @@ class TestRelayWatermark:
 
         # Delete on A, recording the tombstone the way a real local
         # delete records it (``MemoryStore._log_sync_async``).
+        # ``SCOPE_INHERIT`` is what the real delete emitters pass, so
+        # the delete inherits the scope the note was written under and
+        # travels exactly as far as the insert did.
         hlc = await a.engine.log_operation_async(
-            "notes", "delete", "doomed", {"id": "doomed"}
+            "notes", "delete", "doomed", {"id": "doomed"},
+            sync_mod.SyncEngine.SCOPE_INHERIT,
         )
         conn = await a.store._conn()
         try:

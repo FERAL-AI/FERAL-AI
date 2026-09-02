@@ -243,6 +243,72 @@ cannot recall memory the peer has already replicated, and it cannot
 delete their copy. Prefer letting a grant lapse over relying on
 revocation for anything that has already synced.
 
+### Scoped sharing
+
+Enrolling a peer decides **whether** it may connect. A scope grant
+decides **what** it gets, and the default is nothing.
+
+Every replicated operation carries a scope. A peer receives an
+operation only if its scope is in the set you granted that peer, and
+your brain accepts an operation only if its scope is in that same set.
+So two operators can pool one named feed without pooling anything else.
+
+```bash
+# Both operators run this, each naming the other brain's node_id.
+# `feral sync status` prints your own node_id; `feral sync peer list`
+# prints your peers'.
+feral sync peer scope grant <node_id> robot-events
+
+feral sync peer scope list
+feral sync peer scope revoke <node_id> robot-events
+```
+
+Scope names are 1-64 characters of lowercase ASCII, digits, `-`, `_` or
+`.`, starting and ending with a letter or digit. `private` is reserved.
+
+**Pooling takes two grants.** Your roster is your whole policy toward a
+peer and it governs both directions: what you send and what you are
+willing to hold. If only one side grants a scope, nothing moves. That
+is deliberate, because the alternative would let somebody else's roster
+decide what lands in your store.
+
+**Where a scope comes from.** The writer names it. `save_note` and
+`episode_save` take a `scope=` argument, and anything that does not
+name one is `private`. Scope is not derived from the table: doing that
+would make the sharing boundary a property of the schema, so the next
+table anyone adds would inherit some other table's posture silently. A
+delete is the one exception. It inherits the scope of the row's newest
+logged write, so a removal reaches exactly the peers the write reached
+and no further.
+
+**Everything ambiguous is private.** Unscoped writes, WAL rows that
+predate this feature, scope names that do not parse, and operations
+from a peer running an older build are all `private`, and `private`
+never replicates and cannot be granted. A bug in this path produces
+"shared too little", never "shared too much", because sharing too much
+cannot be undone: the other brain is somebody else's.
+
+**Memory written before you upgraded stays private, permanently.**
+Nothing is retroactively classified. The `scope` column defaults to
+`private` for every pre-existing row rather than guessing, so upgrading
+never turns your existing history into something poolable. Re-scoping
+existing memory would be a migration onto the source tables, and that
+is not what this does.
+
+**What revoking a scope does and does not do.** It stops future
+replication in that scope, in both directions, from the next exchange
+onward. It does **not** recall anything that already crossed. Those
+operations are on a disk you do not control and no command here can
+reach them. Revocation is not recall.
+
+**No cross-peer caps.** There is deliberately no aggregate limit like
+"share at most N operations across all peers". Kleppmann and Howard's
+I-confluence result is that an invariant of that shape cannot be
+enforced across independent runtimes without coordination, and a limit
+that silently does not hold is worse than no limit. Any limit in this
+code is local to a single enforcement point and is documented as such
+where it appears.
+
 ## API Reference
 
 | Endpoint | Method | Description |
@@ -258,3 +324,6 @@ revocation for anything that has already synced.
 | `/api/sync/roster/invite` | POST | Mint a grant for one peer (returned once) |
 | `/api/sync/roster/accept` | POST | Store a grant another brain issued us |
 | `/api/sync/roster/{peer_row_id}` | DELETE | Revoke a peer's grant |
+| `/api/sync/scopes` | GET | Per-peer scope grants (what each peer receives) |
+| `/api/sync/scopes` | POST | Grant one scope to one peer by `node_id` |
+| `/api/sync/scopes/{node_id}/{scope}` | DELETE | Revoke one scope from one peer |

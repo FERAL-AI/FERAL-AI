@@ -63,6 +63,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
+from security.sync_scopes import INHERIT as SCOPE_INHERIT
+
 if TYPE_CHECKING:
     from memory.store import MemoryStore
 
@@ -443,9 +445,17 @@ class MemoryDecayService:
             # Emitted after the commit so a delete that did not land
             # locally is never announced, and per-id rather than as a
             # batch because ``SyncOperation`` is keyed on one row_id.
+            # ``SCOPE_INHERIT`` per id: the forget sweep undoes a
+            # write it did not make, so it has no scope intent of its
+            # own. Each delete inherits the scope its episode was
+            # written under and reaches exactly those peers. An episode
+            # whose WAL operation has already been pruned resolves to
+            # private and the delete stays local, which is the right
+            # failure: it leaves a peer holding a copy it already had
+            # rather than telling it about an episode we never shared.
             for eid in (d["id"] for d in doomed):
                 await self.store._log_sync_async(
-                    "episodes", "delete", eid, {"id": eid},
+                    "episodes", "delete", eid, {"id": eid}, SCOPE_INHERIT,
                 )
 
             # 3) Refresh the active/forgotten gauges. Two cheap counts
