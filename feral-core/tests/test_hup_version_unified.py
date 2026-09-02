@@ -217,3 +217,184 @@ def test_companion_ios_info_plist_when_present():
             assert m.group(1) == BRAIN_HUP_VERSION
             return
     pytest.skip("companion-ios Info.plist not present co-located with ASOS")
+
+
+# ─────────────────────────────────────────────
+# The envelope, not just the version literal
+# ─────────────────────────────────────────────
+# Everything above checks that five surfaces AGREE on the version string.
+# None of it ever looked at a frame. HUP_SPEC.md section 5 says every HUP
+# frame carries ``hup_version``, ``type``, ``ts`` and ``payload``; six
+# brain-to-node sends spelled that out by hand and about twenty did not,
+# including every ``hup_action_request`` -- the actuator command frame.
+#
+# Impact was nil while no shipping SDK validated envelopes (the Swift
+# decoder documents the omission and tolerates it by name). It bites the
+# first third-party daemon that follows the published spec, which is the
+# audience the spec exists for.
+#
+# Two gates below. The AST scan is the regression guard: a new send that
+# bypasses ``hup_frame`` / ``stamp_hup_envelope`` / a gated
+# ``build_action_request`` frame fails the build. The behaviour tests in
+# ``tests/test_hup_envelope_and_grants.py`` drive the real code and assert
+# what lands on the wire.
+
+import ast
+
+#: (module, function names whose ``send_json`` calls go to a NODE).
+#: Client-bound sends are out of scope -- browsers read ``FeralMessage``,
+#: which is a different envelope. The list is explicit rather than
+#: inferred because "is this websocket a node?" is not decidable from the
+#: syntax, and a wrong inference either misses a leak or fails the build
+#: on a browser frame.
+NODE_BOUND_SENDERS: tuple = (
+    ("api/server.py", (
+        "_send_protocol_error",
+        "daemon_session",
+        "_handle_ambient_transcript",
+        "_handle_ambient_digest_request",
+    )),
+    ("api/state.py", ("send_to_daemon", "_send_dict_to_node")),
+    ("api/routes/dashboard.py", ("_push_health_update",)),
+    ("agents/orchestrator.py", ("request_frame",)),
+    ("agents/tool_runner.py", (
+        "execute_daemon_command",
+        "execute_daemon_command_with_ack",
+    )),
+    ("hardware/mesh.py", ("invoke", "execute")),
+    ("hardware/protocol.py", ("execute",)),
+    ("gateway/protocol.py", ("node_invoke",)),
+)
+
+#: Calls whose return value is a complete HUP frame.
+ENVELOPE_BUILDERS: frozenset = frozenset({"hup_frame", "stamp_hup_envelope"})
+
+BRAIN_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _function_nodes(tree: ast.AST, names) -> list:
+    """Every def/async def in ``tree`` whose name is in ``names``."""
+    wanted = set(names)
+    return [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in wanted
+    ]
+
+
+def _is_enveloped(expr: ast.AST, enveloped_names: set) -> bool:
+    if isinstance(expr, ast.Call):
+        func = expr.func
+        if isinstance(func, ast.Name) and func.id in ENVELOPE_BUILDERS:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr in ENVELOPE_BUILDERS:
+            return True
+        return False
+    # ``gate.frame`` -- hardware.action_frames.ActionRequest.frame is
+    # built by hup_frame and is None when the capability gate refused.
+    if isinstance(expr, ast.Attribute) and expr.attr == "frame":
+        return True
+    if isinstance(expr, ast.Name):
+        return expr.id in enveloped_names
+    return False
+
+
+def _collect_enveloped_names(fn: ast.AST) -> set:
+    """Locals assigned an enveloped expression anywhere in ``fn``.
+
+    Whole-function rather than flow-sensitive: the shape in the tree is
+    always ``msg = gate.frame`` a few lines above ``send_json(msg)``, and
+    a scan that demanded ordering would reject nothing extra while being
+    far easier to get wrong.
+    """
+    names: set = set()
+    # Two passes so ``a = hup_frame(...)`` then ``b = a`` both land.
+    for _ in range(2):
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign) and _is_enveloped(node.value, names):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+    return names
+
+
+def _send_json_calls(fn: ast.AST) -> list:
+    return [
+        node for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "send_json"
+    ]
+
+
+def test_every_brain_to_node_send_carries_the_hup_envelope():
+    """HUP_SPEC.md section 5, enforced on the brain's own source.
+
+    A send that builds its dict inline is a send that will be missing
+    ``hup_version`` and ``ts``, because that is what all twenty of them
+    did. Route it through ``models.protocol.hup_frame`` (building a new
+    frame), ``stamp_hup_envelope`` (a dict that already exists), or
+    ``hardware.action_frames.build_action_request`` (which does both and
+    applies the section 6 capability gate).
+    """
+    offenders: list = []
+    scanned = 0
+    for rel_path, fn_names in NODE_BOUND_SENDERS:
+        path = BRAIN_ROOT / rel_path
+        assert path.is_file(), f"{rel_path} moved; update NODE_BOUND_SENDERS"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        found = _function_nodes(tree, fn_names)
+        found_names = {f.name for f in found}
+        missing = set(fn_names) - found_names
+        assert not missing, (
+            f"{rel_path}: {sorted(missing)} no longer exist; the scan would "
+            "silently stop covering them. Update NODE_BOUND_SENDERS."
+        )
+        for fn in found:
+            enveloped = _collect_enveloped_names(fn)
+            for call in _send_json_calls(fn):
+                scanned += 1
+                arg = call.args[0] if call.args else None
+                if arg is None or not _is_enveloped(arg, enveloped):
+                    offenders.append(
+                        f"{rel_path}:{call.lineno} in {fn.name}()"
+                    )
+
+    assert scanned >= 12, (
+        f"only {scanned} node-bound send_json calls found; the scan has "
+        "probably stopped matching real code"
+    )
+    assert not offenders, (
+        "brain -> node frames missing the HUP_SPEC.md section 5 envelope "
+        "(hup_version + ts):\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_removed_command_alias_is_gone_from_every_sender():
+    """``{"type": "command"}`` has not been a HUP frame since 2026.7.0.
+
+    ``tests/test_hup_protocol.py`` asserted this for ``hardware/mesh.py``
+    and ``agents/tool_runner.py`` and nothing else, and the gateway's
+    ``node.invoke`` fallback went on sending it -- top-level ``command``
+    and ``args``, no ``payload``, no envelope -- into a socket where no
+    SDK has a branch for it, while returning ``{"dispatched": true}``.
+    """
+    for rel_path, _ in NODE_BOUND_SENDERS:
+        tree = ast.parse((BRAIN_ROOT / rel_path).read_text(encoding="utf-8"))
+        # AST, not a substring scan: the note in gateway/protocol.py that
+        # records what the fallback used to send would trip a text match,
+        # and deleting the note to satisfy the test would delete the
+        # explanation of why the fallback looks the way it does.
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values):
+                if (
+                    isinstance(key, ast.Constant) and key.value == "type"
+                    and isinstance(value, ast.Constant) and value.value == "command"
+                ):
+                    raise AssertionError(
+                        f"{rel_path}:{node.lineno} still builds the removed "
+                        "`command` alias; HUP_SPEC.md section 5.5 maps it to "
+                        "hup_action_request."
+                    )

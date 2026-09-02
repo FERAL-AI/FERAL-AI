@@ -30,6 +30,7 @@ from hardware.command_contract import (
     CommandLedger,
     NodeHealth,
 )
+from hardware.action_frames import build_action_request
 
 logger = logging.getLogger("feral.hardware.mesh")
 
@@ -308,6 +309,20 @@ class HardwareMesh:
             deadline=time.time() + timeout,
         )
 
+        # HUP_SPEC section 6: the brain MUST NOT issue an
+        # hup_action_request for a capability the operator has denied on
+        # this device. Built (and so gated) before the ledger submit
+        # below, because a SUBMITTED record for a command that was never
+        # sent is a pending row nothing can ever resolve, and
+        # node_heartbeat replays pending ids back to the node.
+        gate = build_action_request(
+            node_id, command, params or {},
+            timeout_ms=int(timeout * 1000), action_id=envelope.command_id,
+        )
+        if not gate.allowed:
+            return {"success": False, "error": gate.denied_reason,
+                    "capability_denied": True}
+
         if idempotency_key:
             existing = self.ledger.check_idempotency(idempotency_key)
             if existing is not None:
@@ -321,15 +336,7 @@ class HardwareMesh:
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_invokes[request_id] = future
 
-        msg = {
-            "type": "hup_action_request",
-            "payload": {
-                "action_id": request_id,
-                "name": command,
-                "params": params or {},
-                "timeout_ms": int(timeout * 1000),
-            },
-        }
+        msg = gate.frame
 
         try:
             await ws.send_json(msg)
@@ -565,20 +572,22 @@ class WebSocketNodeAdapter:
             )
 
         request_id = str(uuid4())[:8]
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
-        self._pending[request_id] = future
-
         command = action.capability_id
 
-        msg = {
-            "type": "hup_action_request",
-            "payload": {
-                "action_id": request_id,
-                "name": command,
-                "params": action.parameters,
-                "timeout_ms": action.timeout_ms,
-            },
-        }
+        # HUP_SPEC section 6 capability gate + section 5 envelope.
+        gate = build_action_request(
+            self._node_id, command, action.parameters,
+            timeout_ms=action.timeout_ms, action_id=request_id,
+        )
+        if not gate.allowed:
+            return HUPResult(
+                action_id=action.action_id, device_id=action.device_id,
+                status="denied", error=gate.denied_reason,
+            )
+
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending[request_id] = future
+        msg = gate.frame
 
         try:
             await ws.send_json(msg)

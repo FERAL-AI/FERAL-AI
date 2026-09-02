@@ -16,6 +16,64 @@ HUP_VERSION = "1.4.0"
 
 
 # ─────────────────────────────────────────────
+# The brain -> node envelope (HUP_SPEC.md section 5)
+# ─────────────────────────────────────────────
+# "Every HUP frame is a JSON object with hup_version, type, ts, payload."
+# Six brain-to-node sends spelled that out by hand and about twenty did
+# not, so the wire carried two shapes of the same protocol. Nothing broke
+# because no shipping SDK validates the envelope on inbound -- the Swift
+# decoder documents the omission and tolerates it by name -- but a
+# third-party daemon written against the published spec is entitled to
+# reject a frame with no version on it, and it would have been right to.
+#
+# One builder, used by every brain-to-node send. ``hup_frame`` is for a
+# frame being constructed here; ``stamp_hup_envelope`` is for a dict that
+# already exists (a ``FeralMessage.model_dump()``, a frame assembled by a
+# helper) and only needs the two missing fields. Neither overwrites a
+# value the caller set, so a replayed or forwarded frame keeps its own
+# ``ts``.
+#
+# ``tests/test_hup_version_unified.py`` AST-scans the brain for a
+# node-bound send that bypasses both.
+
+#: Envelope keys HUP_SPEC.md section 5 requires on every frame.
+HUP_ENVELOPE_KEYS: tuple = ("hup_version", "type", "ts", "payload")
+
+
+def stamp_hup_envelope(frame: dict) -> dict:
+    """Fill in ``hup_version`` / ``ts`` / ``payload`` when absent, in place.
+
+    Returns the same dict so it can wrap a send argument directly. A key
+    the caller already set is never overwritten: forwarding a frame must
+    not restamp it with the brain's clock.
+    """
+    if not isinstance(frame, dict):
+        return frame
+    frame.setdefault("hup_version", HUP_VERSION)
+    frame.setdefault("ts", time())
+    frame.setdefault("payload", {})
+    return frame
+
+
+def hup_frame(msg_type: str, payload: Optional[dict] = None, **extra) -> dict:
+    """Build a spec-complete brain -> node HUP frame.
+
+    ``extra`` carries the non-envelope keys some routes add (``hop``,
+    ``session_id``, ``msg_id``); they sit alongside the envelope rather
+    than inside the payload, which is where they already were on the
+    wire.
+    """
+    frame = {
+        "hup_version": HUP_VERSION,
+        "type": msg_type,
+        "ts": time(),
+        "payload": payload if payload is not None else {},
+    }
+    frame.update(extra)
+    return frame
+
+
+# ─────────────────────────────────────────────
 # Structural field bounds (AUDIT-FIXES F-02)
 # ─────────────────────────────────────────────
 # Every model below used to declare its fields bare, so the brain accepted

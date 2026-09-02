@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Plus, RefreshCw, Zap, Radio, Wifi, Trash2, Sparkles } from 'lucide-react';
+import { Plus, RefreshCw, Zap, Radio, Wifi, Trash2, Sparkles, Check, Ban } from 'lucide-react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import Modal from '../ui/Modal';
@@ -668,8 +668,19 @@ function DeviceDetailModal({ device, onClose, onForget }) {
   const [invoke, setInvoke] = useState({ method: '', args: '{}' });
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  // HUP_SPEC.md section 6 says per-device capability gating lives at
+  // Settings > Devices > <device> > Capabilities. This panel used to
+  // render the capability list as read-only chips, so the spec named a
+  // screen that had no control on it and the brain echoed the node's own
+  // self-declaration back as `granted_capabilities`.
+  const [grants, setGrants] = useState(null);
+  const [grantsError, setGrantsError] = useState(null);
+  const [grantBusy, setGrantBusy] = useState('');
 
   const id = device.device_id || device.node_id || device.id;
+  // Grants are keyed by node_id, the HUP identity. A paired row that
+  // never attached a socket has no node_id and therefore nothing to gate.
+  const nodeId = device.node_id || detail.node_id || '';
 
   useEffect(() => {
     if (!id) return;
@@ -694,6 +705,43 @@ function DeviceDetailModal({ device, onClose, onForget }) {
       });
     return () => { cancelled = true; };
   }, [id, device]);
+
+  useEffect(() => {
+    if (!nodeId) { setGrants(null); return undefined; }
+    let cancelled = false;
+    setGrantsError(null);
+    apiJson(`/api/devices/${encodeURIComponent(nodeId)}/capabilities`)
+      .then((body) => {
+        if (cancelled) return;
+        setGrants(Array.isArray(body?.capabilities) ? body.capabilities : []);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        // Said out loud rather than falling back to read-only chips: a
+        // silent fallback is how a security control ends up looking
+        // present while doing nothing, which is the defect being fixed.
+        setGrantsError(e?.detail || e?.message || 'could not load capability grants');
+      });
+    return () => { cancelled = true; };
+  }, [nodeId]);
+
+  const toggleGrant = async (capability, granted) => {
+    setGrantBusy(capability);
+    setGrantsError(null);
+    try {
+      const r = await apiFetch(`/api/devices/${encodeURIComponent(nodeId)}/capabilities`, {
+        method: 'POST',
+        body: JSON.stringify({ capability, granted }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (Array.isArray(body?.capabilities)) setGrants(body.capabilities);
+      else setGrantsError(body?.detail || body?.error || 'grant change was not applied');
+    } catch (e) {
+      setGrantsError(e?.detail || e?.message || 'grant change failed');
+    } finally {
+      setGrantBusy('');
+    }
+  };
 
   // AUDIT-r14 finding 06 fix: previously invalid JSON args were
   // silently coerced to `{}` and the actuator fired with no
@@ -811,11 +859,49 @@ function DeviceDetailModal({ device, onClose, onForget }) {
             </div>
           </DetailRow>
         )}
-        {capList.length > 0 && (
+        {grants?.length > 0 && (
+          <DetailRow label="Capabilities">
+            <div className="v2-device-caps" data-testid="v2-device-capability-grants">
+              {grants.map((g) => (
+                <button
+                  key={g.capability}
+                  type="button"
+                  className={`v2-chip${g.granted ? '' : ' v2-chip--muted'}`}
+                  disabled={grantBusy === g.capability}
+                  aria-pressed={!!g.granted}
+                  data-testid={`v2-device-capability-${g.capability}`}
+                  title={
+                    `${g.tier} tier. ${g.granted ? 'Allowed' : 'Denied'} on this device`
+                    + `${g.explicit ? '' : ' (default)'}. Click to ${g.granted ? 'deny' : 'allow'}.`
+                  }
+                  onClick={() => toggleGrant(g.capability, !g.granted)}
+                >
+                  {g.granted ? <Check size={10} /> : <Ban size={10} />} {g.capability}
+                </button>
+              ))}
+            </div>
+            {grantsError && (
+              <div className="v2-chip v2-chip--error" data-testid="v2-device-capability-error">
+                {String(grantsError)}
+              </div>
+            )}
+          </DetailRow>
+        )}
+        {!(grants?.length > 0) && capList.length > 0 && (
+          // Nothing gateable: no node_id (an unclaimed pairing row, or a
+          // mesh entry that never registered), or the grant lookup did
+          // not answer. Shown read-only rather than hidden, because
+          // losing the capability list is a worse outcome than losing the
+          // toggles, and the error below says which case this is.
           <DetailRow label="Capabilities">
             <div className="v2-device-caps">
               {capList.map((c, i) => <span key={i} className="v2-chip">{String(c)}</span>)}
             </div>
+            {grantsError && (
+              <div className="v2-chip v2-chip--error" data-testid="v2-device-capability-error">
+                {String(grantsError)}
+              </div>
+            )}
           </DetailRow>
         )}
         {device.type === 'wearable' && !capList.includes('haptic') && (

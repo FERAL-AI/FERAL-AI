@@ -18,6 +18,7 @@ from api.device_view import (
 )
 from api.middleware.rate_limit import code_claim_limiter
 from api.state import state
+from security.capability_grants import live_grants
 from config.access_mode import LOOPBACK_HOSTS, AccessMode, coerce
 from config.runtime import bound_host, brain_port, brain_public_base_url
 from services.netinfo import detect_lan_ipv4
@@ -628,6 +629,145 @@ async def connected_devices():
     return view
 
 
+# ─────────────────────────────────────────────
+# Per-device capability grants (HUP_SPEC.md section 6)
+# ─────────────────────────────────────────────
+# The spec has always said gating happens at "Settings -> Devices ->
+# <device> -> Capabilities". Until these two routes there was nothing for
+# that screen to call: the brain echoed the node's own declaration back as
+# ``granted_capabilities`` and stored nothing.
+
+
+def _declared_capabilities(node_id: str) -> list[str]:
+    """What this node says it can do.
+
+    Live socket first (``_feral_capabilities`` is stashed on the
+    WebSocket at ``node_register``), then the pairing row, so a device the
+    operator is denying while it is offline still renders its list.
+    """
+    ws = state.daemons.get(node_id)
+    live = list(getattr(ws, "_feral_capabilities", []) or []) if ws else []
+    if live:
+        return [str(c) for c in live]
+    try:
+        for row in state.device_pairing_store.list_devices() or []:
+            if str(row.get("node_id") or "") != node_id:
+                continue
+            caps = row.get("capabilities")
+            if isinstance(caps, str) and caps.strip():
+                caps = json.loads(caps)
+            if isinstance(caps, list):
+                return [str(c) for c in caps]
+    except Exception as exc:
+        logger.warning(
+            "could not read declared capabilities for %s: %s", node_id, exc,
+        )
+    return []
+
+
+@router.get("/api/devices/{node_id}/capabilities")
+async def get_device_capabilities(node_id: str):
+    """Every capability this node declared, with the operator's answer.
+
+    ``granted`` is the answer that will be enforced; ``explicit`` says
+    whether it is an answer the operator gave or the default. The default
+    is granted -- see ``security/capability_grants`` for why it is not
+    deny.
+    """
+    declared = _declared_capabilities(node_id)
+    return {
+        "node_id": node_id,
+        "connected": node_id in state.daemons,
+        "capabilities": live_grants().grants_for(node_id, declared),
+    }
+
+
+@router.post("/api/devices/{node_id}/capabilities")
+async def set_device_capability(node_id: str, request: Request):
+    """Grant or deny one capability, or a whole tier, on one device.
+
+    Body is either ``{"capability": "camera", "granted": false}`` or
+    ``{"tier": "camera", "granted": false}``. The tier form is the toggle
+    HUP_SPEC.md section 6 describes; it applies to every declared
+    capability in that tier and is a no-op on a node that declared none.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="body must be JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+
+    if "granted" not in body:
+        raise HTTPException(status_code=400, detail="'granted' is required")
+    granted = bool(body.get("granted"))
+    capability = str(body.get("capability") or "").strip()
+    tier = str(body.get("tier") or "").strip()
+    if bool(capability) == bool(tier):
+        raise HTTPException(
+            status_code=400,
+            detail="exactly one of 'capability' or 'tier' is required",
+        )
+
+    declared = _declared_capabilities(node_id)
+    if tier:
+        changed = live_grants().set_tier(node_id, tier, granted, declared)
+    else:
+        live_grants().set_grant(node_id, capability, granted)
+        changed = [capability]
+
+    return {
+        "ok": True,
+        "node_id": node_id,
+        "changed": changed,
+        "granted": granted,
+        # The node is told immediately rather than at its next
+        # node_register: a daemon that reconnects hourly would otherwise
+        # keep acting on a grant the operator revoked minutes ago. The
+        # brain enforces regardless -- this is the daemon's copy.
+        "notified": await _notify_grant_change(node_id, declared),
+        "capabilities": live_grants().grants_for(node_id, declared),
+    }
+
+
+async def _notify_grant_change(node_id: str, declared: list[str]) -> bool:
+    """Re-send ``node_ack`` to a live node after a grant change.
+
+    ``node_ack`` rather than a new frame type: it is the frame that
+    already carries ``granted_capabilities`` / ``denied_capabilities``,
+    every SDK has a branch for it, and adding a ``capability_update``
+    type would be a protocol addition that no shipped daemon can read.
+    Nothing in HUP_SPEC.md section 5.2 says the brain sends it only once.
+
+    The session token is carried through from the register-time ack --
+    ``NodeAckPayload.session_token`` is what both SDKs latch onto, and
+    re-acking without it would blank a live node's token.
+
+    Best effort. The brain refuses denied actions at the sender, so a node
+    that never receives this cannot act on the stale grant anyway.
+    """
+    ws = state.daemons.get(node_id)
+    if ws is None:
+        return False
+    granted, denied = live_grants().partition(node_id, declared)
+    try:
+        await state._send_dict_to_node(node_id, {
+            "type": "node_ack",
+            "payload": {
+                "node_id": node_id,
+                "session_token": str(getattr(ws, "_feral_session_token", "") or ""),
+                "heartbeat_ms": 10000,
+                "capabilities": list(declared),
+                "granted_capabilities": granted,
+                "denied_capabilities": denied,
+            },
+        })
+        return True
+    except Exception as exc:
+        logger.warning("could not push grant update to %s: %s", node_id, exc)
+        return False
+
+
 @router.get("/api/devices/{node_id}/subdevices")
 async def list_node_subdevices(node_id: str):
     """Return the sub-device tree for a single node.
@@ -1187,7 +1327,19 @@ async def pair_device_complete(body: dict):
 async def revoke_device(device_id: str):
     """Revoke (un-pair) a device."""
     store = state.device_pairing_store
+    # Read the node_id before the row goes: an un-paired device's
+    # capability answers are about a device that no longer exists, and
+    # leaving them means a re-pair silently inherits denials the operator
+    # made against a different install.
+    node_ids = {
+        str(row.get("node_id") or "")
+        for row in (store.list_devices() or [])
+        if str(row.get("device_id") or "") == device_id
+    }
     ok = store.revoke_device(device_id)
     if not ok:
         return {"ok": False, "error": "device not found"}
+    for nid in node_ids:
+        if nid:
+            live_grants().clear_node(nid)
     return {"ok": True}

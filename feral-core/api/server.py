@@ -38,7 +38,14 @@ from models.protocol import (
     DeviceRegisterPayload,
     AudioChunkPayload,
     decoded_b64_size,
+    hup_frame,
     parse_message,
+)
+from security.capability_grants import (
+    TIER_AUDIO,
+    TIER_CAMERA,
+    frame_tier_enabled,
+    live_grants,
 )
 from config.runtime import brain_bind_host, brain_port, brain_public_base_url
 from gateway.protocol import GatewaySession
@@ -2476,20 +2483,72 @@ NODE_API_KEY = os.environ.get("NODE_API_KEY", "")
 async def _send_protocol_error(ws: WebSocket, code: int, message: str, *, name: str = "bad_schema") -> None:
     """Emit an HUP §8 error frame to the daemon."""
     try:
-        await ws.send_json({
-            "hup_version": HUP_VERSION,
-            "type": "error",
-            "ts": __import__("time").time(),
-            "payload": {
-                "code": code,
-                "name": name,
-                "message": message,
-                "recoverable": False,
-                "ref_action_id": None,
-            },
-        })
+        await ws.send_json(hup_frame("error", {
+            "code": code,
+            "name": name,
+            "message": message,
+            "recoverable": False,
+            "ref_action_id": None,
+        }))
     except Exception:
         pass
+
+
+# ─────────────────────────────────────────────
+# Capability-tier frame ingress (HUP_SPEC.md section 6)
+# ─────────────────────────────────────────────
+# "Brains MUST drop camera_frame and microphone_chunk events from nodes
+# whose camera/audio tier is disabled, even if the daemon sends them."
+# Nothing implemented it: every image and audio branch below ingested
+# whatever arrived. One map, consulted once per frame in the dispatch
+# loop, so a new image or audio type is covered by adding a line here
+# rather than by remembering to add a check to its branch.
+#
+# ``camera_frame`` and ``microphone_chunk`` are the HUP v1.0 spellings
+# the spec names; the v1.1+ types that land in the same sinks are listed
+# alongside them, because dropping only the two v1.0 names would leave
+# the rule trivially bypassed by a daemon that speaks v1.1.
+
+#: Direct ``msg.type`` -> capability tier.
+_FRAME_TIER_BY_TYPE: dict = {
+    "vision_frame": TIER_CAMERA,
+    "video_frame": TIER_CAMERA,
+    "camera_frame": TIER_CAMERA,
+    "glasses_frame": TIER_CAMERA,
+    "frame": TIER_CAMERA,
+    "audio_frame": TIER_AUDIO,
+    "audio_chunk": TIER_AUDIO,
+    "microphone_chunk": TIER_AUDIO,
+}
+
+#: ``device_event.payload.event_type`` -> capability tier, for the same
+#: frames arriving inside the v1.1 ``device_event`` envelope.
+_FRAME_TIER_BY_EVENT_TYPE: dict = {
+    "video_frame": TIER_CAMERA,
+    "camera_frame": TIER_CAMERA,
+    "audio_frame": TIER_AUDIO,
+    "microphone_chunk": TIER_AUDIO,
+}
+
+
+def _frame_tier_refused(node_id: str, msg_type: str, raw: dict) -> str:
+    """The tier this frame needs, when the operator has disabled it.
+
+    Empty string means ingest it. Returns the tier name so the caller can
+    log which toggle refused the frame; there is deliberately no error
+    frame back to the daemon, because the spec's rule is "drop ... even if
+    the daemon sends them" and a per-frame refusal on a 30fps stream is a
+    denial of service against the brain's own socket.
+    """
+    tier = _FRAME_TIER_BY_TYPE.get(msg_type or "")
+    if tier is None and msg_type == "device_event":
+        event_type = str((raw.get("payload") or {}).get("event_type") or "")
+        tier = _FRAME_TIER_BY_EVENT_TYPE.get(event_type)
+    if tier is None:
+        return ""
+    if frame_tier_enabled(node_id, tier):
+        return ""
+    return tier
 
 
 async def _send_frame_too_large(ws: WebSocket, reason: str) -> None:
@@ -2715,6 +2774,27 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 )
                 continue
 
+            # HUP_SPEC.md section 6: drop camera / microphone frames from
+            # a node whose tier the operator disabled, "even if the daemon
+            # sends them". One gate ahead of the dispatch chain rather
+            # than a check inside each of the six branches that sink these
+            # frames, because the branch that gets forgotten is the one
+            # that leaks.
+            _refused_tier = _frame_tier_refused(node_id, msg.type, raw)
+            if _refused_tier:
+                # debug, not info: these arrive at stream rate, and the
+                # supervisor record below is the durable evidence.
+                logger.debug(
+                    "dropped %s from %s: operator disabled the %s tier",
+                    msg.type, node_id, _refused_tier,
+                )
+                _record_phone_envelope(
+                    "denied", msg.type,
+                    detail={"reason": "capability_tier_disabled",
+                            "tier": _refused_tier},
+                )
+                continue
+
             if msg.type in ("node_register", "register") and isinstance(payload, NodeRegisterPayload):
                 node_id = payload.node_id
                 state.daemons[node_id] = ws
@@ -2767,21 +2847,36 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     })
 
                 session_token = str(__import__("uuid").uuid4())
-                await ws.send_json({
+                # Stashed for the same reason as _feral_capabilities
+                # above: POST /api/devices/<id>/capabilities re-acks a
+                # live node after a grant change, and a re-ack without
+                # the token would blank the one the node latched onto.
+                setattr(ws, "_feral_session_token", session_token)
+                # HUP_SPEC.md section 6. These two lists used to be
+                # ``list(payload.capabilities)`` and ``[]`` -- the node's
+                # own self-declaration echoed straight back, with no
+                # store behind it and nothing an operator could change.
+                # They now come from the per-device grant store, which is
+                # the same store every hup_action_request sender consults
+                # before it builds a frame, so the ack tells the daemon
+                # the truth about what the brain will actually send.
+                _granted_caps, _denied_caps = live_grants().partition(
+                    node_id, list(payload.capabilities),
+                )
+                if _denied_caps:
+                    logger.info(
+                        "node %s: operator has denied %s", node_id, _denied_caps,
+                    )
+                await ws.send_json(hup_frame("node_ack", {
+                    "node_id": node_id,
+                    "session_token": session_token,
                     "hup_version": HUP_VERSION,
-                    "type": "node_ack",
-                    "ts": __import__("time").time(),
-                    "payload": {
-                        "node_id": node_id,
-                        "session_token": session_token,
-                        "hup_version": HUP_VERSION,
-                        "heartbeat_ms": 10000,
-                        "server_time": __import__("time").time(),
-                        "capabilities": list(payload.capabilities),
-                        "granted_capabilities": list(payload.capabilities),
-                        "denied_capabilities": [],
-                    },
-                })
+                    "heartbeat_ms": 10000,
+                    "server_time": __import__("time").time(),
+                    "capabilities": list(payload.capabilities),
+                    "granted_capabilities": _granted_caps,
+                    "denied_capabilities": _denied_caps,
+                }))
 
             elif msg.type == "execute_result":
                 logger.info(f"Daemon result from {node_id}")
@@ -2939,10 +3034,10 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                             if r.state.value == "submitted"
                         ]
                         if unacked_ids:
-                            await ws.send_json({
-                                "type": "pending_commands",
-                                "payload": {"command_ids": unacked_ids},
-                            })
+                            await ws.send_json(hup_frame(
+                                "pending_commands",
+                                {"command_ids": unacked_ids},
+                            ))
 
             elif msg.type == "hup_action_response":
                 result_payload = raw.get("payload", {})
@@ -3021,18 +3116,13 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         detail={"reason": "missing_text_or_orchestrator"},
                         payload_for_hash=payload_dict,
                     )
-                    await ws.send_json({
-                        "hup_version": HUP_VERSION,
-                        "type": "chat_response",
-                        "ts": time.time(),
-                        "payload": {
-                            "session_id": target_sid,
-                            "text": "",
-                            "reply_mode": reply_mode,
-                            "channel": channel,
-                            "reply_to": reply_to,
-                        },
-                    })
+                    await ws.send_json(hup_frame("chat_response", {
+                        "session_id": target_sid,
+                        "text": "",
+                        "reply_mode": reply_mode,
+                        "channel": channel,
+                        "reply_to": reply_to,
+                    }))
                     continue
 
                 if target_sid not in state.sessions:
@@ -3220,12 +3310,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 _somatic_turn = _somatic_state_for_turn(target_sid)
                 if _somatic_turn is not None:
                     chat_payload["somatic"] = _somatic_turn
-                await ws.send_json({
-                    "hup_version": HUP_VERSION,
-                    "type": "chat_response",
-                    "ts": time.time(),
-                    "payload": chat_payload,
-                })
+                await ws.send_json(hup_frame("chat_response", chat_payload))
 
             elif msg.type == "chat_response":
                 _record_phone_envelope(
@@ -5018,17 +5103,12 @@ async def _handle_ambient_transcript(
         )
         return
 
-    await ws.send_json({
-        "hup_version": HUP_VERSION,
-        "type": "ambient_transcript_ack",
-        "ts": time.time(),
-        "payload": {
-            "transcript_id": transcript_id,
-            "duplicate": not is_new,
-            "accepted": True,
-            "detail": "" if is_new else "already received",
-        },
-    })
+    await ws.send_json(hup_frame("ambient_transcript_ack", {
+        "transcript_id": transcript_id,
+        "duplicate": not is_new,
+        "accepted": True,
+        "detail": "" if is_new else "already received",
+    }))
 
     if record_envelope is not None:
         record_envelope(
@@ -5112,7 +5192,7 @@ async def _handle_ambient_digest_request(
             remaining=len(ids) - i - 1,
         )
         try:
-            await ws.send_json({"type": "ambient_digest", "payload": frame})
+            await ws.send_json(hup_frame("ambient_digest", frame))
         except Exception:
             # The socket went away mid-drain. The rest is not lost: the
             # phone asks again on its next connect for anything it still

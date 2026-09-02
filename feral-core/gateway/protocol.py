@@ -491,14 +491,27 @@ def register_core_methods(registry: MethodRegistry, state):
             if not result.get("success", True) and "error" in result:
                 raise GatewayError("INTERNAL", result["error"])
             return result
-        # Fallback: fire-and-forget if mesh not available
+        # Fallback: fire-and-forget if mesh not available.
+        #
+        # This used to send ``{"type": "command", "request_id", "command",
+        # "args"}``. That is not a HUP frame in any version: ``command``
+        # is a deprecated alias removed in 2026.7.0 (HUP_SPEC.md section
+        # 5.5's alias table), and the shape put the fields at the top
+        # level with no ``payload``, no ``hup_version`` and no ``ts``. No
+        # current SDK has a branch for it, so the fallback dispatched into
+        # silence and reported ``{"dispatched": true}``.
+        # ``tests/test_hup_protocol.py`` asserted the alias was gone from
+        # mesh.py and tool_runner.py and never looked here.
+        from hardware.action_frames import build_action_request
+
         ws = state.daemons[node_id]
-        req_id = str(uuid4())[:8]
-        await ws.send_json({
-            "type": "command", "request_id": req_id,
-            "command": command, "args": cmd_params,
-        })
-        return {"dispatched": True, "request_id": req_id}
+        gate = build_action_request(
+            node_id, command, cmd_params, timeout_ms=int(timeout * 1000),
+        )
+        if not gate.allowed:
+            raise GatewayError("FORBIDDEN", gate.denied_reason)
+        await ws.send_json(gate.frame)
+        return {"dispatched": True, "request_id": gate.action_id}
 
     @registry.method("hardware.execute")
     async def hardware_execute(session_id: str, params: dict, session: GatewaySession):

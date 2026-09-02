@@ -105,7 +105,13 @@ class FeralNode:
         self._ws: Optional[WebSocketClientProtocol] = None
         self._send_lock = asyncio.Lock()
         self._stop = asyncio.Event()
-        self._granted: set[str] = set()
+        # ``None`` until the brain's node_ack lands, which is NOT the
+        # same as the empty set. An empty set is a brain saying "you may
+        # do nothing"; None is "nobody has told me yet". The dispatch
+        # gate below has to be able to tell those apart, which is exactly
+        # what the old ``granted or self.capabilities`` fallback could
+        # not do.
+        self._granted: Optional[set[str]] = None
         self._session_token: Optional[str] = None
         self._connected = asyncio.Event()
 
@@ -421,11 +427,27 @@ class FeralNode:
             payload = frame.get("payload") or {}
             if msg_type == "node_ack":
                 self._session_token = payload.get("session_token")
-                self._granted = set(payload.get("granted_capabilities") or self.capabilities)
+                # ``if "granted_capabilities" in payload``, not
+                # ``payload.get(...) or self.capabilities``. The old
+                # expression read an empty grant list -- a brain saying
+                # "you may do nothing" -- as falsy and substituted
+                # everything this node declared, so the one answer the
+                # operator most needs to be able to give was the one that
+                # could not be transmitted. A brain that omits the field
+                # entirely is a pre-HUP-1.4 brain with no grant store, and
+                # only that case falls back to the declaration.
+                if "granted_capabilities" in payload:
+                    self._granted = {
+                        str(c) for c in (payload.get("granted_capabilities") or [])
+                    }
+                else:
+                    self._granted = set(self.capabilities)  # pre-1.4 brain
                 hb = int(payload.get("heartbeat_ms") or self._heartbeat_ms)
                 self._heartbeat_ms = max(1000, hb)
-                logger.info("node_ack: granted=%s heartbeat=%dms",
-                            sorted(self._granted), self._heartbeat_ms)
+                logger.info("node_ack: granted=%s denied=%s heartbeat=%dms",
+                            sorted(self._granted),
+                            sorted(payload.get("denied_capabilities") or []),
+                            self._heartbeat_ms)
             elif msg_type == "hup_action_request":
                 asyncio.create_task(self._dispatch_action(payload))
             elif msg_type in ("text_response", "error", "node_bye"):
@@ -437,6 +459,24 @@ class FeralNode:
         action_id = str(payload.get("action_id", ""))
         name = str(payload.get("name", ""))
         params = dict(payload.get("params") or {})
+
+        # HUP_SPEC.md section 6, nodes: "MUST refuse any
+        # hup_action_request whose name is not in their registered
+        # capabilities, replying with success=false,
+        # error='capability_denied'". ``self._granted`` was assigned from
+        # node_ack and logged and then never read by anything, so the
+        # grant the brain sent had no effect on this side at all. A
+        # handler registered for a capability the operator has since
+        # denied ran exactly as if it had not been.
+        if self._granted is not None and name not in self._granted:
+            logger.warning(
+                "refusing action %s: not in granted capabilities %s",
+                name, sorted(self._granted),
+            )
+            await self._send_action_response(
+                action_id, success=False, error=f"capability_denied: {name}"
+            )
+            return
 
         handler = self._action_handlers.get(name)
         if handler is None:

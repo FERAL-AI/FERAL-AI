@@ -276,13 +276,17 @@ and from the raw capability string list in `NodeRegisterPayload`
 strings outside the enum, but brains MAY ignore unknown capabilities for
 gating. Each capability string maps to a **tier** for policy purposes:
 
+The "default" column below describes the **operator policy layer**
+(`~/.feral/policies/default.yaml`), which is global per capability id.
+The per-device layer in §6 sits on top of it and defaults to granted.
+
 | Tier                | Examples                                  | Default allowed |
 |---------------------|-------------------------------------------|-----------------|
-| `passive_sensor`    | heart_rate, spo2, temperature, accelerometer, ambient_light, battery | yes |
-| `camera`            | camera                                    | requires user opt-in |
-| `audio`             | microphone, speaker                       | requires user opt-in |
-| `active_actuator`   | haptic, buzzer, led, display              | yes, rate-limited |
-| `motor`             | motor, relay, valve, vehicle              | off by default — per-command confirmation |
+| `passive_sensor`    | heart_rate, spo2, temperature, accelerometer, ambient_light, battery | yes (`hardware.sensors.allowed`) |
+| `camera`            | camera                                    | yes (`hardware.cameras.allowed` ships `true`) |
+| `audio`             | microphone, speaker                       | `speaker` yes; the microphone has no policy key |
+| `active_actuator`   | haptic, buzzer, led, display              | yes (`hardware.actuators.allowed`); the 10/min ceiling in §6 is a SHOULD with no implementation |
+| `motor`             | motor, relay, valve, vehicle              | no — absent from `hardware.actuators.allowed`, and named in `requires_confirmation` |
 
 ### 5.2 `node_ack` (brain → daemon, REQUIRED)
 
@@ -1220,22 +1224,57 @@ never existed.
 ## 6. Capability Allowlist and Security
 
 Per-device capability gating happens in the FERAL UI at
-**Settings → Devices → <device> → Capabilities**. Each capability tier
-(§5.1) has a per-device toggle. Brains:
+**Settings → Devices → <device> → Capabilities**. Every capability a node
+declares in `node_register` gets a row there; each row is a toggle, and a
+tier (§5.1) can be toggled as a group.
+
+**Default is granted.** A capability a node declares is allowed on that
+device until the operator denies it. The store records both answers, so
+"the operator allowed this" stays distinguishable from "nobody has been
+asked". Two consequences worth stating plainly:
+
+- Pairing a device does not, by itself, prompt for anything. The
+  capability gate is a *deny* control, not a consent flow.
+- The tier defaults in §5.1 describe the operator policy layer
+  (`~/.feral/policies/default.yaml` — `hardware.sensors.allowed`,
+  `hardware.actuators.allowed`, `hardware.cameras.allowed`), which is
+  global per capability id. This section is the per-device layer on top.
+  A capability has to clear both.
+
+Brains:
 
 - MUST NOT issue `hup_action_request` for a capability that is not in
   `granted_capabilities` from the `node_ack`.
-- MUST issue an inline user confirmation (SDUI prompt) before sending any
-  action whose declared tier is `motor`, or whose
-  `requires_confirmation: true`.
-- SHOULD rate-limit `active_actuator` actions to 10/min/device by default.
 - MUST drop `camera_frame` and `microphone_chunk` events from nodes whose
-  `camera`/`audio` tier is disabled, even if the daemon sends them.
+  `camera`/`audio` tier is disabled, even if the daemon sends them. This
+  covers the v1.1+ spellings of the same frames (`video_frame`,
+  `audio_frame`, `glasses_frame`, and each of them wrapped in a
+  `device_event`), not only the two v1.0 names.
+- MUST reflect the operator's answer in `node_ack.granted_capabilities` /
+  `denied_capabilities` rather than echoing the node's own declaration.
+  A brain MAY re-send `node_ack` to a connected node when the operator
+  changes a grant; there is no separate frame type for this.
+- SHOULD issue an inline user confirmation (SDUI prompt) before sending
+  any action whose declared tier is `motor`, or whose
+  `requires_confirmation: true`. **This is a SHOULD, not a MUST, and it
+  is enforced on some paths and not others**: actions routed through a
+  device skill are gated by the brain's `security/safety_resolver`, which
+  reads `hardware.actuators.requires_confirmation` from operator policy;
+  direct `HardwareMesh.invoke` calls are not.
+- SHOULD rate-limit `active_actuator` actions to 10/min/device by
+  default. `hardware.actuators.max_actions_per_minute` exists in operator
+  policy; **no brain-side rate limiter reads it today.**
 
 Nodes:
 
 - MUST refuse any `hup_action_request` whose `name` is not in their
   registered capabilities, replying with `success=false, error="capability_denied"`.
+- MUST refuse an action whose `name` is not in the `granted_capabilities`
+  they received in `node_ack`, with the same reply.
+- MUST treat an **empty** `granted_capabilities` array as "nothing is
+  granted". It is a full deny, not an absent field. Only a `node_ack`
+  that omits the key entirely — a brain with no grant store — may be read
+  as "everything I declared".
 - MUST NOT send `device_event`s for capabilities they did not register.
 
 ---
