@@ -224,8 +224,8 @@ def test_companion_ios_info_plist_when_present():
 # ─────────────────────────────────────────────
 # Everything above checks that five surfaces AGREE on the version string.
 # None of it ever looked at a frame. HUP_SPEC.md section 5 says every HUP
-# frame carries ``hup_version``, ``type``, ``ts`` and ``payload``; six
-# brain-to-node sends spelled that out by hand and about twenty did not,
+# frame carries ``hup_version``, ``type``, ``ts`` and ``payload``; five
+# brain-to-node sends spelled that out by hand and twelve did not,
 # including every ``hup_action_request`` -- the actuator command frame.
 #
 # Impact was nil while no shipping SDK validated envelopes (the Swift

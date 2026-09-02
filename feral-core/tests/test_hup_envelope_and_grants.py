@@ -3,8 +3,8 @@
 Both sections described behaviour the brain did not have.
 
 **Section 5** says every HUP frame carries ``hup_version``, ``type``,
-``ts`` and ``payload``. Six brain-to-node sends did; about twenty did
-not, including all five ``hup_action_request`` builders -- the actuator
+``ts`` and ``payload``. Five brain-to-node sends did; twelve did not,
+including all five ``hup_action_request`` builders -- the actuator
 command frame. ``tests/test_hup_version_unified.py`` guards the source
 against a regression; the tests here drive the real code and read what
 lands on the socket.

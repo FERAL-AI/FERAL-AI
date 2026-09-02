@@ -19,8 +19,11 @@ HUP_VERSION = "1.4.0"
 # The brain -> node envelope (HUP_SPEC.md section 5)
 # ─────────────────────────────────────────────
 # "Every HUP frame is a JSON object with hup_version, type, ts, payload."
-# Six brain-to-node sends spelled that out by hand and about twenty did
-# not, so the wire carried two shapes of the same protocol. Nothing broke
+# Five brain-to-node sends spelled that out by hand and twelve did not
+# (counted by the AST gate in tests/test_hup_version_unified.py against
+# the pre-change tree), so the wire carried two shapes of the same
+# protocol -- and the twelve included every hup_action_request builder,
+# which is the actuator command frame. Nothing broke
 # because no shipping SDK validates the envelope on inbound -- the Swift
 # decoder documents the omission and tolerates it by name -- but a
 # third-party daemon written against the published spec is entitled to
