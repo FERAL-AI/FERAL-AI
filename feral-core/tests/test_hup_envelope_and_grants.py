@@ -279,6 +279,22 @@ class TestGrantStore:
         assert grants.clear_node("n1") == 1
         assert grants.is_granted("n1", "camera") is True
 
+    def test_a_write_is_visible_to_the_next_read(self, grants):
+        # The read path is cached per node -- frame_tier_enabled runs once
+        # per inbound frame, and a 30fps stream would otherwise open thirty
+        # SQLite connections a second. A toggle has to invalidate it or the
+        # operator's click does nothing until restart.
+        assert grants.is_granted("n1", "camera") is True
+        grants.set_grant("n1", "camera", False)
+        assert grants.is_granted("n1", "camera") is False
+        assert grants.tier_enabled("n1", TIER_CAMERA) is False
+        grants.set_grant("n1", "camera", True)
+        assert grants.is_granted("n1", "camera") is True
+        assert grants.tier_enabled("n1", TIER_CAMERA) is True
+        grants.set_grant("n1", "camera", False)
+        assert grants.clear_node("n1") == 1
+        assert grants.is_granted("n1", "camera") is True
+
     def test_a_grant_survives_a_new_store_over_the_same_file(self, tmp_path):
         path = str(tmp_path / "g.db")
         CapabilityGrantStore(db_path=path).set_grant("n1", "camera", False)

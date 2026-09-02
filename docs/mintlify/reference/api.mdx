@@ -158,7 +158,9 @@ curl -X POST http://localhost:9090/api/identity/twin/ask \
 | `POST` | `/api/devices/pair/complete` | Complete phone/browser pairing |
 | `POST` | `/api/devices/pair/prune` | Revoke unclaimed tokens in bulk |
 | `POST` | `/api/devices/handoff` | Initiate a session handoff between devices |
-| `DELETE` | `/api/devices/{device_id}` | Revoke (un-pair) a device |
+| `GET` | `/api/devices/{node_id}/capabilities` | Per-device capability grants (HUP_SPEC section 6). Each row is `{capability, tier, granted, explicit}`; `explicit: false` means nobody has been asked and the default (granted) applies. |
+| `POST` | `/api/devices/{node_id}/capabilities` | Grant or deny one capability (`{"capability": "camera", "granted": false}`) or a whole tier (`{"tier": "camera", "granted": false}`). Returns the full refreshed list. A denied capability is refused at every `hup_action_request` sender, and denied camera/audio tiers drop inbound frames of that tier. |
+| `DELETE` | `/api/devices/{device_id}` | Revoke (un-pair) a device. Also forgets that device's capability grants, so a re-pair does not inherit denials made against a different install. |
 | `GET` | `/api/nodes/health` | All node health status with heartbeat freshness |
 | `GET` | `/api/commands/recent` | Recent commands with full lifecycle state |
 | `GET` | `/api/commands/{command_id}` | Single command detail including state history |

@@ -179,7 +179,40 @@ class CapabilityGrantStore:
             db_path = str(Path(home) / "capability_grants.db")
         self._db_path = db_path
         self._lock = threading.Lock()
+        # node_id -> {capability: granted}, the whole row set for a node.
+        # Warmed on first question about that node and dropped on write.
+        #
+        # Not an optimisation looking for a problem: ``frame_tier_enabled``
+        # runs once per inbound frame, and a phone streaming video at 30fps
+        # would otherwise open, WAL-configure and close thirty SQLite
+        # connections a second to ask a question whose answer changes when
+        # an operator clicks a toggle. There is one writer (this process,
+        # under ``_lock``) and one file, so the cache cannot go stale
+        # behind our back.
+        self._cache: dict = {}
         self._init_db()
+
+    def _rows_for(self, node_id: str) -> dict:
+        """Every explicit answer for a node, cached."""
+        node_id = (node_id or "").strip()
+        if not node_id:
+            return {}
+        cached = self._cache.get(node_id)
+        if cached is not None:
+            return cached
+        with self._lock:
+            conn = self._conn()
+            try:
+                rows = conn.execute(
+                    "SELECT capability, granted FROM device_capability_grants "
+                    "WHERE node_id = ?",
+                    (node_id,),
+                ).fetchall()
+            finally:
+                conn.close()
+        answers = {str(r["capability"]): bool(r["granted"]) for r in rows}
+        self._cache[node_id] = answers
+        return answers
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, check_same_thread=False)
@@ -212,42 +245,19 @@ class CapabilityGrantStore:
         No row means granted. See the module docstring for why the
         default is not deny.
         """
-        node_id = (node_id or "").strip()
         capability = (capability or "").strip()
-        if not node_id or not capability:
-            # A send with no node or no capability name is not something
-            # this gate can answer; the caller's own validation owns it.
+        if not capability:
+            # A send with no capability name is not something this gate
+            # can answer; the caller's own validation owns it.
             return True
-        with self._lock:
-            conn = self._conn()
-            try:
-                row = conn.execute(
-                    "SELECT granted FROM device_capability_grants "
-                    "WHERE node_id = ? AND capability = ?",
-                    (node_id, capability),
-                ).fetchone()
-            finally:
-                conn.close()
-        if row is None:
-            return True
-        return bool(row["granted"])
+        return self._rows_for(node_id).get(capability, True)
 
     def denied_for(self, node_id: str) -> set:
         """Every capability the operator has explicitly denied on a node."""
-        node_id = (node_id or "").strip()
-        if not node_id:
-            return set()
-        with self._lock:
-            conn = self._conn()
-            try:
-                rows = conn.execute(
-                    "SELECT capability FROM device_capability_grants "
-                    "WHERE node_id = ? AND granted = 0",
-                    (node_id,),
-                ).fetchall()
-            finally:
-                conn.close()
-        return {str(r["capability"]) for r in rows}
+        return {
+            cap for cap, granted in self._rows_for(node_id).items()
+            if not granted
+        }
 
     def partition(
         self, node_id: str, declared: Iterable[str],
@@ -267,18 +277,7 @@ class CapabilityGrantStore:
 
     def grants_for(self, node_id: str, declared: Iterable[str]) -> list:
         """UI-facing rows: capability, tier, granted, explicit."""
-        node_id = (node_id or "").strip()
-        with self._lock:
-            conn = self._conn()
-            try:
-                rows = conn.execute(
-                    "SELECT capability, granted FROM device_capability_grants "
-                    "WHERE node_id = ?",
-                    (node_id,),
-                ).fetchall()
-            finally:
-                conn.close()
-        explicit = {str(r["capability"]): bool(r["granted"]) for r in rows}
+        explicit = dict(self._rows_for(node_id))
         out: list = []
         seen: set = set()
         for cap in list(declared or []) + sorted(explicit):
@@ -316,17 +315,9 @@ class CapabilityGrantStore:
         return bool(granted_in_tier)
 
     def _explicit_grants(self, node_id: str) -> set:
-        with self._lock:
-            conn = self._conn()
-            try:
-                rows = conn.execute(
-                    "SELECT capability FROM device_capability_grants "
-                    "WHERE node_id = ? AND granted = 1",
-                    ((node_id or "").strip(),),
-                ).fetchall()
-            finally:
-                conn.close()
-        return {str(r["capability"]) for r in rows}
+        return {
+            cap for cap, granted in self._rows_for(node_id).items() if granted
+        }
 
     # ── writes ─────────────────────────────────────────────────────
 
@@ -350,6 +341,7 @@ class CapabilityGrantStore:
                 conn.commit()
             finally:
                 conn.close()
+        self._cache.pop(node_id, None)
         logger.info(
             "capability grant: node=%s capability=%s -> %s",
             node_id, capability, "granted" if granted else "DENIED",
@@ -382,9 +374,11 @@ class CapabilityGrantStore:
                     (node_id,),
                 )
                 conn.commit()
-                return int(cur.rowcount or 0)
+                deleted = int(cur.rowcount or 0)
             finally:
                 conn.close()
+        self._cache.pop(node_id, None)
+        return deleted
 
 
 # ─────────────────────────────────────────────
