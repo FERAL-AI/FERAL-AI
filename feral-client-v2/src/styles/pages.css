@@ -177,6 +177,22 @@
 .v2-chip--hybrid { color: var(--v2-accent-text); border-color: var(--v2-accent-soft); }
 .v2-chip--loose { color: var(--v2-state-live); border-color: var(--v2-state-live-soft); }
 
+/* A chip that is a real <button>: the per-device capability toggles in
+   the Devices detail modal (HUP_SPEC section 6). The chip rules above
+   were written for <span>, so a button needs the UA background, font and
+   default padding cleared or the toggles render as grey OS buttons
+   sitting among the spans they replaced. */
+button.v2-chip {
+  gap: 4px;
+  font: inherit;
+  font-size: var(--v2-size-xs);
+  background: transparent;
+  cursor: pointer;
+}
+button.v2-chip:hover:not(:disabled) { border-color: var(--v2-accent-soft); }
+button.v2-chip:disabled { opacity: 0.5; cursor: progress; }
+button.v2-chip[aria-pressed="false"] { text-decoration: line-through; }
+
 .v2-btn {
   display: inline-flex;
   align-items: center;
