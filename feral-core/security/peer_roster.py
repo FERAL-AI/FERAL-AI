@@ -49,7 +49,18 @@ What revocation actually achieves
 ``revoke_peer`` stops FUTURE exchanges. It does not and cannot un-send
 memory the peer already holds, and it cannot delete the copy on their
 disk. Read it as "this brain will no longer accept or send", never as
-"the data came back".
+"the data came back". ``revoke_scope`` is the same sentence one level
+down: it stops future replication in one named scope and recalls
+nothing that already crossed.
+
+Scope grants: whether, then what
+--------------------------------
+``sync_peers`` answers WHETHER a brain may connect. ``peer_scope_grants``
+answers WHAT it gets once it has, and the default is nothing. Enrolling
+a peer hands it no memory; an operator has to name a scope with
+``grant_scope`` before one byte replicates. See ``security/sync_scopes.py``
+for the vocabulary and the fail-closed rules, and ``memory/sync.py`` for
+the two enforcement points (send filter and receive check).
 
 Migration off the shared passphrase
 -----------------------------------
@@ -213,6 +224,39 @@ class PeerRoster:
                         reason      TEXT NOT NULL
                     )
                 """)
+                # Per-peer scope grants: WHAT this brain shares with a
+                # peer, as opposed to sync_peers, which is WHETHER a
+                # peer may connect at all.
+                #
+                # Keyed on node_id, not peer_row_id, and that is the
+                # load-bearing choice. node_id is the only identifier
+                # present at BOTH enforcement points: the send filter
+                # reads it from the handshake response, the receive
+                # check reads it from the handshake request, and the
+                # WAL's own ``origin_node`` is a node_id. peer_row_id
+                # exists only on the brain that minted the credential,
+                # so the dialling side has no row to key on and a
+                # peer_row_id table would leave one of the two
+                # enforcement points unable to answer the question.
+                #
+                # A grant is authorisation layered strictly AFTER
+                # authentication. A row here admits nobody: the peer
+                # still has to get past ``authenticate_sync_peer``.
+                # That is why revoking a credential does not need to
+                # cascade into this table.
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS peer_scope_grants (
+                        node_id     TEXT NOT NULL,
+                        scope       TEXT NOT NULL,
+                        granted_at  REAL NOT NULL,
+                        note        TEXT NOT NULL DEFAULT '',
+                        PRIMARY KEY (node_id, scope)
+                    )
+                """)
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_psg_node_id "
+                    "ON peer_scope_grants(node_id)"
+                )
                 conn.commit()
             finally:
                 conn.close()
@@ -444,6 +488,10 @@ class PeerRoster:
                 "departed_at": r["departed_at"],
                 "revoked_at": r["revoked_at"],
                 "hash_algo": r["hash_algo"],
+                # What is actually shared with this peer. Empty until an
+                # operator grants something: enrolling a brain lets it
+                # connect, it does not hand it any memory.
+                "scopes": sorted(self.granted_scopes(r["node_id"] or "")),
             })
         return out
 
@@ -590,6 +638,143 @@ class PeerRoster:
                 peer_row_id,
             )
         return changed
+
+    # ── Scope grants ───────────────────────────────────────────────
+
+    def grant_scope(self, node_id: str, scope: str, *, note: str = "") -> str:
+        """Share one named scope with one peer brain.
+
+        Returns the normalised scope name. Raises
+        :class:`~security.sync_scopes.InvalidScopeError` on a name that
+        could never replicate, including the reserved ``private``: a
+        grant that silently does nothing is worse than a refusal,
+        because the operator walks away believing sharing is on.
+
+        Nothing is granted by default. A peer that has authenticated
+        but holds no row here receives nothing and may send nothing.
+        """
+        from security.sync_scopes import require_shareable_scope
+
+        node = (node_id or "").strip()
+        if not node:
+            raise ValueError("node_id is required to grant a scope")
+        normalised = require_shareable_scope(scope)
+        now = time.time()
+        with self._lock:
+            conn = self._conn()
+            try:
+                conn.execute(
+                    "INSERT INTO peer_scope_grants (node_id, scope, granted_at, note) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(node_id, scope) DO UPDATE SET note = excluded.note",
+                    (node, normalised, now, note or ""),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        logger.info(
+            "peer_roster.scope_granted node=%s scope=%s, operations in this "
+            "scope will now replicate to and from that brain.",
+            node, normalised,
+        )
+        return normalised
+
+    def revoke_scope(self, node_id: str, scope: str) -> bool:
+        """Stop sharing one scope with one peer. Returns whether a grant
+        was actually removed.
+
+        What this achieves: from the next exchange onward, no operation
+        in this scope is sent to that peer, and any operation in this
+        scope the peer sends is rejected.
+
+        What it does NOT achieve: every operation already replicated
+        under this scope is on the peer's disk and stays there. That
+        brain is owned by somebody else. Revocation is not recall, and
+        nothing in this codebase can make it one.
+        """
+        from security.sync_scopes import normalise_scope
+
+        node = (node_id or "").strip()
+        normalised = normalise_scope(scope)
+        if not node:
+            return False
+        with self._lock:
+            conn = self._conn()
+            try:
+                cur = conn.execute(
+                    "DELETE FROM peer_scope_grants WHERE node_id = ? AND scope = ?",
+                    (node, normalised),
+                )
+                conn.commit()
+                removed = (cur.rowcount or 0) > 0
+            finally:
+                conn.close()
+        if removed:
+            logger.warning(
+                "peer_roster.scope_revoked node=%s scope=%s, future exchanges "
+                "in this scope refused. Data already replicated under it is "
+                "NOT recalled.",
+                node, normalised,
+            )
+        return removed
+
+    def granted_scopes(self, node_id: str) -> frozenset[str]:
+        """The scope set shared with one peer. Empty for an unknown peer.
+
+        This is the value both enforcement points consult, so it fails
+        closed at every step: a blank node_id, a database error, or a
+        stored name that no longer parses all resolve to the empty set
+        rather than to "everything". ``normalise_scope_set`` also drops
+        ``private``, so a hand-edited row naming the reserved scope
+        cannot widen a grant.
+        """
+        from security.sync_scopes import DENY_ALL, normalise_scope_set
+
+        node = (node_id or "").strip()
+        if not node:
+            return DENY_ALL
+        try:
+            conn = self._conn()
+        except sqlite3.Error as exc:
+            logger.warning(
+                "peer_roster.scope_lookup_failed node=%s: %s, denying all "
+                "scopes for this exchange.", node, exc,
+            )
+            return DENY_ALL
+        try:
+            rows = conn.execute(
+                "SELECT scope FROM peer_scope_grants WHERE node_id = ?",
+                (node,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            logger.warning(
+                "peer_roster.scope_lookup_failed node=%s: %s, denying all "
+                "scopes for this exchange.", node, exc,
+            )
+            return DENY_ALL
+        finally:
+            conn.close()
+        return normalise_scope_set(r["scope"] for r in rows)
+
+    def list_scope_grants(self) -> list[dict]:
+        """Every scope grant, for ``feral sync peer scope list``."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT node_id, scope, granted_at, note FROM peer_scope_grants "
+                "ORDER BY node_id, scope"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            {
+                "node_id": r["node_id"],
+                "scope": r["scope"],
+                "granted_at": r["granted_at"],
+                "note": r["note"] or "",
+            }
+            for r in rows
+        ]
 
     def prune_unredeemed_invites(self) -> int:
         """Delete invites that expired without ever being redeemed."""

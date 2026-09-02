@@ -19,6 +19,13 @@ import pytest
 from memory.hlc import HybridLogicalClock
 from memory.sync import SyncEngine, SyncWAL, SyncOperation, VectorClock, _parse_hlc
 
+#: Replication is scoped, and the default is ``private``, which crosses
+#: to nobody. Convergence is only a question at all inside a scope both
+#: brains share, so every write in this module goes into this one and
+#: every exchange is granted it. The scope boundary itself is under
+#: test in ``tests/test_sync_scoped_sharing.py``.
+FUZZ_SCOPE = "fuzz-shared"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -60,7 +67,7 @@ async def _local_write(engine: SyncEngine, table, op_type, row_id, data) -> str:
     stores that hold nothing but each other's data. That is invisible
     while the assertion reads the op log, which is how it survived.
     """
-    op = engine._build_operation(table, op_type, row_id, data)
+    op = engine._build_operation(table, op_type, row_id, data, FUZZ_SCOPE)
     engine._wal.append(op)
     engine._vector_clock.update(engine.node_id, op.hlc)
     await engine._apply_to_memory(op)
@@ -141,10 +148,18 @@ async def _sync_bidirectional(a: SyncEngine, b: SyncEngine):
     """
     # Both change sets are computed before either is applied, which is
     # the ordering the handshake produces.
-    ops_a = a._wal.get_changes_for_peer(b.get_vector_clock(), exclude_node=b.node_id)
-    ops_b = b._wal.get_changes_for_peer(a.get_vector_clock(), exclude_node=a.node_id)
-    await b.apply_remote_changes([op.to_dict() for op in ops_a])
-    await a.apply_remote_changes([op.to_dict() for op in ops_b])
+    ops_a = a._wal.get_changes_for_peer(
+        b.get_vector_clock(), allowed_scopes={FUZZ_SCOPE}, exclude_node=b.node_id,
+    )
+    ops_b = b._wal.get_changes_for_peer(
+        a.get_vector_clock(), allowed_scopes={FUZZ_SCOPE}, exclude_node=a.node_id,
+    )
+    await b.apply_remote_changes(
+        [op.to_dict() for op in ops_a], allowed_scopes={FUZZ_SCOPE},
+    )
+    await a.apply_remote_changes(
+        [op.to_dict() for op in ops_b], allowed_scopes={FUZZ_SCOPE},
+    )
 
 
 # ---------------------------------------------------------------------------

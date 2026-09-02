@@ -21,6 +21,27 @@ Conflict resolution:
     hard DELETE takes the row's ``hlc_string`` with it, so the
     tombstone is what the LWW gate compares against afterwards. See
     ``MemoryStore.prune_tombstones`` for the retention trade-off.
+
+Scoped sharing:
+  Replication is NOT all-or-nothing. Every WAL operation carries a
+  ``scope``, every peer is granted a set of scopes on the roster, and
+  an operation crosses only if its scope is in that peer's set. The
+  default everywhere is ``private``, which never replicates: an
+  unscoped write, a pre-existing WAL row, a scope name that does not
+  parse, and an operation from a peer running an older build are all
+  private, and all stay put. See ``security/sync_scopes.py`` for the
+  vocabulary and ``PeerRoster.grant_scope`` for the grants.
+
+  Both directions are enforced, on this brain, from this brain's
+  roster. ``SyncWAL.get_changes_for_peer`` filters what is sent;
+  ``SyncEngine.apply_remote_changes_from_peer`` re-checks what
+  arrives. The receive check is not redundant: the send filter runs
+  on whichever brain is sending, and the peer's brain belongs to
+  somebody else.
+
+  Revoking a scope stops FUTURE replication in it. It does not and
+  cannot recall operations that already crossed; those live on a disk
+  this brain does not control.
 """
 
 from __future__ import annotations
@@ -42,6 +63,13 @@ from uuid import uuid4
 from config.loader import feral_data_home
 from config.runtime import brain_port
 from memory.hlc import HybridLogicalClock, HLCTimestamp
+from security.sync_scopes import (
+    DENY_ALL,
+    INHERIT as _SCOPE_INHERIT,
+    PRIVATE,
+    normalise_scope,
+    normalise_scope_set,
+)
 
 logger = logging.getLogger("feral.memory.sync")
 
@@ -353,7 +381,15 @@ def stable_node_id(data_home: Optional[Path] = None) -> str:
 
 @dataclass
 class SyncOperation:
-    """A single write operation to be replicated."""
+    """A single write operation to be replicated.
+
+    ``scope`` is the sharing boundary. It defaults to
+    :data:`~security.sync_scopes.PRIVATE`, which never replicates, so an
+    operation constructed by code that has never heard of scopes stays
+    on the brain that wrote it. Every construction path in this module
+    normalises through ``normalise_scope``; nothing trusts the field
+    verbatim, least of all when it arrived from a peer.
+    """
     op_id: str
     table: str
     op_type: str  # "insert", "update", "delete"
@@ -362,6 +398,7 @@ class SyncOperation:
     hlc: str
     origin_node: str
     timestamp: float = field(default_factory=time.time)
+    scope: str = PRIVATE
 
     def to_dict(self) -> dict:
         return {
@@ -373,11 +410,30 @@ class SyncOperation:
             "hlc": self.hlc,
             "origin_node": self.origin_node,
             "timestamp": self.timestamp,
+            "scope": self.scope,
         }
 
     @staticmethod
     def from_dict(d: dict) -> "SyncOperation":
-        return SyncOperation(**d)
+        """Decode one operation off the wire.
+
+        Unknown keys are DROPPED rather than splatted into the
+        constructor, and ``scope`` is re-normalised rather than
+        trusted. Both matter because the dict on this path came from a
+        brain somebody else owns: the old ``SyncOperation(**d)`` handed
+        a peer a ``TypeError`` primitive over any unexpected key, and a
+        peer that could name the scope field freely could name a scope
+        that does not parse and hope the comparison went its way. Every
+        unrecognised or malformed scope resolves to
+        :data:`~security.sync_scopes.PRIVATE`, which no grant can ever
+        contain, so it is refused at the receive check.
+        """
+        fields = {
+            "op_id", "table", "op_type", "row_id",
+            "data", "hlc", "origin_node", "timestamp",
+        }
+        kwargs = {k: v for k, v in d.items() if k in fields}
+        return SyncOperation(**kwargs, scope=normalise_scope(d.get("scope")))
 
 
 @dataclass
@@ -555,6 +611,29 @@ class SyncWAL:
         # ordering: the third tuple element only ever breaks ties
         # BETWEEN nodes, which a per-origin range never spans.
         existing = {r[1] for r in conn.execute("PRAGMA table_info(sync_wal)")}
+        # The sharing boundary, added as a column rather than migrated
+        # onto the eight source tables because the WAL *is* the
+        # replication boundary: nothing reaches a peer except through a
+        # row of this table, so one column here is the complete
+        # enforcement surface.
+        #
+        # ``DEFAULT 'private'`` is the whole fail-closed story for
+        # history. Every operation written before this column existed
+        # gets the never-replicate scope, permanently and without a
+        # backfill pass that could get it wrong. That is a deliberate
+        # one-way door: pre-existing memory is NOT retroactively
+        # classified, and re-scoping it later means a migration onto
+        # the source tables, not a rewrite of this column. The
+        # alternative, defaulting to a shareable scope, would take an
+        # operator's entire personal history and mark it poolable
+        # because of a schema change they never asked for.
+        if "scope" not in existing:
+            conn.execute(
+                f"ALTER TABLE sync_wal ADD COLUMN scope TEXT NOT NULL DEFAULT '{PRIVATE}'"
+            )
+        # Indexed because every send-side query now carries an ``IN``
+        # over the peer's granted scopes on top of the HLC range.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_wal_scope ON sync_wal(scope)")
         if "hlc_wall" not in existing:
             conn.execute("ALTER TABLE sync_wal ADD COLUMN hlc_wall INTEGER NOT NULL DEFAULT 0")
         if "hlc_counter" not in existing:
@@ -613,9 +692,15 @@ class SyncWAL:
             try:
                 try:
                     wall, counter, _ = _parse_hlc(op.hlc)
+                    # ``normalise_scope`` again, at the last point
+                    # before the value becomes durable. The op may have
+                    # been built anywhere; what gets persisted is only
+                    # ever a name this process could parse, so a stored
+                    # scope can never be a string the send filter has
+                    # to reason about specially.
                     conn.execute(
-                        "INSERT OR REPLACE INTO sync_wal (op_id, table_name, op_type, row_id, data, hlc, origin_node, timestamp, hlc_wall, hlc_counter) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        (op.op_id, op.table, op.op_type, op.row_id, json.dumps(op.data), op.hlc, op.origin_node, op.timestamp, wall, counter),
+                        "INSERT OR REPLACE INTO sync_wal (op_id, table_name, op_type, row_id, data, hlc, origin_node, timestamp, hlc_wall, hlc_counter, scope) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (op.op_id, op.table, op.op_type, op.row_id, json.dumps(op.data), op.hlc, op.origin_node, op.timestamp, wall, counter, normalise_scope(op.scope)),
                     )
                     conn.commit()
                 except (OSError, sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
@@ -680,8 +765,8 @@ class SyncWAL:
             conn.close()
 
     _SELECT_COLS = (
-        "SELECT op_id, table_name, op_type, row_id, data, hlc, origin_node, timestamp "
-        "FROM sync_wal"
+        "SELECT op_id, table_name, op_type, row_id, data, hlc, origin_node, "
+        "timestamp, scope FROM sync_wal"
     )
 
     @staticmethod
@@ -690,11 +775,76 @@ class SyncWAL:
             SyncOperation(
                 op_id=r[0], table=r[1], op_type=r[2], row_id=r[3],
                 data=json.loads(r[4]), hlc=r[5], origin_node=r[6], timestamp=r[7],
+                # Re-normalised on the way out as well as on the way
+                # in. The WAL is a file on disk that an operator, a
+                # restore, or a partially-applied migration can leave
+                # holding anything; a row whose scope no longer parses
+                # reads back as private and stops replicating, which is
+                # the failure direction we want.
+                scope=normalise_scope(r[8]),
             )
             for r in rows
         ]
 
-    def get_changes_since(self, hlc: str, exclude_node: str = "") -> list[SyncOperation]:
+    @staticmethod
+    def _scope_clause(allowed_scopes) -> tuple[str, list]:
+        """SQL fragment restricting a query to a peer's granted scopes.
+
+        ``allowed_scopes=None`` means "no peer boundary here" and adds
+        no clause. That value is for LOCAL callers only: bundle export
+        of your own brain, and tests. Every peer-facing path passes a
+        real set, and :meth:`get_changes_for_peer` makes the argument
+        mandatory precisely so that a peer path cannot reach the
+        unrestricted form by forgetting a keyword.
+
+        A real but EMPTY set is the common case (a peer nobody has
+        granted anything) and must select zero rows, not all of them.
+        It is rendered as a clause that no row satisfies rather than
+        short-circuited in Python, so the "empty means everything"
+        SQL-building bug has nowhere to live.
+        """
+        if allowed_scopes is None:
+            return "", []
+        scopes = sorted(normalise_scope_set(allowed_scopes))
+        if not scopes:
+            return " AND 0", []
+        placeholders = ",".join("?" * len(scopes))
+        return f" AND scope IN ({placeholders})", list(scopes)
+
+    def scope_for_row(self, table: str, row_id: str) -> str:
+        """The scope of the newest logged operation for one row.
+
+        Deletes use this to inherit the scope their row was written
+        under, so a delete travels exactly as far as the insert did and
+        never further. A row with no surviving WAL operation (pruned,
+        or written before this column existed) resolves to
+        :data:`~security.sync_scopes.PRIVATE`: the delete then stays
+        local, which leaves a peer holding a copy it already had rather
+        than announcing the existence of a row we never shared.
+        """
+        try:
+            conn = sqlite3.connect(self._db_path)
+        except sqlite3.Error:
+            return PRIVATE
+        try:
+            row = conn.execute(
+                "SELECT scope FROM sync_wal WHERE table_name = ? AND row_id = ? "
+                "ORDER BY hlc_wall DESC, hlc_counter DESC LIMIT 1",
+                (table, row_id),
+            ).fetchone()
+        except sqlite3.Error:
+            return PRIVATE
+        finally:
+            conn.close()
+        return normalise_scope(row[0]) if row else PRIVATE
+
+    def get_changes_since(
+        self,
+        hlc: str,
+        exclude_node: str = "",
+        *,
+        allowed_scopes=None,
+    ) -> list[SyncOperation]:
         """Every operation strictly newer than one global HLC watermark.
 
         A single watermark across all origins is only correct when the
@@ -702,6 +852,13 @@ class SyncWAL:
         log", which is bundle export and the tests. The exchange wants
         :meth:`get_changes_for_peer` instead, because one watermark
         cannot express what a peer has of each *other* node's writes.
+
+        ``allowed_scopes`` defaults to ``None``, meaning "no peer
+        boundary". That default is correct for the callers this method
+        has (local bundle export, tests) and WRONG for anything that
+        speaks to a peer, which is why no peer path calls it directly:
+        :meth:`get_changes_for_peer` requires the argument and threads
+        it into every internal use of this method.
 
         The filter runs in SQL against the numeric HLC columns. It used
         to be a Python comprehension over ``fetchall()`` of the entire
@@ -722,6 +879,9 @@ class SyncWAL:
         if exclude_node:
             sql += " AND origin_node != ?"
             params.append(exclude_node)
+        scope_sql, scope_params = self._scope_clause(allowed_scopes)
+        sql += scope_sql
+        params.extend(scope_params)
         sql += " ORDER BY hlc_wall, hlc_counter"
         conn = sqlite3.connect(self._db_path)
         try:
@@ -733,10 +893,29 @@ class SyncWAL:
         self,
         remote_vc: dict,
         *,
+        allowed_scopes,
         exclude_node: str = "",
         limit: Optional[int] = None,
     ) -> list[SyncOperation]:
-        """Every operation the peer is missing, judged PER ORIGIN.
+        """Every operation the peer is missing IN THE SCOPES IT WAS
+        GRANTED, judged PER ORIGIN.
+
+        ``allowed_scopes`` is keyword-only and has NO DEFAULT. That is
+        the point: this is the send-side enforcement of scoped sharing,
+        and a default would be a way to reach the unfiltered form by
+        omission. Pass ``roster.granted_scopes(peer_node_id)``. The
+        empty set is a legitimate value and means the peer receives
+        nothing, which is what an authenticated peer with no grants is
+        entitled to.
+
+        A send filter alone is not the whole enforcement, and cannot
+        be. It runs on this brain, so it governs what an honest local
+        build transmits; it says nothing about what a modified peer
+        sends back. The other half is
+        :meth:`SyncEngine.apply_remote_changes_from_peer`, which
+        re-checks every arriving operation against the same grant set.
+        The two together are what makes the boundary hold when the
+        brain on the other end is owned by somebody else.
 
         This is the correct reading of a vector clock and the fix for a
         defect that lost data silently. The exchange used to cut the
@@ -770,9 +949,9 @@ class SyncWAL:
             watermarks[origin] = (wall, counter)
 
         if not watermarks:
-            return self.get_changes_since("0:0:", exclude_node=exclude_node)[
-                : limit if limit is not None else None
-            ]
+            return self.get_changes_since(
+                "0:0:", exclude_node=exclude_node, allowed_scopes=allowed_scopes,
+            )[: limit if limit is not None else None]
 
         # Each origin costs 5 bind variables (4 in its own clause, 1 in
         # the catch-all NOT IN), so the clause form is only viable while
@@ -787,7 +966,9 @@ class SyncWAL:
         if len(watermarks) > _MAX_VC_CLAUSES:
             floor = min(watermarks.values())
             coarse = self.get_changes_since(
-                f"{floor[0]}:{floor[1]}:", exclude_node=exclude_node
+                f"{floor[0]}:{floor[1]}:",
+                exclude_node=exclude_node,
+                allowed_scopes=allowed_scopes,
             )
             out = []
             for op in coarse:
@@ -816,6 +997,9 @@ class SyncWAL:
         if exclude_node:
             sql += " AND origin_node != ?"
             params.append(exclude_node)
+        scope_sql, scope_params = self._scope_clause(allowed_scopes)
+        sql += scope_sql
+        params.extend(scope_params)
         sql += " ORDER BY hlc_wall, hlc_counter"
         if limit is not None:
             sql += " LIMIT ?"
@@ -1081,6 +1265,11 @@ class SyncEngine:
     def __init__(self, node_id: str, memory_store=None, db_path: str = None):
         self.node_id = node_id
         self._memory = memory_store
+        # Bound explicitly by the brain that owns this engine (see
+        # ``set_peer_roster``); ``None`` falls back to the process
+        # global, which is correct for the single-brain-per-process
+        # deployment FERAL actually ships.
+        self._peer_roster = None
         self._hlc = HybridLogicalClock(node_id)
         self._vector_clock = VectorClock()
 
@@ -1155,14 +1344,62 @@ class SyncEngine:
         logger.info("SyncEngine resumed after IO pause (node=%s)", self.node_id)
         return True
 
+    #: Sentinel for ``scope=``: take the scope of the row's newest
+    #: existing WAL operation. Used by delete emitters so a delete
+    #: replicates exactly as far as the write it undoes. Defined in
+    #: ``security/sync_scopes.py`` so a caller in ``memory/store.py``
+    #: can name it without importing this module.
+    SCOPE_INHERIT = _SCOPE_INHERIT
+
+    def _resolve_scope(self, table: str, row_id: str, scope) -> str:
+        """Turn a caller's ``scope=`` argument into a stored scope name.
+
+        WHERE SCOPE COMES FROM, and why it is not derived from the
+        table. Deriving it (``episodes`` is always shareable, ``notes``
+        never, and so on) makes the sharing boundary a property of the
+        schema. The first person to add a table then gets whatever
+        posture the fallback branch happens to have, silently, and the
+        operator has no record of an intent that was never expressed.
+        Caller-supplied scope puts the decision at the write, where the
+        human intent actually exists, and leaves the WAL row as the
+        audit record of what was decided. It also degrades correctly:
+        a call site that has not been taught about scopes passes
+        nothing and gets ``private``.
+
+        The one exception is a delete, which passes
+        :data:`SCOPE_INHERIT`. A delete carries no user intent of its
+        own about sharing; it must reach exactly the peers the original
+        write reached. Inheriting from the row's newest logged
+        operation does that, and an unknown lineage (pruned WAL, or a
+        row written before the column existed) resolves to ``private``
+        so the delete stays local rather than announcing a row we
+        never shared.
+
+        COST. The inherit branch is a synchronous sqlite3 read, and
+        ``log_operation_async`` reaches it from the event loop. It is
+        on the DELETE path only, and deletes are rare on a real store
+        (386 note deletes total on the reference store, against 16,184
+        WAL operations), which is the same trade
+        ``MemoryStore._record_tombstone`` already takes one call later
+        on the same path. No insert ever reaches this branch.
+        """
+        if isinstance(scope, str) and scope == self.SCOPE_INHERIT:
+            return self._wal.scope_for_row(table, row_id)
+        return normalise_scope(scope)
+
     def _build_operation(
-        self, table: str, op_type: str, row_id: str, data: dict
+        self, table: str, op_type: str, row_id: str, data: dict, scope=None
     ) -> SyncOperation:
         """Mint a SyncOperation with a fresh HLC for *table.row_id*.
 
         Lifted out of ``log_operation`` so the sync and async paths
         can share the same HLC bump + envelope construction without
         duplicating logic.
+
+        ``scope`` defaults to ``None``, which resolves to
+        :data:`~security.sync_scopes.PRIVATE`. Every write that does
+        not name a scope is therefore unreplicable, which is the
+        posture this whole change is for.
         """
         if self._io_paused:
             raise SyncDiskFullError(
@@ -1177,6 +1414,7 @@ class SyncEngine:
             data=data,
             hlc=hlc_ts.to_string(),
             origin_node=self.node_id,
+            scope=self._resolve_scope(table, row_id, scope),
         )
 
     def _on_wal_append_failure(
@@ -1202,7 +1440,9 @@ class SyncEngine:
             raise SyncDiskFullError(str(exc)) from exc
         raise exc
 
-    def log_operation(self, table: str, op_type: str, row_id: str, data: dict) -> str:
+    def log_operation(
+        self, table: str, op_type: str, row_id: str, data: dict, scope=None,
+    ) -> str:
         """Synchronous variant — kept for the boot path and any
         non-async caller. Async callers MUST use
         :meth:`log_operation_async` so the WAL fsync runs on a worker
@@ -1217,7 +1457,7 @@ class SyncEngine:
         upstream (MemoryStore._log_sync) intentionally swallow the error
         so a full sync_wal.db never breaks a local note save.
         """
-        op = self._build_operation(table, op_type, row_id, data)
+        op = self._build_operation(table, op_type, row_id, data, scope)
         try:
             self._wal.append(op)
         except (SyncDiskFullError, OSError) as exc:
@@ -1227,7 +1467,7 @@ class SyncEngine:
         return op.hlc
 
     async def log_operation_async(
-        self, table: str, op_type: str, row_id: str, data: dict
+        self, table: str, op_type: str, row_id: str, data: dict, scope=None,
     ) -> str:
         """Async-safe variant of :meth:`log_operation`.
 
@@ -1237,7 +1477,7 @@ class SyncEngine:
         the disk fsync resolves. This is the codepath the chat /
         voice / memory hot paths use.
         """
-        op = self._build_operation(table, op_type, row_id, data)
+        op = self._build_operation(table, op_type, row_id, data, scope)
         try:
             await self._wal.append_async(op)
         except (SyncDiskFullError, OSError) as exc:
@@ -1246,8 +1486,14 @@ class SyncEngine:
         self._vector_clock.update(self.node_id, op.hlc)
         return op.hlc
 
-    def get_changes_since(self, hlc: str) -> list[dict]:
-        ops = self._wal.get_changes_since(hlc)
+    def get_changes_since(self, hlc: str, *, allowed_scopes=None) -> list[dict]:
+        """Local view of the log. ``allowed_scopes=None`` means no peer
+        boundary, which is correct here because the only production
+        caller is :meth:`export_to_bundle` (an operator exporting their
+        OWN brain to their own USB stick). Nothing peer-facing calls
+        this; the exchange uses ``SyncWAL.get_changes_for_peer``, whose
+        scope argument is mandatory."""
+        ops = self._wal.get_changes_since(hlc, allowed_scopes=allowed_scopes)
         return [op.to_dict() for op in ops]
 
     # Tables that the sync subsystem is willing to mutate. Anything
@@ -1265,8 +1511,71 @@ class SyncEngine:
         "entities", "relations",
     })
 
-    async def apply_remote_changes(self, changes: list[dict]) -> int:
+    def scopes_for_peer(self, peer_node_id: str) -> frozenset[str]:
+        """Scopes this brain shares with one peer, by node_id.
+
+        Fails closed at every step. No roster, a roster that raises, a
+        blank node_id, or a peer nobody has granted anything all give
+        the empty set, and the empty set means "send nothing, accept
+        nothing". There is deliberately no branch anywhere in this
+        method that can return a wider set than the roster stated.
+        """
+        try:
+            roster = self._roster()
+        except Exception as exc:  # noqa: BLE001, denial is the safe answer
+            logger.warning(
+                "sync: peer roster unavailable for scope lookup (%s), "
+                "denying all scopes for node=%s", exc, peer_node_id,
+            )
+            return DENY_ALL
+        if roster is None:
+            return DENY_ALL
+        try:
+            return roster.granted_scopes(peer_node_id)
+        except Exception as exc:  # noqa: BLE001, denial is the safe answer
+            logger.warning(
+                "sync: scope lookup failed for node=%s (%s), denying all.",
+                peer_node_id, exc,
+            )
+            return DENY_ALL
+
+    async def apply_remote_changes_from_peer(
+        self, changes: list[dict], *, peer_node_id: str,
+    ) -> int:
+        """THE RECEIVE-SIDE ENFORCEMENT POINT. Every peer-facing caller
+        uses this; nothing peer-facing calls
+        :meth:`apply_remote_changes` directly.
+
+        Why a receive check exists at all when the send filter already
+        runs: the send filter runs on the brain that is sending, and
+        that brain belongs to somebody else. A peer running a modified
+        build can put any scope on any operation, or none. A
+        send-side-only filter protects an honest peer from our
+        mistakes; it does nothing about a dishonest one, and the entire
+        point of federation is that the other brain is not ours. So the
+        grant set is applied a second time here, from OUR roster, over
+        operations we did not construct.
+
+        ``tests/test_sync_scoped_sharing.py`` asserts that the two
+        peer-facing call sites (``api/server.py`` and
+        ``_handshake_and_exchange``) route through this method, so the
+        wider ``apply_remote_changes`` cannot quietly acquire a third
+        peer caller.
+        """
+        return await self.apply_remote_changes(
+            changes, allowed_scopes=self.scopes_for_peer(peer_node_id),
+        )
+
+    async def apply_remote_changes(self, changes: list[dict], *, allowed_scopes=None) -> int:
         """Apply operations received from a peer. Returns count of applied ops.
+
+        ``allowed_scopes=None`` means "no peer boundary": the caller is
+        local and trusted (``import_from_bundle`` of a bundle the
+        operator carried on a USB stick, and tests). Peer traffic must
+        NOT reach this form. Use
+        :meth:`apply_remote_changes_from_peer`, which resolves the
+        grant set from the roster and cannot be called without a peer
+        identity.
 
         v2026.5.34 (PR 2 D12): runs on the asyncio event loop and
         uses MemoryStore's connection pool — the previous code path
@@ -1277,9 +1586,32 @@ class SyncEngine:
         the arrival order on the wire no longer dictates which copy
         survives.
         """
+        scope_gate = (
+            None if allowed_scopes is None else normalise_scope_set(allowed_scopes)
+        )
         applied = 0
+        rejected_scopes: dict[str, int] = {}
         for change_dict in changes:
             op = SyncOperation.from_dict(change_dict)
+
+            # Scope gate, BEFORE the op touches the local WAL. An
+            # operation this brain was not granted is not merely
+            # unmaterialised, it is not recorded either: writing it to
+            # our WAL would make this node a relay for memory it has no
+            # permission to hold, and the next peer's send filter would
+            # be the only thing standing between that row and a third
+            # brain. Dropped, counted, and logged in aggregate rather
+            # than per op, because a peer can control the volume here.
+            #
+            # ``op.scope`` is already normalised by
+            # ``SyncOperation.from_dict``, so an operation with no
+            # scope field, a junk scope, or the reserved ``private``
+            # arrives as ``private`` and can match no grant set:
+            # ``normalise_scope_set`` drops ``private`` from every set
+            # it builds.
+            if scope_gate is not None and op.scope not in scope_gate:
+                rejected_scopes[op.scope] = rejected_scopes.get(op.scope, 0) + 1
+                continue
 
             # Malformed HLC. ``from_string`` raises on junk, and an
             # unguarded raise here aborts the whole batch: one bad op
@@ -1343,6 +1675,15 @@ class SyncEngine:
             else:
                 applied += 1
 
+        if rejected_scopes:
+            logger.warning(
+                "sync: dropped %d incoming operation(s) in ungranted scope(s) "
+                "%s. The peer sent memory this brain never agreed to hold; "
+                "grant the scope with `feral sync peer scope grant` if that "
+                "was intended.",
+                sum(rejected_scopes.values()),
+                ", ".join(sorted(rejected_scopes)),
+            )
         return applied
 
     async def _apply_to_memory(self, op: SyncOperation) -> bool:
@@ -1669,20 +2010,36 @@ class SyncEngine:
 
     # -- Membership -----------------------------------------------------
 
-    @staticmethod
-    def _roster():
-        """The persistent peer roster, or ``None`` if it cannot be opened.
+    def _roster(self):
+        """The peer roster this engine answers to, or ``None``.
+
+        Prefers an explicitly attached roster over the process global.
+        A roster is per BRAIN, and the process global is only the right
+        answer when there is exactly one brain in the process; two
+        engines in one process (the end-to-end harness, and any future
+        embedding) must not share one membership list, or a grant
+        minted on one becomes a grant on the other and the per-peer
+        boundary silently becomes global again.
 
         Never fatal. Sync predates the roster and must keep working on a
-        brain where the roster DB is unwritable; what is lost in that
-        case is the durability of membership, not the exchange itself.
+        brain where the roster DB is unwritable. What is lost in that
+        case is the durability of membership, not the exchange itself,
+        with one deliberate exception: :meth:`scopes_for_peer` reads
+        ``None`` as "grant nothing", because a missing roster cannot
+        prove anything was shared.
         """
+        if self._peer_roster is not None:
+            return self._peer_roster
         try:
             from security.peer_roster import get_peer_roster
             return get_peer_roster()
         except Exception as exc:  # noqa: BLE001, roster is advisory here
             logger.warning("sync: peer roster unavailable: %s", exc)
             return None
+
+    def set_peer_roster(self, roster) -> None:
+        """Bind this engine to one brain's roster. See :meth:`_roster`."""
+        self._peer_roster = roster
 
     def note_peer_seen(self, peer_id: str, address: str = "") -> None:
         """Persist liveness for a peer we just heard from.
@@ -2135,9 +2492,20 @@ class SyncEngine:
             # Off the loop: this is a synchronous sqlite3 query whose
             # cost scales with the WAL, and it runs once per peer per
             # cadence tick.
+            # Scoped sharing, send side. The grant set is resolved
+            # from OUR roster against the peer's real node_id off the
+            # handshake, never against the local dictionary key: a
+            # statically configured peer is keyed ``static-host:port``,
+            # which is not a node_id and would resolve to no grants
+            # (safe, but wrong for an operator who did grant something).
+            # An empty set here is not an error, it is an authenticated
+            # peer that has been granted nothing, and it correctly
+            # sends zero operations.
+            allowed_scopes = self.scopes_for_peer(remote_node_id)
             changes_for_peer = await asyncio.to_thread(
                 self._wal.get_changes_for_peer,
                 remote_vc,
+                allowed_scopes=allowed_scopes,
                 exclude_node=remote_node_id or peer_id,
             )
 
@@ -2158,7 +2526,13 @@ class SyncEngine:
                 if isinstance(msg, dict) and msg.get("type") == "sync_error":
                     return {"success": False, "error": msg.get("message", "rejected")}
                 raise
-            applied = await self.apply_remote_changes(remote_changes)
+            # Scoped sharing, receive side. Same grant set, applied a
+            # second time to operations WE DID NOT BUILD. See
+            # ``apply_remote_changes_from_peer`` for why the send
+            # filter above is not sufficient on its own.
+            applied = await self.apply_remote_changes_from_peer(
+                remote_changes, peer_node_id=remote_node_id,
+            )
 
             # Record per-peer delivery. ``SyncWAL.mark_synced`` had zero
             # callers anywhere in the tree (audit 2026-08-12): every one
@@ -2206,7 +2580,17 @@ class SyncEngine:
             }
 
     def export_to_bundle(self) -> dict:
-        """Export all memory for manual sync (USB, AirDrop)."""
+        """Export all memory for manual sync (USB, AirDrop).
+
+        Deliberately unscoped: this is the operator exporting their OWN
+        brain to their own removable media, not a peer exchange, so the
+        bundle carries everything including ``private`` operations. The
+        scope of each operation travels in the bundle, so importing it
+        into a second brain the same operator owns preserves the
+        boundary rather than flattening it. Do not repurpose this to
+        hand a bundle to somebody else's brain: that is a peer
+        exchange and belongs on the scoped path.
+        """
         bundle = {
             "node_id": self.node_id,
             "vector_clock": self.get_vector_clock(),

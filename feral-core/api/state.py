@@ -1321,6 +1321,13 @@ class BrainState:
         from memory.sync import stable_node_id
         sync_node_id = stable_node_id()
         self.sync_engine = SyncEngine(node_id=sync_node_id, memory_store=self.memory)
+        # Bind the engine to THIS brain's roster rather than letting it
+        # fall back to the process global. ``/sync`` already reads
+        # ``state.peer_roster`` for authentication, and the scope
+        # grants the engine enforces have to come off the same roster
+        # or a grant an operator can see in `feral sync peer list`
+        # would not be the one the exchange honours.
+        self.sync_engine.set_peer_roster(self.peer_roster)
         self.memory.set_sync_engine(self.sync_engine)
         await self.sync_engine.start_discovery()
 

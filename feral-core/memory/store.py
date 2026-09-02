@@ -78,6 +78,7 @@ except Exception:
 from config.loader import feral_data_home
 from memory.fts_query import STRICT as FTS_STRICT, fts5_match_query
 from memory.sqlite_features import require_fts5
+from security.sync_scopes import INHERIT as SCOPE_INHERIT
 from memory.context_builder import (
     TURN_EVENT_TYPES,
     build_context_for_llm_async as context_build_context_for_llm_async,
@@ -733,7 +734,9 @@ class MemoryStore:
         """
         self._about_me_store = about_me_store
 
-    def _log_sync(self, table: str, op_type: str, row_id: str, data: dict) -> str:
+    def _log_sync(
+        self, table: str, op_type: str, row_id: str, data: dict, scope=None,
+    ) -> str:
         """Synchronous WAL log. Used by the few non-async writers
         that survive in the codebase (boot path, peer-applied changes,
         unit tests). Async hot paths MUST use :meth:`_log_sync_async`
@@ -748,22 +751,33 @@ class MemoryStore:
         empty string is returned when sync is disabled or the WAL
         append failed (the row still lands locally; replication just
         won't carry an HLC).
+
+        ``scope`` is the sharing boundary and defaults to ``None``,
+        which the engine resolves to ``private``: a write that does
+        not name a scope never replicates. Pass a named scope to share
+        it, or ``SyncEngine.SCOPE_INHERIT`` on a delete so the removal
+        travels exactly as far as the write it undoes. See
+        ``SyncEngine._resolve_scope`` for why scope is supplied by the
+        caller instead of derived from ``table``.
         """
         if not self._sync_engine:
             return ""
         try:
-            return self._sync_engine.log_operation(table, op_type, row_id, data) or ""
+            return self._sync_engine.log_operation(
+                table, op_type, row_id, data, scope,
+            ) or ""
         except Exception as exc:
             logger.debug("_log_sync swallowed exception: %s", exc)
             return ""
 
     async def _log_sync_async(
-        self, table: str, op_type: str, row_id: str, data: dict
+        self, table: str, op_type: str, row_id: str, data: dict, scope=None,
     ) -> str:
         """Async-offloaded WAL log. Same contract as :meth:`_log_sync`
-        but the underlying sqlite3 ``INSERT OR REPLACE`` runs on a
-        worker thread so the calling coroutine yields control while
-        the disk fsync resolves. Used by every async write path on
+        (including the ``scope`` argument and its private-by-default
+        resolution) but the underlying sqlite3 ``INSERT OR REPLACE``
+        runs on a worker thread so the calling coroutine yields control
+        while the disk fsync resolves. Used by every async write path on
         ``MemoryStore`` — episodes, knowledge graph entities/relations,
         knowledge entries — to keep the event loop free.
         """
@@ -772,7 +786,7 @@ class MemoryStore:
         try:
             hlc = (
                 await self._sync_engine.log_operation_async(
-                    table, op_type, row_id, data
+                    table, op_type, row_id, data, scope
                 )
                 or ""
             )
@@ -2063,8 +2077,15 @@ class MemoryStore:
         # no-op on the peer; it is logged anyway because the invariant
         # under test is "every delete on a syncable table is logged", and
         # an unlogged delete is invisible the moment that flow lands.)
+        # ``SCOPE_INHERIT``: a delete has to reach exactly the peers
+        # the write reached. Inheriting the scope of this row's newest
+        # WAL operation does that; a row with no surviving operation
+        # resolves to private and the delete stays local, which leaves
+        # a peer holding a copy it already had rather than telling it
+        # about a row we never shared.
         await self._log_sync_async(
             "conversations", "delete", conversation_id, {"id": conversation_id},
+            SCOPE_INHERIT,
         )
         return True
 
@@ -2216,7 +2237,18 @@ class MemoryStore:
         participants: list[str] | None = None,
         importance: float = 0.5,
         created_at: float | None = None,
+        scope: str | None = None,
     ) -> dict:
+        """``scope`` names the sharing boundary for this episode.
+
+        ``None`` (the default) means private: the episode is written
+        locally and replicates to nobody, whatever any peer has been
+        granted. Pass a scope name to make it eligible for the peers
+        that hold a grant for that scope. The caller supplies it
+        because the caller is where the intent is: a robot-event feed
+        and a therapy session are both episodes, and no property of
+        the ``episodes`` table can tell them apart.
+        """
         eid = str(uuid4())[:12]
         # ``created_at`` is when the thing HAPPENED, which is not always
         # when it was written. An ambient transcript queues on the phone
@@ -2243,7 +2275,7 @@ class MemoryStore:
         hlc = await self._log_sync_async("episodes", "insert", eid, {
             "id": eid, "session_id": session_id, "event_type": event_type,
             "summary": summary, "detail": detail, "importance": importance, "created_at": now,
-        })
+        }, scope)
 
         conn = await self._conn()
         try:

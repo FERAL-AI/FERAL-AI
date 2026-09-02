@@ -29,6 +29,7 @@ import pytest
 from memory.decay import DecayConfig, MemoryDecayService
 from memory.store import MemoryStore
 from memory.sync import SyncEngine, SyncWAL
+from security.peer_roster import PeerRoster
 
 
 @pytest.fixture
@@ -208,12 +209,22 @@ async def test_exchange_marks_the_ops_it_shipped_to_the_peer(tmp_path, monkeypat
     """A completed exchange must leave synced_to naming the peer."""
     wal_path = str(tmp_path / "wal.db")
     engine = SyncEngine("node-a", db_path=wal_path)
-    engine.log_operation("notes", "insert", "n1", {"id": "n1"})
+    # Replication is scoped and the default is ``private``, which
+    # crosses to nobody, so an exchange that ships anything at all
+    # needs a granted scope. The roster is per test: without the
+    # explicit bind the engine falls back to the process global, which
+    # is the operator's real ``~/.feral`` roster.
+    roster = PeerRoster(db_path=str(tmp_path / "roster.db"))
+    roster.grant_scope("peer-b", "audit-shared")
+    engine.set_peer_roster(roster)
+    engine.log_operation("notes", "insert", "n1", {"id": "n1"}, "audit-shared")
 
     class _FakeWS:
         def __init__(self):
             self._outbox = [
-                json.dumps({"type": "sync_ack", "vector_clock": {}}),
+                json.dumps({
+                    "type": "sync_ack", "vector_clock": {}, "node_id": "peer-b",
+                }),
                 json.dumps({"changes": []}),
             ]
 

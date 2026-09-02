@@ -18,6 +18,7 @@ import aiosqlite
 
 from memory.embeddings import chunk_text, cosine_similarity_bulk
 from memory.fts_query import fts5_match_query
+from security.sync_scopes import INHERIT as SCOPE_INHERIT
 
 logger = logging.getLogger("feral.memory.notes_legacy")
 
@@ -46,7 +47,16 @@ async def save_note(
     tags: list[str] | None = None,
     importance: str = "normal",
     source: str = "user",
+    scope: str | None = None,
 ) -> dict:
+    """``scope`` names the sharing boundary for this note.
+
+    ``None`` (the default) means private: the note lands locally and
+    replicates to nobody, no matter what any peer has been granted.
+    Personal notes are the exact case scoped sharing exists to keep at
+    home, so the default is the safe one and sharing is the thing you
+    have to ask for by name.
+    """
     note_id = str(uuid4())[:8]
     now = time.time()
     tags = tags or []
@@ -64,6 +74,7 @@ async def save_note(
             "source": source,
             "created_at": now,
         },
+        scope,
     )
     conn = await aiosqlite.connect(store.db_path)
     try:
@@ -428,7 +439,13 @@ async def delete_note(store, note_id: str) -> bool:
     # Logged AFTER the local commit so a delete that failed locally is
     # never announced to peers.
     if deleted:
-        await store._log_sync_async("notes", "delete", note_id, {"id": note_id})
+        # ``SCOPE_INHERIT``: the delete inherits the scope the note was
+        # written under, so it reaches exactly the peers the insert
+        # reached. A note written privately produces a private delete,
+        # which replicates nowhere and needs to: nobody else has it.
+        await store._log_sync_async(
+            "notes", "delete", note_id, {"id": note_id}, SCOPE_INHERIT,
+        )
     return deleted
 
 

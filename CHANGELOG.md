@@ -8,6 +8,85 @@ All notable changes to FERAL are documented here.
 
 ### Added
 
+- **Scoped sharing for brain-to-brain memory sync.** Replication was
+  all-or-nothing. `SyncEngine._SYNC_ALLOWED_TABLES` covers notes,
+  episodes, conversations, knowledge, wiki pages, execution log,
+  entities and relations, and every row of all eight went to any peer
+  that got past the handshake. Two operators who wanted to pool robot
+  events had to pool their entire personal memory. That was the blocker
+  in front of federation between separately-owned brains.
+
+  **`sync_wal` now carries a `scope`, and the WAL is the whole
+  enforcement surface.** Nothing reaches a peer except through a row of
+  that table, so one column there is complete; the eight source tables
+  are untouched. Scope is supplied by the CALLER
+  (`save_note(scope=...)`, `episode_save(scope=...)`, threaded through
+  `MemoryStore._log_sync` / `_log_sync_async` and
+  `SyncEngine.log_operation` / `log_operation_async`), not derived from
+  the table. Deriving it would make the sharing boundary a property of
+  the schema, so the next table anyone adds inherits some other table's
+  posture silently and the operator has no record of an intent that was
+  never expressed. Deletes are the one exception: they pass
+  `SCOPE_INHERIT` and take the scope of the row's newest logged write,
+  so a removal reaches exactly the peers the write reached.
+
+  **Fail closed, everywhere.** `security/sync_scopes.py` is the single
+  place a scope name is judged, and it answers `private` — the reserved
+  scope that never replicates and cannot be granted — for an unscoped
+  write, a WAL row that predates the column, a name that fails the
+  grammar, a wrong-typed field, and an operation from a peer running an
+  older build. The column's `DEFAULT 'private'` is the migration: every
+  pre-existing row is private permanently, with no backfill that could
+  guess wrong. Nothing is retroactively classified, and upgrading never
+  turns an operator's existing history into something poolable.
+
+  **Both sides enforce, from the local roster.**
+  `PeerRoster.grant_scope` / `revoke_scope` / `granted_scopes` store
+  per-peer grants in a new `peer_scope_grants` table keyed on `node_id`,
+  the only identifier present at both enforcement points.
+  `SyncWAL.get_changes_for_peer` filters what is sent and takes
+  `allowed_scopes` as a keyword argument with NO DEFAULT, so a peer path
+  cannot reach the unfiltered form by omission.
+  `SyncEngine.apply_remote_changes_from_peer` re-checks every arriving
+  operation against the same grant set, before it touches the local WAL,
+  so a refused operation is not recorded either and this brain never
+  becomes a relay for memory it has no permission to hold. The receive
+  check is not redundant: the send filter runs on the brain that is
+  sending, and in federation that brain belongs to somebody else.
+  Disabling it alone fails 12 of the new tests.
+
+  **Pooling takes two grants.** Each brain's roster is that brain's
+  whole policy toward a peer and governs both directions. A one-sided
+  grant moves nothing, because the alternative would let somebody
+  else's roster decide what lands in your store.
+
+  **Revocation is not recall, and nothing says otherwise.**
+  `revoke_scope` stops future replication in that scope from the next
+  exchange onward. Operations that already crossed are on a disk this
+  brain does not control. The code, the CLI output, the API response
+  and the docs all state that, and
+  `test_revoking_a_scope_stops_later_writes_but_not_earlier_ones`
+  asserts the half an operator might hope was false.
+
+  **No aggregate caps across peers.** Kleppmann and Howard's
+  I-confluence result makes a cross-runtime aggregate limit
+  unenforceable without coordination, and a limit that silently does not
+  hold is worse than none. Any limit here is local to one enforcement
+  point and says so where it appears.
+
+  Operator surface: `feral sync peer scope grant|revoke|list`,
+  `GET/POST /api/sync/scopes`, `DELETE
+  /api/sync/scopes/{node_id}/{scope}`, and `feral sync peer list` now
+  prints each peer's scopes, including `none (receives nothing)`,
+  because "enrolled" and "receives something" are different states.
+
+  `tests/test_sync_scoped_sharing.py` (77 tests) drives the headline
+  case through the real `/sync` endpoint over a real websocket and
+  asserts on MATERIALISED TABLE CONTENTS, never the op log: two brains
+  pool `robot-events`, both write personal notes the ordinary way, and
+  the personal notes must not cross. 20 of the 77 fail with the two
+  gates removed.
+
 - **`feral setup`'s lists are clickable.** Every list prompt in the
   wizard was arrow-key only. `cli/ui_kit.pick` (the direct single-pick
   behind the provider list, the network profile, phone pairing, the
