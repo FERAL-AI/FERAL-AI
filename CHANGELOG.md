@@ -1,10 +1,12 @@
 # Changelog
 
-<!-- feral-version: 2026.9.1 -->
+<!-- feral-version: 2026.9.2 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.9.2] - 2026-09-02 - two brains that share only what you named
 
 ### Added
 
