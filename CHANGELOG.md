@@ -31,8 +31,8 @@ All notable changes to FERAL are documented here.
   so a removal reaches exactly the peers the write reached.
 
   **Fail closed, everywhere.** `security/sync_scopes.py` is the single
-  place a scope name is judged, and it answers `private` — the reserved
-  scope that never replicates and cannot be granted — for an unscoped
+  place a scope name is judged, and it answers `private` (the reserved
+  scope that never replicates and cannot be granted) for an unscoped
   write, a WAL row that predates the column, a name that fails the
   grammar, a wrong-typed field, and an operation from a peer running an
   older build. The column's `DEFAULT 'private'` is the migration: every
