@@ -283,6 +283,19 @@ def _function_nodes(tree: ast.AST, names) -> list:
 
 
 def _is_enveloped(expr: ast.AST, enveloped_names: set) -> bool:
+    # A dict literal that spells the envelope out by hand is compliant on
+    # the wire, so it passes. Six sends did exactly this and were the only
+    # correct ones in the tree. It is still worse than the builder --
+    # `time.time()` and the version constant get retyped at every site,
+    # which is how five of them ended up with the version and none of the
+    # twenty others did -- but a gate that failed correct frames would be
+    # asserting a style rule while claiming to assert the spec.
+    if isinstance(expr, ast.Dict):
+        keys = {
+            k.value for k in expr.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)
+        }
+        return {"hup_version", "ts", "type"} <= keys
     if isinstance(expr, ast.Call):
         func = expr.func
         if isinstance(func, ast.Name) and func.id in ENVELOPE_BUILDERS:
@@ -366,7 +379,10 @@ def test_every_brain_to_node_send_carries_the_hup_envelope():
     )
     assert not offenders, (
         "brain -> node frames missing the HUP_SPEC.md section 5 envelope "
-        "(hup_version + ts):\n  " + "\n  ".join(offenders)
+        "(hup_version + ts). Route each through models.protocol.hup_frame "
+        "(a new frame), stamp_hup_envelope (a dict that already exists), "
+        "or hardware.action_frames.build_action_request (both, plus the "
+        "section 6 capability gate):\n  " + "\n  ".join(offenders)
     )
 
 
