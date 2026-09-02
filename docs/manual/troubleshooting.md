@@ -48,6 +48,20 @@ If you chose local voice and a cloud provider is the only fallback
 available, FERAL stops rather than sending your audio off the machine,
 and tells you that is what happened.
 
+## I cannot select text in `feral setup`
+
+The wizard's lists are clickable, which means the terminal is reporting
+mouse gestures to FERAL while a list is on screen instead of using them
+to select text. Drag-to-select comes back with:
+
+```
+FERAL_SETUP_MOUSE=0 feral setup
+```
+
+Arrow keys and enter work the same either way. Many terminals will also
+let you drag past a capturing application by holding shift (option in
+iTerm2).
+
 ## The dashboard is blank or stale
 
 The web UI is served by the brain from a bundle built at release time.

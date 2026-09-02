@@ -8,6 +8,46 @@ All notable changes to FERAL are documented here.
 
 ### Added
 
+- **`feral setup`'s lists are clickable.** Every list prompt in the
+  wizard was arrow-key only. `cli/ui_kit.pick` (the direct single-pick
+  behind the provider list, the network profile, phone pairing, the
+  post-model checkpoint and `ask_choice`'s 19 call sites) sat on
+  `InquirerPy.inquirer.select`, which exposes no mouse parameter at all,
+  so there was no argument to pass and no hook to reach through. The
+  `prompt_toolkit.Application` one layer down does accept
+  `mouse_support`, so `pick` is now built directly on prompt_toolkit
+  (`_MousePicker`) and the other prompts (`select`, `multi_select`,
+  `fuzzy_select`, `fuzzy_pick`, `password`, `confirm`, `text`) stay on
+  InquirerPy. Clicking a row picks it; the wheel scrolls.
+
+  **The keyboard did not change and is still the primary input.** ↑/↓
+  (and ctrl-p / ctrl-n) move without wrapping, exactly as InquirerPy's
+  `cycle=False` did; enter takes the row under the cursor; ctrl-c raises
+  `KeyboardInterrupt`, which is what `helpers.ask_choice` turns into
+  `QuitNavigation`. A picker that needed a mouse would be worse than the
+  one it replaced.
+
+  **Mouse capture costs drag-to-select, so it is opt-out.** While a
+  capturing prompt is on screen the terminal routes drags to the
+  application, so selecting a provider name or a model id with the mouse
+  selects nothing. `FERAL_SETUP_MOUSE=0` turns capture off for the run
+  and changes nothing else; the rendered instruction only says "click to
+  pick" when clicking will actually work. Documented in
+  `docs/manual/first-run.md` and `docs/manual/troubleshooting.md`.
+
+  The rows are built from `_fallback_pairs`, the same helper the typed
+  non-TTY fallback renders from, so the clickable list and the typed
+  list cannot show different labels or a different order, which is the failure
+  mode the navigation hint already hit once. Every degradation path is
+  unchanged: no TTY, no prompt_toolkit, or any failure to build or run
+  the application still falls through to `_fallback_select`.
+
+  `tests/test_cli_ui_kit_mouse_picker.py` (60 tests) drives the real
+  `Application` over a `create_pipe_input()` pipe with real vt100 bytes,
+  including SGR mouse press/release sequences, so the click is executed
+  rather than asserted about: a click on screen row 3 returns the second
+  choice, and the same bytes are inert when capture is off.
+
 - **Per-device capability grants — the screen HUP_SPEC named for two
   years.** `feral-nodes/HUP_SPEC.md` section 6 has said since v1.0 that
   gating happens at **Settings > Devices > <device> > Capabilities**,

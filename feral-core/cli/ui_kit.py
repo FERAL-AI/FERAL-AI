@@ -29,6 +29,22 @@ fallback. ``_run_inquirer_safely`` detects this case and runs the
 prompt in a worker thread that has no event loop of its own, so
 prompt_toolkit's normal blocking path works. When called from a sync
 context (no running loop) we bypass the thread entirely.
+
+The mouse
+---------
+``pick`` is the one prompt built directly on ``prompt_toolkit`` rather
+than on InquirerPy, because ``inquirer.select`` exposes no way to reach
+``Application(mouse_support=...)`` and a wizard the operator cannot
+click in is the thing this was asked to fix. See ``_MousePicker``.
+
+Mouse capture is on by default and turned off with
+``FERAL_SETUP_MOUSE=0``. It is opt-out rather than opt-in because most
+operators want the click; it is opt-*able* because while a picker with
+mouse reporting on is on screen the terminal sends drag gestures to the
+application instead of selecting text, so the usual drag-to-select /
+copy of a provider name or a model id does not work. That is a real
+cost, and an operator who is copying rather than clicking should be
+able to pay nothing for a feature they are not using.
 """
 
 from __future__ import annotations
@@ -36,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import getpass
 import logging
+import os
 import sys
 import threading
 from typing import Any, Callable, Optional, Sequence, Union
@@ -61,6 +78,30 @@ except Exception:  # pragma: no cover - InquirerPy is the new dep; allow tests t
     inquirer = None  # type: ignore[assignment]
     Choice = None  # type: ignore[assignment]
     _INQUIRER_AVAILABLE = False
+
+try:
+    from prompt_toolkit.application import Application  # type: ignore
+    from prompt_toolkit.data_structures import Point  # type: ignore
+    from prompt_toolkit.formatted_text import FormattedText  # type: ignore
+    from prompt_toolkit.key_binding import KeyBindings  # type: ignore
+    from prompt_toolkit.layout import HSplit, Layout, Window  # type: ignore
+    from prompt_toolkit.layout.controls import FormattedTextControl  # type: ignore
+    from prompt_toolkit.mouse_events import MouseEventType  # type: ignore
+    from prompt_toolkit.shortcuts import print_formatted_text  # type: ignore
+    from prompt_toolkit.styles import Style  # type: ignore
+
+    _PROMPT_TOOLKIT_AVAILABLE = True
+except Exception:  # pragma: no cover - prompt_toolkit ships with InquirerPy
+    Application = None  # type: ignore[assignment]
+    Point = None  # type: ignore[assignment]
+    FormattedText = None  # type: ignore[assignment]
+    KeyBindings = None  # type: ignore[assignment]
+    HSplit = Layout = Window = None  # type: ignore[assignment]
+    FormattedTextControl = None  # type: ignore[assignment]
+    MouseEventType = None  # type: ignore[assignment]
+    print_formatted_text = None  # type: ignore[assignment]
+    Style = None  # type: ignore[assignment]
+    _PROMPT_TOOLKIT_AVAILABLE = False
 
 
 BRAND_EMOJI = "🦝"
@@ -399,6 +440,274 @@ def _normalise_default_for_checkbox(default: Any, choices: Sequence[ChoiceLike])
 
 
 # ---------------------------------------------------------------------------
+# The clickable picker (``pick``'s engine)
+# ---------------------------------------------------------------------------
+
+
+MOUSE_ENV_VAR = "FERAL_SETUP_MOUSE"
+
+# Values that mean "do not capture the mouse". Everything else, including
+# an unset or empty variable, leaves the mouse on: the click is what most
+# operators want, and the opt-out exists for the minority who are copying
+# text out of the prompt rather than clicking in it.
+_MOUSE_OFF_VALUES = frozenset({"0", "off", "false", "no", "n", "disable", "disabled"})
+
+
+def mouse_enabled() -> bool:
+    """Whether ``pick`` should ask the terminal to report mouse events.
+
+    On (the default) the operator can click a row or scroll the wheel.
+    The cost is that while the picker is on screen the terminal routes
+    drags to the application, so the usual click-and-drag text selection
+    does not select anything and there is nothing to copy. Set
+    ``FERAL_SETUP_MOUSE=0`` to get that back; every keyboard gesture is
+    identical either way.
+    """
+    raw = os.environ.get(MOUSE_ENV_VAR, "").strip().lower()
+    return raw not in _MOUSE_OFF_VALUES
+
+
+_MOUSE_HINT = "click to pick"
+
+_PICK_STYLE_RULES = {
+    "qmark": "ansicyan",
+    "question": "bold",
+    "instruction": "ansibrightblack",
+    "pointer": "ansicyan bold",
+    "selected": "ansicyan bold",
+    "choice": "",
+}
+
+
+class _MousePicker:
+    """Single-select list rendered on prompt_toolkit, mouse included.
+
+    Exists because ``InquirerPy.inquirer.select`` accepts no mouse
+    parameter, while the ``prompt_toolkit.Application`` it is built on
+    does. Rather than reach around InquirerPy's internals, ``pick``
+    drives prompt_toolkit directly; every other prompt in this module
+    is still InquirerPy's.
+
+    Rows come in already normalised as ``(label, value)`` pairs from
+    :func:`_fallback_pairs`, the *same* function the typed fallback
+    renders from, so the clickable list and the typed list cannot show
+    different labels or a different order. Nothing here re-derives a
+    label from a choice.
+
+    The instance is the render state: ``index`` is the cursor, and both
+    the key bindings and the per-row mouse handlers mutate it. Key
+    handlers reach the application through ``event.app``; mouse
+    handlers are called with only a ``MouseEvent``, so they use
+    ``self.app``, which :meth:`build_application` sets.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        rows: Sequence[tuple[str, Any]],
+        *,
+        default: Any = None,
+        instruction: str = "",
+        mouse: Optional[bool] = None,
+    ) -> None:
+        self.message = message
+        self.rows: list[tuple[str, Any]] = list(rows)
+        self.instruction = instruction
+        self.mouse = mouse_enabled() if mouse is None else bool(mouse)
+        self.app: Any = None
+        self.index = 0
+        self._pressed: Optional[int] = None
+        # One header line above the rows; the cursor position is what
+        # lets a list longer than the terminal scroll itself.
+        self._header_lines = 1
+        if default is not None:
+            for i, (_label, value) in enumerate(self.rows):
+                if value == default:
+                    self.index = i
+                    break
+
+    # -- content ---------------------------------------------------------
+
+    def row_labels(self) -> list[str]:
+        return [label for label, _value in self.rows]
+
+    def header_text(self) -> str:
+        parts = [f"{BRAND_EMOJI}  {self.message}"]
+        hint = self.instruction
+        if self.mouse:
+            hint = f"{hint} · {_MOUSE_HINT}" if hint else _MOUSE_HINT
+        if hint:
+            parts.append(f"  {hint}")
+        return "".join(parts)
+
+    def cursor_position(self):
+        return Point(x=0, y=self._header_lines + self.index)
+
+    def fragments(self) -> list:
+        """What prompt_toolkit draws, one fragment per row."""
+        out: list = [
+            ("class:qmark", f"{BRAND_EMOJI}  "),
+            ("class:question", self.message),
+        ]
+        hint = self.instruction
+        if self.mouse:
+            hint = f"{hint} · {_MOUSE_HINT}" if hint else _MOUSE_HINT
+        if hint:
+            out.append(("class:instruction", f"  {hint}"))
+        width = max((len(label) for label in self.row_labels()), default=0)
+        for i, (label, _value) in enumerate(self.rows):
+            out.append(("", "\n"))
+            selected = i == self.index
+            style = "class:selected" if selected else "class:choice"
+            pointer = "❯ " if selected else "  "
+            # The pointer, the label and the padding are one fragment so
+            # the whole row is the click target, not just the glyphs.
+            text = f"{pointer}{label}".ljust(width + 2)
+            if self.mouse:
+                out.append((style, text, self._row_mouse_handler(i)))
+            else:
+                out.append((style, text))
+        return out
+
+    # -- state -----------------------------------------------------------
+
+    def move(self, delta: int) -> None:
+        """Move the cursor without wrapping.
+
+        InquirerPy ran this list with ``cycle=False``; an operator who
+        holds down ↑ should land on the first row and stay there rather
+        than being teleported to the bottom.
+        """
+        if not self.rows:
+            return
+        self.index = max(0, min(len(self.rows) - 1, self.index + delta))
+
+    def accept(self, app: Any, index: Optional[int] = None) -> None:
+        if index is not None:
+            self.index = index
+        if app is None:  # pragma: no cover - defensive
+            return
+        app.exit(result=self.index)
+
+    def _invalidate(self) -> None:
+        app = self.app
+        if app is not None:
+            try:
+                app.invalidate()
+            except Exception:  # pragma: no cover - redraw is best-effort
+                logger.debug("picker redraw request failed", exc_info=True)
+
+    # -- input -----------------------------------------------------------
+
+    def _row_mouse_handler(self, index: int):
+        def handler(mouse_event):
+            event_type = mouse_event.event_type
+            if event_type == MouseEventType.MOUSE_DOWN:
+                self.index = index
+                self._pressed = index
+                self._invalidate()
+            elif event_type == MouseEventType.MOUSE_UP:
+                pressed, self._pressed = self._pressed, None
+                # A release on a different row than the press is a drag
+                # off the button: cancelled, the way a button behaves.
+                if pressed == index:
+                    self.accept(self.app, index)
+            elif event_type == MouseEventType.SCROLL_DOWN:
+                self.move(1)
+                self._invalidate()
+            elif event_type == MouseEventType.SCROLL_UP:
+                self.move(-1)
+                self._invalidate()
+            else:
+                return NotImplemented
+            return None
+
+        handler.row_index = index  # type: ignore[attr-defined]
+        return handler
+
+    def key_bindings(self):
+        """Exactly the gestures the InquirerPy picker answered to.
+
+        A picker that needs a mouse would be worse than the one it
+        replaces, so the keyboard is bound first and the mouse is an
+        addition to it.
+        """
+        kb = KeyBindings()
+
+        @kb.add("up")
+        @kb.add("c-p")
+        def _up(event):
+            self.move(-1)
+
+        @kb.add("down")
+        @kb.add("c-n")
+        def _down(event):
+            self.move(1)
+
+        @kb.add("enter")
+        def _enter(event):
+            self.accept(event.app)
+
+        @kb.add("c-c")
+        def _interrupt(event):
+            # ``helpers.ask_choice`` turns this into ``QuitNavigation``,
+            # which is how ctrl-c leaves the wizard cleanly.
+            event.app.exit(exception=KeyboardInterrupt)
+
+        return kb
+
+    # -- wiring ----------------------------------------------------------
+
+    def build_application(self, *, input=None, output=None):
+        control = FormattedTextControl(
+            self.fragments,
+            focusable=True,
+            show_cursor=False,
+            get_cursor_position=self.cursor_position,
+        )
+        window = Window(control, always_hide_cursor=True, wrap_lines=False)
+        extra: dict[str, Any] = {}
+        if input is not None:
+            extra["input"] = input
+        if output is not None:
+            extra["output"] = output
+        app = Application(
+            layout=Layout(HSplit([window])),
+            key_bindings=self.key_bindings(),
+            style=Style.from_dict(_PICK_STYLE_RULES),
+            mouse_support=self.mouse,
+            full_screen=False,
+            erase_when_done=True,
+            **extra,
+        )
+        self.app = app
+        return app
+
+    def echo_answer(self, index: int) -> None:
+        """Leave one line behind, the way InquirerPy's ``amark`` does.
+
+        ``erase_when_done`` wipes the list on exit, so without this the
+        transcript would not record what the operator chose.
+        """
+        label = self.rows[index][0]
+        try:
+            print_formatted_text(
+                FormattedText(
+                    [
+                        ("class:qmark", f"{BRAND_EMOJI}  "),
+                        ("class:question", f"{self.message} "),
+                        ("class:selected", label),
+                    ]
+                ),
+                style=Style.from_dict(_PICK_STYLE_RULES),
+                file=sys.stdout,
+            )
+        except Exception:  # pragma: no cover - never fail on an echo
+            sys.stdout.write(f"{BRAND_EMOJI}  {self.message} {label}\n")
+            sys.stdout.flush()
+
+
+# ---------------------------------------------------------------------------
 # Public prompts
 # ---------------------------------------------------------------------------
 
@@ -610,33 +919,48 @@ def pick(
     triplets. Keep ``select`` for flows that genuinely want a mark
     step before commit.
 
-    Falls back to the same typed numeric prompt off-tty.
+    v2026.9.1. The only prompt in this module not built on InquirerPy.
+    ``inquirer.select`` exposes no mouse parameter, so the operator
+    could not click a row; the ``prompt_toolkit.Application`` under it
+    accepts ``mouse_support``, so ``pick`` drives prompt_toolkit
+    directly through :class:`_MousePicker` instead. Keyboard gestures
+    are unchanged: ↑/↓ (and ctrl-p / ctrl-n) move without wrapping,
+    enter takes the row under the cursor, ctrl-c raises
+    ``KeyboardInterrupt``. Clicking a row picks it and the wheel
+    scrolls, unless ``FERAL_SETUP_MOUSE=0`` (see :func:`mouse_enabled`
+    for what mouse capture costs).
+
+    Falls back to the same typed numeric prompt off-tty, and on any
+    failure to build or run the application. A picker that raised in
+    an unusual terminal would take the whole wizard down with it.
     """
-    if _INQUIRER_AVAILABLE and _is_interactive():
+    if _PROMPT_TOOLKIT_AVAILABLE and _is_interactive():
         try:
-            normalised = _normalise_choices(choices)
-            default_value = default if default in [
-                getattr(c, "value", c if isinstance(c, str) else c.get("value"))
-                for c in choices
-            ] else None
+            # Rows come from the same helper the fallback renders from,
+            # so the two lists cannot drift apart.
+            picker = _MousePicker(
+                message,
+                _fallback_pairs(choices),
+                default=default,
+                instruction=instruction,
+            )
+            if picker.rows:
 
-            def _build():
-                return inquirer.select(  # type: ignore[union-attr]
-                    message=message,
-                    choices=normalised,
-                    default=default_value,
-                    instruction=instruction,
-                    qmark=BRAND_EMOJI,
-                    amark=BRAND_EMOJI,
-                    pointer="❯",
-                    cycle=False,
-                ).execute()
+                def _build_and_run():
+                    # Built inside the worker thread (when there is one)
+                    # so the application and its event loop share a
+                    # thread, exactly as the InquirerPy prompts do.
+                    return picker.build_application().run()
 
-            return _run_inquirer_safely(_build)
+                index = _run_inquirer_safely(_build_and_run)
+                if isinstance(index, int) and 0 <= index < len(picker.rows):
+                    picker.echo_answer(index)
+                    return picker.rows[index][1]
+                logger.debug("ui_kit.pick got no usable selection: %r", index)
         except KeyboardInterrupt:
             raise
         except Exception as exc:  # pragma: no cover
-            logger.debug("ui_kit.pick InquirerPy path failed: %r", exc)
+            logger.debug("ui_kit.pick prompt_toolkit path failed: %r", exc)
     return _fallback_select(message, choices, default=default)
 
 
@@ -881,6 +1205,8 @@ def warn_non_interactive_setup_hint(console=None) -> None:
 __all__ = [
     "BRAND_EMOJI",
     "BRAND_COLOR",
+    "MOUSE_ENV_VAR",
+    "mouse_enabled",
     "select",
     "fuzzy_select",
     "pick",

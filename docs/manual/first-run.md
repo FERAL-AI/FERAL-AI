@@ -7,6 +7,32 @@ feral setup
 The wizard walks through an LLM provider, voice, who you are, and
 optionally pairing a device. You can skip parts and come back.
 
+## Answering a list
+
+Every list in the wizard takes arrow keys: ↑ and ↓ move, enter takes the
+row the cursor is on. The last rows are always **jump to a previous
+step**, **back** and **quit setup**, so you never have to remember a
+word to escape with.
+
+You can also **click a row**, and scroll the list with the wheel.
+
+Clicking has one cost, and it is worth knowing before it surprises you:
+while a list is on screen the terminal hands mouse gestures to FERAL
+instead of to itself, so dragging across a provider name or a model id
+selects nothing and there is nothing to copy. If you would rather have
+the selection back:
+
+```
+FERAL_SETUP_MOUSE=0 feral setup
+```
+
+That turns mouse capture off for the run. Every keyboard gesture is
+identical either way, and nothing else about the wizard changes.
+
+Many terminals also let you drag past a capturing application by holding
+a modifier (shift in the xterm family, option in iTerm2). If yours does,
+that works too and you do not need the variable at all.
+
 Then:
 
 ```
