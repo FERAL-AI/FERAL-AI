@@ -2722,6 +2722,10 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
         except Exception as exc:
             logger.debug("phone_envelope supervisor record failed: %s", exc)
 
+    # (msg.type, tier) pairs already reported for this socket. See the
+    # capability-tier gate in the loop below.
+    _tier_drops_reported: set = set()
+
     try:
         while True:
             try:
@@ -2782,17 +2786,24 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
             # that leaks.
             _refused_tier = _frame_tier_refused(node_id, msg.type, raw)
             if _refused_tier:
-                # debug, not info: these arrive at stream rate, and the
-                # supervisor record below is the durable evidence.
-                logger.debug(
-                    "dropped %s from %s: operator disabled the %s tier",
-                    msg.type, node_id, _refused_tier,
-                )
-                _record_phone_envelope(
-                    "denied", msg.type,
-                    detail={"reason": "capability_tier_disabled",
-                            "tier": _refused_tier},
-                )
+                # Once per (type, tier) per socket, not once per frame.
+                # A phone whose camera the operator turned off keeps
+                # streaming until it reconnects and reads the new
+                # node_ack, so this branch runs at frame rate; a log line
+                # and a supervisor row per frame would cost more than the
+                # ingestion this is refusing to do.
+                _drop_key = (msg.type, _refused_tier)
+                if _drop_key not in _tier_drops_reported:
+                    _tier_drops_reported.add(_drop_key)
+                    logger.info(
+                        "dropping %s from %s: operator disabled the %s tier",
+                        msg.type, node_id, _refused_tier,
+                    )
+                    _record_phone_envelope(
+                        "denied", msg.type,
+                        detail={"reason": "capability_tier_disabled",
+                                "tier": _refused_tier},
+                    )
                 continue
 
             if msg.type in ("node_register", "register") and isinstance(payload, NodeRegisterPayload):

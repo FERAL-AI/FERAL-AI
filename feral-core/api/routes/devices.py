@@ -651,11 +651,11 @@ def _declared_capabilities(node_id: str) -> list[str]:
         return [str(c) for c in live]
     try:
         for row in state.device_pairing_store.list_devices() or []:
+            # ``list_devices`` already decodes the stored JSON column into
+            # a list, so this is a list or nothing.
             if str(row.get("node_id") or "") != node_id:
                 continue
             caps = row.get("capabilities")
-            if isinstance(caps, str) and caps.strip():
-                caps = json.loads(caps)
             if isinstance(caps, list):
                 return [str(c) for c in caps]
     except Exception as exc:
