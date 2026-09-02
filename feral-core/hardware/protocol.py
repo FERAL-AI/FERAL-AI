@@ -526,17 +526,23 @@ class WebSocketDeviceAdapter(DeviceAdapter):
         self._node_id = node_id
 
     async def execute(self, action: HUPAction) -> dict:
-        msg = {
-            "hop": "brain",
-            "type": "hup_action_request",
-            "payload": {
-                "action_id": action.action_id,
-                "name": action.capability_id,
-                "params": action.parameters,
-                "timeout_ms": action.timeout_ms,
-            }
-        }
-        await self._ws.send_json(msg)
+        # Imported here, not at module scope: ``hardware.action_frames``
+        # builds a frame out of ``models.protocol``, and this module is
+        # imported by ``models``-adjacent code during boot.
+        from hardware.action_frames import build_action_request
+
+        gate = build_action_request(
+            self._node_id, action.capability_id, action.parameters,
+            timeout_ms=action.timeout_ms, action_id=action.action_id,
+            hop="brain",
+        )
+        if not gate.allowed:
+            # HUP_SPEC section 6. ``DeviceRegistry.execute_action`` has
+            # already asked the operator's global policy whether this
+            # capability may run anywhere; this is the per-device answer.
+            return {"sent": False, "node_id": self._node_id,
+                    "denied": True, "error": gate.denied_reason}
+        await self._ws.send_json(gate.frame)
         return {"sent": True, "node_id": self._node_id}
 
     async def get_status(self) -> dict:

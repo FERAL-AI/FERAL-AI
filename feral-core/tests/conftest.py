@@ -440,6 +440,19 @@ def _reset_device_pairing_store():
     reset_store()
 
 
+def _reset_capability_grant_store():
+    """Per-device capability grant store singleton (HUP_SPEC section 6).
+
+    A denial written by one test must not deny that capability in the
+    next. The store lives in ``FERAL_HOME``, which the isolation fixture
+    already points at a tmp dir per test, so dropping the singleton is
+    enough to get a fresh empty file.
+    """
+    from security.capability_grants import reset_store
+
+    reset_store()
+
+
 def _reset_bound_host():
     """The recorded live-listener bind host.
 
@@ -901,6 +914,7 @@ _SHARED_STATE_RESETTERS = (
     _reset_budget_cache,
     _reset_shared_catalog,
     _reset_device_pairing_store,
+    _reset_capability_grant_store,
     _reset_bound_host,
     _reset_glasses_buffer_registration,
 )

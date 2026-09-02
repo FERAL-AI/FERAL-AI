@@ -286,18 +286,42 @@ class TestHupActionResponse:
 
 
 class TestBrainEmitsHupActionRequest:
+    """Every actuator sender emits the canonical type, via one builder.
+
+    These three tests used to grep each module for the literal
+    ``"hup_action_request"``. The literal now lives in exactly one place,
+    ``hardware/action_frames.build_action_request``, which all five
+    senders call: it stamps the HUP_SPEC section 5 envelope the
+    hand-rolled dicts were missing, and applies the section 6 per-device
+    capability gate that nothing applied at all.
+
+    Asserting the call site uses that builder is what the original
+    assertion was reaching for and is strictly stronger than the string
+    search, which a comment mentioning the type would also have
+    satisfied. The other half of each test -- that the removed ``command``
+    alias is not emitted -- is unchanged, and
+    ``tests/test_hup_version_unified.py`` now applies it to every sender
+    including the gateway fallback these three never covered.
+    """
+
+    def test_the_builder_emits_the_canonical_type(self):
+        from hardware.action_frames import build_action_request
+
+        frame = build_action_request("n1", "buzz", {}).frame
+        assert frame["type"] == "hup_action_request"
+
     def test_mesh_invoke_sends_hup_action_request(self):
         """hardware/mesh.py must emit type='hup_action_request', not 'command'."""
         import hardware.mesh as mesh_mod
-        src = inspect.getsource(mesh_mod)
-        assert '"hup_action_request"' in src
+        src = inspect.getsource(mesh_mod.HardwareMesh.invoke)
+        assert "build_action_request(" in src
         assert '"type": "command"' not in src
 
     def test_tool_runner_sends_hup_action_request(self):
         """agents/tool_runner.py must emit type='hup_action_request'."""
         import agents.tool_runner as tr_mod
         src = inspect.getsource(tr_mod)
-        assert '"hup_action_request"' in src
+        assert "build_action_request(" in src
         assert '"type": "command"' not in src
 
 
@@ -307,7 +331,7 @@ class TestHupExecuteDeprecated:
         import hardware.protocol as hp
         src = inspect.getsource(hp.WebSocketDeviceAdapter.execute)
         assert '"hup_execute"' not in src
-        assert '"hup_action_request"' in src
+        assert "build_action_request(" in src
 
 
 class TestNodeBye:

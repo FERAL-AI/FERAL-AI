@@ -8,6 +8,95 @@ All notable changes to FERAL are documented here.
 
 ### Added
 
+- **Per-device capability grants — the screen HUP_SPEC named for two
+  years.** `feral-nodes/HUP_SPEC.md` section 6 has said since v1.0 that
+  gating happens at **Settings > Devices > <device> > Capabilities**,
+  that brains **MUST NOT** issue `hup_action_request` for a capability
+  outside `granted_capabilities`, and that they **MUST** drop
+  `camera_frame` / `microphone_chunk` from a node whose tier is
+  disabled. Nothing implemented any of it. `api/server.py:2781` answered
+  every `node_register` with `"granted_capabilities":
+  list(payload.capabilities)` and `"denied_capabilities": []` — the
+  node's own self-declaration echoed straight back, no store, no
+  operator input, no filtering. `feral-client-v2/src/pages/Devices.jsx`
+  drew the list as read-only `<span>` chips and called no grant endpoint
+  because none existed. Both node SDKs then read that ack as `granted or
+  self.capabilities` (Python) / `granted.length ? granted : capabilities`
+  (TypeScript), so an empty grant list — a brain saying "you may do
+  nothing" — was falsy and got replaced with everything the node had
+  declared. The single answer the operator most needs to give was the
+  one answer the protocol could not carry.
+
+  `security/capability_grants.py` is the store, keyed by `node_id`, with
+  the section 5.1 tier map. `GET`/`POST
+  /api/devices/{node_id}/capabilities` read and write it, the Devices
+  detail modal's chips are toggles that post to it, and both SDKs now
+  consult the grant before dispatching an action.
+
+  **The default is granted, not denied**, and that is a deliberate
+  departure from what the section 5.1 tier table used to claim. That
+  table said `camera` and `audio` were "requires user opt-in"; the
+  shipped policy has `hardware.cameras.allowed: true` and no key gating
+  the microphone, so the claim was false when it was written.
+  Implementing it literally would have made it true by breaking every
+  already-paired phone at upgrade: vision-context-attach and ambient
+  transcription both live on frames this gate can drop, and they would
+  have gone dark with no operator action and no error. The table now
+  says what ships, and section 6 says in words that the per-device layer
+  is a deny control layered on the global operator policy.
+
+  Not a duplicate of `security/hardware_policy`. That module answers
+  "may this capability run at all, and unattended?" from
+  `hardware.sensors.allowed` / `hardware.actuators.allowed` /
+  `hardware.cameras.allowed`, which are global lists of capability ids
+  with no device in them. An operator with a work phone and a personal
+  phone paired to the same brain had no way to say "no camera on the
+  work one". The two layers compose; a capability clears both.
+
+### Fixed
+
+- **Brain-to-node frames now carry the envelope the spec requires.**
+  HUP_SPEC section 5: every HUP frame is a JSON object with
+  `hup_version`, `type`, `ts`, `payload`. Twelve brain-to-node sends
+  carried only `type` and `payload`, including **every**
+  `hup_action_request` builder — the actuator command frame —
+  (`hardware/mesh.py` twice, `hardware/protocol.py`,
+  `agents/tool_runner.py` twice) plus `api/state._send_dict_to_node`,
+  which is a bare passthrough and therefore the choke point for the
+  whole voice pipeline, `somatic_state`, and ambient digest pushes.
+  Impact to date is nil because no shipping SDK validates envelopes on
+  inbound — the Swift decoder documents the omission and tolerates it by
+  name — so this is a bill payable by the first third-party daemon
+  written against the published spec, which is the audience the spec
+  exists for. `models/protocol.py` gains `hup_frame()` and
+  `stamp_hup_envelope()`; `hardware/action_frames.build_action_request`
+  is the single builder every action sender now calls, and it applies
+  the section 6 capability gate in the same step.
+  `tests/test_hup_version_unified.py` gains an AST gate over every
+  node-bound `send_json`, so a new sender that bypasses all three fails
+  the build. That file previously checked only that five surfaces agreed
+  on the version *literal*; it never looked at a frame.
+
+- **The gateway's `node.invoke` fallback dispatched into silence.**
+  `gateway/protocol.py:497` sent `{"type": "command", "request_id",
+  "command", "args"}` when `state.hardware_mesh` was absent. That is not
+  a HUP frame in any version: `command` is an alias removed in 2026.7.0
+  (HUP_SPEC section 5.5's alias table), and the shape put the fields at
+  the top level with no `payload`, no `hup_version` and no `ts`. No
+  current SDK has a branch for it, so the frame was ignored and the
+  caller was told `{"dispatched": true}`. `tests/test_hup_protocol.py`
+  asserted the alias was gone from `hardware/mesh.py` and
+  `agents/tool_runner.py` and never looked at the gateway.
+
+- **Node SDKs failed open on a full deny.** Both SDKs treated an empty
+  `granted_capabilities` as absent and substituted the node's own
+  declaration, and neither read the grant before dispatching an action:
+  `_granted` appeared at exactly three lines in the Python SDK —
+  declared, assigned, logged. Presence of the key now decides, `None`
+  distinguishes "no ack yet" from "granted nothing", and both
+  dispatchers refuse an ungranted action with
+  `success=false, error="capability_denied"` per section 6.
+
 - **Federated sync peers have identities.** `/sync` authenticated every
   peer with one shared plaintext passphrase, read at
   `api/server.py` as `raw.get("passphrase", "")` and compared with a

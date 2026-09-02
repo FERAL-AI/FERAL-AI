@@ -34,6 +34,7 @@ from models.protocol import (
     ToolResultPayload,
     ToolStartPayload,
     VisionRequestPayload,
+    stamp_hup_envelope,
 )
 from models.skill_manifest import SkillManifest
 from memory.execution_audit import claimed_by_caller, status_of as audit_status_of
@@ -5828,7 +5829,9 @@ class Orchestrator:
             msg_id=msg_id, hop="brain", type="vision_request",
             payload=VisionRequestPayload(resolution=resolution, quality=quality, reason=reason).model_dump(),
         )
-        await ws.send_json(request_msg.model_dump())
+        # ``ws`` here is a daemon socket, so the frame needs the
+        # HUP_SPEC.md section 5 envelope ``FeralMessage`` does not carry.
+        await ws.send_json(stamp_hup_envelope(request_msg.model_dump()))
 
         try:
             frame = await asyncio.wait_for(future, timeout=timeout)

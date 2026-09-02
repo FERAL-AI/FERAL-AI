@@ -35,6 +35,7 @@ from agents.tool_dispatch_validator import (
     ToolDispatchValidator,
     make_tool_error_envelope,
 )
+from hardware.action_frames import build_action_request
 from skills.call_context import bind_context, new_turn_id
 
 MAX_LLM_TOOLS = 64
@@ -872,18 +873,19 @@ class ToolRunner:
 
         ws = daemons[actual_node_id]
         request_id = str(uuid4())[:8]
-        daemon_msg = {
-            "type": "hup_action_request",
-            "payload": {
-                "action_id": request_id,
-                "name": action,
-                "params": args,
-                "timeout_ms": 30000,
-            },
-        }
+        gate = build_action_request(
+            actual_node_id, action, args,
+            timeout_ms=30000, action_id=request_id,
+        )
+        if not gate.allowed:
+            # HUP_SPEC section 6. Told to the user rather than swallowed:
+            # a denied capability looks exactly like a broken device from
+            # the chat side unless the reason is said out loud.
+            await self._orch._send_text(session_id, gate.denied_reason)
+            return
 
         self._daemon_session_map[request_id] = session_id
-        await ws.send_json(daemon_msg)
+        await ws.send_json(gate.frame)
         await self._orch._send_text(session_id, f"Action sent to node '{actual_node_id}'...")
 
     async def execute_capability_action(
@@ -1086,15 +1088,20 @@ class ToolRunner:
 
         ws = daemons[actual_node_id]
         request_id = str(uuid4())[:8]
-        daemon_msg = {
-            "type": "hup_action_request",
-            "payload": {
-                "action_id": request_id,
-                "name": action,
-                "params": args,
-                "timeout_ms": int(timeout * 1000),
-            },
-        }
+        gate = build_action_request(
+            actual_node_id, action, args,
+            timeout_ms=int(timeout * 1000), action_id=request_id,
+        )
+        if not gate.allowed:
+            # HUP_SPEC section 6. 403, not 500: the operator answered and
+            # the answer was no, which is not a failure of this call.
+            return {
+                "success": False,
+                "status_code": 403,
+                "error": gate.denied_reason,
+                "data": None,
+            }
+        daemon_msg = gate.frame
 
         loop = asyncio.get_event_loop()
         future: asyncio.Future = loop.create_future()

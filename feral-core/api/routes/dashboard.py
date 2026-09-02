@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from version import VERSION as __version__
+from models.protocol import stamp_hup_envelope
 from api.state import state
 from config.loader import feral_home
 
@@ -796,7 +797,7 @@ async def _push_health_update(frame: dict) -> int:
         try:
             payload = dict(frame.get("payload") or {})
             payload["node_id"] = str(node_id)
-            await ws.send_json({**frame, "payload": payload})
+            await ws.send_json(stamp_hup_envelope({**frame, "payload": payload}))
             delivered += 1
         except Exception as exc:
             # Deliberately still debug, unlike the other handlers in this file.

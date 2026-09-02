@@ -14,7 +14,7 @@ from typing import Optional
 from fastapi import WebSocket
 
 from version import VERSION as __version__
-from models.protocol import FeralMessage
+from models.protocol import FeralMessage, stamp_hup_envelope
 from agents.orchestrator import Orchestrator
 from agents.learner import Learner
 from agents.skill_generator import SkillGenerator
@@ -73,6 +73,10 @@ from agents.app_registry import (
     default_apps_db_path,
     default_apps_dir,
     default_hybrid_cache_dir,
+)
+from security.capability_grants import (
+    CapabilityGrantStore,
+    get_store as capability_grant_store,
 )
 from security.device_pairing import DevicePairingStore
 from security.peer_roster import PeerRoster
@@ -484,6 +488,12 @@ class BrainState:
         self.mqtt_bridge = None
         self.email_watcher: Optional[EmailWatcher] = None
         self.device_pairing_store: DevicePairingStore = DevicePairingStore()
+        # Per-device capability grants (HUP_SPEC.md section 6). Eager for
+        # the same reason as the pairing store above: node_ack answers
+        # the very first frame a daemon sends and has to know the
+        # operator's answer by then, and every hup_action_request sender
+        # asks this store before it builds a frame.
+        self.capability_grants: CapabilityGrantStore = capability_grant_store()
         # Per-peer identity for federated memory sync. Constructed
         # eagerly for the same reason the pairing store is: the /sync
         # websocket needs it on the first handshake, and a lazily
@@ -3439,15 +3449,28 @@ class BrainState:
         return None
 
     async def send_to_daemon(self, node_id: str, msg: FeralMessage):
+        # ``FeralMessage`` predates HUP and carries ``msg_id`` /
+        # ``timestamp_ms`` / ``hop``, none of which are the envelope
+        # HUP_SPEC.md section 5 requires. Stamped here rather than added
+        # to the model because the same message also goes to browser
+        # clients, which have their own reader.
         ws = self.daemons.get(node_id)
         if ws:
-            await ws.send_json(msg.model_dump())
+            await ws.send_json(stamp_hup_envelope(msg.model_dump()))
 
     async def _send_dict_to_node(self, node_id: str, msg_dict: dict):
-        """Send a raw dict message to a daemon node (used by voice pipeline)."""
+        """Send a raw dict message to a daemon node.
+
+        The choke point for the voice pipeline (``RealtimeProxy`` and
+        ``GeminiRealtimeProxy`` are both constructed with this as their
+        ``send_to_node``), for ``somatic_state`` and for ambient digest
+        pushes. It used to be a bare passthrough that added nothing, so
+        every frame those paths built landed on the wire without the
+        ``hup_version`` / ``ts`` HUP_SPEC.md section 5 requires.
+        """
         ws = self.daemons.get(node_id)
         if ws:
-            await ws.send_json(msg_dict)
+            await ws.send_json(stamp_hup_envelope(msg_dict))
 
     def bind_session_to_daemon(self, session_id: str, node_id: str):
         if node_id not in self._daemon_session_bindings:

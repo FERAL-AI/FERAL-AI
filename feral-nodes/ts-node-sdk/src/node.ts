@@ -91,7 +91,13 @@ export class FeralNode {
   private ws: WebSocket | null = null;
   private handlers = new Map<string, ActionHandler>();
   private stopping = false;
-  private granted = new Set<string>();
+  // `null` until the brain's node_ack lands, which is NOT the same as an
+  // empty set. An empty set is a brain saying "you may do nothing"; null
+  // is "nobody has told me yet". The dispatch gate has to tell those
+  // apart, which is exactly what the old
+  // `granted_capabilities.length ? granted : capabilities` fallback
+  // could not do.
+  private granted: Set<string> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sessionToken: string | null = null;
   private connectedResolver: (() => void) | null = null;
@@ -279,8 +285,11 @@ export class FeralNode {
       case "node_ack": {
         const ack = payload as unknown as NodeAckPayload;
         this.sessionToken = ack.session_token ?? null;
+        // Presence of the key, not truthiness of its length. A brain
+        // that omits it entirely is pre-HUP-1.4 and has no grant store,
+        // and only that case falls back to this node's own declaration.
         this.granted = new Set(
-          (ack.granted_capabilities && ack.granted_capabilities.length)
+          ack.granted_capabilities !== undefined
             ? ack.granted_capabilities
             : this.capabilities,
         );
@@ -300,6 +309,18 @@ export class FeralNode {
   }
 
   private async dispatchAction(req: HUPActionRequestPayload): Promise<void> {
+    // HUP_SPEC.md section 6, nodes: "MUST refuse any hup_action_request
+    // whose name is not in their registered capabilities, replying with
+    // success=false, error='capability_denied'". `this.granted` was
+    // assigned from node_ack and then never read, so the grant the brain
+    // sent had no effect on this side at all.
+    if (this.granted !== null && !this.granted.has(req.name)) {
+      await this.sendActionResponse(req.action_id, {
+        success: false,
+        error: `capability_denied: ${req.name}`,
+      });
+      return;
+    }
     const handler = this.handlers.get(req.name);
     if (!handler) {
       await this.sendActionResponse(req.action_id, {
