@@ -19,10 +19,17 @@ shape; see ``feral-nodes/ts-node-sdk/tests/capabilityGrants.test.ts``.
    and got replaced with everything this node declared. The one answer
    the operator most needs to be able to give was the one that could not
    be transmitted.
+
+``asyncio.run`` in sync tests rather than ``@pytest.mark.asyncio``: this
+SDK's dev extra carries pytest and pytest-timeout and no async plugin, so
+an asyncio-marked test is a warning and a no-op in the
+``Subprojects -- pytest`` CI job. ``tests/test_node_bye.py`` drives its
+coroutines the same way.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -32,25 +39,24 @@ from feral_node_sdk import FeralNode
 
 @pytest.fixture
 def node():
-    n = FeralNode(
+    return FeralNode(
         node_id="grant-test-node",
         node_type="sensor",
         capabilities=["camera", "heart_rate", "buzzer"],
         brain_url="ws://localhost:9999/v1/node",
         api_key="test-key",
     )
-    return n
 
 
 @pytest.fixture
-def responses(node, monkeypatch):
+def responses(node):
     """Capture ``_send_action_response`` instead of writing to a socket."""
     captured: list = []
 
     async def _capture(action_id, **kwargs):
         captured.append({"action_id": action_id, **kwargs})
 
-    monkeypatch.setattr(node, "_send_action_response", _capture)
+    node._send_action_response = _capture
     return captured
 
 
@@ -69,9 +75,26 @@ class _AckSocket:
         return self._frames.pop(0)
 
 
-async def _feed(node, payload: dict) -> None:
+def _feed_ack(node, payload: dict) -> None:
     node._ws = _AckSocket([json.dumps({"type": "node_ack", "payload": payload})])
-    await node._read_loop()
+    asyncio.run(node._read_loop())
+
+
+def _dispatch(node, name: str, action_id: str = "a1") -> None:
+    asyncio.run(
+        node._dispatch_action({"action_id": action_id, "name": name, "params": {}})
+    )
+
+
+async def _record(sink, _params):
+    sink.append(True)
+    return {"ok": True}
+
+
+def _handler_into(sink):
+    async def _fn(params):
+        return await _record(sink, params)
+    return _fn
 
 
 class TestNodeAckGrantHandling:
@@ -81,80 +104,59 @@ class TestNodeAckGrantHandling:
         # initial value made those the same value.
         assert node._granted is None
 
-    @pytest.mark.asyncio
-    async def test_an_explicit_grant_list_is_taken_verbatim(self, node):
-        await _feed(node, {
+    def test_an_explicit_grant_list_is_taken_verbatim(self, node):
+        _feed_ack(node, {
             "granted_capabilities": ["heart_rate"],
             "denied_capabilities": ["camera", "buzzer"],
         })
         assert node._granted == {"heart_rate"}
 
-    @pytest.mark.asyncio
-    async def test_an_empty_grant_list_is_a_full_deny(self, node):
-        await _feed(node, {"granted_capabilities": []})
+    def test_an_empty_grant_list_is_a_full_deny(self, node):
+        _feed_ack(node, {"granted_capabilities": []})
         assert node._granted == set()
 
-    @pytest.mark.asyncio
-    async def test_an_omitted_key_falls_back_to_the_declaration(self, node):
+    def test_an_omitted_key_falls_back_to_the_declaration(self, node):
         # A brain with no grant store. Only this case may be read as
         # "everything I declared".
-        await _feed(node, {"heartbeat_ms": 5000})
+        _feed_ack(node, {"heartbeat_ms": 5000})
         assert node._granted == {"camera", "heart_rate", "buzzer"}
 
-    @pytest.mark.asyncio
-    async def test_the_session_token_still_lands(self, node):
-        await _feed(node, {"session_token": "tok-1", "granted_capabilities": []})
+    def test_the_session_token_still_lands(self, node):
+        _feed_ack(node, {"session_token": "tok-1", "granted_capabilities": []})
         assert node._session_token == "tok-1"
 
 
 class TestDispatchHonoursTheGrant:
-    @pytest.mark.asyncio
-    async def test_a_denied_capability_is_refused(self, node, responses):
-        ran = []
-        node.on_action("camera")(lambda params: _record(ran))
-        await _feed(node, {"granted_capabilities": ["heart_rate"]})
-        await node._dispatch_action(
-            {"action_id": "a1", "name": "camera", "params": {}},
-        )
+    def test_a_denied_capability_is_refused(self, node, responses):
+        ran: list = []
+        node.on_action("camera")(_handler_into(ran))
+        _feed_ack(node, {"granted_capabilities": ["heart_rate"]})
+        _dispatch(node, "camera")
         assert ran == []
         assert responses[0]["success"] is False
         assert "capability_denied" in responses[0]["error"]
 
-    @pytest.mark.asyncio
-    async def test_an_empty_grant_denies_everything(self, node, responses):
-        ran = []
-        node.on_action("buzzer")(lambda params: _record(ran))
-        await _feed(node, {"granted_capabilities": []})
-        await node._dispatch_action(
-            {"action_id": "a1", "name": "buzzer", "params": {}},
-        )
+    def test_an_empty_grant_denies_everything(self, node, responses):
+        ran: list = []
+        node.on_action("buzzer")(_handler_into(ran))
+        _feed_ack(node, {"granted_capabilities": []})
+        _dispatch(node, "buzzer")
         assert ran == []
         assert responses[0]["success"] is False
 
-    @pytest.mark.asyncio
-    async def test_a_granted_capability_still_runs(self, node, responses):
-        ran = []
-        node.on_action("buzzer")(lambda params: _record(ran))
-        await _feed(node, {"granted_capabilities": ["buzzer"]})
-        await node._dispatch_action(
-            {"action_id": "a1", "name": "buzzer", "params": {}},
-        )
+    def test_a_granted_capability_still_runs(self, node, responses):
+        ran: list = []
+        node.on_action("buzzer")(_handler_into(ran))
+        _feed_ack(node, {"granted_capabilities": ["buzzer"]})
+        _dispatch(node, "buzzer")
         assert ran == [True]
         assert responses[0]["success"] is True
 
-    @pytest.mark.asyncio
-    async def test_dispatch_before_any_ack_is_not_blocked(self, node, responses):
+    def test_dispatch_before_any_ack_is_not_blocked(self, node, responses):
         # Fail-open on "nobody has told me yet" is deliberate: a node that
         # reconnects and is handed an action before its ack must not
         # refuse it.
-        ran = []
-        node.on_action("buzzer")(lambda params: _record(ran))
-        await node._dispatch_action(
-            {"action_id": "a1", "name": "buzzer", "params": {}},
-        )
+        ran: list = []
+        node.on_action("buzzer")(_handler_into(ran))
+        _dispatch(node, "buzzer")
         assert ran == [True]
-
-
-async def _record(sink):
-    sink.append(True)
-    return {"ok": True}
