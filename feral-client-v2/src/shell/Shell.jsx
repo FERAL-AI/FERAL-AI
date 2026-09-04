@@ -124,24 +124,50 @@ function normaliseUiMessages(rawMessages) {
   return mapped;
 }
 
+/**
+ * Project a chat row into the shape the conversation store keeps: the
+ * same row, with the log's `text` spelled as the store's `content`.
+ *
+ * It PRESERVES every other field. It used to project each row down to
+ * `{id, role, content}` (with one hand-written exception for `sdui`),
+ * which is the write-side twin of the bug normaliseUiMessages above was
+ * fixed for. That fix stopped the setter erasing a turn's tool trace at
+ * commit time, and this function then erased it again 450 ms later when
+ * the autosave POSTed the transcript to /api/conversations/save. So
+ * `tools`, `reasoning`, `timeline`, `notice`, `attachments`, `model`,
+ * `usage` and `type` all survived on screen and none of them survived a
+ * reload. Measured against the live brain: GET
+ * /api/conversations/thread-mtn5j55b returned messages whose only keys
+ * were ['content', 'id', 'role'] for a turn that had run seven tools.
+ * Because the loss happens at write time, a reload (or a brain restart)
+ * rendered every past assistant turn as bare prose, and nothing could
+ * recover the cards after the fact.
+ *
+ * The rule is the one normaliseUiMessages follows: spread the row and
+ * override only the fields this function owns (`id`, `role`, `content`).
+ * Nothing is excluded on purpose. No message row carries a field that
+ * Chat.jsx marks as transient-only (`pendingAttachments` is composer
+ * state, not a message field, and the `attachments` a user row carries
+ * are AttachmentRef handles from POST /api/uploads, not file bodies).
+ * The server is a plain `json.dumps` of the list (memory/store.py
+ * conversation_save) and `json.loads` on the way back, so nothing is
+ * stripped there either. A new per-turn field cannot silently go
+ * missing from the store again.
+ */
 function serialiseConversationMessages(messages) {
   const list = Array.isArray(messages) ? messages : [];
   return list.map((message) => {
-    if (message?.type === 'sdui' && message?.sdui && typeof message.sdui === 'object') {
-      return {
-        id: message.id || newMessageId(),
-        role: message.role || 'assistant',
-        type: 'sdui',
-        sdui: message.sdui,
-        screen_id: message.screen_id || null,
-      };
-    }
+    if (!message || typeof message !== 'object') return null;
+    // `text` is the LOG's field name; the store reads `content`. Drop it
+    // so one row never carries two spellings of the same prose.
+    const { text, ...rest } = message;
     return {
-      id: message?.id || newMessageId(),
-      role: message?.role || 'assistant',
-      content: typeof message?.text === 'string' ? message.text : textFromContent(message?.content),
+      ...rest,
+      id: message.id || newMessageId(),
+      role: message.role || 'assistant',
+      content: typeof text === 'string' ? text : textFromContent(message.content),
     };
-  });
+  }).filter(Boolean);
 }
 
 function deriveConversationTitle(messages) {
@@ -155,6 +181,12 @@ function deriveConversationTitle(messages) {
 // through Shell. Every existing `import { useChatThread } from
 // '../shell/Shell'` keeps resolving.
 export { useChatThread };
+
+// Named so the round trip between the log's row shape and the store's
+// row shape can be unit-tested directly (see
+// __tests__/shell/Shell.message-roundtrip.test.jsx). Everything else
+// reaches these through <Shell />.
+export { normaliseUiMessages, serialiseConversationMessages };
 
 /**
  * Shell is the v2 chrome: ambient background + minimal top menubar + bottom
