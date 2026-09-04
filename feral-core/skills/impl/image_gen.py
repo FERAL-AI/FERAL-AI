@@ -1,7 +1,23 @@
 """
 FERAL Image Generation Skill
 =============================
-Provider-abstracted image generation with DALL·E 3 and failover between providers.
+Provider-abstracted image generation over OpenAI's Images API, with failover
+between providers.
+
+Why the request body looks the way it does
+------------------------------------------
+On 2026-09-04 the operator asked the brain to make a wallpaper and got back
+``OpenAI images error 400: Unknown parameter: 'response_format'``. This file
+was sending ``model: dall-e-3`` with ``response_format: b64_json``, which was
+the documented shape for that model. OpenAI now rejects the parameter on
+``/v1/images/generations`` outright. The GPT image models (``gpt-image-1``,
+``gpt-image-1.5``, ``gpt-image-2``) never took it: they always return base64
+and reject ``response_format`` and ``style`` as unknown parameters. So the
+body is now the one those models accept, and the default model is a GPT image
+model rather than DALL·E 3, which is a legacy name on the same endpoint.
+
+The result shape the rest of the brain reads (``b64``, ``image_b64``,
+``revised_prompt``, ``provider``, ``size``) is unchanged.
 """
 
 from __future__ import annotations
@@ -19,7 +35,29 @@ from skills.impl import register_skill
 
 logger = logging.getLogger("feral.skills.image_gen")
 
-_VALID_DALLE3_SIZES = frozenset({"1024x1024", "1792x1024", "1024x1792"})
+# Sizes the GPT image models accept. ``auto`` lets the model choose. The old
+# DALL·E 3 landscape/portrait sizes (1792x1024, 1024x1792) are mapped onto the
+# nearest GPT-image size below rather than refused, so a caller written against
+# the old manifest still gets a landscape or portrait picture back.
+_VALID_SIZES = frozenset({"1024x1024", "1536x1024", "1024x1536", "auto"})
+_LEGACY_SIZE_MAP = {"1792x1024": "1536x1024", "1024x1792": "1024x1536"}
+
+# Default model. Read from ``FERAL_IMAGE_MODEL`` so an operator can pin a
+# different one (for example ``gpt-image-2``) without a code change; the
+# default is the mid-tier GPT image model rather than DALL·E 3, whose request
+# shape OpenAI no longer accepts (see module docstring).
+_DEFAULT_MODEL = "gpt-image-1.5"
+
+
+def _image_model() -> str:
+    return (os.getenv("FERAL_IMAGE_MODEL") or "").strip() or _DEFAULT_MODEL
+
+
+def _normalise_size(size: str) -> str:
+    size = (size or "").strip()
+    if size in _VALID_SIZES:
+        return size
+    return _LEGACY_SIZE_MAP.get(size, "1024x1024")
 
 
 @dataclass
@@ -47,13 +85,19 @@ class ImageGenProvider(ABC):
         ...
 
 
-class DallE3Provider(ImageGenProvider):
-    """OpenAI DALL·E 3 via Images API (b64_json)."""
+class OpenAIImagesProvider(ImageGenProvider):
+    """OpenAI Images API with a GPT image model.
 
-    name = "dall-e-3"
+    The body deliberately carries only ``model``, ``prompt``, ``n`` and
+    ``size``. ``response_format`` is rejected by the endpoint (the failure
+    this class exists to fix) and ``style`` is a DALL·E 3 only parameter that
+    the GPT image models reject as unknown. The models always return
+    ``b64_json``, which is what the tool-result image pipeline wants.
+    """
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model: str | None = None):
         self._api_key = api_key
+        self.name = model or _image_model()
 
     async def generate(
         self,
@@ -62,16 +106,17 @@ class DallE3Provider(ImageGenProvider):
         style: str = "vivid",
         n: int = 1,
     ) -> ImageResult:
-        _ = n  # dall-e-3 API supports n=1 only; reserved for interface parity
-        sz = size if size in _VALID_DALLE3_SIZES else "1024x1024"
-        st = style if style in ("vivid", "natural") else "vivid"
+        # ``style`` is accepted for interface parity and ignored: sending it
+        # is a 400. ``n`` is clamped to one because the skill returns a single
+        # image and a larger batch would only be billed and dropped.
+        _ = style
+        _ = n
+        sz = _normalise_size(size)
         payload: Dict[str, Any] = {
-            "model": "dall-e-3",
+            "model": self.name,
             "prompt": prompt,
             "n": 1,
             "size": sz,
-            "response_format": "b64_json",
-            "style": st,
         }
         async with httpx.AsyncClient(
             timeout=120.0,
@@ -112,7 +157,7 @@ class ImageGenEngine:
         self.providers: list[ImageGenProvider] = []
         key = openai_key or os.getenv("OPENAI_API_KEY")
         if key:
-            self.providers.append(DallE3Provider(key))
+            self.providers.append(OpenAIImagesProvider(key))
 
     async def generate(self, prompt: str, size: str = "1024x1024", style: str = "vivid") -> ImageResult:
         if not prompt.strip():
@@ -139,8 +184,8 @@ class ImageGenSkill(BaseSkill):
             "description": "Generate an image from text prompt",
             "params": [
                 {"name": "prompt", "type": "string", "required": True, "description": "Image description"},
-                {"name": "size", "type": "string", "required": False, "description": "e.g. 1024x1024"},
-                {"name": "style", "type": "string", "required": False, "description": "vivid or natural (DALL·E 3)"},
+                {"name": "size", "type": "string", "required": False, "description": "1024x1024, 1536x1024, 1024x1536 or auto"},
+                {"name": "style", "type": "string", "required": False, "description": "Accepted and ignored; GPT image models take no style parameter"},
                 {"name": "n", "type": "integer", "required": False, "description": "Number of images (provider limits apply)"},
             ],
         }
@@ -184,7 +229,6 @@ class ImageGenSkill(BaseSkill):
         n = int(args.get("n") or 1)
 
         try:
-            # DALL·E 3 only supports n=1; extra providers could use n later.
             result = await engine.generate(prompt, size=size, style=style)
         except ValueError as e:
             return {"success": False, "status_code": 400, "data": None, "error": str(e)}
