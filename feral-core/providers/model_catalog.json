@@ -96,6 +96,7 @@
         "gpt-5.6-luna",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
+        "gpt-6-astra",
         "gpt-audio",
         "gpt-audio-1.5",
         "gpt-audio-2025-08-28",
@@ -213,6 +214,14 @@
           "input": 0.0025,
           "output": 0.015,
           "needs_verification": true
+        },
+        "gpt-6-astra": {
+          "input": 0.01,
+          "output": 0.05,
+          "cache_read": 0.001,
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "notes": "GPT-6 Astra, released 2026-09-03. Rates and limits copied from developers.openai.com/api/docs/models/gpt-6-astra on 2026-09-04 (input $10, cached input $1, output $50 per 1M; 1,050,000 context; 128,000 max output; reasoning effort low/medium/high/xhigh/max; text+image in; Chat Completions, Responses and Batch, no Realtime). Not yet visible on every account: OpenAI is rolling it out to Trusted Access organisations first, so a live /v1/models refresh decides whether the picker shows it."
         },
         "gpt-5.6-luna": {
           "input": 0.001,
