@@ -7,7 +7,7 @@ import re
 from fastapi import APIRouter, HTTPException
 
 from api.state import state
-from config.loader import feral_home
+from config.loader import clear_settings_cache as _clear_settings_cache, feral_home
 from config.runtime import ollama_base_url
 
 logger = logging.getLogger("feral.api.config")
@@ -118,6 +118,14 @@ async def update_config(body: dict):
         )
 
     state.config.update_settings(section, key, value)
+
+    # ``load_settings`` memoises the merged dict so a per-turn caller does
+    # not re-parse three files and unlock the keychain every time. The
+    # memo keys on file mtime, which already covers this write, but the
+    # route is the one place a human is waiting on the new value, so drop
+    # it explicitly rather than trusting timestamp granularity. Harmless
+    # when ``state.config`` is a stub that never touched disk.
+    _clear_settings_cache()
 
     if section == "agents" and state.orchestrator:
         # v2026.6.11 — live-apply the tool-loop budget so the operator's
