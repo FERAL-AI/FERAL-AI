@@ -1,7 +1,7 @@
 """The chat-only filter — the fix for the 132-models picker.
 
 The v2026.5.0 bug: ``OpenAIProvider.refresh_models`` returned all 132
-ids from ``/v1/models`` (including babbage-002, whisper-1, dall-e-3,
+ids from ``/v1/models`` (including babbage-002, whisper-1, image models,
 text-embedding-3-large, gpt-realtime-1.5, gpt-4o-mini-tts, etc.), the
 v2 picker rendered them, the user picked one that wasn't chat, and
 ``/v1/chat/completions`` returned 400.
@@ -69,7 +69,13 @@ async def test_refresh_stores_full_raw_list(openai_fixture: dict) -> None:
     raw = adapter.list_models()
     assert "babbage-002" in raw
     assert "whisper-1" in raw
-    assert "dall-e-3" in raw
+    # An image model, to prove the raw list keeps non-chat ids. This used
+    # to be dall-e-3; OpenAI retired dall-e-2 and dall-e-3 from the models
+    # endpoint some time before 2026-09-04, when a live refresh dropped
+    # them from the fixture and this assertion started failing. The point
+    # of the assertion is the class, not that one id, so it now names an
+    # image model the account really serves.
+    assert "chatgpt-image-latest" in raw
     assert "text-embedding-3-large" in raw
     assert "gpt-5.5" in raw
 
@@ -98,7 +104,15 @@ async def test_list_models_chat_class_drops_non_chat(openai_fixture: dict) -> No
                       "gpt-4o-mini-tts-2025-03-20",
                       "gpt-4o-mini-tts-2025-12-15",
                       "tts-1", "tts-1-hd",
-                      "dall-e-2", "dall-e-3", "gpt-image-2",
+                      # dall-e-* are gone from the account but stay
+                      # listed here: if they ever come back they must
+                      # still never be offered as a chat model.
+                      "dall-e-2", "dall-e-3",
+                      "gpt-image-2", "gpt-image-1.5", "chatgpt-image-latest",
+                      # The 2026-07 transcription line without the gpt-4o
+                      # prefix. Both classified as unknown until the
+                      # 2026-09-04 refresh surfaced them on a live account.
+                      "gpt-transcribe", "gpt-live-transcribe",
                       "text-embedding-3-small", "text-embedding-3-large",
                       "text-embedding-ada-002",
                       "gpt-realtime-1.5", "gpt-4o-realtime-preview",
