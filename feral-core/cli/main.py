@@ -2264,6 +2264,67 @@ def cmd_doctor():
                 "FERAL_EMBED_PROVIDER=openai but no OPENAI_API_KEY is set",
                 "Set OPENAI_API_KEY, or unset FERAL_EMBED_PROVIDER to use local embeddings",
             )
+
+        # Naming the live provider is not the same as checking that the
+        # STORED vectors were written by it. Switching provider, or
+        # falling back to local when a key goes away, leaves the old
+        # vectors in place at the old width, and a vector of the wrong
+        # width cannot be compared with the query at all.
+        #
+        # Found on the operator's own brain on 2026-09-05: 312 of 334
+        # entities held 1536d OpenAI vectors while the active provider
+        # was fastembed at 384d, so 93 percent of the knowledge graph was
+        # unreachable by semantic search and the graph had quietly
+        # degraded to keyword-only. `feral memory reembed check` knew and
+        # printed "<- stale". Doctor, which is the surface an operator
+        # actually consults, printed a green tick reading "Embedding
+        # provider fastembed (384d, local and free)" and said nothing.
+        # The only other symptom was one line about a numpy reshape.
+        #
+        # A degraded state that every diagnostic reports as healthy is
+        # worse than no diagnostic, so doctor now measures the store
+        # rather than only the provider.
+        try:
+            import sqlite3 as _sqlite3
+
+            from memory.reembed import scan_store as _scan_store
+
+            _mem_db = feral_data_home() / "memory.db"
+            if _mem_db.exists():
+                _conn = _sqlite3.connect(f"file:{_mem_db}?mode=ro", uri=True)
+                try:
+                    _scan = _scan_store(_conn, _emb.dimension)
+                finally:
+                    _conn.close()
+                if _scan.columns and _scan.stale_total:
+                    _where = ", ".join(
+                        f"{c.table}.{c.column} "
+                        + " ".join(
+                            f"{d}d x{n}" for d, n in sorted(c.widths.items())
+                        )
+                        for c in _scan.columns
+                        if c.stale
+                    )
+                    _warn(
+                        "Stored embeddings",
+                        f"{_scan.stale_total} vector(s) were written at a "
+                        f"different width than the active provider's "
+                        f"{_emb.dimension}d, so semantic search cannot reach "
+                        f"them and that tier has degraded to keyword-only "
+                        f"({_where})",
+                        "Run `feral memory reembed check`, then "
+                        "`feral memory reembed`, then restart the brain",
+                    )
+                elif _scan.columns:
+                    _pass(
+                        "Stored embeddings",
+                        f"every stored vector matches the active {_emb.dimension}d provider",
+                    )
+        except Exception as _scan_exc:
+            # A store that cannot be scanned is not a store that is
+            # known to be fine, and saying nothing here is the exact
+            # failure this block exists to end.
+            _warn("Stored embeddings", f"could not be checked: {_scan_exc}")
     except Exception as exc:
         _warn("Embedding provider", f"could not verify: {exc}")
 
