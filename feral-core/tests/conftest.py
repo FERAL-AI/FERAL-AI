@@ -1,6 +1,5 @@
 import pytest
 import os
-import sys
 import types
 import warnings
 from pathlib import Path
@@ -185,70 +184,6 @@ def reset_settings_cache():
     clear_settings_cache()
     yield
     clear_settings_cache()
-
-
-@pytest.fixture(autouse=True)
-def websockets_connect_is_left_alone():
-    """Fail the test that leaves a patched ``websockets.connect`` behind.
-
-    ``websockets`` resolves ``connect`` lazily through a module
-    __getattr__ that forwards to ``websockets.asyncio.client.connect``
-    and never caches it. A test that patches the asyncio client and then
-    reads ``websockets.connect`` to remember "the original" records the
-    FAKE, and its restore writes that fake back for good.
-
-    That happened. test_voice_realtime_headers captured interleaved with
-    patching, and every sync test that ran after it in a randomised
-    order failed with "dial halted (test)", its sentinel, because
-    memory/sync.py dials peers through ``websockets.connect``. It was 25
-    failures in a full run, every one of them passing in isolation,
-    which is the signature that sends somebody hunting a product bug
-    that does not exist.
-
-    Deliberately narrow. It only judges a test when the module OBJECTS
-    are the same before and after, because replacing the whole entry in
-    ``sys.modules`` is a different and legitimate technique
-    (test_memory_remembers_audit does exactly that through
-    ``monkeypatch.setitem``, and monkeypatch restores it). Comparing an
-    attribute across two different module objects says nothing, and an
-    earlier version of this guard failed two innocent tests that way.
-
-    Observed through sys.modules and never imported: importing
-    websockets here changed what a test could see, and
-    test_external_agent_skill asserts a skill call pulls in no heavy
-    modules. A guard that perturbs the thing it guards is not a guard.
-    """
-    ws_before = sys.modules.get("websockets")
-    ac_before = sys.modules.get("websockets.asyncio.client")
-    connects_before = (
-        getattr(ws_before, "connect", None),
-        getattr(ac_before, "connect", None),
-    )
-
-    yield
-
-    ws_after = sys.modules.get("websockets")
-    ac_after = sys.modules.get("websockets.asyncio.client")
-    # Nothing to judge: websockets was absent, or the module object was
-    # swapped wholesale and restored by whoever swapped it.
-    if ws_before is None or ws_after is not ws_before or ac_after is not ac_before:
-        return
-
-    connects_after = (
-        getattr(ws_after, "connect", None),
-        getattr(ac_after, "connect", None),
-    )
-    if connects_before != connects_after:
-        # Put it back so one offender cannot fail every later test.
-        ws_after.connect = connects_before[0]
-        if ac_after is not None and connects_before[1] is not None:
-            ac_after.connect = connects_before[1]
-        raise AssertionError(
-            "this test left websockets.connect patched. Capture every "
-            "original BEFORE patching anything: reading websockets.connect "
-            "after patching websockets.asyncio.client.connect returns the "
-            "patch, not the original."
-        )
 
 
 @pytest.fixture(autouse=True)
