@@ -271,7 +271,7 @@ contract, and point it at the brain.
 
 - `feral-nodes/python-node-sdk/hardware_daemon/` — BLE wristband HR/SpO2
   sampler.
-- `feral-nodes/python-node-sdk/w300_daemon.py` — W300 smart-glasses video
+- `feral-nodes/python-node-sdk/w300_daemon.py` — smart-glasses video
   bridge.
 - `feral-nodes/python-node-sdk/robot_template.py` — serial / ROS robot
   starter. It refuses every actuator command until you implement its
