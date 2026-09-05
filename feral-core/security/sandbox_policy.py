@@ -16,7 +16,9 @@ Policy file: ~/.feral/policies/default.yaml (or per-device)
 from __future__ import annotations
 import json
 import logging
+import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -28,6 +30,114 @@ from security.safe_regex import UnsafePatternError, compile_safe_regex
 logger = logging.getLogger("feral.sandbox_policy")
 
 _GRANTS_FILE = "workspace_grants.json"
+
+
+# ─────────────────────────────────────────
+# Dead grant pruning
+# ─────────────────────────────────────────
+#
+# workspace_grants.json only ever grew. On a live install it reached 876
+# entries and 172 KB, of which 870 were pytest temp directories
+# (.../T/pytest-of-<user>/pytest-184/test_.../work) deleted by pytest
+# long ago, 4 were other temp directories, and exactly 2 were folders the
+# operator had actually granted. The /grants page rendered 2665 lines, so
+# the one list that says where the brain may read and write was not
+# reviewable by the person responsible for reviewing it.
+#
+# The rule below is deliberately narrow. A grant that merely does not
+# exist RIGHT NOW is kept: an unplugged external drive, an unmounted
+# network share, or a project folder on a volume that has not been
+# attached yet all look identical to a deleted one from here, and
+# silently dropping a grant an operator deliberately made is a worse
+# failure than keeping a dead row. Only a path that is BOTH missing AND
+# lives somewhere the operating system itself hands out and reclaims
+# (the system temp directory, or a pytest-of-* sandbox) is removed.
+
+_PYTEST_TMP_RE = re.compile(r"(?:^|/)pytest-of-[^/]*(?:/|$)")
+
+
+def _ephemeral_roots() -> tuple[Path, ...]:
+    """Directories the OS owns and recycles.
+
+    Both the literal and the fully resolved form of the system temp
+    directory are returned, because on macOS ``tempfile.gettempdir()``
+    answers ``/var/folders/...`` while grant keys are stored resolved and
+    therefore read ``/private/var/folders/...``.
+    """
+    roots: list[Path] = []
+    candidates = [tempfile.gettempdir(), "/tmp", "/var/tmp", "/var/folders"]
+    for raw in candidates:
+        if not raw:
+            continue
+        for form in (Path(raw), Path(os.path.realpath(raw))):
+            if form not in roots:
+                roots.append(form)
+    return tuple(roots)
+
+
+def is_ephemeral_grant_path(raw_path: str) -> bool:
+    """Whether *raw_path* lives in storage the OS reclaims on its own."""
+    if _PYTEST_TMP_RE.search(str(raw_path)):
+        return True
+    target = Path(raw_path)
+    for root in _ephemeral_roots():
+        try:
+            target.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _still_on_disk(raw_path: str) -> bool:
+    """``Path.exists()`` that keeps the grant when the answer is unclear.
+
+    A permission error or an I/O error on a network mount is not
+    evidence that the folder is gone, so it counts as present.
+    """
+    try:
+        return Path(raw_path).exists()
+    except OSError:
+        return True
+
+
+def prune_dead_grants(grants: dict) -> tuple[dict, list[str]]:
+    """Return ``(kept, dropped_paths)`` for a grants mapping.
+
+    Drops only entries that are ephemeral by the rule above *and* no
+    longer on disk. Idempotent: a second pass over ``kept`` drops
+    nothing.
+    """
+    kept: dict = {}
+    dropped: list[str] = []
+    for path, info in grants.items():
+        if is_ephemeral_grant_path(path) and not _still_on_disk(path):
+            dropped.append(path)
+        else:
+            kept[path] = info
+    return kept, dropped
+
+
+def prune_grants_file(path: Path) -> tuple[list[str], int]:
+    """Prune a grants file in place. Returns ``(dropped, remaining)``.
+
+    A missing, empty, or unreadable file is a no-op, and the file is only
+    rewritten when something actually came out of it, so running this
+    twice leaves the second run with nothing to do and no write.
+    """
+    if not path.exists():
+        return [], 0
+    try:
+        grants = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return [], 0
+    if not isinstance(grants, dict):
+        return [], 0
+
+    kept, dropped = prune_dead_grants(grants)
+    if dropped:
+        path.write_text(json.dumps(kept, indent=2), encoding="utf-8")
+    return dropped, len(kept)
 
 
 class SandboxPolicy:
@@ -368,6 +478,19 @@ class SandboxPolicy:
         return False
 
     def _load_grants(self) -> dict:
+        # Deliberately does NOT prune. This is the hot path: every
+        # can_read_path / can_write_path / resolve_workspace call reaches
+        # it, which means once per file tool call and once per shell
+        # command, and coding_tools.py already had to move it off the
+        # event loop for that reason. Adding a stat() per grant here
+        # would put hundreds of syscalls on every tool call to remove
+        # rows that cannot grant access to anything anyway, since the
+        # directories they name no longer exist.
+        #
+        # Pruning happens where it is cheap and observable instead: in
+        # _save_grants (a grant or revoke, which is rare and already
+        # writes the file) and once at boot from the migration in
+        # migrations/*_prune_ephemeral_workspace_grants.py.
         gf = feral_home() / _GRANTS_FILE
         if gf.exists():
             try:
@@ -378,8 +501,17 @@ class SandboxPolicy:
 
     def _save_grants(self, grants: dict) -> None:
         gf = feral_home() / _GRANTS_FILE
+        kept, dropped = prune_dead_grants(grants)
+        if dropped:
+            # One line, with a sample, so an operator who sees their
+            # grant list shrink can find out what left and why.
+            logger.info(
+                "workspace grants: pruned %d dead temporary folder(s), %d remain "
+                "(first: %s)",
+                len(dropped), len(kept), dropped[0],
+            )
         gf.parent.mkdir(parents=True, exist_ok=True)
-        gf.write_text(json.dumps(grants, indent=2))
+        gf.write_text(json.dumps(kept, indent=2))
 
     def can_read_path(self, raw_path: str) -> bool:
         target = self._resolve(raw_path)

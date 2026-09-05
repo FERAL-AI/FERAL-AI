@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { FolderLock, Trash2, Plus, Eye, Pencil } from 'lucide-react';
 import Pane from '../ui/Pane';
 import EmptyState from '../ui/EmptyState';
@@ -54,6 +54,50 @@ export function formatGranted(ts) {
   }
 }
 
+/**
+ * Above this many rows the list stops being a list and becomes a wall,
+ * so a filter box and a count appear.
+ *
+ * This is not hypothetical. A live workspace_grants.json held 876 grants
+ * in 172 KB, 870 of them pytest sandboxes that no longer existed, and
+ * this page rendered 2,665 lines. The brain now prunes those, but the
+ * page is the security surface and has to stay readable on its own: a
+ * folder list only ever grows, and an operator who cannot find their own
+ * two grants in it cannot review what FERAL is allowed to touch.
+ */
+export const FILTER_THRESHOLD = 25;
+
+/** Roots the operating system hands out and reclaims. */
+const TEMP_PREFIXES = [
+  '/tmp/', '/private/tmp/', '/var/tmp/', '/private/var/tmp/',
+  '/var/folders/', '/private/var/folders/',
+];
+
+export function isTemporaryPath(p) {
+  const s = String(p || '');
+  if (/(^|\/)pytest-of-[^/]*(\/|$)/.test(s)) return true;
+  return TEMP_PREFIXES.some((prefix) => s.startsWith(prefix));
+}
+
+/** Folders a person chose first; scratch directories after them. */
+export function orderGrants(grants) {
+  const real = [];
+  const temp = [];
+  for (const g of grants || []) {
+    (isTemporaryPath(g?.path) ? temp : real).push(g);
+  }
+  return real.concat(temp);
+}
+
+/** Case-insensitive substring match on the path. Empty query matches all. */
+export function filterGrants(grants, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return grants || [];
+  return (grants || []).filter(
+    (g) => String(g?.path || '').toLowerCase().includes(q),
+  );
+}
+
 /** Read {ok:false, error} out of either a body or a thrown ApiError. */
 export function envelopeOf(valueOrError) {
   if (valueOrError && typeof valueOrError === 'object') {
@@ -70,6 +114,11 @@ export default function Grants() {
   const [path, setPath] = useState('');
   const [mode, setMode] = useState('read');
   const [busy, setBusy] = useState('');
+  const [query, setQuery] = useState('');
+
+  const ordered = useMemo(() => orderGrants(grants), [grants]);
+  const shown = useMemo(() => filterGrants(ordered, query), [ordered, query]);
+  const crowded = grants.length > FILTER_THRESHOLD;
 
   const load = useCallback(async () => {
     try {
@@ -184,9 +233,31 @@ export default function Grants() {
           />
         )}
 
-        {grants.length > 0 && (
+        {crowded && (
+          <div className="v2-grants-find">
+            <input
+              className="v2-input"
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Filter by path"
+              aria-label="Filter folders"
+            />
+            <span className="v2-grants-count" role="status">
+              {shown.length === grants.length
+                ? `${grants.length} folders`
+                : `${shown.length} of ${grants.length} folders`}
+            </span>
+          </div>
+        )}
+
+        {crowded && shown.length === 0 && (
+          <p className="v2-p v2-p--muted">No folder matches that filter.</p>
+        )}
+
+        {shown.length > 0 && (
           <ul className="v2-grants-list" aria-label="Allowed folders">
-            {grants.map((g) => (
+            {shown.map((g) => (
               <li key={g.path} className="v2-grant">
                 <span
                   className="v2-grant-mode"
