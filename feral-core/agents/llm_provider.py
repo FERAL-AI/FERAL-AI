@@ -12,6 +12,7 @@ import os
 import json
 import logging
 import time
+import uuid
 import httpx
 from typing import Any, Optional, AsyncGenerator
 
@@ -47,6 +48,10 @@ from agents.llm_failover import (
 # spending that budget on a known-bad provider is the wrong trade.
 _FAILOVER_FAST_MAX_RETRIES = 2
 _FAILOVER_FAST_DELAYS: list[float] = [0.5]
+
+# Stable for the life of this process, sent as ``prompt_cache_key`` on
+# every /v1/responses request. See ``_build_responses_body``.
+_PROMPT_CACHE_KEY = f"feral-{uuid.uuid4().hex[:16]}"
 from agents.llm_reasoning import (
     _apply_openai_reasoning_fork,
     _apply_deepseek_reasoning_fork,
@@ -2088,6 +2093,17 @@ class LLMProvider:
         }
         if instructions:
             body["instructions"] = instructions
+        # Routing hint for OpenAI's prompt cache. Requests carrying the
+        # same key are steered to the same machine, which is what lets a
+        # long shared prefix (the identity header, then the tool schemas)
+        # actually hit the cache instead of being re-read at the full
+        # input rate on every turn. There is no session id in scope at
+        # this layer, and threading one down would touch every caller of
+        # ``chat``, so this is a per-PROCESS key: every turn a brain
+        # serves shares it, which is the grouping that matters, and a
+        # restart starts a new one. Cached tokens are billed at a tenth
+        # of the input rate for gpt-5.6-sol.
+        body["prompt_cache_key"] = _PROMPT_CACHE_KEY
         # The 128-tool cap lived only on the chat/completions paths, and
         # this builder is the one gpt-5.6-sol actually uses
         # (``providers/model_classes.classify_endpoint`` routes it to
@@ -2098,6 +2114,11 @@ class LLMProvider:
         # ``cap_tools_with_pins`` reads pin names off either shape but
         # the pin list and the coverage floor were written against the
         # chat-shape list and stay honest applied to the same input.
+        #
+        # The cap and the cache key work together rather than against
+        # each other: caching pays off on a prefix that is identical
+        # turn to turn, and a capped list is both shorter AND more
+        # stable than one that varies with whatever the router picked.
         clean_tools = self._chat_tools_to_responses_tools(
             _cap_openai_chat_tools(tools) if tools else tools
         )
@@ -4279,6 +4300,44 @@ class LLMProvider:
             return (0, 0)
         return (max(0, write), max(0, read))
 
+    @staticmethod
+    def _extract_inclusive_cached_tokens(result: Any) -> int:
+        """OpenAI's prompt-cache read count, which is INSIDE the input total.
+
+        OpenAI reports it as ``usage.prompt_tokens_details.cached_tokens``
+        on /chat/completions and ``usage.input_tokens_details.cached_tokens``
+        on /v1/responses, and in both cases the number is a subset of
+        ``prompt_tokens`` / ``input_tokens`` rather than an addition to
+        it. That is the opposite of Anthropic's contract (see
+        ``_extract_cache_usage``), which is why this is a separate read
+        and why the caller SUBTRACTS before re-adding at the cache rate.
+
+        Both spellings are checked because the Responses adapter
+        (``_responses_payload_to_chat_dict``) passes the provider's usage
+        block through untouched, so whichever shape arrived is the shape
+        stored. Neither was read at all before this, so every cached
+        token on the audited install was billed at the full input rate:
+        ``model_catalog.json`` prices ``gpt-5.6-sol`` cache reads at
+        0.0005 against an input rate of 0.005, a tenth, so a cache-heavy
+        turn charged the hourly cap roughly ten times what it cost.
+        """
+        if not isinstance(result, dict):
+            return 0
+        usage = result.get("usage")
+        if not isinstance(usage, dict):
+            return 0
+        for key in ("input_tokens_details", "prompt_tokens_details"):
+            details = usage.get(key)
+            if not isinstance(details, dict):
+                continue
+            try:
+                cached = int(details.get("cached_tokens") or 0)
+            except (TypeError, ValueError):
+                continue
+            if cached > 0:
+                return cached
+        return 0
+
     def _budget_exceeded_response(self, exc: Any) -> dict:
         """Build the structured ``BudgetExceeded`` response shape.
 
@@ -4396,6 +4455,16 @@ class LLMProvider:
         try:
             prompt, completion, reasoning = self._extract_usage(result)
             cache_write, cache_read = self._extract_cache_usage(result)
+            # OpenAI's cached tokens are already counted inside the input
+            # total, so they have to come OUT of the prompt count before
+            # they go back in at the cache rate. Anthropic reports its
+            # cache tokens alongside the input total, so nothing is
+            # subtracted for it and this is a no-op there.
+            inclusive_cached = self._extract_inclusive_cached_tokens(result)
+            if inclusive_cached:
+                inclusive_cached = min(inclusive_cached, prompt)
+                prompt -= inclusive_cached
+                cache_read += inclusive_cached
             if cache_write or cache_read:
                 # Own try: a pricing failure must cost us the cache
                 # SURCHARGE only, not the whole turn's billing. Falling
