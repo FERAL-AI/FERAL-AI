@@ -91,3 +91,73 @@ class TestNegativePreferences:
         assert not any(
             t.startswith("Prefers: know been working") for t in texts
         ), texts
+
+
+class TestNegativeCaptureShape:
+    """Rendering the negation correctly was half the fix.
+
+    The live row on the operator's brain (GET /api/about-me, audited
+    2026-08-23) was ``Prefers: know been working on the demo so we'll see
+    how it's gonna go`` at confidence 0.5. With the "Does not:" template
+    alone the same sentence would still be extracted today, as ``Does
+    not: know been working on the demo so we'll see how it's gonna go``,
+    which is not a preference either. "I don't know" is a disfluency and
+    the old ``.{4,120}`` capture ran to the end of the utterance.
+    """
+
+    EXACT = (
+        "Spoke to know I don't know been working on the demo so "
+        "we'll see how it's gonna go"
+    )
+
+    def test_the_exact_sentence_produces_no_preference_at_all(self, store):
+        store.extract_from_text(self.EXACT)
+        facts = store.list()
+        assert not [f for f in facts if f.kind == "preference"], [
+            f.text for f in facts
+        ]
+
+    def test_capture_stops_at_the_clause_boundary(self, store):
+        store.extract_from_text("I don't eat pork, it makes me sick")
+        texts = [f.text for f in store.list()]
+        assert texts == ["Does not: eat pork"], texts
+
+    def test_dark_mode_negation_still_extracts(self, store):
+        store.extract_from_text("I never use dark mode")
+        texts = [f.text for f in store.list()]
+        assert texts == ["Does not: use dark mode"], texts
+
+    @pytest.mark.parametrize("sentence", [
+        "I don't know been working on the demo",
+        "I don't think that's the right approach for us",
+        "I don't really have an opinion on that",
+        "I don't remember where I parked the car",
+        "I don't get why it keeps failing",
+        "I don't understand the question",
+        "I don't see the point of that",
+        "I don't mean to be rude about it",
+        "I never guess at these things",
+        # A single word after the negation is never a usable preference.
+        "I don't care.",
+    ])
+    def test_disfluencies_and_verbs_of_thinking_are_not_preferences(
+        self, store, sentence,
+    ):
+        store.extract_from_text(sentence)
+        texts = [f.text for f in store.list()]
+        assert not any(t.startswith("Does not:") for t in texts), (
+            f"{sentence!r} was stored as a preference: {texts}"
+        )
+
+    @pytest.mark.parametrize("sentence, expected", [
+        ("I don't drink coffee after 4pm.", "Does not: drink coffee after 4pm"),
+        ("I do not use social media; it wastes my time", "Does not: use social media"),
+        ("I never work on weekends, and I don't check email then",
+         "Does not: work on weekends"),
+    ])
+    def test_real_negative_preferences_survive_the_gate(
+        self, store, sentence, expected,
+    ):
+        store.extract_from_text(sentence)
+        texts = [f.text for f in store.list()]
+        assert expected in texts, texts

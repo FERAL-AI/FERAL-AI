@@ -6,6 +6,31 @@ All notable changes to FERAL are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Voice replies no longer fragment into several assistant rows.** When
+  the assistant's own audio tripped OpenAI's server VAD on the phone
+  mic, OpenAI cancelled the response (`response.done status=cancelled
+  reason=turn_detected`), whisper transcribed the echo as a stock closer
+  the phantom filter dropped, and the model started over. The proxy
+  persisted every `response.output_audio_transcript.done` on arrival, so
+  "Hey Omar," and "How's it going?" landed as two rows 2 seconds apart.
+  `RealtimeProxy` now buffers assistant finals per session and writes
+  them (durable `voice:<sid>` thread, working memory,
+  `note_voice_assistant_turn`) only on `response.done status=completed`,
+  merging a `turn_detected` fragment into the reply that follows unless a
+  real user transcript arrived in between, in which case the fragment is
+  its own row because the operator really interrupted. Pending text is
+  flushed on `stop_session`. Live wire frames to the client are unchanged.
+- **About-Me extractor no longer files voice disfluencies as
+  preferences.** The negative pattern `I don't/do not/never X` captured
+  to the end of the utterance, so "I don't know been working on the demo
+  so we'll see how it's gonna go" became a stored preference. The
+  capture now stops at a clause boundary and is dropped when its first
+  word is a disfluency or verb of thinking (know, think, really, mean,
+  remember, get, understand, see, guess) or when it is a single word.
+  "I don't eat pork, it makes me sick" still yields "Does not: eat pork".
+
 ## [2026.9.2] - 2026-09-02 - two brains that share only what you named
 
 ### Added

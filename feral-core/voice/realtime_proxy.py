@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import time
+from dataclasses import dataclass, field
 from typing import Optional, Callable, Awaitable, Any
 
 from agents.tool_display import tool_feedback_text
@@ -166,6 +167,12 @@ class RealtimeSession:
         on_error: Callable[[str, str], Awaitable[None]] | None = None,
         on_conversation_item: Callable[[str, dict], Awaitable[None]] | None = None,
         on_notice: Callable[[str, str, str], Awaitable[None]] | None = None,
+        # Response lifecycle, called as (session_id) on ``response.created``
+        # and (session_id, status, reason) on ``response.done``. The proxy
+        # uses these to decide when an assistant transcript is a whole
+        # reply and when it is a fragment cut off by turn detection.
+        on_response_created: Callable[[str], Awaitable[None]] | None = None,
+        on_response_done: Callable[[str, str, str], Awaitable[None]] | None = None,
     ):
         self.session_id = session_id
         self.node_id = node_id
@@ -196,6 +203,8 @@ class RealtimeSession:
         # session over", ``on_notice`` means "the session is alive,
         # tell the operator/client what the server refused".
         self._on_notice = on_notice
+        self._on_response_created = on_response_created
+        self._on_response_done = on_response_done
 
         self._ws = None
         self._connected = False
@@ -750,15 +759,17 @@ class RealtimeSession:
         elif event_type == "response.created":
             self._response_in_progress = True
             logger.info("Realtime response.created session=%s", self.session_id)
+            if self._on_response_created:
+                await self._on_response_created(self.session_id)
 
         elif event_type == "response.done":
             self._response_in_progress = False
             # Surface the response's status so we can tell if OpenAI
             # is rejecting our requests silently (e.g. "content_filter",
             # "failed", "incomplete"). A healthy response is "completed".
-            resp = event.get("response", {})
-            status = resp.get("status", "")
-            status_details = resp.get("status_details", {})
+            resp = event.get("response", {}) or {}
+            status = resp.get("status", "") or ""
+            status_details = resp.get("status_details", {}) or {}
             if status and status != "completed":
                 logger.warning(
                     "Realtime response.done session=%s status=%s details=%s",
@@ -769,10 +780,18 @@ class RealtimeSession:
                     "Realtime response.done session=%s status=%s",
                     self.session_id, status or "(unknown)",
                 )
+            if self._on_response_done:
+                reason = ""
+                if isinstance(status_details, dict):
+                    reason = str(status_details.get("reason", "") or "")
+                await self._on_response_done(self.session_id, status, reason)
 
         elif event_type in {"response.failed", "response.cancelled", "response.canceled"}:
             self._response_in_progress = False
             logger.warning("Realtime %s session=%s", event_type, self.session_id)
+            if self._on_response_done:
+                legacy_status = "failed" if event_type == "response.failed" else "cancelled"
+                await self._on_response_done(self.session_id, legacy_status, "")
 
         elif event_type == "rate_limits.updated":
             pass
@@ -785,6 +804,44 @@ class RealtimeSession:
                 "Realtime unhandled event type=%s session=%s",
                 event_type, self.session_id,
             )
+
+
+@dataclass
+class _PendingAssistantReply:
+    """What the assistant has said in this session that is not yet persisted.
+
+    Operator store, conversation ``voice:voice-feral-iphone-60dc6b3aa07e-BC78452A``
+    (2026-08-25): "Hey Omar," at 17:29:21.868 and "How's it going?" at
+    17:29:23.844 were two assistant rows. brain.err for the same
+    seconds: ``17:29:20,752 response.created`` -> ``17:29:21,870
+    response.done status=cancelled details={'reason': 'turn_detected'}``
+    -> ``17:29:22,958 response.created`` -> ``17:29:23,848 response.done
+    status=completed``. Each cancellation was immediately followed by
+    ``dropping phantom user transcript 'Bye. Bye.'``: the assistant's own
+    audio, picked up by the phone mic, tripped OpenAI's server VAD,
+    OpenAI cancelled the response mid sentence, whisper transcribed the
+    echo as a stock closer (which the phantom filter rightly dropped),
+    and the model started over. The proxy persisted the partial
+    transcript the moment ``response.output_audio_transcript.done``
+    arrived, so one spoken reply became several rows.
+
+    ``fragments`` holds the transcripts of responses that were cancelled
+    by ``turn_detected`` with no real user turn in between. ``current``
+    holds the transcript finals of the response in flight. Both are
+    joined with a space and written as ONE row when a response completes.
+    """
+
+    fragments: list[str] = field(default_factory=list)
+    current: list[str] = field(default_factory=list)
+    in_progress: bool = False
+
+    def take(self, *, fragments_only: bool = False) -> str:
+        parts = list(self.fragments)
+        self.fragments = []
+        if not fragments_only:
+            parts.extend(self.current)
+            self.current = []
+        return " ".join(p.strip() for p in parts if p and p.strip())
 
 
 class RealtimeProxy:
@@ -815,6 +872,12 @@ class RealtimeProxy:
         # be collected mid-flight, and both are memory writes: the user's
         # voice turn simply never gets remembered, with nothing logged.
         self._bg_tasks: set[asyncio.Task] = set()
+        # Assistant transcript finals awaiting a ``response.done``. Keyed
+        # by realtime session id; an entry exists only once the session
+        # has reported a ``response.created``, so a proxy driven without
+        # lifecycle events (older tests, providers that never send them)
+        # keeps persisting each final immediately.
+        self._pending_replies: dict[str, _PendingAssistantReply] = {}
         self._skill_registry = skill_registry
         self._skill_executor = skill_executor
         self._memory = memory
@@ -952,6 +1015,8 @@ class RealtimeProxy:
             on_error=self._handle_error,
             on_conversation_item=self._handle_conversation_item,
             on_notice=self._handle_notice,
+            on_response_created=self._handle_response_created,
+            on_response_done=self._handle_response_done,
         )
 
         await rs.connect()
@@ -1000,6 +1065,13 @@ class RealtimeProxy:
 
     async def stop_session(self, session_id: str):
         rs = self._sessions.pop(session_id, None)
+        # A reply cut off by turn detection with no completed response
+        # after it would otherwise never be written. Flush before the
+        # socket goes so nothing the assistant said is lost on teardown.
+        try:
+            await self._flush_pending_reply(session_id, why="session_close")
+        finally:
+            self._pending_replies.pop(session_id, None)
         if rs:
             node_id = rs.node_id
             await rs.disconnect()
@@ -1217,33 +1289,37 @@ class RealtimeProxy:
         that arrived out of order. Both default to blank: the fallback
         ``seq`` stamped in ``_forward_transcript`` is always present.
         """
-        if is_final and text and self._memory:
-            if text.startswith("[user] "):
-                self._memory.working_push(session_id, {
-                    "role": "user", "text": text[7:], "source": "voice_realtime",
-                })
-            else:
-                self._memory.working_push(session_id, {
-                    "role": "assistant", "text": text[:300], "source": "voice_realtime",
-                })
-            # PR 9 gap-fill — also persist into the durable conversations
-            # store under a voice-scoped thread so the conversation list
-            # surfaces voice sessions next to chat threads. We key the
-            # thread on the realtime session id (not the WS session) so a
-            # reconnect of the same realtime session keeps appending to
-            # the same thread.
-            try:
-                conv_id = f"voice:{session_id}"
-                role = "user" if text.startswith("[user] ") else "assistant"
-                clean_for_store = text[len("[user] "):] if text.startswith("[user] ") else text
-                if hasattr(self._memory, "conversation_append"):
-                    await self._memory.conversation_append(
-                        conv_id, role, clean_for_store,
-                        source="voice_realtime_openai",
-                        title=f"Voice session {session_id[:8]}",
-                    )
-            except Exception as exc:
-                logger.debug("voice transcript persistence skipped: %s", exc)
+        is_user = text.startswith("[user] ")
+        pending = self._pending_replies.get(session_id)
+
+        if is_final and text and is_user:
+            # A real user turn reached us (phantom closers are dropped in
+            # ``RealtimeSession._handle_event`` before this callback).
+            # Any assistant fragment cut off by turn detection was
+            # therefore a genuine interruption: write it as its own row,
+            # ahead of the user's, instead of merging it into the reply
+            # that follows. Only the cancelled fragments go; a final for
+            # the response still in flight stays buffered because
+            # input transcription runs asynchronously with response
+            # creation and may simply be arriving late.
+            await self._flush_pending_reply(
+                session_id, fragments_only=True, why="user_turn",
+            )
+
+        assistant_buffered = False
+        if is_final and text and not is_user and pending is not None:
+            # Assistant final while a response lifecycle is tracked.
+            # Hold it; ``_handle_response_done`` decides whether it was
+            # a whole reply or the first half of one OpenAI restarted.
+            pending.current.append(text)
+            assistant_buffered = True
+
+        if is_final and text and not assistant_buffered:
+            await self._store_transcript_row(
+                session_id,
+                "user" if is_user else "assistant",
+                text[len("[user] "):] if is_user else text,
+            )
 
         # Wire emit runs BEFORE the orchestrator hooks below. Those
         # hooks await SQLite reads, tool-forcing session.update
@@ -1271,18 +1347,12 @@ class RealtimeProxy:
         # Sequenced AFTER the emit above for the reason in that comment:
         # this awaits the orchestrator's per-session lock, so running it
         # first would put the transcript race back.
-        if (
-            is_final
-            and text
-            and not text.startswith("[user] ")
-            and self._orchestrator is not None
-        ):
-            try:
-                await self._orchestrator.note_voice_assistant_turn(session_id, text)
-            except Exception:
-                logger.exception(
-                    "realtime: note_voice_assistant_turn failed (non-fatal)"
-                )
+        #
+        # Skipped while the final is buffered: the merged reply is
+        # handed over from ``_flush_pending_reply`` instead, so the
+        # orchestrator's history sees one assistant turn per reply too.
+        if is_final and text and not is_user and not assistant_buffered:
+            await self._note_assistant_turn(session_id, text)
 
         # Bug 1 + Bug 2(B) hook: hand the final USER transcript to the
         # orchestrator so coref tracking, conversation_history, and
@@ -1306,6 +1376,98 @@ class RealtimeProxy:
             )
             self._bg_tasks.add(_t)
             _t.add_done_callback(self._bg_tasks.discard)
+
+    # ------------------------------------------------------------------
+    # Assistant reply persistence (see ``_PendingAssistantReply``)
+    # ------------------------------------------------------------------
+
+    async def _handle_response_created(self, session_id: str) -> None:
+        pending = self._pending_replies.get(session_id)
+        if pending is None:
+            pending = self._pending_replies[session_id] = _PendingAssistantReply()
+        pending.in_progress = True
+        pending.current = []
+
+    async def _handle_response_done(
+        self, session_id: str, status: str, reason: str,
+    ) -> None:
+        pending = self._pending_replies.get(session_id)
+        if pending is None:
+            return
+        pending.in_progress = False
+        if status == "completed":
+            await self._flush_pending_reply(session_id, why="completed")
+            return
+        if status == "cancelled" and reason == "turn_detected":
+            # OpenAI's server VAD heard speech and cut the reply. Whether
+            # that speech was the operator or the assistant's own echo
+            # is not known yet: a real user transcript arriving in
+            # ``_handle_transcript`` flushes this as its own row, a
+            # phantom one never reaches the proxy and the next completed
+            # response absorbs it.
+            if pending.current:
+                pending.fragments.extend(pending.current)
+                pending.current = []
+                logger.info(
+                    "realtime: holding assistant fragment after turn_detected "
+                    "session=%s fragments=%d", session_id, len(pending.fragments),
+                )
+            return
+        # failed / incomplete / cancelled for any other reason: whatever
+        # transcript exists is all this reply will ever be.
+        await self._flush_pending_reply(session_id, why=status or "unknown")
+
+    async def _flush_pending_reply(
+        self, session_id: str, *, fragments_only: bool = False, why: str = "",
+    ) -> None:
+        pending = self._pending_replies.get(session_id)
+        if pending is None:
+            return
+        text = pending.take(fragments_only=fragments_only)
+        if not text:
+            return
+        logger.debug(
+            "realtime: persisting assistant reply session=%s why=%s chars=%d",
+            session_id, why, len(text),
+        )
+        await self._store_transcript_row(session_id, "assistant", text)
+        await self._note_assistant_turn(session_id, text)
+
+    async def _store_transcript_row(
+        self, session_id: str, role: str, clean_text: str,
+    ) -> None:
+        """Write one final transcript to working memory and the durable thread."""
+        if not self._memory:
+            return
+        self._memory.working_push(session_id, {
+            "role": role,
+            "text": clean_text if role == "user" else clean_text[:300],
+            "source": "voice_realtime",
+        })
+        # PR 9 gap-fill: also persist into the durable conversations
+        # store under a voice-scoped thread so the conversation list
+        # surfaces voice sessions next to chat threads. Keyed on the
+        # realtime session id (not the WS session) so a reconnect of the
+        # same realtime session keeps appending to the same thread.
+        try:
+            if hasattr(self._memory, "conversation_append"):
+                await self._memory.conversation_append(
+                    f"voice:{session_id}", role, clean_text,
+                    source="voice_realtime_openai",
+                    title=f"Voice session {session_id[:8]}",
+                )
+        except Exception as exc:
+            logger.debug("voice transcript persistence skipped: %s", exc)
+
+    async def _note_assistant_turn(self, session_id: str, text: str) -> None:
+        if self._orchestrator is None:
+            return
+        try:
+            await self._orchestrator.note_voice_assistant_turn(session_id, text)
+        except Exception:
+            logger.exception(
+                "realtime: note_voice_assistant_turn failed (non-fatal)"
+            )
 
     async def _apply_voice_turn_hooks(self, session_id: str, clean: str) -> None:
         """Run the orchestrator side-channels for a final user turn.
