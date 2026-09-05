@@ -120,6 +120,72 @@ def window_reset_at(window: str, ts: float | None = None) -> float:
     raise ValueError(f"unsupported window: {window}")
 
 
+_WINDOW_ADJECTIVE = {"hour": "Hourly", "day": "Daily", "month": "Monthly"}
+
+
+def _reset_phrase(reset_at: float, now: float) -> str:
+    """"Resets in 8 minutes." from an absolute reset timestamp.
+
+    Windows are UTC clock hours (see :func:`window_start`), so "resets at
+    1788541200" is a number no operator can act on, and even a rendered
+    clock time makes them do the subtraction. How long they have to wait
+    is the thing they actually asked.
+    """
+    remaining = float(reset_at or 0.0) - float(now)
+    if reset_at <= 0 or remaining <= 0:
+        return ""
+    minutes = int(remaining // 60)
+    if minutes < 1:
+        return "Resets in under a minute."
+    if minutes == 1:
+        return "Resets in 1 minute."
+    if minutes < 90:
+        return f"Resets in {minutes} minutes."
+    hours = remaining / 3600.0
+    if hours < 24:
+        return f"Resets in {round(hours)} hours."
+    return f"Resets in {round(hours / 24)} days."
+
+
+def budget_exceeded_sentence(
+    *,
+    call_site: str = "chat",
+    cap_dollars: float = 0.0,
+    current_dollars: float = 0.0,
+    window: str = "hour",
+    reset_at: float = 0.0,
+    now: float | None = None,
+) -> str:
+    """One line an operator can act on when a cost cap stops a turn.
+
+    What shipped was "Cost cap reached (chat, $10.00/hour). Adjust in
+    Settings, Cost, or wait for the cap to reset." It named the cap but
+    not the spend, and "wait for the cap to reset" gave no idea how
+    long. The raw provider string the multi-agent path leaked instead
+    was worse again: "budget exceeded for chat: $9.992715 / $10.000000
+    (hour, resets at 1788541200)".
+
+    This names the window, the cap, what has been spent against it, how
+    long until it clears and where to change it.
+    """
+    site = str(call_site or "chat")
+    adjective = _WINDOW_ADJECTIVE.get(str(window), str(window or "").capitalize())
+    cap = float(cap_dollars or 0.0)
+    spent = float(current_dollars or 0.0)
+
+    if cap > 0:
+        head = f"{adjective} {site} budget of ${cap:.2f} reached (${spent:.2f} spent)."
+    else:
+        head = f"{adjective} {site} budget reached (${spent:.2f} spent)."
+
+    parts = [head.strip()]
+    phrase = _reset_phrase(float(reset_at or 0.0), time.time() if now is None else now)
+    if phrase:
+        parts.append(phrase)
+    parts.append("Raise it in Settings > Cost.")
+    return " ".join(parts)
+
+
 class CostBudget:
     """Track LLM spend per call site with hourly/daily/global caps."""
 
