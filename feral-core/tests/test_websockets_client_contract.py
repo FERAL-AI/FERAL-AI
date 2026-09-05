@@ -56,15 +56,28 @@ def test_connect_resolves_to_the_asyncio_implementation_not_the_legacy_one():
 
     Checked by module path rather than by version string: the version is
     a proxy, and this is the thing that actually differs.
+
+    Reads ``__module__`` off the ``connect`` attribute itself and does
+    not call it. The first version of this test called it and took the
+    type of the result, which passed locally, where connect is a class
+    and calling it builds an instance, and failed in CI with
+    "AssertionError: builtins", because there calling it produced a
+    coroutine and every coroutine's type lives in builtins. The
+    attribute's own module is the same fact without depending on what
+    connect happens to be, and it is measured identical on 13.1
+    (websockets.legacy.client) and on 14.0 and 15.0.1
+    (websockets.asyncio.client).
     """
     import websockets
 
-    module = type(websockets.connect("ws://example.invalid/")).__module__
+    module = getattr(websockets.connect, "__module__", "")
     assert "legacy" not in module, (
         f"websockets.connect resolves to {module}, the legacy implementation, "
         "whose awaited result is a WebSocketClientProtocol with no __aenter__"
     )
-    assert module.startswith("websockets.asyncio"), module
+    assert module.startswith("websockets.asyncio"), (
+        f"expected the asyncio client, got {module!r}"
+    )
 
 
 def test_the_legacy_protocol_really_lacks_the_method():
