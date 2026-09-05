@@ -200,45 +200,49 @@ def websockets_connect_is_left_alone():
     That happened. test_voice_realtime_headers captured interleaved with
     patching, and every sync test that ran after it in a randomised
     order failed with "dial halted (test)", its sentinel, because
-    memory/sync.py dials peers through ``websockets.connect``. It was 11
-    of 28 failures in a full run, every one of them passing in isolation,
+    memory/sync.py dials peers through ``websockets.connect``. It was 25
+    failures in a full run, every one of them passing in isolation,
     which is the signature that sends somebody hunting a product bug
     that does not exist.
 
-    Comparing two attributes per test is cheap. Finding this by hand
-    cost an afternoon.
+    Deliberately narrow. It only judges a test when the module OBJECTS
+    are the same before and after, because replacing the whole entry in
+    ``sys.modules`` is a different and legitimate technique
+    (test_memory_remembers_audit does exactly that through
+    ``monkeypatch.setitem``, and monkeypatch restores it). Comparing an
+    attribute across two different module objects says nothing, and an
+    earlier version of this guard failed two innocent tests that way.
+
+    Observed through sys.modules and never imported: importing
+    websockets here changed what a test could see, and
+    test_external_agent_skill asserts a skill call pulls in no heavy
+    modules. A guard that perturbs the thing it guards is not a guard.
     """
-    # Observed through sys.modules, never imported. Importing websockets
-    # here would change what a test sees: test_external_agent_skill
-    # asserts that a skill call pulls in no heavy modules, and this
-    # fixture running first made that assertion fail. A guard that
-    # perturbs the thing it guards is not a guard. If websockets was
-    # never imported, nothing can have patched it, so there is nothing
-    # to check.
-    websockets = sys.modules.get("websockets")
-    asyncio_client = sys.modules.get("websockets.asyncio.client")
+    ws_before = sys.modules.get("websockets")
+    ac_before = sys.modules.get("websockets.asyncio.client")
+    connects_before = (
+        getattr(ws_before, "connect", None),
+        getattr(ac_before, "connect", None),
+    )
 
-    def _snapshot():
-        return (
-            getattr(websockets, "connect", None) if websockets else None,
-            getattr(asyncio_client, "connect", None) if asyncio_client else None,
-        )
-
-    before = _snapshot()
     yield
-    # Re-read: a test may have imported websockets for the first time,
-    # in which case there was nothing to compare against anyway.
-    websockets = sys.modules.get("websockets")
-    asyncio_client = sys.modules.get("websockets.asyncio.client")
-    if before == (None, None):
+
+    ws_after = sys.modules.get("websockets")
+    ac_after = sys.modules.get("websockets.asyncio.client")
+    # Nothing to judge: websockets was absent, or the module object was
+    # swapped wholesale and restored by whoever swapped it.
+    if ws_before is None or ws_after is not ws_before or ac_after is not ac_before:
         return
-    after = _snapshot()
-    if before != after:
-        # Put it back so one offender does not fail every later test.
-        if websockets is not None and before[0] is not None:
-            websockets.connect = before[0]
-        if asyncio_client is not None and before[1] is not None:
-            asyncio_client.connect = before[1]
+
+    connects_after = (
+        getattr(ws_after, "connect", None),
+        getattr(ac_after, "connect", None),
+    )
+    if connects_before != connects_after:
+        # Put it back so one offender cannot fail every later test.
+        ws_after.connect = connects_before[0]
+        if ac_after is not None and connects_before[1] is not None:
+            ac_after.connect = connects_before[1]
         raise AssertionError(
             "this test left websockets.connect patched. Capture every "
             "original BEFORE patching anything: reading websockets.connect "
