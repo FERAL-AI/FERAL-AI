@@ -157,6 +157,18 @@ ALLOWED_FAIL_LABELS: set[str] = {
 }
 
 ALLOWED_WARN_LABELS: set[str] = {
+    # Stored vectors written at a width the active embedding provider
+    # does not emit. Yellow rather than red because the brain runs and
+    # every query still returns rows: the affected tier silently falls
+    # back to keyword-only, which is precisely why it needs saying out
+    # loud. Measured on the author's brain on 2026-09-05, 312 of 334
+    # entities were unreachable this way while doctor showed a green
+    # tick for the provider row directly above. Not _info, because a
+    # store that disagrees with its provider is a malfunction with a
+    # known remedy (`feral memory reembed`), not an un-enabled opt-in.
+    # It cannot fire on a fresh install: an empty store has no columns
+    # to be stale.
+    "Stored embeddings",
     # Under 2 GiB free. Yellow because nothing is broken yet, but the
     # store grows on every turn, so this is the last point at which the
     # operator can act without losing work. The same label is also in
