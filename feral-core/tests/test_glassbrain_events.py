@@ -137,6 +137,10 @@ async def test_openai_voice_proxy_emits_voice_session_start():
     fake_state = _mock_state(orchestrator=orch)
 
     proxy = RealtimeProxy.__new__(RealtimeProxy)
+    # Assistant transcript fragments are buffered per session and flushed
+    # on teardown, so stop_session reads this map. Seeded for the same
+    # reason _voice is below: this proxy gets no __init__.
+    proxy._pending_replies = {}
     proxy._sessions = {}
     proxy._node_to_session = {}
     proxy._api_key = "test-key"
@@ -182,6 +186,10 @@ async def test_openai_voice_proxy_emits_voice_session_stop():
     fake_state = _mock_state(orchestrator=orch)
 
     proxy = RealtimeProxy.__new__(RealtimeProxy)
+    # Assistant transcript fragments are buffered per session and flushed
+    # on teardown, so stop_session reads this map. Seeded for the same
+    # reason _voice is below: this proxy gets no __init__.
+    proxy._pending_replies = {}
     proxy._sessions = {}
     proxy._node_to_session = {}
 

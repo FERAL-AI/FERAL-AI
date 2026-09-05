@@ -92,6 +92,33 @@ CONFIDENCE_UNCONFIRMED = 0.5
 CONFIDENCE_RECURRED = 0.75
 CONFIDENCE_CONFIRMED = 1.0
 
+#: First words that mean "I don't <X>" is not a preference at all. Spoken
+#: input reaches the extractor (voice user turns are saved as
+#: ``user_command`` episodes), and speech is full of "I don't know",
+#: "I don't think", "I don't really", "I don't remember": disfluencies
+#: and verbs of thinking, not habits. The operator profile audited on
+#: 2026-08-23 held "Prefers: know been working on the demo so we'll see
+#: how it's gonna go", extracted from exactly such a sentence.
+_NEGATIVE_CAPTURE_STOPWORDS = frozenset({
+    "know", "think", "really", "mean", "remember", "get", "understand",
+    "see", "guess",
+})
+
+
+def _negative_capture_is_usable(payload: str) -> bool:
+    """Cheap verb-object check for the "I don't/never X" capture.
+
+    Keeps "eat pork", "use dark mode", "drink coffee at all". Rejects a
+    capture whose first word is a disfluency or a verb of thinking, and a
+    bare single word ("I don't care", "I never know"), which is never a
+    usable preference on its own.
+    """
+    words = payload.split()
+    if len(words) < 2:
+        return False
+    first = words[0].lower().strip("'\"")
+    return first not in _NEGATIVE_CAPTURE_STOPWORDS
+
 
 @dataclass
 class AboutMeFact:
@@ -378,8 +405,13 @@ class AboutMeStore:
     _EXTRACTOR_PATTERNS: tuple[tuple[str, FactKind, tuple[str, ...]], ...] = (
         # "I prefer X" / "I like X" / "I love X"
         (r"\bI (?:prefer|like|love|enjoy) (.{4,120})", "preference", ()),
-        # "I don't/never X" - negative preference
-        (r"\bI (?:don't|do not|never) (.{4,120})", "preference", ("negative",)),
+        # "I don't/never X" - negative preference. The capture stops at
+        # a clause boundary: the old `.{4,120}` swallowed everything to
+        # the end of the utterance, so "I don't know been working on the
+        # demo so we'll see how it's gonna go" became a 60 character
+        # "preference". See `_negative_capture_is_usable` for the second
+        # gate on what this pattern may keep.
+        (r"\bI (?:don't|do not|never) ([^,.;:!?\n]{4,80})", "preference", ("negative",)),
         # "My <relation> <name>" — capture with name
         (r"\bMy (wife|husband|partner|sister|brother|mom|dad|mother|father|son|daughter|kid|child) (?:is )?([A-Z][a-zA-Z]{1,20})", "relationship", ("family",)),
         # "I live in X" / "I'm based in X"
@@ -424,6 +456,12 @@ class AboutMeStore:
                     "",
                 ).strip(" \t\n\r.,;:!?")
                 if not payload:
+                    continue
+                if "negative" in extra_tags and not _negative_capture_is_usable(payload):
+                    logger.debug(
+                        "About-me extractor skipped negative capture %r: "
+                        "disfluency or no verb-object shape", payload,
+                    )
                     continue
 
                 # Rebuild the canonical fact text so UI reads cleanly:
