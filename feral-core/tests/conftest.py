@@ -112,6 +112,25 @@ def mock_vault():
 
 
 @pytest.fixture(autouse=True)
+def reset_settings_cache():
+    """Drop the ``load_settings`` memo around every test.
+
+    ``config.loader.load_settings`` caches its merged dict keyed on the
+    settings files' mtime plus the FERAL_* env overrides. Under pytest
+    ``isolate_feral_home`` gives each test its own FERAL_HOME, so the key
+    normally differs anyway, but a test that manages FERAL_HOME itself
+    (``no_auto_feral_home``) can otherwise inherit the previous test's
+    answer. Clearing on both sides makes that impossible rather than
+    unlikely.
+    """
+    from config.loader import clear_settings_cache
+
+    clear_settings_cache()
+    yield
+    clear_settings_cache()
+
+
+@pytest.fixture(autouse=True)
 def isolate_feral_home(request, tmp_path, monkeypatch):
     """Isolate tests from real ~/.feral directory.
     Skips for tests that manage FERAL_HOME themselves.

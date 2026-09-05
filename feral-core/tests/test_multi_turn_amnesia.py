@@ -205,7 +205,14 @@ async def test_budget_exceeded_turn_records_its_assistant_reply():
 
     history = orch.conversation_history[sid]
     assert history[-1]["role"] == "assistant"
-    assert "Cost cap reached" in history[-1]["content"]
+    # The line names the window, the cap, what has been spent against it
+    # and where to change it. The wording it replaced ("Cost cap reached
+    # (chat, $1.00/hour)") gave the cap but never the spend, and told
+    # the operator to wait without saying how long.
+    assert history[-1]["content"] == (
+        "Hourly chat budget of $1.00 reached ($1.50 spent). "
+        "Raise it in Settings > Cost."
+    )
 
 
 @pytest.mark.asyncio

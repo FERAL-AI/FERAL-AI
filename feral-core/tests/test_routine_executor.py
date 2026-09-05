@@ -198,3 +198,146 @@ async def test_taskflow_skill_invoke_deny(env):
         assert "denied by safety policy" in (step["error"] or "")
     finally:
         await taskflows.stop()
+
+
+# ── Cost caps ────────────────────────────────────────────────────────────────
+#
+# A routine that fires while the chat budget is spent used to be recorded as a
+# success. The pre-flight guard estimated against a hard-coded "gpt-4o-mini" at
+# 512 tokens, an order of magnitude under the 4096 the orchestrator actually
+# asks for, so the cap cleared here and then tripped inside the provider. The
+# turn came back holding the raw budget error, could not deliver it (the
+# "undeliverable frame ... no live websocket" warnings) and the run history
+# showed green for a routine that never acted.
+
+
+class _StubGuard:
+    """A BudgetLoopGuard shaped just enough for the dispatch path."""
+
+    call_site = "chat"
+    paused_until = 0.0
+
+    def __init__(self, allow=True):
+        self._allow = allow
+        self.seen = []
+
+    def allow(self, *, model, estimated_max_tokens):
+        self.seen.append((model, estimated_max_tokens))
+        return self._allow
+
+    def _tight_cap(self):
+        return 10.0
+
+    def _current_spend(self):
+        return 9.992715
+
+    def _tight_window(self):
+        return "hour"
+
+    def _next_reset(self):
+        return time.time() + 8 * 60
+
+
+class _CappedOrch:
+    """Dispatches, then reports the cap the turn hit."""
+
+    def __init__(self, notice):
+        self._notice = notice
+        self.dispatched = 0
+
+    async def handle_command(self, session_id, prompt, context=None):
+        self.dispatched += 1
+        return ""
+
+    def pop_budget_notice(self, session_id):
+        notice, self._notice = self._notice, {}
+        return notice
+
+
+def test_prompt_branch_precheck_uses_the_real_model_and_token_budget(env):
+    cron = env["cron"]
+    guard = _StubGuard(allow=True)
+    server.state.cron_cost_guard = guard
+
+    class _Orch:
+        llm = type("L", (), {"model": "gpt-5.6-sol"})()
+
+        async def handle_command(self, session_id, prompt, context=None):
+            return "done"
+
+        def pop_budget_notice(self, session_id):
+            return {}
+
+    server.state.orchestrator = _Orch()
+    job = cron.create_job(JobType.CUSTOM, "every 30m", "nl", {"action_text": "hi"}, "")
+    server.execute_routine_job(job)
+
+    assert guard.seen == [("gpt-5.6-sol", 4096)]
+    assert _latest_run(cron, job.id)["status"] == "success"
+
+
+def test_prompt_branch_skips_without_dispatching_when_capped(env):
+    cron = env["cron"]
+    server.state.cron_cost_guard = _StubGuard(allow=False)
+    orch = _CappedOrch({})
+    server.state.orchestrator = orch
+
+    job = cron.create_job(JobType.CUSTOM, "every 30m", "nl", {"action_text": "hi"}, "")
+    server.execute_routine_job(job)
+
+    assert orch.dispatched == 0
+    run = _latest_run(cron, job.id)
+    assert run["status"] == "skipped"
+    error = run["error"] or ""
+    assert "Hourly chat budget of $10.00 reached ($9.99 spent)." in error
+    assert "Settings > Cost" in error
+
+
+def test_a_dispatched_turn_that_comes_back_capped_is_not_a_success(env):
+    cron = env["cron"]
+    server.state.cron_cost_guard = _StubGuard(allow=True)
+    orch = _CappedOrch({
+        "call_site": "chat",
+        "cap_dollars": 10.0,
+        "current_dollars": 9.992715,
+        "window": "hour",
+        "reset_at": time.time() + 8 * 60,
+    })
+    server.state.orchestrator = orch
+
+    job = cron.create_job(JobType.CUSTOM, "every 30m", "nl", {"action_text": "hi"}, "")
+    server.execute_routine_job(job)
+
+    assert orch.dispatched == 1
+    run = _latest_run(cron, job.id)
+    assert run["status"] == "skipped"
+    assert "Hourly chat budget" in (run["error"] or "")
+    assert run["result"].get("budget_exceeded", {}).get("cap_dollars") == 10.0
+
+
+def test_an_uncapped_turn_is_still_recorded_as_success(env):
+    cron = env["cron"]
+    server.state.cron_cost_guard = _StubGuard(allow=True)
+    orch = _CappedOrch({})
+    server.state.orchestrator = orch
+
+    job = cron.create_job(JobType.CUSTOM, "every 30m", "nl", {"action_text": "hi"}, "")
+    server.execute_routine_job(job)
+
+    assert orch.dispatched == 1
+    assert _latest_run(cron, job.id)["status"] == "success"
+
+
+def test_an_orchestrator_without_the_accessor_still_records_success(env):
+    """Older/stubbed orchestrators must not start reporting skipped."""
+    cron = env["cron"]
+    server.state.cron_cost_guard = None
+
+    class _Bare:
+        async def handle_command(self, session_id, prompt, context=None):
+            return "ok"
+
+    server.state.orchestrator = _Bare()
+    job = cron.create_job(JobType.CUSTOM, "every 30m", "nl", {"action_text": "hi"}, "")
+    server.execute_routine_job(job)
+    assert _latest_run(cron, job.id)["status"] == "success"

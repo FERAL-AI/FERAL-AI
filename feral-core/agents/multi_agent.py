@@ -13,10 +13,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import time
-from typing import Optional, Any, Callable, Awaitable
+from typing import Any, Optional
 from uuid import uuid4
 from dataclasses import dataclass, field
 
@@ -81,6 +80,13 @@ class WorkerResult:
     # answer ends up on screen. Empty when the provider reported nothing.
     usage: dict = field(default_factory=dict)
     model: str = ""
+    # The provider's structured ``budget_exceeded`` block when a cost cap
+    # stopped this worker before it could answer. Carried instead of
+    # ``text`` on purpose: the block is what ``_emit_budget_exceeded``
+    # renders into a banner, and the accompanying ``error`` string is
+    # provider diagnostics, not something to show an operator. Empty on
+    # every normal run.
+    budget_exceeded: dict = field(default_factory=dict)
 
 
 class AgentBus:
@@ -198,6 +204,127 @@ class AgentWorker:
                 return refusal
         return None
 
+    def _build_full_prompt(
+        self,
+        *,
+        environment: str = "",
+        memory: str = "",
+        extra_context: str = "",
+    ) -> str:
+        """This worker's system prompt, identity header included.
+
+        The worker used to send its ~270-token role prompt and nothing
+        else, because ``handle_command``'s multi-agent branch returns
+        before the single-agent path builds an identity prompt. So on
+        every default turn the model saw no agent name, no personality,
+        none of the operator's IDENTITY rules ("Never make up sensor data
+        or health readings" among them), no SOUL.md, no MEMORY.md, no
+        About-Me and, worst of the lot, no clock. That last omission is
+        how the audited install produced "I've scheduled a reminder for
+        your design review meeting at 10 AM PST on October 4, 2023" on a
+        brain running in 2026 with no such routine in the scheduler.
+
+        Falls back to the bare role prompt when no identity loader is
+        reachable, which is the old behaviour rather than a new failure.
+        """
+        loader = getattr(self._orchestrator, "identity_loader", None)
+        builder = getattr(loader, "build_worker_system_prompt", None)
+        if callable(builder):
+            try:
+                built = builder(
+                    self.system_prompt,
+                    environment=environment,
+                    memory=memory,
+                    extra_context=extra_context,
+                )
+                if isinstance(built, str) and built.strip():
+                    return built
+            except Exception:
+                logger.warning(
+                    "worker identity header unavailable; role prompt only",
+                    exc_info=True,
+                )
+
+        full_prompt = self.system_prompt
+        if environment:
+            full_prompt += f"\n\n[Environment]\n{environment}"
+        if memory:
+            full_prompt += f"\n\n[Memory]\n{memory}"
+        if extra_context:
+            full_prompt += f"\n\n[Additional Context]\n{extra_context}"
+        return full_prompt
+
+    @staticmethod
+    def _row_text(content: Any) -> str:
+        """Plain text of one transcript row, whatever shape it arrived in."""
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") in ("text", "input_text"):
+                    parts.append(str(block.get("text") or ""))
+            return "\n".join(p for p in parts if p).strip()
+        return ""
+
+    def replay_history(self, session_id: str) -> list[dict]:
+        """Prior turns of this session, as plain user/assistant rows.
+
+        The multi-agent path sent the model exactly two messages, a
+        system prompt and the current user text, so the assistant could
+        not remember what was said one turn earlier. The transcript was
+        never missing: ``_finalize_turn`` writes both rows of a
+        multi-agent turn into ``conversation_history``. Nothing read it.
+
+        The window comes from ``ContextManager`` rather than a fresh
+        slice invented here, so a worker replays what the single-agent
+        loop would replay: the newest 12 user turns, shrunk until they
+        fit half the model's context window, never cut in a way that
+        starts after the last assistant message.
+
+        Tool rows are dropped on purpose. A worker is offered its own
+        narrow tool set, so an ``assistant``/``tool`` round trip
+        replayed out of a single-agent turn can name a function this
+        request never declares, which the Responses API rejects outright
+        ("No tool call found for function call output"). Prose is what
+        makes the model remember the conversation; the tool traffic that
+        produced it is not worth a 400.
+        """
+        orch = self._orchestrator
+        if orch is None:
+            return []
+        try:
+            full = list((getattr(orch, "conversation_history", None) or {}).get(session_id) or [])
+        except Exception:
+            return []
+        if not full:
+            return []
+
+        window = full
+        compact = getattr(orch, "_compact_context", None)
+        if callable(compact):
+            try:
+                compacted = compact(full)
+                if isinstance(compacted, list):
+                    window = compacted
+            except Exception:
+                logger.debug("worker history compaction failed", exc_info=True)
+
+        rows: list[dict] = []
+        for row in window:
+            if not isinstance(row, dict):
+                continue
+            role = row.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            if row.get("tool_calls"):
+                continue
+            text = self._row_text(row.get("content"))
+            if not text:
+                continue
+            rows.append({"role": role, "content": text})
+        return rows
+
     def get_tools(self) -> list[dict]:
         """Tools this worker may call this turn.
 
@@ -240,13 +367,11 @@ class AgentWorker:
         if self._memory:
             memory_ctx = await self._memory.build_context_for_llm(session_id, max_tokens_budget=300)
 
-        full_prompt = self.system_prompt
-        if perception_ctx:
-            full_prompt += f"\n\n[Environment]\n{perception_ctx}"
-        if memory_ctx:
-            full_prompt += f"\n\n[Memory]\n{memory_ctx}"
-        if context:
-            full_prompt += f"\n\n[Additional Context]\n{context}"
+        full_prompt = self._build_full_prompt(
+            environment=perception_ctx,
+            memory=memory_ctx,
+            extra_context=context,
+        )
 
         # Tool-result images ride out of band, keyed by tool_call_id, and
         # are spliced into a per-request copy of ``messages`` just before
@@ -280,10 +405,12 @@ class AgentWorker:
                 )
                 return msgs
 
-        messages = [
-            {"role": "system", "content": full_prompt},
-            {"role": "user", "content": user_text},
-        ]
+        # Prior turns first, then this one. Without the replay the model
+        # was handed a two-message conversation every time and correctly
+        # reported that it could not remember the previous exchange.
+        messages = [{"role": "system", "content": full_prompt}]
+        messages.extend(self.replay_history(session_id))
+        messages.append({"role": "user", "content": user_text})
 
         tool_calls_made = []
         tool_results = []
@@ -345,6 +472,30 @@ class AgentWorker:
                 _m = model_of_llm_response(response)
                 if _m:
                     w_model = _m
+
+                # Order matters. A cost cap and a provider failure both
+                # arrive as ``{"error": ..., "choices": []}``, and the cap
+                # additionally carries ``budget_exceeded``. Check the cap
+                # first, because it is the specific case and the client
+                # already knows how to draw its structured frame; falling
+                # through to the general branch would report a spending
+                # limit as a provider outage.
+                #
+                # Either way this is not an answer. ``extract_response``
+                # below would hand the error string back as assistant
+                # prose, which is how the operator got a chat bubble
+                # reading "budget exceeded for chat: $9.992715 /
+                # $10.000000 (hour, resets at 1788541200)" and how it
+                # reached working memory and the saved transcript.
+                if isinstance(response, dict) and response.get("budget_exceeded"):
+                    return WorkerResult(
+                        worker_id=self.worker_id,
+                        budget_exceeded=dict(response["budget_exceeded"]),
+                        tool_calls_made=tool_calls_made,
+                        tool_results=tool_results,
+                        usage=w_usage,
+                        model=w_model,
+                    )
 
                 # A provider failure ends the worker with an ERROR, not
                 # with the failure text as its answer. ``run`` below
@@ -569,6 +720,17 @@ class AgentWorker:
                 _m = model_of_llm_response(response)
                 if _m:
                     w_model = _m
+                # Same guard as the tool loop above: a cap that trips on
+                # the synthesis pass must not be summarised into prose.
+                if isinstance(response, dict) and response.get("budget_exceeded"):
+                    return WorkerResult(
+                        worker_id=self.worker_id,
+                        budget_exceeded=dict(response["budget_exceeded"]),
+                        tool_calls_made=tool_calls_made,
+                        tool_results=tool_results,
+                        usage=w_usage,
+                        model=w_model,
+                    )
                 text_content, _ = self._llm.extract_response(response)
                 if text_content:
                     return WorkerResult(
@@ -769,6 +931,9 @@ class MultiAgentOrchestrator:
         # session_id -> {"model", "usage"} for the turn that just ran.
         # Consumed by ``pop_turn_attribution``; see ``run``.
         self._turn_attribution: dict[str, dict] = {}
+        # session_id -> the provider's ``budget_exceeded`` block when a
+        # cost cap stopped the turn. Consumed by ``pop_budget_block``.
+        self._budget_blocks: dict[str, dict] = {}
         self._init_workers()
 
     def _init_workers(self):
@@ -876,6 +1041,16 @@ class MultiAgentOrchestrator:
                 if not turn_model and r.model:
                     turn_model = r.model
             self._stash_turn_attribution(session_id, turn_model, turn_usage)
+            # One capped worker caps the turn: the others are drawing on
+            # the same wallet and there is no partial answer worth
+            # showing next to a banner saying the budget ran out. Checked
+            # before the provider-failure branch below, because a cap is
+            # the specific case and reporting it as an outage would send
+            # the operator looking for a fault that is not there.
+            for r in valid_results:
+                if r.budget_exceeded:
+                    self._stash_budget_block(session_id, r.budget_exceeded)
+                    return ""
             # No worker produced text and at least one hit a provider
             # failure: raise, so the failure is delivered as an error
             # frame. ``ResponseMerger.merge`` would otherwise hand the
@@ -893,6 +1068,16 @@ class MultiAgentOrchestrator:
             if result.model:
                 turn_model = result.model
             self._stash_turn_attribution(session_id, turn_model, turn_usage)
+            if result.budget_exceeded:
+                # Empty text, and the block left where the orchestrator
+                # will find it. The orchestrator owns ``send`` and
+                # ``_emit_budget_exceeded``, and it is the only place that
+                # can also stop the turn falling through to the
+                # single-agent loop, which would just hit the same cap.
+                # Before the provider-failure branch: a cap is not an
+                # outage and must not be reported as one.
+                self._stash_budget_block(session_id, result.budget_exceeded)
+                return ""
             if not result.text and result.provider_error and result.error:
                 raise MultiAgentProviderError(result.error)
             return result.text if result.text else (result.error or "No response.")
@@ -916,6 +1101,27 @@ class MultiAgentOrchestrator:
             "model": model or "",
             "usage": dict(usage or {}),
         }
+
+    def _stash_budget_block(self, session_id: str, block: dict) -> None:
+        # Bounded exactly like ``_turn_attribution``: the orchestrator
+        # drains this on the same turn, but a turn that raises between
+        # the stash and the pop would otherwise leave an entry behind
+        # forever on a long-lived brain.
+        if (
+            len(self._budget_blocks) >= self._ATTRIBUTION_MAX_SESSIONS
+            and session_id not in self._budget_blocks
+        ):
+            self._budget_blocks.pop(next(iter(self._budget_blocks)), None)
+        self._budget_blocks[session_id] = dict(block or {})
+
+    def pop_budget_block(self, session_id: str) -> dict:
+        """Consume the ``budget_exceeded`` block from the last ``run``.
+
+        Popped, not peeked, for the same reason as the attribution map:
+        a stale block would make a later, perfectly affordable turn
+        answer with a cost-cap banner.
+        """
+        return self._budget_blocks.pop(session_id, {}) or {}
 
     def pop_turn_attribution(self, session_id: str) -> dict:
         """Consume the attribution recorded by the last ``run`` for a session.

@@ -261,6 +261,63 @@ class IdentityLoader:
 
         return "\n".join(parts)
 
+    def build_worker_system_prompt(
+        self,
+        worker_prompt: str,
+        *,
+        identity_text: str | None = None,
+        environment: str = "",
+        memory: str = "",
+        extra_context: str = "",
+    ) -> str:
+        """Assemble the system prompt for a multi-agent worker.
+
+        The lean sibling of :meth:`build_system_prompt`. It carries the
+        agent's identity (name, personality, the operator's IDENTITY
+        rules, SOUL.md, MEMORY.md, About-Me) and the current time, and
+        deliberately omits the tool catalog and the self-model blocks:
+        a worker is handed its own tool list by the registry and its own
+        role by ``worker_prompt``, so those blocks would be duplicated
+        weight on a path that runs on every default turn.
+
+        Why this exists at all. Every default turn routes through
+        multi-agent ("Multi-agent routing: ['general'] (single)"), and
+        that branch of ``handle_command`` returns before the single-agent
+        path builds its system prompt. The worker therefore ran on about
+        270 tokens of role prompt plus an Environment and Memory block,
+        with no agent name, no personality, no rules and no clock. Two
+        live consequences, both from the audited install: the assistant
+        answered "I've scheduled a reminder for your design review
+        meeting at 10 AM PST on October 4, 2023" when no such routine
+        exists and the year is 2026, and it could not recall the
+        previous turn.
+
+        Ordering is load-bearing for cost, not just for tidiness.
+        Everything static comes first (identity, then the worker's role),
+        everything volatile last (environment, clock, memory, per-turn
+        context), so OpenAI prompt caching sees a stable prefix across
+        turns instead of a prompt whose second line is a timestamp.
+        """
+        identity = identity_text if identity_text is not None else self.load_identity()
+
+        parts: list[str] = []
+        if identity:
+            parts.append(identity.strip())
+        if worker_prompt:
+            parts.append(worker_prompt.strip())
+        # ── volatile from here down ──
+        if environment:
+            parts.append(f"[Environment]\n{environment.strip()}")
+        try:
+            parts.append(current_time_context().strip())
+        except Exception:
+            logger.debug("current_time_context failed for worker prompt", exc_info=True)
+        if memory:
+            parts.append(f"[Memory]\n{memory.strip()}")
+        if extra_context:
+            parts.append(f"[Additional Context]\n{extra_context.strip()}")
+        return "\n\n".join(p for p in parts if p)
+
     async def build_system_prompt(
         self,
         frame: "PerceptionFrame",

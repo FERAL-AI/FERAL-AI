@@ -233,7 +233,8 @@ class TestFollowupText:
         """Some clients haven't shipped support for the new
         ``budget_exceeded`` type yet. The orchestrator also emits a
         friendly ``text_response`` so those clients still see SOMETHING
-        useful (e.g. "Cost cap reached (chat, $0.10/hour)...").
+        useful (e.g. "Hourly chat budget of $0.10 reached ($0.12 spent).
+        Resets in 44 minutes. Raise it in Settings > Cost.").
         """
         orch = _make_orchestrator()
         orch.llm.chat_with_failover = AsyncMock(return_value={
@@ -256,3 +257,133 @@ class TestFollowupText:
         body = (text_frame["payload"].get("text") or "").lower()
         assert "cap" in body or "budget" in body
         assert "settings" in body or "hour" in body
+
+
+# ── Multi-agent path (the default one) ─────────────────────────────
+
+
+class TestMultiAgentPath:
+    """The path every default turn takes had none of the above.
+
+    ``features.multi_agent`` defaults on, so a normal chat turn routes
+    through ``MultiAgentOrchestrator`` and returns from that branch
+    before the single-agent loop the tests above exercise. The branch
+    treated the provider's budget-deny shape as prose: the error string
+    became the reply text, went to working memory and was persisted.
+    The operator saw an assistant bubble reading "budget exceeded for
+    chat: $9.992715 / $10.000000 (hour, resets at 1788541200)".
+    """
+
+    RAW_PROVIDER_ERROR = (
+        "budget exceeded for chat: $9.992715 / $10.000000 "
+        "(hour, resets at 1788541200)"
+    )
+
+    def _capped_multi_agent(self):
+        fake = MagicMock()
+        # The worker returned no text and left the block to be popped.
+        fake.run = AsyncMock(return_value="")
+        fake.pop_budget_block = MagicMock(return_value=dict(SAMPLE_BUDGET))
+        fake.pop_turn_attribution = MagicMock(return_value={})
+        return fake
+
+    @pytest.mark.asyncio
+    async def test_emits_one_frame_and_never_the_raw_error(self):
+        orch = _make_orchestrator()
+        orch._multi_agent_enabled = True
+        orch._multi_agent = self._capped_multi_agent()
+        sends = _capture_sends(orch)
+
+        await orch.handle_command(session_id="s-dddddddd", text="hi")
+
+        types = [f["type"] for f in sends]
+        assert types.count("budget_exceeded") == 1
+        blob = " ".join(str(f["payload"]) for f in sends)
+        assert "9.992715" not in blob
+        assert "resets at 1788541200" not in blob
+
+    @pytest.mark.asyncio
+    async def test_transcript_keeps_the_readable_line_not_the_raw_error(self):
+        orch = _make_orchestrator()
+        orch._multi_agent_enabled = True
+        orch._multi_agent = self._capped_multi_agent()
+        _capture_sends(orch)
+
+        await orch.handle_command(session_id="s-eeeeeeee", text="hi")
+
+        rows = orch.conversation_history.get("s-eeeeeeee") or []
+        assistant = [r for r in rows if r.get("role") == "assistant"]
+        assert len(assistant) == 1
+        body = assistant[0]["content"]
+        assert self.RAW_PROVIDER_ERROR not in body
+        assert "Hourly chat budget" in body
+        assert "Settings > Cost" in body
+
+    @pytest.mark.asyncio
+    async def test_capped_turn_does_not_fall_through_to_single_agent(self):
+        """Falling through would only hit the same cap and bill a retry."""
+        orch = _make_orchestrator()
+        orch._multi_agent_enabled = True
+        orch._multi_agent = self._capped_multi_agent()
+        orch.llm.chat_with_failover = AsyncMock(return_value={
+            "choices": [{"message": {"role": "assistant", "content": "second try"}}],
+        })
+        orch.llm.extract_response = MagicMock(return_value=("second try", []))
+        _capture_sends(orch)
+
+        await orch.handle_command(session_id="s-ffffffff", text="hi")
+        orch.llm.chat_with_failover.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_uncapped_multi_agent_turn_is_unaffected(self):
+        orch = _make_orchestrator()
+        orch._multi_agent_enabled = True
+        fake = MagicMock()
+        fake.run = AsyncMock(return_value="here you go")
+        fake.pop_budget_block = MagicMock(return_value={})
+        fake.pop_turn_attribution = MagicMock(return_value={})
+        orch._multi_agent = fake
+        sends = _capture_sends(orch)
+
+        result = await orch.handle_command(session_id="s-99999999", text="hi")
+        assert result == "here you go"
+        assert not any(f["type"] == "budget_exceeded" for f in sends)
+
+
+# ── The sentence itself ────────────────────────────────────────────
+
+
+class TestBudgetSentence:
+    def test_names_cap_spend_reset_and_where_to_change_it(self):
+        from cost.budget import budget_exceeded_sentence
+
+        line = budget_exceeded_sentence(
+            call_site="chat",
+            cap_dollars=10.0,
+            current_dollars=9.992715,
+            window="hour",
+            reset_at=1000.0 + 8 * 60,
+            now=1000.0,
+        )
+        assert line == (
+            "Hourly chat budget of $10.00 reached ($9.99 spent). "
+            "Resets in 8 minutes. Raise it in Settings > Cost."
+        )
+
+    def test_no_reset_phrase_when_the_window_already_cleared(self):
+        from cost.budget import budget_exceeded_sentence
+
+        line = budget_exceeded_sentence(
+            cap_dollars=1.0, current_dollars=2.0, reset_at=10.0, now=99.0,
+        )
+        assert "Resets in" not in line
+        assert line.endswith("Raise it in Settings > Cost.")
+
+    def test_unknown_cap_still_reports_the_spend(self):
+        from cost.budget import budget_exceeded_sentence
+
+        line = budget_exceeded_sentence(
+            call_site="chat", cap_dollars=0.0, current_dollars=4.5,
+            window="day", reset_at=0.0,
+        )
+        assert line.startswith("Daily chat budget reached ($4.50 spent).")

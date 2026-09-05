@@ -1067,6 +1067,42 @@ def _cron_target_loop(owner):
     return loop
 
 
+def _budget_reason_from_payload(payload: dict) -> str:
+    """Why a routine run was skipped, in the run history's own words.
+
+    The recorded reason is what the operator reads in the routine's run
+    list, so it has to say which cap, how much of it is spent, when it
+    clears and where to change it. "cost cap reached; routine deferred"
+    said none of that.
+    """
+    try:
+        from cost.budget import budget_exceeded_sentence
+
+        return budget_exceeded_sentence(
+            call_site=str(payload.get("call_site") or "chat"),
+            cap_dollars=float(payload.get("cap_dollars") or 0.0),
+            current_dollars=float(payload.get("current_dollars") or 0.0),
+            window=str(payload.get("window") or "hour"),
+            reset_at=float(payload.get("reset_at") or 0.0),
+        )
+    except Exception:
+        return "cost cap reached; routine skipped"
+
+
+def _cron_budget_reason(guard) -> str:
+    """The same sentence, built from a BudgetLoopGuard's own view."""
+    try:
+        return _budget_reason_from_payload({
+            "call_site": guard.call_site,
+            "cap_dollars": guard._tight_cap(),
+            "current_dollars": guard._current_spend(),
+            "window": guard._tight_window(),
+            "reset_at": guard.paused_until or guard._next_reset(),
+        })
+    except Exception:
+        return "cost cap reached; routine skipped"
+
+
 def _run_cron_coroutine(coro, owner=None):
     """Run a routine's coroutine without losing what it schedules.
 
@@ -1349,15 +1385,25 @@ def execute_routine_job(job):
             # on a daemon thread so the guard's broadcast is a no-op (no
             # running asyncio loop) — the structured log line is still emitted.
             guard = getattr(state, "cron_cost_guard", None)
+            # Estimate against the model and the token budget the turn
+            # will ACTUALLY use. The hard-coded "gpt-4o-mini" / 512 was a
+            # guess an order of magnitude under a real chat turn (the
+            # orchestrator asks for 4096), so the pre-flight cleared caps
+            # the turn then tripped from inside the provider. The routine
+            # dispatched, came back holding the raw budget error, could
+            # not deliver it (no live websocket) and was recorded as a
+            # success.
+            _llm = getattr(state.orchestrator, "llm", None)
+            _model = str(getattr(_llm, "model", "") or "gpt-4o-mini")
             if guard is not None and not guard.allow(
-                model="gpt-4o-mini",
-                estimated_max_tokens=512,
+                model=_model,
+                estimated_max_tokens=4096,
             ):
                 state.cron_service.record_run_finish(
                     run_id,
                     "skipped",
                     {},
-                    "cost cap reached; routine deferred",
+                    _cron_budget_reason(guard),
                 )
                 return
             session_id = job.session_id or f"routine-{job.id}"
@@ -1381,6 +1427,25 @@ def execute_routine_job(job):
                 ),
                 owner=state.orchestrator,
             )
+            # A turn the provider refused on cost is not a run that
+            # happened. The orchestrator records the cap it emitted for
+            # this session, which is the only signal that survives a
+            # dispatch with no websocket to deliver the banner to.
+            capped = {}
+            _pop = getattr(state.orchestrator, "pop_budget_notice", None)
+            if callable(_pop):
+                try:
+                    capped = _pop(session_id) or {}
+                except Exception:
+                    capped = {}
+            if capped:
+                state.cron_service.record_run_finish(
+                    run_id,
+                    "skipped",
+                    {"prompt": prompt, "budget_exceeded": capped},
+                    _budget_reason_from_payload(capped),
+                )
+                return
             state.cron_service.record_run_finish(run_id, "success", {"prompt": prompt}, None)
             return
 

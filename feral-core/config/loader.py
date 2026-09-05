@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -686,6 +687,95 @@ def local_timezone_name() -> str:
     return "UTC"
 
 
+# Env vars that ``ConfigLoader._apply_env_overrides`` folds into the
+# merged dict. They are part of the cache identity below because an
+# override changes the answer without touching any file on disk.
+_ENV_OVERRIDE_KEYS: tuple[str, ...] = (
+    "FERAL_HOME",
+    "FERAL_DATA_HOME",
+    "FERAL_LLM_PROVIDER",
+    "FERAL_LLM_MODEL",
+    "FERAL_LLM_BASE_URL",
+    "FERAL_LLM_DAILY_BUDGET_USD",
+    "FERAL_LLM_DAILY_SPEND_USD",
+    "FERAL_LLM_BUDGET_TIGHT_RATIO",
+    "FERAL_VISION_ENABLED",
+    "FERAL_VISION_MAX_FRAME_KB",
+    "FERAL_STREAMING",
+    "FERAL_PROACTIVE",
+    "FERAL_MULTI_AGENT",
+    "FERAL_SELF_LEARNING",
+    "FERAL_SCENE_COOLDOWN",
+    "FERAL_STT_PROVIDER",
+    "FERAL_STT_MODEL",
+    "FERAL_TTS_PROVIDER",
+    "FERAL_TTS_MODEL",
+    "FERAL_TTS_VOICE",
+    "NODE_API_KEY",
+    "FERAL_AUTONOMY",
+    "FERAL_READ_BEFORE_EDIT",
+    "FERAL_TOOL_CALL_CONTEXT",
+    "FERAL_EDIT_MAX_CONTENT_LINES",
+    "FERAL_EDIT_MAX_NEEDLE_LINES",
+    "FERAL_CHECKPOINT_DIR",
+    "FERAL_CHECKPOINT_RETENTION_DAYS",
+    "FERAL_CHECKPOINT_MAX_BLOB_BYTES",
+    "FERAL_POST_EDIT_DIAGNOSTICS",
+    "FERAL_DIAGNOSTICS_TIMEOUT",
+    "FERAL_TURN_IDLE_SECONDS",
+)
+
+_settings_cache_lock = threading.Lock()
+_settings_cache: dict | None = None
+_settings_cache_key: tuple | None = None
+
+
+def _mtime_ns(path: Path) -> int:
+    """``st_mtime_ns`` for ``path``, or 0 when it does not exist.
+
+    A missing file and an unreadable one both answer 0, which is the
+    same identity a missing file has always had: absent contributes
+    nothing to the merge, so it contributes nothing to the key either.
+    """
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def _settings_cache_identity() -> tuple:
+    """Everything that can change what ``load_settings`` returns.
+
+    Three settings files plus the env overrides. Stat calls are cheap
+    (microseconds, no keychain, no JSON parse); the point of the cache
+    is the work that follows a miss, not the stat itself.
+    """
+    home = feral_home()
+    project = Path.cwd()
+    return (
+        str(home),
+        _mtime_ns(home / "settings.json"),
+        str(project),
+        _mtime_ns(project / ".feral" / "settings.json"),
+        _mtime_ns(project / ".feral" / "settings.local.json"),
+        tuple(os.environ.get(k) for k in _ENV_OVERRIDE_KEYS),
+    )
+
+
+def clear_settings_cache() -> None:
+    """Drop the memoised ``load_settings`` result.
+
+    Called by every ConfigLoader write path. The mtime in the cache key
+    already invalidates on a write, so this is belt and braces for the
+    case where a write and a read land inside the same filesystem
+    timestamp, and it is what makes the invalidation testable.
+    """
+    global _settings_cache, _settings_cache_key
+    with _settings_cache_lock:
+        _settings_cache = None
+        _settings_cache_key = None
+
+
 def load_settings() -> dict:
     """Lightweight module-level helper that returns the merged settings
     dict from ``~/.feral/settings.json`` (+ project + env overrides).
@@ -695,13 +785,52 @@ def load_settings() -> dict:
     the encrypted vault, derives fallback providers, mirrors env
     overrides, etc.). The router's whisper-TTS fallback consults this
     to pick an alternate provider; missing settings degrade silently.
+
+    Two things make that docstring true rather than aspirational.
+
+    First, ``discover(load_credentials=False)``. The old body built a
+    full ``ConfigLoader().discover()``, which opens BlindVault and
+    reaches the macOS Keychain through ``keyring`` on a worker thread.
+    Nothing this helper returns is derived from a credential, yet the
+    audited install logged 295 keychain unlocks in one day, roughly one
+    every 16 seconds, with bursts of five inside 30 ms at boot, because
+    six per-turn and per-tick callers (``memory/store.py``,
+    ``agents/orchestrator.py``, ``agents/iteration_budget.py``,
+    ``perception/context_attach.py``, ``voice/router.py``,
+    ``cost/budget.py``) each land here.
+
+    Second, a module-level memo keyed on the identity of the inputs:
+    the three settings files' ``st_mtime_ns`` plus the env overrides.
+    An unchanged install therefore re-reads and re-parses nothing. Edit
+    a settings file, set an env var, or call
+    :func:`clear_settings_cache` and the next call rebuilds.
+
+    The cached dict is deep-copied out, so a caller that mutates what it
+    got back cannot poison the next caller's view.
     """
+    global _settings_cache, _settings_cache_key
+    try:
+        identity = _settings_cache_identity()
+    except Exception:
+        identity = None
+
+    if identity is not None:
+        with _settings_cache_lock:
+            if _settings_cache is not None and _settings_cache_key == identity:
+                return copy.deepcopy(_settings_cache)
+
     try:
         loader = ConfigLoader()
-        return loader.discover() or {}
+        merged = loader.discover(load_credentials=False) or {}
     except Exception:
         logger.debug("load_settings fallback to defaults", exc_info=True)
         return copy.deepcopy(DEFAULT_SETTINGS)
+
+    if identity is not None:
+        with _settings_cache_lock:
+            _settings_cache = copy.deepcopy(merged)
+            _settings_cache_key = identity
+    return merged
 
 
 def _merge_patch(target: dict, patch: dict) -> dict:
@@ -751,9 +880,21 @@ class ConfigLoader:
         self._credentials: dict = {}
         self._setup_complete = False
 
-    def discover(self) -> dict:
+    def discover(self, load_credentials: bool = True) -> dict:
         """
         Load and merge all config sources. Returns the merged settings dict.
+
+        Args:
+            load_credentials: When False, the encrypted vault is not
+                opened. That skips a macOS Keychain unlock (and the three
+                INFO lines it logs) on a call that only wants settings.
+                Two derived values depend on credentials and are
+                therefore also skipped: ``llm.fallback_providers`` keeps
+                whatever the files declared instead of being re-derived
+                from stored keys, and ``is_setup_complete()`` stays
+                False. Callers that read either of those must leave this
+                True. :func:`load_settings` is the caller that does not,
+                and its docstring already promised as much.
         """
         self._merged = copy.deepcopy(DEFAULT_SETTINGS)
         self._sources = []
@@ -795,18 +936,27 @@ class ConfigLoader:
         # advertises a LAN pair URL that nothing is listening on.
         self._repair_access_mode()
 
-        # Load credentials separately
-        self._load_credentials()
+        if load_credentials:
+            # Load credentials separately
+            self._load_credentials()
 
-        # Auto-derive fallback providers from stored keys if not explicitly set
-        self._merged.setdefault("llm", {})
-        self._merged["llm"]["fallback_providers"] = self._derive_fallback_providers()
+            # Auto-derive fallback providers from stored keys if not explicitly set
+            self._merged.setdefault("llm", {})
+            self._merged["llm"]["fallback_providers"] = self._derive_fallback_providers()
 
-        # Check if setup has been completed
-        self._setup_complete = self._check_setup_complete()
+            # Check if setup has been completed
+            self._setup_complete = self._check_setup_complete()
 
         sources_desc = ", ".join(s.get("_source", "?") for s in self._sources)
-        logger.info(f"Config loaded from: [{sources_desc}] | Setup complete: {self._setup_complete}")
+        if load_credentials:
+            logger.info(
+                f"Config loaded from: [{sources_desc}] | Setup complete: {self._setup_complete}"
+            )
+        else:
+            # The settings-only path runs several times per turn and per
+            # scheduler tick. At INFO it was three quarters of the boot
+            # log's noise for a line that says nothing changed.
+            logger.debug(f"Config loaded from: [{sources_desc}] (settings only)")
         return self._merged
 
     def _load_and_merge(self, path: Path, source: str):
@@ -1314,6 +1464,10 @@ class ConfigLoader:
         merged = _merge_patch(existing, settings if isinstance(settings, dict) else {})
         with open(path, "w") as f:
             json.dump(merged, f, indent=2)
+        # Every write goes through here (``update_settings`` calls it
+        # too), so this one line covers every settings writer in the
+        # process, the HTTP route included.
+        clear_settings_cache()
         logger.info(f"User settings saved to {path}")
 
     def save_credentials(self, credentials: dict):

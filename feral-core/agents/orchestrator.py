@@ -215,6 +215,9 @@ class Orchestrator:
         # Delegate sub-modules
         self.tool_runner = ToolRunner(self, approval_manager=approval_manager)
         self.context_manager = ContextManager(max_messages=15)
+        # session_id -> the last ``budget_exceeded`` payload emitted for
+        # it. Drained by ``pop_budget_notice``; see ``_emit_budget_exceeded``.
+        self._budget_notices: dict[str, dict] = {}
         # When a turn last finished, and how full the context window was
         # the last time one was built. Nothing measured either, so the
         # dashboard could not answer "when did this thing last do
@@ -2612,6 +2615,20 @@ class Orchestrator:
             logger.debug("route_call failed for tier=%s", tier, exc_info=True)
             return None
 
+    # Ceiling on how many sessions keep an undrained budget notice. The
+    # cron path drains its own on the same tick; a chat client that never
+    # asks must not grow this forever.
+    _BUDGET_NOTICE_MAX_SESSIONS = 128
+
+    def pop_budget_notice(self, session_id: str) -> dict:
+        """Consume the record of a cost cap that stopped this session's turn.
+
+        Returns the ``budget_exceeded`` payload, or an empty dict when
+        the turn was not capped. Popped rather than peeked so a later,
+        affordable run cannot be recorded as skipped on a stale entry.
+        """
+        return self._budget_notices.pop(session_id, {}) or {}
+
     async def _emit_budget_exceeded(
         self,
         *,
@@ -2644,6 +2661,17 @@ class Orchestrator:
             reset_at=float(budget.get("reset_at") or 0.0),
         )
 
+        # Recorded before the send so a caller can tell a capped turn from
+        # a completed one even if the socket is gone. That is not
+        # hypothetical: a cron-dispatched routine has no live websocket
+        # (the "undeliverable frame" warnings), and ``api/server.py``
+        # recorded every one of those runs as "success" because a turn
+        # that answers nothing and a turn refused on cost look identical
+        # from the outside.
+        self._budget_notices[session_id] = payload.model_dump()
+        if len(self._budget_notices) > self._BUDGET_NOTICE_MAX_SESSIONS:
+            self._budget_notices.pop(next(iter(self._budget_notices)), None)
+
         try:
             await self.send(
                 session_id,
@@ -2659,12 +2687,15 @@ class Orchestrator:
 
         # Friendly text so older chat clients still see a banner.
         try:
-            human = (
-                f"Cost cap reached ({payload.call_site}, "
-                f"${payload.cap_dollars:.2f}/{payload.window}). "
-                "Adjust in Settings → Cost, or wait for the cap to reset."
-            )
-            await self._send_text(session_id, human)
+            from cost.budget import budget_exceeded_sentence
+
+            await self._send_text(session_id, budget_exceeded_sentence(
+                call_site=payload.call_site,
+                cap_dollars=payload.cap_dollars,
+                current_dollars=payload.current_dollars,
+                window=payload.window,
+                reset_at=payload.reset_at,
+            ))
         except Exception:
             logger.debug("budget_exceeded follow-up text failed", exc_info=True)
 
@@ -3207,6 +3238,38 @@ class Orchestrator:
             if source != "proactive":
                 try:
                     response_text = await self._multi_agent.run(session_id, text, context)
+                    # A cost cap is not a reply. The provider's
+                    # short-circuit shape carries the error string in
+                    # ``error`` and the numbers in ``budget_exceeded``,
+                    # and this branch used to render the error string as
+                    # assistant prose, push it to working memory and
+                    # persist it: the operator's chat showed a bubble
+                    # reading "budget exceeded for chat: $9.992715 /
+                    # $10.000000 (hour, resets at 1788541200)". The
+                    # single-agent loop has emitted a structured frame
+                    # for this since WS8 and the client already renders
+                    # it with a formatted time and a Settings link. Same
+                    # treatment here, and return rather than falling
+                    # through to the single-agent loop, which would only
+                    # hit the same cap again.
+                    #
+                    # ``isinstance(..., dict)``, not merely truthy: a
+                    # MagicMock multi-agent answers every attribute and
+                    # returns a truthy MagicMock from every call, so a
+                    # bare truth test would report a cost cap on every
+                    # turn in every test that mocks this collaborator.
+                    # The same trap already bit ``_gate_tool_call``.
+                    budget_block = {}
+                    _pop = getattr(self._multi_agent, "pop_budget_block", None)
+                    if callable(_pop):
+                        _popped = _pop(session_id)
+                        if isinstance(_popped, dict):
+                            budget_block = _popped
+                    if budget_block:
+                        await self._emit_budget_exceeded(
+                            session_id=session_id, budget=budget_block,
+                        )
+                        return
                     if response_text:
                         # Attribution for the multi-agent turn. This branch
                         # runs BEFORE the single-agent loop and returns, so
