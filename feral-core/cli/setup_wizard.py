@@ -1121,7 +1121,7 @@ class OnboardWizard:
             "[bold]Step 6 · Tool API Keys (Optional)[/]\n"
             "[dim]These unlock extra capabilities. Skip any you don't need — \n"
             "FERAL works without them (falls back to free alternatives).\n"
-            "Your LLM key (if OpenAI) already enables DALL-E image generation.[/]",
+            "Your LLM key (if OpenAI) already enables image generation (GPT image models).[/]",
             style="blue",
         ))
 
