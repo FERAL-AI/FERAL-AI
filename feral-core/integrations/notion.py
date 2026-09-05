@@ -54,7 +54,7 @@ class NotionIntegration:
         ``Authorization: Bearer `` with nothing after the space. httpx
         rejects that header before the request leaves the process, so
         every Notion endpoint answered with ``Illegal header value
-        b'Bearer '`` — a message about header encoding for what is
+        b'Bearer '``, a message about header encoding for what is
         simply an integration nobody has authorised. ``microsoft365``
         already gets this right (``_headers`` returns None and each
         method answers "Not connected to Microsoft 365"); this is the

@@ -301,6 +301,8 @@ class AgentWorker:
             NO_PROGRESS_WARNING,
             resolve_max_tool_iterations,
             resolve_tool_loop_max_seconds,
+            unavailable_tool_notice,
+            withdrawn_tool_refusal,
         )
         budget = IterationBudget(
             resolve_max_tool_iterations(), resolve_tool_loop_max_seconds()
@@ -312,6 +314,13 @@ class AgentWorker:
         no_progress_warned = False
 
         while budget.start_iteration():
+            # Withdraw any tool the precondition guard has written off for
+            # this turn. This path calls SkillExecutor directly and never
+            # reaches ToolRunner's anti-loop block, which is how
+            # cutebot__set_lights got 46 calls against a disconnected
+            # robot: the args changed every time, so both arg-keyed
+            # streaks kept resetting. See agents/iteration_budget.py.
+            tools = budget.filter_tools(tools)
             try:
                 forced_tool = None
                 if self._orchestrator is not None:
@@ -399,6 +408,16 @@ class AgentWorker:
                                     _gate = self._gate_tool_call(
                                         tc["name"], tc.get("args") or {}, session_id
                                     )
+                                    # Removing a withdrawn tool from the
+                                    # list is advisory; a model can name a
+                                    # tool it was not given. ToolRunner
+                                    # blocks that on the orchestrator path
+                                    # and this path never reaches it.
+                                    if _gate is None and tc["name"] in budget.unavailable_tools:
+                                        _gate = withdrawn_tool_refusal(
+                                            tc["name"],
+                                            budget.unavailable_tools[tc["name"]],
+                                        )
                                     if _gate is not None:
                                         result = _gate
                                     else:
@@ -484,6 +503,15 @@ class AgentWorker:
                                         messages.append({
                                             "role": "system",
                                             "content": NO_PROGRESS_WARNING,
+                                        })
+                                    for _dead, _why in (
+                                        budget.take_unannounced_unavailable()
+                                    ):
+                                        messages.append({
+                                            "role": "system",
+                                            "content": unavailable_tool_notice(
+                                                _dead, _why,
+                                            ),
                                         })
                     if final_answer_only:
                         messages.append({"role": "system", "content": NO_PROGRESS_GUIDANCE})

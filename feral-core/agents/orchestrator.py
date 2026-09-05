@@ -3386,6 +3386,7 @@ class Orchestrator:
             IterationBudget,
             NO_PROGRESS_GUIDANCE,
             NO_PROGRESS_WARNING,
+            unavailable_tool_notice,
         )
         budget = IterationBudget(self._max_iterations, self._tool_loop_max_seconds)
         # Set only by the guard's STOP level: tools are withdrawn and the
@@ -3460,6 +3461,12 @@ class Orchestrator:
             self._note_agent_round(session_id)
             self._maybe_prune_tool_images(session_id)
             messages = self._materialize_tool_images(session_id, messages)
+            # Withdraw any tool the precondition guard has written off
+            # for this turn. Rebound once per round so every ``tools if
+            # tools else None`` below this point sees the same list, and
+            # so a tool withdrawn on round 3 is genuinely absent from
+            # round 4 rather than merely discouraged in prose.
+            tools = budget.filter_tools(tools)
 
             try:
                 model_name = getattr(self.llm, 'model_name', 'llm')
@@ -3751,6 +3758,17 @@ class Orchestrator:
                     anti_loop_guidance = result_data.get("_anti_loop_guidance")
                     if anti_loop_guidance:
                         history.append({"role": "system", "content": anti_loop_guidance})
+
+                    # A tool whose PRECONDITION keeps failing is dropped
+                    # from the next round's list and named once. Unlike
+                    # the streaks above this ignores arguments, because
+                    # no argument connects a robot. See
+                    # agents/iteration_budget.py.
+                    for _dead_tool, _dead_why in budget.take_unannounced_unavailable():
+                        history.append({
+                            "role": "system",
+                            "content": unavailable_tool_notice(_dead_tool, _dead_why),
+                        })
 
                     if (
                         tc["name"].startswith("messaging_channels__send")
@@ -4056,6 +4074,7 @@ class Orchestrator:
             IterationBudget,
             NO_PROGRESS_GUIDANCE,
             NO_PROGRESS_WARNING,
+            unavailable_tool_notice,
         )
         budget = IterationBudget(self._max_iterations, self._tool_loop_max_seconds)
         # Only the guard's STOP level withdraws tools; see the
@@ -4074,6 +4093,12 @@ class Orchestrator:
             self._note_agent_round(session_id)
             self._maybe_prune_tool_images(session_id)
             messages = self._materialize_tool_images(session_id, messages)
+            # Withdraw any tool the precondition guard has written off
+            # for this turn. Rebound once per round so every ``tools if
+            # tools else None`` below this point sees the same list, and
+            # so a tool withdrawn on round 3 is genuinely absent from
+            # round 4 rather than merely discouraged in prose.
+            tools = budget.filter_tools(tools)
             stream_id = str(uuid4())[:8]
             accumulated_text = ""
             streamed_text = False
@@ -4398,6 +4423,13 @@ class Orchestrator:
                     anti_loop_guidance = result_data.get("_anti_loop_guidance")
                     if anti_loop_guidance:
                         history.append({"role": "system", "content": anti_loop_guidance})
+
+                    # Mirrors the non-streaming path; see the comment there.
+                    for _dead_tool, _dead_why in budget.take_unannounced_unavailable():
+                        history.append({
+                            "role": "system",
+                            "content": unavailable_tool_notice(_dead_tool, _dead_why),
+                        })
 
                     await self._try_genui_for_result(session_id, tc, result_data)
 
