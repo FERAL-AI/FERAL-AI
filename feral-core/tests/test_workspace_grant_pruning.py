@@ -333,10 +333,43 @@ class TestTheGuard:
         target.write_text("{}")
         assert grants_fingerprint(target) == grants_fingerprint(target)
 
+    @staticmethod
+    def _fixture_marker(fixture):
+        """The FixtureFunctionMarker behind a @pytest.fixture, any version.
+
+        pytest moved this. Through 8.x, ``@pytest.fixture`` returned the
+        plain function with the marker attached as
+        ``_pytestfixturefunction``. From 9.x it returns a
+        ``FixtureFunctionDefinition`` carrying
+        ``_fixture_function_marker`` instead. Both hold the same
+        ``FixtureFunctionMarker`` with ``.scope`` and ``.autouse``.
+
+        Verified by construction on pytest 8.3.3 and 9.1.1 rather than
+        inferred, because this test previously read only the 8.x name and
+        so passed on a maintainer's laptop while failing CI with
+        ``AttributeError: 'FixtureFunctionDefinition' object has no
+        attribute '_pytestfixturefunction'``.
+
+        Raises rather than skipping when neither name is present: a
+        version that exposes neither has moved the internals again, and
+        the honest outcome is a loud failure telling the next person to
+        look, not a green run that has quietly stopped checking.
+        """
+        for attr in ("_pytestfixturefunction", "_fixture_function_marker"):
+            marker = getattr(fixture, attr, None)
+            if marker is not None:
+                return marker
+        raise AssertionError(
+            "cannot read the fixture marker off "
+            f"{type(fixture).__name__}; pytest has moved it again. Tried "
+            "_pytestfixturefunction (pytest <= 8) and "
+            "_fixture_function_marker (pytest >= 9)."
+        )
+
     def test_the_suite_wide_fixture_is_session_scoped_and_autouse(self):
         """A per-test check would be too slow and would name the wrong
         test anyway; the leak is only visible across a whole run."""
         from tests import conftest
-        marker = conftest.real_workspace_grants_untouched._pytestfixturefunction
+        marker = self._fixture_marker(conftest.real_workspace_grants_untouched)
         assert marker.scope == "session"
         assert marker.autouse is True
