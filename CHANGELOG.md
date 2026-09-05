@@ -49,6 +49,213 @@ All notable changes to FERAL are documented here.
   word is a disfluency or verb of thinking (know, think, really, mean,
   remember, get, understand, see, guess) or when it is a single word.
   "I don't eat pork, it makes me sick" still yields "Does not: eat pork".
+- **Tool traces survive a reload.** The web client flattened every
+  message to `{id, role, content}` before the 450 ms autosave, so the
+  `tools`, `reasoning`, `timeline`, `notice`, `attachments`, `model` and
+  `usage` fields were discarded at write time. A turn that ran seven
+  tools was stored on the operator's brain with three fields, and the
+  loss was already permanent by the time anyone reloaded. The renderer
+  had been fixed for exactly this a release earlier and its docstring
+  said so; the save path was never changed to match. It now spreads the
+  row and overrides only the three fields it owns.
+- **Image generation works again.** Every request failed with `OpenAI
+  images error 400: Unknown parameter: 'response_format'`. The skill
+  sent `model: dall-e-3` with `response_format: b64_json` and `style`,
+  which was the documented shape for that model; OpenAI now rejects the
+  parameter, and the GPT image models never accepted it or `style`. The
+  body is `model`, `prompt`, `n`, `size`, the default is `gpt-image-1.5`
+  (override with `FERAL_IMAGE_MODEL`), and the old landscape and
+  portrait sizes map onto their GPT-image equivalents so a caller
+  written against the previous manifest keeps its orientation. A later
+  catalog refresh confirmed the diagnosis independently: `dall-e-2` and
+  `dall-e-3` are no longer served at all.
+- **Responses-only models stop being sent to /chat/completions.** When
+  OpenAI was a failover candidate, or when the primary fell through from
+  the Responses API, a `gpt-5.6-sol` request carrying tools was posted
+  to `/chat/completions` with `reasoning_effort` set, which OpenAI
+  refuses: "Function tools with reasoning_effort are not supported". The
+  endpoint guard existed but only on the primary non-streaming path.
+  Both `_call_provider` branches and both fall-throughs now consult it.
+  Present in the logs on eleven separate days.
+- **Provider failures are delivered as errors, not as the assistant's
+  answer.** `extract_response` returned the error string in the text
+  slot, so `HTTP 400 - invalid_request_error, param=reasoning_effort...`
+  was rendered as a chat bubble, written to the transcript, and fed back
+  as context on later turns. Eleven callers were updated; the failure
+  now travels as an error frame, which the client already knew how to
+  draw.
+- **A single email lookup could freeze the whole brain.** `email
+  __get_unread_count` opens `imaplib.IMAP4_SSL` with no timeout and ran
+  it on the event loop, so one call stalled every request for 181
+  seconds on the operator's machine, including chat, voice and the
+  phone. The five IMAP paths now run through `asyncio.to_thread` with a
+  15 second socket timeout, and `SkillExecutor.execute` wraps every tool
+  in `asyncio.wait_for` with a 30 second default that manifests may
+  raise, returning a 504 envelope rather than hanging.
+- **Credentials no longer reach the log file.** The root logger was set
+  to INFO, and httpx logs every request URL at INFO, so the Telegram bot
+  token and the Gemini API key were written in clear text on every call:
+  5,983 and 1,857 lines respectively in one 44 MB log, world readable at
+  0644. httpx, httpcore and the websockets loggers are now at WARNING, a
+  redaction filter covers `/bot<token>`, `key=`, `token=`,
+  `access_token=`, `api_key=` and `Authorization: Bearer`, and the log
+  directory and files are created 0700 and 0600. Existing logs are not
+  rewritten: rotate any credential that has already been recorded.
+- **Peer sync stops dialling a dead peer forever.** The backoff computed
+  `initial * 2 ** (failures - 1)`, which raises `OverflowError` past
+  about 1,024 consecutive failures. The exception escaped the failure
+  bookkeeping, so `backoff_until` never advanced and the peer was dialled
+  every 30 seconds indefinitely. The exponent is clamped, the bookkeeping
+  cannot be aborted by a metrics error, fan-out is bounded by a
+  semaphore, a peer is evicted after 20 consecutive failures, and the
+  `/sync` handshake read has a 10 second timeout so an idle client cannot
+  hold a handler open.
+- **Dollar amounts render as text, not as mathematics.** `remark-math`
+  ran with single-dollar parsing on, so "$5 billion ... $550 million"
+  became one italic KaTeX expression, as did the cost banner's
+  "$9.99 / $10.00".
+- **Opening a thread lands on the newest message.** The chat log left
+  itself at the top of a 6,480 pixel transcript, so the page opened on a
+  conversation from days earlier and a reply just sent was six screens
+  down, which reads as "my message did not send". The follow-the-tail
+  effect could not do this: it runs after paint and asks for a smooth
+  scroll, which loses a race against the markdown and tool cards below
+  it growing the scroll height. A layout effect now sets the position
+  before paint, once per conversation.
+- **"Running now" no longer reports 0 active above five rows.** The
+  header counted only `running` and `connected`, while routines are
+  `scheduled` and specialists are `ready`. It now says what it lists,
+  and a routine shows its next run rather than its age, which had been
+  rendering as "scheduled, 1722h 29m".
+- **The cost readout is the real one.** The header read
+  `budget.daily_spend_usd` from a static config default that nothing
+  ever wrote, so it showed $0.00 while $9.99 of a $10 hourly cap had
+  been spent. It now reads the ledger the enforcer itself uses.
+- **A cost cap reads like a cost cap.** Hitting the hourly limit
+  produced an assistant message reading `budget exceeded for chat:
+  $9.992715 / $10.000000 (hour, resets at 1788541200)`, stored in the
+  transcript. It is now a structured frame the client already knew how
+  to draw, naming the cap, the spend, the minutes until reset and where
+  to change it, and it is not persisted as something the assistant said.
+- **The default chat path knows who it is and what day it is.** Every
+  ordinary turn routes through the multi-agent worker, which returned
+  before the system prompt was built, so the model never saw the agent
+  name, the IDENTITY rules, SOUL, MEMORY, About-Me or the current time,
+  and no prior turn was replayed. It answered a scheduling request with
+  a date in 2023 and could not remember the previous message. The worker
+  now receives the identity header and a bounded history window, with
+  static text first and volatile text last so the prompt cache has a
+  stable prefix.
+- **Tools that cannot run are no longer offered.** 79 of 266 tool
+  schemas failed deterministically at call time because a key, an OAuth
+  connection, Docker or a USB device was absent. The model tried them,
+  failed, and sometimes told the operator the brain was incapable. A
+  network-free availability gate now withholds them and names what is
+  off and why in the system prompt, so "Email is not connected" is
+  sayable instead of "I cannot do email". `FERAL_OFFER_UNAVAILABLE_TOOLS=1`
+  restores the old behaviour.
+- **The Responses API request is capped like the chat one.** The
+  128-tool cap existed only on `/chat/completions`, so the model that
+  actually serves chat received all 266 schemas, measured at 32,391
+  tokens, 97 percent of every request before a word of conversation.
+  Measured after: 19,893 input tokens per turn.
+- **A routine that fails the same way forever now stops.** The
+  no-progress guard reset its streak whenever the arguments changed, and
+  its warning told the model to change them, so a nightly routine called
+  `cutebot__set_lights` 46 times against a disconnected robot, walking
+  the colour down one value at a time. A per-tool streak of precondition
+  failures now withdraws the tool for the rest of the turn regardless of
+  arguments.
+- **Restarting the brain is not an event.** The morning briefing was
+  gated on an in-memory flag, so every restart re-delivered it; the
+  delivered date now lives in `~/.feral/proactive_state.json`. Boot
+  catch-up ran any routine missed within a day, so "spin the CuteBot at
+  9 PM" ran at 08:41 the next morning; a routine that names a time of
+  day is now only caught up inside a one hour grace
+  (`FERAL_CATCHUP_GRACE_SECONDS`) and is otherwise re-armed and
+  reported, while interval routines are unchanged.
+- **`feral doctor` checks what wrote the stored vectors.** It reported
+  the live embedding provider and never asked what had written the
+  vectors already in the store. On the operator's brain, 312 of 334
+  entities held 1536d vectors while the provider was 384d, so 93 percent
+  of the knowledge graph was unreachable by semantic search and the
+  graph had degraded to keyword-only, under a green tick. The only other
+  symptom was one line naming a failed numpy reshape. Doctor now scans
+  the store and names the count, the widths, the tier that lost semantic
+  search, and the remedy.
+- **Vision stops hammering an unreachable provider.** With Ollama down,
+  the scene loop logged an error every 16 seconds and still recorded a
+  token reservation for every failed call. It now backs off after three
+  consecutive connection failures, warns once per step, and records no
+  cost when no description was produced.
+- **Skills that only read are no longer held for confirmation.** Fifteen
+  read-only endpoints across five manifests lacked `read_only_hint`, so
+  the resolver's legacy default asked for approval before answering a
+  question.
+- **Notion and Home Assistant fail honestly.** Notion sent
+  `Authorization: Bearer ` with an empty token and raised "Illegal
+  header value"; Home Assistant spent five seconds resolving a default
+  hostname that does not exist. Both now say they are not configured.
+- **Settings and the keychain are read once, not on every turn.**
+  `load_settings` built a fresh loader on each call, re-read both
+  settings files and unlocked the vault through the macOS keychain,
+  295 times in one day. It is cached on file mtime and no longer loads
+  credentials it never used.
+
+### Changed
+
+- **`websockets` floor raised to 14.0 for feral-core.** The range
+  allowed 13.x, where `websockets.connect` resolves to the legacy client
+  and the awaited result is a `WebSocketClientProtocol` with no
+  `__aenter__`. `memory/sync.py` awaits the connect and then enters it,
+  so on 13.x every brain-to-brain sync attempt failed with "does not
+  support the asynchronous context manager protocol" while chat, which
+  never touches that path, looked healthy. Measured across 13.1, 14.0,
+  14.2 and 15.0.1. The node SDKs keep their lower floors: they enter the
+  connect object directly, which works on both implementations.
+- **The bundled model catalog was refreshed** for the first time since
+  2026-07-30, moving 137 ids. OpenAI retired `dall-e-2`, `dall-e-3`,
+  `o3-pro`, `o3-deep-research` and the `gpt-4o` audio and realtime
+  preview line, and added the `gpt-realtime-2` family. Three ids new to
+  the account classified as unknown and were therefore eligible to be
+  sent to `/chat/completions`: `gpt-transcribe` and `gpt-live-transcribe`
+  are audio, `chatgpt-image-latest` is an image model.
+- **Modal sheets no longer black out the page behind them.** The
+  backdrop was `rgba(0,0,0,.45)` with a 24 pixel blur, which on the dark
+  theme rendered everything behind a skill sheet as one flat slab.
+- **Per-turn token counts say what they are.** A turn's footer showed
+  the sum across every LLM round in that turn, so an eight round turn
+  read "241,240 tokens" beside a 12.5k context indicator. It now says
+  the total is across all rounds.
+- **A brain restart no longer toasts its own startup.** Six client calls
+  raced the brain coming back and surfaced "Failed to fetch" and a bare
+  503 as global errors, though each already had a local fallback.
+
+### Added
+
+- **`gpt-6-astra` is known before it reaches an account.** Released
+  2026-09-03 and not yet visible on this operator's key. Classified as a
+  reasoning model and routed to `/v1/responses`, priced from the model
+  page ($10 in, $1 cached, $50 out per 1M; 1,050,000 context). It is
+  recommended but ranked below `gpt-5.6-sol` on purpose, because
+  `default_model_for` takes the top of that list and astra costs twice
+  as much per token. Not verified against a live call.
+- **OpenAI cached tokens are billed at the cached rate.** The usage
+  parser read only Anthropic's cache fields, so cached input was charged
+  at the full rate, roughly ten times its real cost on `gpt-5.6-sol`.
+  Responses requests now also carry a `prompt_cache_key`.
+
+### Packaging
+
+- **Four packages that the runtime imports were missing from the
+  wheel.** `migrations`, `process`, `system` and `bridges` are in the
+  source tree and imported by `api/server.py`, `cli/main.py`,
+  `skills/impl/coding_tools.py` and the memory store, but were absent
+  from the setuptools include list, so every pip install logged
+  "migration pass failed; continuing boot" and never ran a single
+  `~/.feral` migration. A test now fails if any top-level package that
+  product code imports is not shipped, or if one is neither included nor
+  deliberately excluded.
 
 ## [2026.9.2] - 2026-09-02 - two brains that share only what you named
 
