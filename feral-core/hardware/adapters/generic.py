@@ -1,6 +1,6 @@
 """Generic self-describing HUP adapter — one adapter per *transport*.
 
-The whole point of the Hardware Use Protocol is that the brain should learn a
+The whole point of the Hardware Unification Protocol is that the brain should learn a
 device from the device, not from hand-written per-device code. The CuteBot
 adapter proved the manifest half of that (``QtBot.capabilities()['actions']``
 → ``DeviceManifest`` → generic LLM tools + safety + honesty loop). This module

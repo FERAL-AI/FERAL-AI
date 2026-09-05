@@ -7,7 +7,7 @@ slug: /guides/hardware
 
 # Hardware Mesh Protocol
 
-FERAL controls physical devices through the **Hardware Use Protocol (HUP)** — a generic, self-describing hardware hub. Devices declare what they can do via an `actions[]` envelope; the brain converts that into a `DeviceManifest`, registers a transport adapter, auto-generates LLM tools, and runs a closed-loop **honesty loop** when capabilities declare a `verify` contract. Communication stays local-first over USB, WebSocket mesh, or phone-bridged BLE.
+FERAL controls physical devices through the **Hardware Unification Protocol (HUP)** — a generic, self-describing hardware hub. Devices declare what they can do via an `actions[]` envelope; the brain converts that into a `DeviceManifest`, registers a transport adapter, auto-generates LLM tools, and runs a closed-loop **honesty loop** when capabilities declare a `verify` contract. Communication stays local-first over USB, WebSocket mesh, or phone-bridged BLE.
 
 ## HUP Overview
 

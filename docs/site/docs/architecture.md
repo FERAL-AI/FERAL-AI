@@ -40,7 +40,7 @@ flowchart TD
     tools["Tools + Skills"]
     mcp_s["MCP Server / Client"]
     ch_mgr["Channel Manager"]
-    hup["Hardware Use Protocol (HUP)"]
+    hup["Hardware Unification Protocol (HUP)"]
   end
 
   web --> orch
@@ -119,7 +119,7 @@ For provider surfaces, a JSON contract defines layout, brand tokens, and endpoin
 - **Tools & Skills** — computer use (shell, files, grep), web search, browser automation, custom JSON manifests, Python plugins, WASM sandboxed skills.
 - **MCP** — dual-role: expose FERAL's tools as an MCP server, and consume external MCP servers.
 - **Channels** — bridge to Telegram, Discord, Slack, WhatsApp.
-- **HUP (Hardware Use Protocol)** — devices connect via WebSocket, register with a declarative manifest, stream telemetry, and receive commands.
+- **HUP (Hardware Unification Protocol)** — devices connect via WebSocket, register with a declarative manifest, stream telemetry, and receive commands.
 
 ### Security
 

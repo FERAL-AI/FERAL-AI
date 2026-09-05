@@ -139,7 +139,7 @@ def seed_demo_memory(memory_store):
         ("Alex", "lives_in", "San Francisco"),
         ("Feral", "is_a", "AI operating system"),
         ("Feral", "ships_with", "registry.feral.sh marketplace"),
-        ("Feral", "has_feature", "Hardware Use Protocol"),
+        ("Feral", "has_feature", "Hardware Unification Protocol"),
         ("Feral", "has_feature", "4-tier memory"),
         ("Feral", "has_feature", "GenUI"),
         ("Feral", "has_feature", "self-learning skills"),

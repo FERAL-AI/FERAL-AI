@@ -1,5 +1,5 @@
 """
-HUPDevice — Base class for FERAL Hardware Use Protocol device adapters.
+HUPDevice — Base class for FERAL Hardware Unification Protocol device adapters.
 
 Create device adapters that connect physical hardware (wristbands, robots,
 smart home devices) to the FERAL Brain via the HUP mesh.
@@ -28,7 +28,7 @@ logger = logging.getLogger("feral.sdk.device")
 
 
 class HUPDevice:
-    """Base class for Hardware Use Protocol device adapters.
+    """Base class for Hardware Unification Protocol device adapters.
 
     Subclass this to create a device adapter. The adapter connects to
     the Brain's hardware mesh and receives/sends HUP messages.
