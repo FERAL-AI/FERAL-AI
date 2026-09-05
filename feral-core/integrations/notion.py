@@ -19,6 +19,11 @@ logger = logging.getLogger("feral.integrations.notion")
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
 
+NOT_CONNECTED_ERROR = (
+    "Not connected to Notion. Authorise it in Settings > Integrations, "
+    "or set NOTION_TOKEN to an internal integration token."
+)
+
 
 class NotionIntegration:
     """
@@ -31,11 +36,44 @@ class NotionIntegration:
         self._token = os.getenv("NOTION_TOKEN", "")
         self._http: Optional[httpx.AsyncClient] = None
 
-    async def _ensure_client(self):
-        if self._http is None:
-            token = self._token
-            if not token and self._oauth:
+    async def _resolve_token(self) -> str:
+        """The Notion token, from the env override or the OAuth manager."""
+        token = self._token
+        if not token and self._oauth:
+            try:
                 token = await self._oauth.get_token("notion") or ""
+            except Exception as exc:
+                logger.debug("Notion token lookup failed: %s", exc)
+                token = ""
+        return token or ""
+
+    async def _ensure_client(self) -> Optional[dict]:
+        """Ready the HTTP client, or return a "not connected" envelope.
+
+        With no token this used to build a client anyway and send
+        ``Authorization: Bearer `` with nothing after the space. httpx
+        rejects that header before the request leaves the process, so
+        every Notion endpoint answered with ``Illegal header value
+        b'Bearer '``, a message about header encoding for what is
+        simply an integration nobody has authorised. ``microsoft365``
+        already gets this right (``_headers`` returns None and each
+        method answers "Not connected to Microsoft 365"); this is the
+        same shape.
+
+        The client is also no longer built once and kept forever with a
+        token baked into its headers: authorising Notion after the first
+        call would otherwise leave the stale header in place for the
+        life of the process.
+        """
+        token = await self._resolve_token()
+        if not token:
+            return {
+                "success": False,
+                "status_code": 401,
+                "data": None,
+                "error": NOT_CONNECTED_ERROR,
+            }
+        if self._http is None:
             self._http = httpx.AsyncClient(
                 base_url=NOTION_API,
                 headers={
@@ -45,6 +83,9 @@ class NotionIntegration:
                 },
                 timeout=15.0,
             )
+        else:
+            self._http.headers["Authorization"] = f"Bearer {token}"
+        return None
 
     @property
     def connected(self) -> bool:
@@ -81,7 +122,9 @@ class NotionIntegration:
         return await fn(**args)
 
     async def search_pages(self, query: str = "", **kwargs) -> dict:
-        await self._ensure_client()
+        guard = await self._ensure_client()
+        if guard is not None:
+            return guard
         try:
             body = {"query": query, "page_size": 10}
             resp = await self._http.post("/search", json=body)
@@ -103,7 +146,9 @@ class NotionIntegration:
             return {"success": False, "error": str(e)}
 
     async def read_page(self, page_id: str = "", **kwargs) -> dict:
-        await self._ensure_client()
+        guard = await self._ensure_client()
+        if guard is not None:
+            return guard
         try:
             page_resp = await self._http.get(f"/pages/{page_id}")
             page_resp.raise_for_status()
@@ -130,7 +175,9 @@ class NotionIntegration:
             return {"success": False, "error": str(e)}
 
     async def create_page(self, parent_id: str = "", title: str = "", content: str = "", **kwargs) -> dict:
-        await self._ensure_client()
+        guard = await self._ensure_client()
+        if guard is not None:
+            return guard
         try:
             children = self._text_to_blocks(content) if content else []
             body = {
@@ -157,7 +204,9 @@ class NotionIntegration:
             return {"success": False, "error": str(e)}
 
     async def update_page(self, page_id: str = "", properties: dict = None, **kwargs) -> dict:
-        await self._ensure_client()
+        guard = await self._ensure_client()
+        if guard is not None:
+            return guard
         try:
             body = {}
             if properties:
@@ -169,7 +218,9 @@ class NotionIntegration:
             return {"success": False, "error": str(e)}
 
     async def query_database(self, database_id: str = "", filter: dict = None, sorts: list = None, **kwargs) -> dict:
-        await self._ensure_client()
+        guard = await self._ensure_client()
+        if guard is not None:
+            return guard
         try:
             body = {"page_size": 20}
             if filter:
@@ -193,7 +244,9 @@ class NotionIntegration:
             return {"success": False, "error": str(e)}
 
     async def create_database_entry(self, database_id: str = "", properties: dict = None, **kwargs) -> dict:
-        await self._ensure_client()
+        guard = await self._ensure_client()
+        if guard is not None:
+            return guard
         try:
             body = {
                 "parent": {"database_id": database_id},

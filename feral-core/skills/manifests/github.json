@@ -179,7 +179,8 @@
             "description": "Get the authenticated user's GitHub profile info.",
             "params": [],
             "returns_description": "{login, name, avatar_url, bio, public_repos, followers, following}",
-            "ui_hint": "detail_card"
+            "ui_hint": "detail_card",
+            "read_only_hint": true
         },
         {
             "id": "notifications",
@@ -196,7 +197,8 @@
                 }
             ],
             "returns_description": "Array of {subject, reason, updated_at, repository}",
-            "ui_hint": "list"
+            "ui_hint": "list",
+            "read_only_hint": true
         }
     ],
     "flows": [],

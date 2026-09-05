@@ -191,9 +191,14 @@ class TestHomeAssistant:
         assert result["success"] is False
 
     @pytest.mark.asyncio
-    async def test_get_states_mocked(self):
+    async def test_get_states_mocked(self, monkeypatch):
         from integrations.home_assistant import HomeAssistantIntegration
 
+        # A token, because an unconfigured Home Assistant now short-circuits
+        # before any HTTP: the default host is homeassistant.local, and a
+        # call to it costs 5s of DNS and returns errno 8. See
+        # tests/test_unconfigured_integrations_answer_plainly.py.
+        monkeypatch.setenv("HA_TOKEN", "llat_test")
         ha = HomeAssistantIntegration()
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
@@ -233,9 +238,10 @@ class TestHomeAssistant:
         assert events_received[0]["data"]["entity_id"] == "light.kitchen"
 
     @pytest.mark.asyncio
-    async def test_ha_discover_capabilities_mocked(self):
+    async def test_ha_discover_capabilities_mocked(self, monkeypatch):
         from integrations.home_assistant import HomeAssistantIntegration
 
+        monkeypatch.setenv("HA_TOKEN", "llat_test")
         ha = HomeAssistantIntegration()
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
@@ -299,9 +305,13 @@ class TestNotion:
         assert result["success"] is False
 
     @pytest.mark.asyncio
-    async def test_search_pages_mocked(self):
+    async def test_search_pages_mocked(self, monkeypatch):
         from integrations.notion import NotionIntegration
 
+        # A token, because Notion with none now answers "Not connected"
+        # instead of sending ``Authorization: Bearer `` and getting
+        # "Illegal header value b'Bearer '" back from httpx.
+        monkeypatch.setenv("NOTION_TOKEN", "secret_test")
         n = NotionIntegration()
         resp = MagicMock()
         resp.raise_for_status = MagicMock()

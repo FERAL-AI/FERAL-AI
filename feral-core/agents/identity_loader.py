@@ -538,13 +538,25 @@ class IdentityLoader:
         # "Relevant skills: ..." line with a detailed enumeration so
         # the LLM can see which tools are live AND which exist at all.
         try:
-            from agents.self_model import build_tooling_catalog, build_ui_route_map, build_runtime_line
+            from agents.self_model import (
+                build_availability_note,
+                build_runtime_line,
+                build_tooling_catalog,
+                build_ui_route_map,
+            )
             tooling_block = build_tooling_catalog(
                 active=skills or [],
                 full=full_catalog or skills or [],
             )
             if tooling_block:
                 prompt += f"\n{tooling_block}\n"
+            # Names the capabilities whose tools were withheld this turn
+            # because their prerequisite is absent, so the model answers
+            # "Email is not connected" rather than calling a tool that
+            # can only fail. See skills/availability.py.
+            availability_line = build_availability_note()
+            if availability_line:
+                prompt += f"\n{availability_line}\n"
             prompt += f"\n{build_ui_route_map()}\n"
             prompt_runtime_line = build_runtime_line(frame)
         except Exception as exc:

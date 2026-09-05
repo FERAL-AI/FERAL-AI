@@ -65,7 +65,8 @@
       ],
       "returns_description": "Object with frame_id, resolution, data_b64 (JPEG), encoding, and scene_description (natural-language summary).",
       "ui_hint": "detail_card",
-      "emit_result_preview": true
+      "emit_result_preview": true,
+      "read_only_hint": true
     }
   ],
   "flows": [],

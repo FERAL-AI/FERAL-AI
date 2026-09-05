@@ -268,6 +268,7 @@ class ScreenLoop:
         self._capture_count = 0
         self._error_count = 0
         self._blind_ticks = 0
+        self._vision_unreachable_skips = 0
         self._last_description = ""
         self._tmp_path = Path(f"/tmp/feral_screen_loop_{id(self)}.png")
 
@@ -292,6 +293,17 @@ class ScreenLoop:
             "budget_pauses": self._budget_pause_count,
             "budget_paused": bool(
                 self._cost_guard and self._cost_guard.is_paused
+            ),
+            # Ticks skipped because the vision provider is unreachable
+            # and inside its backoff. Distinct from ``blind_ticks``,
+            # which means "we called and got nothing back": this means
+            # "we did not call, and here is why".
+            "vision_unreachable_skips": self._vision_unreachable_skips,
+            "vision_provider": (
+                self._scene_analyzer.provider_health
+                if self._scene_analyzer is not None
+                and hasattr(self._scene_analyzer, "provider_health")
+                else {}
             ),
         }
 
@@ -355,21 +367,34 @@ class ScreenLoop:
         description: Optional[str] = None
         detected: Optional[list[str]] = None
 
-        if self._scene_analyzer and self._scene_analyzer.available:
-            encoding = "jpeg" if mime == "image/jpeg" else "png"
-            # A6 — periodic ticks MUST respect the SceneAnalyzer
-            # cooldown. The previous ``force=True`` bypassed the
-            # cooldown on every tick, so a 10s cooldown + 8s tick
-            # interval still issued a vision-model call every 8s.
-            # The cooldown is operator-tunable via
-            # ``FERAL_SCENE_COOLDOWN`` / ``vision.scene_cooldown``;
-            # letting it apply here is the whole point of that knob.
-            result = await self._scene_analyzer.analyze_frame(
-                image_b64, encoding=encoding, node_id=self._session_id,
-            )
-            if result:
-                description = result.get("scene_description")
-                detected = result.get("detected_objects")
+        # ``configured`` rather than ``available``: a SceneAnalyzer whose
+        # provider is inside its unreachable backoff window is still THE
+        # vision path for this install. Branching on ``available`` here
+        # would silently fall through to the shared LLM below and start
+        # billing the operator's chat provider for screen frames the
+        # moment their local Ollama went down.
+        scene = self._scene_analyzer
+        if scene is not None and getattr(scene, "configured", scene.available):
+            if scene.available:
+                encoding = "jpeg" if mime == "image/jpeg" else "png"
+                # A6 — periodic ticks MUST respect the SceneAnalyzer
+                # cooldown. The previous ``force=True`` bypassed the
+                # cooldown on every tick, so a 10s cooldown + 8s tick
+                # interval still issued a vision-model call every 8s.
+                # The cooldown is operator-tunable via
+                # ``FERAL_SCENE_COOLDOWN`` / ``vision.scene_cooldown``;
+                # letting it apply here is the whole point of that knob.
+                result = await scene.analyze_frame(
+                    image_b64, encoding=encoding, node_id=self._session_id,
+                )
+                if result:
+                    description = result.get("scene_description")
+                    detected = result.get("detected_objects")
+            else:
+                # Unreachable and backing off. SceneAnalyzer has already
+                # said so once, with a next-probe time; saying it again
+                # every 8s is the noise this replaces.
+                self._vision_unreachable_skips += 1
         elif self._llm and self._llm.available:
             description = await _ask_vision_llm(self._llm, image_b64, mime)
 
@@ -379,7 +404,15 @@ class ScreenLoop:
         # common path; pass the reservation as an upper bound on the
         # completion side and 0 on the prompt side (image tokens are
         # priced separately in the catalog).
-        if self._cost_guard is not None:
+        # ...and only when there was a call to bill. A tick that produced
+        # no description either never reached the provider (unreachable,
+        # backing off) or got nothing back, and in neither case did the
+        # operator spend the 120-token vision reservation. Recording it
+        # anyway is what wrote 413 zero-token cost rows in a single day,
+        # every one of them attributing spend to a call that never
+        # happened, and it is what would have tripped the hourly cap and
+        # paused a loop that was not costing anything.
+        if self._cost_guard is not None and description:
             # Bookkeeping MUST NOT be able to destroy an observation we
             # already paid the VLM for. This await used to run bare, and
             # a CostBudget whose asyncio.Lock was bound to another event

@@ -37,6 +37,8 @@ from agents.tool_list import (
     skill_id_from_tool_name,
     tool_name_from_def,
 )
+from skills import availability
+from skills.availability import filter_unavailable_tools
 
 
 #: Every await in this module is against an in-memory fake, so anything
@@ -128,7 +130,11 @@ class _ToolsOnlyRegistry:
     def __init__(self, tools: list[dict]):
         self._tools = tools
 
-    def get_all_tools(self) -> list[dict]:
+    def get_all_tools(self, *, offerable_only: bool = False) -> list[dict]:
+        # ``offerable_only`` is accepted and ignored: the availability
+        # gate (skills/availability.py) is exercised in
+        # tests/test_tool_availability_gate.py, and this file is about
+        # what reaches the wire, so it wants the whole list either way.
         return list(self._tools)
 
 
@@ -238,17 +244,75 @@ class TestTheFrameAVoiceSessionReallySends:
         names = {t["name"] for t in sess["tools"]}
         assert "desktop_control__open_url" in names
 
-    async def test_no_skill_is_invisible_on_the_wire(self, wire, live_tools):
+    async def test_no_available_skill_is_invisible_on_the_wire(
+        self, wire, live_tools
+    ):
         """The wider bug. A skill with zero tools in the frame cannot be
         reached and cannot be reasoned about, so the model reports the
-        BRAIN as incapable of something it does daily in chat."""
+        BRAIN as incapable of something it does daily in chat.
+
+        The property is about skills that CAN work. Since
+        ``skills/availability.py``, a skill whose prerequisite is absent
+        (no key, not connected, no Docker, no device) is withheld on
+        purpose, and it is withheld in chat too, so its absence here is
+        not the voice/text divergence this test was written for. The
+        model saying "I cannot reach email" about an unconnected mailbox
+        is true. The next test is what keeps it from being the only thing
+        the model knows.
+        """
         _session, _endpoint, sess = wire
         on_wire = {skill_id_from_tool_name(t["name"]) for t in sess["tools"]}
-        registered = {
-            skill_id_from_tool_name(tool_name_from_def(t)) for t in live_tools
+        offerable = {
+            skill_id_from_tool_name(tool_name_from_def(t))
+            for t in filter_unavailable_tools(live_tools)
         }
-        missing = sorted(registered - on_wire)
-        assert not missing, f"these skills are invisible on voice: {missing}"
+        missing = sorted(offerable - on_wire)
+        assert not missing, f"these usable skills are invisible on voice: {missing}"
+
+    async def test_a_withheld_skill_is_named_in_the_instructions(
+        self, live_tools, monkeypatch
+    ):
+        """Withholding without explaining is the same bug in a new place.
+
+        A capability that vanishes from the tool list with no reason
+        attached is one the model will report as missing from the BRAIN
+        rather than from the setup, which is the exact operator-facing
+        failure this module exists to prevent. So every skill the gate
+        withheld has to be named, with why, in the prompt that actually
+        went over the wire.
+
+        The verdicts are pinned rather than read from the ambient
+        environment. Whether this machine has a Docker binary or a
+        connected mailbox decides what the real gate withholds, and a
+        test that skips itself on the developer's laptop and only bites
+        in CI is not a test of anything.
+        """
+        withheld = {
+            "email": "Email: not connected",
+            "cutebot": "CuteBot: not plugged in",
+        }
+        monkeypatch.setattr(
+            availability, "unavailable_skills", lambda **_kw: dict(withheld),
+        )
+
+        session, endpoint = await _configured_session(live_tools, monkeypatch)
+        try:
+            sess = endpoint.frames_of_type("session.update")[-1]["session"]
+            on_wire = {skill_id_from_tool_name(t["name"]) for t in sess["tools"]}
+            instructions = sess["instructions"]
+
+            for skill_id, reason in withheld.items():
+                assert skill_id not in on_wire, (
+                    f"{skill_id} was withheld yet still reached the wire"
+                )
+                assert reason in instructions, (
+                    f"{skill_id} was withheld with no explanation in the prompt"
+                )
+            assert (
+                "do not claim feral lacks the capability" in instructions.lower()
+            )
+        finally:
+            await asyncio.wait_for(session.disconnect(), timeout=WIRE_TIMEOUT_S)
 
     async def test_tool_choice_is_a_value_the_api_accepts(self, wire):
         """``auto`` for an unforced session. A forced turn sends the GA
@@ -290,17 +354,25 @@ class TestTheTruncationNoticeReachesTheWire:
     async def test_the_notice_names_the_real_totals_not_the_capped_one(
         self, wire, live_tools
     ):
-        """The number that matters is how many tools the brain HAS.
+        """The number that matters is how many tools were available to cap.
 
         Had the notice been computed from the pre-capped list it would
-        have read "128 of the 128 tools this brain actually has", which
-        is both false and useless. Asserting the real registry total
+        have read "128 of the 128 tools available to you right now",
+        which is both false and useless. Asserting the real pre-cap total
         appears is what distinguishes a correct notice from a
         self-referential one.
+
+        That total is the OFFERED set, not the installed one. The two
+        differ by the skills ``skills/availability.py`` withheld, and
+        folding those in here would make the notice actively wrong: its
+        remedy is "ask me in chat, where the full set is available", and
+        chat cannot reach an unauthorised Notion either. Those are named
+        separately, with their reasons, and asserted above.
         """
         _session, _endpoint, sess = wire
         instructions = sess["instructions"]
-        assert str(len(live_tools)) in instructions
+        offered = filter_unavailable_tools(live_tools)
+        assert str(len(offered)) in instructions
         assert str(len(sess["tools"])) in instructions
 
     async def test_the_notice_tells_the_model_absence_is_not_incapability(
@@ -338,7 +410,15 @@ class TestTheTruncationNoticeReachesTheWire:
         """
         session, endpoint = await _configured_session(live_tools, monkeypatch)
         try:
-            assert len(session._tools) == len(live_tools)
+            # Uncapped, but gated: the session measures the cap's damage
+            # against what it could have offered, which is the registry
+            # minus the skills whose prerequisite is absent. Pre-capping
+            # is the bug; pre-gating is the point.
+            assert len(session._tools) == len(filter_unavailable_tools(live_tools))
+            assert len(session._tools) > OPENAI_TOOL_HARD_LIMIT, (
+                "the gated list must still overflow the cap, or this file "
+                "is no longer testing truncation at all"
+            )
         finally:
             await asyncio.wait_for(session.disconnect(), timeout=WIRE_TIMEOUT_S)
 

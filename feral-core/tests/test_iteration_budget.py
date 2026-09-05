@@ -31,15 +31,20 @@ if str(ROOT) not in sys.path:
 from agents.iteration_budget import (  # noqa: E402
     DEFAULT_NO_PROGRESS_STOP_THRESHOLD,
     DEFAULT_NO_PROGRESS_WARN_THRESHOLD,
+    DEFAULT_UNAVAILABLE_TOOL_THRESHOLD,
     GUARD_OK,
     GUARD_STOP,
     GUARD_WARN,
     IterationBudget,
     NoProgressGuard,
+    drop_unavailable_tools,
+    precondition_failure_reason,
     resolve_max_tool_iterations,
     resolve_no_progress_stop_threshold,
     resolve_no_progress_warn_threshold,
     resolve_tool_loop_max_seconds,
+    resolve_unavailable_tool_threshold,
+    unavailable_tool_notice,
 )
 from agents.multi_agent import AgentWorker  # noqa: E402
 
@@ -50,6 +55,7 @@ def _clean_env(monkeypatch):
     monkeypatch.delenv("FERAL_TOOL_LOOP_MAX_SECONDS", raising=False)
     monkeypatch.delenv("FERAL_NO_PROGRESS_WARN_THRESHOLD", raising=False)
     monkeypatch.delenv("FERAL_NO_PROGRESS_STOP_THRESHOLD", raising=False)
+    monkeypatch.delenv("FERAL_UNAVAILABLE_TOOL_THRESHOLD", raising=False)
 
 
 # ── Setting resolution ───────────────────────────────────────────────────────
@@ -217,6 +223,15 @@ def _make_worker(llm, executor=None):
     skill = MagicMock()
     skill.endpoints = [endpoint]
     skills.skills = {"cutebot": skill}
+    # A real list, not a MagicMock. ``AgentWorker.get_tools`` passes the
+    # registry's output through the availability gate
+    # (skills/availability.py), which returns a list; a MagicMock double
+    # would come back as [] and the worker would look like it had lost
+    # its tools when it had not.
+    skills._manifest_to_tools = MagicMock(return_value=[{
+        "type": "function",
+        "function": {"name": "cutebot__explore", "parameters": {}},
+    }])
     return AgentWorker(
         "hw", "Hardware", "SYS", ["cutebot"],
         llm=llm, skill_registry=skills, skill_executor=executor,
@@ -359,3 +374,217 @@ def test_orchestrator_env_limit_applies(monkeypatch):
     monkeypatch.setenv("FERAL_MAX_ITERATIONS", "7")
     orch = _make_orchestrator()
     assert orch._max_iterations == 7
+
+
+# ── Precondition failures, regardless of arguments ───────────────────────────
+#
+# Finding 11 of the 2026-09-04 audit. Both streaks above key on
+# ``(tool, args)`` and reset when the args change, while the WARN text
+# they emit tells the model to "change the arguments", so an agent that
+# follows the advice resets the counter meant to stop it.
+
+
+CUTEBOT_503 = {
+    "success": False,
+    "status_code": 503,
+    "data": None,
+    "error": "CuteBot is not connected (no USB robot found)",
+}
+
+
+def _lights(red: int) -> dict:
+    return {"red": red, "green": 0, "blue": 0}
+
+
+def test_walking_the_arguments_does_not_escape_the_precondition_guard():
+    """routine-10, reproduced.
+
+    It called ``cutebot__set_lights`` 46 times against a disconnected
+    robot, walking rgb 255,0,0 then 254, 253, 252, and every call came
+    back with the same deterministic 503. Neither existing streak ever
+    reached its threshold because the args changed every single time.
+    """
+    g = NoProgressGuard(warn_threshold=4, stop_threshold=8)
+
+    levels = [
+        g.observe("cutebot__set_lights", _lights(red), False, CUTEBOT_503)
+        for red in (255, 254, 253, 252, 251, 250)
+    ]
+
+    # The old guards still see nothing, which is the point.
+    assert set(levels) == {GUARD_OK}
+    # The new one has withdrawn the tool after three.
+    assert "cutebot__set_lights" in g.unavailable_tools
+    assert "not connected" in g.unavailable_tools["cutebot__set_lights"]
+
+
+def test_the_tool_is_withdrawn_exactly_at_the_threshold():
+    g = NoProgressGuard()
+    for i in range(DEFAULT_UNAVAILABLE_TOOL_THRESHOLD - 1):
+        g.observe("cutebot__set_lights", _lights(255 - i), False, CUTEBOT_503)
+        assert g.unavailable_tools == {}
+    g.observe("cutebot__set_lights", _lights(1), False, CUTEBOT_503)
+    assert list(g.unavailable_tools) == ["cutebot__set_lights"]
+
+
+def test_only_the_broken_tool_is_withdrawn():
+    """The whole objection to the old behaviour: one dead tool must not
+    cost the agent its hands."""
+    g = NoProgressGuard(unavailable_threshold=2)
+    for _ in range(3):
+        g.observe("cutebot__set_lights", {}, False, CUTEBOT_503)
+
+    tools = [
+        {"function": {"name": "cutebot__set_lights"}},
+        {"function": {"name": "cutebot__halt"}},
+        {"function": {"name": "coding_tools__read_file"}},
+    ]
+    kept = drop_unavailable_tools(tools, g.unavailable_tools)
+
+    assert [t["function"]["name"] for t in kept] == [
+        "cutebot__halt", "coding_tools__read_file",
+    ]
+
+
+def test_the_model_is_told_once_and_by_name():
+    g = NoProgressGuard(unavailable_threshold=1)
+    g.observe("cutebot__set_lights", {}, False, CUTEBOT_503)
+
+    first = g.take_unannounced_unavailable()
+    assert [name for name, _ in first] == ["cutebot__set_lights"]
+    notice = unavailable_tool_notice(*first[0])
+    assert "cutebot__set_lights" in notice
+    assert "CuteBot is not connected" in notice
+    assert "do not try different values" in notice.lower()
+
+    # Announced once. Further failures must not re-announce...
+    g.observe("cutebot__set_lights", {"red": 9}, False, CUTEBOT_503)
+    assert g.take_unannounced_unavailable() == []
+    # ...but the tool stays withdrawn for the rest of the turn.
+    assert "cutebot__set_lights" in g.unavailable_tools
+
+
+def test_a_failure_arguments_could_fix_is_left_to_the_other_streaks():
+    """A 404, a 500, a rejected parameter: retrying differently is exactly
+    the right move, so this guard must not claim them."""
+    g = NoProgressGuard(unavailable_threshold=2)
+    for path in ("/a", "/b", "/c", "/d"):
+        g.observe(
+            "coding_tools__read_file", {"path": path}, False,
+            {"success": False, "status_code": 404, "error": "no such file"},
+        )
+    assert g.unavailable_tools == {}
+
+
+def test_a_success_clears_the_precondition_streak():
+    g = NoProgressGuard(unavailable_threshold=3)
+    g.observe("cutebot__set_lights", {}, False, CUTEBOT_503)
+    g.observe("cutebot__set_lights", {}, False, CUTEBOT_503)
+    g.observe("cutebot__set_lights", {}, True, {"success": True})
+    g.observe("cutebot__set_lights", {}, False, CUTEBOT_503)
+    assert g.unavailable_tools == {}
+
+
+@pytest.mark.parametrize(
+    "result, expected",
+    [
+        ({"success": True}, False),
+        ({"success": False, "status_code": 503, "error": "no live websocket"}, True),
+        ({"success": False, "status_code": 412, "error": "requires confirmation"}, True),
+        ({"success": False, "status_code": 424, "error": "dep failed"}, True),
+        # Ten integration modules return no status_code at all, so the
+        # phrasing has to carry it.
+        ({"success": False, "error": "Not connected to Notion"}, True),
+        ({"success": False, "error": "Home Assistant is not configured"}, True),
+        ({"success": False, "error": "Sandbox required, Docker unavailable"}, True),
+        # Retrying differently may well help with these.
+        ({"success": False, "status_code": 429, "error": "rate limited"}, False),
+        ({"success": False, "status_code": 500, "error": "server error"}, False),
+        ({"success": False, "status_code": 404, "error": "not found"}, False),
+        ("not a dict", False),
+    ],
+)
+def test_precondition_classification(result, expected):
+    assert bool(precondition_failure_reason(result)) is expected
+
+
+def test_threshold_is_configurable(monkeypatch):
+    assert resolve_unavailable_tool_threshold(settings={}) == (
+        DEFAULT_UNAVAILABLE_TOOL_THRESHOLD
+    )
+    assert resolve_unavailable_tool_threshold(
+        settings={"agents": {"unavailable_tool_threshold": 7}},
+    ) == 7
+    monkeypatch.setenv("FERAL_UNAVAILABLE_TOOL_THRESHOLD", "2")
+    assert resolve_unavailable_tool_threshold(
+        settings={"agents": {"unavailable_tool_threshold": 7}},
+    ) == 2
+
+
+def test_budget_exposes_the_guard_for_both_tool_loops():
+    """``agents/multi_agent.py`` calls SkillExecutor directly and never
+    reaches ToolRunner's anti-loop block, so both loops drive this through
+    the same IterationBudget rather than each rolling its own."""
+    budget = IterationBudget(unavailable_threshold=1)
+    tools = [
+        {"function": {"name": "cutebot__set_lights"}},
+        {"function": {"name": "notes_memory__fused_timeline"}},
+    ]
+
+    budget.observe_tool("cutebot__set_lights", {}, False, CUTEBOT_503)
+
+    assert budget.unavailable_tools
+    assert [t["function"]["name"] for t in budget.filter_tools(tools)] == [
+        "notes_memory__fused_timeline",
+    ]
+    assert budget.take_unannounced_unavailable()
+
+
+def test_filter_returns_none_when_nothing_survives():
+    """``tools=None`` is the shape every caller already passes when it has
+    no tools; an empty list is not."""
+    budget = IterationBudget(unavailable_threshold=1)
+    budget.observe_tool("cutebot__set_lights", {}, False, CUTEBOT_503)
+    assert budget.filter_tools([{"function": {"name": "cutebot__set_lights"}}]) is None
+
+
+@pytest.mark.asyncio
+async def test_the_multi_agent_worker_stops_offering_the_dead_tool(monkeypatch):
+    """The path routine-10 actually ran on.
+
+    ``AgentWorker`` calls ``SkillExecutor.execute`` directly and never
+    reaches ``ToolRunner``, so ToolRunner's hard anti-loop block never
+    saw those 46 calls. The guard has to bite here too.
+    """
+    monkeypatch.setenv("FERAL_MAX_ITERATIONS", "0")
+    monkeypatch.setenv("FERAL_UNAVAILABLE_TOOL_THRESHOLD", "3")
+
+    llm = MagicMock()
+    llm.available = True
+    llm.chat = AsyncMock(return_value={})
+    # Six rounds walking the argument, exactly as the routine did, then a
+    # text answer so the worker can finish.
+    rounds = [
+        ("", [_tool_call("cutebot__explore", {"red": red})])
+        for red in (255, 254, 253, 252, 251, 250)
+    ]
+    rounds.append(("the robot is not connected", []))
+    responses = iter(rounds)
+    llm.extract_response = MagicMock(side_effect=lambda _r: next(responses))
+
+    executor = MagicMock()
+    executor.execute = AsyncMock(return_value=CUTEBOT_503)
+
+    worker = _make_worker(llm, executor)
+    result = await worker.run("s1", "flash the lights")
+
+    # Three failures, then the tool is gone from the next request AND
+    # refused at dispatch if the model names it anyway.
+    assert executor.execute.await_count == 3
+    tool_lists = [c.kwargs.get("tools") for c in llm.chat.await_args_list]
+    assert tool_lists[0], "the first round must still be offered the tool"
+    assert tool_lists[-1] is None, (
+        "once the only tool is withdrawn the worker asks for a plain answer"
+    )
+    assert result.text
+

@@ -27,6 +27,7 @@
     "endpoints": [
         {
             "id": "extract_text",
+            "read_only_hint": true,
             "method": "PYTHON",
             "url": "",
             "description": "Extract rich text from a local PDF with layout-preserving structure, markdown tables and optional images. A page with an embedded text layer always works. A scanned page falls through to OCR, which is only available when pytesseract and tesseract are installed; otherwise that page returns '[OCR not available - install pytesseract]'.",
@@ -67,6 +68,7 @@
         },
         {
             "id": "metadata",
+            "read_only_hint": true,
             "method": "PYTHON",
             "url": "",
             "description": "Read PDF metadata: title, author, creation date, page count, keywords. Needs no OCR.",
@@ -83,6 +85,7 @@
         },
         {
             "id": "extract_images",
+            "read_only_hint": true,
             "method": "PYTHON",
             "url": "",
             "description": "Extract embedded images from PDF pages as base64-encoded PNGs.",

@@ -44,6 +44,22 @@ in settings.json; ``FERAL_NO_PROGRESS_WARN_THRESHOLD`` /
   counter, so the failing body is never byte-identical and the strict
   signature alone would spin until the wall clock. Only at ``GUARD_STOP``
   is the toolset withdrawn for a final honest answer.
+
+v2026.9.5: both of those key on ``(tool, args)`` and reset when the args
+change, and the WARN text tells the model to "change the arguments". An
+agent that takes the advice therefore resets the counter meant to stop
+it. Measured: routine-10 called ``cutebot__set_lights`` 46 times against
+a disconnected robot, walking rgb 255,0,0 then 254, 253, 252, each answered
+with the same 503 "CuteBot is not connected", and neither streak ever
+reached its threshold.
+
+* A third streak counts PRECONDITION failures per tool and ignores args
+  entirely (``agents.unavailable_tool_threshold``, default 3;
+  ``FERAL_UNAVAILABLE_TOOL_THRESHOLD`` env pin). No value of any argument
+  connects a robot, authorises an OAuth app or installs Docker, so after
+  three the tool is dropped from the list passed to the next round and the
+  model is told once, by name, why. Every OTHER tool stays available: this
+  withdraws one broken capability, not the agent's hands.
 """
 
 from __future__ import annotations
@@ -63,6 +79,49 @@ DEFAULT_TOOL_LOOP_MAX_SECONDS = 900.0
 # warn level is no longer 2 and why stopping uses a looser signature.
 DEFAULT_NO_PROGRESS_WARN_THRESHOLD = 4
 DEFAULT_NO_PROGRESS_STOP_THRESHOLD = 8
+
+# Third guard, and the only one that survives an agent varying its
+# arguments. Both streaks above key on ``(tool, args)`` and reset the
+# moment the args change, while the WARN text they produce tells the
+# model to "change the arguments", so an agent that follows the advice
+# resets the counter that was supposed to stop it.
+#
+# routine-10 did exactly that on the operator's brain: 46 calls to
+# ``cutebot__set_lights`` walking rgb 255,0,0 then 254, 253, 252 against
+# a robot that was not plugged in, every one answered with the same
+# deterministic 503 "CuteBot is not connected". Not a loop by either
+# existing definition, and 46 calls of pure loss.
+#
+# A precondition failure is not an argument problem. No value of any
+# argument connects a robot, authorises an OAuth app or installs Docker,
+# so this streak counts per TOOL and ignores args entirely.
+DEFAULT_UNAVAILABLE_TOOL_THRESHOLD = 3
+
+# Status codes that mean "the precondition for this tool is absent":
+# 503 unavailable (no daemon, no sandbox, nothing configured),
+# 412 precondition failed, 424 failed dependency, 401/403 not authorised.
+# Deliberately NOT 429 (rate limited, waiting helps) or 5xx generally (a
+# transient server fault may well clear).
+PRECONDITION_STATUS_CODES = frozenset({401, 403, 412, 424, 503})
+
+# ...and the phrases integrations use when they answer without one. Kept
+# alongside the codes because ten integration modules return
+# ``{"success": False, "error": ...}`` with no status_code at all (see
+# the comment in ``skills/executor.py`` about the flat ``.get(..., 200)``
+# that used to stamp HTTP 200 on every one of them).
+PRECONDITION_ERROR_PHRASES = (
+    "not connected",
+    "not configured",
+    "not installed",
+    "not authorised",
+    "not authorized",
+    "no live websocket",
+    "undeliverable frame",
+    "sandbox required",
+    "sandbox unavailable",
+    "no usb robot",
+    "requires authentication",
+)
 
 # Guard levels, ordered by severity. Falsy "" means "no problem", so a
 # caller that only cares whether something tripped can still use a plain
@@ -179,11 +238,94 @@ def resolve_no_progress_stop_threshold(settings: Optional[dict] = None) -> int:
     )
 
 
+def resolve_unavailable_tool_threshold(settings: Optional[dict] = None) -> int:
+    """Precondition failures of one tool before it stops being offered."""
+    return _resolve_int_setting(
+        "FERAL_UNAVAILABLE_TOOL_THRESHOLD", "unavailable_tool_threshold",
+        DEFAULT_UNAVAILABLE_TOOL_THRESHOLD, settings,
+    )
+
+
 def _stable_key(value: Any, limit: int = 4000) -> str:
     try:
         return json.dumps(value, sort_keys=True, default=str)[:limit]
     except Exception:
         return repr(value)[:limit]
+
+
+def precondition_failure_reason(result: Any) -> str:
+    """The reason this result is a missing precondition, or "".
+
+    Answers "no argument will fix this", which is a different question
+    from "did this fail". A 404 from a search, a 500 from a flaky API and
+    a rejected parameter are all failures worth retrying differently; a
+    503 saying the robot is not plugged in is not.
+    """
+    if not isinstance(result, dict):
+        return ""
+    if result.get("success"):
+        return ""
+    error = str(result.get("error") or "").strip()
+    try:
+        status = int(result.get("status_code") or 0)
+    except (TypeError, ValueError):
+        status = 0
+    if status in PRECONDITION_STATUS_CODES:
+        return error or f"the tool answered HTTP {status}"
+    lowered = error.lower()
+    for phrase in PRECONDITION_ERROR_PHRASES:
+        if phrase in lowered:
+            return error
+    return ""
+
+
+def unavailable_tool_notice(tool_name: str, reason: str) -> str:
+    """The one message the model gets when a tool is withdrawn."""
+    return (
+        f"(TOOL UNAVAILABLE: `{tool_name}` has failed its precondition "
+        f"repeatedly and has been removed from your tools for the rest of "
+        f"this turn. Reason: {reason} No arguments will change that, so do "
+        f"not try different values. Use another tool or tell the user what "
+        f"is missing. Do NOT claim the action succeeded.)"
+    )
+
+
+def withdrawn_tool_refusal(tool_name: str, reason: str) -> dict:
+    """Envelope for a call to a tool that was already withdrawn.
+
+    Removing a tool from the list is advisory: a model can name a tool it
+    was not given, and on the multi-agent path nothing else stops it.
+    ``ToolRunner`` has its own hard anti-loop block for the orchestrator
+    path; this is the same idea in the shape the executor returns, so a
+    withdrawn tool is withdrawn on both.
+    """
+    return {
+        "success": False,
+        "status_code": 503,
+        "data": None,
+        "error": (
+            f"{tool_name} was withdrawn for this turn after repeated "
+            f"precondition failures ({reason}). It was not called."
+        ),
+    }
+
+
+def drop_unavailable_tools(
+    tools: Optional[list], unavailable: dict[str, str],
+) -> Optional[list]:
+    """Remove withdrawn tools from a tool list, preserving order.
+
+    Shared by the orchestrator and the multi-agent worker so the two
+    cannot drift; ``agents/multi_agent.py`` calls ``SkillExecutor``
+    directly and never reaches ``ToolRunner``'s anti-loop block, which is
+    exactly how routine-10 got 46 calls in.
+    """
+    if not tools or not unavailable:
+        return tools
+    from agents.tool_list import tool_name_from_def
+
+    kept = [t for t in tools if tool_name_from_def(t) not in unavailable]
+    return kept or None
 
 
 class NoProgressGuard:
@@ -203,7 +345,19 @@ class NoProgressGuard:
         self,
         warn_threshold: Optional[int] = None,
         stop_threshold: Optional[int] = None,
+        unavailable_threshold: Optional[int] = None,
     ) -> None:
+        self.unavailable_threshold = (
+            resolve_unavailable_tool_threshold()
+            if unavailable_threshold is None
+            else max(1, int(unavailable_threshold))
+        )
+        #: tool name -> consecutive precondition failures, args ignored.
+        self._precondition_streaks: dict[str, int] = {}
+        #: tool name -> reason, for every tool withdrawn this turn.
+        self.unavailable_tools: dict[str, str] = {}
+        #: Withdrawals the caller has not yet told the model about.
+        self._unannounced: list[tuple[str, str]] = []
         self.warn_threshold = (
             resolve_no_progress_warn_threshold()
             if warn_threshold is None else max(1, int(warn_threshold))
@@ -222,9 +376,52 @@ class NoProgressGuard:
         self.tripped = False
         self.level = GUARD_OK
 
+    def take_unannounced_unavailable(self) -> list[tuple[str, str]]:
+        """Drain the tools withdrawn since the last call.
+
+        Drained rather than read so the caller tells the model once per
+        withdrawal. The tool stays in :attr:`unavailable_tools`, which is
+        what the tool-list filter reads on every subsequent round.
+        """
+        pending, self._unannounced = self._unannounced, []
+        return pending
+
+    def _observe_precondition(self, tool_name: str, success: bool, result: Any) -> None:
+        """Track the args-independent precondition streak for one tool."""
+        name = str(tool_name)
+        if success:
+            self._precondition_streaks.pop(name, None)
+            return
+        reason = precondition_failure_reason(result)
+        if not reason:
+            # A failure that arguments might fix. The two streaks above
+            # own that case; this one must not claim it.
+            self._precondition_streaks.pop(name, None)
+            return
+        streak = self._precondition_streaks.get(name, 0) + 1
+        self._precondition_streaks[name] = streak
+        if streak < self.unavailable_threshold or name in self.unavailable_tools:
+            return
+        self.unavailable_tools[name] = reason
+        self._unannounced.append((name, reason))
+        logger.warning(
+            "Tool withdrawn for this turn: %s failed its precondition %d× "
+            "regardless of arguments (%s). It will not be offered again "
+            "this turn.",
+            name, streak, reason,
+        )
+
     def observe(self, tool_name: str, args: Any, success: bool, result: Any) -> str:
         """Record one executed tool call; returns ``GUARD_OK`` / ``GUARD_WARN``
-        / ``GUARD_STOP``. Falsy when nothing is wrong."""
+        / ``GUARD_STOP``. Falsy when nothing is wrong.
+
+        The returned level is unchanged by the precondition streak: that
+        one withdraws a single tool rather than ending the loop, and the
+        caller reads it from :attr:`unavailable_tools` and
+        :meth:`take_unannounced_unavailable`.
+        """
+        self._observe_precondition(tool_name, success, result)
+
         if success:
             self._last_sig = None
             self._last_call = None
@@ -281,11 +478,14 @@ class IterationBudget:
         max_seconds: float = 0.0,
         warn_threshold: Optional[int] = None,
         stop_threshold: Optional[int] = None,
+        unavailable_threshold: Optional[int] = None,
     ):
         self.max_iterations = max(0, int(max_iterations or 0))
         self.max_seconds = max(0.0, float(max_seconds or 0.0))
         self.iterations = 0
-        self.guard = NoProgressGuard(warn_threshold, stop_threshold)
+        self.guard = NoProgressGuard(
+            warn_threshold, stop_threshold, unavailable_threshold,
+        )
         self.stop_reason = ""
         self._started = time.monotonic()
 
@@ -326,3 +526,21 @@ class IterationBudget:
                 f"{self.guard.stop_threshold}× in a row"
             )
         return level
+
+    # ── Withdrawn tools (precondition streak) ────────────────────────
+    #
+    # Thin pass-throughs so a caller holding an IterationBudget does not
+    # have to know the guard exists. Both loops that run tools use these.
+
+    @property
+    def unavailable_tools(self) -> dict[str, str]:
+        """Tools withdrawn for the rest of this turn -> why."""
+        return self.guard.unavailable_tools
+
+    def take_unannounced_unavailable(self) -> list[tuple[str, str]]:
+        """Withdrawals the model has not been told about yet."""
+        return self.guard.take_unannounced_unavailable()
+
+    def filter_tools(self, tools: Optional[list]) -> Optional[list]:
+        """``tools`` minus anything withdrawn this turn."""
+        return drop_unavailable_tools(tools, self.guard.unavailable_tools)

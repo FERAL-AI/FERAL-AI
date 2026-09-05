@@ -1171,16 +1171,54 @@ class RealtimeProxy:
             if mem_ctx:
                 parts.append(f"\n[Memory Context]\n{mem_ctx}")
 
+        # The other half of the availability gate, and on voice it is the
+        # more important half.
+        #
+        # ``_get_raw_tools`` withholds the skills whose prerequisite is
+        # absent, so those skills have NO tool in the frame. The
+        # truncation notice cannot cover them: its remedy is "ask me in
+        # chat, where the full set is available", which is a promise chat
+        # cannot keep for an unauthorised Notion. Without this line the
+        # model would find email simply missing and would have to guess
+        # why, and the guess it reaches for is the one that makes the
+        # operator hear the brain deny a capability.
+        #
+        # This line is what makes the withheld half honest rather than
+        # silent: it names each one and says what is wrong with it, so
+        # "Email is not connected, want me to walk you through it" is
+        # available instead of "I can't do email".
+        try:
+            from skills.availability import availability_note
+
+            note = availability_note()
+            if note:
+                parts.append(f"\n{note}")
+        except Exception:
+            logger.debug("voice availability note unavailable", exc_info=True)
+
         return "\n".join(parts)
 
     def _get_raw_tools(self) -> list[dict]:
-        """Everything the registry has, uncapped.
+        """Everything the registry has that could actually run, uncapped.
 
         Only ``start_session`` wants this, and only so the session can
         measure how much the cap dropped. See the comment there.
+
+        ``filter_unavailable_tools`` withholds the skills with no key, no
+        OAuth, no Docker and no robot behind them
+        (``skills/availability.py``). Voice needs that more than chat
+        does, not less: it is the surface already fighting a hard
+        128-tool ceiling, so every schema spent on a tool that cannot run
+        evicts one that can, one for one. The skills withheld here are
+        named in the system prompt by ``_build_system_prompt`` so their
+        absence from the frame is explained rather than merely observed.
         """
         if self._skill_registry:
-            return list(self._skill_registry.get_all_tools() or [])
+            from skills.availability import filter_unavailable_tools
+
+            return filter_unavailable_tools(
+                list(self._skill_registry.get_all_tools() or []),
+            )
         return []
 
     def _get_tools(self) -> list[dict]:

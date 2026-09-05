@@ -260,6 +260,16 @@ def truncation_notice(tools: list[dict], capped: list[dict]) -> str:
     tool; it makes the model's ignorance of one legible, so an honest
     "I can't reach that from voice, ask me in chat" replaces a confident
     "I can't do that".
+
+    ``tools`` is the list the session was OFFERED, which since
+    ``skills/availability.py`` is the installed set minus the skills whose
+    prerequisite is absent. That is deliberate and the two must not be
+    conflated: this notice's remedy is "ask me in chat, where the full set
+    is available", and that is a promise chat cannot keep for a skill with
+    no OAuth token behind it. Withheld capabilities get their own line,
+    ``skills.availability.availability_note``, which names each one and
+    why it is off. So this counts against what is available right now, and
+    that line accounts for the difference.
     """
     if not tools or len(capped) >= len(tools):
         return ""
@@ -267,8 +277,8 @@ def truncation_notice(tools: list[dict], capped: list[dict]) -> str:
     return (
         "\n\n## Voice Tool Limit\n"
         f"This voice session can carry {len(capped)} of the "
-        f"{len(tools)} tools this brain actually has: the realtime API "
-        f"caps the list, so {dropped} are not visible to you right now. "
+        f"{len(tools)} tools available to you right now: the realtime API "
+        f"caps the list, so {dropped} are not visible to you here. "
         "Every skill is still represented, but some have only their "
         "main action available here.\n"
         "This means a tool being absent from your list does NOT mean the "

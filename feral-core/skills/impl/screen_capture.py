@@ -70,7 +70,11 @@ class ScreenCaptureSkill(BaseSkill):
 
         if analyze or query:
             scene = self._get_scene_analyzer()
-            if scene and scene.available:
+            # ``configured``, not ``available``: a VLM that is set up but
+            # currently unreachable is still this install's vision path,
+            # and an explicit capture is a fine moment to probe it (see
+            # SceneAnalyzer.analyze_frame, which forces here).
+            if scene and getattr(scene, "configured", getattr(scene, "available", False)):
                 mode = "query" if query else "general"
                 analysis = await scene.analyze_frame(
                     data_b64=image_b64,
@@ -81,12 +85,25 @@ class ScreenCaptureSkill(BaseSkill):
                     query=query,
                 )
                 data["analysis"] = analysis
+                if analysis is None:
+                    health = getattr(scene, "provider_health", {}) or {}
+                    if health.get("unreachable"):
+                        # Naming the provider beats "no VLM available",
+                        # which is what an unreachable-but-configured VLM
+                        # used to report and is a different problem with a
+                        # different fix.
+                        data["analysis_error"] = (
+                            f"Vision provider {health.get('provider', '?')} is "
+                            f"unreachable: {health.get('detail', 'no connection')}"
+                        )
                 if query and analysis:
                     answer = analysis.get("answer") or analysis.get("scene_description")
                     if answer:
                         data["analysis_text"] = answer
             else:
-                data["analysis_error"] = "No VLM available. Set OPENAI_API_KEY or FERAL_VLM_PROVIDER."
+                data["analysis_error"] = (
+                    "No VLM available. Set OPENAI_API_KEY or FERAL_VLM_PROVIDER."
+                )
 
         return {"success": True, "status_code": 200, "data": data, "error": None}
 

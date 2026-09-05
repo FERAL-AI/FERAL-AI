@@ -268,6 +268,32 @@ def build_tooling_catalog(
     return "\n".join(parts)
 
 
+def build_availability_note() -> str:
+    """The withheld-capability line for the system prompt, or "".
+
+    The other half of the availability gate. ``skills/availability.py``
+    stops offering the tools of a skill whose prerequisite is provably
+    absent, which on the operator's brain was 79 of 266 schemas. A tool
+    that silently disappears is worse than a tool that fails, though: the
+    model cannot tell "FERAL cannot do this" from "this needs
+    connecting", and it guesses wrong. One line names what is off and
+    why, so the honest answer is available to it.
+
+    Deliberately separate from :func:`build_tooling_catalog`, which is a
+    pure function of its arguments and stays that way, and defensive
+    because this runs inside system-prompt assembly: a failure here must
+    degrade to a prompt without the note, never to a turn without a
+    prompt.
+    """
+    try:
+        from skills.availability import availability_note
+
+        return availability_note()
+    except Exception:  # pragma: no cover - prompt assembly must not fail
+        logger.debug("availability note unavailable", exc_info=True)
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # UI route section
 # ---------------------------------------------------------------------------
@@ -303,6 +329,9 @@ def build_core_self_model(
         sections.append(
             build_tooling_catalog(active_skills or [], full_skills or [])
         )
+        note = build_availability_note()
+        if note:
+            sections.append(note)
 
     if include_ui_routes:
         sections.append(build_ui_route_map())

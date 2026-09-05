@@ -471,13 +471,32 @@ class GeminiRealtimeProxy:
             ctx = await self._memory.build_context_for_llm(session_id, max_tokens_budget=400)
             if ctx:
                 parts.append(f"\n[Memory]\n{ctx}")
+        # ``_get_tools`` withholds the skills whose prerequisite is
+        # absent, so name them and say why. Same reasoning as the OpenAI
+        # proxy: a capability that vanishes from the tool list with no
+        # explanation is one the model will report as missing from the
+        # brain rather than from the setup.
+        try:
+            from skills.availability import availability_note
+
+            note = availability_note()
+            if note:
+                parts.append(f"\n{note}")
+        except Exception:
+            logger.debug("voice availability note unavailable", exc_info=True)
         return "\n".join(parts)
 
     def _get_tools(self) -> list[dict]:
         if self._skill_registry:
             from agents.tool_list import OPENAI_TOOL_HARD_LIMIT, cap_tools_with_pins
+            from skills.availability import filter_unavailable_tools
+
+            # Withhold what cannot run before spending the 128 slots on
+            # it. Voice needs the gate more than chat does, not less: it
+            # is the surface already fighting a hard tool ceiling, so
+            # every schema spent on a dead tool evicts a live one.
             return cap_tools_with_pins(
-                self._skill_registry.get_all_tools(),
+                filter_unavailable_tools(self._skill_registry.get_all_tools()),
                 max_tools=OPENAI_TOOL_HARD_LIMIT,
             )
         return []
