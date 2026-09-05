@@ -29,7 +29,7 @@ dependencies = [
     # boot-time auth-allowlist drift guard). Pin below 0.137 until that
     # upstream regression is resolved. See release wheel-smoke failure for
     # v2026.6.13.
-    "fastapi>=0.115.0,<0.137",
+    "fastapi>=0.115.0,<0.142",
     # PR 10: chat composer attachments + wiki PDF ingestion both use
     # multipart/form-data, which FastAPI delegates to python-multipart.
     # Without this, /api/uploads and /api/wiki/ingest/pdf raise a
