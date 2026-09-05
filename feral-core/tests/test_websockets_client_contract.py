@@ -54,23 +54,38 @@ def test_awaiting_connect_yields_something_usable_as_a_context_manager():
 def test_connect_resolves_to_the_asyncio_implementation_not_the_legacy_one():
     """13.x routes `websockets.connect` at the legacy client.
 
-    Checked by module path rather than by version string: the version is
-    a proxy, and this is the thing that actually differs.
+    Asked of a FRESH interpreter, on purpose. ``websockets.connect`` is
+    a module attribute, and tests legitimately patch it: for instance
+    test_voice_realtime_headers swaps in a fake to prove the proxy
+    dispatches through it, restoring it in a finally. Under
+    pytest-randomly this test can run while such a swap is the current
+    value, and reading it in-process then measures the test suite rather
+    than the installed library.
 
-    Reads ``__module__`` off the ``connect`` attribute itself and does
-    not call it. The first version of this test called it and took the
-    type of the result, which passed locally, where connect is a class
-    and calling it builds an instance, and failed in CI with
-    "AssertionError: builtins", because there calling it produced a
-    coroutine and every coroutine's type lives in builtins. The
-    attribute's own module is the same fact without depending on what
-    connect happens to be, and it is measured identical on 13.1
-    (websockets.legacy.client) and on 14.0 and 15.0.1
+    That is not hypothetical. In-process, this assertion failed in CI
+    twice with two different wrong answers: once with "builtins" (the
+    patched value was an async function, so calling it produced a
+    coroutine) and once with "tests.test_voice_realtime_headers" (the
+    fake itself). A subprocess cannot see any of that.
+
+    Checked by module path rather than by version string: the version is
+    a proxy, and this is the thing that actually differs. Measured
+    identical on 13.1 (websockets.legacy.client) and on 14.0 and 15.0.1
     (websockets.asyncio.client).
     """
-    import websockets
+    import subprocess
 
-    module = getattr(websockets.connect, "__module__", "")
+    probe = (
+        "import websockets;"
+        "print(getattr(websockets.connect, '__module__', ''))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert out.returncode == 0, f"could not import websockets: {out.stderr[:300]}"
+    module = out.stdout.strip()
+
     assert "legacy" not in module, (
         f"websockets.connect resolves to {module}, the legacy implementation, "
         "whose awaited result is a WebSocketClientProtocol with no __aenter__"
