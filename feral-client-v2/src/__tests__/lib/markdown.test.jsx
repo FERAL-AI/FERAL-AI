@@ -39,6 +39,31 @@ describe('MarkdownMessage', () => {
     expect(out).toMatch(/katex/);
   });
 
+  // Observed live in chat before the fix: an assistant paragraph reading
+  // "valuation more than doubles to $5 billion in latest funding round. The
+  // company raised $550 million" rendered the span between the two dollar
+  // signs as italic KaTeX ("5billioninlatestfundinground"), and a budget
+  // refusal quoting "$9.99 / $10.00" came out in the math font. remark-math
+  // 6 enables `$...$` inline math by default; money is far commoner than
+  // inline LaTeX in assistant prose, so `singleDollarTextMath` is off.
+  it('leaves two dollar amounts in one paragraph as literal text', () => {
+    const { container } = render(
+      <MarkdownMessage text="Valuation more than doubles to $5 billion in latest funding round. The company raised $550 million." />,
+    );
+    expect(container.querySelector('.katex')).toBeNull();
+    expect(container.textContent).toContain('$5 billion');
+    expect(container.textContent).toContain('$550 million');
+  });
+
+  it('leaves a quoted price pair as literal text', () => {
+    const { container } = render(
+      <MarkdownMessage text="That costs $9.99 and you have $10.00 left." />,
+    );
+    expect(container.querySelector('.katex')).toBeNull();
+    expect(container.textContent).toContain('$9.99');
+    expect(container.textContent).toContain('$10.00');
+  });
+
   it('renders images and applies the cap class', () => {
     const out = html('![alt](https://example.com/x.png)');
     expect(out).toContain('v2-md-img');

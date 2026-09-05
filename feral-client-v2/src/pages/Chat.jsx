@@ -1420,6 +1420,19 @@ export function TurnMeta({ model, usage }) {
   const outTok = Number(usage?.output_tokens || 0);
   const total = Number(usage?.total_tokens || 0) || inTok + outTok;
   const fmt = (n) => n.toLocaleString();
+  // The number is a SUM over every LLM round in the turn, not the size
+  // of one context: agents/turn_attribution.py `accumulate_turn_usage`
+  // folds each round's usage into a running total, and a turn that ran
+  // eight tool rounds re-sends the whole conversation each time. Left
+  // unqualified it read as one measurement, which is how "241,240
+  // tokens" came to sit under a single answer while the header's
+  // context indicator said 12.5k. Both numbers were right; the label
+  // was not. `rounds` is not on the wire today, so the honest fallback
+  // says which kind of number this is without inventing a count.
+  const rounds = Number(usage?.rounds || 0);
+  const scope = rounds > 0
+    ? ` across ${fmt(rounds)} round${rounds === 1 ? '' : 's'}`
+    : ' (all rounds)';
   return (
     <span
       className="v2-chat-turnmeta"
@@ -1432,6 +1445,7 @@ export function TurnMeta({ model, usage }) {
         <span className="v2-chat-turnmeta__tokens">
           {fmt(total)}
           {' tokens'}
+          {scope}
         </span>
       )}
     </span>

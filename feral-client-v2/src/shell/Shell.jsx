@@ -170,6 +170,62 @@ function serialiseConversationMessages(messages) {
   }).filter(Boolean);
 }
 
+/**
+ * Merge the orchestrator's primary-session transcript into the rows the
+ * conversation store already gave us.
+ *
+ * The two stores overlap: /api/conversations/* is the persisted thread,
+ * /api/sessions/primary/transcript is the live in-RAM history, and a
+ * WebSocket-only turn exists in the second but not the first. So the
+ * transcript has to be folded in without re-adding what is already on
+ * screen.
+ *
+ * The old fold deduped on a `role|text` signature held in ONE growing
+ * set, so the transcript was deduped against itself as well as against
+ * `prev`. Repetition is normal in a real thread, and this silently
+ * rewrote history: an operator who sent the same message three times saw
+ * one row come back, and two identical assistant replies collapsed into
+ * one. A thread that looked like it held two near-duplicate answers was
+ * actually three sends with the middle one deleted by the client.
+ *
+ * The rule here: a transcript row is only ever suppressed because a
+ * MATCHING ROW IS ALREADY IN `prev`, and each row in `prev` can absorb
+ * at most one transcript row, so signatures are counted rather than
+ * set-tested. Transcript rows are never compared to each other. `ts_ms`
+ * is the row's 1-based POSITION in the transcript (api/routes/
+ * sessions.py builds it as `idx + 1`), which gives two identical
+ * messages two different ids and makes the merge idempotent if boot
+ * hydration runs twice.
+ */
+function mergeTranscriptIntoMessages(prev, transcriptRows) {
+  const existing = Array.isArray(prev) ? prev : [];
+  const rows = Array.isArray(transcriptRows) ? transcriptRows : [];
+  const unconsumed = new Map();
+  const existingIds = new Set();
+  for (const m of existing) {
+    if (m?.id) existingIds.add(m.id);
+    const sig = `${m?.role}|${(m?.text || '').trim()}`;
+    unconsumed.set(sig, (unconsumed.get(sig) || 0) + 1);
+  }
+  const additions = [];
+  for (const m of rows) {
+    const role = m?.role;
+    const text = (m?.text || '').trim();
+    if (!role || !text) continue;
+    const id = m.ts_ms ? `pt_${m.ts_ms}` : `pt_${Math.random().toString(36).slice(2, 8)}`;
+    if (existingIds.has(id)) continue;
+    const sig = `${role}|${text}`;
+    const left = unconsumed.get(sig) || 0;
+    if (left > 0) {
+      unconsumed.set(sig, left - 1);
+      continue;
+    }
+    existingIds.add(id);
+    additions.push({ id, role, text });
+  }
+  return additions.length ? [...existing, ...additions] : existing;
+}
+
 function deriveConversationTitle(messages) {
   const firstUser = (messages || []).find((m) => m?.role === 'user' && typeof m?.text === 'string' && m.text.trim());
   if (!firstUser) return 'New conversation';
@@ -186,7 +242,7 @@ export { useChatThread };
 // row shape can be unit-tested directly (see
 // __tests__/shell/Shell.message-roundtrip.test.jsx). Everything else
 // reaches these through <Shell />.
-export { normaliseUiMessages, serialiseConversationMessages };
+export { normaliseUiMessages, serialiseConversationMessages, mergeTranscriptIntoMessages };
 
 /**
  * Shell is the v2 chrome: ambient background + minimal top menubar + bottom
@@ -298,8 +354,16 @@ function ShellFrame() {
     const fallbackId = `thread-${Date.now().toString(36)}`;
     let nextId = fallbackId;
     try {
+      // `silent: true` because the catch below already handles this:
+      // the local fallback id is a complete answer, so a failure here
+      // costs the user nothing and does not deserve a toast. Observed
+      // after `feral stop` / `feral start`: this call toasted "Failed to
+      // fetch /api/conversations/new" on a boot that then worked fine,
+      // because surfaceError pushes the toast before it throws and a
+      // caller cannot opt out of it by catching.
       const response = await apiFetch('/api/conversations/new', {
         method: 'POST',
+        silent: true,
         body: JSON.stringify({ id: fallbackId, title: 'New conversation' }),
       });
       const body = await response.json().catch(() => ({}));
@@ -339,7 +403,12 @@ function ShellFrame() {
       let hydratedFromConversations = false;
       try {
         const query = stored ? `?conversation_id=${encodeURIComponent(stored)}` : '';
-        const active = await apiJson(`/api/conversations/active/thread${query}`);
+        // Silent for the same reason as the two calls around it: the
+        // catch falls through to an explicit create, so the user is not
+        // blocked. On a brain that is still booting this returned 503
+        // and put "Request failed (503)" on screen next to a chat that
+        // then worked.
+        const active = await apiJson(`/api/conversations/active/thread${query}`, { silent: true });
         if (!active?.error && active?.id) {
           setConversation(active.id, active.messages || []);
           // The conversation resolved by the boot hydration is the
@@ -360,30 +429,17 @@ function ShellFrame() {
       // separate store. If anything goes wrong we just keep the
       // conversation-store thread we already loaded.
       try {
-        const transcript = await apiJson('/api/sessions/primary/transcript');
+        // Silent for the same reason as the rest of the boot chain: the
+        // catch below states outright that this endpoint is optional and
+        // must never block hydration, so its failure is not news.
+        const transcript = await apiJson('/api/sessions/primary/transcript', { silent: true });
         const wsMessages = Array.isArray(transcript?.messages) ? transcript.messages : [];
         if (wsMessages.length) {
-          // Use the functional updater so we see the current messages
-          // (whether they came from the conversations store above or
-          // are empty) and dedupe by role+text signature.
-          setMessages((prev) => {
-            const seen = new Set(prev.map((m) => `${m.role}|${(m.text || '').trim()}`));
-            const additions = [];
-            for (const m of wsMessages) {
-              const role = m?.role;
-              const text = (m?.text || '').trim();
-              if (!role || !text) continue;
-              const sig = `${role}|${text}`;
-              if (seen.has(sig)) continue;
-              seen.add(sig);
-              additions.push({
-                id: `pt_${m.ts_ms || Math.random().toString(36).slice(2, 8)}`,
-                role,
-                text,
-              });
-            }
-            return additions.length ? [...prev, ...additions] : prev;
-          });
+          // Functional updater so the merge sees the current messages,
+          // whether they came from the conversations store above or the
+          // greeting. See mergeTranscriptIntoMessages for why the fold
+          // never compares two transcript rows to each other.
+          setMessages((prev) => mergeTranscriptIntoMessages(prev, wsMessages));
         }
       } catch {
         // Phase 9 endpoint optional — never block hydration on it.
@@ -412,6 +468,11 @@ function ShellFrame() {
       };
       apiFetch('/api/conversations/save', {
         method: 'POST',
+        // The autosave is best-effort by design and fires every 450 ms
+        // of typing, so a brain that is down turned it into a toast
+        // machine. `.catch(() => {})` did not stop that: the toast is
+        // pushed before the throw. It retries on the next keystroke.
+        silent: true,
         body: JSON.stringify(payload),
       }).catch(() => {
         // best-effort autosave

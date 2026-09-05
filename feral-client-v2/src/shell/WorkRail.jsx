@@ -132,15 +132,22 @@ export default function WorkRail() {
     // Each source is read independently. One failing must not blank the
     // whole rail: a rail that disappears when the timeline is slow is
     // worse than a rail with two sections.
+    // All four are `silent: true` for the reason the comment above
+    // gives: a failing source is an expected outcome here and is already
+    // handled per-source, so it must not also become a toast. On a brain
+    // that is restarting all four fail at once on every tick of the
+    // poll, which is how one `feral start` put a stack of "Failed to
+    // fetch" on Home. A caller cannot suppress this by absorbing the
+    // rejection, because lib/api.js pushes the toast before it throws.
     const [a, j, t, c] = await Promise.allSettled([
-      apiJson('/api/approvals'),
-      apiJson('/api/jobs?limit=40'),
-      apiJson('/api/timeline?limit=6'),
+      apiJson('/api/approvals', { silent: true }),
+      apiJson('/api/jobs?limit=40', { silent: true }),
+      apiJson('/api/timeline?limit=6', { silent: true }),
       // Verified against the running brain: GET /api/conversations
       // answers {conversations, total, has_more, limit, offset, query}
       // and a row is {id, title, created_at, updated_at, message_count,
       // pinned, preview, title_custom}.
-      apiJson('/api/conversations?limit=5&offset=0'),
+      apiJson('/api/conversations?limit=5&offset=0', { silent: true }),
     ]);
     if (a.status === 'fulfilled') {
       setNeeds(Array.isArray(a.value?.approvals) ? a.value.approvals : []);

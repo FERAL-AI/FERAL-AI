@@ -33,6 +33,28 @@ export function ranFor(startedAt, now = Date.now() / 1000) {
   return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
 }
 
+/**
+ * How long until a scheduled routine next fires, as a short human string.
+ *
+ * A routine has not started, so `ranFor(started_at)` is the wrong number
+ * for it: it is the AGE of the row. Observed live, a routine created 71
+ * days ago rendered as "scheduled · 1722h 29m", which reads as a routine
+ * due in 71 days. `detail.next_run` is the wall-clock epoch the scheduler
+ * will actually fire at (api/routes/jobs.py builds it from
+ * `job.next_run`), so that is what the row shows instead. Returns '' when
+ * the brain did not name a next run, rather than inventing one.
+ */
+export function nextRunIn(nextRun, now = Date.now() / 1000) {
+  const at = Number(nextRun || 0);
+  if (!Number.isFinite(at) || at <= 0) return '';
+  const secs = Math.round(at - now);
+  if (secs <= 0) return 'next due now';
+  if (secs > 60 * 60 * 24 * 365) return '';
+  if (secs < 60) return `next in ${secs}s`;
+  if (secs < 3600) return `next in ${Math.floor(secs / 60)}m`;
+  return `next in ${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
+}
+
 /** A job is only cancellable when the brain names a route for it. */
 export function cancelRouteOf(job) {
   const via = String(job?.cancellable_via || '');
@@ -95,18 +117,21 @@ export default function Jobs() {
     }
   }, [load]);
 
+  // `running` is genuinely only the running ones. The header used to say
+  // "N active" off this same filter while the list below it showed every
+  // job the brain reported, so five rows (routines at status "scheduled",
+  // specialists at "ready") sat under the words "0 active". Reproduced
+  // live. The count now describes what is actually on screen and keeps
+  // the running number beside it, so neither number contradicts the list.
   const running = items.filter((i) => i.status === 'running' || i.status === 'connected');
+  const countLabel = `${items.length} listed · ${running.length} running`;
 
   return (
     <div className="v2-page v2-jobs">
       <Pane
         title="Running now"
         leading={<Activity size={16} aria-hidden="true" />}
-        actions={
-          <span className="v2-jobs-count">
-            {running.length === 1 ? '1 active' : `${running.length} active`}
-          </span>
-        }
+        actions={<span className="v2-jobs-count">{countLabel}</span>}
       >
         {error && <div className="v2-jobs-error" role="status">{error}</div>}
 
@@ -132,7 +157,11 @@ export default function Jobs() {
           <ul className="v2-jobs-list" aria-label="Active jobs">
             {items.map((j) => {
               const cancel = cancelRouteOf(j);
-              const ran = ranFor(j.started_at);
+              // A routine has not started, so its age is meaningless next
+              // to the word "scheduled"; show when it next fires instead.
+              const ran = j.kind === 'routine'
+                ? nextRunIn(j.detail?.next_run)
+                : ranFor(j.started_at);
               return (
                 <li key={j.id} className="v2-job" data-status={j.status}>
                   <span className="v2-job-kind">{jobKindLabel(j.kind)}</span>

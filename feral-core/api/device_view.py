@@ -251,9 +251,15 @@ def reconnect_guidance(entry: dict) -> dict:
         "brain_can_initiate": False,
         "why": RECONNECT_BRAIN_CANNOT_INITIATE,
         "steps": [
-            f"Open the FERAL app on {label}. It reconnects on its own using "
-            "the pairing token it already holds (the iOS client retries up "
-            "to 10 times with backoff).",
+            # No retry count on purpose. This said "the iOS client
+            # retries up to 10 times with backoff", which is not what the
+            # phone client does: it runs 6 reconnect sweeps with
+            # full-jitter backoff. A specific number a reader can wait
+            # out is worse than no number when it is the wrong number,
+            # and it would go stale again the next time the client's
+            # backoff is retuned, in a different repo from this one.
+            f"Open the FERAL app on {label}. It reconnects on its own with "
+            "backoff, using the pairing token it already holds.",
             f"If it has not come back within {int(NODE_HEARTBEAT_WINDOW_S)} s, "
             "its pairing token has probably expired -- tokens last 24 h by "
             "default (security/device_pairing.DEFAULT_TTL_SECONDS). Pair "

@@ -38,7 +38,16 @@ import CopyButton from '../ui/CopyButton';
 // so it lives in the shared bundle rather than being duplicated each
 // time MarkdownMessage mounts. Don't import it here.
 
-const REMARK_PLUGINS = [remarkGfm, remarkMath];
+// `singleDollarTextMath: false` turns OFF the `$...$` inline-math syntax and
+// leaves only `$$...$$` as math. remark-math 6 defaults it to true, which
+// means any two dollar signs in one paragraph swallow everything between
+// them. Observed live in chat: "valuation more than doubles to $5 billion in
+// latest funding round. The company raised $550 million" rendered as an
+// italic KaTeX run reading "5billioninlatestfundinground", and a budget
+// refusal quoting "$9.99 / $10.00" rendered in the math font. Money is far
+// more common in assistant prose than inline LaTeX is, and `$$` block math
+// still works, so the dollar sign wins the ambiguity.
+const REMARK_PLUGINS = [remarkGfm, [remarkMath, { singleDollarTextMath: false }]];
 // `detect: false` keeps highlight.js off bare ```fenced``` blocks the
 // LLM didn't tag with a language. Auto-detection was painting prose
 // deliverables (Slack standups, weekly recaps) orange/yellow by

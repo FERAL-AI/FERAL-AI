@@ -52,7 +52,13 @@ export function useVoiceMode() {
   useEffect(() => {
     (async () => {
       try {
-        const config = await apiJson('/api/config');
+        // Silent: the catch below is a complete answer (the provider
+        // falls back to 'openai'), so a failure here costs the user
+        // nothing and must not toast. This fires on every Shell mount,
+        // so on a brain that is still booting it was one more "Failed to
+        // fetch" in the restart stack, for a setting that had already
+        // resolved itself.
+        const config = await apiJson('/api/config', { silent: true });
         const cfgProvider =
           config?.features?.voice_provider ||
           config?.voice_provider ||
