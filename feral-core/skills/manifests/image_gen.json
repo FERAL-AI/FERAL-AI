@@ -71,5 +71,6 @@
         "network"
     ],
     "requires_daemon": false,
-    "max_calls_per_hour": 30
+    "max_calls_per_hour": 30,
+    "timeout_seconds": 180
 }

@@ -38,6 +38,17 @@ GMAIL_SMTP_PORT = 587
 # Vault key under which the Gmail address + App Password are persisted.
 EMAIL_CRED_VAULT_KEY = "email_app_credential"
 
+# Socket timeout for every IMAP connection this module opens.
+#
+# ``imaplib.IMAP4_SSL(host, port)`` with no timeout blocks in ``connect``
+# and in every subsequent read for as long as the kernel allows. On
+# 2026-09-02 at 09:41:00.907 the executor ran ``email__get_unread_count``
+# on the event loop; the next log line from any logger was 09:44:02.571,
+# 181 seconds later. Every HTTP request to the brain timed out in between
+# and the UI reported the brain offline. The timeout bounds a hung server,
+# ``asyncio.to_thread`` below keeps even a bounded wait off the loop.
+IMAP_TIMEOUT_SECONDS = 15
+
 
 class EmailIntegration:
     """
@@ -127,7 +138,7 @@ class EmailIntegration:
         app_password = (app_password or "").replace(" ", "")
         result: dict[str, Any] = {"imap": False, "smtp": False}
         try:
-            conn = imaplib.IMAP4_SSL(GMAIL_IMAP_HOST, GMAIL_IMAP_PORT)
+            conn = imaplib.IMAP4_SSL(GMAIL_IMAP_HOST, GMAIL_IMAP_PORT, timeout=IMAP_TIMEOUT_SECONDS)
             conn.login(address, app_password)
             conn.logout()
             result["imap"] = True
@@ -219,13 +230,93 @@ class EmailIntegration:
     # ── IMAP helpers ───────────────────────────────────────────────
 
     def _imap_connect(self) -> imaplib.IMAP4_SSL:
+        """Open and log in. Blocking, call via asyncio.to_thread.
+
+        Every ``if self._use_imap:`` branch in the endpoints below runs
+        its whole IMAP conversation inside one ``_imap_*_sync`` helper
+        that is handed to ``asyncio.to_thread``. Do not call this from a
+        coroutine directly: that is the 181 s freeze described at
+        ``IMAP_TIMEOUT_SECONDS``.
+        """
         resolved = self._resolve_imap()
         if resolved is None:
             raise RuntimeError("No IMAP credentials configured")
         host, port, user, password = resolved
-        conn = imaplib.IMAP4_SSL(host, port)
+        conn = imaplib.IMAP4_SSL(host, port, timeout=IMAP_TIMEOUT_SECONDS)
         conn.login(user, password)
         return conn
+
+    def _imap_list_inbox_sync(self, max_results: int) -> list[dict]:
+        conn = self._imap_connect()
+        try:
+            conn.select("INBOX")
+            _, data = conn.search(None, "ALL")
+            ids = data[0].split()
+            ids = ids[-max_results:] if len(ids) > max_results else ids
+            ids.reverse()
+            messages: list[dict] = []
+            for mid in ids:
+                _, msg_data = conn.fetch(mid, "(RFC822)")
+                if msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
+                    parsed = self._parse_imap_message(msg_data[0][1])
+                    parsed["id"] = mid.decode()
+                    messages.append(parsed)
+            return messages
+        finally:
+            self._imap_logout_quietly(conn)
+
+    def _imap_read_email_sync(self, message_id: str) -> Optional[dict]:
+        conn = self._imap_connect()
+        try:
+            conn.select("INBOX")
+            _, msg_data = conn.fetch(message_id.encode(), "(RFC822)")
+        finally:
+            self._imap_logout_quietly(conn)
+        if msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
+            parsed = self._parse_imap_message(msg_data[0][1])
+            parsed["id"] = message_id
+            return parsed
+        return None
+
+    def _imap_unread_count_sync(self) -> int:
+        conn = self._imap_connect()
+        try:
+            conn.select("INBOX")
+            _, data = conn.search(None, "UNSEEN")
+            return len(data[0].split()) if data[0] else 0
+        finally:
+            self._imap_logout_quietly(conn)
+
+    def _imap_unread_summaries_sync(self, max_emails: int) -> list[dict]:
+        conn = self._imap_connect()
+        try:
+            conn.select("INBOX")
+            _, data = conn.search(None, "UNSEEN")
+            ids = data[0].split()
+            ids = ids[-max_emails:] if len(ids) > max_emails else ids
+            ids.reverse()
+            messages: list[dict] = []
+            for mid in ids:
+                _, msg_data = conn.fetch(mid, "(RFC822)")
+                if msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
+                    parsed = self._parse_imap_message(msg_data[0][1])
+                    messages.append({
+                        "subject": parsed["subject"],
+                        "from": parsed["from"],
+                        "snippet": parsed.get("body", "")[:200],
+                    })
+            return messages
+        finally:
+            self._imap_logout_quietly(conn)
+
+    @staticmethod
+    def _imap_logout_quietly(conn) -> None:
+        # The result is what matters; a logout that fails after a
+        # successful fetch must not turn the call into an error.
+        try:
+            conn.logout()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("IMAP logout failed: %s", exc)
 
     @staticmethod
     def _clamp_max_results(max_results: int, default: int = 10) -> int:
@@ -500,20 +591,7 @@ class EmailIntegration:
         max_results = self._clamp_max_results(max_results, default=20)
         if self._use_imap:
             try:
-                conn = self._imap_connect()
-                conn.select("INBOX")
-                _, data = conn.search(None, "ALL")
-                ids = data[0].split()
-                ids = ids[-max_results:] if len(ids) > max_results else ids
-                ids.reverse()
-                messages: list[dict] = []
-                for mid in ids:
-                    _, msg_data = conn.fetch(mid, "(RFC822)")
-                    if msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
-                        parsed = self._parse_imap_message(msg_data[0][1])
-                        parsed["id"] = mid.decode()
-                        messages.append(parsed)
-                conn.logout()
+                messages = await asyncio.to_thread(self._imap_list_inbox_sync, max_results)
                 return {"success": True, "data": {"messages": messages, "source": "imap"}}
             except Exception as e:
                 return {"success": False, "error": http_error_detail(e)}
@@ -555,13 +633,8 @@ class EmailIntegration:
     async def read_email(self, message_id: str = "", **kwargs) -> dict:
         if self._use_imap:
             try:
-                conn = self._imap_connect()
-                conn.select("INBOX")
-                _, msg_data = conn.fetch(message_id.encode(), "(RFC822)")
-                conn.logout()
-                if msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
-                    parsed = self._parse_imap_message(msg_data[0][1])
-                    parsed["id"] = message_id
+                parsed = await asyncio.to_thread(self._imap_read_email_sync, message_id)
+                if parsed is not None:
                     return {"success": True, "data": parsed}
                 return {"success": False, "error": "Message not found"}
             except Exception as e:
@@ -690,7 +763,9 @@ class EmailIntegration:
 
     async def send_email(self, to: str = "", subject: str = "", body: str = "", **kwargs) -> dict:
         if self._use_imap:
-            import asyncio
+            # ``_smtp_send`` opens the socket, so it runs off the loop like
+            # the IMAP helpers above; ``smtplib.SMTP(..., timeout=20)``
+            # bounds it as well.
             if self._resolve_smtp() is not None:
                 return await asyncio.to_thread(self._smtp_send, to, subject, body)
             return {"success": False, "error": "Cannot send via IMAP — connect Gmail"}
@@ -740,11 +815,7 @@ class EmailIntegration:
     async def get_unread_count(self, **kwargs) -> dict:
         if self._use_imap:
             try:
-                conn = self._imap_connect()
-                conn.select("INBOX")
-                _, data = conn.search(None, "UNSEEN")
-                count = len(data[0].split()) if data[0] else 0
-                conn.logout()
+                count = await asyncio.to_thread(self._imap_unread_count_sync)
                 return {"success": True, "data": {"unread": count, "source": "imap"}}
             except Exception as e:
                 return {"success": False, "error": http_error_detail(e)}
@@ -774,19 +845,7 @@ class EmailIntegration:
         """Fetch recent unread and optionally pass to LLM for summarisation."""
         if self._use_imap:
             try:
-                conn = self._imap_connect()
-                conn.select("INBOX")
-                _, data = conn.search(None, "UNSEEN")
-                ids = data[0].split()
-                ids = ids[-max_emails:] if len(ids) > max_emails else ids
-                ids.reverse()
-                messages: list[dict] = []
-                for mid in ids:
-                    _, msg_data = conn.fetch(mid, "(RFC822)")
-                    if msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
-                        parsed = self._parse_imap_message(msg_data[0][1])
-                        messages.append({"subject": parsed["subject"], "from": parsed["from"], "snippet": parsed.get("body", "")[:200]})
-                conn.logout()
+                messages = await asyncio.to_thread(self._imap_unread_summaries_sync, max_emails)
                 source = "imap"
             except Exception as e:
                 return {"success": False, "error": http_error_detail(e)}

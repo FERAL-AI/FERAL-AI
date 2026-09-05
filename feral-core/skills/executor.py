@@ -21,7 +21,12 @@ from urllib.parse import urlparse
 import httpx
 
 from config.loader import feral_home
-from models.skill_manifest import SkillManifest, SkillEndpoint
+from models.skill_manifest import (
+    LEGACY_TIMEOUT_KEYS,
+    SkillManifest,
+    SkillEndpoint,
+    normalize_timeout_seconds,
+)
 from security.exec_mode import MODE_DOCKER, MODE_REFUSED, NEEDS_DOCKER
 from skills.result_budget import (
     DEFAULT_TIER,
@@ -51,6 +56,64 @@ SANDBOX_REQUIRED_SKILL_IDS = {"workspace_scripts", "code_interpreter"}
 # ``_get_key`` still falls back to the flat namespace so keys written by
 # older builds keep resolving.
 SKILL_KEY_NAMESPACE = "skill_keys"
+
+# Wall-clock budget for one backing-implementation call when neither the
+# endpoint nor the skill manifest declares ``timeout_seconds``. Before this
+# existed ``impl.execute`` ran unbounded: on 2026-09-02 a single
+# ``email__get_unread_count`` call took 181 s and nothing here noticed.
+# ``FERAL_TOOL_TIMEOUT_SECONDS`` overrides it for an operator whose tools
+# are legitimately slow.
+DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
+_TOOL_TIMEOUT_ENV = "FERAL_TOOL_TIMEOUT_SECONDS"
+
+# Added on top of a caller-supplied per-call timeout (``timeout=600`` on
+# ``coding_tools__bash``) so the tool's own, more specific timeout fires
+# first and produces its own, better error, with this one as the backstop.
+TOOL_TIMEOUT_GRACE_SECONDS = 5.0
+
+
+def default_tool_timeout_seconds() -> float:
+    raw = os.getenv(_TOOL_TIMEOUT_ENV, "")
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            logger.warning("%s=%r is not a number; using %.0fs", _TOOL_TIMEOUT_ENV, raw, DEFAULT_TOOL_TIMEOUT_SECONDS)
+    return DEFAULT_TOOL_TIMEOUT_SECONDS
+
+
+def tool_budget_seconds(skill: SkillManifest, endpoint: SkillEndpoint, args: Optional[dict]) -> float:
+    """The ``asyncio.wait_for`` budget for one call.
+
+    Precedence: ``endpoint.timeout_seconds``, then ``skill.timeout_seconds``,
+    then the default. Whatever that gives is then raised, never lowered, to
+    cover a per-call timeout the caller passed as an argument (or the
+    manifest's default for that argument) plus a grace period. Ten shipped
+    endpoints declare a ``timeout`` / ``timeout_s`` / ``timeout_ms`` /
+    ``timeout_seconds`` parameter whose value the skill enforces itself; a
+    flat 30 s here would cut ``code_interpreter`` (default 45 s) and any
+    ``coding_tools__bash`` call above 25 s short of the limit the model
+    asked for.
+    """
+    budget = getattr(endpoint, "timeout_seconds", None)
+    if budget is None:
+        budget = getattr(skill, "timeout_seconds", None)
+    if budget is None:
+        budget = default_tool_timeout_seconds()
+    budget = float(budget)
+
+    args = args or {}
+    for param in getattr(endpoint, "params", None) or []:
+        name = getattr(param, "name", "")
+        if name not in LEGACY_TIMEOUT_KEYS:
+            continue
+        value = args.get(name, getattr(param, "default", None))
+        requested = normalize_timeout_seconds(name, value)
+        if requested is not None:
+            budget = max(budget, requested + TOOL_TIMEOUT_GRACE_SECONDS)
+    return budget
 
 
 def _record_action_reversal(tool_name: str, result) -> None:
@@ -806,8 +869,20 @@ class SkillExecutor:
             if sandbox_required:
                 # Let backing implementations know host fallback is forbidden.
                 exec_args["_feral_require_sandbox"] = True
+            time_budget = tool_budget_seconds(skill, endpoint, exec_args)
             try:
-                result = await impl.execute(endpoint.id, exec_args, self._vault)
+                # Bounded. ``wait_for`` cancels the coroutine when the
+                # budget expires and the caller gets a 504 envelope
+                # instead of waiting on a hung vendor. It can only do
+                # that at an ``await``: a backing implementation that
+                # makes a blocking call (imaplib, urllib, subprocess) on
+                # the loop stalls this timer along with everything else,
+                # which is why integrations/email.py moved its IMAP work
+                # to ``asyncio.to_thread`` in the same change.
+                result = await asyncio.wait_for(
+                    impl.execute(endpoint.id, exec_args, self._vault),
+                    timeout=time_budget,
+                )
                 # The budget is declared by the manifest for THIS endpoint
                 # (see skills/result_budget.py). Before v2026.7.30 a single
                 # global 2 000-char / 20-item clamp ran here, which meant
@@ -850,6 +925,17 @@ class SkillExecutor:
                     # confidently about code it never saw.
                     envelope["_truncation_note"] = note
                 return envelope
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Tool %s exceeded its %.0fs budget; returning 504",
+                    tool_name, time_budget,
+                )
+                return {
+                    "success": False,
+                    "status_code": 504,
+                    "data": None,
+                    "error": f"{tool_name} exceeded {time_budget:.0f}s",
+                }
             except Exception as e:
                 logger.error(f"Python Skill error: {e}", exc_info=True)
                 return {"success": False, "status_code": 500, "data": None, "error": str(e)}

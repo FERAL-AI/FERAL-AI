@@ -58,6 +58,10 @@ logger = logging.getLogger("feral.memory.sync_scheduler")
 # nothing and the DELETE stays off the 30-second tick.
 TOMBSTONE_GC_INTERVAL_SECONDS = 6 * 60 * 60
 
+# Largest exponent ``SchedulerConfig.backoff_seconds`` will raise 2 to.
+# See that method for the overflow this prevents.
+BACKOFF_EXPONENT_CAP = 16
+
 
 def _metrics() -> dict:
     """Lazy accessor for the central D12 sync metrics. See decay.py
@@ -93,6 +97,16 @@ class SchedulerConfig:
     backoff_max_seconds: float = 300.0
     heartbeat_interval_seconds: float = 15.0
     heartbeat_miss_threshold: int = 3
+    # Consecutive failures after which a discovered peer is dropped via
+    # ``SyncEngine.forget_peer``. mDNS ``remove_service`` fires only when
+    # a peer announces its departure; a peer that is alive but unreachable
+    # stays in the set forever and is dialled at ``backoff_max_seconds``
+    # for as long as the brain runs. 0 disables eviction. Manually added
+    # peers are never evicted: the operator asked for them by address.
+    evict_after_failures: int = 20
+    # Upper bound on ``_sync_one_peer`` calls in flight at once. Without
+    # it a tick over N unreachable peers opened N connections at once.
+    max_concurrent_syncs: int = 4
 
     @classmethod
     def from_settings(cls, settings: dict) -> "SchedulerConfig":
@@ -105,6 +119,29 @@ class SchedulerConfig:
             backoff_max_seconds=float(cfg.get("backoff_max_seconds", cls.backoff_max_seconds)),
             heartbeat_interval_seconds=float(cfg.get("heartbeat_interval_seconds", cls.heartbeat_interval_seconds)),
             heartbeat_miss_threshold=int(cfg.get("heartbeat_miss_threshold", cls.heartbeat_miss_threshold)),
+            evict_after_failures=int(cfg.get("evict_after_failures", cls.evict_after_failures)),
+            max_concurrent_syncs=max(1, int(cfg.get("max_concurrent_syncs", cls.max_concurrent_syncs))),
+        )
+
+    def backoff_seconds(self, consecutive_failures: int) -> float:
+        """Exponential backoff for the Nth consecutive failure, capped.
+
+        The exponent is clamped before ``2 **`` is evaluated. The previous
+        form, ``initial * (2 ** (failures - 1))``, built an arbitrarily
+        large int and then multiplied it by a float, which raises
+        ``OverflowError: int too large to convert to float`` once the
+        streak passes about 1,024 (reproduced with ``5.0 * 2 ** 1100``).
+        A second brain on the operator's machine logged 717,708 of those
+        tracebacks; because the exception escaped ``_record_failure``,
+        ``backoff_until`` never advanced and the peer was dialled every
+        30 s cadence tick forever. With the cap at 16 the uncapped value
+        is ``initial * 65536``, far past any sane ``backoff_max_seconds``,
+        so the clamp never changes a result the cap would not have.
+        """
+        exponent = min(max(int(consecutive_failures) - 1, 0), BACKOFF_EXPONENT_CAP)
+        return min(
+            float(self.backoff_initial_seconds) * (2.0 ** exponent),
+            float(self.backoff_max_seconds),
         )
 
 
@@ -163,6 +200,11 @@ class SyncScheduler:
         # records a failure, and the operator sees a peer that never syncs.
         # Discard-on-done bounds the set to peers currently syncing.
         self._bg_tasks: set[asyncio.Task] = set()
+        # Bounds concurrent per-peer syncs. Created lazily for the same
+        # reason as the per-peer locks: an asyncio primitive binds to the
+        # running loop on first use, and the scheduler is constructed
+        # before the loop it will run on.
+        self._sync_slots: Optional[asyncio.Semaphore] = None
         # Deletion tombstones grow one row per delete and nothing else
         # in the tree collects them. The cadence tick is the only
         # periodic sync-owned callback that exists, so GC rides on it,
@@ -183,6 +225,22 @@ class SyncScheduler:
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
         return task
+
+    def _slots(self) -> asyncio.Semaphore:
+        if self._sync_slots is None:
+            self._sync_slots = asyncio.Semaphore(max(1, self.config.max_concurrent_syncs))
+        return self._sync_slots
+
+    async def _sync_one_peer_bounded(self, peer_id: str, trigger: str) -> dict:
+        """``_sync_one_peer`` behind the concurrency semaphore.
+
+        Used by every fire-and-forget path (cadence tick, heartbeat
+        reconnect). The operator brain was observed serving 81 to 133
+        simultaneous inbound ``/sync`` handlers from a single misbehaving
+        peer; on the outbound side this is the matching bound.
+        """
+        async with self._slots():
+            return await self._sync_one_peer(peer_id, trigger=trigger)
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -250,10 +308,12 @@ class SyncScheduler:
                 )
                 continue
             # Per-peer lock — kick off the sync without blocking other
-            # peers, but never let two overlap for the same peer.
+            # peers, but never let two overlap for the same peer. The
+            # semaphore inside ``_sync_one_peer_bounded`` caps how many
+            # of these run at once.
             self._track_bg_task(
                 asyncio.create_task(
-                    self._sync_one_peer(peer_id, trigger="cadence"),
+                    self._sync_one_peer_bounded(peer_id, trigger="cadence"),
                     name=f"sync-{peer_id}",
                 )
             )
@@ -396,13 +456,18 @@ class SyncScheduler:
             return {"ok": True, "peer_id": peer_id, "sent": sent, "received": received, "trigger": trigger}
 
     def _record_failure(self, status: PeerStatus, reason: str, detail: str, trigger: str, metrics: dict) -> dict:
-        """Bump the failure counter, compute next backoff, emit metrics."""
+        """Bump the failure counter, compute next backoff, emit metrics.
+
+        Must not raise. It runs inside the ``except`` handlers of
+        ``_sync_one_peer``, so anything escaping here escapes the task,
+        and the one thing that has to happen on every failure is that
+        ``backoff_until`` moves forward. The backoff is therefore set
+        first and from arithmetic that cannot overflow; everything after
+        it (metrics, eviction, the log line) is best-effort.
+        """
         status.consecutive_failures += 1
-        status.last_error = f"{reason}:{detail[:200]}"
-        backoff = min(
-            self.config.backoff_initial_seconds * (2 ** (status.consecutive_failures - 1)),
-            self.config.backoff_max_seconds,
-        )
+        status.last_error = f"{reason}:{str(detail)[:200]}"
+        backoff = self.config.backoff_seconds(status.consecutive_failures)
         status.backoff_until = time.time() + backoff
         try:
             if "attempts" in metrics:
@@ -413,9 +478,15 @@ class SyncScheduler:
                 )
         except Exception as exc:  # pragma: no cover
             logger.debug("metric emit failed: %s", exc)
+        evicted = False
+        try:
+            evicted = self._maybe_evict(status)
+        except Exception as exc:
+            logger.warning("scheduler: eviction of %s failed: %s", status.peer_id, exc)
         logger.warning(
-            "sync failed (%s): peer=%s reason=%s failures=%d backoff=%.1fs",
+            "sync failed (%s): peer=%s reason=%s failures=%d backoff=%.1fs%s",
             trigger, status.peer_id, reason, status.consecutive_failures, backoff,
+            " evicted" if evicted else "",
         )
         return {
             "ok": False,
@@ -424,7 +495,36 @@ class SyncScheduler:
             "detail": detail,
             "consecutive_failures": status.consecutive_failures,
             "backoff_seconds": backoff,
+            "evicted": evicted,
         }
+
+    def _maybe_evict(self, status: PeerStatus) -> bool:
+        """Drop a discovered peer once it has failed ``evict_after_failures``
+        times in a row. Returns True when the peer was evicted.
+
+        Manual peers (``add_peer``) are exempt: the operator named them.
+        The engine is asked to forget the peer first, because
+        ``SyncEngine._peers`` is what ``_tick`` enumerates; without that
+        the peer would be re-created with a fresh PeerStatus on the very
+        next tick, and the eviction would be a counter reset.
+        """
+        threshold = int(self.config.evict_after_failures)
+        if threshold <= 0 or status.consecutive_failures < threshold:
+            return False
+        peer_id = status.peer_id
+        if peer_id in self._manual_peers:
+            return False
+        forget = getattr(self.engine, "forget_peer", None)
+        if callable(forget):
+            forget(peer_id, reason=f"unreachable after {status.consecutive_failures} failures")
+        elif self.engine is not None and getattr(self.engine, "_peers", None) is not None:
+            self.engine._peers.pop(peer_id, None)
+        self._peers.pop(peer_id, None)
+        logger.info(
+            "scheduler: evicted peer %s after %d consecutive failures",
+            peer_id, status.consecutive_failures,
+        )
+        return True
 
     # ── Heartbeat (D12) ─────────────────────────────────────────────────
 
@@ -442,10 +542,10 @@ class SyncScheduler:
         except Exception as exc:  # pragma: no cover
             logger.debug("metric emit failed: %s", exc)
         if status.consecutive_heartbeat_misses >= self.config.heartbeat_miss_threshold:
-            backoff = min(
-                self.config.backoff_initial_seconds * (2 ** status.consecutive_failures),
-                self.config.backoff_max_seconds,
-            )
+            # Same clamped arithmetic as _record_failure; this was the
+            # second copy of the overflowing expression. ``+ 1`` keeps
+            # the previous shape (2 ** failures, not failures - 1).
+            backoff = self.config.backoff_seconds(status.consecutive_failures + 1)
             status.backoff_until = time.time() + backoff
             logger.info(
                 "heartbeat: %s reached %d misses → backoff %.1fs",
@@ -465,7 +565,7 @@ class SyncScheduler:
         logger.info("heartbeat: %s reconnected → immediate re-sync", peer_id)
         self._track_bg_task(
             asyncio.create_task(
-                self._sync_one_peer(peer_id, trigger="heartbeat_reconnect"),
+                self._sync_one_peer_bounded(peer_id, trigger="heartbeat_reconnect"),
                 name=f"sync-{peer_id}-rc",
             )
         )
