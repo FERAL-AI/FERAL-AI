@@ -28,6 +28,11 @@ ws_logger = logging.getLogger("feral.integrations.ha.ws")
 DEFAULT_BASE_URL = "http://homeassistant.local:8123"
 ADDON_DEFAULT_BASE_URL = "http://supervisor/core"
 
+NOT_CONFIGURED_ERROR = (
+    "Home Assistant is not configured (set the URL and token in "
+    "Settings > Integrations)."
+)
+
 # Vault slot holding the operator's Home Assistant URL. Not a secret, but
 # the vault is the store this integration already reaches (through the
 # OAuth manager) and it is the one place a value written by an HTTP route
@@ -208,11 +213,44 @@ class HomeAssistantIntegration:
             # could leak from a sync context.
             pass
 
-    async def _ensure_client(self):
-        if self._http is None:
-            token = self._token
-            if not token and self._oauth:
+    async def _resolve_token(self) -> str:
+        """The long-lived token, from the env override or the vault."""
+        token = self._token
+        if not token and self._oauth:
+            try:
                 token = await self._oauth.get_token("home_assistant") or ""
+            except Exception as exc:
+                logger.debug("Home Assistant token lookup failed: %s", exc)
+                token = ""
+        return token or ""
+
+    async def _ensure_client(self) -> Optional[dict]:
+        """Ready the HTTP client, or return a "not configured" envelope.
+
+        :data:`DEFAULT_BASE_URL` is ``homeassistant.local:8123``, which is
+        the right guess for someone who has a Home Assistant and the
+        wrong one for everybody else. With nothing configured, every
+        smart-home tool call therefore spent about five seconds failing
+        to resolve that name and came back with ``[Errno 8] nodename nor
+        servname provided``: five seconds of the operator's turn, and an
+        error that names a DNS failure rather than the missing setup.
+
+        A token is the thing an operator must supply either way (a
+        Home Assistant with no token rejects every REST call), so its
+        absence is a complete, network-free answer to "is this
+        configured". The URL is deliberately not part of the test: an
+        operator whose Home Assistant really is at ``homeassistant.local``
+        has configured nothing but a token, and must still work.
+        """
+        token = await self._resolve_token()
+        if not token:
+            return {
+                "success": False,
+                "status_code": 503,
+                "data": None,
+                "error": NOT_CONFIGURED_ERROR,
+            }
+        if self._http is None:
             self._http = httpx.AsyncClient(
                 base_url=self._base_url,
                 headers={
@@ -221,6 +259,9 @@ class HomeAssistantIntegration:
                 },
                 timeout=10.0,
             )
+        else:
+            self._http.headers["Authorization"] = f"Bearer {token}"
+        return None
 
     @property
     def connected(self) -> bool:
@@ -245,7 +286,15 @@ class HomeAssistantIntegration:
         # No registered probe — do a one-off direct check so the cache
         # gets populated. Without this the integration would never
         # transition out of token-presence fallback.
-        await self._ensure_client()
+        if await self._ensure_client() is not None:
+            # Nothing configured. That is a definite "not connected",
+            # and recording it stops the badge sitting on unverified
+            # token-presence forever.
+            mark_probe_result(
+                "home_assistant", ok=False, reason="not_configured",
+                detail=NOT_CONFIGURED_ERROR,
+            )
+            return False
         try:
             resp = await self._http.get("/api/states")
             ok = resp.status_code == 200
@@ -299,7 +348,9 @@ class HomeAssistantIntegration:
         return await fn(**args)
 
     async def get_states(self, **kwargs) -> dict:
-        await self._ensure_client()
+        guard = await self._ensure_client()
+        if guard is not None:
+            return guard
         try:
             resp = await self._http.get("/api/states")
             resp.raise_for_status()
@@ -316,7 +367,9 @@ class HomeAssistantIntegration:
             return {"success": False, "error": str(e)}
 
     async def get_entities(self, domain: str = "", **kwargs) -> dict:
-        await self._ensure_client()
+        guard = await self._ensure_client()
+        if guard is not None:
+            return guard
         try:
             resp = await self._http.get("/api/states")
             resp.raise_for_status()
@@ -341,7 +394,9 @@ class HomeAssistantIntegration:
             return {"success": False, "error": str(e)}
 
     async def get_entity_state(self, entity_id: str = "", **kwargs) -> dict:
-        await self._ensure_client()
+        guard = await self._ensure_client()
+        if guard is not None:
+            return guard
         try:
             resp = await self._http.get(f"/api/states/{entity_id}")
             resp.raise_for_status()
@@ -365,7 +420,9 @@ class HomeAssistantIntegration:
             return {"success": False, "error": str(e)}
 
     async def call_service(self, domain: str = "", service: str = "", entity_id: str = "", data: dict = None, **kwargs) -> dict:
-        await self._ensure_client()
+        guard = await self._ensure_client()
+        if guard is not None:
+            return guard
         try:
             body = {"entity_id": entity_id}
             if data:
@@ -521,7 +578,9 @@ class HomeAssistantIntegration:
 
     async def discover_capabilities(self) -> dict:
         """Fetch all entities and build a capabilities map for the LLM."""
-        await self._ensure_client()
+        guard = await self._ensure_client()
+        if guard is not None:
+            return guard
         try:
             resp = await self._http.get("/api/states")
             resp.raise_for_status()
