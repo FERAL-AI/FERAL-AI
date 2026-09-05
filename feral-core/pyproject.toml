@@ -126,7 +126,7 @@ dependencies = [
     # installed. FERAL is correct either way (VectorIndex falls back to
     # a numpy brute-force scan) but the fallback is O(n) per query.
     "sqlite-vec>=0.1.1,<1.0",
-    "cryptography>=41.0.0,<47.0",
+    "cryptography>=41.0.0,<51.0",
     "pynacl>=1.5.0,<2.0",
     # W9: vault encryption-at-rest. The OS keychain is now a hard
     # requirement of the security path — `keyring` reads/writes the
