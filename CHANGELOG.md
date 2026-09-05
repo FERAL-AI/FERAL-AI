@@ -1,10 +1,19 @@
 # Changelog
 
-<!-- feral-version: 2026.9.2 -->
+<!-- feral-version: 2026.9.5 -->
 
 All notable changes to FERAL are documented here.
 
 ## [Unreleased]
+
+## [2026.9.5] - 2026-09-05 - the release that checked its own claims
+
+### Coverage
+- pytest (feral-core): 11,436 passed, 39 skipped, 73.96% coverage.
+  Run with `-p no:randomly`; see issue #292 for 49 order-dependent
+  failures in one file, all of which pass in isolation.
+- vitest (feral-client-v2): 166 files, 1,335 passed.
+
 
 ### Fixed
 
