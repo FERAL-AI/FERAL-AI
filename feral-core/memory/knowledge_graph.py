@@ -1389,7 +1389,7 @@ class KnowledgeGraph:
         try:
             response = await llm.chat([{"role": "user", "content": prompt}], tools=None)
             raw_text, _ = llm.extract_response(response)
-            cleaned = raw_text.strip()
+            cleaned = (raw_text or "").strip()
             if cleaned.startswith("```"):
                 cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
             triples = json.loads(cleaned)

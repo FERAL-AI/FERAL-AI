@@ -147,6 +147,11 @@ class AgentMitosisEngine:
                 {"role": "user", "content": prompt_gen},
             ])
             text, _ = self._llm.extract_response(response)
+            if not text:
+                from agents.llm_provider import llm_response_error
+                raise RuntimeError(
+                    llm_response_error(response) or "empty specialist prompt",
+                )
 
             agent_id = f"specialist_{pattern.topic_cluster}"
             name = pattern.topic_cluster.replace("_", " ").title() + " Agent"

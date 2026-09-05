@@ -134,7 +134,7 @@ class GenUIEngine:
         try:
             response = await self._llm.chat(messages, tools=None)
             text, _ = self._llm.extract_response(response)
-            cleaned = text.strip()
+            cleaned = (text or "").strip()
             if cleaned.startswith("```"):
                 cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
             sdui = json.loads(cleaned)

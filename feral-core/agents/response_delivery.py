@@ -3,10 +3,54 @@ from __future__ import annotations
 import json
 import logging
 
-from models.protocol import FeralMessage, SDUIPayload, TextResponsePayload
+from models.protocol import ErrorPayload, FeralMessage, SDUIPayload, TextResponsePayload
 from agents.chat_sanitizer import sanitize_assistant_display_text
 
 logger = logging.getLogger("feral.orchestrator")
+
+
+LLM_PROVIDER_ERROR_CODE = "llm_provider_error"
+
+
+async def send_error(
+    orchestrator,
+    session_id: str,
+    message: str,
+    *,
+    code: str = LLM_PROVIDER_ERROR_CODE,
+    recoverable: bool = True,
+):
+    """Deliver a failure as an ``error`` frame, not as assistant prose.
+
+    Provider failures used to travel through ``send_text`` as a
+    ``text_response``, so the web client drew "HTTP 400 ..." as an
+    assistant bubble, the orchestrator recorded it in
+    ``conversation_history`` and the next turn fed it back to the model
+    as its own earlier reply. ``feral-client-v2`` (Chat.jsx) already
+    renders ``type="error"`` frames as an inline notice keyed on
+    ``payload.message`` / ``payload.code`` / ``payload.recoverable``,
+    which is exactly ``ErrorPayload``.
+
+    Deliberately does NOT go through ``orchestrator._send_text``: that
+    helper calls ``_note_outbound_text``, which is how prose gets
+    committed to the transcript by ``_finalize_turn``.
+    """
+    try:
+        await orchestrator.send(
+            session_id,
+            FeralMessage(
+                session_id=session_id,
+                hop="brain",
+                type="error",
+                payload=ErrorPayload(
+                    code=code,
+                    message=str(message or "The brain reported an error."),
+                    recoverable=recoverable,
+                ).model_dump(),
+            ),
+        )
+    except Exception:
+        logger.exception("error frame delivery failed for %s", session_id[:8])
 
 
 async def send_text(

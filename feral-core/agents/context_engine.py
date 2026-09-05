@@ -178,6 +178,14 @@ class DefaultContextEngine(ContextEngine):
             ]
             response = await self._llm.chat(summary_prompt)
             text, _ = self._llm.extract_response(response)
+            if not text:
+                # Provider failure or empty summary: a summary row that
+                # reads "None" (or an HTTP error) would poison every
+                # later turn's context. Prune instead.
+                from agents.llm_provider import llm_response_error
+                raise RuntimeError(
+                    llm_response_error(response) or "empty summary",
+                )
             summary_msg = {"role": "system", "content": f"[Compacted history summary]\n{text}"}
             return [summary_msg] + recent
         except Exception as e:

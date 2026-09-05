@@ -26,6 +26,7 @@ from security.safety_resolver import (
     is_read_only,
     resolve_policy,
 )
+from agents.llm_provider import llm_response_error
 from agents.plan_mode import (
     PlanModeState,
     is_plan_safe_tool,
@@ -1737,6 +1738,22 @@ class ToolRunner:
                 messages=sub_messages,
                 tools=tools if tools else None,
             )
+            # A provider failure is the subagent's failure, reported in
+            # ``error`` with ``success=False``. ``extract_response`` no
+            # longer returns the failure text, so without this check
+            # the subagent would loop on empty rounds and then report
+            # "No final answer produced" as a success.
+            provider_error = llm_response_error(response)
+            if provider_error:
+                return {
+                    "task_index": ordinal,
+                    "task": task_text,
+                    "success": False,
+                    "result": "",
+                    "error": provider_error,
+                    "iterations": iterations_used,
+                    "tool_calls_executed": tool_calls_executed,
+                }
             text_content, tool_calls = orch.llm.extract_response(response)
 
             assistant_msg = {"role": "assistant"}

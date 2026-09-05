@@ -153,7 +153,7 @@ class IntentCompiler:
                     {"role": "user", "content": prompt},
                 ])
                 text, _ = self._llm.extract_response(response)
-                text = text.strip()
+                text = (text or "").strip()
                 if text.startswith("```"):
                     text = text.split("\n", 1)[1].rsplit("```", 1)[0]
 

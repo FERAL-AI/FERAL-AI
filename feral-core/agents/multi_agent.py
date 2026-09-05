@@ -26,6 +26,7 @@ from agents.turn_attribution import (
     model_of_llm_response,
 )
 
+from agents.llm_provider import llm_response_error
 from skills.call_context import bind_context
 from skills.result_budget import serialize_tool_result_with_images
 from agents.multimodal_blocks import (
@@ -46,6 +47,19 @@ class AgentMessage:
     timestamp: float = field(default_factory=time.time)
 
 
+class MultiAgentProviderError(RuntimeError):
+    """The LLM provider failed for every worker that could have answered.
+
+    Raised by ``MultiAgentOrchestrator.run`` instead of returning the
+    provider's error text as the reply. ``run`` returns a bare string to
+    the orchestrator, so without a distinct exception a 400 from OpenAI
+    was indistinguishable from an answer and was rendered, stored and
+    replayed as one. The orchestrator catches this type specifically,
+    emits an ``error`` frame and does NOT retry on the single-agent
+    path (same provider, same failure).
+    """
+
+
 @dataclass
 class WorkerResult:
     """Output from a single worker execution."""
@@ -55,6 +69,11 @@ class WorkerResult:
     tool_results: list[dict] = field(default_factory=list)
     confidence: float = 1.0
     error: str = ""
+    # True when ``error`` is the LLM provider's own failure (the
+    # ``{"error": ...}`` dict ``LLMProvider.chat`` returns), as opposed
+    # to a worker-side exception. ``MultiAgentOrchestrator.run`` raises
+    # these instead of returning them as reply text.
+    provider_error: bool = False
     # Per-turn attribution for THIS worker: the tokens it burned across
     # all of its rounds, and the model that produced its final text. The
     # orchestrator sums these across workers, because a parallel strategy
@@ -308,6 +327,27 @@ class AgentWorker:
                 _m = model_of_llm_response(response)
                 if _m:
                     w_model = _m
+
+                # A provider failure ends the worker with an ERROR, not
+                # with the failure text as its answer. ``run`` below
+                # turns it into ``MultiAgentProviderError`` so the
+                # orchestrator emits an error frame instead of an
+                # assistant bubble that then lands in the transcript.
+                provider_error = llm_response_error(response)
+                if provider_error:
+                    logger.error(
+                        "Worker %s: LLM provider failed: %s",
+                        self.worker_id, provider_error,
+                    )
+                    return WorkerResult(
+                        worker_id=self.worker_id,
+                        error=provider_error,
+                        provider_error=True,
+                        tool_calls_made=tool_calls_made,
+                        tool_results=tool_results,
+                        usage=w_usage,
+                        model=w_model,
+                    )
 
                 text_content, tool_calls = self._llm.extract_response(response)
 
@@ -631,7 +671,9 @@ class AgentRouter:
         # turn, so its tokens belong in the turn total.
         accumulate_turn_usage(self.last_usage, response)
         text_content, _ = self._llm.extract_response(response)
-        cleaned = text_content.strip()
+        # ``None`` on a provider failure; the caller's ``except`` falls
+        # back to keyword routing either way.
+        cleaned = (text_content or "").strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         result = json.loads(cleaned)
@@ -797,6 +839,16 @@ class MultiAgentOrchestrator:
                 if not turn_model and r.model:
                     turn_model = r.model
             self._stash_turn_attribution(session_id, turn_model, turn_usage)
+            # No worker produced text and at least one hit a provider
+            # failure: raise, so the failure is delivered as an error
+            # frame. ``ResponseMerger.merge`` would otherwise hand the
+            # first error string back as the reply.
+            if not any(r.text for r in valid_results):
+                provider_failures = [
+                    r.error for r in valid_results if r.provider_error and r.error
+                ]
+                if provider_failures:
+                    raise MultiAgentProviderError(provider_failures[0])
             return ResponseMerger.merge(valid_results)
         else:
             result = await workers[0].run(session_id, text)
@@ -804,6 +856,8 @@ class MultiAgentOrchestrator:
             if result.model:
                 turn_model = result.model
             self._stash_turn_attribution(session_id, turn_model, turn_usage)
+            if not result.text and result.provider_error and result.error:
+                raise MultiAgentProviderError(result.error)
             return result.text if result.text else (result.error or "No response.")
 
     # Entries are normally popped by the orchestrator on the same turn, but

@@ -76,10 +76,13 @@ from agents.ui_handlers import (
     send_permission_request as helper_send_permission_request,
 )
 from agents.response_delivery import (
+    send_error as helper_send_error,
     send_text as helper_send_text,
     try_genui_for_result as helper_try_genui_for_result,
     try_send_sdui as helper_try_send_sdui,
 )
+from agents.llm_provider import llm_response_error
+from agents.multi_agent import MultiAgentProviderError
 from agents.turn_attribution import (
     accumulate_turn_usage as _accumulate_turn_usage,
     model_of_llm_response as _model_of_llm_response,
@@ -3232,6 +3235,20 @@ class Orchestrator:
                         # chat_request handler) can carry it in chat_response
                         # instead of relying on the working-memory fallback.
                         return response_text
+                except MultiAgentProviderError as exc:
+                    # The provider itself failed. Deliver an error
+                    # frame and stop: the single-agent fallback below
+                    # would call the same provider again and produce
+                    # a second failure, and ``response_text`` must
+                    # not carry the failure into ``_try_send_sdui`` /
+                    # ``turn["reply_text"]`` (which is how "HTTP 400
+                    # ..." ended up in conversation_history).
+                    logger.error(
+                        "[%s] Multi-agent LLM provider failed: %s",
+                        session_id[:8], exc,
+                    )
+                    await self._send_error(session_id, str(exc))
+                    return None
                 except Exception as e:
                     logger.warning(f"Multi-agent failed, falling back to single-agent: {e}")
 
@@ -3481,6 +3498,23 @@ class Orchestrator:
                 _round_model = _model_of_llm_response(response)
                 if _round_model:
                     turn_model = _round_model
+
+                # Provider failure travels as an error frame, never as
+                # assistant text. Checked BEFORE the empty-response
+                # retry below: a 400 from the provider is not an empty
+                # answer, and retrying with a prompt addition would
+                # burn a second failing call. Nothing is appended to
+                # ``history`` here, so ``_finalize_turn`` commits no
+                # assistant row and the failure never becomes model
+                # context on the next turn.
+                provider_error = llm_response_error(response)
+                if provider_error:
+                    logger.error(
+                        "[%s] LLM provider failed: %s", session_id[:8], provider_error,
+                    )
+                    await self._send_error(session_id, provider_error)
+                    sent_response = True
+                    break
 
                 text_content, tool_calls = self.llm.extract_response(response)
 
@@ -3883,6 +3917,15 @@ class Orchestrator:
                             )
                         )
                     return response_text
+            except MultiAgentProviderError as exc:
+                # Same as the non-stream branch: error frame, no
+                # single-agent retry against the failing provider.
+                logger.error(
+                    "[%s] Multi-agent (stream) LLM provider failed: %s",
+                    session_id[:8], exc,
+                )
+                await self._send_error(session_id, str(exc))
+                return None
             except Exception as e:
                 logger.warning(
                     f"Multi-agent (stream) failed, falling back to single-agent: {e}"
@@ -4136,7 +4179,15 @@ class Orchestrator:
                         return
                     elif delta["type"] == "error":
                         await _flush_stream_prose()
-                        await self._send_text(session_id, f"Stream error: {delta.get('content', 'unknown')}")
+                        # Error frame, not "Stream error: ..." prose:
+                        # ``_send_text`` records what it sends and
+                        # ``_finalize_turn`` would commit the provider
+                        # failure as the assistant's reply.
+                        await self._send_error(
+                            session_id,
+                            str(delta.get("content") or "unknown stream error"),
+                            code="llm_stream_error",
+                        )
                         return
                 # Safety net: flush any tail prose if the stream ended
                 # without an explicit `done` event.
@@ -5922,6 +5973,24 @@ class Orchestrator:
         # UI attributes an answer and stays quiet about everything else.
         await helper_send_text(
             self, session_id=session_id, text=text, model=model, usage=usage,
+        )
+
+    async def _send_error(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        code: str = "llm_provider_error",
+        recoverable: bool = True,
+    ):
+        """Deliver a provider / pipeline failure as an ``error`` frame.
+
+        Not ``_send_text``: this must not call ``_note_outbound_text``,
+        or ``_finalize_turn`` commits the failure to the transcript as
+        an assistant row and the next turn feeds it back to the model.
+        """
+        await helper_send_error(
+            self, session_id, message, code=code, recoverable=recoverable,
         )
 
     def _pop_multi_agent_attribution(self, session_id: str) -> tuple[str, dict]:
