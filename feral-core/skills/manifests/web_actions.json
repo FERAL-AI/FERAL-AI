@@ -104,5 +104,6 @@
     "triggers": [],
     "permissions": ["browser", "commerce"],
     "requires_daemon": false,
-    "max_calls_per_hour": 50
+    "max_calls_per_hour": 50,
+    "timeout_seconds": 300
 }

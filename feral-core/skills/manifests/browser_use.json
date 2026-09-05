@@ -62,6 +62,7 @@
   ],
   "requires_daemon": false,
   "max_calls_per_hour": 600,
+  "timeout_seconds": 120,
   "endpoints": [
     {
       "id": "navigate",

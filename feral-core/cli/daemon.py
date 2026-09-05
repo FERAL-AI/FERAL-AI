@@ -47,6 +47,15 @@ LEGACY_LABELS = ("ai.feral.brain",)
 def _logs_dir() -> Path:
     d = Path.home() / ".feral" / "logs"
     d.mkdir(parents=True, exist_ok=True)
+    # Owner-only. The brain's stderr carried the Telegram bot token on
+    # 5,983 lines and the Gemini key on 1,857 lines (httpx logs request
+    # URLs at INFO), and launchd/systemd created the files 0644 under a
+    # 0755 directory. Redaction now happens in the logger, this is the
+    # second layer for anything that still gets through.
+    try:
+        os.chmod(str(d), 0o700)
+    except OSError:
+        pass
     return d
 
 
@@ -56,6 +65,36 @@ def _stdout_log() -> Path:
 
 def _stderr_log() -> Path:
     return _logs_dir() / "brain.err"
+
+
+def _ensure_private_file(path: Path, *, create: bool) -> None:
+    """Make ``path`` owner-read/write only, creating it first if asked.
+
+    launchd and systemd open the log paths themselves with a default
+    umask, so the file has to exist with the right mode before the
+    service is (re)installed. Existing files are tightened in place, so
+    an operator on an older install gets 0600 the next time ``feral
+    start`` or ``feral logs`` runs. ``feral logs`` tails as the same
+    user, so 0600 does not lock it out.
+    """
+    if create:
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            os.close(fd)
+        except OSError:
+            return
+    if path.exists():
+        try:
+            os.chmod(str(path), 0o600)
+        except OSError:
+            pass
+
+
+def _prepare_log_files(*, create: bool = True) -> tuple[Path, Path]:
+    out, err = _stdout_log(), _stderr_log()
+    _ensure_private_file(out, create=create)
+    _ensure_private_file(err, create=create)
+    return out, err
 
 
 def _resolve_feral_bin() -> str:
@@ -205,6 +244,8 @@ def _render_plist(program_arguments: list[str], environment: dict[str, str]) -> 
 def _write_launchd_plist() -> Path:
     plist_path = _launchd_plist_path()
     plist_path.parent.mkdir(parents=True, exist_ok=True)
+    # Before launchd opens them with its own umask.
+    _prepare_log_files()
     content = _render_plist(_resolve_program_arguments(), _build_environment_vars())
     plist_path.write_text(content)
     os.chmod(str(plist_path), 0o644)
@@ -300,6 +341,8 @@ def _systemd_unit_path() -> Path:
 def _install_and_start_linux() -> None:
     unit_path = _systemd_unit_path()
     unit_path.parent.mkdir(parents=True, exist_ok=True)
+    # Before systemd opens them with ``append:`` and its own umask.
+    _prepare_log_files()
     program = " ".join(_resolve_program_arguments())
     feral_dir = os.path.dirname(_resolve_feral_bin())
     feral_env_lines = "\n".join(
@@ -416,8 +459,12 @@ def service_status() -> dict[str, object]:
 
 
 def log_paths() -> tuple[Path, Path]:
-    """Return ``(stdout_log, stderr_log)`` for ``feral logs`` to tail."""
-    return _stdout_log(), _stderr_log()
+    """Return ``(stdout_log, stderr_log)`` for ``feral logs`` to tail.
+
+    Also tightens the files to 0600 so an install that predates the
+    private-log change is fixed the first time the operator looks.
+    """
+    return _prepare_log_files(create=False)
 
 
 def is_service_supported() -> bool:

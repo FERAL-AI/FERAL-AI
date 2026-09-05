@@ -110,7 +110,13 @@ from api.routes.checkpoints import router as checkpoints_router
 # --- Subagent A (realtime GA) additions ---
 from api.routes.realtime_client_secret import router as realtime_client_secret_router
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
+# basicConfig plus two redaction layers. The bare basicConfig that used to
+# sit here put the root logger at INFO, and httpx logs every request URL at
+# INFO; the Telegram (``/bot<token>``) and Gemini (``?key=``) URLs carry the
+# credential, so ~/.feral/logs/brain.err filled with both. See
+# observability/log_redaction.py for the evidence and the two layers.
+from observability.log_redaction import configure_brain_logging, install_log_redaction
+configure_brain_logging(level=logging.INFO)
 logger = logging.getLogger("feral.brain")
 
 
@@ -1544,6 +1550,12 @@ async def refresh_provider_catalog_once(catalog, consecutive_failures: int) -> i
 @app.on_event("startup")
 async def startup():
     check_local_bypass_safety()
+
+    # uvicorn.run installs its own non-propagating handlers on the
+    # ``uvicorn.*`` loggers after this module was imported, so the filter
+    # attached at import time never sees the access log. Second pass here,
+    # once those handlers exist. Idempotent.
+    install_log_redaction()
 
     # Apply outstanding ~/.feral shape changes before anything reads from
     # it. Runs before state.init() on purpose: a migration exists to make
@@ -4184,15 +4196,49 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
 # Federated Sync WebSocket
 # ─────────────────────────────────────────────
 
+# How long a freshly accepted /sync client has to send its handshake frame
+# before the handler gives up on it. Bounds the handler count an idle or
+# misbehaving client can pin.
+SYNC_FIRST_FRAME_TIMEOUT_SECONDS = 10.0
+
+
 @app.websocket("/sync")
 async def sync_peer_endpoint(ws: WebSocket):
     """Peer-to-peer sync endpoint for federated memory."""
     await ws.accept()
-    logger.info("Sync peer connected")
+    client_host = ""
+    try:
+        if ws.client is not None:
+            client_host = f"{ws.client.host}:{ws.client.port}"
+    except Exception as exc:  # noqa: BLE001, address is advisory
+        logger.debug("sync: client address unavailable: %s", exc)
+    # DEBUG, not INFO. A second brain on the same host with a broken
+    # backoff dialled this endpoint every 30 s for days and logged one
+    # "Sync peer connected" per attempt (81 to 133 concurrent handlers
+    # were observed). The host is logged so a repeat can be traced.
+    logger.debug("Sync peer connected from %s", client_host or "unknown")
 
     try:
+        first_frame = True
         while True:
-            raw = await ws.receive_json()
+            if first_frame:
+                # A client that connects and then sends nothing used to
+                # hold this handler (and its websocket) open forever. Ten
+                # seconds is generous for the handshake frame, which the
+                # real peer sends immediately after connecting.
+                try:
+                    raw = await asyncio.wait_for(
+                        ws.receive_json(), timeout=SYNC_FIRST_FRAME_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.debug(
+                        "Sync peer %s sent no handshake within %.0fs; closing",
+                        client_host or "unknown", SYNC_FIRST_FRAME_TIMEOUT_SECONDS,
+                    )
+                    break
+                first_frame = False
+            else:
+                raw = await ws.receive_json()
             msg_type = raw.get("type")
 
             if msg_type == "sync_request":

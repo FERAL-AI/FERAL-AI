@@ -405,6 +405,14 @@ DEFAULT_SETTINGS = {
             "backoff_max_seconds": 300,
             "heartbeat_interval_seconds": 15,
             "heartbeat_miss_threshold": 3,
+            # A peer that fails this many syncs in a row is dropped from
+            # the live set (``SyncEngine.forget_peer``). mDNS only reports
+            # a peer that has announced its departure; one that is alive
+            # but unreachable is never removed and would be dialled at
+            # ``backoff_max_seconds`` forever. 0 disables eviction.
+            "evict_after_failures": 20,
+            # Upper bound on peers synced at the same time per tick.
+            "max_concurrent_syncs": 4,
         },
         "kg": {
             # F1 — Unified knowledge graph. When ``unified`` is true

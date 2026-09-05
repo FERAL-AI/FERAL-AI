@@ -239,5 +239,6 @@
   ],
   "requires_daemon": false,
   "daemon_node_type": null,
-  "max_calls_per_hour": 200
+  "max_calls_per_hour": 200,
+  "timeout_seconds": 900
 }

@@ -68,5 +68,6 @@
     "triggers": [],
     "permissions": ["llm", "autonomy"],
     "requires_daemon": false,
-    "max_calls_per_hour": 500
+    "max_calls_per_hour": 500,
+    "timeout_seconds": 900
 }

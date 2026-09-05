@@ -8,9 +8,72 @@ with GenUI hints, flows, and cron/trigger support.
 
 from __future__ import annotations
 from enum import Enum
-from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from pydantic import BaseModel, Field, model_validator
+from typing import Any, Optional, Literal
 from uuid import uuid4
+
+
+# ─────────────────────────────────────────────
+# Per-endpoint execution budget
+# ─────────────────────────────────────────────
+#
+# Manifests grew five spellings of "how long may this take" before any of
+# them had a reader: ``timeout`` (x5), ``timeout_s`` (x2), ``timeout_ms``
+# (x2), ``timeout_seconds`` (x1) and ``manual_timeout_s`` (x1). The
+# executor now enforces ``SkillEndpoint.timeout_seconds`` with
+# ``asyncio.wait_for``; the table below is how each legacy spelling is
+# read into that one field, so a manifest author can keep writing the
+# spelling their skill already uses. The unit is the only thing that
+# differs: everything is seconds except ``timeout_ms``.
+LEGACY_TIMEOUT_KEYS: dict[str, float] = {
+    "timeout_seconds": 1.0,
+    "timeout": 1.0,
+    "timeout_s": 1.0,
+    "manual_timeout_s": 1.0,
+    "timeout_ms": 0.001,
+}
+
+
+def normalize_timeout_seconds(key: str, value: Any) -> Optional[float]:
+    """Convert a legacy timeout declaration to seconds.
+
+    Returns None for an unknown key, a non-numeric value, or a value that
+    is not strictly positive, so the caller falls back to the default
+    rather than enforcing a zero-second budget.
+    """
+    scale = LEGACY_TIMEOUT_KEYS.get(key)
+    if scale is None or value is None or isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value) * scale
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0:
+        return None
+    return seconds
+
+
+def _fold_legacy_timeout_keys(data: Any) -> Any:
+    """Before-validator body shared by SkillEndpoint and SkillManifest.
+
+    An explicit ``timeout_seconds`` wins. Otherwise the first legacy key
+    (in ``LEGACY_TIMEOUT_KEYS`` order) that normalises to a positive
+    number is written into ``timeout_seconds``. The legacy key is left in
+    place; pydantic ignores unknown keys, and the manifest on disk is not
+    rewritten.
+    """
+    if not isinstance(data, dict):
+        return data
+    if data.get("timeout_seconds") is not None:
+        return data
+    for key in LEGACY_TIMEOUT_KEYS:
+        if key in data:
+            seconds = normalize_timeout_seconds(key, data[key])
+            if seconds is not None:
+                data = dict(data)
+                data["timeout_seconds"] = seconds
+                return data
+    return data
 
 
 class SkillPermission(str, Enum):
@@ -283,6 +346,18 @@ class SkillEndpoint(BaseModel):
     # manifests shipping in feral-core/skills/manifests/.
     emit_result_preview: bool = False
 
+    # Wall-clock budget for one call, enforced by ``SkillExecutor`` with
+    # ``asyncio.wait_for`` around the backing implementation. Unset means
+    # the skill-level value, else ``skills.executor.DEFAULT_TOOL_TIMEOUT_SECONDS``.
+    # The legacy spellings in ``LEGACY_TIMEOUT_KEYS`` are folded into this
+    # field on load, so existing manifests need no edit.
+    timeout_seconds: Optional[float] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_timeout(cls, data: Any) -> Any:
+        return _fold_legacy_timeout_keys(data)
+
 
 class FlowStep(BaseModel):
     """One step in a multi-step flow."""
@@ -415,6 +490,16 @@ class SkillManifest(BaseModel):
     # codebase. Same trust clamp as result_budget - honoured only for
     # manifests shipping in feral-core/skills/manifests/.
     emit_result_preview: bool = False
+
+    # Skill-wide default for ``SkillEndpoint.timeout_seconds``. Lets a skill
+    # whose every endpoint is slow (image generation, a subagent run) raise
+    # the budget once instead of on each endpoint.
+    timeout_seconds: Optional[float] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_timeout(cls, data: Any) -> Any:
+        return _fold_legacy_timeout_keys(data)
 
 
 # ─────────────────────────────────────────────

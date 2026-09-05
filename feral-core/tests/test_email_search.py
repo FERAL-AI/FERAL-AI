@@ -33,9 +33,10 @@ class FakeIMAP:
 
     instances: list["FakeIMAP"] = []
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str, port: int, timeout: float | None = None):
         self.host = host
         self.port = port
+        self.timeout = timeout
         self.logged_in = False
         self.selected: str | None = None
         self.search_calls: list[tuple] = []
@@ -118,8 +119,8 @@ def _make_email(host: str = "imap.gmail.com") -> EmailIntegration:
 def _patch_imap(monkeypatch):
     FakeIMAP.reset()
 
-    def _factory(host, port):
-        return FakeIMAP(host, port)
+    def _factory(host, port, timeout=None):
+        return FakeIMAP(host, port, timeout=timeout)
 
     monkeypatch.setattr("integrations.email.imaplib.IMAP4_SSL", _factory)
     yield
@@ -218,8 +219,8 @@ async def test_max_results_clamping(monkeypatch):
     many = b" ".join(str(i).encode() for i in range(1, 151))
 
     class ManyFakeIMAP(FakeIMAP):
-        def __init__(self, host, port):
-            super().__init__(host, port)
+        def __init__(self, host, port, timeout=None):
+            super().__init__(host, port, timeout=timeout)
             self.search_result = [many]
 
     monkeypatch.setattr("integrations.email.imaplib.IMAP4_SSL", ManyFakeIMAP)
@@ -237,8 +238,8 @@ async def test_response_shape():
     email = _make_email("imap.gmail.com")
 
     class SingleFakeIMAP(FakeIMAP):
-        def __init__(self, host, port):
-            super().__init__(host, port)
+        def __init__(self, host, port, timeout=None):
+            super().__init__(host, port, timeout=timeout)
             self.search_result = [b"42"]
 
     import integrations.email as email_mod

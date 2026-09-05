@@ -3385,13 +3385,18 @@ class LLMProvider:
             self.base_url = _base_url_override or "http://localhost:1234/v1"
             self.api_key = "lm-studio"
             if not model:
-                detected = self._detect_lmstudio()
+                # Blocking probe (sync httpx.get, timeout=2). Off the loop:
+                # this is an async method and the probe stalls every other
+                # request for its whole timeout when the server is down.
+                detected = await asyncio.to_thread(self._detect_lmstudio)
                 self.model = detected or _default_model_for("lmstudio")
         elif provider == "ollama":
             self.base_url = _base_url_override or ollama_openai_base_url()
             self.api_key = "ollama"
             if not model:
-                detected = self._detect_ollama()
+                # Blocking probe (urllib.request.urlopen, timeout=3), same
+                # reason as the LM Studio branch above.
+                detected = await asyncio.to_thread(self._detect_ollama)
                 self.model = detected or _default_model_for("ollama")
         elif provider == "local":
             self._init_local_engine()
