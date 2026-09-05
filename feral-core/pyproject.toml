@@ -38,7 +38,21 @@ dependencies = [
     "python-multipart>=0.0.9,<1.0",
     "uvicorn[standard]>=0.30.0,<1.0",
     "pydantic>=2.9.0,<3.0",
-    "websockets>=13.0,<16.0",
+    # Floor is 14.0, not 13.0, and that is load bearing. memory/sync.py
+    # awaits the connect first and then uses the result as a context
+    # manager (``ws = await websockets.connect(...)`` then ``async with
+    # ws:``). On 13.x that await yields a legacy WebSocketClientProtocol,
+    # which has no __aenter__, so every brain-to-brain sync attempt dies
+    # with "'WebSocketClientProtocol' object does not support the
+    # asynchronous context manager protocol". From 14.0 connect resolves
+    # to the asyncio implementation and yields a ClientConnection, which
+    # does. Measured across 13.1, 14.0, 14.2 and 15.0.1 rather than read
+    # off a changelog. Chat is unaffected either way, so a resolver that
+    # picked 13.x gave a brain that looked healthy and could not sync.
+    # The sibling SDKs keep their lower floors on purpose: they use
+    # ``async with websockets.connect(...)`` directly, which is a context
+    # manager on both the legacy and asyncio implementations.
+    "websockets>=14.0,<16.0",
     "httpx>=0.27.0,<1.0",
     "pyyaml>=6.0,<7.0",
     "rich>=13.0.0,<15.0",
