@@ -244,7 +244,15 @@ async def test_sync_scheduler_reconnect_task_survives_gc():
     sched = SyncScheduler.__new__(SyncScheduler)
     sched._peers = {}
     sched._bg_tasks = set()
+    # ``heartbeat_reconnect`` dispatches through ``_sync_one_peer_bounded``
+    # since the concurrency cap landed, so that is what has to be stubbed;
+    # stubbing the unbounded method left the probe untouched and the
+    # failure read as "the task was collected" when the task had in fact
+    # raised on an unseeded attribute. This scheduler is built with
+    # ``__new__``, so it gets whatever the path under test touches and
+    # nothing else.
     sched._sync_one_peer = lambda peer_id, trigger="manual": probe.body()
+    sched._sync_one_peer_bounded = lambda peer_id, trigger="manual": probe.body()
 
     status = sched._peers.setdefault(
         "peer-1", _peer_status("peer-1")

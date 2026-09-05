@@ -10,6 +10,8 @@ Pins the contract Lane 11 (iOS Settings → Voice picker) and Lane 12
 
 from __future__ import annotations
 
+import re
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -161,6 +163,9 @@ def test_openai_realtime_entry_has_models(client):
     assert row.get("default_model") == "gpt-realtime"
 
 
+_DATED = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+
+
 def test_openai_realtime_models_list_has_full_set(client):
     """v2026.5.43 Nit-1 — the OpenAI Realtime entry surfaces every
     realtime model the API will accept, not just the GA default.
@@ -171,7 +176,19 @@ def test_openai_realtime_models_list_has_full_set(client):
     models = row["models"]
     assert "gpt-realtime" in models
     assert "gpt-realtime-mini" in models
-    assert any("preview" in m for m in models), models
+    # This used to require a "preview" id, on the reasoning that
+    # operators pinned to the preview family needed an in-list option.
+    # OpenAI retired gpt-4o-realtime-preview and its siblings from the
+    # models endpoint, and the 2026-09-04 catalog refresh removed them
+    # from the bundled list, so requiring one now demands that the picker
+    # offer a model the API will refuse. The intent behind the assertion
+    # was "more than just the GA default", and that is what is checked:
+    # a dated snapshot for anyone pinning one, and the mini line for
+    # anyone on those quotas. voice/router.py already rewrites a pinned
+    # gpt-4o-realtime* to the GA id with a warning, so nobody stranded on
+    # the old name is stuck.
+    assert any(_DATED.search(m) for m in models), models
+    assert any(m.startswith("gpt-realtime-mini") for m in models), models
     assert row.get("default_model") == "gpt-realtime"
     # was 1 in v2026.5.42; v2026.5.43 ships the curated multi-entry list.
     assert len(models) >= 5
