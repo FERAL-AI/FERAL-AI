@@ -43,6 +43,7 @@
         },
         {
             "id": "describe_skill",
+            "read_only_hint": true,
             "method": "CUSTOM",
             "url": "",
             "description": "Return full details (endpoints, params, description) for a single skill by id.",
@@ -54,6 +55,7 @@
         },
         {
             "id": "active_channels",
+            "read_only_hint": true,
             "method": "CUSTOM",
             "url": "",
             "description": "List the messaging channels currently connected on this brain.",
@@ -63,6 +65,7 @@
         },
         {
             "id": "connected_devices",
+            "read_only_hint": true,
             "method": "CUSTOM",
             "url": "",
             "description": "List hardware daemons / HUP nodes currently registered.",
@@ -72,6 +75,7 @@
         },
         {
             "id": "current_session",
+            "read_only_hint": true,
             "method": "CUSTOM",
             "url": "",
             "description": "Return the current runtime snapshot: agent version, active LLM model, autonomy mode, host.",

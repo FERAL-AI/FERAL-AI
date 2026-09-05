@@ -53,7 +53,8 @@
         }
       ],
       "returns_description": "{host, domain, scope_chain, notes[], briefing} — briefing is a short markdown block written for the agent to read.",
-      "ui_hint": "detail_card"
+      "ui_hint": "detail_card",
+      "read_only_hint": true
     },
     {
       "id": "remember",
@@ -120,7 +121,8 @@
         }
       ],
       "returns_description": "{count, notes[]}",
-      "ui_hint": "list"
+      "ui_hint": "list",
+      "read_only_hint": true
     },
     {
       "id": "list_domains",
@@ -129,7 +131,8 @@
       "description": "List every site FERAL has notes about, with note and observation counts.",
       "params": [],
       "returns_description": "{count, scopes[]}",
-      "ui_hint": "list"
+      "ui_hint": "list",
+      "read_only_hint": true
     },
     {
       "id": "stats",
@@ -138,7 +141,8 @@
       "description": "Size and shape of the site-knowledge store, including how many recurring failures are ready to propose to Tool Genesis.",
       "params": [],
       "returns_description": "{db_path, notes, scopes, total_observations, by_kind, genesis_candidates}",
-      "ui_hint": "detail_card"
+      "ui_hint": "detail_card",
+      "read_only_hint": true
     },
     {
       "id": "genesis_candidates",
@@ -155,7 +159,8 @@
         }
       ],
       "returns_description": "{count, candidates[]} — each candidate carries requires_human_approval=true and auto_execute=false.",
-      "ui_hint": "list"
+      "ui_hint": "list",
+      "read_only_hint": true
     },
     {
       "id": "forget",
